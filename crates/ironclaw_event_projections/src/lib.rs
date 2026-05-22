@@ -192,6 +192,7 @@ pub enum TimelineEntryKind {
     ModelFailed,
     AssistantReplyFinalized,
     LoopCompleted,
+    LoopCancelled,
     LoopFailed,
     ProcessStarted,
     ProcessCompleted,
@@ -211,6 +212,7 @@ impl From<RuntimeEventKind> for TimelineEntryKind {
             RuntimeEventKind::ModelFailed => Self::ModelFailed,
             RuntimeEventKind::AssistantReplyFinalized => Self::AssistantReplyFinalized,
             RuntimeEventKind::LoopCompleted => Self::LoopCompleted,
+            RuntimeEventKind::LoopCancelled => Self::LoopCancelled,
             RuntimeEventKind::LoopFailed => Self::LoopFailed,
             RuntimeEventKind::ProcessStarted => Self::ProcessStarted,
             RuntimeEventKind::ProcessCompleted => Self::ProcessCompleted,
@@ -239,6 +241,7 @@ pub struct RunStatusProjection {
 pub enum RunProjectionStatus {
     Running,
     Completed,
+    Cancelled,
     Failed,
     Killed,
 }
@@ -1592,6 +1595,7 @@ fn apply_run_event(
         event.kind,
         RuntimeEventKind::AssistantReplyFinalized
             | RuntimeEventKind::LoopCompleted
+            | RuntimeEventKind::LoopCancelled
             | RuntimeEventKind::LoopFailed
     ) {
         run.capability_id = event.capability_id.clone();
@@ -1608,7 +1612,9 @@ fn apply_run_event(
     }
     if matches!(
         event.kind,
-        RuntimeEventKind::AssistantReplyFinalized | RuntimeEventKind::LoopCompleted
+        RuntimeEventKind::AssistantReplyFinalized
+            | RuntimeEventKind::LoopCompleted
+            | RuntimeEventKind::LoopCancelled
     ) {
         run.error_kind = None;
     } else if sanitized_error_kind.is_some() {
@@ -1653,6 +1659,7 @@ fn run_status_for_event(
         | RuntimeEventKind::AssistantReplyFinalized
         | RuntimeEventKind::LoopCompleted
         | RuntimeEventKind::ProcessCompleted => RunProjectionStatus::Completed,
+        RuntimeEventKind::LoopCancelled => RunProjectionStatus::Cancelled,
         RuntimeEventKind::DispatchFailed
         | RuntimeEventKind::LoopFailed
         | RuntimeEventKind::ProcessFailed => RunProjectionStatus::Failed,

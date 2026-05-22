@@ -136,10 +136,13 @@ boundary test enforces this.
 ## Streaming model
 
 `stream_events` is SSE. The facade is drain-only right now, so the
-handler drains, emits each event with its projection cursor as the SSE
-`id`, then polls again on a 1-second cadence. When
+handler drains, renders each `ProductOutboundEnvelope` into the
+browser-visible `WebChatV2EventFrame` schema with its projection cursor
+as the SSE `id`, then polls again on a 1-second cadence. The frame
+intentionally excludes adapter routing/delivery metadata. When
 `RebornServicesApi::stream_events` gains a true subscription API the
-handler can migrate without changing the descriptor.
+handler can migrate without changing the descriptor or browser event
+schema.
 
 The per-poll ownership probe goes through `SessionThreadService::read_thread`
 (metadata-only) rather than `list_thread_history`, so an active stream does

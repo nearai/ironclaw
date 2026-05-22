@@ -45,6 +45,11 @@ pub use types::{
     RebornTimelineRequest, RebornTimelineResponse,
 };
 
+type SkillActivationRecorder =
+    dyn Fn(&TurnScope, &AcceptedMessageRef, &str) -> Result<(), RebornServicesError> + Send + Sync;
+type SkillActivationClearer =
+    dyn Fn(&TurnScope, &AcceptedMessageRef) -> Result<(), RebornServicesError> + Send + Sync;
+
 /// Stable WebUI-facing facade surface for beta Reborn routes.
 #[async_trait]
 pub trait RebornServicesApi: Send + Sync {
@@ -130,6 +135,8 @@ pub struct RebornServices {
     thread_service: Arc<dyn SessionThreadService>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
     event_stream: Option<Arc<dyn ProjectionStream>>,
+    skill_activation_recorder: Option<Arc<SkillActivationRecorder>>,
+    skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
 }
 
 impl RebornServices {
@@ -141,12 +148,64 @@ impl RebornServices {
             thread_service,
             turn_coordinator,
             event_stream: None,
+            skill_activation_recorder: None,
+            skill_activation_clearer: None,
         }
     }
 
     pub fn with_event_stream(mut self, event_stream: Arc<dyn ProjectionStream>) -> Self {
         self.event_stream = Some(event_stream);
         self
+    }
+
+    pub fn with_skill_activation_recorder<F>(mut self, recorder: F) -> Self
+    where
+        F: Fn(&TurnScope, &AcceptedMessageRef, &str) -> Result<(), RebornServicesError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.skill_activation_recorder = Some(Arc::new(recorder));
+        self
+    }
+
+    pub fn with_skill_activation_hooks<R, C>(mut self, recorder: R, clearer: C) -> Self
+    where
+        R: Fn(&TurnScope, &AcceptedMessageRef, &str) -> Result<(), RebornServicesError>
+            + Send
+            + Sync
+            + 'static,
+        C: Fn(&TurnScope, &AcceptedMessageRef) -> Result<(), RebornServicesError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.skill_activation_recorder = Some(Arc::new(recorder));
+        self.skill_activation_clearer = Some(Arc::new(clearer));
+        self
+    }
+
+    fn record_skill_activation_message(
+        &self,
+        scope: &TurnScope,
+        accepted_message_ref: &AcceptedMessageRef,
+        content: &str,
+    ) -> Result<(), RebornServicesError> {
+        if let Some(recorder) = &self.skill_activation_recorder {
+            recorder(scope, accepted_message_ref, content)?;
+        }
+        Ok(())
+    }
+
+    fn clear_skill_activation_message(
+        &self,
+        scope: &TurnScope,
+        accepted_message_ref: &AcceptedMessageRef,
+    ) -> Result<(), RebornServicesError> {
+        if let Some(clearer) = &self.skill_activation_clearer {
+            clearer(scope, accepted_message_ref)?;
+        }
+        Ok(())
     }
 }
 
@@ -290,7 +349,7 @@ impl RebornServicesApi for RebornServices {
                     source_binding_id: Some(source_binding_id.clone()),
                     reply_target_binding_id: Some(source_binding_id.clone()),
                     external_event_id: Some(external_event_id),
-                    content: MessageContent::text(content),
+                    content: MessageContent::text(content.clone()),
                 })
                 .await
                 .map_err(map_thread_error)?;
@@ -308,9 +367,8 @@ impl RebornServicesApi for RebornServices {
             bounded_ref::<SourceBindingRef>("webui-src", &handoff.source_binding_id)?;
         let reply_target_binding_ref =
             bounded_ref::<ReplyTargetBindingRef>("webui-reply", &handoff.reply_target_binding_id)?;
-
         let submit = SubmitTurnRequest {
-            scope,
+            scope: scope.clone(),
             actor,
             accepted_message_ref: accepted_message_ref.clone(),
             source_binding_ref,
@@ -320,6 +378,7 @@ impl RebornServicesApi for RebornServices {
             received_at: Utc::now(),
         };
 
+        self.record_skill_activation_message(&scope, &accepted_message_ref, &content)?;
         match self.turn_coordinator.submit_turn(submit).await {
             Ok(SubmitTurnResponse::Accepted {
                 turn_id,
@@ -352,6 +411,7 @@ impl RebornServicesApi for RebornServices {
                 })
             }
             Err(TurnError::ThreadBusy(busy)) => {
+                self.clear_skill_activation_message(&scope, &accepted_message_ref)?;
                 mark_message_deferred_busy_or_replay(
                     &*self.thread_service,
                     &thread_scope,
@@ -368,7 +428,10 @@ impl RebornServicesApi for RebornServices {
                     event_cursor: busy.event_cursor,
                 })
             }
-            Err(error) => Err(map_turn_error(error)),
+            Err(error) => {
+                self.clear_skill_activation_message(&scope, &accepted_message_ref)?;
+                Err(map_turn_error(error))
+            }
         }
     }
 

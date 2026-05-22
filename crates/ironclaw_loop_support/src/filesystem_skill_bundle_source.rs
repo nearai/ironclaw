@@ -308,7 +308,9 @@ where
             .ok_or(SkillBundleSourceError::BundleNotFound)?;
         let scope = resource_scope_for_run(run_context);
         let skill_md_path = bundle_scoped_path(root.root(), bundle_id, &SkillFilePath::skill_md())?;
-        if !self.validated_manifests.lock().contains(&skill_md_path) {
+        if path.as_str() != SkillFilePath::skill_md().as_str()
+            && !self.validated_manifests.lock().contains(&skill_md_path)
+        {
             // Re-validates manifests before uncached reads for security defense-in-depth.
             self.validate_bundle_manifest(&scope, &skill_md_path, bundle_id)
                 .await

@@ -23,10 +23,11 @@
 //!
 //! `stream_events` is exposed as SSE. The current
 //! [`RebornServicesApi::stream_events`] is drain-only, so the handler
-//! drains once, emits each event as an SSE message with the projection
-//! cursor as the SSE id, then polls at a low cadence for newly-arrived
-//! events. When the facade gains a real subscription API the handler can
-//! migrate without changing the descriptor.
+//! drains once, renders each product envelope into a
+//! [`WebChatV2EventFrame`] SSE message with the projection cursor as the
+//! SSE id, then polls at a low cadence for newly-arrived events. When the
+//! facade gains a real subscription API the handler can migrate without
+//! changing the descriptor or browser-visible event schema.
 //!
 //! Beyond the route descriptor's per-caller request rate limit, the
 //! handler caps the number of *concurrent* SSE streams a single
@@ -35,6 +36,7 @@
 //! caller's slot indefinitely.
 //!
 //! [`RebornServicesApi`]: ironclaw_product_workflow::RebornServicesApi
+//! [`WebChatV2EventFrame`]: crate::WebChatV2EventFrame
 //! [`WebUiAuthenticatedCaller`]: ironclaw_product_workflow::WebUiAuthenticatedCaller
 //! [`IngressRouteDescriptor`]: ironclaw_host_api::ingress::IngressRouteDescriptor
 
@@ -48,6 +50,8 @@ mod error;
 mod handlers;
 #[cfg(feature = "webui-v2-beta")]
 mod router;
+#[cfg(feature = "webui-v2-beta")]
+mod schema;
 #[cfg(feature = "webui-v2-beta")]
 mod sse_capacity;
 
@@ -67,3 +71,5 @@ pub use handlers::{
 };
 #[cfg(feature = "webui-v2-beta")]
 pub use router::{WebUiV2State, webui_v2_router};
+#[cfg(feature = "webui-v2-beta")]
+pub use schema::{WebChatV2Event, WebChatV2EventFrame};

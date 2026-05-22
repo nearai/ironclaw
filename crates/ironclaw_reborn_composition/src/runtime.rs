@@ -31,19 +31,30 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
+use ironclaw_events::{DurableEventLog, InMemoryDurableEventLog, RuntimeEvent};
+use ironclaw_filesystem::LocalFilesystem;
+use ironclaw_first_party_extensions::{
+    FirstPartySkillsExtension, FirstPartySkillsExtensionHandles, LoadedFirstPartyExtensions,
+    SelectableSkillContextSource, SkillActivationSelectorConfig,
+};
+use ironclaw_host_api::{
+    AgentId, CapabilityId, InvocationId, ResourceScope, TenantId, ThreadId, UserId,
+};
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
-    HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
-    HostSkillContextSource,
+    FilesystemSkillBundleSource, HostIdentityContextBuildError, HostIdentityContextCandidate,
+    HostIdentityContextSource, HostSkillContextSource,
 };
+use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_reborn::loop_exit_applier::ThreadCheckpointLoopExitEvidencePort;
+use ironclaw_reborn::milestone_events::{
+    DurableLoopHostMilestoneScope, DurableLoopHostMilestoneSink,
+};
 use ironclaw_reborn::runtime::{
     DefaultPlannedRuntimeBuildError, DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts,
     build_default_planned_runtime,
 };
 use ironclaw_reborn::turn_runner::{TurnRunnerWakeSender, TurnRunnerWorkerConfig};
-use ironclaw_reborn_extensions::{FirstPartySkillsExtension, FirstPartySkillsExtensionHandles};
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, InMemorySessionThreadService, MessageContent,
     MessageKind, MessageStatus, SessionThreadService, ThreadHistoryRequest, ThreadScope,
@@ -53,9 +64,10 @@ use ironclaw_turns::{
     ReplyTargetBindingRef, RunProfileResolutionRequest, SanitizedCancelReason, SourceBindingRef,
     SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId,
     TurnScope, TurnStatus,
-    run_profile::{InMemoryLoopHostMilestoneSink, LoopRunContext, PromptMode},
+    run_profile::{LoopHostMilestoneSink, LoopRunContext, PromptMode},
 };
 
+use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
 use crate::{RebornBuildError, RebornCompositionProfile, RebornServices, build_reborn_services};
 
@@ -147,10 +159,16 @@ pub struct RebornRuntime {
     actor_user_id: UserId,
     source_binding_ref: SourceBindingRef,
     reply_target_binding_ref: ReplyTargetBindingRef,
+    projection_services: RebornProjectionServices,
+    webui_event_log: Arc<dyn DurableEventLog>,
     default_run_profile_id: String,
     wake_sender: TurnRunnerWakeSender,
     send_locks: Mutex<HashMap<ConversationId, Arc<Mutex<()>>>>,
+    skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
 }
+
+pub(crate) type LocalDevSelectableSkillContextSource =
+    SelectableSkillContextSource<FilesystemSkillBundleSource<LocalFilesystem>>;
 
 impl RebornRuntime {
     /// Snapshot of the substrate facades produced by `build_reborn_services`.
@@ -170,6 +188,16 @@ impl RebornRuntime {
 
     pub(crate) fn webui_turn_coordinator(&self) -> Arc<dyn TurnCoordinator> {
         self.turn_coordinator.clone()
+    }
+
+    pub(crate) fn webui_event_stream(&self) -> Arc<dyn ProjectionStream> {
+        self.projection_services.webui_event_stream()
+    }
+
+    pub(crate) fn webui_skill_activation_source(
+        &self,
+    ) -> Option<Arc<LocalDevSelectableSkillContextSource>> {
+        self.skill_activation_source.clone()
     }
 
     /// Create a fresh conversation. Returns the opaque conversation id used
@@ -259,22 +287,46 @@ impl RebornRuntime {
         ))
         .map_err(|reason| RebornRuntimeError::InvalidArgument { reason })?;
 
-        let response = self
+        if let Some(skill_activation_source) = &self.skill_activation_source {
+            skill_activation_source
+                .record_user_message(scope.clone(), accepted_message_ref.clone(), text)
+                .map_err(|error| RebornRuntimeError::TurnSubmission(error.to_string()))?;
+        }
+
+        let response = match self
             .turn_coordinator
             .submit_turn(SubmitTurnRequest {
                 scope: scope.clone(),
                 actor: TurnActor::new(self.actor_user_id.clone()),
-                accepted_message_ref,
+                accepted_message_ref: accepted_message_ref.clone(),
                 source_binding_ref: self.source_binding_ref.clone(),
                 reply_target_binding_ref: self.reply_target_binding_ref.clone(),
                 requested_run_profile: None,
                 idempotency_key,
                 received_at: Utc::now(),
             })
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                if let Some(skill_activation_source) = &self.skill_activation_source {
+                    skill_activation_source
+                        .clear_accepted_message(&scope, &accepted_message_ref)
+                        .map_err(|clear_error| {
+                            RebornRuntimeError::TurnSubmission(clear_error.to_string())
+                        })?;
+                }
+                return Err(error.into());
+            }
+        };
 
         let SubmitTurnResponse::Accepted { run_id, .. } = response;
         if cancellation.is_cancelled() {
+            if let Some(skill_activation_source) = &self.skill_activation_source {
+                skill_activation_source
+                    .clear_accepted_message(&scope, &accepted_message_ref)
+                    .map_err(|error| RebornRuntimeError::TurnSubmission(error.to_string()))?;
+            }
             self.cancel_run(
                 &scope,
                 run_id,
@@ -286,19 +338,30 @@ impl RebornRuntime {
         }
         self.wake_sender.wake();
 
-        let terminal_status = self
-            .wait_for_terminal(&scope, run_id, &cancellation)
-            .await?;
-        let assistant_text = self
-            .read_latest_assistant_text(&conversation.0, run_id)
-            .await?;
+        let reply = async {
+            let terminal_status = self
+                .wait_for_terminal(&scope, run_id, &cancellation)
+                .await?;
+            let assistant_text = self
+                .read_latest_assistant_text(&conversation.0, run_id)
+                .await?;
 
-        Ok(AssistantReply {
-            conversation: conversation.clone(),
-            run_id,
-            status: terminal_status,
-            text: assistant_text,
-        })
+            Ok(AssistantReply {
+                conversation: conversation.clone(),
+                run_id,
+                status: terminal_status,
+                text: assistant_text,
+            })
+        }
+        .await;
+
+        if let Some(skill_activation_source) = &self.skill_activation_source {
+            skill_activation_source
+                .clear_accepted_message(&scope, &accepted_message_ref)
+                .map_err(|error| RebornRuntimeError::TurnSubmission(error.to_string()))?;
+        }
+
+        reply
     }
 
     /// Stop the turn-runner worker. Awaits the worker task to finish before
@@ -420,8 +483,42 @@ impl RebornRuntime {
                 .map_err(|reason| RebornRuntimeError::InvalidArgument { reason })?,
             })
             .await?;
+        if matches!(
+            response.status,
+            TurnStatus::CancelRequested | TurnStatus::Cancelled
+        ) {
+            self.append_webui_loop_cancelled(scope, run_id).await?;
+        }
         self.wake_sender.wake();
         Ok(response)
+    }
+
+    async fn append_webui_loop_cancelled(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+    ) -> Result<(), RebornRuntimeError> {
+        let capability_id = CapabilityId::new(LOOP_RUN_CAPABILITY_ID).map_err(|reason| {
+            RebornRuntimeError::InvalidArgument {
+                reason: format!("loop-run capability id: {reason}"),
+            }
+        })?;
+        self.webui_event_log
+            .append(RuntimeEvent::loop_cancelled(
+                ResourceScope {
+                    tenant_id: scope.tenant_id.clone(),
+                    user_id: self.actor_user_id.clone(),
+                    agent_id: scope.agent_id.clone(),
+                    project_id: scope.project_id.clone(),
+                    mission_id: None,
+                    thread_id: Some(scope.thread_id.clone()),
+                    invocation_id: InvocationId::from_uuid(run_id.as_uuid()),
+                },
+                capability_id,
+            ))
+            .await
+            .map(|_| ())
+            .map_err(|error| RebornRuntimeError::TurnCoordinator(error.to_string()))
     }
 
     async fn read_latest_assistant_text(
@@ -513,12 +610,18 @@ pub async fn build_reborn_runtime(
     let loop_checkpoint_store = Arc::clone(&local_runtime.loop_checkpoint_store);
     let thread_service = Arc::clone(&local_runtime.thread_service);
     let validated_identity = validate_runtime_identity(identity)?;
-    let skill_context_source = match configured_skill_context_source {
-        Some(source) => Some(source),
-        None => Some(local_dev_filesystem_skill_context_source(
-            local_runtime,
-            &validated_identity.tenant_id,
-        )?),
+    let (skill_context_source, skill_activation_source) = match configured_skill_context_source {
+        Some(source) => (Some(source), None),
+        None => {
+            let local_dev_skills = local_dev_filesystem_skill_context_source(
+                local_runtime,
+                &validated_identity.tenant_id,
+            )?;
+            (
+                Some(local_dev_skills.source),
+                Some(local_dev_skills.activation_source),
+            )
+        }
     };
 
     let tenant_id = validated_identity.tenant_id.clone();
@@ -531,10 +634,9 @@ pub async fn build_reborn_runtime(
         tenant_id,
         agent_id,
         project_id: None,
-        // Keep this scope aligned with `ThreadCheckpointLoopExitEvidencePort`,
-        // which reconstructs thread scope from `TurnScope` for completion
-        // evidence and currently has no owner-user dimension there.
-        owner_user_id: None,
+        // Keep local-dev runtime threads aligned with WebUI's owner-scoped
+        // facade so both entrypoints drive the same runner/evidence path.
+        owner_user_id: Some(actor_user_id.clone()),
         mission_id: None,
     };
 
@@ -577,7 +679,24 @@ pub async fn build_reborn_runtime(
         Arc::clone(&loop_checkpoint_store) as Arc<dyn ironclaw_turns::LoopCheckpointStore>,
         thread_scope.clone(),
     ));
-    let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    // Local-dev WebUI projections are process-local today; production fanout
+    // will swap this for a retained durable log owned by the host runtime.
+    let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let projection_services = build_reborn_projection_services(
+        Arc::clone(&event_log),
+        validated_identity.reply_target_binding_ref.clone(),
+    );
+    let milestone_thread_scope = ThreadScope {
+        owner_user_id: Some(actor_user_id.clone()),
+        ..thread_scope.clone()
+    };
+    let milestone_scope = DurableLoopHostMilestoneScope::from_thread_scope(&milestone_thread_scope)
+        .map_err(|error| RebornRuntimeError::InvalidArgument {
+            reason: error.to_string(),
+        })?;
+    let milestone_sink: Arc<dyn LoopHostMilestoneSink> = Arc::new(
+        DurableLoopHostMilestoneSink::new(Arc::clone(&event_log), milestone_scope),
+    );
     let local_dev_capabilities = local_dev::capability_wiring(
         &services,
         actor_user_id.clone(),
@@ -651,19 +770,29 @@ pub async fn build_reborn_runtime(
         actor_user_id,
         source_binding_ref: validated_identity.source_binding_ref,
         reply_target_binding_ref: validated_identity.reply_target_binding_ref,
+        projection_services,
+        webui_event_log: event_log,
         default_run_profile_id,
         wake_sender,
         send_locks: Mutex::new(HashMap::new()),
+        skill_activation_source,
     })
+}
+
+const LOOP_RUN_CAPABILITY_ID: &str = "loop.run";
+
+struct LocalDevSkillContextSource {
+    source: Arc<dyn HostSkillContextSource>,
+    activation_source: Arc<LocalDevSelectableSkillContextSource>,
 }
 
 fn local_dev_filesystem_skill_context_source(
     local_runtime: &crate::factory::RebornLocalRuntimeServices,
     tenant_id: &TenantId,
-) -> Result<Arc<dyn HostSkillContextSource>, RebornRuntimeError> {
+) -> Result<LocalDevSkillContextSource, RebornRuntimeError> {
     let extension = FirstPartySkillsExtension::new(
         Arc::clone(&local_runtime.skill_filesystem),
-        FirstPartySkillsExtensionHandles::reborn_default().map_err(|reason| {
+        FirstPartySkillsExtensionHandles::without_tenant_shared().map_err(|reason| {
             RebornRuntimeError::InvalidArgument {
                 reason: format!("first-party skills extension handles: {reason}"),
             }
@@ -673,7 +802,18 @@ fn local_dev_filesystem_skill_context_source(
     .map_err(|reason| RebornRuntimeError::InvalidArgument {
         reason: format!("first-party skills extension source: {reason}"),
     })?;
-    Ok(extension.host_skill_context_source())
+    let loaded_extensions = LoadedFirstPartyExtensions::new().with_skills(extension);
+    let activation_source = loaded_extensions
+        .selectable_skill_context_source(SkillActivationSelectorConfig::default())
+        .ok_or_else(|| RebornRuntimeError::InvalidArgument {
+            reason: "first-party skills extension did not expose a skill context source"
+                .to_string(),
+        })?;
+    let source: Arc<dyn HostSkillContextSource> = activation_source.clone();
+    Ok(LocalDevSkillContextSource {
+        source,
+        activation_source,
+    })
 }
 
 struct ValidatedRuntimeIdentity {
@@ -833,7 +973,7 @@ mod tests {
 
     use async_trait::async_trait;
     use ironclaw_host_api::{
-        CapabilityId,
+        AgentId, CapabilityId, TenantId, UserId,
         runtime_policy::{
             ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy,
             FilesystemBackendKind, NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -844,14 +984,20 @@ mod tests {
         HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
         HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
     };
+    use ironclaw_product_adapters::{ProductOutboundPayload, ProductProjectionItem};
+    use ironclaw_product_workflow::{
+        RebornStreamEventsRequest, RebornSubmitTurnResponse, WebUiAuthenticatedCaller,
+        WebUiCreateThreadRequest, WebUiSendMessageRequest,
+    };
     use ironclaw_skills::SkillTrust;
     use ironclaw_threads::{
         LoadContextMessagesRequest, MessageKind, SessionThreadService, ThreadHistoryRequest,
     };
     use ironclaw_turns::{
-        TurnStatus,
+        TurnActor, TurnId, TurnRunId, TurnStatus,
         run_profile::{
-            LoopCapabilityPort, LoopRunContext, ProviderToolCall, SkillVisibility,
+            InMemoryRunProfileResolver, LoopCapabilityPort, LoopRunContext, ProviderToolCall,
+            RunProfileResolutionRequest, RunProfileResolver, SkillVisibility,
             VisibleCapabilityRequest,
         },
     };
@@ -1123,7 +1269,16 @@ mod tests {
     }
 
     fn skill_md(name: &str, description: &str, prompt: &str) -> String {
-        format!("---\nname: {name}\ndescription: {description}\n---\n\n{prompt}")
+        format!(
+            "---\nname: {name}\ndescription: {description}\nactivation:\n  keywords: [\"{name}\"]\n---\n\n{prompt}"
+        )
+    }
+
+    fn recorded_request_count(requests: &StdMutex<Vec<HostManagedModelRequest>>) -> usize {
+        requests
+            .lock()
+            .expect("recording gateway requests lock poisoned")
+            .len()
     }
 
     #[tokio::test]
@@ -1182,13 +1337,7 @@ mod tests {
 
         assert_eq!(reply.status, TurnStatus::Completed);
         assert_eq!(reply.text.as_deref(), Some("recorded runtime reply"));
-        assert_eq!(
-            requests
-                .lock()
-                .expect("recording gateway requests lock poisoned")
-                .len(),
-            1
-        );
+        assert_eq!(recorded_request_count(&requests), 1);
 
         runtime.shutdown().await.expect("runtime shutdown");
     }
@@ -1418,6 +1567,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_dev_runtime_prefers_configured_skill_context_source_over_filesystem_default() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let storage_root = root.path().join("local-dev");
+        std::fs::create_dir_all(storage_root.join("system/skills/filesystem-helper"))
+            .expect("filesystem skill dir");
+        std::fs::write(
+            storage_root.join("system/skills/filesystem-helper/SKILL.md"),
+            skill_md(
+                "filesystem-helper",
+                "filesystem helper description",
+                "FILESYSTEM_HELPER_PROMPT_SENTINEL",
+            ),
+        )
+        .expect("write filesystem skill");
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let gateway = Arc::new(RecordingGateway {
+            reply: "configured skill context ok".to_string(),
+            requests: Arc::clone(&requests),
+        });
+        let skill_source = Arc::new(StaticSkillContextSource::new(vec![
+            HostSkillContextCandidate::new(
+                skill_md(
+                    "configured-helper",
+                    "configured helper description",
+                    "CONFIGURED_HELPER_PROMPT_SENTINEL",
+                ),
+                Some(SkillTrust::Trusted),
+                Some(SkillVisibility::Visible),
+            ),
+        ]));
+        let skill_context_source: Arc<dyn HostSkillContextSource> = skill_source;
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-skill-override-owner", storage_root)
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-skill-override-tenant".to_string(),
+            agent_id: "runtime-skill-override-agent".to_string(),
+            source_binding_id: "runtime-skill-override-source".to_string(),
+            reply_target_binding_id: "runtime-skill-override-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_skill_context_source(skill_context_source)
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let reply = tokio::time::timeout(
+            Duration::from_secs(3),
+            runtime.send_user_message(&conversation, "review this"),
+        )
+        .await
+        .expect("runtime send should finish")
+        .expect("runtime send should succeed");
+
+        assert_eq!(reply.status, TurnStatus::Completed);
+        assert_eq!(reply.text.as_deref(), Some("configured skill context ok"));
+        let combined_skill_context = {
+            let requests = requests
+                .lock()
+                .expect("recording gateway requests lock poisoned");
+            requests[0]
+                .messages
+                .iter()
+                .filter(|message| {
+                    message.role == HostManagedModelMessageRole::System
+                        && message
+                            .content_ref
+                            .as_str()
+                            .starts_with("msg:snippet.skill.")
+                })
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert!(combined_skill_context.contains("configured helper description"));
+        assert!(combined_skill_context.contains("CONFIGURED_HELPER_PROMPT_SENTINEL"));
+        assert!(!combined_skill_context.contains("filesystem helper description"));
+        assert!(!combined_skill_context.contains("FILESYSTEM_HELPER_PROMPT_SENTINEL"));
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
     async fn local_dev_runtime_wires_filesystem_skills_by_default_to_model_calls() {
         let root = tempfile::tempdir().expect("tempdir");
         let storage_root = root.path().join("local-dev");
@@ -1478,7 +1714,7 @@ mod tests {
         let conversation = runtime.new_conversation().await.expect("conversation");
         let reply = tokio::time::timeout(
             Duration::from_secs(3),
-            runtime.send_user_message(&conversation, "review this"),
+            runtime.send_user_message(&conversation, "/system-helper and /local-helper"),
         )
         .await
         .expect("runtime send should finish")
@@ -1504,13 +1740,81 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let combined_skill_context = skill_messages.join("\n");
-        assert_eq!(skill_messages.len(), 3);
+        assert_eq!(skill_messages.len(), 2);
         assert!(combined_skill_context.contains("system helper description"));
         assert!(combined_skill_context.contains("SYSTEM_HELPER_PROMPT_SENTINEL"));
         assert!(combined_skill_context.contains("local helper description"));
         assert!(combined_skill_context.contains("USER_HELPER_PROMPT_SENTINEL"));
-        assert!(combined_skill_context.contains("tenant shared helper description"));
+        assert!(!combined_skill_context.contains("tenant shared helper description"));
         assert!(!combined_skill_context.contains("TENANT_SHARED_PROMPT_SENTINEL"));
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn local_dev_runtime_fails_closed_for_ambiguous_explicit_skill_before_model_call() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let storage_root = root.path().join("local-dev");
+        std::fs::create_dir_all(storage_root.join("system/skills/code-review"))
+            .expect("system skill dir");
+        std::fs::write(
+            storage_root.join("system/skills/code-review/SKILL.md"),
+            skill_md(
+                "code-review",
+                "system review description",
+                "SYSTEM_REVIEW_PROMPT_SENTINEL",
+            ),
+        )
+        .expect("write system skill");
+        std::fs::create_dir_all(storage_root.join("skills/code-review")).expect("user skill dir");
+        std::fs::write(
+            storage_root.join("skills/code-review/SKILL.md"),
+            skill_md(
+                "code-review",
+                "user review description",
+                "USER_REVIEW_PROMPT_SENTINEL",
+            ),
+        )
+        .expect("write user skill");
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let gateway = Arc::new(RecordingGateway {
+            reply: "should not reach model".to_string(),
+            requests: Arc::clone(&requests),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-ambiguous-skill-owner", storage_root)
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-ambiguous-skill-tenant".to_string(),
+            agent_id: "runtime-ambiguous-skill-agent".to_string(),
+            source_binding_id: "runtime-ambiguous-skill-source".to_string(),
+            reply_target_binding_id: "runtime-ambiguous-skill-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let reply = tokio::time::timeout(
+            Duration::from_secs(3),
+            runtime.send_user_message(&conversation, "/code-review this PR"),
+        )
+        .await
+        .expect("runtime send should finish")
+        .expect("runtime send should succeed");
+
+        assert_ne!(reply.status, TurnStatus::Completed);
+        assert!(
+            requests
+                .lock()
+                .expect("recording gateway requests lock poisoned")
+                .is_empty(),
+            "ambiguous explicit skill should fail before model dispatch"
+        );
 
         runtime.shutdown().await.expect("runtime shutdown");
     }
@@ -1672,6 +1976,10 @@ mod tests {
     #[tokio::test]
     async fn local_dev_runtime_webui_bundle_reuses_thread_and_turn_facades() {
         let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "webui projection ok".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
         let input = RebornRuntimeInput::from_services(
             RebornBuildInput::local_dev("runtime-webui-owner", root.path().join("local-dev"))
                 .with_runtime_policy(local_dev_runtime_policy()),
@@ -1685,19 +1993,199 @@ mod tests {
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(10),
             max_total: Duration::from_secs(3),
-        });
+        })
+        .with_model_gateway_override(gateway);
 
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let runtime_turn_coordinator = runtime.webui_turn_coordinator();
         let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+        let caller = WebUiAuthenticatedCaller::new(
+            TenantId::new("runtime-webui-tenant").unwrap(),
+            UserId::new("runtime-webui-owner").unwrap(),
+            Some(AgentId::new("runtime-webui-agent").unwrap()),
+            None,
+        );
+        let created = bundle
+            .api
+            .create_thread(
+                caller.clone(),
+                WebUiCreateThreadRequest {
+                    client_action_id: Some("create-webui-stream-thread".to_string()),
+                    requested_thread_id: None,
+                },
+            )
+            .await
+            .expect("create webui thread");
+        let submitted = bundle
+            .api
+            .submit_turn(
+                caller.clone(),
+                WebUiSendMessageRequest {
+                    client_action_id: Some("send-webui-stream-message".to_string()),
+                    thread_id: Some(created.thread.thread_id.to_string()),
+                    content: Some("hello webui stream".to_string()),
+                },
+            )
+            .await
+            .expect("submit webui turn");
+        let RebornSubmitTurnResponse::Submitted { run_id, .. } = submitted else {
+            panic!("webui submit should start a run");
+        };
+        let stream = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let stream = bundle
+                    .api
+                    .stream_events(
+                        caller.clone(),
+                        RebornStreamEventsRequest {
+                            thread_id: created.thread.thread_id.to_string(),
+                            after_cursor: None,
+                        },
+                    )
+                    .await
+                    .expect("webui event stream");
+                if stream.events.iter().any(|event| {
+                    matches!(
+                        event.payload(),
+                        ProductOutboundPayload::ProjectionSnapshot { state }
+                            | ProductOutboundPayload::ProjectionUpdate { state }
+                            if state.items.iter().any(|item| matches!(
+                                item,
+                                ProductProjectionItem::RunStatus { run_id: seen, status }
+                                    if *seen == run_id && status == "completed"
+                            ))
+                    )
+                }) {
+                    break stream;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("completed webui projection should appear");
 
         let _api = bundle.api.clone();
         assert!(Arc::ptr_eq(
             &runtime_turn_coordinator,
             &runtime.webui_turn_coordinator()
         ));
+        assert!(
+            stream.events.iter().all(|event| matches!(
+                event.payload(),
+                ProductOutboundPayload::ProjectionSnapshot { .. }
+                    | ProductOutboundPayload::ProjectionUpdate { .. }
+            )),
+            "webui bundle should expose only projection stream events"
+        );
         assert_eq!(bundle.readiness, runtime.services().readiness);
         assert_eq!(bundle.readiness.state, RebornReadinessState::DevOnly);
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn local_dev_webui_bundle_records_selectable_filesystem_skill_context() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let storage_root = root.path().join("local-dev");
+        std::fs::create_dir_all(storage_root.join("skills/webui-helper")).expect("user skill dir");
+        std::fs::write(
+            storage_root.join("skills/webui-helper/SKILL.md"),
+            skill_md(
+                "webui-helper",
+                "webui helper description",
+                "WEBUI_HELPER_PROMPT_SENTINEL",
+            ),
+        )
+        .expect("write user skill");
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let gateway = Arc::new(RecordingGateway {
+            reply: "webui skill context ok".to_string(),
+            requests: Arc::clone(&requests),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-webui-skill-owner", storage_root)
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-webui-skill-tenant".to_string(),
+            agent_id: "runtime-webui-skill-agent".to_string(),
+            source_binding_id: "runtime-webui-skill-source".to_string(),
+            reply_target_binding_id: "runtime-webui-skill-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+        let caller = WebUiAuthenticatedCaller::new(
+            TenantId::new("runtime-webui-skill-tenant").unwrap(),
+            UserId::new("runtime-webui-skill-user").unwrap(),
+            Some(AgentId::new("runtime-webui-skill-agent").unwrap()),
+            None,
+        );
+        let created = bundle
+            .api
+            .create_thread(
+                caller.clone(),
+                WebUiCreateThreadRequest {
+                    client_action_id: Some("create-webui-skill-thread".to_string()),
+                    requested_thread_id: None,
+                },
+            )
+            .await
+            .expect("create thread");
+        let submitted = bundle
+            .api
+            .submit_turn(
+                caller,
+                WebUiSendMessageRequest {
+                    client_action_id: Some("send-webui-skill-message".to_string()),
+                    thread_id: Some(created.thread.thread_id.to_string()),
+                    content: Some("please use webui-helper".to_string()),
+                },
+            )
+            .await
+            .expect("submit turn");
+        let RebornSubmitTurnResponse::Submitted {
+            thread_id,
+            accepted_message_ref,
+            ..
+        } = submitted
+        else {
+            panic!("webui submit should start a run");
+        };
+        let resolved_run_profile = InMemoryRunProfileResolver::default()
+            .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+            .await
+            .expect("resolve run profile");
+        let source = runtime
+            .webui_skill_activation_source()
+            .expect("webui skill activation source");
+        let context = LoopRunContext::new(
+            runtime.turn_scope_for(&thread_id),
+            TurnId::new(),
+            TurnRunId::new(),
+            resolved_run_profile,
+        )
+        .with_accepted_message_ref(accepted_message_ref)
+        .with_actor(TurnActor::new(
+            UserId::new("runtime-webui-skill-user").unwrap(),
+        ));
+        let selected = source
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("webui-recorded skill context should load");
+        let combined_skill_context = selected
+            .iter()
+            .map(|candidate| candidate.skill_md.as_deref().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(selected.len(), 1);
+        assert!(combined_skill_context.contains("webui helper description"));
+        assert!(combined_skill_context.contains("WEBUI_HELPER_PROMPT_SENTINEL"));
 
         runtime.shutdown().await.expect("runtime shutdown");
     }

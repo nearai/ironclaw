@@ -5745,6 +5745,7 @@ impl ScriptBackend for E2eEchoScriptBackend {
 }
 
 const E2E_SCRIPT_MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
 id = "script"
 name = "Script Echo"
 version = "0.1.0"
@@ -5762,7 +5763,9 @@ id = "script.echo"
 description = "Echo text through Reborn adapter e2e"
 effects = ["dispatch_capability"]
 default_permission = "allow"
-parameters_schema = { type = "object" }
+visibility = "host_internal"
+input_schema_ref = "schemas/script/echo.input.v1.json"
+output_schema_ref = "schemas/script/echo.output.v1.json"
 "#;
 
 /// Test-only evidence port that bypasses all durable evidence checks.

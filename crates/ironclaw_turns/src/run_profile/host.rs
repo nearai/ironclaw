@@ -10,8 +10,9 @@ use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 use crate::{
-    LoopDiagnosticRef, LoopGateRef, LoopMessageRef, LoopResultRef, RedactedCheckpointPayload,
-    RunProfileVersion, TurnActor, TurnCheckpointId, TurnId, TurnRunId, TurnScope,
+    AcceptedMessageRef, LoopDiagnosticRef, LoopGateRef, LoopMessageRef, LoopResultRef,
+    RedactedCheckpointPayload, RunProfileVersion, TurnActor, TurnCheckpointId, TurnId, TurnRunId,
+    TurnScope,
 };
 
 use super::{
@@ -478,6 +479,8 @@ pub struct LoopRunContext {
     pub scope: TurnScope,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor: Option<TurnActor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_message_ref: Option<AcceptedMessageRef>,
     pub thread_id: ThreadId,
     pub turn_id: TurnId,
     pub run_id: TurnRunId,
@@ -505,6 +508,7 @@ impl LoopRunContext {
         Self {
             scope,
             actor: None,
+            accepted_message_ref: None,
             thread_id,
             turn_id,
             run_id,
@@ -519,6 +523,11 @@ impl LoopRunContext {
 
     pub fn with_actor(mut self, actor: TurnActor) -> Self {
         self.actor = Some(actor);
+        self
+    }
+
+    pub fn with_accepted_message_ref(mut self, accepted_message_ref: AcceptedMessageRef) -> Self {
+        self.accepted_message_ref = Some(accepted_message_ref);
         self
     }
 

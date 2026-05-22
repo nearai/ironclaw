@@ -35,6 +35,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::WebUiV2HttpError;
 use crate::router::WebUiV2State;
+use crate::schema::WebChatV2EventFrame;
 use crate::sse_capacity::{SSE_MAX_LIFETIME, SseSlot};
 
 /// `POST /api/webchat/v2/threads`
@@ -115,7 +116,7 @@ const LAST_EVENT_ID_HEADER: &str = "last-event-id";
 /// `GET /api/webchat/v2/threads/{thread_id}/events`
 ///
 /// Server-Sent Events stream. Each event carries one
-/// [`ProductOutboundEnvelope`] as JSON with the projection cursor as the
+/// [`WebChatV2EventFrame`] as JSON with the projection cursor as the
 /// SSE `id` so the browser can resume from the last delivered event.
 ///
 /// Resume cursor precedence: `Last-Event-ID` header (sent automatically
@@ -134,7 +135,7 @@ const LAST_EVENT_ID_HEADER: &str = "last-event-id";
 /// polls in a loop. Drain-only semantics are documented on
 /// [`RebornServicesApi::stream_events`].
 ///
-/// [`ProductOutboundEnvelope`]: ironclaw_product_workflow::ProductOutboundEnvelope
+/// [`WebChatV2EventFrame`]: crate::schema::WebChatV2EventFrame
 /// [`RebornServicesApi::stream_events`]: ironclaw_product_workflow::RebornServicesApi::stream_events
 /// [`SSE_MAX_LIFETIME`]: crate::sse_capacity::SSE_MAX_LIFETIME
 pub async fn stream_events(
@@ -247,10 +248,11 @@ fn build_sse_stream(
                         after_cursor = Some(latest.projection_cursor.clone());
                     }
                     for envelope in response.events {
-                        let id = cursor_token(&envelope.projection_cursor);
-                        match serde_json::to_string(&envelope) {
+                        let frame = WebChatV2EventFrame::from_outbound(envelope);
+                        let id = cursor_token(frame.cursor());
+                        match serde_json::to_string(&frame) {
                             Ok(payload) => {
-                                let mut event = Event::default().event("projection").data(payload);
+                                let mut event = Event::default().event(frame.event_name()).data(payload);
                                 if let Some(id) = id {
                                     event = event.id(id);
                                 }
@@ -264,7 +266,7 @@ fn build_sse_stream(
                                 tracing::debug!(
                                     target = "ironclaw_webui_v2::sse",
                                     error = %error,
-                                    "failed to serialize ProductOutboundEnvelope for SSE",
+                                    "failed to serialize WebChatV2EventFrame for SSE",
                                 );
                             }
                         }

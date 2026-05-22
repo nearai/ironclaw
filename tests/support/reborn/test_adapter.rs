@@ -5,8 +5,9 @@ use ironclaw_product_adapters::{
     ExternalConversationRef, ExternalEventId, OutboundDeliverySink, ParsedProductInbound,
     ProductAdapter, ProductAdapterCapabilities, ProductAdapterError, ProductAdapterHealth,
     ProductAdapterId, ProductInboundEnvelope, ProductInboundPayload, ProductOutboundEnvelope,
-    ProductRenderOutcome, ProductSurfaceKind, ProductTriggerReason, ProtocolAuthEvidence,
-    ProtocolAuthFailure, ProtocolHttpEgress, TrustedInboundContext, UserMessagePayload,
+    ProductRenderOutcome, ProductSurfaceKind, ProductTriggerReason, ProjectionCursor,
+    ProjectionSubscriptionPayload, ProtocolAuthEvidence, ProtocolAuthFailure, ProtocolHttpEgress,
+    TrustedInboundContext, UserMessagePayload,
 };
 use serde::{Deserialize, Serialize};
 
@@ -54,11 +55,36 @@ impl RebornTestProductAdapter {
         trigger: ProductTriggerReason,
     ) -> Result<Vec<u8>, ProductAdapterError> {
         serde_json::to_vec(&RebornTestInboundPayload {
+            kind: RebornTestInboundKind::UserMessage,
             event_id,
             user_id,
             thread_id,
-            text,
-            trigger,
+            text: Some(text),
+            trigger: Some(trigger),
+            thread_id_hint: None,
+            after_cursor: None,
+        })
+        .map_err(|error| ProductAdapterError::MalformedInboundPayload {
+            reason: ironclaw_product_adapters::RedactedString::new(error.to_string()),
+        })
+    }
+
+    pub fn subscription_payload(
+        event_id: &str,
+        user_id: &str,
+        thread_id: &str,
+        thread_id_hint: Option<&str>,
+        after_cursor: Option<ProjectionCursor>,
+    ) -> Result<Vec<u8>, ProductAdapterError> {
+        serde_json::to_vec(&RebornTestInboundPayload {
+            kind: RebornTestInboundKind::SubscriptionRequest,
+            event_id,
+            user_id,
+            thread_id,
+            text: None,
+            trigger: None,
+            thread_id_hint,
+            after_cursor,
         })
         .map_err(|error| ProductAdapterError::MalformedInboundPayload {
             reason: ironclaw_product_adapters::RedactedString::new(error.to_string()),
@@ -121,6 +147,33 @@ impl ProductAdapter for RebornTestProductAdapter {
                 },
             ));
         }
+        let inbound_payload = match payload.kind {
+            RebornTestInboundKind::UserMessage => {
+                ProductInboundPayload::UserMessage(UserMessagePayload::new(
+                    payload
+                        .text
+                        .ok_or_else(|| ProductAdapterError::MalformedInboundPayload {
+                            reason: ironclaw_product_adapters::RedactedString::new(
+                                "user message payload missing text",
+                            ),
+                        })?,
+                    Vec::new(),
+                    payload.trigger.ok_or_else(|| {
+                        ProductAdapterError::MalformedInboundPayload {
+                            reason: ironclaw_product_adapters::RedactedString::new(
+                                "user message payload missing trigger",
+                            ),
+                        }
+                    })?,
+                )?)
+            }
+            RebornTestInboundKind::SubscriptionRequest => {
+                ProductInboundPayload::SubscriptionRequest(ProjectionSubscriptionPayload::new(
+                    payload.thread_id_hint,
+                    payload.after_cursor,
+                )?)
+            }
+        };
         ParsedProductInbound::new(
             ExternalEventId::new(payload.event_id)?,
             ExternalActorRef::new(
@@ -129,11 +182,7 @@ impl ProductAdapter for RebornTestProductAdapter {
                 Some(payload.user_id),
             )?,
             ExternalConversationRef::new(None, payload.thread_id, None, None)?,
-            ProductInboundPayload::UserMessage(UserMessagePayload::new(
-                payload.text,
-                Vec::new(),
-                payload.trigger,
-            )?),
+            inbound_payload,
         )
     }
 
@@ -231,6 +280,32 @@ impl RebornTestIngress {
         ProductInboundEnvelope::from_trusted_parse(context, parsed)
     }
 
+    pub fn verified_subscription_envelope(
+        &self,
+        event_id: &str,
+        user_id: &str,
+        thread_id: &str,
+        thread_id_hint: Option<&str>,
+        after_cursor: Option<ProjectionCursor>,
+    ) -> Result<ProductInboundEnvelope, ProductAdapterError> {
+        let evidence = ProtocolAuthEvidence::test_verified(AuthRequirement::BearerToken, user_id);
+        let raw = RebornTestProductAdapter::subscription_payload(
+            event_id,
+            user_id,
+            thread_id,
+            thread_id_hint,
+            after_cursor,
+        )?;
+        let parsed = self.adapter.parse_inbound(&raw, &evidence)?;
+        let context = TrustedInboundContext::from_verified_evidence(
+            self.adapter.adapter_id().clone(),
+            self.adapter.installation_id().clone(),
+            Utc::now(),
+            &evidence,
+        )?;
+        ProductInboundEnvelope::from_trusted_parse(context, parsed)
+    }
+
     pub fn failed_auth_payload(
         &self,
         raw_payload: &[u8],
@@ -240,20 +315,42 @@ impl RebornTestIngress {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RebornTestInboundKind {
+    UserMessage,
+    SubscriptionRequest,
+}
+
+fn default_inbound_kind() -> RebornTestInboundKind {
+    RebornTestInboundKind::UserMessage
+}
+
 #[derive(Debug, Serialize)]
 struct RebornTestInboundPayload<'a> {
+    kind: RebornTestInboundKind,
     event_id: &'a str,
     user_id: &'a str,
     thread_id: &'a str,
-    text: &'a str,
-    trigger: ProductTriggerReason,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trigger: Option<ProductTriggerReason>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thread_id_hint: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    after_cursor: Option<ProjectionCursor>,
 }
 
 #[derive(Debug, Deserialize)]
 struct OwnedRebornTestInboundPayload {
+    #[serde(default = "default_inbound_kind")]
+    kind: RebornTestInboundKind,
     event_id: String,
     user_id: String,
     thread_id: String,
-    text: String,
-    trigger: ProductTriggerReason,
+    text: Option<String>,
+    trigger: Option<ProductTriggerReason>,
+    thread_id_hint: Option<String>,
+    after_cursor: Option<ProjectionCursor>,
 }

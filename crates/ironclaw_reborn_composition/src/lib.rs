@@ -25,6 +25,7 @@ mod input;
 mod llm_catalog;
 mod product_live_adapters;
 mod profile;
+mod projection;
 mod readiness;
 mod runtime;
 mod runtime_input;
