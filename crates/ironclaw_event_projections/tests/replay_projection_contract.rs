@@ -1131,6 +1131,45 @@ async fn replay_projection_keeps_model_failed_non_terminal_until_loop_terminal_e
 }
 
 #[tokio::test]
+async fn replay_projection_projects_loop_cancelled_as_terminal_cancelled_status() {
+    let log = Arc::new(InMemoryDurableEventLog::new());
+    let service = ReplayEventProjectionService::new(Arc::clone(&log));
+    let scope = scope_for_thread(ThreadId::new("thread-loop-terminal-cancelled").unwrap());
+    let model_capability = CapabilityId::new("loop.model").unwrap();
+    let run_capability = CapabilityId::new("loop.run").unwrap();
+
+    log.append(RuntimeEvent::model_started(
+        scope.clone(),
+        model_capability.clone(),
+    ))
+    .await
+    .unwrap();
+    log.append(RuntimeEvent::loop_cancelled(scope.clone(), run_capability))
+        .await
+        .unwrap();
+
+    let snapshot = service
+        .snapshot(ProjectionRequest {
+            scope: ProjectionScope::from_resource_scope(&scope),
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(snapshot.runs.len(), 1);
+    assert_eq!(snapshot.runs[0].status, RunProjectionStatus::Cancelled);
+    assert_eq!(
+        snapshot.runs[0].capability_id, model_capability,
+        "trusted terminal loop events should not reclassify the primary run capability"
+    );
+    assert_eq!(
+        snapshot.runs[0].error_kind, None,
+        "cancelled terminal events must clear stale attempt-level errors"
+    );
+}
+
+#[tokio::test]
 async fn replay_projection_updates_preserve_running_process_state_after_checkpoint() {
     let log = Arc::new(InMemoryDurableEventLog::new());
     let service = ReplayEventProjectionService::new(Arc::clone(&log));

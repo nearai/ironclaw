@@ -454,8 +454,8 @@ pub enum LoopFailureKind {
 }
 
 impl LoopFailureKind {
-    fn to_sanitized_failure(self) -> SanitizedFailure {
-        SanitizedFailure::from_trusted_static(match self {
+    pub fn as_str(self) -> &'static str {
+        match self {
             Self::ModelError => "model_error",
             Self::ContextBuildFailed => "context_build_failed",
             Self::CapabilityProtocolError => "capability_protocol_error",
@@ -468,7 +468,11 @@ impl LoopFailureKind {
             Self::InterruptedUnexpectedly => "interrupted_unexpectedly",
             Self::NoProgressDetected => "no_progress_detected",
             Self::PolicyDenied => "policy_denied",
-        })
+        }
+    }
+
+    fn to_sanitized_failure(self) -> SanitizedFailure {
+        SanitizedFailure::from_trusted_static(self.as_str())
     }
 }
 

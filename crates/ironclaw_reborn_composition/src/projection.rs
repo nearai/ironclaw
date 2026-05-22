@@ -268,6 +268,7 @@ fn run_status_wire(status: RunProjectionStatus) -> &'static str {
     match status {
         RunProjectionStatus::Running => "running",
         RunProjectionStatus::Completed => "completed",
+        RunProjectionStatus::Cancelled => "cancelled",
         RunProjectionStatus::Failed => "failed",
         RunProjectionStatus::Killed => "killed",
     }
@@ -318,7 +319,7 @@ mod tests {
     use ironclaw_host_api::{
         AgentId, CapabilityId, InvocationId, ResourceScope, TenantId, ThreadId, UserId,
     };
-    use ironclaw_product_adapters::ProductOutboundPayload;
+    use ironclaw_product_adapters::{ProductOutboundEnvelope, ProductOutboundPayload};
 
     #[tokio::test]
     async fn webui_event_stream_drains_run_status_projection_from_event_stream_manager() {
@@ -371,6 +372,64 @@ mod tests {
         ));
     }
 
+    async fn webui_event_stream_resumes_after_serialized_projection_cursor() {
+        let tenant_id = TenantId::new("webui-events-tenant").unwrap();
+        let user_id = UserId::new("webui-events-user").unwrap();
+        let agent_id = AgentId::new("webui-events-agent").unwrap();
+        let thread_id = ThreadId::new("webui-events-thread").unwrap();
+        let first_run = InvocationId::new();
+        let second_run = InvocationId::new();
+        let event_log = Arc::new(InMemoryDurableEventLog::new());
+        event_log
+            .append(RuntimeEvent::model_started(
+                resource_scope(&tenant_id, &user_id, &agent_id, &thread_id, first_run),
+                CapabilityId::new("loop.model").unwrap(),
+            ))
+            .await
+            .unwrap();
+
+        let event_log_dyn: Arc<dyn DurableEventLog> = event_log.clone();
+        let actor = TurnActor::new(user_id.clone());
+        let services = build_reborn_projection_services(
+            event_log_dyn,
+            ReplyTargetBindingRef::new("webui-events-reply").unwrap(),
+        );
+        let first = services
+            .webui_event_stream()
+            .drain(ProjectionSubscriptionRequest {
+                actor: actor.clone(),
+                scope: TurnScope::new(
+                    tenant_id.clone(),
+                    Some(agent_id.clone()),
+                    None,
+                    thread_id.clone(),
+                ),
+                after_cursor: None,
+            })
+            .await
+            .unwrap();
+
+        event_log
+            .append(RuntimeEvent::model_started(
+                resource_scope(&tenant_id, &user_id, &agent_id, &thread_id, second_run),
+                CapabilityId::new("loop.model").unwrap(),
+            ))
+            .await
+            .unwrap();
+        let resumed = services
+            .webui_event_stream()
+            .drain(ProjectionSubscriptionRequest {
+                actor,
+                scope: TurnScope::new(tenant_id, Some(agent_id), None, thread_id),
+                after_cursor: Some(first[0].projection_cursor().clone()),
+            })
+            .await
+            .unwrap();
+
+        assert!(contains_run_status(&resumed, second_run, "running"));
+        assert!(!contains_run_status(&resumed, first_run, "running"));
+    }
+
     #[tokio::test]
     async fn webui_event_stream_uses_request_actor_for_projection_scope() {
         let tenant_id = TenantId::new("webui-events-tenant").unwrap();
@@ -381,15 +440,13 @@ mod tests {
         let event_log = Arc::new(InMemoryDurableEventLog::new());
         event_log
             .append(RuntimeEvent::model_started(
-                ResourceScope {
-                    tenant_id: tenant_id.clone(),
-                    user_id: owner_user_id,
-                    agent_id: Some(agent_id.clone()),
-                    project_id: None,
-                    mission_id: None,
-                    thread_id: Some(thread_id.clone()),
-                    invocation_id: InvocationId::new(),
-                },
+                resource_scope(
+                    &tenant_id,
+                    &owner_user_id,
+                    &agent_id,
+                    &thread_id,
+                    InvocationId::new(),
+                ),
                 CapabilityId::new("loop.model").unwrap(),
             ))
             .await
@@ -414,5 +471,76 @@ mod tests {
             events.is_empty(),
             "projection stream must not read another user's event stream through a hidden runtime actor"
         );
+    }
+
+    #[tokio::test]
+    async fn webui_event_stream_rejects_malformed_projection_cursor() {
+        let tenant_id = TenantId::new("webui-events-tenant").unwrap();
+        let user_id = UserId::new("webui-events-user").unwrap();
+        let agent_id = AgentId::new("webui-events-agent").unwrap();
+        let thread_id = ThreadId::new("webui-events-thread").unwrap();
+        let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+        let actor = TurnActor::new(user_id);
+        let services = build_reborn_projection_services(
+            event_log,
+            ReplyTargetBindingRef::new("webui-events-reply").unwrap(),
+        );
+
+        let error = services
+            .webui_event_stream()
+            .drain(ProjectionSubscriptionRequest {
+                actor,
+                scope: TurnScope::new(tenant_id, Some(agent_id), None, thread_id),
+                after_cursor: Some(ProductProjectionCursor::new("not-json").unwrap()),
+            })
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ProductAdapterError::InvalidIdentifier {
+                kind: "projection_cursor",
+                ..
+            }
+        ));
+    }
+
+    fn resource_scope(
+        tenant_id: &TenantId,
+        user_id: &UserId,
+        agent_id: &AgentId,
+        thread_id: &ThreadId,
+        invocation_id: InvocationId,
+    ) -> ResourceScope {
+        ResourceScope {
+            tenant_id: tenant_id.clone(),
+            user_id: user_id.clone(),
+            agent_id: Some(agent_id.clone()),
+            project_id: None,
+            mission_id: None,
+            thread_id: Some(thread_id.clone()),
+            invocation_id,
+        }
+    }
+
+    fn contains_run_status(
+        events: &[ProductOutboundEnvelope],
+        invocation_id: InvocationId,
+        expected_status: &str,
+    ) -> bool {
+        let expected_run_id = TurnRunId::from_uuid(invocation_id.as_uuid());
+        events.iter().any(|event| match event.payload() {
+            ProductOutboundPayload::ProjectionSnapshot { state }
+            | ProductOutboundPayload::ProjectionUpdate { state } => {
+                state.items.iter().any(|item| {
+                    matches!(
+                        item,
+                        ProductProjectionItem::RunStatus { run_id, status }
+                            if *run_id == expected_run_id && status == expected_status
+                    )
+                })
+            }
+            _ => false,
+        })
     }
 }
