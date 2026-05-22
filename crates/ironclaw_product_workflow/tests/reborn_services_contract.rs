@@ -567,6 +567,45 @@ async fn submit_turn_uses_facade_and_thread_history_without_route_store_access()
 }
 
 #[tokio::test]
+async fn submit_turn_records_skill_activation_message_before_turn_submission() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let recorded_for_hook = Arc::clone(&recorded);
+    let services = RebornServices::new(threads, coordinator.clone())
+        .with_skill_activation_recorder(move |scope, message| {
+            recorded_for_hook
+                .lock()
+                .expect("lock")
+                .push((scope.thread_id.as_str().to_string(), message.to_string()));
+            Ok(())
+        });
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-skill-activation",
+                "thread_id": "thread-alpha",
+                "content": "/code-review inspect this"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("submit succeeds");
+
+    assert_eq!(coordinator.submission_count(), 1);
+    assert_eq!(
+        recorded.lock().expect("lock").as_slice(),
+        &[(
+            "thread-alpha".to_string(),
+            "/code-review inspect this".to_string()
+        )]
+    );
+}
+
+#[tokio::test]
 async fn duplicate_submit_replays_prior_handoff_without_second_submission() {
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(FakeTurnCoordinator::default());

@@ -41,6 +41,9 @@ pub use types::{
     RebornTimelineRequest, RebornTimelineResponse,
 };
 
+type SkillActivationRecorder =
+    dyn Fn(&TurnScope, &str) -> Result<(), RebornServicesError> + Send + Sync;
+
 /// Stable WebUI-facing facade surface for beta Reborn routes.
 #[async_trait]
 pub trait RebornServicesApi: Send + Sync {
@@ -93,6 +96,7 @@ pub struct RebornServices {
     thread_service: Arc<dyn SessionThreadService>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
     event_stream: Option<Arc<dyn ProjectionStream>>,
+    skill_activation_recorder: Option<Arc<SkillActivationRecorder>>,
 }
 
 impl RebornServices {
@@ -104,12 +108,32 @@ impl RebornServices {
             thread_service,
             turn_coordinator,
             event_stream: None,
+            skill_activation_recorder: None,
         }
     }
 
     pub fn with_event_stream(mut self, event_stream: Arc<dyn ProjectionStream>) -> Self {
         self.event_stream = Some(event_stream);
         self
+    }
+
+    pub fn with_skill_activation_recorder<F>(mut self, recorder: F) -> Self
+    where
+        F: Fn(&TurnScope, &str) -> Result<(), RebornServicesError> + Send + Sync + 'static,
+    {
+        self.skill_activation_recorder = Some(Arc::new(recorder));
+        self
+    }
+
+    fn record_skill_activation_message(
+        &self,
+        scope: &TurnScope,
+        content: &str,
+    ) -> Result<(), RebornServicesError> {
+        if let Some(recorder) = &self.skill_activation_recorder {
+            recorder(scope, content)?;
+        }
+        Ok(())
     }
 }
 
@@ -254,7 +278,7 @@ impl RebornServicesApi for RebornServices {
                     source_binding_id: Some(source_binding_id.clone()),
                     reply_target_binding_id: Some(source_binding_id.clone()),
                     external_event_id: Some(external_event_id),
-                    content: MessageContent::text(content),
+                    content: MessageContent::text(content.clone()),
                 })
                 .await
                 .map_err(map_thread_error)?;
@@ -272,6 +296,7 @@ impl RebornServicesApi for RebornServices {
             bounded_ref::<SourceBindingRef>("webui-src", &handoff.source_binding_id)?;
         let reply_target_binding_ref =
             bounded_ref::<ReplyTargetBindingRef>("webui-reply", &handoff.reply_target_binding_id)?;
+        self.record_skill_activation_message(&scope, &content)?;
 
         let submit = SubmitTurnRequest {
             scope,

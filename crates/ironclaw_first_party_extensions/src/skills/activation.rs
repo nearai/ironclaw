@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use futures::future::try_join_all;
@@ -165,42 +165,72 @@ where
         }
     }
 
-    pub fn record_user_message(&self, scope: TurnScope, message: impl Into<String>) {
-        lock_or_recover(&self.messages_by_scope, "skill activation message")
+    pub fn record_user_message(
+        &self,
+        scope: TurnScope,
+        message: impl Into<String>,
+    ) -> Result<(), SkillActivationSelectionError> {
+        self.messages_by_scope
+            .lock()
+            .map_err(|_| SkillActivationSelectionError::Internal)?
             .insert(scope, message.into());
+        Ok(())
     }
 
-    pub fn clear_scope(&self, scope: &TurnScope) {
-        lock_or_recover(&self.messages_by_scope, "skill activation message").remove(scope);
-        lock_or_recover(
-            &self.plan_capture_counts_by_scope,
-            "skill activation plan capture",
-        )
-        .remove(scope);
-        lock_or_recover(&self.plans_by_run, "skill activation plans")
+    pub fn clear_scope(&self, scope: &TurnScope) -> Result<(), SkillActivationSelectionError> {
+        self.messages_by_scope
+            .lock()
+            .map_err(|_| SkillActivationSelectionError::Internal)?
+            .remove(scope);
+        self.plan_capture_counts_by_scope
+            .lock()
+            .map_err(|_| SkillActivationSelectionError::Internal)?
+            .remove(scope);
+        self.plans_by_run
+            .lock()
+            .map_err(|_| SkillActivationSelectionError::Internal)?
             .retain(|(plan_scope, _), _| plan_scope != scope);
+        Ok(())
     }
 
     pub fn bundle_source(&self) -> Arc<S> {
         Arc::clone(&self.bundle_source)
     }
 
-    pub fn capture_next_activation_plan(&self, scope: TurnScope) {
-        let mut counts = self.lock_capture_counts();
+    pub fn capture_next_activation_plan(
+        &self,
+        scope: TurnScope,
+    ) -> Result<(), SkillActivationSelectionError> {
+        let mut counts = self
+            .plan_capture_counts_by_scope
+            .lock()
+            .map_err(|_| SkillActivationSelectionError::Internal)?;
         *counts.entry(scope).or_default() += 1;
+        Ok(())
     }
 
-    pub fn cancel_next_activation_plan_capture(&self, scope: &TurnScope) {
-        decrement_capture_count(&mut self.lock_capture_counts(), scope);
+    pub fn cancel_next_activation_plan_capture(
+        &self,
+        scope: &TurnScope,
+    ) -> Result<(), SkillActivationSelectionError> {
+        let mut counts = self
+            .plan_capture_counts_by_scope
+            .lock()
+            .map_err(|_| SkillActivationSelectionError::Internal)?;
+        decrement_capture_count(&mut counts, scope);
+        Ok(())
     }
 
     pub fn take_activation_plan_for_run(
         &self,
         scope: &TurnScope,
         run_id: TurnRunId,
-    ) -> Option<SkillActivationPlan> {
-        lock_or_recover(&self.plans_by_run, "skill activation plans")
-            .remove(&(scope.clone(), run_id))
+    ) -> Result<Option<SkillActivationPlan>, SkillActivationSelectionError> {
+        Ok(self
+            .plans_by_run
+            .lock()
+            .map_err(|_| SkillActivationSelectionError::Internal)?
+            .remove(&(scope.clone(), run_id)))
     }
 
     pub async fn select_activation_plan(
@@ -211,10 +241,16 @@ where
         self.resolve_activation_plan(run_context, message).await
     }
 
-    fn message_for_scope(&self, scope: &TurnScope) -> Option<String> {
-        lock_or_recover(&self.messages_by_scope, "skill activation message")
+    fn message_for_scope(
+        &self,
+        scope: &TurnScope,
+    ) -> Result<Option<String>, SkillActivationSelectionError> {
+        Ok(self
+            .messages_by_scope
+            .lock()
+            .map_err(|_| SkillActivationSelectionError::Internal)?
             .get(scope)
-            .cloned()
+            .cloned())
     }
 
     async fn selected_candidates(
@@ -225,11 +261,14 @@ where
         let (plan, candidates) = self
             .resolve_activation_plan_with_candidates(run_context, message)
             .await?;
-        if self.should_capture_plan(&run_context.scope) {
-            lock_or_recover(&self.plans_by_run, "skill activation plans").insert(
-                (run_context.scope.clone(), run_context.run_id),
-                plan.clone(),
-            );
+        if self.should_capture_plan(&run_context.scope)? {
+            self.plans_by_run
+                .lock()
+                .map_err(|_| SkillActivationSelectionError::Internal)?
+                .insert(
+                    (run_context.scope.clone(), run_context.run_id),
+                    plan.clone(),
+                );
         }
         if plan.selection.activations.is_empty() {
             return Ok(Vec::new());
@@ -290,16 +329,15 @@ where
         Ok((plan, candidates))
     }
 
-    fn should_capture_plan(&self, scope: &TurnScope) -> bool {
-        let mut counts = self.lock_capture_counts();
-        decrement_capture_count(&mut counts, scope)
-    }
-
-    fn lock_capture_counts(&self) -> MutexGuard<'_, HashMap<TurnScope, usize>> {
-        lock_or_recover(
-            &self.plan_capture_counts_by_scope,
-            "skill activation plan capture",
-        )
+    fn should_capture_plan(
+        &self,
+        scope: &TurnScope,
+    ) -> Result<bool, SkillActivationSelectionError> {
+        let mut counts = self
+            .plan_capture_counts_by_scope
+            .lock()
+            .map_err(|_| SkillActivationSelectionError::Internal)?;
+        Ok(decrement_capture_count(&mut counts, scope))
     }
 }
 
@@ -314,13 +352,6 @@ fn decrement_capture_count(counts: &mut HashMap<TurnScope, usize>, scope: &TurnS
     true
 }
 
-fn lock_or_recover<'a, T>(mutex: &'a Mutex<T>, _label: &str) -> MutexGuard<'a, T> {
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
-}
-
 #[async_trait]
 impl<S> HostSkillContextSource for SelectableSkillContextSource<S>
 where
@@ -330,7 +361,10 @@ where
         &self,
         run_context: &LoopRunContext,
     ) -> Result<Vec<HostSkillContextCandidate>, HostSkillContextBuildError> {
-        let Some(message) = self.message_for_scope(&run_context.scope) else {
+        let Some(message) = self
+            .message_for_scope(&run_context.scope)
+            .map_err(SkillActivationSelectionError::into_context_error)?
+        else {
             return Ok(Vec::new());
         };
         self.selected_candidates(run_context, &message)
@@ -449,6 +483,8 @@ fn select_skill_activations(
     let mut activations = Vec::new();
     let mut selected_keys = HashSet::new();
     let mut feedback = Vec::new();
+    let mut remaining_slots = config.max_active_skills;
+    let mut remaining_tokens = config.max_context_tokens;
 
     for skill in explicit {
         let candidate = candidate_for_loaded_skill(skill, candidates)?;
@@ -457,6 +493,7 @@ fn select_skill_activations(
             candidate.loaded.manifest.name.clone(),
         );
         if selected_keys.insert(key) {
+            reserve_skill_budget(skill, &mut remaining_slots, &mut remaining_tokens)?;
             activations.push(SkillActivationRequest::resolved(
                 candidate.loaded.manifest.name.clone(),
                 candidate.descriptor.id().clone(),
@@ -472,8 +509,8 @@ fn select_skill_activations(
     let outcome = prefilter_skills(
         &rewritten_message,
         &loaded_skills,
-        config.max_active_skills,
-        config.max_context_tokens,
+        remaining_slots,
+        remaining_tokens,
         &HashSet::new(),
     );
     feedback.extend(outcome.notes);
@@ -669,6 +706,34 @@ fn lowercased(values: &[String]) -> Vec<String> {
     values.iter().map(|value| value.to_lowercase()).collect()
 }
 
+fn reserve_skill_budget(
+    skill: &LoadedSkill,
+    remaining_slots: &mut usize,
+    remaining_tokens: &mut usize,
+) -> Result<(), SkillActivationSelectionError> {
+    if *remaining_slots == 0 {
+        return Err(SkillActivationSelectionError::ContextBudgetExceeded);
+    }
+    let cost = skill_token_cost(skill);
+    if cost > *remaining_tokens {
+        return Err(SkillActivationSelectionError::ContextBudgetExceeded);
+    }
+    *remaining_slots -= 1;
+    *remaining_tokens -= cost;
+    Ok(())
+}
+
+fn skill_token_cost(skill: &LoadedSkill) -> usize {
+    let declared_tokens = skill.manifest.activation.max_context_tokens;
+    let approx_tokens = (skill.prompt_content.len() as f64 * 0.25) as usize;
+    let raw_cost = if approx_tokens > declared_tokens * 2 {
+        approx_tokens
+    } else {
+        declared_tokens
+    };
+    raw_cost.max(1)
+}
+
 fn descriptor_context_ordering_key(descriptor: &SkillBundleDescriptor) -> String {
     let (source_kind, name, path) = descriptor.ordering_key();
     format!("{}:{}:{}", source_kind.as_str(), name, path)
@@ -742,6 +807,12 @@ mod tests {
         )
     }
 
+    fn skill_md_with_activation(name: &str, activation: &str, prompt: &str) -> String {
+        format!(
+            "---\nname: {name}\ndescription: {name} description\nactivation:\n{activation}\n---\n\n{prompt}"
+        )
+    }
+
     async fn run_context() -> LoopRunContext {
         let resolved = InMemoryRunProfileResolver::default()
             .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
@@ -778,7 +849,9 @@ mod tests {
         let selectable =
             SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
         let context = run_context().await;
-        selectable.record_user_message(context.scope.clone(), "hello there");
+        selectable
+            .record_user_message(context.scope.clone(), "hello there")
+            .expect("record message");
 
         let selected = selectable
             .load_skill_context_candidates(&context)
@@ -815,7 +888,9 @@ mod tests {
         let selectable =
             SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
         let context = run_context().await;
-        selectable.record_user_message(context.scope.clone(), "please review this PR");
+        selectable
+            .record_user_message(context.scope.clone(), "please review this PR")
+            .expect("record message");
 
         let selected = selectable
             .load_skill_context_candidates(&context)
@@ -842,7 +917,9 @@ mod tests {
         let selectable =
             SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
         let context = run_context().await;
-        selectable.record_user_message(context.scope.clone(), "$code-review this PR");
+        selectable
+            .record_user_message(context.scope.clone(), "$code-review this PR")
+            .expect("record message");
 
         let selected = selectable
             .load_skill_context_candidates(&context)
@@ -874,7 +951,9 @@ mod tests {
         let selectable =
             SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
         let context = run_context().await;
-        selectable.record_user_message(context.scope.clone(), "/code-review this PR");
+        selectable
+            .record_user_message(context.scope.clone(), "/code-review this PR")
+            .expect("record message");
 
         let error = selectable
             .selected_candidates(&context, "/code-review this PR")
@@ -885,5 +964,106 @@ mod tests {
             error,
             SkillActivationSelectionError::AmbiguousSkill { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn selector_activates_skills_from_tags_and_patterns() {
+        let source = Arc::new(StaticSkillBundleSource::new(vec![
+            (
+                SkillSourceKind::System,
+                "tag-helper",
+                &skill_md_with_activation(
+                    "tag-helper",
+                    "  tags: [\"release\"]",
+                    "TAG_HELPER_SENTINEL",
+                ),
+            ),
+            (
+                SkillSourceKind::User,
+                "pattern-helper",
+                &skill_md_with_activation(
+                    "pattern-helper",
+                    "  patterns: [\"deploy\\\\s+plan\"]",
+                    "PATTERN_HELPER_SENTINEL",
+                ),
+            ),
+            (
+                SkillSourceKind::User,
+                "quiet-helper",
+                &skill_md("quiet-helper", "Quiet", &["quiet"], "QUIET_HELPER_SENTINEL"),
+            ),
+        ]));
+        let selectable =
+            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let context = run_context().await;
+        selectable
+            .record_user_message(context.scope.clone(), "review release deploy plan")
+            .expect("record message");
+
+        let selected = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("selection succeeds");
+        let combined = selected
+            .iter()
+            .map(|candidate| candidate.skill_md.as_deref().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(selected.len(), 2);
+        assert!(combined.contains("TAG_HELPER_SENTINEL"));
+        assert!(combined.contains("PATTERN_HELPER_SENTINEL"));
+        assert!(!combined.contains("QUIET_HELPER_SENTINEL"));
+    }
+
+    #[tokio::test]
+    async fn selector_respects_configured_active_skill_and_token_limits() {
+        let source = Arc::new(StaticSkillBundleSource::new(vec![
+            (
+                SkillSourceKind::System,
+                "alpha-helper",
+                &skill_md_with_activation(
+                    "alpha-helper",
+                    "  keywords: [\"shared\"]\n  max_context_tokens: 2",
+                    "ALPHA_SENTINEL",
+                ),
+            ),
+            (
+                SkillSourceKind::User,
+                "beta-helper",
+                &skill_md_with_activation(
+                    "beta-helper",
+                    "  keywords: [\"shared\"]\n  max_context_tokens: 2",
+                    "BETA_SENTINEL",
+                ),
+            ),
+        ]));
+        let selectable = SelectableSkillContextSource::new(
+            source,
+            SkillActivationSelectorConfig {
+                max_active_skills: 1,
+                max_context_tokens: 4,
+            },
+        );
+        let context = run_context().await;
+        selectable
+            .record_user_message(context.scope.clone(), "shared")
+            .expect("record message");
+
+        let selected = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("selection succeeds");
+
+        assert_eq!(selected.len(), 1);
+
+        selectable
+            .record_user_message(context.scope.clone(), "/alpha-helper /beta-helper")
+            .expect("record message");
+        let error = selectable
+            .selected_candidates(&context, "/alpha-helper /beta-helper")
+            .await
+            .expect_err("explicit activation should honor active skill limit");
+        assert_eq!(error, SkillActivationSelectionError::ContextBudgetExceeded);
     }
 }

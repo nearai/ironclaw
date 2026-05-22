@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use ironclaw_product_adapters::ProjectionStream;
-use ironclaw_product_workflow::{RebornServices as ProductRebornServices, RebornServicesApi};
+use ironclaw_product_workflow::RebornServicesErrorCode;
+use ironclaw_product_workflow::{
+    RebornServices as ProductRebornServices, RebornServicesApi, RebornServicesError,
+};
 
 use crate::{RebornBuildError, RebornReadiness, RebornRuntime};
 
@@ -45,6 +48,19 @@ pub(crate) fn build_webui_services(
         runtime.webui_thread_service(),
         runtime.webui_turn_coordinator(),
     );
+    if let Some(skill_activation_source) = runtime.webui_skill_activation_source() {
+        api = api.with_skill_activation_recorder(move |scope, message| {
+            skill_activation_source
+                .record_user_message(scope.clone(), message)
+                .map_err(|_| RebornServicesError {
+                    code: RebornServicesErrorCode::Internal,
+                    status_code: 500,
+                    retryable: false,
+                    field: None,
+                    validation_code: None,
+                })
+        });
+    }
     if let Some(event_stream) = event_stream {
         api = api.with_event_stream(event_stream);
     }

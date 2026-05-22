@@ -36,19 +36,25 @@ where
         &self.selector
     }
 
-    pub fn capture_next_activation_plan(&self, scope: TurnScope) {
-        self.selector.capture_next_activation_plan(scope);
+    pub fn capture_next_activation_plan(
+        &self,
+        scope: TurnScope,
+    ) -> Result<(), SkillActivationSelectionError> {
+        self.selector.capture_next_activation_plan(scope)
     }
 
-    pub fn cancel_next_activation_plan_capture(&self, scope: &TurnScope) {
-        self.selector.cancel_next_activation_plan_capture(scope);
+    pub fn cancel_next_activation_plan_capture(
+        &self,
+        scope: &TurnScope,
+    ) -> Result<(), SkillActivationSelectionError> {
+        self.selector.cancel_next_activation_plan_capture(scope)
     }
 
     pub fn take_activation_plan_for_run(
         &self,
         scope: &TurnScope,
         run_id: TurnRunId,
-    ) -> Option<super::SkillActivationPlan> {
+    ) -> Result<Option<super::SkillActivationPlan>, SkillActivationSelectionError> {
         self.selector.take_activation_plan_for_run(scope, run_id)
     }
 
