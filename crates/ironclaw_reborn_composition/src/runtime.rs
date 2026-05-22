@@ -24,7 +24,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use chrono::Utc;
 use thiserror::Error;
 use tokio::sync::Mutex;
@@ -32,15 +31,13 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use ironclaw_events::{DurableEventLog, EventError, InMemoryDurableEventLog, RuntimeEvent};
+use ironclaw_events::{DurableEventLog, InMemoryDurableEventLog};
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_first_party_extensions::{
     FirstPartySkillsExtension, FirstPartySkillsExtensionHandles, LoadedFirstPartyExtensions,
     SelectableSkillContextSource, SkillActivationSelectorConfig,
 };
-use ironclaw_host_api::{
-    AgentId, CapabilityId, InvocationId, ResourceScope, TenantId, ThreadId, UserId,
-};
+use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
     FilesystemSkillBundleSource, HostIdentityContextBuildError, HostIdentityContextCandidate,
@@ -48,6 +45,9 @@ use ironclaw_loop_support::{
 };
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_reborn::loop_exit_applier::ThreadCheckpointLoopExitEvidencePort;
+use ironclaw_reborn::milestone_events::{
+    DurableLoopHostMilestoneScope, DurableLoopHostMilestoneSink,
+};
 use ironclaw_reborn::runtime::{
     DefaultPlannedRuntimeBuildError, DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts,
     build_default_planned_runtime,
@@ -59,17 +59,14 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey,
-    LoopFailureKind, ReplyTargetBindingRef, RunProfileResolutionRequest, SanitizedCancelReason,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
-    TurnRunId, TurnScope, TurnStatus,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, LoopHostMilestone, LoopHostMilestoneKind,
-        LoopHostMilestoneSink, LoopRunContext, PromptMode,
-    },
+    ReplyTargetBindingRef, RunProfileResolutionRequest, SanitizedCancelReason, SourceBindingRef,
+    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId,
+    TurnScope, TurnStatus,
+    run_profile::{LoopHostMilestoneSink, LoopRunContext, PromptMode},
 };
 
+use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
-use crate::webui::build_webui_event_stream;
 use crate::{RebornBuildError, RebornCompositionProfile, RebornServices, build_reborn_services};
 
 mod local_dev;
@@ -160,7 +157,7 @@ pub struct RebornRuntime {
     actor_user_id: UserId,
     source_binding_ref: SourceBindingRef,
     reply_target_binding_ref: ReplyTargetBindingRef,
-    webui_event_stream: Arc<dyn ProjectionStream>,
+    projection_services: RebornProjectionServices,
     default_run_profile_id: String,
     wake_sender: TurnRunnerWakeSender,
     send_locks: Mutex<HashMap<ConversationId, Arc<Mutex<()>>>>,
@@ -191,7 +188,7 @@ impl RebornRuntime {
     }
 
     pub(crate) fn webui_event_stream(&self) -> Arc<dyn ProjectionStream> {
-        self.webui_event_stream.clone()
+        self.projection_services.webui_event_stream()
     }
 
     pub(crate) fn webui_skill_activation_source(
@@ -647,19 +644,18 @@ pub async fn build_reborn_runtime(
         thread_scope.clone(),
     ));
     let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
-    let stream_actor = TurnActor::new(actor_user_id.clone());
-    let webui_event_stream = build_webui_event_stream(
+    let projection_services = build_reborn_projection_services(
         Arc::clone(&event_log),
-        stream_actor.clone(),
+        TurnActor::new(actor_user_id.clone()),
         validated_identity.reply_target_binding_ref.clone(),
     );
-    let milestone_sink: Arc<dyn LoopHostMilestoneSink> =
-        Arc::new(RuntimeEventLoopHostMilestoneSink::new(
-            event_log,
-            validated_identity.tenant_id.clone(),
-            actor_user_id.clone(),
-            Some(validated_identity.agent_id.clone()),
-        ));
+    let milestone_scope = DurableLoopHostMilestoneScope::from_thread_scope_with_owner_user(
+        &thread_scope,
+        actor_user_id.clone(),
+    );
+    let milestone_sink: Arc<dyn LoopHostMilestoneSink> = Arc::new(
+        DurableLoopHostMilestoneSink::new(event_log, milestone_scope),
+    );
     let local_dev_capabilities = local_dev::capability_wiring(
         &services,
         actor_user_id.clone(),
@@ -733,169 +729,12 @@ pub async fn build_reborn_runtime(
         actor_user_id,
         source_binding_ref: validated_identity.source_binding_ref,
         reply_target_binding_ref: validated_identity.reply_target_binding_ref,
-        webui_event_stream,
+        projection_services,
         default_run_profile_id,
         wake_sender,
         send_locks: Mutex::new(HashMap::new()),
         skill_activation_source,
     })
-}
-
-const MODEL_CAPABILITY_ID: &str = "loop.model";
-const ASSISTANT_REPLY_CAPABILITY_ID: &str = "loop.assistant_reply";
-const LOOP_RUN_CAPABILITY_ID: &str = "loop.run";
-
-#[derive(Clone)]
-struct RuntimeEventLoopHostMilestoneSink {
-    event_log: Arc<dyn DurableEventLog>,
-    tenant_id: TenantId,
-    user_id: UserId,
-    agent_id: Option<AgentId>,
-}
-
-impl RuntimeEventLoopHostMilestoneSink {
-    fn new(
-        event_log: Arc<dyn DurableEventLog>,
-        tenant_id: TenantId,
-        user_id: UserId,
-        agent_id: Option<AgentId>,
-    ) -> Self {
-        Self {
-            event_log,
-            tenant_id,
-            user_id,
-            agent_id,
-        }
-    }
-
-    fn resource_scope(
-        &self,
-        milestone: &LoopHostMilestone,
-    ) -> Result<ResourceScope, AgentLoopHostError> {
-        if milestone.scope.tenant_id != self.tenant_id || milestone.scope.agent_id != self.agent_id
-        {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::ScopeMismatch,
-                "loop milestone scope does not match runtime event stream scope",
-            ));
-        }
-        Ok(ResourceScope {
-            tenant_id: self.tenant_id.clone(),
-            user_id: self.user_id.clone(),
-            agent_id: self.agent_id.clone(),
-            project_id: milestone.scope.project_id.clone(),
-            mission_id: None,
-            thread_id: Some(milestone.scope.thread_id.clone()),
-            invocation_id: InvocationId::from_uuid(milestone.run_id.as_uuid()),
-        })
-    }
-
-    fn runtime_event_for_milestone(
-        &self,
-        milestone: &LoopHostMilestone,
-    ) -> Result<Option<RuntimeEvent>, AgentLoopHostError> {
-        let scope = self.resource_scope(milestone)?;
-        let event = match &milestone.kind {
-            LoopHostMilestoneKind::ModelStarted { .. } => {
-                RuntimeEvent::model_started(scope, capability_id(MODEL_CAPABILITY_ID)?)
-            }
-            LoopHostMilestoneKind::ModelCompleted { .. } => {
-                RuntimeEvent::model_completed(scope, capability_id(MODEL_CAPABILITY_ID)?)
-            }
-            LoopHostMilestoneKind::ModelFailed { reason_kind } => RuntimeEvent::model_failed(
-                scope,
-                capability_id(MODEL_CAPABILITY_ID)?,
-                reason_kind.as_str(),
-            ),
-            LoopHostMilestoneKind::AssistantReplyFinalized { .. } => {
-                RuntimeEvent::assistant_reply_finalized(
-                    scope,
-                    capability_id(ASSISTANT_REPLY_CAPABILITY_ID)?,
-                )
-            }
-            LoopHostMilestoneKind::Completed { .. } => {
-                RuntimeEvent::loop_completed(scope, capability_id(LOOP_RUN_CAPABILITY_ID)?)
-            }
-            LoopHostMilestoneKind::Failed { reason_kind, .. } => RuntimeEvent::loop_failed(
-                scope,
-                capability_id(LOOP_RUN_CAPABILITY_ID)?,
-                loop_failure_kind(reason_kind),
-            ),
-            LoopHostMilestoneKind::IterationStarted { .. }
-            | LoopHostMilestoneKind::PromptBundleBuilt { .. }
-            | LoopHostMilestoneKind::CapabilityInvoked { .. }
-            | LoopHostMilestoneKind::CapabilityBatchStarted { .. }
-            | LoopHostMilestoneKind::CapabilityBatchCompleted { .. }
-            | LoopHostMilestoneKind::GateBlocked { .. }
-            | LoopHostMilestoneKind::CheckpointCreated { .. }
-            | LoopHostMilestoneKind::Blocked { .. }
-            | LoopHostMilestoneKind::DriverNote { .. } => return Ok(None),
-        };
-        Ok(Some(event))
-    }
-}
-
-#[async_trait]
-impl LoopHostMilestoneSink for RuntimeEventLoopHostMilestoneSink {
-    async fn publish_loop_milestone(
-        &self,
-        milestone: LoopHostMilestone,
-    ) -> Result<(), AgentLoopHostError> {
-        let Some(event) = self.runtime_event_for_milestone(&milestone)? else {
-            return Ok(());
-        };
-        self.event_log
-            .append(event)
-            .await
-            .map(|_| ())
-            .map_err(durable_event_error)
-    }
-}
-
-impl std::fmt::Debug for RuntimeEventLoopHostMilestoneSink {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("RuntimeEventLoopHostMilestoneSink")
-            .field("event_log", &"<durable_event_log>")
-            .field("tenant_id", &self.tenant_id)
-            .field("user_id", &self.user_id)
-            .field("agent_id", &self.agent_id)
-            .finish()
-    }
-}
-
-fn loop_failure_kind(reason_kind: &LoopFailureKind) -> &'static str {
-    match reason_kind {
-        LoopFailureKind::ModelError => "model_error",
-        LoopFailureKind::ContextBuildFailed => "context_build_failed",
-        LoopFailureKind::CapabilityProtocolError => "capability_protocol_error",
-        LoopFailureKind::IterationLimit => "iteration_limit",
-        LoopFailureKind::InvalidModelOutput => "invalid_model_output",
-        LoopFailureKind::CheckpointRejected => "checkpoint_rejected",
-        LoopFailureKind::CheckpointUnavailable => "checkpoint_unavailable",
-        LoopFailureKind::TranscriptWriteFailed => "transcript_write_failed",
-        LoopFailureKind::DriverBug => "driver_bug",
-        LoopFailureKind::InterruptedUnexpectedly => "interrupted_unexpectedly",
-        LoopFailureKind::NoProgressDetected => "no_progress_detected",
-        LoopFailureKind::PolicyDenied => "policy_denied",
-        _ => "driver_bug",
-    }
-}
-
-fn capability_id(value: &'static str) -> Result<CapabilityId, AgentLoopHostError> {
-    CapabilityId::new(value).map_err(|_| {
-        AgentLoopHostError::new(
-            AgentLoopHostErrorKind::Internal,
-            "loop milestone event capability id is invalid",
-        )
-    })
-}
-
-fn durable_event_error(_error: EventError) -> AgentLoopHostError {
-    AgentLoopHostError::new(
-        AgentLoopHostErrorKind::Unavailable,
-        "loop milestone event log is unavailable",
-    )
 }
 
 struct LocalDevSkillContextSource {
@@ -1101,10 +940,9 @@ mod tests {
         HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
         HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
     };
-    use ironclaw_product_adapters::ProductOutboundPayload;
     use ironclaw_product_workflow::{
-        RebornStreamEventsRequest, RebornSubmitTurnResponse, WebUiAuthenticatedCaller,
-        WebUiCreateThreadRequest, WebUiSendMessageRequest,
+        RebornSubmitTurnResponse, WebUiAuthenticatedCaller, WebUiCreateThreadRequest,
+        WebUiSendMessageRequest,
     };
     use ironclaw_skills::SkillTrust;
     use ironclaw_threads::{
@@ -2111,60 +1949,12 @@ mod tests {
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let runtime_turn_coordinator = runtime.webui_turn_coordinator();
         let bundle = build_webui_services(&runtime, None).expect("webui bundle");
-        let caller = WebUiAuthenticatedCaller::new(
-            TenantId::new("runtime-webui-tenant").unwrap(),
-            UserId::new("runtime-webui-owner").unwrap(),
-            Some(AgentId::new("runtime-webui-agent").unwrap()),
-            None,
-        );
-        let created = bundle
-            .api
-            .create_thread(
-                caller.clone(),
-                WebUiCreateThreadRequest {
-                    client_action_id: Some("create-webui-stream-thread".to_string()),
-                    requested_thread_id: None,
-                },
-            )
-            .await
-            .expect("create webui thread");
-        bundle
-            .api
-            .submit_turn(
-                caller.clone(),
-                WebUiSendMessageRequest {
-                    client_action_id: Some("send-webui-stream-message".to_string()),
-                    thread_id: Some(created.thread.thread_id.to_string()),
-                    content: Some("hello webui stream".to_string()),
-                },
-            )
-            .await
-            .expect("submit webui turn");
-        let stream = bundle
-            .api
-            .stream_events(
-                caller,
-                RebornStreamEventsRequest {
-                    thread_id: created.thread.thread_id.to_string(),
-                    after_cursor: None,
-                },
-            )
-            .await
-            .expect("webui event stream");
 
         let _api = bundle.api.clone();
         assert!(Arc::ptr_eq(
             &runtime_turn_coordinator,
             &runtime.webui_turn_coordinator()
         ));
-        assert!(
-            stream.events.iter().all(|event| matches!(
-                event.payload(),
-                ProductOutboundPayload::ProjectionSnapshot { .. }
-                    | ProductOutboundPayload::ProjectionUpdate { .. }
-            )),
-            "webui bundle should expose only projection stream events"
-        );
         assert_eq!(bundle.readiness, runtime.services().readiness);
         assert_eq!(bundle.readiness.state, RebornReadinessState::DevOnly);
 

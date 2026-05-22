@@ -53,6 +53,21 @@ impl DurableLoopHostMilestoneScope {
         })
     }
 
+    pub fn from_thread_scope_with_owner_user(
+        thread_scope: &ThreadScope,
+        owner_user_id: UserId,
+    ) -> Self {
+        Self {
+            tenant_id: thread_scope.tenant_id.clone(),
+            user_id: owner_user_id,
+            agent_id: Some(thread_scope.agent_id.clone()),
+            project_id: thread_scope.project_id.clone(),
+            mission_id: thread_scope.mission_id.clone(),
+            thread_id: None,
+            run_id: None,
+        }
+    }
+
     pub fn from_thread_scope_for_run(
         thread_scope: &ThreadScope,
         thread_id: ThreadId,
