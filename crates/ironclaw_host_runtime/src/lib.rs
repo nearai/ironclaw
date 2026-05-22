@@ -96,8 +96,9 @@ pub use process_port::{
 };
 pub use production::DefaultHostRuntime;
 pub use services::{
-    HostRuntimeServices, ProductionWiringComponent, ProductionWiringConfig, ProductionWiringIssue,
-    ProductionWiringIssueKind, ProductionWiringReport, RegisteredRuntimeHealth,
+    HostRuntimeServices, ProductionEventStoreWiringError, ProductionWiringComponent,
+    ProductionWiringConfig, ProductionWiringIssue, ProductionWiringIssueKind,
+    ProductionWiringReport, RegisteredRuntimeHealth,
 };
 pub use surface::{CapabilitySurfacePolicy, VisibleCapability, VisibleCapabilityAccess};
 pub use turn_scheduler::{
@@ -1086,21 +1087,47 @@ fn lease_secret_for_injection<S>(
 where
     S: SecretStore,
 {
-    let metadata = block_on_secret(secrets.metadata(&request.scope, &injection.handle))?;
-    if metadata.is_none() {
-        if injection.required {
-            return Err(RuntimeHttpEgressError::Credential {
-                reason: "required credential is unavailable".to_string(),
-            });
-        }
-        return Ok(None);
-    }
-    let lease = block_on_secret(secrets.lease_once(&request.scope, &injection.handle))?;
-    let material = block_on_secret(secrets.consume(&request.scope, lease.id))?;
-    Ok(Some(material))
+    BlockingSecretMaterialResolver { secrets }.lease_once(request, injection)
 }
 
-fn block_on_secret<T>(
+struct BlockingSecretMaterialResolver<'a, S> {
+    secrets: &'a S,
+}
+
+impl<S> BlockingSecretMaterialResolver<'_, S>
+where
+    S: SecretStore,
+{
+    fn lease_once(
+        &self,
+        request: &RuntimeHttpEgressRequest,
+        injection: &RuntimeCredentialInjection,
+    ) -> Result<Option<SecretMaterial>, RuntimeHttpEgressError> {
+        block_on_secret_store(async {
+            let metadata = self
+                .secrets
+                .metadata(&request.scope, &injection.handle)
+                .await?;
+            if metadata.is_none() {
+                return Ok(None);
+            }
+            let lease = self
+                .secrets
+                .lease_once(&request.scope, &injection.handle)
+                .await?;
+            self.secrets
+                .consume(&request.scope, lease.id)
+                .await
+                .map(Some)
+        })?
+        .map_or_else(
+            || missing_runtime_credential(injection.required),
+            |material| Ok(Some(material)),
+        )
+    }
+}
+
+fn block_on_secret_store<T>(
     future: impl std::future::Future<Output = Result<T, SecretStoreError>> + Send,
 ) -> Result<T, RuntimeHttpEgressError>
 where
