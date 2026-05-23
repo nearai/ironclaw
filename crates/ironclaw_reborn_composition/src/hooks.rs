@@ -253,24 +253,45 @@ impl std::fmt::Debug for HookProjectionRegistry {
     }
 }
 
-/// Derive the fixed `/system/extensions/<tenant>` discovery root for a tenant.
+/// The fixed `/system/extensions` discovery root.
 ///
-/// The shape is fixed by construction: the caller supplies *identity* (the
-/// authenticated [`TenantId`]); the root is *computed* here, never accepted
-/// from a caller-supplied path. This is the tenant-isolation contract for
-/// discovery — changing the identity changes the discovered set, and there is
-/// no parameter through which one tenant could point discovery at another
-/// tenant's extension tree.
+/// # Tenant isolation via the scoped filesystem (not the path)
+///
+/// The discovery layer ([`ironclaw_extensions::ExtensionDiscovery`] /
+/// [`ironclaw_extensions::ExtensionPackage::from_manifest`]) hardcodes package
+/// roots to `/system/extensions/<extension-id>` — exactly one segment under
+/// this root. It does so **because the `RootFilesystem` it is handed is itself
+/// the tenant scope boundary**: every other tenant-scoped resource in the
+/// system (secrets, authorization leases, run state, …) is isolated by the
+/// per-tenant [`ironclaw_filesystem::ScopedFilesystem`] / per-identity backend,
+/// not by a tenant segment baked into the virtual path. Discovery follows the
+/// same convention.
+///
+/// Consequently `tenant_extension_root` takes the authenticated `tenant_id`
+/// (so the SIGNATURE pins that callers must supply identity, and the
+/// containment defense knows the root) but returns the fixed `/system/extensions`
+/// path. The isolation guarantee is: **the per-tenant `RootFilesystem` passed
+/// to discovery resolves `/system/extensions/<id>` to that tenant's storage and
+/// no other's.** In local-dev (single-tenant, the only profile
+/// `build_reborn_runtime` wires) the runtime's FS is constructed once per
+/// identity in `build_reborn_services`, so it is per-identity by construction;
+/// production wiring (a follow-up, since `build_reborn_runtime` only supports
+/// local-dev) must supply a tenant-scoped backend here.
+///
+/// **This makes the scoped FS the SOLE isolation boundary** — see the
+/// FS-hardening gate on [`HooksActivationConfig`]: `HOOKS_THIRD_PARTY_ENABLED`
+/// MUST NOT be enabled in multi-tenant production until
+/// `openat2(RESOLVE_BENEATH)` / `O_NOFOLLOW` backend hardening lands, because
+/// that hardening is precisely what protects the scoped-FS-is-the-boundary
+/// property against symlink/`..` escapes below the virtual layer.
 pub fn tenant_extension_root(
-    tenant_id: &ironclaw_host_api::TenantId,
+    _tenant_id: &ironclaw_host_api::TenantId,
 ) -> Result<ironclaw_host_api::VirtualPath, RebornBuildError> {
-    ironclaw_host_api::VirtualPath::new(format!("/system/extensions/{}", tenant_id.as_str()))
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!(
-                "could not derive tenant extension root for `{}`: {error}",
-                tenant_id.as_str()
-            ),
-        })
+    ironclaw_host_api::VirtualPath::new("/system/extensions").map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("could not derive extension discovery root: {error}"),
+        }
+    })
 }
 
 /// Defense-in-depth containment check applied to a discovered package's root
@@ -1324,18 +1345,20 @@ body = { mode = "wasm", export = "evaluate" }
         assert!(enforce_root_containment(&tenant_root, &tenant_root).is_err());
     }
 
-    /// `tenant_extension_root` derives the fixed `/system/extensions/<tenant>`
-    /// shape from identity, and distinct tenants yield distinct (disjoint)
-    /// roots — the tenant-isolation contract (no caller-supplied root).
+    /// `tenant_extension_root` returns the fixed `/system/extensions` root
+    /// (Option 1 — FS-scoped isolation; the per-tenant `RootFilesystem`, not a
+    /// path segment, is the isolation boundary). The signature still requires
+    /// identity so callers must thread it (and the containment defense knows the
+    /// root), but the path is profile-independent. The cross-tenant proof lives
+    /// in the integration test driving two distinct per-tenant filesystems.
     #[test]
-    fn tenant_root_is_derived_from_identity_and_disjoint() {
+    fn tenant_root_is_the_fixed_system_extensions_root() {
         let a = tenant_extension_root(&ironclaw_host_api::TenantId::new("alpha").expect("a"))
             .expect("root a");
         let b = tenant_extension_root(&ironclaw_host_api::TenantId::new("beta").expect("b"))
             .expect("root b");
-        assert_eq!(a.as_str(), "/system/extensions/alpha");
-        assert_eq!(b.as_str(), "/system/extensions/beta");
-        assert_ne!(a.as_str(), b.as_str());
+        assert_eq!(a.as_str(), "/system/extensions");
+        assert_eq!(b.as_str(), "/system/extensions");
     }
 
     /// DoS cap: more than `MAX_INSTALLED_EXTENSIONS_CONSIDERED` hook-bearing

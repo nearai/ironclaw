@@ -149,6 +149,27 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: error.to_string(),
         })?;
+    // Mount `/system/extensions` to a per-owner host subtree under the storage
+    // root. This is the discovery root for third-party extension hooks. Because
+    // the whole local-dev runtime (and this filesystem) is constructed once per
+    // owner/identity in `build_reborn_services`, this mount is per-identity by
+    // construction — it is NOT a process-global, cross-tenant-shared mount. That
+    // per-identity construction is the tenant-isolation boundary the hook-only
+    // projection model relies on (see `crate::hooks::tenant_extension_root`).
+    // In multi-tenant production a tenant-scoped backend must supply this mount;
+    // `build_reborn_runtime` only wires local-dev today. Computed before the
+    // `/projects` mount consumes `root`.
+    let extensions_host_root = root.join("system/extensions");
+    std::fs::create_dir_all(&extensions_host_root).map_err(|_| {
+        RebornBuildError::InvalidConfig {
+            reason: "local-dev extensions root could not be initialized".to_string(),
+        }
+    })?;
+    let extensions_virtual_root = ironclaw_host_api::VirtualPath::new("/system/extensions")
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: error.to_string(),
+        })?;
+
     filesystem.mount_local(
         projects_root,
         ironclaw_host_api::HostPath::from_path_buf(root),
@@ -156,6 +177,10 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     filesystem.mount_local(
         workspace_virtual_root,
         ironclaw_host_api::HostPath::from_path_buf(workspace_root),
+    )?;
+    filesystem.mount_local(
+        extensions_virtual_root,
+        ironclaw_host_api::HostPath::from_path_buf(extensions_host_root),
     )?;
 
     let filesystem = Arc::new(filesystem);

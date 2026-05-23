@@ -106,6 +106,57 @@ fn composition_public_api_is_facade_shaped() {
     }
 }
 
+/// The third-party hook-projection path in `hooks.rs` MUST install exclusively
+/// through `HookRegistrar::install`, never the lower-level
+/// `HookDispatcherBuilder::install_installed_*` methods. The registrar is the
+/// single seam that (a) enforces the Installed-tier ceiling and the
+/// per-extension caps, and (b) derives `owning_extension` from the installer
+/// argument (spoof-blocked). The direct builder installers accept
+/// `owning_extension` as a free parameter and would bypass both. This source
+/// assertion pins the registrar-only invariant so a future refactor cannot
+/// silently introduce a bypass for untrusted extensions.
+#[test]
+fn hook_projection_path_never_calls_direct_installed_builder_api() {
+    let hooks = std::fs::read_to_string(
+        workspace_root().join("crates/ironclaw_reborn_composition/src/hooks.rs"),
+    )
+    .expect("composition hooks.rs readable");
+
+    // Strip the unit-test module: tests legitimately exercise builder APIs
+    // directly, and the architecture invariant is about the production
+    // projection path only. Match the module attribute line specifically (a
+    // bare `#[cfg(test)]` substring also appears in a module doc comment).
+    let production = match hooks.find("#[cfg(test)]\nmod tests") {
+        Some(idx) => &hooks[..idx],
+        None => hooks.as_str(),
+    };
+
+    for forbidden in [
+        "install_installed_before_capability",
+        "install_installed_before_prompt",
+        "install_installed_observer",
+        "install_installed_event_triggered",
+        "install_installed_wasm_before_capability",
+        "install_installed_wasm_before_prompt",
+        "install_installed_wasm_observer",
+    ] {
+        assert!(
+            !production.contains(forbidden),
+            "third-party hook projection in hooks.rs must go through \
+             HookRegistrar::install, never the direct builder installer \
+             `{forbidden}` (registrar-only invariant: ceiling + spoof-blocked \
+             owning_extension)"
+        );
+    }
+
+    // Positive anchor: the projection path DOES route through the registrar, so
+    // the negative assertions above are not vacuously true.
+    assert!(
+        production.contains("registrar.install("),
+        "the projection path must install through HookRegistrar::install"
+    );
+}
+
 fn workspace_dependencies() -> HashMap<String, Vec<String>> {
     cargo_metadata()["packages"]
         .as_array()
