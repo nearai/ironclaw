@@ -65,35 +65,13 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
         assert_eq!(descriptor.default_permission, expected_permission);
     }
 
-    let descriptors = package
+    for descriptor in package
         .capabilities
         .iter()
-        .map(|descriptor| (descriptor.id.as_str(), descriptor))
-        .collect::<BTreeMap<_, _>>();
-    assert_coding_manifest_contract(
-        descriptors[READ_FILE_CAPABILITY_ID],
-        &[EffectKind::ReadFilesystem],
-    );
-    assert_coding_manifest_contract(
-        descriptors[WRITE_FILE_CAPABILITY_ID],
-        &[EffectKind::WriteFilesystem],
-    );
-    assert_coding_manifest_contract(
-        descriptors[LIST_DIR_CAPABILITY_ID],
-        &[EffectKind::ReadFilesystem],
-    );
-    assert_coding_manifest_contract(
-        descriptors[GLOB_CAPABILITY_ID],
-        &[EffectKind::ReadFilesystem],
-    );
-    assert_coding_manifest_contract(
-        descriptors[GREP_CAPABILITY_ID],
-        &[EffectKind::ReadFilesystem],
-    );
-    assert_coding_manifest_contract(
-        descriptors[APPLY_PATCH_CAPABILITY_ID],
-        &[EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
-    );
+        .filter(|descriptor| is_coding_capability_id(descriptor.id.as_str()))
+    {
+        assert_coding_manifest_contract(descriptor);
+    }
 
     let handlers = builtin_first_party_handlers().unwrap();
     for id in all_builtin_capability_ids() {
@@ -101,12 +79,26 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
     }
 }
 
-fn assert_coding_manifest_contract(
-    descriptor: &CapabilityDescriptor,
-    expected_effects: &[EffectKind],
-) {
-    assert_eq!(descriptor.effects.as_slice(), expected_effects);
+fn assert_coding_manifest_contract(descriptor: &CapabilityDescriptor) {
+    let expected_effects = match descriptor.id.as_str() {
+        WRITE_FILE_CAPABILITY_ID => vec![EffectKind::WriteFilesystem],
+        APPLY_PATCH_CAPABILITY_ID => vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
+        _ => vec![EffectKind::ReadFilesystem],
+    };
+    assert_eq!(descriptor.effects, expected_effects);
     assert_eq!(descriptor.default_permission, PermissionMode::Allow);
+}
+
+fn is_coding_capability_id(id: &str) -> bool {
+    matches!(
+        id,
+        READ_FILE_CAPABILITY_ID
+            | WRITE_FILE_CAPABILITY_ID
+            | LIST_DIR_CAPABILITY_ID
+            | GLOB_CAPABILITY_ID
+            | GREP_CAPABILITY_ID
+            | APPLY_PATCH_CAPABILITY_ID
+    )
 }
 
 #[tokio::test]
