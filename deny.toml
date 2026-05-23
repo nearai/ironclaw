@@ -19,6 +19,11 @@ ignore = [
     # rand unsoundness with custom logger calling rand::rng() during reseed — we don't use this pattern;
     # revisit/remove by 2026-06-30, or when transitive deps (tower, nanoid, phf_generator) release rand ≥0.9.3 compat
     "RUSTSEC-2026-0097",
+    # wasmtime-wasi path_open(TRUNCATE) bypasses `FilePerms::WRITE`. Workspace is pinned to
+    # wasmtime/wasmtime-wasi 43.0.2; advisory fix requires bump to 44.0.2+ (workspace-wide,
+    # touches ironclaw_wasm, ironclaw_wasm_sandbox_core, host runtime). Tracked separately;
+    # our WASI sandboxing restricts filesystem access via host policy, not FilePerms::WRITE.
+    "RUSTSEC-2026-0149",
 ]
 
 [licenses]
