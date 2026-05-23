@@ -607,6 +607,104 @@ async fn run_global_cap_parity_script(backend: &dyn PredicateStateBackend) -> Ob
     log
 }
 
+/// Multi-sample-per-key per-tenant LRU script — the MIN-vs-MAX victim-rule
+/// discriminator (regression guard for the Postgres `MAX(ts)` bug fixed in
+/// 0c102a631, which all three backends now resolve as oldest-front
+/// `MIN(occurred_at)`).
+///
+/// The existing `run_lru_script` puts exactly ONE sample per key, so each
+/// key's `MIN(ts) == MAX(ts)` and a backend that ranked eviction victims by
+/// newest-activity (`MAX`) instead of oldest-front (`MIN`) would pick the SAME
+/// victim and the divergence would be invisible. This script gives the
+/// oldest-front key a SECOND, very RECENT sample so its `MIN(ts)` (oldest) and
+/// `MAX(ts)` (newest) point at DIFFERENT victims, making the rule observable:
+///
+/// 1. Tenant gamma fills exactly `MAX_KEYS_PER_TENANT` distinct keys, one
+///    sample each, at strictly increasing timestamps (key 0 oldest-front, key
+///    N-1 newest). No eviction yet — each insert was below the quota.
+/// 2. Add a SECOND sample to key 0 with a far-RECENT timestamp. Key 0 now has
+///    `MIN(ts)` = the original (oldest of ALL keys) but `MAX(ts)` = the newest
+///    of all keys. Existing key, so no eviction; count returns 2.
+/// 3. Insert a NEW key, pushing gamma over quota and forcing one eviction.
+///    - oldest-front (`MIN`, correct): key 0 is still the global oldest-front →
+///      key 0 is the victim.
+///    - newest-activity (`MAX`, the old Postgres bug): key 0 looks newest → it
+///      is SPARED and key 1 is evicted instead.
+/// 4. Probe key 0 with a fresh distinct id. This is the load-bearing
+///    discriminator:
+///    - `MIN` (correct): key 0 was evicted, so it is a fresh bucket → count 1.
+///      (Re-inserting key 0 finds gamma at quota again and evicts the new
+///      oldest-front, key 1 — a second eviction.)
+///    - `MAX` (buggy): key 0 was spared and still holds its 2 in-window
+///      samples → the fresh id makes count 3.
+///
+/// A backend that regressed to `MAX`-victim selection produces count 3 at the
+/// probe and fails against the oracle (which pins count 1).
+async fn run_multisample_lru_script(backend: &dyn PredicateStateBackend) -> ObservationLog {
+    let mut log = ObservationLog::new();
+    // Wide window so nothing trims across the whole script.
+    let window = Duration::from_secs(1_000_000);
+
+    // (1) Fill exactly MAX_KEYS_PER_TENANT keys, one sample each, increasing ts.
+    // Recorded directly (not logged) — this is setup, not an observation.
+    for i in 0..MAX_KEYS_PER_TENANT {
+        let key = inv_key("gamma", &format!("gamma.cap.{i}"));
+        backend
+            .record_invocation(
+                &key,
+                &ev(&format!("g-{i}")),
+                at_millis(i as i64 + 1),
+                window,
+            )
+            .await
+            .expect("fill ok");
+    }
+
+    // (2) Second, far-recent sample on key 0. Existing key → no eviction.
+    // Count is 2 (two in-window samples); MIN(ts) stays oldest, MAX(ts) newest.
+    let key0 = inv_key("gamma", "gamma.cap.0");
+    step_invocation(
+        backend,
+        &mut log,
+        "multi/key0-second-sample",
+        &key0,
+        &ev("g-0-recent"),
+        at_millis(1_000_000),
+        window,
+    )
+    .await;
+
+    // (3) New key pushes gamma over quota → exactly one eviction fires.
+    let key_new = inv_key("gamma", "gamma.cap.NEW");
+    step_invocation(
+        backend,
+        &mut log,
+        "multi/new-key-forces-eviction",
+        &key_new,
+        &ev("g-new"),
+        at_millis(1_000_001),
+        window,
+    )
+    .await;
+
+    // (4) Probe key 0 — the MIN-vs-MAX discriminator. Under oldest-front (MIN)
+    // key 0 was the victim, so a fresh id restarts it at count 1 (and triggers
+    // a SECOND eviction of the new oldest-front key). Under newest-activity
+    // (MAX) key 0 was spared and the fresh id makes count 3.
+    step_invocation(
+        backend,
+        &mut log,
+        "multi/key0-probe-after-eviction",
+        &key0,
+        &ev("g-0-probe"),
+        at_millis(1_000_002),
+        window,
+    )
+    .await;
+
+    log
+}
+
 // ---------------------------------------------------------------------------
 // Backend factories
 // ---------------------------------------------------------------------------
@@ -688,7 +786,7 @@ async fn postgres_backend() -> Option<Arc<dyn PredicateStateBackend>> {
     backend.run_migrations().await.ok()?;
     let client = pool.get().await.ok()?;
     client
-        .batch_execute("TRUNCATE TABLE hook_predicate_counters")
+        .batch_execute("TRUNCATE TABLE hooks_predicate_invocations, hooks_predicate_values")
         .await
         .ok()?;
     Some(Arc::new(backend))
@@ -956,11 +1054,49 @@ async fn parity_per_tenant_lru_script() {
     assert!(ran.contains(&"in-memory") && ran.contains(&"libsql"));
 }
 
+/// Independent oracle for [`run_multisample_lru_script`] — the MIN-vs-MAX
+/// victim-rule discriminator. All three backends use oldest-front
+/// (`MIN(occurred_at)`) victim selection, so:
+///
+/// - `key0-second-sample`: existing key gains a second in-window sample →
+///   count 2, no eviction (evictions stay 0).
+/// - `new-key-forces-eviction`: gamma is at `MAX_KEYS_PER_TENANT`; the new key
+///   forces eviction of the oldest-front key (key 0) → the new key is fresh
+///   (count 1) and one eviction fires (evictions 0 → 1).
+/// - `key0-probe-after-eviction`: under the correct `MIN` rule key 0 WAS the
+///   victim, so a fresh id restarts it at count 1; re-inserting it finds gamma
+///   at quota again and evicts the new oldest-front (key 1) → a SECOND eviction
+///   (evictions 1 → 2). A backend that regressed to `MAX`-victim selection
+///   would have SPARED key 0 (it looked newest) and this step would observe
+///   count 3 with no second eviction — diverging from this oracle and failing.
+fn expected_multisample_lru_log() -> ObservationLog {
+    vec![
+        obs_count("multi/key0-second-sample", 2, 0),
+        obs_count("multi/new-key-forces-eviction", 1, 1),
+        obs_count("multi/key0-probe-after-eviction", 1, 2),
+    ]
+}
+
 #[tokio::test]
 async fn parity_global_cap_script() {
     let ran = assert_parity("global-cap", expected_global_cap_log(), |b| async move {
         run_global_cap_parity_script(&*b).await
     })
+    .await;
+    assert!(ran.contains(&"in-memory") && ran.contains(&"libsql"));
+}
+
+/// Multi-sample-per-key LRU victim-rule parity (MIN oldest-front vs MAX
+/// newest-activity). Regression guard for the Postgres `MAX(ts)` bug fixed in
+/// 0c102a631: with more than one sample per key, a `MAX`-victim backend evicts
+/// a DIFFERENT key than the oldest-front backends and fails the oracle here.
+#[tokio::test]
+async fn parity_multisample_lru_victim_rule() {
+    let ran = assert_parity(
+        "multisample-lru",
+        expected_multisample_lru_log(),
+        |b| async move { run_multisample_lru_script(&*b).await },
+    )
     .await;
     assert!(ran.contains(&"in-memory") && ran.contains(&"libsql"));
 }

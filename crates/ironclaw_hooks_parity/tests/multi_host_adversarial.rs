@@ -132,15 +132,19 @@ mod libsql_cluster {
             Arc::new(LibSqlPredicateStateBackend::new(self.db.clone()))
         }
 
-        /// Count distinct scopes recorded for `tenant` in the invocation table —
-        /// used to assert the per-tenant LRU quota held under flood.
+        /// Count distinct keys recorded for `tenant` in the invocation table —
+        /// used to assert the per-tenant LRU quota held under flood. The tenant
+        /// grain is the `scope_hash` digest (the raw `tenant_id` column is gone
+        /// in the canonical typed schema), so resolve the digest and filter on
+        /// it, counting the distinct `key_hash` buckets under it.
         pub async fn distinct_invocation_scopes(&self, tenant: &str) -> usize {
+            let scope = ironclaw_hooks_libsql::test_support::tenant_scope_hash_bytes(tenant);
             let conn = self.db.connect().expect("connect");
             let mut rows = conn
                 .query(
-                    "SELECT count(DISTINCT scope_hash) FROM hooks_predicate_invocations \
-                     WHERE tenant_id = ?1",
-                    libsql::params![tenant],
+                    "SELECT count(DISTINCT key_hash) FROM hooks_predicate_invocations \
+                     WHERE scope_hash = ?1",
+                    libsql::params![scope],
                 )
                 .await
                 .expect("query");
@@ -610,7 +614,7 @@ mod postgres_cluster {
         let backend = PostgresPredicateStateBackend::new(pool.clone());
         backend.run_migrations().await.ok()?;
         let c = pool.get().await.ok()?;
-        c.batch_execute("TRUNCATE TABLE hook_predicate_counters")
+        c.batch_execute("TRUNCATE TABLE hooks_predicate_invocations, hooks_predicate_values")
             .await
             .ok()?;
         Some(url)
