@@ -301,6 +301,7 @@ async fn oauth_callback_continuation_dispatch_maps_turn_error_categories() {
     }
 }
 
+#[cfg(test)]
 fn turn_scope() -> TurnScope {
     TurnScope::new(
         TenantId::new("tenant-auth").unwrap(),
@@ -310,6 +311,7 @@ fn turn_scope() -> TurnScope {
     )
 }
 
+#[cfg(test)]
 fn auth_scope_for_turn(scope: &TurnScope, actor: &TurnActor) -> AuthProductScope {
     AuthProductScope::new(
         ResourceScope {
@@ -326,22 +328,27 @@ fn auth_scope_for_turn(scope: &TurnScope, actor: &TurnActor) -> AuthProductScope
     .with_session_id(AuthSessionId::new("session-auth-callback").unwrap())
 }
 
+#[cfg(test)]
 fn provider() -> AuthProviderId {
     AuthProviderId::new("github").unwrap()
 }
 
+#[cfg(test)]
 fn label() -> CredentialAccountLabel {
     CredentialAccountLabel::new("work github").unwrap()
 }
 
+#[cfg(test)]
 fn authorization_url(value: &str) -> OAuthAuthorizationUrl {
     OAuthAuthorizationUrl::new(value).unwrap()
 }
 
+#[cfg(test)]
 fn provider_scope(value: &str) -> ProviderScope {
     ProviderScope::new(value).unwrap()
 }
 
+#[cfg(test)]
 async fn submit_and_block_auth_run(
     turn_coordinator: &dyn ironclaw_turns::TurnCoordinator,
     local_runtime: &RebornLocalRuntimeServices,
@@ -392,6 +399,7 @@ async fn submit_and_block_auth_run(
     run_id
 }
 
+#[cfg(test)]
 async fn create_flow(
     product_auth: &RebornProductAuthServices,
     scope: AuthProductScope,
@@ -418,6 +426,7 @@ async fn create_flow(
         .id
 }
 
+#[cfg(test)]
 fn authorized_request(
     scope: AuthProductScope,
     flow_id: AuthFlowId,
@@ -446,14 +455,17 @@ fn authorized_request(
     }
 }
 
+#[cfg(test)]
 fn state_hash() -> OpaqueStateHash {
     OpaqueStateHash::new(fake_digest("state-hash")).unwrap()
 }
 
+#[cfg(test)]
 fn pkce_hash() -> PkceVerifierHash {
     PkceVerifierHash::new(fake_digest("pkce-hash")).unwrap()
 }
 
+#[cfg(test)]
 fn code_hash() -> AuthorizationCodeHash {
     AuthorizationCodeHash::new(fake_digest("code-hash")).unwrap()
 }
