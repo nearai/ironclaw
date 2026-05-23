@@ -2,10 +2,42 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
-use ironclaw_host_runtime::SchedulerTurnRunWakeNotifier;
+use ironclaw_host_runtime::{
+    SchedulerTurnRunWakeNotifier, TenantSandboxProcessPort, VerifiedTenantSandboxProcessPort,
+};
 use ironclaw_trust::HostTrustPolicy;
 
 use crate::{RebornCompositionProfile, RebornProductAuthServices};
+
+#[derive(Clone, Default)]
+pub struct RebornHostRuntimePorts {
+    pub(crate) tenant_sandbox_process_port: Option<Arc<TenantSandboxProcessPort>>,
+    pub(crate) verified_tenant_sandbox_process_port: Option<VerifiedTenantSandboxProcessPort>,
+}
+
+impl RebornHostRuntimePorts {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_tenant_sandbox_process_port(
+        mut self,
+        process_port: Arc<TenantSandboxProcessPort>,
+    ) -> Self {
+        self.tenant_sandbox_process_port = Some(process_port);
+        self.verified_tenant_sandbox_process_port = None;
+        self
+    }
+
+    pub fn with_verified_tenant_sandbox_process_port(
+        mut self,
+        process_port: VerifiedTenantSandboxProcessPort,
+    ) -> Self {
+        self.verified_tenant_sandbox_process_port = Some(process_port);
+        self.tenant_sandbox_process_port = None;
+        self
+    }
+}
 
 pub struct RebornBuildInput {
     pub(crate) profile: RebornCompositionProfile,
@@ -14,6 +46,7 @@ pub struct RebornBuildInput {
     pub(crate) production_trust_policy: Option<Arc<HostTrustPolicy>>,
     pub(crate) runtime_policy: Option<EffectiveRuntimePolicy>,
     pub(crate) turn_run_wake_notifier: Option<Arc<SchedulerTurnRunWakeNotifier>>,
+    pub(crate) host_runtime_ports: RebornHostRuntimePorts,
     pub(crate) required_runtime_backends: Vec<ironclaw_host_api::RuntimeKind>,
     pub(crate) require_runtime_http_egress: bool,
     pub(crate) require_wasm_credentials: bool,
@@ -153,6 +186,11 @@ impl RebornBuildInput {
         self
     }
 
+    pub fn with_host_runtime_ports(mut self, ports: RebornHostRuntimePorts) -> Self {
+        self.host_runtime_ports = ports;
+        self
+    }
+
     pub fn require_runtime_http_egress(mut self) -> Self {
         self.require_runtime_http_egress = true;
         self
@@ -185,6 +223,7 @@ impl RebornBuildInput {
             production_trust_policy: None,
             runtime_policy: None,
             turn_run_wake_notifier: None,
+            host_runtime_ports: RebornHostRuntimePorts::default(),
             required_runtime_backends: Vec::new(),
             require_runtime_http_egress: false,
             require_wasm_credentials: false,

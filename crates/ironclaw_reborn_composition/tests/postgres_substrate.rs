@@ -1,6 +1,6 @@
 #![cfg(feature = "postgres")]
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use deadpool_postgres::tokio_postgres;
 use ironclaw_host_api::{
@@ -8,7 +8,11 @@ use ironclaw_host_api::{
     RuntimeProfile, SecretMode,
     runtime_policy::{ApprovalPolicy, EffectiveRuntimePolicy},
 };
-use ironclaw_host_runtime::{CapabilitySurfaceVersion, ProductionWiringConfig};
+use ironclaw_host_runtime::{
+    CapabilitySurfaceVersion, CommandExecutionOutput, CommandExecutionRequest,
+    ProductionWiringConfig, RuntimeProcessError, SandboxCommandTransport,
+    VerifiedTenantSandboxProcessPort,
+};
 use ironclaw_reborn_composition::{
     PostgresProductionSubstrateConfig, RebornCompositionError,
     build_postgres_production_host_runtime_services,
@@ -32,6 +36,7 @@ async fn postgres_substrate_builder_wires_production_components_without_local_on
             secret_master_key: Some(SecretString::from("01234567890123456789012345678901")),
             trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
             runtime_policy: production_runtime_policy(),
+            verified_tenant_sandbox_process_port: Some(verified_sandbox_process_port()),
             turn_run_wake_notifier: Arc::new(RecordingSchedulerWakeNotifier),
             surface_version: CapabilitySurfaceVersion::new("test-surface").unwrap(),
         })
@@ -59,6 +64,7 @@ async fn postgres_substrate_builder_rejects_missing_secret_master_key() {
             secret_master_key: None,
             trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
             runtime_policy: production_runtime_policy(),
+            verified_tenant_sandbox_process_port: None,
             turn_run_wake_notifier: Arc::new(RecordingSchedulerWakeNotifier),
             surface_version: CapabilitySurfaceVersion::new("test-surface").unwrap(),
         })
@@ -72,15 +78,37 @@ async fn postgres_substrate_builder_rejects_missing_secret_master_key() {
 
 fn production_runtime_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
-        deployment: DeploymentMode::LocalSingleUser,
-        requested_profile: RuntimeProfile::LocalDev,
-        resolved_profile: RuntimeProfile::LocalDev,
-        filesystem_backend: FilesystemBackendKind::HostWorkspace,
-        process_backend: ProcessBackendKind::LocalHost,
-        network_mode: NetworkMode::DirectLogged,
-        secret_mode: SecretMode::ScrubbedEnv,
+        deployment: DeploymentMode::HostedMultiTenant,
+        requested_profile: RuntimeProfile::HostedDev,
+        resolved_profile: RuntimeProfile::HostedDev,
+        filesystem_backend: FilesystemBackendKind::TenantWorkspace,
+        process_backend: ProcessBackendKind::TenantSandbox,
+        network_mode: NetworkMode::Allowlist,
+        secret_mode: SecretMode::TenantBroker,
         approval_policy: ApprovalPolicy::AskDestructive,
-        audit_mode: AuditMode::LocalMinimal,
+        audit_mode: AuditMode::Standard,
+    }
+}
+
+fn verified_sandbox_process_port() -> VerifiedTenantSandboxProcessPort {
+    VerifiedTenantSandboxProcessPort::from_transport(Arc::new(RecordingSandboxTransport))
+}
+
+#[derive(Debug)]
+struct RecordingSandboxTransport;
+
+#[async_trait::async_trait]
+impl SandboxCommandTransport for RecordingSandboxTransport {
+    async fn run_command(
+        &self,
+        _request: CommandExecutionRequest,
+    ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+        Ok(CommandExecutionOutput {
+            output: String::new(),
+            exit_code: 0,
+            sandboxed: true,
+            duration: Duration::ZERO,
+        })
     }
 }
 

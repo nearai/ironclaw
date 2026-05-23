@@ -86,7 +86,7 @@ use crate::{
     InvocationServicesResolutionRequest, InvocationServicesResolver, LocalHostProcessPort,
     LocalInvocationServicesResolver, PlannerError, ProcessObligationLifecycleStore,
     RuntimeBackendHealth, RuntimeProcessPort, TenantSandboxProcessPort, TurnRunExecutor,
-    TurnRunScheduler, TurnRunSchedulerConfig, plan_capability,
+    TurnRunScheduler, TurnRunSchedulerConfig, VerifiedTenantSandboxProcessPort, plan_capability,
 };
 
 type SharedRuntimeHttpEgress = Arc<Mutex<Option<Arc<dyn RuntimeHttpEgress>>>>;
@@ -1043,6 +1043,21 @@ where
             ProductionImplementationReadiness::UnverifiedProductionImplementation,
         ));
         self.tenant_sandbox_process_port = Some(process_port);
+        self
+    }
+
+    /// Attaches a tenant sandbox process port whose transport is verified by
+    /// the composition root as production-suitable for the active
+    /// tenant-scoped runtime policy.
+    pub fn with_verified_tenant_sandbox_process_port(
+        mut self,
+        process_port: VerifiedTenantSandboxProcessPort,
+    ) -> Self {
+        self.component_types.tenant_sandbox_process_port = Some(ProductionComponentType::named(
+            "TenantSandboxProcessPort",
+            ProductionImplementationReadiness::ProductionCandidate,
+        ));
+        self.tenant_sandbox_process_port = Some(process_port.into_inner());
         self
     }
 

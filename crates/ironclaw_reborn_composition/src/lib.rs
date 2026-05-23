@@ -30,6 +30,7 @@ mod projection;
 mod readiness;
 mod runtime;
 mod runtime_input;
+mod sandbox_process;
 mod webui;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_body_limit;
@@ -50,7 +51,7 @@ pub use auth::{
 };
 pub use error::RebornBuildError;
 pub use factory::{RebornServices, build_reborn_services};
-pub use input::RebornBuildInput;
+pub use input::{RebornBuildInput, RebornHostRuntimePorts};
 #[cfg(feature = "root-llm-provider")]
 pub use llm_catalog::{
     RebornLlmCatalogError, resolve_against_registry, resolve_llm_selection_against_catalog,
@@ -75,6 +76,9 @@ pub use runtime_input::{
 };
 #[cfg(feature = "root-llm-provider")]
 pub use runtime_input::{RebornLlmConfig, ResolvedRebornLlm};
+pub use sandbox_process::{
+    RebornSandboxConfig, RebornSandboxScopeKey, RebornScopedSandboxCommandTransport,
+};
 pub use webui::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]
 pub use webui_rate_limit::RateLimitConfigError;
@@ -197,7 +201,9 @@ use ironclaw_host_api::{
     runtime_policy::EffectiveRuntimePolicy,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_host_runtime::{CapabilitySurfaceVersion, HostRuntimeServices};
+use ironclaw_host_runtime::{
+    CapabilitySurfaceVersion, HostRuntimeServices, VerifiedTenantSandboxProcessPort,
+};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_network::{PolicyNetworkHttpEgress, ReqwestNetworkTransport};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -278,11 +284,12 @@ const PER_USER_ALIASES: &[&str] = &[
 pub fn invocation_mount_view(
     scope: &ResourceScope,
 ) -> Result<MountView, ironclaw_host_api::HostApiError> {
-    let tenant_user_prefix = format!(
-        "/tenants/{}/users/{}",
-        scope.tenant_id.as_str(),
-        scope.user_id.as_str()
-    );
+    let (tenant_id, user_id) = if scope.is_system() {
+        ("__SYSTEM__", "__SYSTEM__")
+    } else {
+        (scope.tenant_id.as_str(), scope.user_id.as_str())
+    };
+    let tenant_user_prefix = format!("/tenants/{tenant_id}/users/{user_id}");
     let mut grants = Vec::with_capacity(PER_USER_ALIASES.len() + 2);
     for alias in PER_USER_ALIASES {
         let target = format!("{tenant_user_prefix}{alias}");
@@ -294,7 +301,7 @@ pub fn invocation_mount_view(
     }
     grants.push(MountGrant::new(
         MountAlias::new("/tenant-shared")?,
-        VirtualPath::new(format!("/tenants/{}/shared", scope.tenant_id.as_str()))?,
+        VirtualPath::new(format!("/tenants/{tenant_id}/shared"))?,
         MountPermissions::read_write(),
     ));
     for system_subroot in ["/system/settings", "/system/extensions", "/system/skills"] {
@@ -331,6 +338,7 @@ where
     pub secret_master_key: Option<SecretMaterial>,
     pub trust_policy: Arc<TPolicy>,
     pub runtime_policy: EffectiveRuntimePolicy,
+    pub verified_tenant_sandbox_process_port: Option<VerifiedTenantSandboxProcessPort>,
     pub turn_run_wake_notifier: Arc<TWake>,
     pub surface_version: CapabilitySurfaceVersion,
 }
@@ -347,6 +355,7 @@ where
     pub secret_master_key: Option<SecretMaterial>,
     pub trust_policy: Arc<TPolicy>,
     pub runtime_policy: EffectiveRuntimePolicy,
+    pub verified_tenant_sandbox_process_port: Option<VerifiedTenantSandboxProcessPort>,
     pub turn_run_wake_notifier: Arc<TWake>,
     pub surface_version: CapabilitySurfaceVersion,
 }
@@ -409,7 +418,7 @@ where
         &scoped_filesystem,
     )));
 
-    let services = HostRuntimeServices::new(
+    let mut services = HostRuntimeServices::new(
         Arc::new(ExtensionRegistry::new()),
         filesystem,
         governor,
@@ -426,9 +435,13 @@ where
     .with_filesystem_turn_state_store(Arc::clone(&scoped_filesystem))
     .with_run_profile_resolver(Arc::new(
         ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver()?,
-    ))
-    .with_reborn_event_store_config(RebornProfile::Production, config.event_store)
-    .await?;
+    ));
+    if let Some(process_port) = config.verified_tenant_sandbox_process_port {
+        services = services.with_verified_tenant_sandbox_process_port(process_port);
+    }
+    let services = services
+        .with_reborn_event_store_config(RebornProfile::Production, config.event_store)
+        .await?;
 
     // safety: `with_secret_store` is called unconditionally above on the same
     // builder chain, so `try_with_host_http_egress` can only return a
@@ -474,7 +487,7 @@ where
         &scoped_filesystem,
     )));
 
-    let services = HostRuntimeServices::new(
+    let mut services = HostRuntimeServices::new(
         Arc::new(ExtensionRegistry::new()),
         filesystem,
         governor,
@@ -491,9 +504,13 @@ where
     .with_filesystem_turn_state_store(Arc::clone(&scoped_filesystem))
     .with_run_profile_resolver(Arc::new(
         ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver()?,
-    ))
-    .with_reborn_event_store_config(RebornProfile::Production, config.event_store)
-    .await?;
+    ));
+    if let Some(process_port) = config.verified_tenant_sandbox_process_port {
+        services = services.with_verified_tenant_sandbox_process_port(process_port);
+    }
+    let services = services
+        .with_reborn_event_store_config(RebornProfile::Production, config.event_store)
+        .await?;
 
     // safety: `with_secret_store` is called unconditionally above on the same
     // builder chain, so `try_with_host_http_egress` can only return a
@@ -657,6 +674,21 @@ mod mount_view_tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn invocation_mount_view_routes_system_scope_to_valid_sentinel_paths() {
+        let scope = ResourceScope::system();
+        let view = invocation_mount_view(&scope).unwrap();
+
+        let resolved = view
+            .resolve(&ScopedPath::new("/turns/state.json").unwrap())
+            .unwrap();
+
+        assert_eq!(
+            resolved.as_str(),
+            "/tenants/__SYSTEM__/users/__SYSTEM__/turns/state.json"
+        );
     }
 
     #[test]

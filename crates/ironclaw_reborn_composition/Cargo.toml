@@ -55,8 +55,11 @@ postgres = [
 
 [dependencies]
 async-trait = "0.1"
+bollard = "0.18"
 chrono = "0.4"
 deadpool-postgres = { version = "0.14", optional = true }
+futures = "0.3"
+hex = "0.4"
 ironclaw_auth = { path = "../ironclaw_auth" }
 ironclaw_authorization = { path = "../ironclaw_authorization" }
 ironclaw_event_projections = { path = "../ironclaw_event_projections" }
@@ -96,6 +99,7 @@ lru = { version = "0.16", optional = true }
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
