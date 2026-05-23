@@ -220,9 +220,12 @@ impl HookManifestEntry {
     /// (trust class assignment, scope grant matching, hook-id pinning all
     /// happen later in the installer).
     pub fn validate(&self) -> Result<(), HookManifestValidationError> {
-        if self.id.as_str().is_empty() {
-            return Err(HookManifestValidationError("hook id is empty".to_string()));
-        }
+        // Note: the previous empty-id guard here is unreachable now that
+        // `HookLocalId::new` rejects empty strings at construction time
+        // (see `crates/ironclaw_hooks/src/identity.rs`), so manifest
+        // deserialization fails before this method is ever called. Removed
+        // per henrypark133 review of PR #3912 (finding L1).
+        //
         // Phase × Trust: a manifest hook is always Installed, so it cannot
         // register at Validation or Authorization.
         if matches!(self.phase, HookPhase::Validation | HookPhase::Authorization) {

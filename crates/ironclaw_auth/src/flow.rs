@@ -28,6 +28,8 @@ pub enum AuthFlowStatus {
     Pending,
     AwaitingUser,
     CallbackReceived,
+    /// Reserved for production stores that split durable claim, provider
+    /// exchange, and account mutation across asynchronous workers.
     Completing,
     Completed,
     Failed,
@@ -164,6 +166,24 @@ pub struct OAuthCallbackInput {
     pub outcome: ProviderCallbackOutcome,
 }
 
+/// Terminal failure input for an already-claimed OAuth callback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthCallbackFailureInput {
+    pub flow_id: AuthFlowId,
+    pub opaque_state_hash: OpaqueStateHash,
+    pub error: AuthErrorCode,
+}
+
+/// Pre-egress claim for an authorized OAuth callback. This validates and marks
+/// the scoped flow before one-shot provider exchange can consume a raw code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthCallbackClaimRequest {
+    pub flow_id: AuthFlowId,
+    pub opaque_state_hash: OpaqueStateHash,
+    pub provider: AuthProviderId,
+    pub pkce_verifier_hash: crate::PkceVerifierHash,
+}
+
 #[async_trait]
 pub trait AuthFlowManager: Send + Sync {
     async fn create_flow(&self, request: NewAuthFlow) -> Result<AuthFlowRecord, AuthProductError>;
@@ -174,10 +194,22 @@ pub trait AuthFlowManager: Send + Sync {
         flow_id: AuthFlowId,
     ) -> Result<Option<AuthFlowRecord>, AuthProductError>;
 
+    async fn claim_oauth_callback(
+        &self,
+        scope: &AuthProductScope,
+        request: OAuthCallbackClaimRequest,
+    ) -> Result<AuthFlowRecord, AuthProductError>;
+
     async fn complete_oauth_callback(
         &self,
         scope: &AuthProductScope,
         input: OAuthCallbackInput,
+    ) -> Result<AuthFlowRecord, AuthProductError>;
+
+    async fn fail_oauth_callback(
+        &self,
+        scope: &AuthProductScope,
+        input: OAuthCallbackFailureInput,
     ) -> Result<AuthFlowRecord, AuthProductError>;
 
     async fn cancel_flow(

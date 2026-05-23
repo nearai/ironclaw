@@ -1,6 +1,7 @@
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
 use crate::{AuthProductError, validate_public_text};
@@ -92,6 +93,12 @@ macro_rules! validated_string {
 macro_rules! digest_string {
     ($name:ident, $label:literal) => {
         string_newtype!($name, |value| validate_digest_text(value, $label));
+
+        impl $name {
+            pub fn constant_time_eq(&self, other: &Self) -> bool {
+                self.0.as_bytes().ct_eq(other.0.as_bytes()).into()
+            }
+        }
     };
 }
 

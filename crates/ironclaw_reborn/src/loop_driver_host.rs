@@ -25,6 +25,7 @@ use ironclaw_loop_support::{
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 
 use crate::driver_registry::{DriverRequirements, LoopDriverRegistryKey, RequirementLevel};
+use crate::hook_gate_refs::HookGateInvocationScopePort;
 use crate::model_routes::{ModelRouteError, ModelRouteResolver, ModelSlot};
 use crate::text_loop_driver::{TEXT_ONLY_DRIVER_ID, TEXT_ONLY_DRIVER_VERSION};
 
@@ -427,12 +428,29 @@ where
     /// install `UuidHookGateRefFactory` to exercise the affirmative path.
     /// See [`Self::with_hook_gate_ref_factory`].
     hook_gate_ref_factory: Option<Arc<dyn ironclaw_hooks::middleware::HookGateRefFactory>>,
+    /// Per-build hook-gate-factory builder. See
+    /// [`Self::with_hook_gate_ref_factory_builder`].
+    hook_gate_ref_factory_builder: Option<HookGateRefFactoryBuilder>,
     safety_context: Option<InstructionSafetyContext>,
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
     input_queue: Option<Arc<dyn HostInputQueue>>,
     profiled_capabilities: Option<ProfiledCapabilityHostRuntime>,
     driver_requirements: HashMap<LoopDriverRegistryKey, DriverRequirements>,
 }
+
+/// Per-host-build callback that produces a fresh hook-gate factory bound
+/// to the active run. Preferred over a shared `Arc<dyn HookGateRefFactory>`
+/// because it eliminates the stale-`LoopRunContext` capture risk
+/// serrrfirat MEDIUM (5-15 review on PR #3633) flagged: a single shared
+/// factory carries whatever run context it was constructed against, and
+/// the host reuses the same `Arc` across every host it produces — so a
+/// second host build could mint gate refs against the first build's run
+/// context.
+pub type HookGateRefFactoryBuilder = Arc<
+    dyn Fn(&LoopRunContext) -> Arc<dyn ironclaw_hooks::middleware::HookGateRefFactory>
+        + Send
+        + Sync,
+>;
 
 impl<S, G> RebornLoopDriverHostFactory<S, G>
 where
@@ -470,6 +488,7 @@ where
             hook_dispatcher_builder_factory: None,
             capability_input_resolver: None,
             hook_gate_ref_factory: None,
+            hook_gate_ref_factory_builder: None,
             safety_context: None,
             identity_context_source: None,
             input_queue: None,
@@ -566,11 +585,46 @@ where
     /// the affirmative `ApprovalRequired { gate_ref }` shape (the refs are
     /// locally unique but not router-registered — production must not use
     /// this).
+    /// **Deprecated for production use.** A single shared factory captures
+    /// its `LoopRunContext` (typically through the `Fn() ->
+    /// HookGateReservationContext` closure passed to
+    /// `RouterBackedHookGateRefFactory::try_new`) at construction time
+    /// and reuses it for every host build. The host factory itself
+    /// produces many hosts with different run contexts, so a later
+    /// build can mint a gate ref against a stale run — exactly the
+    /// integration footgun serrrfirat MEDIUM on PR #3633 (5-15 review)
+    /// flagged. Use [`Self::with_hook_gate_ref_factory_builder`]
+    /// instead, which receives the current `LoopRunContext` per build
+    /// so the factory can carry the right run identity by construction.
+    #[deprecated(
+        since = "0.1.0",
+        note = "shared factory captures stale LoopRunContext across host \
+                builds. Use `with_hook_gate_ref_factory_builder(|run_ctx| ...)` \
+                so the factory is constructed fresh per host with the right \
+                run context."
+    )]
     pub fn with_hook_gate_ref_factory(
         mut self,
         factory: Arc<dyn ironclaw_hooks::middleware::HookGateRefFactory>,
     ) -> Self {
         self.hook_gate_ref_factory = Some(factory);
+        self
+    }
+
+    /// Install a per-build hook-gate-factory builder. The closure is
+    /// invoked once per `build_text_only_host*` call with the current
+    /// `LoopRunContext`; the returned factory is wired into that host's
+    /// `HookedLoopCapabilityPort`. This is the preferred path for
+    /// router-backed factories that need to bind the active run/actor
+    /// at mint time (serrrfirat MEDIUM on PR #3633 5-15 review).
+    pub fn with_hook_gate_ref_factory_builder<F>(mut self, factory_builder: F) -> Self
+    where
+        F: Fn(&LoopRunContext) -> Arc<dyn ironclaw_hooks::middleware::HookGateRefFactory>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.hook_gate_ref_factory_builder = Some(Arc::new(factory_builder));
         self
     }
 
@@ -779,8 +833,19 @@ where
                 run_context.scope.tenant_id.clone(),
             )
             .with_provider_resolver(provider_resolver);
-            if let Some(factory) = self.hook_gate_ref_factory.as_ref() {
-                hooked = hooked.with_gate_ref_factory(Arc::clone(factory));
+            // Prefer the per-build builder (serrrfirat MEDIUM on PR
+            // #3633 5-15 review): each host build invokes the closure
+            // with its own `LoopRunContext`, so the resulting factory
+            // can't capture stale run/actor identity. Fall back to the
+            // deprecated shared factory if only the older API is wired.
+            let per_build_gate_factory = self
+                .hook_gate_ref_factory_builder
+                .as_ref()
+                .map(|builder| builder(&run_context))
+                .or_else(|| self.hook_gate_ref_factory.clone());
+            let has_gate_factory = per_build_gate_factory.is_some();
+            if let Some(factory) = per_build_gate_factory {
+                hooked = hooked.with_gate_ref_factory(factory);
             }
             if let Some(input_resolver) = self.capability_input_resolver.as_ref() {
                 let adapter: Arc<dyn HookCapabilityInputResolver> =
@@ -790,7 +855,12 @@ where
                     ));
                 hooked = hooked.with_resolver(adapter);
             }
-            capabilities = Arc::new(hooked);
+            let hooked: Arc<dyn LoopCapabilityPort> = Arc::new(hooked);
+            capabilities = if has_gate_factory {
+                Arc::new(HookGateInvocationScopePort::new(hooked))
+            } else {
+                hooked
+            };
         }
         capabilities
             .visible_capabilities(VisibleCapabilityRequest)

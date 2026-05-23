@@ -212,8 +212,29 @@ impl ExtensionId {
         &self.0
     }
 
-    pub fn into_string(self) -> String {
+    /// Canonical newtype-template accessor for taking the inner string by
+    /// value. Prefer this over [`Self::into_string`] in new code.
+    pub fn into_inner(self) -> String {
         self.0
+    }
+
+    /// Legacy alias retained for callers that predate the canonical
+    /// `into_inner` convention from `.claude/rules/types.md`. New code
+    /// should use [`Self::into_inner`].
+    pub fn into_string(self) -> String {
+        self.into_inner()
+    }
+}
+
+impl AsRef<str> for ExtensionId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<ExtensionId> for String {
+    fn from(id: ExtensionId) -> Self {
+        id.0
     }
 }
 
@@ -271,8 +292,29 @@ impl HookLocalId {
         &self.0
     }
 
-    pub fn into_string(self) -> String {
+    /// Canonical newtype-template accessor for taking the inner string by
+    /// value. Prefer this over [`Self::into_string`] in new code.
+    pub fn into_inner(self) -> String {
         self.0
+    }
+
+    /// Legacy alias retained for callers that predate the canonical
+    /// `into_inner` convention from `.claude/rules/types.md`. New code
+    /// should use [`Self::into_inner`].
+    pub fn into_string(self) -> String {
+        self.into_inner()
+    }
+}
+
+impl AsRef<str> for HookLocalId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<HookLocalId> for String {
+    fn from(id: HookLocalId) -> Self {
+        id.0
     }
 }
 
@@ -356,7 +398,16 @@ mod tests {
     #[test]
     fn builtin_id_distinct_from_extension_id() {
         // Use a `.`-separated local id, which is permitted by the segment
-        // grammar (mirroring host-api's `validate_name_segment`).
+        // grammar (mirroring host-api's `validate_name_segment`). The
+        // original fixture used `"path::module"` for the installed local id,
+        // but the post-#3912 segment grammar disallows `:` characters
+        // anywhere in a `HookLocalId`, so we substitute the equivalent
+        // legal value `"path.module"`. The assertion's intent — that the
+        // builtin and installed digests are distinct for any pair of
+        // syntactically legal ids — is unchanged; `HookId::for_builtin`
+        // accepts a free-form canonical path (not a `HookLocalId`) so the
+        // builtin side can still carry the original `"path::module"`
+        // shape.
         let installed = HookId::derive(
             &ext("builtin"),
             "x",
