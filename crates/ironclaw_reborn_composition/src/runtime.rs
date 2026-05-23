@@ -67,6 +67,8 @@ use ironclaw_turns::{
     run_profile::{LoopHostMilestoneSink, LoopRunContext, PromptMode},
 };
 
+use crate::factory::builtin_extension_registry;
+use crate::hooks::{HooksActivationConfig, build_hook_dispatcher_builder_factory};
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
 use crate::{RebornBuildError, RebornCompositionProfile, RebornServices, build_reborn_services};
@@ -811,6 +813,23 @@ pub async fn build_reborn_runtime(
     let capability_factory = local_dev_capabilities.capability_factory;
     let model_gateway = local_dev_capabilities.model_gateway;
 
+    // Hook framework activation (#3934), gated behind HOOKS_ENABLED (default
+    // OFF). When OFF this is `None` and `build_default_planned_runtime`
+    // composes no dispatcher — zero behavior change. When ON, the per-run
+    // dispatcher builder factory is built against this tenant's extension
+    // registry (per-tenant scoping by construction: this whole function runs
+    // once per identity). Fail-closed: a malformed manifest hook fails the
+    // build here rather than silently composing a broken dispatcher.
+    let hooks_config = HooksActivationConfig::from_env();
+    let hook_dispatcher_builder_factory = {
+        let registry = builtin_extension_registry()?;
+        build_hook_dispatcher_builder_factory(hooks_config, &registry).map_err(|error| {
+            RebornRuntimeError::InvalidArgument {
+                reason: format!("hook framework activation failed: {error}"),
+            }
+        })?
+    };
+
     let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
         turn_state: Arc::clone(&turn_state_store),
         thread_service: Arc::clone(&thread_service),
@@ -840,6 +859,7 @@ pub async fn build_reborn_runtime(
         model_policy_guard: None,
         model_budget_accountant: None,
         safety_context: None,
+        hook_dispatcher_builder_factory,
     })?;
     let default_resolved_run_profile = composition
         .run_profile_resolver

@@ -65,10 +65,14 @@ const NOOP_OBSERVER_CANONICAL_PATH: &str = "ironclaw_reborn_composition::hooks::
 
 /// Per-host-build factory closure passed to
 /// `RebornLoopDriverHostFactory::with_hook_dispatcher_builder_factory`. The
-/// closure is invoked once per `build_text_only_host*` call and must return a
+/// closure is invoked once per `build_text_only_host*` call and returns a
 /// fresh [`HookDispatcherBuilder`] (no pre-attached milestone sink — the host
-/// factory wires a run-scoped one). `Fn + Send + Sync + 'static`.
-pub type HookDispatcherBuilderFactory = Arc<dyn Fn() -> HookDispatcherBuilder + Send + Sync>;
+/// factory wires a run-scoped one).
+///
+/// Re-exported from `ironclaw_reborn` so the type is identical to the one
+/// `DefaultPlannedRuntimeParts::hook_dispatcher_builder_factory` accepts; this
+/// crate just gives it a local name at its public surface.
+pub use ironclaw_reborn::loop_driver_host::HookDispatcherBuilderFactory;
 
 /// Activation configuration for the hook framework.
 ///

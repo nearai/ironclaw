@@ -279,6 +279,7 @@ impl ProductLiveAgentLoopHarness {
             model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
             model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
             safety_context: Some(test_safety_context()),
+            hook_dispatcher_builder_factory: None,
         })
         .expect("product-live planned AgentLoop harness should build");
 

@@ -269,7 +269,7 @@ fn local_dev_skill_mount_view() -> Result<MountView, RebornBuildError> {
     })
 }
 
-fn builtin_extension_registry() -> Result<ExtensionRegistry, RebornBuildError> {
+pub(crate) fn builtin_extension_registry() -> Result<ExtensionRegistry, RebornBuildError> {
     // Shared by local-dev and production composition so host-owned first-party
     // capabilities expose the same built-in package contract in both profiles.
     let mut registry = ExtensionRegistry::new();

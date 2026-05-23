@@ -25,7 +25,8 @@ use crate::{
     app_loop_family::build_loop_family_registry,
     driver_registry::{DriverRegistry, DriverRegistryError},
     loop_driver_host::{
-        LoopCapabilityPortFactory, RebornLoopDriverHostFactory, TextOnlyLoopHostConfig,
+        HookDispatcherBuilderFactory, LoopCapabilityPortFactory, RebornLoopDriverHostFactory,
+        TextOnlyLoopHostConfig,
     },
     loop_exit_applier::{LoopExitApplier, ThreadCheckpointLoopExitEvidencePort},
     model_routes::ModelRouteResolver,
@@ -78,6 +79,16 @@ where
     pub model_policy_guard: Option<Arc<dyn LoopModelPolicyGuard>>,
     pub model_budget_accountant: Option<Arc<dyn LoopModelBudgetAccountant>>,
     pub safety_context: Option<InstructionSafetyContext>,
+    /// Per-run hook dispatcher builder factory. `None` (the default) leaves
+    /// the hook framework dormant: no dispatcher is composed and the runtime
+    /// behaves exactly as it did before hooks existed — the rollout-safety
+    /// contract for the activation behind `HOOKS_ENABLED`. `Some(factory)`
+    /// (only when the flag is ON) wires the factory through
+    /// [`RebornLoopDriverHostFactory::with_hook_dispatcher_builder_factory`],
+    /// so each host build mints a fresh dispatcher (per-run isolation) and the
+    /// host attaches a run-scoped milestone sink internally (per-run telemetry
+    /// attribution, the #3573 lesson).
+    pub hook_dispatcher_builder_factory: Option<HookDispatcherBuilderFactory>,
 }
 
 pub struct RebornRuntimeLoopComposition<T, S, G>
@@ -348,6 +359,15 @@ where
     }
     if let Some(safety) = parts.safety_context {
         host_factory = host_factory.with_safety_context(safety);
+    }
+    // Hook framework activation (item 6 of #3934). When the builder factory is
+    // present (flag ON), wire it so each host build mints a fresh dispatcher
+    // with per-run isolation; the host factory attaches the run-scoped
+    // milestone sink internally for per-run telemetry attribution. When `None`
+    // (flag OFF / default), no dispatcher is composed and behavior is
+    // identical to the pre-hooks runtime.
+    if let Some(factory) = parts.hook_dispatcher_builder_factory {
+        host_factory = host_factory.with_hook_dispatcher_builder_factory(move || factory());
     }
     host_factory = host_factory.with_identity_context_source(parts.identity_context_source);
     let host_factory = Arc::new(host_factory);
