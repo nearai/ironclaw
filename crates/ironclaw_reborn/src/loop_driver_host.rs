@@ -630,13 +630,46 @@ impl EventTriggeredHookSubscription {
         self
     }
 
-    fn spawn(
+    async fn spawn(
         self,
         dispatcher: Arc<HookDispatcher>,
         tenant_id: ironclaw_host_api::TenantId,
         run_context: LoopRunContext,
         milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     ) -> EventTriggeredHookSubscriptionHandle {
+        // PR #3931 (Hole 1): snapshot the replay/live boundary **here**, at
+        // subscription start, synchronously before the background task is
+        // spawned. Doing it inside the spawned task would re-introduce the
+        // race: an event appended between build-return and the task's first
+        // poll could land at or below a lazily-read head and be mis-classified
+        // as replay. Snapshotting before `tokio::spawn` makes "head-at-startup"
+        // mean exactly the head at the instant the host is built.
+        let startup_head = match self.log.head_cursor(&self.stream, self.start_cursor).await {
+            Ok(head) => head,
+            Err(error) => {
+                // Fail-closed: without a boundary we cannot classify replay vs
+                // live. Don't fail the host build (consistent with the
+                // ReplayGap-as-milestone path); spawn a task that only emits
+                // the operator-visible terminated milestone so the dead
+                // subscription is auditable.
+                tracing::error!(
+                    error = %error,
+                    "event-triggered hook subscription could not snapshot stream head at start; \
+                     subscription will not dispatch"
+                );
+                let sink = Arc::clone(&milestone_sink);
+                let context = run_context.clone();
+                let task = tokio::spawn(async move {
+                    emit_subscription_terminated_note(
+                        &sink,
+                        &context,
+                        "event subscription stopped: head snapshot failed",
+                    )
+                    .await;
+                });
+                return EventTriggeredHookSubscriptionHandle { task };
+            }
+        };
         // henrypark133 should-fix #3 on PR #3640: wrap the background
         // task body in `catch_unwind`. Without it, a panic in `run()`
         // terminates the task silently — no operator-visible signal.
@@ -651,6 +684,7 @@ impl EventTriggeredHookSubscription {
                 tenant_id,
                 run_context,
                 milestone_sink,
+                startup_head,
             ))
             .catch_unwind()
             .await;
@@ -676,6 +710,7 @@ impl EventTriggeredHookSubscription {
         tenant_id: ironclaw_host_api::TenantId,
         run_context: LoopRunContext,
         milestone_sink: Arc<dyn LoopHostMilestoneSink>,
+        startup_head: EventCursor,
     ) {
         let mut cursor = self.start_cursor;
         // Adaptive backoff state (PR #3640 finding C5). `empty_streak`
@@ -689,13 +724,19 @@ impl EventTriggeredHookSubscription {
         // PR #3640 followup (Bug 2, replay signal): events read while catching
         // up from `start_cursor` to the stream head at subscription time are
         // *replay* — on a reconnect/restart they may have already fired their
-        // side effects, so hooks receive `is_replay = true` to dedupe. The
-        // first empty poll means we have drained the backlog and reached head;
-        // every event after that boundary is *live* (`is_replay = false`).
-        // This needs no durable cursor state: `start_cursor` is the caller's
-        // committed resume point, and the catch-up window is exactly the gap
-        // between it and head-at-startup.
-        let mut replaying = true;
+        // side effects, so hooks receive `is_replay = true` to dedupe.
+        // Everything appended after the subscription started is *live*
+        // (`is_replay = false`).
+        //
+        // PR #3931 (Hole 1, replay/live boundary race): `startup_head` is the
+        // stream head snapshotted atomically at subscription start (see
+        // `spawn`), NOT "the first poll that returns no entries". The old
+        // empty-poll heuristic raced: a live record appended before the first
+        // empty poll — or while a continuous backlog drains past the true head
+        // — was mis-classified as replay and could be wrongly deduped/skipped
+        // by the hook. The catch-up window is exactly the gap from
+        // `start_cursor` to head-at-startup: a record is replay iff
+        // `cursor <= startup_head`; anything beyond is live.
         loop {
             match self
                 .log
@@ -710,9 +751,6 @@ impl EventTriggeredHookSubscription {
                 Ok(replay) => {
                     if replay.entries.is_empty() {
                         cursor = replay.next_cursor;
-                        // First empty poll == backlog drained == head reached.
-                        // Everything after this boundary is live (Bug 2).
-                        replaying = false;
                         let sleep_for = adaptive_poll_interval(
                             self.poll_interval,
                             self.max_poll_interval,
@@ -723,8 +761,12 @@ impl EventTriggeredHookSubscription {
                         continue;
                     }
                     empty_streak = 0;
+                    // Classify each record against the head snapshotted at
+                    // startup. A mixed batch (some at/below `startup_head`,
+                    // some above) is split at the boundary cursor-by-cursor —
+                    // records `<= startup_head` replay, the rest are live.
                     for entry in replay.entries {
-                        if replaying {
+                        if entry.cursor <= startup_head {
                             dispatcher
                                 .dispatch_event_triggered_replay_at(
                                     tenant_id.clone(),
@@ -1312,7 +1354,8 @@ where
                             run_context.scope.tenant_id.clone(),
                             run_context.clone(),
                             Arc::clone(&self.milestone_sink) as _,
-                        ),
+                        )
+                        .await,
                 )
             }
             _ => None,

@@ -1049,3 +1049,70 @@ async fn read_scope_filter_excludes_records_with_none_field_when_filter_is_some(
         scope_with_project.project_id
     );
 }
+
+// ─── head_cursor (PR #3931, Hole 1 replay/live boundary) ─────────────────────
+
+#[tokio::test]
+async fn head_cursor_reports_latest_appended_cursor() {
+    let log = InMemoryDurableEventLog::new();
+    let scope = local_scope("alice", Some("default"));
+    let stream = EventStreamKey::from_scope(&scope);
+
+    // Empty stream: head is origin.
+    assert_eq!(
+        log.head_cursor(&stream, EventCursor::origin())
+            .await
+            .expect("head of empty stream"),
+        EventCursor::origin()
+    );
+
+    for _ in 0..3 {
+        log.append(RuntimeEvent::dispatch_requested(
+            scope.clone(),
+            capability_id(),
+        ))
+        .await
+        .expect("append");
+    }
+
+    // Head is the cursor of the most recently appended record, regardless of
+    // any deeper-scope filtering (it is a whole-stream property).
+    assert_eq!(
+        log.head_cursor(&stream, EventCursor::origin())
+            .await
+            .expect("head after 3 appends"),
+        EventCursor::new(3)
+    );
+    // Probing from a valid mid-stream cursor still returns the true head.
+    assert_eq!(
+        log.head_cursor(&stream, EventCursor::new(2))
+            .await
+            .expect("head from mid-stream cursor"),
+        EventCursor::new(3)
+    );
+}
+
+#[tokio::test]
+async fn head_cursor_rejects_cursor_beyond_head_as_replay_gap() {
+    let log = InMemoryDurableEventLog::new();
+    let scope = local_scope("alice", Some("default"));
+    let stream = EventStreamKey::from_scope(&scope);
+
+    log.append(RuntimeEvent::dispatch_requested(
+        scope.clone(),
+        capability_id(),
+    ))
+    .await
+    .expect("append");
+
+    // Probing from a cursor past the head must surface a ReplayGap rather than
+    // silently echoing a head the stream never issued.
+    let err = log
+        .head_cursor(&stream, EventCursor::new(99))
+        .await
+        .expect_err("future cursor must be rejected");
+    assert!(
+        matches!(err, EventError::ReplayGap { .. }),
+        "expected ReplayGap, got {err:?}"
+    );
+}

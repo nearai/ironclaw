@@ -264,6 +264,31 @@ impl DurableEventLog for InMemoryDurableEventLog {
             }
         }
     }
+
+    /// O(1) head snapshot: the stream's `next_cursor` field already tracks the
+    /// cursor of the most recently appended record. Mirrors the validation in
+    /// [`Self::read_after_cursor`] (absent stream is at head-zero; a cursor
+    /// past head is a `ReplayGap`). See the trait default for the contract.
+    async fn head_cursor(
+        &self,
+        stream: &EventStreamKey,
+        after: EventCursor,
+    ) -> Result<EventCursor, EventError> {
+        let streams = self.streams.lock().map_err(|_| EventError::DurableLog {
+            reason: "in-memory durable event log lock poisoned".to_string(),
+        })?;
+        let head = match streams.get(stream) {
+            Some(state) => state.next_cursor,
+            None => 0,
+        };
+        if after.as_u64() > head {
+            return Err(EventError::ReplayGap {
+                requested: after,
+                earliest: EventCursor::new(head),
+            });
+        }
+        Ok(EventCursor::new(head))
+    }
 }
 
 /// In-memory durable audit log with per-stream monotonic cursors.

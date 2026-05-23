@@ -1357,6 +1357,190 @@ async fn event_subscription_marks_is_replay_true_for_replayed_events() {
     );
 }
 
+/// PR #3931 (Hole 1, replay/live boundary race): a live event appended after
+/// the subscription started but BEFORE the subscription's first empty poll must
+/// be dispatched as LIVE (`is_replay = false`), not replay. The old
+/// implementation flipped a `replaying` flag only on the first empty poll, so
+/// any record observed before that flip — including ones appended post-startup
+/// — was wrongly marked as replay. Snapshotting the head at startup fixes the
+/// boundary: cursor 2 (appended after startup_head = 1) is live.
+#[tokio::test]
+async fn event_subscription_live_event_before_first_empty_poll_is_live() {
+    let fixture = Fixture::new().await;
+    let scope = runtime_scope(&fixture);
+    let stream = EventStreamKey::from_scope(&scope);
+    let log = Arc::new(InMemoryDurableEventLog::new());
+    let hook_id = HookId::for_builtin("tests::hooks_integration::race_live", HookVersion::ONE);
+
+    // One backlog event present at subscription start (startup_head = cursor 1).
+    log.append(RuntimeEvent::hook_failed(
+        scope.clone(),
+        runtime_capability("hooks.race"),
+        hook_id.to_hex(),
+        "timeout",
+        "fail_isolated",
+        None,
+    ))
+    .await
+    .expect("append backlog event");
+
+    let seen = SeenLog::new();
+    let inner = Arc::new(RecordingCapabilityPort::new());
+    // A per-observe delay keeps the subscription dispatching the backlog while
+    // we append the live event, so the live append lands before any empty
+    // poll could occur.
+    let _host = fixture
+        .factory()
+        .with_hook_dispatcher(event_triggered_dispatcher_with_scope(
+            RuntimeEventKind::HookFailed,
+            Arc::clone(&seen),
+            HookBindingScope::Global,
+            "integration-tests",
+            Some(Duration::from_millis(80)),
+        ))
+        .with_event_subscription(event_log_subscription(
+            &fixture,
+            Arc::clone(&log),
+            stream,
+            RuntimeEventCursor::origin(),
+        ))
+        .build_text_only_host_with_capabilities(fixture.request(), inner)
+        .await
+        .expect("host builds with event subscription");
+
+    // Append a SECOND event immediately after startup. Its cursor (2) is beyond
+    // startup_head (1), so it is live even though it may be read before the
+    // subscription ever observes an empty poll.
+    log.append(RuntimeEvent::hook_failed(
+        scope.clone(),
+        runtime_capability("hooks.race"),
+        hook_id.to_hex(),
+        "timeout",
+        "fail_isolated",
+        None,
+    ))
+    .await
+    .expect("append live event after startup");
+
+    let all = wait_for_seen_events(&seen, 2).await;
+    assert_eq!(all.len(), 2, "both events must be observed");
+    let backlog = all
+        .iter()
+        .find(|e| e.cursor == RuntimeEventCursor::new(1))
+        .expect("backlog event observed");
+    let live = all
+        .iter()
+        .find(|e| e.cursor == RuntimeEventCursor::new(2))
+        .expect("live event observed");
+    assert!(
+        backlog.is_replay,
+        "event at/below startup_head must be replay: {backlog:?}"
+    );
+    assert!(
+        !live.is_replay,
+        "event appended after startup_head must be LIVE, not replay: {live:?}"
+    );
+}
+
+/// PR #3931 (Hole 1, continuous-drain variant): when the backlog drains
+/// continuously (the subscription never hits an empty poll because new events
+/// keep landing), events appended past `startup_head` must still be live. The
+/// old empty-poll heuristic would keep marking everything replay until the
+/// stream went quiet. Here `batch_limit = 1` plus a per-event observe delay
+/// guarantees a steady, never-empty drain across the boundary.
+#[tokio::test]
+async fn event_subscription_event_during_continuous_drain_is_live() {
+    let fixture = Fixture::new().await;
+    let scope = runtime_scope(&fixture);
+    let stream = EventStreamKey::from_scope(&scope);
+    let log = Arc::new(InMemoryDurableEventLog::new());
+    let hook_id = HookId::for_builtin("tests::hooks_integration::race_drain", HookVersion::ONE);
+
+    // Three backlog events present at startup (startup_head = cursor 3).
+    for _ in 0..3 {
+        log.append(RuntimeEvent::hook_failed(
+            scope.clone(),
+            runtime_capability("hooks.drain"),
+            hook_id.to_hex(),
+            "timeout",
+            "fail_isolated",
+            None,
+        ))
+        .await
+        .expect("append backlog event");
+    }
+
+    let seen = SeenLog::new();
+    let inner = Arc::new(RecordingCapabilityPort::new());
+    let log_for_sub: Arc<dyn DurableEventLog> = Arc::clone(&log) as Arc<dyn DurableEventLog>;
+    let read_scope = ReadScope {
+        project_id: fixture.context.scope.project_id.clone(),
+        mission_id: None,
+        thread_id: Some(fixture.context.thread_id.clone()),
+        process_id: None,
+    };
+    // batch_limit = 1 forces one record per poll; the observe delay holds each
+    // dispatch open long enough that we keep the stream non-empty by appending
+    // a fresh event while the backlog is still draining.
+    let subscription = EventTriggeredHookSubscription::new(
+        log_for_sub,
+        stream,
+        read_scope,
+        RuntimeEventCursor::origin(),
+    )
+    .with_poll_interval(Duration::from_millis(2))
+    .with_batch_limit(1);
+
+    let _host = fixture
+        .factory()
+        .with_hook_dispatcher(event_triggered_dispatcher_with_scope(
+            RuntimeEventKind::HookFailed,
+            Arc::clone(&seen),
+            HookBindingScope::Global,
+            "integration-tests",
+            Some(Duration::from_millis(40)),
+        ))
+        .with_event_subscription(subscription)
+        .build_text_only_host_with_capabilities(fixture.request(), inner)
+        .await
+        .expect("host builds with event subscription");
+
+    // While the 3-event backlog is still draining (first dispatch is blocked on
+    // the 40ms delay), append a fourth event. Its cursor (4) is beyond
+    // startup_head (3) and must be live.
+    log.append(RuntimeEvent::hook_failed(
+        scope.clone(),
+        runtime_capability("hooks.drain"),
+        hook_id.to_hex(),
+        "timeout",
+        "fail_isolated",
+        None,
+    ))
+    .await
+    .expect("append live event during drain");
+
+    let all = wait_for_seen_events(&seen, 4).await;
+    assert_eq!(all.len(), 4, "all four events must be observed");
+    for cursor in 1..=3u64 {
+        let e = all
+            .iter()
+            .find(|e| e.cursor == RuntimeEventCursor::new(cursor))
+            .unwrap_or_else(|| panic!("backlog event {cursor} observed"));
+        assert!(
+            e.is_replay,
+            "backlog event {cursor} (<= startup_head) must be replay: {e:?}"
+        );
+    }
+    let live = all
+        .iter()
+        .find(|e| e.cursor == RuntimeEventCursor::new(4))
+        .expect("live event observed");
+    assert!(
+        !live.is_replay,
+        "event appended past startup_head during continuous drain must be LIVE: {live:?}"
+    );
+}
+
 #[tokio::test]
 async fn event_triggered_hook_respects_own_capabilities_scope_filter() {
     let fixture = Fixture::new().await;
