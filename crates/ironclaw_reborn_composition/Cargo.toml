@@ -122,3 +122,6 @@ tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "
 # proper WS client.
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }
 tower = { version = "0.5", features = ["util"] }
+
+[lints]
+workspace = true
