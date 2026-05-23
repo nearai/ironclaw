@@ -49,6 +49,9 @@ impl SandboxCommandTransport for DockerSandboxCommandTransport {
         &self,
         request: CommandExecutionRequest,
     ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+        // Command authorization and shell policy checks happen before this
+        // placement adapter. This boundary still rejects bytes whose daemon or
+        // kernel interpretation can differ from the validated Rust string.
         if request.command.contains('\0') {
             return Err(RuntimeProcessError::ExecutionFailed(
                 "sandbox shell command must not contain null bytes".to_string(),
