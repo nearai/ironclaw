@@ -449,6 +449,24 @@ pub const MAX_HISTORY_KEYS: usize = 8_192;
 /// PRIMARY KEY (tenant_id, …).
 pub const MAX_KEYS_PER_TENANT: usize = MAX_HISTORY_KEYS / 4;
 
+/// Maximum number of samples retained per `(hook, capability, tenant[, field])`
+/// key in either sliding-window history. Without this cap, an installed hook
+/// could declare a very large window on a hot capability and force the
+/// backend to retain every invocation in the window, exhausting memory under
+/// attacker-triggered hot capabilities (threat-model finding **D5**).
+///
+/// Once this cap is reached for a key, the oldest samples are dropped to make
+/// room for the new one — the predicate continues to evaluate against the
+/// most-recent `MAX_SAMPLES_PER_KEY` samples in the window, which is the
+/// conservative bound for a rate / value cap.
+///
+/// Ported from the pre-extraction inline enforcement in `evaluator.rs` that
+/// PR #3573 round-3 review introduced; the predicate-state extraction in
+/// PR #3635 moved the bookkeeping into this trait, so the cap must live with
+/// the bookkeeping (durable backends must enforce the same bound — see
+/// trait-level rustdoc on [`PredicateStateBackend`]).
+pub const MAX_SAMPLES_PER_KEY: usize = 4_096;
+
 impl InMemoryPredicateStateBackend {
     pub fn new() -> Self {
         Self {
@@ -516,6 +534,14 @@ impl PredicateStateBackend for InMemoryPredicateStateBackend {
         // outer mutex while scanning thousands of entries on the hot
         // path).
         if !bucket.dedup_ids.contains(event_id) {
+            // Per-key sample cap: drop the oldest sample(s) to make room.
+            // Bounds per-key memory under attacker-triggered hot capabilities
+            // (threat-model finding D5). Ported from the pre-extraction
+            // inline enforcement in `evaluator.rs` (PR #3573 round 3) which
+            // the predicate-state extraction missed.
+            while bucket.entries.len() >= MAX_SAMPLES_PER_KEY {
+                bucket.pop_front();
+            }
             bucket.push_back(now, event_id.clone());
         }
         let count = bucket.entries.len() as u32;
@@ -562,6 +588,14 @@ impl PredicateStateBackend for InMemoryPredicateStateBackend {
             }
         }
         if !bucket.dedup_ids.contains(event_id) {
+            // Per-key sample cap: drop oldest sample(s). `pop_front`
+            // decrements `running_sum` so the incremental invariant
+            // (`running_sum == sum(entries values)`) is preserved across
+            // eviction (threat-model finding D5). Ported from the
+            // pre-extraction inline enforcement in `evaluator.rs`.
+            while bucket.entries.len() >= MAX_SAMPLES_PER_KEY {
+                bucket.pop_front();
+            }
             bucket.push_back(now, value, event_id.clone());
         }
         // O(1): the bucket maintains `running_sum` incrementally on
@@ -1434,6 +1468,123 @@ mod tests {
     /// record-and-read contract holds under concurrent writers. N threads
     /// each call `record_invocation` once with a distinct `event_id`; the
     /// final observed count must equal N (no lost-update race).
+    /// Threat-model finding **D5** regression: an attacker that triggers a
+    /// hot capability with a very large declared window can otherwise force
+    /// the backend to retain every invocation in the window, exhausting
+    /// memory. The per-key sample cap drops oldest samples first, so the
+    /// bucket never grows past [`MAX_SAMPLES_PER_KEY`].
+    ///
+    /// Round 3 of PR #3573 introduced this defense inline in
+    /// `evaluator.rs`; the predicate-state extraction in PR #3635 moved the
+    /// bookkeeping into [`PredicateStateBackend`] but initially missed
+    /// porting the cap — this test pins it in the backend.
+    #[test]
+    fn record_invocation_caps_samples_per_key_under_attacker_pressure() {
+        let backend = InMemoryPredicateStateBackend::new();
+        let key = InvocationKey {
+            hook_id: hook_id(),
+            tenant_id: tenant(),
+            capability: "cap.hot".to_string(),
+        };
+        let t0 = Instant::now();
+        // Window large enough that no entry trims for time; the cap is the
+        // only thing keeping the bucket bounded.
+        let window = Duration::from_secs(3600);
+        let overflow = MAX_SAMPLES_PER_KEY + 64;
+        for i in 0..overflow {
+            let _ = backend
+                .record_invocation(
+                    &key,
+                    &ev(&format!("evt-{i}")),
+                    t0 + Duration::from_millis(i as u64),
+                    window,
+                )
+                .expect("ok");
+        }
+        let history = backend.invocation_history.lock().expect("lock");
+        let bucket = history.get(&key).expect("bucket retained");
+        assert!(
+            bucket.entries.len() <= MAX_SAMPLES_PER_KEY,
+            "bucket must not grow past per-key cap; got {}",
+            bucket.entries.len()
+        );
+        // The cap drop-oldest path; with a fresh insert each iteration the
+        // bucket should sit exactly at the cap.
+        assert_eq!(
+            bucket.entries.len(),
+            MAX_SAMPLES_PER_KEY,
+            "drop-oldest must keep the bucket pinned at the cap under sustained pressure"
+        );
+        // dedup_ids must stay in sync with entries — pop_front decrements
+        // both via the bucket helper.
+        assert_eq!(
+            bucket.dedup_ids.len(),
+            bucket.entries.len(),
+            "dedup_ids must mirror entries after cap-driven eviction"
+        );
+    }
+
+    /// Threat-model finding **D5** regression for the NumericSum path. In
+    /// addition to bounding bucket size, the `running_sum` invariant
+    /// (`running_sum == sum(entries values)`) must survive cap-driven
+    /// eviction — `pop_front` is responsible for decrementing the sum on
+    /// each drop, so the reported sum tracks only the retained
+    /// most-recent `MAX_SAMPLES_PER_KEY` values.
+    #[test]
+    fn record_value_evicts_oldest_keeping_running_sum_consistent() {
+        let backend = InMemoryPredicateStateBackend::new();
+        let key = ValueKey {
+            hook_id: hook_id(),
+            tenant_id: tenant(),
+            capability: "cap.spend".to_string(),
+            field: "amount".to_string(),
+        };
+        let t0 = Instant::now();
+        let window = Duration::from_secs(3600);
+        let overflow = MAX_SAMPLES_PER_KEY + 32;
+        // Use a constant value so the expected post-cap sum is easy to
+        // compute: it must equal MAX_SAMPLES_PER_KEY * value once the cap
+        // is saturated.
+        let value = Decimal::from(3);
+        for i in 0..overflow {
+            let _ = backend
+                .record_value(
+                    &key,
+                    &ev(&format!("v-{i}")),
+                    t0 + Duration::from_millis(i as u64),
+                    value,
+                    window,
+                )
+                .expect("ok");
+        }
+        let history = backend.value_history.lock().expect("lock");
+        let bucket = history.get(&key).expect("bucket retained");
+        assert!(
+            bucket.entries.len() <= MAX_SAMPLES_PER_KEY,
+            "bucket must not grow past per-key cap; got {}",
+            bucket.entries.len()
+        );
+        assert_eq!(bucket.entries.len(), MAX_SAMPLES_PER_KEY);
+        // Running-sum invariant: must match the actual deque content
+        // exactly. If `pop_front` failed to decrement on eviction, the
+        // sum would still reflect the dropped values.
+        let deque_sum: Decimal = bucket.entries.iter().map(|(_, v, _)| *v).sum();
+        assert_eq!(
+            bucket.running_sum, deque_sum,
+            "running_sum must stay in sync with deque content after cap-driven eviction"
+        );
+        assert_eq!(
+            bucket.running_sum,
+            Decimal::from(MAX_SAMPLES_PER_KEY as u64) * value,
+            "with constant value inserts, post-cap sum = cap * value"
+        );
+        assert_eq!(
+            bucket.dedup_ids.len(),
+            bucket.entries.len(),
+            "dedup_ids must mirror entries after cap-driven eviction"
+        );
+    }
+
     #[test]
     fn in_memory_record_invocation_is_atomic_under_concurrent_writers() {
         use std::sync::Arc as StdArc;
