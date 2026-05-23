@@ -3,6 +3,9 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_first_party_extensions::{
+    ECHO_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
+};
 use ironclaw_host_api::{
     AgentId, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
     ExecutionContext, ExtensionId, GrantConstraints, MountAlias, MountGrant, MountPermissions,
@@ -10,8 +13,7 @@ use ironclaw_host_api::{
     TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
-    CapabilitySurfacePolicy, ECHO_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
-    SurfaceKind, VisibleCapabilityRequest as HostVisibleCapabilityRequest,
+    CapabilitySurfacePolicy, SurfaceKind, VisibleCapabilityRequest as HostVisibleCapabilityRequest,
 };
 use ironclaw_loop_support::{
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,

@@ -22,7 +22,7 @@ use ironclaw_host_api::{
 #[cfg(feature = "libsql")]
 use ironclaw_host_runtime::{CapabilitySurfacePolicy, SurfaceKind, VisibleCapabilityRequest};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_host_runtime::{
+use ironclaw_loop_support::{
     SchedulerTurnRunWakeNotifier, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
     TurnRunSchedulerConfig, TurnRunSchedulerHandle,
 };

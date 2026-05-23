@@ -107,8 +107,8 @@ the `tier_specific_installers_are_documented_as_loader_contract` test in
 - `Gate` / `Mutator` hooks fail closed.
 - `Observer` / `Effect` hooks fail isolated with redacted audit.
 - All model-visible hook output is bounded, typed, redacted/trust-labeled, and
-  envelope-wrapped when untrusted (reuses the prompt envelope from
-  `ironclaw_host_runtime::memory_context` once that helper is extracted).
+  envelope-wrapped when untrusted (reuses the prompt envelope behavior exposed
+  through `ironclaw_loop_support::ProductionMemoryPromptContextService`).
 - A hook that demonstrates protocol violation (timeout, panic, malformed
   decision) gets its slot poisoned for the rest of the current turn run.
 

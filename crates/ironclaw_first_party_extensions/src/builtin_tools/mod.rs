@@ -25,7 +25,7 @@ use ironclaw_host_api::{
     ResourceUsage, RuntimeDispatchErrorKind, TrustClass, VirtualPath,
 };
 
-use crate::{
+use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };

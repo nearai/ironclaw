@@ -18,7 +18,7 @@ use ironclaw_turns::run_profile::{
 };
 use ironclaw_turns::scope::{TurnActor, TurnScope};
 
-use ironclaw_host_runtime::memory_context::ProductionMemoryPromptContextService;
+use ironclaw_loop_support::ProductionMemoryPromptContextService;
 
 // ─── Mock MemoryBackend ──────────────────────────────────────────────────
 

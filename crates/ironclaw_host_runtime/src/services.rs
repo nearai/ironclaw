@@ -33,7 +33,7 @@ use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    CapabilityDispatchRequest, CapabilityDispatcher, CapabilityId, DispatchError,
+    CapabilityDispatchRequest, CapabilityDispatcher, CapabilityId, DispatchError, EffectKind,
     ResourceReservationId, ResourceScope, ResourceUsage, RuntimeDispatchErrorKind,
     RuntimeHttpEgress, RuntimeKind,
     runtime_policy::{
@@ -85,8 +85,7 @@ use crate::{
     FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, HostRuntimeError,
     InvocationServicesResolutionRequest, InvocationServicesResolver, LocalHostProcessPort,
     LocalInvocationServicesResolver, PlannerError, ProcessObligationLifecycleStore,
-    RuntimeBackendHealth, RuntimeProcessPort, TenantSandboxProcessPort, TurnRunExecutor,
-    TurnRunScheduler, TurnRunSchedulerConfig, plan_capability,
+    RuntimeBackendHealth, RuntimeProcessPort, TenantSandboxProcessPort, plan_capability,
 };
 
 type SharedRuntimeHttpEgress = Arc<Mutex<Option<Arc<dyn RuntimeHttpEgress>>>>;
@@ -1567,65 +1566,6 @@ where
             .with_wake_notifier(Arc::clone(notifier)))
     }
 
-    /// Validates turn persistence wiring and builds a scheduler over the
-    /// configured trusted runner transition port. The concrete executor stays
-    /// injected so product loop strategy remains above host-runtime.
-    pub fn turn_scheduler_for_production(
-        &self,
-        executor: Arc<dyn TurnRunExecutor>,
-        config: TurnRunSchedulerConfig,
-    ) -> Result<TurnRunScheduler, ProductionWiringReport> {
-        let mut issues = Vec::new();
-        self.push_missing(
-            &mut issues,
-            ProductionWiringComponent::TurnState,
-            self.turn_state.is_some(),
-        );
-        self.push_local_only(
-            &mut issues,
-            ProductionWiringComponent::TurnState,
-            self.component_types.turn_state,
-        );
-        self.push_local_only(
-            &mut issues,
-            ProductionWiringComponent::TurnState,
-            self.component_types.turn_run_transition_port,
-        );
-        if self.turn_run_transition_port.is_some()
-            && !self.component_types.turn_run_transition_port_verified
-        {
-            self.push_issue(
-                &mut issues,
-                ProductionWiringComponent::TurnState,
-                ProductionWiringIssueKind::UnverifiedProductionImplementation,
-                component_name(self.component_types.turn_run_transition_port),
-            );
-        }
-        if self.turn_run_transition_port.is_none() {
-            self.push_issue(
-                &mut issues,
-                ProductionWiringComponent::TurnState,
-                ProductionWiringIssueKind::UnsupportedRequirement,
-                component_name(self.component_types.turn_state),
-            );
-        }
-        if !issues.is_empty() {
-            return Err(ProductionWiringReport { issues });
-        }
-        let Some(transition_port) = self.turn_run_transition_port.as_ref() else {
-            return Err(production_wiring_report(
-                ProductionWiringComponent::TurnState,
-                ProductionWiringIssueKind::UnsupportedRequirement,
-                component_name(self.component_types.turn_state),
-            ));
-        };
-        Ok(TurnRunScheduler::new(
-            Arc::clone(transition_port),
-            executor,
-            config,
-        ))
-    }
-
     fn validate_production_turn_wiring(&self) -> Result<(), ProductionWiringReport> {
         let mut issues = Vec::new();
         self.push_missing(
@@ -1899,7 +1839,9 @@ where
         };
         self.registry.capabilities().any(|descriptor| {
             descriptor.runtime == RuntimeKind::FirstParty
-                && descriptor.id.as_str() == crate::SHELL_CAPABILITY_ID
+                && descriptor.effects.iter().any(|effect| {
+                    matches!(effect, EffectKind::SpawnProcess | EffectKind::ExecuteCode)
+                })
                 && first_party_runtime.contains_handler(&descriptor.id)
         })
     }

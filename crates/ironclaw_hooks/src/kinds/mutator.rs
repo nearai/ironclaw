@@ -59,9 +59,9 @@ pub enum PatchOrdinalHint {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SnippetBody {
     /// Already envelope-wrapped untrusted content produced by an Installed
-    /// hook. The envelope helper (currently in
-    /// `ironclaw_host_runtime::memory_context`; extraction tracked separately)
-    /// is the only path that produces this variant.
+    /// hook. The envelope helper in
+    /// `ironclaw_loop_support::ProductionMemoryPromptContextService` is the
+    /// only path that produces this variant.
     Enveloped { wrapped: String },
     /// Trusted content from a Builtin or Trusted hook. Bypasses envelope
     /// wrapping but goes through the safe-summary length and pattern checks.

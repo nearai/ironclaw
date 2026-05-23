@@ -9,22 +9,22 @@
 
 ## Agent-loop touch points
 
-- `turn_scheduler.rs` owns scheduler-backed run concurrency. It does not own the
-  canonical loop tick or product inbound serialization.
+- Scheduler-backed turn concurrency belongs in `ironclaw_loop_support`; this
+  crate only exposes host-runtime services that scheduler/executor code calls.
 - `surface.rs` owns host-runtime capability-surface shaping and versions.
 - `production.rs` and `services.rs` compose runtime services and readiness
   evidence used by Reborn loop wiring.
 - Production wiring must reject local-only runtime policy shapes, not just require
   that some `EffectiveRuntimePolicy` value is present.
-- First-party runtime tools belong under `first_party_tools/`; do not append new
-  built-ins to broad runtime files.
+- First-party runtime registry traits and dispatch adapters live here. Concrete
+  built-in first-party tools belong in `ironclaw_first_party_extensions`.
 
 ## Adding code
 
 - Add a new runtime service module when the service has its own authority,
   readiness, or resource accounting boundary.
-- Add a first-party tool file per capability, except for tightly-coupled
-  v1-compatible coding-tool families that share one legacy surface contract.
+- Add concrete first-party tool files in `ironclaw_first_party_extensions`, not
+  in this crate.
 - Keep readiness checks near the runtime service they validate; driver/product
   readiness belongs in `ironclaw_reborn`.
 

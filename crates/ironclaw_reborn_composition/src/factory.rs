@@ -6,6 +6,7 @@ use std::{
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
+use ironclaw_first_party_extensions::{builtin_first_party_handlers, builtin_first_party_package};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
 use ironclaw_host_api::{
@@ -13,7 +14,6 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostRuntimeServices,
-    builtin_first_party_handlers, builtin_first_party_package,
 };
 use ironclaw_processes::ProcessServices;
 use ironclaw_resources::InMemoryResourceGovernor;
@@ -409,7 +409,7 @@ async fn build_production_shaped(
 struct RebornProductionWiring {
     trust_policy: Arc<HostTrustPolicy>,
     runtime_policy: EffectiveRuntimePolicy,
-    turn_run_wake_notifier: Arc<ironclaw_host_runtime::SchedulerTurnRunWakeNotifier>,
+    turn_run_wake_notifier: Arc<ironclaw_loop_support::SchedulerTurnRunWakeNotifier>,
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -424,7 +424,7 @@ struct RebornProductionBuildContext {
 fn production_wiring(
     trust_policy: Option<Arc<HostTrustPolicy>>,
     runtime_policy: Option<EffectiveRuntimePolicy>,
-    turn_run_wake_notifier: Option<Arc<ironclaw_host_runtime::SchedulerTurnRunWakeNotifier>>,
+    turn_run_wake_notifier: Option<Arc<ironclaw_loop_support::SchedulerTurnRunWakeNotifier>>,
 ) -> Result<RebornProductionWiring, RebornBuildError> {
     let trust_policy = trust_policy.ok_or(RebornBuildError::MissingProductionTrustPolicy)?;
     if !trust_policy.has_sources() {

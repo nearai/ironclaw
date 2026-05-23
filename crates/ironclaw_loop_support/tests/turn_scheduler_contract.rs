@@ -8,17 +8,10 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
-use ironclaw_authorization::GrantAuthorizer;
-use ironclaw_extensions::ExtensionRegistry;
-use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-use ironclaw_host_runtime::{
-    CapabilitySurfaceVersion, HostRuntimeServices, ProductionWiringComponent,
-    ProductionWiringIssueKind, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
-    TurnRunSchedulerConfig,
+use ironclaw_loop_support::{
+    TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler, TurnRunSchedulerConfig,
 };
-use ironclaw_processes::ProcessServices;
-use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator,
     GetRunStateRequest, IdempotencyKey, InMemoryTurnStateStore, InMemoryTurnStateStoreLimits,
@@ -676,48 +669,12 @@ fn executor_error_exposes_typed_sanitized_failure() {
 }
 
 #[test]
-fn production_services_build_scheduler_from_configured_transition_port_without_notifier() {
+fn scheduler_builds_from_configured_transition_port_without_host_runtime_services() {
     let store = Arc::new(DurableTurnStoreStub);
-    let services = HostRuntimeServices::new(
-        Arc::new(ExtensionRegistry::new()),
-        Arc::new(LocalFilesystem::new()),
-        Arc::new(InMemoryResourceGovernor::new()),
-        Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
-        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
-    )
-    .with_turn_state_and_transition_port(store);
+    let transition_port: Arc<dyn TurnRunTransitionPort> = store;
     let executor: Arc<dyn TurnRunExecutor> = Arc::new(CompletingExecutor::default());
 
-    let _scheduler = services
-        .turn_scheduler_for_production(executor, fast_config())
-        .expect("production turn scheduler should build from configured transition port");
-}
-
-#[test]
-fn production_services_reject_unverified_scheduler_transition_port() {
-    let turn_state = Arc::new(DurableTurnStoreStub);
-    let transition_port = Arc::new(DurableTurnStoreStub);
-    let services = HostRuntimeServices::new(
-        Arc::new(ExtensionRegistry::new()),
-        Arc::new(LocalFilesystem::new()),
-        Arc::new(InMemoryResourceGovernor::new()),
-        Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
-        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
-    )
-    .with_turn_state(turn_state)
-    .with_turn_run_transition_port(transition_port);
-    let executor: Arc<dyn TurnRunExecutor> = Arc::new(CompletingExecutor::default());
-
-    let result = services.turn_scheduler_for_production(executor, fast_config());
-    let Err(report) = result else {
-        panic!("production scheduler should reject unverified transition port");
-    };
-    assert!(report.contains(
-        ProductionWiringComponent::TurnState,
-        ProductionWiringIssueKind::UnverifiedProductionImplementation
-    ));
+    let _scheduler = TurnRunScheduler::new(transition_port, executor, fast_config());
 }
 
 #[tokio::test]
@@ -760,23 +717,14 @@ async fn scheduler_uses_stable_runner_id_across_claims() {
 #[tokio::test]
 async fn production_services_scheduler_and_coordinator_execute_turn_end_to_end() {
     let store = Arc::new(DurableLikeTurnStore::default());
-    let services = HostRuntimeServices::new(
-        Arc::new(ExtensionRegistry::new()),
-        Arc::new(LocalFilesystem::new()),
-        Arc::new(InMemoryResourceGovernor::new()),
-        Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
-        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
-    )
-    .with_turn_state_and_transition_port(Arc::clone(&store));
     let executor = Arc::new(CompletingExecutor::default());
     let executor_port: Arc<dyn TurnRunExecutor> = executor.clone();
-    let scheduler = services
-        .turn_scheduler_for_production(
-            executor_port,
-            fast_config().with_poll_interval(Duration::from_secs(60)),
-        )
-        .expect("production scheduler should build from verified turn store");
+    let transition_port: Arc<dyn TurnRunTransitionPort> = store.clone();
+    let scheduler = TurnRunScheduler::new(
+        transition_port,
+        executor_port,
+        fast_config().with_poll_interval(Duration::from_secs(60)),
+    );
     let handle = scheduler.start();
     let coordinator =
         DefaultTurnCoordinator::new(store.clone()).with_wake_notifier(handle.wake_notifier());

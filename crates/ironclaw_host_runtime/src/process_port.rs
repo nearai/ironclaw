@@ -16,7 +16,7 @@ use thiserror::Error;
 use tokio::{io::AsyncReadExt, process::Command};
 
 /// Maximum captured output before middle truncation.
-pub(crate) const COMMAND_MAX_OUTPUT_SIZE: usize = 64 * 1024;
+pub const COMMAND_MAX_OUTPUT_SIZE: usize = 64 * 1024;
 
 const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 

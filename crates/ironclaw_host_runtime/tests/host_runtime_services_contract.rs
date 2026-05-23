@@ -33,7 +33,10 @@ use ironclaw_events::{
     EventReplay, EventStreamKey, InMemoryAuditSink, InMemoryDurableAuditLog,
     InMemoryDurableEventLog, InMemoryEventSink, ReadScope, RuntimeEventKind,
 };
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
+use ironclaw_extensions::{
+    CapabilityManifest, CapabilityVisibility, ExtensionManifest, ExtensionPackage,
+    ExtensionRegistry, ExtensionRuntime, MANIFEST_SCHEMA_VERSION, ManifestSource,
+};
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
 #[cfg(feature = "libsql")]
@@ -43,12 +46,13 @@ use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationHandler, BuiltinObligationServices, CancelReason, CancelRuntimeWorkRequest,
     CapabilitySurfaceVersion, CommandExecutionOutput, CommandExecutionRequest, DefaultHostRuntime,
-    HostHttpEgressService, HostRuntime, HostRuntimeServices, ProcessObligationLifecycleStore,
-    ProductionWiringComponent, ProductionWiringConfig, ProductionWiringIssueKind,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
-    RuntimeFailureKind, RuntimeProcessError, RuntimeProcessPort, RuntimeStatusRequest,
-    RuntimeWorkId, SandboxCommandTransport, TenantSandboxProcessPort, builtin_first_party_handlers,
-    builtin_first_party_package,
+    FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
+    FirstPartyCapabilityRequest, FirstPartyCapabilityResult, HostHttpEgressService, HostRuntime,
+    HostRuntimeServices, ProcessObligationLifecycleStore, ProductionWiringComponent,
+    ProductionWiringConfig, ProductionWiringIssueKind, RuntimeCapabilityOutcome,
+    RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeFailureKind,
+    RuntimeProcessError, RuntimeProcessPort, RuntimeStatusRequest, RuntimeWorkId,
+    SandboxCommandTransport, TenantSandboxProcessPort,
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutionResult, McpExecutor};
 use ironclaw_network::{
@@ -1110,16 +1114,16 @@ fn production_wiring_validation_rejects_unverified_runtime_http_egress() {
 }
 
 #[test]
-fn production_wiring_validation_tracks_process_port_for_builtin_shell() {
+fn production_wiring_validation_tracks_process_port_for_first_party_process_tool() {
     let services = HostRuntimeServices::new(
-        Arc::new(registry_with_builtin_first_party_package()),
+        Arc::new(registry_with_first_party_process_package()),
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()));
+    .with_first_party_capabilities(Arc::new(first_party_process_handlers()));
 
     let report = services
         .validate_production_wiring(&ProductionWiringConfig::new([RuntimeKind::FirstParty]))
@@ -1130,18 +1134,18 @@ fn production_wiring_validation_tracks_process_port_for_builtin_shell() {
             ProductionWiringComponent::RuntimeProcessPort,
             ProductionWiringIssueKind::LocalOnlyImplementation
         ),
-        "builtin shell should make the local process port visible to production guardrails: {report:?}"
+        "first-party process tool should make the local process port visible to production guardrails: {report:?}"
     );
 
     let services = HostRuntimeServices::new(
-        Arc::new(registry_with_builtin_first_party_package()),
+        Arc::new(registry_with_first_party_process_package()),
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_first_party_capabilities(Arc::new(first_party_process_handlers()))
     .with_runtime_process_port(Arc::new(ProductionCandidateProcessPort));
 
     let report = services
@@ -1158,16 +1162,16 @@ fn production_wiring_validation_tracks_process_port_for_builtin_shell() {
 }
 
 #[test]
-fn production_wiring_validation_tracks_tenant_sandbox_process_port_for_builtin_shell() {
+fn production_wiring_validation_tracks_tenant_sandbox_process_port_for_first_party_process_tool() {
     let services = HostRuntimeServices::new(
-        Arc::new(registry_with_builtin_first_party_package()),
+        Arc::new(registry_with_first_party_process_package()),
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_first_party_capabilities(Arc::new(first_party_process_handlers()))
     .with_runtime_policy(hosted_dev_runtime_policy());
 
     let report = services
@@ -1183,14 +1187,14 @@ fn production_wiring_validation_tracks_tenant_sandbox_process_port_for_builtin_s
     );
 
     let services = HostRuntimeServices::new(
-        Arc::new(registry_with_builtin_first_party_package()),
+        Arc::new(registry_with_first_party_process_package()),
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_first_party_capabilities(Arc::new(first_party_process_handlers()))
     .with_runtime_policy(hosted_dev_runtime_policy())
     .with_tenant_sandbox_process_port(Arc::new(TenantSandboxProcessPort::new(Arc::new(
         ProductionCandidateSandboxTransport,
@@ -6020,11 +6024,75 @@ fn registry_with_manifest(manifest: &str) -> ExtensionRegistry {
     registry_with_manifests(&[manifest])
 }
 
-fn registry_with_builtin_first_party_package() -> ExtensionRegistry {
+const TEST_FIRST_PARTY_PROCESS_CAPABILITY_ID: &str = "test-first-party.shell";
+
+struct NoopFirstPartyProcessHandler;
+
+#[async_trait]
+impl FirstPartyCapabilityHandler for NoopFirstPartyProcessHandler {
+    async fn dispatch(
+        &self,
+        _request: FirstPartyCapabilityRequest,
+    ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
+        Ok(FirstPartyCapabilityResult::new(
+            json!({"status":"ok"}),
+            ResourceUsage::default(),
+        ))
+    }
+}
+
+fn first_party_process_handlers() -> FirstPartyCapabilityRegistry {
+    FirstPartyCapabilityRegistry::new().with_handler(
+        CapabilityId::new(TEST_FIRST_PARTY_PROCESS_CAPABILITY_ID).unwrap(),
+        Arc::new(NoopFirstPartyProcessHandler),
+    )
+}
+
+fn registry_with_first_party_process_package() -> ExtensionRegistry {
+    let capability_id = CapabilityId::new(TEST_FIRST_PARTY_PROCESS_CAPABILITY_ID).unwrap();
+    let package = ExtensionPackage::from_manifest(
+        ExtensionManifest {
+            schema_version: MANIFEST_SCHEMA_VERSION.to_string(),
+            id: ExtensionId::new("test-first-party").unwrap(),
+            name: "Test first-party process tools".to_string(),
+            version: "0.1.0".to_string(),
+            description: "Host-runtime test fixture for first-party process guardrails".to_string(),
+            source: ManifestSource::HostBundled,
+            requested_trust: RequestedTrustClass::FirstPartyRequested,
+            descriptor_trust_default: TrustClass::Sandbox,
+            runtime: ExtensionRuntime::FirstParty {
+                service: "test".to_string(),
+            },
+            host_apis: Vec::new(),
+            capabilities: vec![CapabilityManifest {
+                id: capability_id,
+                implements: Vec::new(),
+                description: "Runs a first-party process-backed command".to_string(),
+                effects: vec![
+                    EffectKind::SpawnProcess,
+                    EffectKind::ExecuteCode,
+                    EffectKind::Network,
+                ],
+                default_permission: PermissionMode::Allow,
+                visibility: CapabilityVisibility::Model,
+                input_schema_ref: CapabilityProfileSchemaRef::new(
+                    "schemas/test/first-party-process.input.v1.json",
+                )
+                .unwrap(),
+                output_schema_ref: CapabilityProfileSchemaRef::new(
+                    "schemas/test/first-party-process.output.v1.json",
+                )
+                .unwrap(),
+                prompt_doc_ref: None,
+                required_host_ports: Vec::new(),
+                resource_profile: None,
+            }],
+        },
+        VirtualPath::new("/system/extensions/test-first-party").unwrap(),
+    )
+    .unwrap();
     let mut registry = ExtensionRegistry::new();
-    registry
-        .insert(builtin_first_party_package().unwrap())
-        .unwrap();
+    registry.insert(package).unwrap();
     registry
 }
 

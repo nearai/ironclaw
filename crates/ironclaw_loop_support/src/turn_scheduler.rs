@@ -2,7 +2,7 @@ use std::{error::Error, fmt, panic::AssertUnwindSafe, sync::Arc, time::Duration}
 
 use async_trait::async_trait;
 use chrono::Utc;
-use futures_util::FutureExt;
+use futures::FutureExt;
 use ironclaw_turns::{
     SanitizedFailure, TurnError, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError,
     TurnRunnerId, TurnScope,

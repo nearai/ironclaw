@@ -7,7 +7,7 @@ use ironclaw_host_api::{
 };
 use serde_json::{Map, Value, json};
 
-use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest};
+use ironclaw_host_runtime::{FirstPartyCapabilityError, FirstPartyCapabilityRequest};
 
 use super::{FIRST_PARTY_MAX_OUTPUT_BYTES, first_party_capability_manifest, input_error};
 

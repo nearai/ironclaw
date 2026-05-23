@@ -7,7 +7,7 @@ use std::{
 
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
 
-use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest};
+use ironclaw_host_runtime::{FirstPartyCapabilityError, FirstPartyCapabilityRequest};
 
 use super::guest_error;
 

@@ -22,9 +22,11 @@ mod filesystem_skill_bundle_source;
 pub mod identity_context;
 mod input_port;
 mod input_queue;
+mod memory_prompt_context;
 mod skill_bundle_context_source;
 mod skill_bundle_source;
 mod skill_context;
+mod turn_scheduler;
 
 pub use budget_accountant::{
     BudgetSeedingPolicy, GovernorBackedAccountant, ModelCost, ModelCostTable, ZeroCostTable,
@@ -57,6 +59,7 @@ pub use identity_context::{
 };
 pub use input_port::HostQueueLoopInputPort;
 pub use input_queue::{HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError};
+pub use memory_prompt_context::ProductionMemoryPromptContextService;
 pub use skill_bundle_context_source::SkillBundleContextSource;
 pub use skill_bundle_source::{
     SkillBundleDescriptor, SkillBundleId, SkillBundleProvenance, SkillBundleSource,
@@ -65,6 +68,10 @@ pub use skill_bundle_source::{
 pub use skill_context::{
     HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
     build_skill_run_snapshot,
+};
+pub use turn_scheduler::{
+    SchedulerTurnRunWakeNotifier, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
+    TurnRunSchedulerConfig, TurnRunSchedulerHandle,
 };
 
 use tokio::sync::{Mutex, OnceCell};

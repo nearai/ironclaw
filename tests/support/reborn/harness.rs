@@ -28,6 +28,12 @@ use async_trait::async_trait;
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem, ScopedFilesystem};
+use ironclaw_first_party_extensions::{
+    APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, GLOB_CAPABILITY_ID,
+    GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID,
+    READ_FILE_CAPABILITY_ID, TIME_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
+    builtin_first_party_handlers, builtin_first_party_package,
+};
 use ironclaw_host_api::{
     AgentId, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
     ExtensionId, GrantConstraints, HostPath, MountAlias, MountGrant, MountPermissions, MountView,
@@ -36,11 +42,8 @@ use ironclaw_host_api::{
     RuntimeHttpEgressResponse, RuntimeKind, TenantId, ThreadId, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
-    APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, CapabilitySurfacePolicy,
-    CapabilitySurfaceVersion as HostRuntimeCapabilitySurfaceVersion, GLOB_CAPABILITY_ID,
-    GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HostRuntime, HostRuntimeServices, JSON_CAPABILITY_ID,
-    LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SurfaceKind, TIME_CAPABILITY_ID,
-    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers, builtin_first_party_package,
+    CapabilitySurfacePolicy, CapabilitySurfaceVersion as HostRuntimeCapabilitySurfaceVersion,
+    HostRuntime, HostRuntimeServices, SurfaceKind,
 };
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,

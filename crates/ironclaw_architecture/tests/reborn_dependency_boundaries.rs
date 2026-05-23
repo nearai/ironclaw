@@ -1373,9 +1373,11 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             ],
         },
         BoundaryRule {
-            // First-party extensions are userland packages. They may
-            // consume scoped storage and loop-facing DTO adapters, but must not
-            // receive ambient runtime authority or lower substrate handles.
+            // First-party extensions are userland packages. They may publish
+            // host-bundled extension manifests, implement host-runtime
+            // first-party handlers, and consume scoped filesystem/safety/
+            // loop-facing DTO adapters, but must not receive ambient lower
+            // substrate handles.
             crate_name: "ironclaw_first_party_extensions",
             forbidden: vec![
                 "ironclaw",
@@ -1386,9 +1388,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_dispatcher",
                 "ironclaw_engine",
                 "ironclaw_events",
-                "ironclaw_extensions",
                 "ironclaw_gateway",
-                "ironclaw_host_runtime",
                 "ironclaw_llm",
                 "ironclaw_mcp",
                 "ironclaw_memory",
@@ -1405,7 +1405,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_resources",
                 "ironclaw_run_state",
                 "ironclaw_runtime_policy",
-                "ironclaw_safety",
                 "ironclaw_scripts",
                 "ironclaw_secrets",
                 "ironclaw_threads",
@@ -1597,8 +1596,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_dispatcher",
                 "ironclaw_events",
                 "ironclaw_extensions",
-                "ironclaw_filesystem",
-                "ironclaw_host_runtime",
                 "ironclaw_secrets",
                 "ironclaw_network",
                 "ironclaw_mcp",

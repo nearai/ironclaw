@@ -26,9 +26,7 @@ use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, PermissionMode, RuntimeKind,
     TrustClass,
 };
-use ironclaw_host_runtime::{
-    PlannerError, SHELL_CAPABILITY_ID, builtin_first_party_package, plan_capability,
-};
+use ironclaw_host_runtime::{PlannerError, plan_capability};
 use ironclaw_runtime_policy::{OrgPolicyConstraints, ResolveRequest, resolve};
 
 fn descriptor_with_runtime(
@@ -54,12 +52,15 @@ fn descriptor(id: &str, effects: Vec<EffectKind>) -> CapabilityDescriptor {
 }
 
 fn builtin_shell_descriptor() -> CapabilityDescriptor {
-    builtin_first_party_package()
-        .unwrap()
-        .capabilities
-        .into_iter()
-        .find(|descriptor| descriptor.id.as_str() == SHELL_CAPABILITY_ID)
-        .expect("built-in shell descriptor must be registered")
+    descriptor_with_runtime(
+        "test.first_party_shell",
+        RuntimeKind::FirstParty,
+        vec![
+            EffectKind::SpawnProcess,
+            EffectKind::ExecuteCode,
+            EffectKind::Network,
+        ],
+    )
 }
 
 // -- PR 6: Local profile vertical slice -------------------------------------
@@ -121,10 +122,9 @@ fn local_dev_coding_alias_capabilities_plan_against_local_host_shell() {
 }
 
 #[test]
-fn local_dev_builtin_shell_manifest_plans_against_local_host_direct_network() {
-    // `builtin.shell` is the real copied shell tool descriptor. Under the
-    // LocalDev profile its declared process/network effects must resolve to
-    // the local host/direct logged backend family.
+fn local_dev_first_party_shell_descriptor_plans_against_local_host_direct_network() {
+    // A first-party shell descriptor with process/network effects must resolve
+    // to the local host/direct logged backend family under the LocalDev profile.
     let policy = resolve(ResolveRequest::new(
         DeploymentMode::LocalSingleUser,
         RuntimeProfile::LocalDev,

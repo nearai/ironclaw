@@ -117,6 +117,7 @@ jsonschema = { version = "0.45", default-features = false }
 
 # Shared types
 ironclaw_common = { path = "crates/ironclaw_common", version = "0.4.1" }
+ironclaw_first_party_extensions = { path = "crates/ironclaw_first_party_extensions", version = "0.1.0" }
 ironclaw_host_api = { path = "crates/ironclaw_host_api", version = "0.1.0" }
 ironclaw_loop_support = { path = "crates/ironclaw_loop_support", version = "0.1.0" }
 ironclaw_memory = { path = "crates/ironclaw_memory", version = "0.1.0" }

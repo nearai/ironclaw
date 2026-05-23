@@ -7,7 +7,7 @@ use ironclaw_filesystem::{FileType, FilesystemOperation};
 use ironclaw_host_api::RuntimeDispatchErrorKind;
 use serde_json::{Value, json};
 
-use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest};
+use ironclaw_host_runtime::{FirstPartyCapabilityError, FirstPartyCapabilityRequest};
 
 use super::{
     config::{

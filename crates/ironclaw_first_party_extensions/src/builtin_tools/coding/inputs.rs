@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::FirstPartyCapabilityError;
+use ironclaw_host_runtime::FirstPartyCapabilityError;
 
 use super::input_error;
 
