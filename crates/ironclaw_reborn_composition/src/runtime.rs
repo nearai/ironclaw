@@ -34,8 +34,8 @@ use uuid::Uuid;
 use ironclaw_events::{DurableEventLog, InMemoryDurableEventLog, RuntimeEvent};
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_first_party_extensions::{
-    FirstPartySkillsExtension, FirstPartySkillsExtensionHandles, LoadedFirstPartyExtensions,
-    SelectableSkillContextSource, SkillActivationSelectorConfig, SkillExecutionAdapter,
+    FirstPartySkillsExtension, FirstPartySkillsExtensionHandles, SelectableSkillContextSource,
+    SkillActivationSelectorConfig, SkillExecutionAdapter,
 };
 use ironclaw_host_api::{
     AgentId, CapabilityId, InvocationId, ResourceScope, TenantId, ThreadId, UserId,
@@ -906,20 +906,10 @@ fn local_dev_filesystem_skill_context_source(
     .map_err(|reason| RebornRuntimeError::InvalidArgument {
         reason: format!("first-party skills extension source: {reason}"),
     })?;
-    let loaded_extensions = LoadedFirstPartyExtensions::new().with_skills(extension);
-    let activation_source = loaded_extensions
-        .selectable_skill_context_source(SkillActivationSelectorConfig::default())
-        .ok_or_else(|| RebornRuntimeError::InvalidArgument {
-            reason: "first-party skills extension did not expose a skill context source"
-                .to_string(),
-        })?;
+    let activation_source =
+        extension.selectable_skill_context_source(SkillActivationSelectorConfig::default());
     let source: Arc<dyn HostSkillContextSource> = activation_source.clone();
-    let execution_adapter = loaded_extensions.skill_execution_adapter().ok_or_else(|| {
-        RebornRuntimeError::InvalidArgument {
-            reason: "first-party skills extension did not expose a skill execution adapter"
-                .to_string(),
-        }
-    })?;
+    let execution_adapter = extension.skill_execution_adapter();
     Ok(LocalDevSkillContextSource {
         source,
         activation_source,

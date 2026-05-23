@@ -9,7 +9,6 @@ mod activation;
 mod assets;
 mod error;
 mod execution;
-mod loaded;
 mod skills;
 
 pub use activation::{
@@ -20,5 +19,9 @@ pub use activation::{
 pub use assets::{SkillBundleAsset, SkillBundleAssetReadError, SkillBundleAssetReader};
 pub use error::FirstPartySkillsExtensionError;
 pub use execution::{SkillExecutionAdapter, SkillExecutionAdapterError, SkillExecutionPlan};
-pub use loaded::LoadedFirstPartyExtensions;
+pub use ironclaw_skills::{
+    ManagedSkillSource as SkillSource, SkillInstallRequest, SkillInstallResult,
+    SkillManagementContext, SkillManagementError, SkillManagementErrorKind, SkillRemoveRequest,
+    SkillRemoveResult, SkillSummary, install_skill, list_skills, remove_skill,
+};
 pub use skills::{FirstPartySkillsExtension, FirstPartySkillsExtensionHandles};

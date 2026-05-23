@@ -631,6 +631,16 @@ fn readiness_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_host_api::{
+        CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
+        ExecutionContext, ExtensionId, GrantConstraints, NetworkPolicy, Principal,
+        ResourceEstimate, RuntimeKind, TrustClass, UserId,
+    };
+    use ironclaw_host_runtime::{
+        RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind,
+        SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
+    };
+    use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 
     #[tokio::test]
     async fn local_dev_services_include_repl_runtime_substrate() {
@@ -647,6 +657,118 @@ mod tests {
         assert!(services.product_auth.is_some());
         assert!(services.local_runtime.is_some());
         assert_eq!(services.readiness.state, RebornReadinessState::DevOnly);
+    }
+
+    #[tokio::test]
+    async fn local_dev_skill_management_invokes_through_first_party_runtime() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        let services = build_reborn_services(RebornBuildInput::local_dev(
+            "local-dev-skill-tools-owner",
+            storage_root.clone(),
+        ))
+        .await
+        .expect("local-dev services build");
+        let runtime = services.host_runtime.expect("host runtime composed");
+
+        let install_output = invoke_json(
+            runtime.as_ref(),
+            SKILL_INSTALL_CAPABILITY_ID,
+            skill_context(SKILL_INSTALL_CAPABILITY_ID),
+            serde_json::json!({
+                "content": skill_md("runtime-sentinel", "runtime skill", "RUNTIME_SENTINEL")
+            }),
+        )
+        .await
+        .expect("skill install succeeds");
+        assert_eq!(install_output["installed"], true);
+        assert_eq!(install_output["name"], "runtime-sentinel");
+        assert!(
+            storage_root
+                .join("skills/runtime-sentinel/SKILL.md")
+                .exists()
+        );
+
+        let list_output = invoke_json(
+            runtime.as_ref(),
+            SKILL_LIST_CAPABILITY_ID,
+            skill_context(SKILL_LIST_CAPABILITY_ID),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("skill list succeeds");
+        assert!(
+            list_output["skills"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|skill| { skill["name"] == "runtime-sentinel" && skill["source"] == "user" })
+        );
+
+        let remove_output = invoke_json(
+            runtime.as_ref(),
+            SKILL_REMOVE_CAPABILITY_ID,
+            skill_context(SKILL_REMOVE_CAPABILITY_ID),
+            serde_json::json!({"name": "runtime-sentinel"}),
+        )
+        .await
+        .expect("skill remove succeeds");
+        assert_eq!(remove_output["removed"], true);
+        assert!(
+            !storage_root
+                .join("skills/runtime-sentinel/SKILL.md")
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn local_dev_workspace_mounts_do_not_authorize_skill_writes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        let services = build_reborn_services(RebornBuildInput::local_dev(
+            "local-dev-workspace-skill-boundary-owner",
+            storage_root.clone(),
+        ))
+        .await
+        .expect("local-dev services build");
+        let runtime = services.host_runtime.expect("host runtime composed");
+
+        let failure = invoke_json(
+            runtime.as_ref(),
+            "builtin.write_file",
+            workspace_context("builtin.write_file"),
+            serde_json::json!({
+                "path": "/skills/blocked/SKILL.md",
+                "content": skill_md("blocked", "blocked skill", "BLOCKED")
+            }),
+        )
+        .await
+        .expect_err("workspace tool cannot write skill root");
+
+        assert_eq!(failure, RuntimeFailureKind::Authorization);
+        assert!(!storage_root.join("skills/blocked/SKILL.md").exists());
+    }
+
+    #[test]
+    fn builtin_first_party_package_declares_skill_management_tools() {
+        let package = builtin_first_party_package().expect("built-in package builds");
+        let ids = package
+            .capabilities
+            .iter()
+            .map(|capability| capability.id.as_str())
+            .collect::<Vec<_>>();
+        assert!(ids.contains(&SKILL_LIST_CAPABILITY_ID));
+        assert!(ids.contains(&SKILL_INSTALL_CAPABILITY_ID));
+        assert!(ids.contains(&SKILL_REMOVE_CAPABILITY_ID));
+
+        let registry = builtin_first_party_registry().expect("built-in handlers build");
+        for id in [
+            SKILL_LIST_CAPABILITY_ID,
+            SKILL_INSTALL_CAPABILITY_ID,
+            SKILL_REMOVE_CAPABILITY_ID,
+        ] {
+            assert!(registry.contains_handler(&ironclaw_host_api::CapabilityId::new(id).unwrap()));
+        }
     }
 
     #[test]
@@ -672,5 +794,126 @@ mod tests {
         let with_auth = readiness_for(RebornCompositionProfile::Production, true, true, true);
         assert_eq!(with_auth.state, RebornReadinessState::ProductionValidated);
         assert!(with_auth.facades.product_auth);
+    }
+
+    async fn invoke_json(
+        runtime: &dyn ironclaw_host_runtime::HostRuntime,
+        capability_id: &str,
+        context: ExecutionContext,
+        input: serde_json::Value,
+    ) -> Result<serde_json::Value, RuntimeFailureKind> {
+        let outcome = runtime
+            .invoke_capability(RuntimeCapabilityRequest::new(
+                context,
+                CapabilityId::new(capability_id).expect("valid capability id"),
+                ResourceEstimate::default(),
+                input,
+                trust_decision(),
+            ))
+            .await
+            .expect("runtime invocation completes");
+        match outcome {
+            RuntimeCapabilityOutcome::Completed(completed) => Ok(completed.output),
+            RuntimeCapabilityOutcome::Failed(failure) => Err(failure.kind),
+            other => panic!("unexpected runtime outcome: {other:?}"),
+        }
+    }
+
+    fn skill_context(capability_id: &str) -> ExecutionContext {
+        execution_context(capability_id, skill_mounts())
+    }
+
+    fn workspace_context(capability_id: &str) -> ExecutionContext {
+        execution_context(capability_id, workspace_mounts())
+    }
+
+    fn execution_context(capability_id: &str, mounts: MountView) -> ExecutionContext {
+        let extension_id = ExtensionId::new("caller").expect("valid extension id");
+        ExecutionContext::local_default(
+            UserId::new("local-dev-test-user").expect("valid user id"),
+            extension_id.clone(),
+            RuntimeKind::FirstParty,
+            TrustClass::FirstParty,
+            CapabilitySet {
+                grants: vec![capability_grant(
+                    capability_id,
+                    extension_id,
+                    mounts.clone(),
+                )],
+            },
+            mounts,
+        )
+        .expect("valid execution context")
+    }
+
+    fn capability_grant(
+        capability_id: &str,
+        grantee: ExtensionId,
+        mounts: MountView,
+    ) -> CapabilityGrant {
+        CapabilityGrant {
+            id: CapabilityGrantId::new(),
+            capability: CapabilityId::new(capability_id).expect("valid capability id"),
+            grantee: Principal::Extension(grantee),
+            issued_by: Principal::HostRuntime,
+            constraints: GrantConstraints {
+                allowed_effects: allowed_effects(),
+                mounts,
+                network: NetworkPolicy::default(),
+                secrets: Vec::new(),
+                resource_ceiling: None,
+                expires_at: None,
+                max_invocations: None,
+            },
+        }
+    }
+
+    fn skill_mounts() -> MountView {
+        MountView::new(vec![
+            MountGrant::new(
+                MountAlias::new("/skills").expect("valid mount alias"),
+                VirtualPath::new("/projects/skills").expect("valid virtual path"),
+                MountPermissions::read_write_list_delete(),
+            ),
+            MountGrant::new(
+                MountAlias::new("/system/skills").expect("valid mount alias"),
+                VirtualPath::new("/projects/system/skills").expect("valid virtual path"),
+                MountPermissions::read_only(),
+            ),
+        ])
+        .expect("valid mount view")
+    }
+
+    fn workspace_mounts() -> MountView {
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workspace").expect("valid mount alias"),
+            VirtualPath::new("/projects/workspace").expect("valid virtual path"),
+            MountPermissions::read_write(),
+        )])
+        .expect("valid mount view")
+    }
+
+    fn allowed_effects() -> Vec<EffectKind> {
+        vec![
+            EffectKind::DispatchCapability,
+            EffectKind::ReadFilesystem,
+            EffectKind::WriteFilesystem,
+        ]
+    }
+
+    fn trust_decision() -> TrustDecision {
+        TrustDecision {
+            effective_trust: EffectiveTrustClass::user_trusted(),
+            authority_ceiling: AuthorityCeiling {
+                allowed_effects: allowed_effects(),
+                max_resource_ceiling: None,
+            },
+            provenance: TrustProvenance::Default,
+            evaluated_at: chrono::Utc::now(),
+        }
+    }
+
+    fn skill_md(name: &str, description: &str, prompt: &str) -> String {
+        format!("---\nname: {name}\ndescription: {description}\n---\n{prompt}\n")
     }
 }

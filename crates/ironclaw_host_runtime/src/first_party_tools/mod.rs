@@ -10,6 +10,7 @@ mod echo;
 mod http;
 mod json;
 mod shell;
+mod skill_management;
 mod time;
 
 use std::{sync::Arc, time::Instant};
@@ -38,6 +39,9 @@ pub use echo::ECHO_CAPABILITY_ID;
 pub use http::HTTP_CAPABILITY_ID;
 pub use json::JSON_CAPABILITY_ID;
 pub use shell::SHELL_CAPABILITY_ID;
+pub use skill_management::{
+    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
+};
 pub use time::TIME_CAPABILITY_ID;
 
 pub const BUILTIN_FIRST_PARTY_PROVIDER: &str = "builtin";
@@ -78,6 +82,7 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                     shell::manifest()?,
                 ];
                 capabilities.extend(coding::manifests()?);
+                capabilities.extend(skill_management::manifests()?);
                 capabilities
             },
         },
@@ -88,7 +93,7 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
 /// Create handlers for all built-in first-party capabilities.
 pub fn builtin_first_party_handlers() -> Result<FirstPartyCapabilityRegistry, HostApiError> {
     let handler = Arc::new(BuiltinFirstPartyTools::default());
-    Ok(FirstPartyCapabilityRegistry::new()
+    let mut registry = FirstPartyCapabilityRegistry::new()
         .with_handler(CapabilityId::new(ECHO_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(TIME_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(JSON_CAPABILITY_ID)?, handler.clone())
@@ -102,7 +107,9 @@ pub fn builtin_first_party_handlers() -> Result<FirstPartyCapabilityRegistry, Ho
         .with_handler(CapabilityId::new(LIST_DIR_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(GLOB_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(GREP_CAPABILITY_ID)?, handler.clone())
-        .with_handler(CapabilityId::new(APPLY_PATCH_CAPABILITY_ID)?, handler))
+        .with_handler(CapabilityId::new(APPLY_PATCH_CAPABILITY_ID)?, handler);
+    skill_management::insert_handlers(&mut registry)?;
+    Ok(registry)
 }
 
 fn first_party_capability_manifest(
