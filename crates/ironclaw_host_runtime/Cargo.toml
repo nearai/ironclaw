@@ -64,3 +64,6 @@ tokio-postgres = "0.7"
 wat = "1.245.1"
 wit-component = "0.245.1"
 wit-parser = "0.245.1"
+
+[lints]
+workspace = true

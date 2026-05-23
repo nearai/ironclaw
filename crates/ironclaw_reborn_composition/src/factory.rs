@@ -47,6 +47,7 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) loop_checkpoint_store: Arc<InMemoryLoopCheckpointStore>,
     pub(crate) thread_service: Arc<InMemorySessionThreadService>,
     pub(crate) skill_filesystem: Arc<ScopedFilesystem<LocalFilesystem>>,
+    pub(crate) workspace_filesystem: Arc<ScopedFilesystem<LocalFilesystem>>,
 }
 
 impl std::fmt::Debug for RebornServices {
@@ -158,6 +159,10 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         Arc::clone(&filesystem),
         local_dev_skill_mount_view()?,
     ));
+    let workspace_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(&filesystem),
+        local_dev_workspace_mount_view()?,
+    ));
 
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
@@ -168,6 +173,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         loop_checkpoint_store: Arc::new(InMemoryLoopCheckpointStore::default()),
         thread_service: Arc::new(InMemorySessionThreadService::default()),
         skill_filesystem,
+        workspace_filesystem,
     });
 
     let mut services = HostRuntimeServices::new(
@@ -264,6 +270,23 @@ fn local_dev_skill_mount_view() -> Result<MountView, RebornBuildError> {
         grant("/tenant-shared/skills", "/projects/tenant-shared/skills")?,
         grant("/system/skills", "/projects/system/skills")?,
     ])
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: error.to_string(),
+    })
+}
+
+fn local_dev_workspace_mount_view() -> Result<MountView, RebornBuildError> {
+    MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").map_err(|error| RebornBuildError::InvalidConfig {
+            reason: error.to_string(),
+        })?,
+        VirtualPath::new("/projects/workspace").map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: error.to_string(),
+            }
+        })?,
+        MountPermissions::read_only(),
+    )])
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: error.to_string(),
     })
@@ -631,10 +654,11 @@ fn readiness_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_filesystem::FilesystemError;
     use ironclaw_host_api::{
         CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
-        ExecutionContext, ExtensionId, GrantConstraints, NetworkPolicy, Principal,
-        ResourceEstimate, RuntimeKind, TrustClass, UserId,
+        ExecutionContext, ExtensionId, GrantConstraints, InvocationId, NetworkPolicy, Principal,
+        ResourceEstimate, ResourceScope, RuntimeKind, ScopedPath, TrustClass, UserId,
     };
     use ironclaw_host_runtime::{
         RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind,
@@ -657,6 +681,52 @@ mod tests {
         assert!(services.product_auth.is_some());
         assert!(services.local_runtime.is_some());
         assert_eq!(services.readiness.state, RebornReadinessState::DevOnly);
+    }
+
+    #[tokio::test]
+    async fn local_dev_setup_marker_workspace_filesystem_is_read_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        let marker_path = storage_root.join("workspace/markers/setup.done");
+        std::fs::create_dir_all(marker_path.parent().expect("marker parent"))
+            .expect("marker directory");
+        std::fs::write(&marker_path, "done").expect("marker file");
+        let services = build_reborn_services(RebornBuildInput::local_dev(
+            "local-dev-marker-workspace-owner",
+            storage_root,
+        ))
+        .await
+        .expect("local-dev services build");
+        let local_runtime = services
+            .local_runtime
+            .as_ref()
+            .expect("local-dev runtime substrate");
+        let scope = ResourceScope::local_default(
+            UserId::new("local-dev-marker-user").expect("valid user"),
+            InvocationId::new(),
+        )
+        .expect("valid resource scope");
+
+        let stat = local_runtime
+            .workspace_filesystem
+            .stat(
+                &scope,
+                &ScopedPath::new("/workspace/markers/setup.done").expect("valid marker path"),
+            )
+            .await
+            .expect("marker stat succeeds");
+        assert_eq!(stat.len, 4);
+
+        let error = local_runtime
+            .workspace_filesystem
+            .write_file(
+                &scope,
+                &ScopedPath::new("/workspace/markers/new.done").expect("valid marker path"),
+                b"done",
+            )
+            .await
+            .expect_err("setup marker workspace filesystem should be read-only");
+        assert!(matches!(error, FilesystemError::PermissionDenied { .. }));
     }
 
     #[tokio::test]

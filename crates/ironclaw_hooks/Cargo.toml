@@ -46,3 +46,6 @@ wasmtime = "44.0.2"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
 toml = "0.8"
 wat = "1"
+
+[lints]
+workspace = true

@@ -906,14 +906,14 @@ fn local_dev_filesystem_skill_context_source(
     .map_err(|reason| RebornRuntimeError::InvalidArgument {
         reason: format!("first-party skills extension source: {reason}"),
     })?;
-    let activation_source =
-        extension.selectable_skill_context_source(SkillActivationSelectorConfig::default());
-    let source: Arc<dyn HostSkillContextSource> = activation_source.clone();
-    let execution_adapter = extension.skill_execution_adapter();
+    let selectable_skills = extension.selectable_skill_runtime_with_setup_markers(
+        SkillActivationSelectorConfig::default(),
+        Arc::clone(&local_runtime.workspace_filesystem),
+    );
     Ok(LocalDevSkillContextSource {
-        source,
-        activation_source,
-        execution_adapter,
+        source: selectable_skills.host_skill_context_source(),
+        activation_source: selectable_skills.activation_source(),
+        execution_adapter: selectable_skills.execution_adapter(),
     })
 }
 
@@ -1372,6 +1372,17 @@ mod tests {
     fn skill_md(name: &str, description: &str, prompt: &str) -> String {
         format!(
             "---\nname: {name}\ndescription: {description}\nactivation:\n  keywords: [\"{name}\"]\n---\n\n{prompt}"
+        )
+    }
+
+    fn skill_md_with_setup_marker(
+        name: &str,
+        description: &str,
+        marker: &str,
+        prompt: &str,
+    ) -> String {
+        format!(
+            "---\nname: {name}\ndescription: {description}\nactivation:\n  keywords: [\"{name}\"]\n  setup_marker: \"{marker}\"\n---\n\n{prompt}"
         )
     }
 
@@ -2019,6 +2030,154 @@ mod tests {
                 .is_empty(),
             "ambiguous explicit skill should fail before model dispatch"
         );
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn local_dev_runtime_suppresses_explicit_setup_skill_when_workspace_marker_exists() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let storage_root = root.path().join("local-dev");
+        std::fs::create_dir_all(storage_root.join("skills/setup-helper")).expect("user skill dir");
+        std::fs::create_dir_all(storage_root.join("workspace/markers")).expect("marker dir");
+        std::fs::write(
+            storage_root.join("skills/setup-helper/SKILL.md"),
+            skill_md_with_setup_marker(
+                "setup-helper",
+                "setup helper description",
+                "markers/setup-helper.done",
+                "SETUP_HELPER_PROMPT_SENTINEL",
+            ),
+        )
+        .expect("write setup helper skill");
+        std::fs::write(
+            storage_root.join("workspace/markers/setup-helper.done"),
+            "done",
+        )
+        .expect("write setup marker");
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let gateway = Arc::new(RecordingGateway {
+            reply: "setup marker ok".to_string(),
+            requests: Arc::clone(&requests),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-setup-marker-owner", storage_root)
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-setup-marker-tenant".to_string(),
+            agent_id: "runtime-setup-marker-agent".to_string(),
+            source_binding_id: "runtime-setup-marker-source".to_string(),
+            reply_target_binding_id: "runtime-setup-marker-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            runtime.execute_skill_message(&conversation, "$setup-helper"),
+        )
+        .await
+        .expect("skill execution should finish")
+        .expect("skill execution should succeed");
+
+        assert_eq!(result.reply.status, TurnStatus::Completed);
+        assert!(result.plan.activations().is_empty());
+        let skill_messages = {
+            let requests = requests
+                .lock()
+                .expect("recording gateway requests lock poisoned");
+            requests[0]
+                .messages
+                .iter()
+                .filter(|message| {
+                    message.role == HostManagedModelMessageRole::System
+                        && message
+                            .content_ref
+                            .as_str()
+                            .starts_with("msg:snippet.skill.")
+                })
+                .count()
+        };
+        assert_eq!(skill_messages, 0);
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn local_dev_runtime_activates_setup_skill_when_workspace_marker_is_absent() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let storage_root = root.path().join("local-dev");
+        std::fs::create_dir_all(storage_root.join("skills/setup-helper")).expect("user skill dir");
+        std::fs::write(
+            storage_root.join("skills/setup-helper/SKILL.md"),
+            skill_md_with_setup_marker(
+                "setup-helper",
+                "setup helper description",
+                "markers/setup-helper.done",
+                "SETUP_HELPER_PROMPT_SENTINEL",
+            ),
+        )
+        .expect("write setup helper skill");
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let gateway = Arc::new(RecordingGateway {
+            reply: "setup marker absent ok".to_string(),
+            requests: Arc::clone(&requests),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-setup-marker-absent-owner", storage_root)
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-setup-marker-absent-tenant".to_string(),
+            agent_id: "runtime-setup-marker-absent-agent".to_string(),
+            source_binding_id: "runtime-setup-marker-absent-source".to_string(),
+            reply_target_binding_id: "runtime-setup-marker-absent-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            runtime.execute_skill_message(&conversation, "$setup-helper"),
+        )
+        .await
+        .expect("skill execution should finish")
+        .expect("skill execution should succeed");
+
+        assert_eq!(result.reply.status, TurnStatus::Completed);
+        assert_eq!(result.plan.activations().len(), 1);
+        assert_eq!(result.plan.activations()[0].name, "setup-helper");
+        let skill_context = {
+            let requests = requests
+                .lock()
+                .expect("recording gateway requests lock poisoned");
+            requests[0]
+                .messages
+                .iter()
+                .filter(|message| {
+                    message.role == HostManagedModelMessageRole::System
+                        && message
+                            .content_ref
+                            .as_str()
+                            .starts_with("msg:snippet.skill.")
+                })
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert!(skill_context.contains("setup helper description"));
+        assert!(skill_context.contains("SETUP_HELPER_PROMPT_SENTINEL"));
 
         runtime.shutdown().await.expect("runtime shutdown");
     }
