@@ -123,7 +123,11 @@ impl TurnStateStore for StaticTurnStateStore {
     }
 
     async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
-        Ok(self.state.lock().expect("static turn state lock not poisoned").clone())
+        Ok(self
+            .state
+            .lock()
+            .expect("static turn state lock not poisoned")
+            .clone())
     }
 }
 
