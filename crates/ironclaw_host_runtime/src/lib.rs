@@ -50,14 +50,12 @@ mod extension_contracts;
 mod first_party;
 mod first_party_tools;
 mod invocation_services;
-pub mod memory_context;
 mod obligations;
 mod planner;
 mod process_port;
 mod production;
 mod services;
 mod surface;
-mod turn_scheduler;
 
 pub use capability_catalog::{
     HotCapabilityCatalog, HotCapabilityRecord, MAX_HOT_PROMPT_BYTES, MAX_HOT_SCHEMA_BYTES,
@@ -100,10 +98,6 @@ pub use services::{
     ProductionWiringIssueKind, ProductionWiringReport, RegisteredRuntimeHealth,
 };
 pub use surface::{CapabilitySurfacePolicy, VisibleCapability, VisibleCapabilityAccess};
-pub use turn_scheduler::{
-    SchedulerTurnRunWakeNotifier, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
-    TurnRunSchedulerConfig, TurnRunSchedulerHandle,
-};
 
 /// Stable, validated idempotency key supplied by upper turn/loop services.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

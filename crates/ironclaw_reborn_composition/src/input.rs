@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
-use ironclaw_host_runtime::SchedulerTurnRunWakeNotifier;
+use ironclaw_loop_support::SchedulerTurnRunWakeNotifier;
 use ironclaw_trust::HostTrustPolicy;
 
 use crate::{RebornCompositionProfile, RebornProductAuthServices};

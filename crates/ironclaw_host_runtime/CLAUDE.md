@@ -9,8 +9,8 @@
 
 ## Agent-loop touch points
 
-- `turn_scheduler.rs` owns scheduler-backed run concurrency. It does not own the
-  canonical loop tick or product inbound serialization.
+- Scheduler-backed turn concurrency belongs in `ironclaw_loop_support`; this
+  crate only exposes host-runtime services that scheduler/executor code calls.
 - `surface.rs` owns host-runtime capability-surface shaping and versions.
 - `production.rs` and `services.rs` compose runtime services and readiness
   evidence used by Reborn loop wiring.
