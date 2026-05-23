@@ -11,13 +11,16 @@ use ironclaw_capabilities::{
     CapabilityObligationFailureKind, CapabilityObligationHandler, CapabilityObligationPhase,
     CapabilityObligationRequest,
 };
-use ironclaw_events::InMemoryAuditSink;
+use ironclaw_events::{
+    InMemoryAuditSink, InMemorySecurityAuditSink, SecurityAuditSink, SecurityBoundary,
+    SecurityDecision,
+};
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationHandler, BuiltinObligationServices, CapabilitySurfaceVersion,
-    DefaultHostRuntime, HostRuntime, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    RuntimeFailureKind,
+    DefaultHostRuntime, HostRuntime, LEAK_REDACT_FAILED_CODE, RuntimeCapabilityOutcome,
+    RuntimeCapabilityRequest, RuntimeFailureKind,
 };
 use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount};
 use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
@@ -134,6 +137,125 @@ async fn builtin_obligation_handler_enforces_output_limit_after_dispatch() {
         err,
         CapabilityObligationError::Failed {
             kind: CapabilityObligationFailureKind::Output
+        }
+    ));
+}
+
+/// Caller-level regression for the wiring added in this PR: when the
+/// production composition seam ([`BuiltinObligationServices`]) is built with
+/// a [`SecurityAuditSink`] via `with_security_audit_sink`, security-boundary
+/// decisions made by `obligation_handler()` actually reach the sink. This
+/// drives the same code path that `host_runtime::services::HostRuntimeServices`
+/// threads in production composition: a unit test on
+/// `BuiltinObligationHandler::with_security_audit_sink` alone would not catch
+/// a missing wire in the services builder.
+#[tokio::test]
+async fn obligation_services_with_security_audit_sink_records_leak_block() {
+    let security_sink: Arc<InMemorySecurityAuditSink> = Arc::new(InMemorySecurityAuditSink::new());
+    let security_sink_dyn: Arc<dyn SecurityAuditSink> = security_sink.clone();
+
+    let services = BuiltinObligationServices::new(
+        Arc::new(InMemoryAuditSink::new()),
+        Arc::new(InMemorySecretStore::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+    )
+    .with_security_audit_sink(security_sink_dyn);
+
+    // The handler returned by the services builder is what production
+    // composition installs into `DefaultHostRuntime`. Drive the redact
+    // boundary by feeding the leak-detector its built-in AWS access-key
+    // BLOCK pattern (`AKIA[0-9A-Z]{16}` — see `ironclaw_safety`).
+    let handler = services.obligation_handler();
+    let context = execution_context(CapabilitySet::default());
+    let capability_id = capability_id();
+    let estimate = ResourceEstimate::default();
+    let obligations = vec![Obligation::RedactOutput];
+    let dispatch = sample_dispatch(
+        &context.resource_scope,
+        &capability_id,
+        json!("hello AKIAABCDEFGHIJKLMNOP goodbye"),
+    );
+
+    let err = handler
+        .complete_dispatch(CapabilityObligationCompletionRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+            dispatch: &dispatch,
+        })
+        .await
+        .expect_err("redact obligation must fail closed when leak detector blocks");
+    assert!(matches!(
+        err,
+        CapabilityObligationError::Failed {
+            kind: CapabilityObligationFailureKind::Output,
+        }
+    ));
+
+    // Caller-level assertions: the boundary actually recorded an event via
+    // the sink wired through `BuiltinObligationServices` (not the handler
+    // directly).
+    let events = security_sink.snapshot();
+    assert_eq!(
+        events.len(),
+        1,
+        "exactly one security-boundary decision should have been recorded, got {events:?}"
+    );
+    let event = &events[0];
+    assert_eq!(event.boundary, SecurityBoundary::LeakDetector);
+    assert_eq!(event.decision, SecurityDecision::Blocked);
+    assert_eq!(event.code, LEAK_REDACT_FAILED_CODE);
+    assert_eq!(event.code, "leak_redact_failed"); // stability lock against rename
+    assert_eq!(event.capability_id.as_ref(), Some(&capability_id));
+    assert_eq!(event.scope.as_ref(), Some(&context.resource_scope));
+
+    // The `SecurityAuditEvent` struct has no free-form `String` payload field
+    // by construction (see `ironclaw_events::security_audit`); this is a
+    // value-level documentation lock — the offending string never appears
+    // in the recorded event because there is nowhere on the type for it
+    // to live.
+}
+
+/// Regression: when [`BuiltinObligationServices::with_security_audit_sink`]
+/// is *not* called, the obligation handler still produces the original
+/// fail-closed semantics on the redact boundary (no panic, no missing
+/// dependency). This is the negative half of the wiring contract.
+#[tokio::test]
+async fn obligation_services_without_security_audit_sink_preserves_failure_semantics() {
+    let services = BuiltinObligationServices::new(
+        Arc::new(InMemoryAuditSink::new()),
+        Arc::new(InMemorySecretStore::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+    );
+    // Intentionally no `.with_security_audit_sink(...)` call.
+    let handler = services.obligation_handler();
+    let context = execution_context(CapabilitySet::default());
+    let capability_id = capability_id();
+    let estimate = ResourceEstimate::default();
+    let obligations = vec![Obligation::RedactOutput];
+    let dispatch = sample_dispatch(
+        &context.resource_scope,
+        &capability_id,
+        json!("leak AKIAABCDEFGHIJKLMNOP"),
+    );
+
+    let err = handler
+        .complete_dispatch(CapabilityObligationCompletionRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+            dispatch: &dispatch,
+        })
+        .await
+        .expect_err("redact obligation must still fail closed without a security sink");
+    assert!(matches!(
+        err,
+        CapabilityObligationError::Failed {
+            kind: CapabilityObligationFailureKind::Output,
         }
     ));
 }

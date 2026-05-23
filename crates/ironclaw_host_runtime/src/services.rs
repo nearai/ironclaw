@@ -25,6 +25,7 @@ use ironclaw_dispatcher::{
 use ironclaw_events::{
     AuditSink, DurableAuditLog, DurableAuditSink, DurableEventLog, DurableEventSink, EventSink,
     InMemoryAuditSink, InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink,
+    SecurityAuditSink,
 };
 use ironclaw_extensions::{ExtensionRegistry, ExtensionRuntime};
 #[cfg(feature = "libsql")]
@@ -375,6 +376,7 @@ where
     capability_leases: Option<Arc<dyn CapabilityLeaseStore>>,
     event_sink: Option<Arc<dyn EventSink>>,
     audit_sink: Option<Arc<dyn AuditSink>>,
+    security_audit_sink: Option<Arc<dyn SecurityAuditSink>>,
     secret_store: Option<Arc<dyn SecretStore>>,
     network_policy_store: Arc<NetworkObligationPolicyStore>,
     secret_injection_store: Arc<RuntimeSecretInjectionStore>,
@@ -434,6 +436,7 @@ where
             capability_leases: None,
             event_sink: None,
             audit_sink: None,
+            security_audit_sink: None,
             secret_store: None,
             network_policy_store,
             secret_injection_store,
@@ -504,6 +507,7 @@ where
             capability_leases,
             event_sink,
             audit_sink,
+            security_audit_sink,
             secret_store,
             network_policy_store,
             secret_injection_store,
@@ -540,6 +544,7 @@ where
             capability_leases,
             event_sink,
             audit_sink,
+            security_audit_sink,
             secret_store,
             network_policy_store,
             secret_injection_store,
@@ -597,6 +602,7 @@ where
             capability_leases,
             event_sink,
             audit_sink,
+            security_audit_sink,
             secret_store,
             network_policy_store,
             secret_injection_store,
@@ -643,6 +649,7 @@ where
             capability_leases,
             event_sink,
             audit_sink,
+            security_audit_sink,
             secret_store,
             network_policy_store,
             secret_injection_store,
@@ -946,6 +953,30 @@ where
         self.component_types.audit_sink = Some(ProductionComponentType::of::<T>());
         let audit_log: Arc<dyn DurableAuditLog> = audit_log;
         self.audit_sink = Some(Arc::new(DurableAuditSink::new(audit_log)));
+        self
+    }
+
+    /// Wire in a [`SecurityAuditSink`] so security-boundary decisions inside
+    /// the built-in obligation handler (leak detector / output redaction
+    /// today; more boundaries in follow-ups) are recorded instead of dropped.
+    ///
+    /// This is the production composition seam that the host-runtime layer
+    /// uses; upper Reborn crates assembling a [`BuiltinObligationServices`]
+    /// directly should use [`BuiltinObligationServices::with_security_audit_sink`]
+    /// instead. The sink is optional — without it, the obligation handler
+    /// keeps its prior behavior (boundary decisions still log via
+    /// `tracing::debug!`).
+    pub fn with_security_audit_sink<T>(mut self, sink: Arc<T>) -> Self
+    where
+        T: SecurityAuditSink + 'static,
+    {
+        let sink: Arc<dyn SecurityAuditSink> = sink;
+        self.security_audit_sink = Some(sink);
+        self
+    }
+
+    pub fn with_security_audit_sink_dyn(mut self, sink: Arc<dyn SecurityAuditSink>) -> Self {
+        self.security_audit_sink = Some(sink);
         self
     }
 
@@ -1838,6 +1869,9 @@ where
 
         if let Some(audit_sink) = &self.audit_sink {
             handler = handler.with_audit_sink_dyn(Arc::clone(audit_sink));
+        }
+        if let Some(security_audit_sink) = &self.security_audit_sink {
+            handler = handler.with_security_audit_sink(Arc::clone(security_audit_sink));
         }
         if let Some(secret_store) = &self.secret_store {
             handler = handler.with_secret_store_dyn(Arc::clone(secret_store));

@@ -367,6 +367,7 @@ impl NetworkPolicyKey {
 #[derive(Clone)]
 pub struct BuiltinObligationServices {
     audit_sink: Arc<dyn AuditSink>,
+    security_audit_sink: Option<Arc<dyn SecurityAuditSink>>,
     network_policies: Arc<NetworkObligationPolicyStore>,
     secret_store: Arc<dyn SecretStore>,
     secret_injections: Arc<RuntimeSecretInjectionStore>,
@@ -397,11 +398,29 @@ impl BuiltinObligationServices {
     ) -> Self {
         Self {
             audit_sink,
+            security_audit_sink: None,
             network_policies,
             secret_store,
             secret_injections,
             resource_governor,
         }
+    }
+
+    /// Wire in a [`SecurityAuditSink`] for boundary-decision recording.
+    ///
+    /// This is the production composition seam for security-audit recording
+    /// at obligation boundaries (leak-detector / output-redaction today; other
+    /// boundaries will adopt the same sink in follow-up PRs). Without this
+    /// call, [`Self::obligation_handler`] returns a handler with no
+    /// security-audit sink wired and boundary decisions are silently dropped.
+    /// See PR #3919 for the upstream `BuiltinObligationHandler` plumbing.
+    pub fn with_security_audit_sink(mut self, sink: Arc<dyn SecurityAuditSink>) -> Self {
+        self.security_audit_sink = Some(sink);
+        self
+    }
+
+    pub fn security_audit_sink(&self) -> Option<Arc<dyn SecurityAuditSink>> {
+        self.security_audit_sink.clone()
     }
 
     pub fn audit_sink(&self) -> Arc<dyn AuditSink> {
@@ -456,12 +475,16 @@ impl BuiltinObligationServices {
     }
 
     pub fn obligation_handler(&self) -> BuiltinObligationHandler {
-        BuiltinObligationHandler::new()
+        let mut handler = BuiltinObligationHandler::new()
             .with_audit_sink_dyn(self.audit_sink.clone())
             .with_network_policy_store(self.network_policies.clone())
             .with_secret_store_dyn(self.secret_store.clone())
             .with_secret_injection_store(self.secret_injections.clone())
-            .with_resource_governor_dyn(self.resource_governor.clone())
+            .with_resource_governor_dyn(self.resource_governor.clone());
+        if let Some(sink) = &self.security_audit_sink {
+            handler = handler.with_security_audit_sink(Arc::clone(sink));
+        }
+        handler
     }
 }
 
@@ -470,6 +493,13 @@ impl fmt::Debug for BuiltinObligationServices {
         formatter
             .debug_struct("BuiltinObligationServices")
             .field("audit_sink", &"<audit_sink>")
+            .field(
+                "security_audit_sink",
+                &self
+                    .security_audit_sink
+                    .as_ref()
+                    .map(|_| "<security_audit_sink>"),
+            )
             .field("network_policies", &self.network_policies)
             .field("secret_store", &"[REDACTED]")
             .field("secret_injections", &self.secret_injections)
