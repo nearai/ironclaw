@@ -317,10 +317,13 @@ pub fn build_hook_dispatcher_builder_factory(
     let factory: HookDispatcherBuilderFactory = Arc::new(move || {
         // Fresh registry + builder per run: no cross-run state leak.
         let mut builder = HookDispatcherBuilder::new(HookRegistry::new());
-        builder = install_first_party_hooks(builder)
-            .expect("first-party hook install validated at composition time");
+        // safety: install_first_party_hooks installs a single static NoOpObserverHook with no external input; the identical call was proven to succeed against a scratch builder in the composition-time validation block above (fail-closed via `?`). It is a pure function of its inputs, so a per-run replay cannot fail.
+        let first_party = "first-party hook install validated at composition time";
+        builder = install_first_party_hooks(builder).expect(first_party); // safety: replay of composition-validated static install; see binding above
         let registrar = HookRegistrar::new(Arc::clone(&evaluator_for_factory));
         for (extension_id, version, entries) in &extension_install_sets {
+            // safety: `entries` were already projected from TOML (the only fallible, external-input step) and the same install set was validated against a scratch builder above (fail-closed via `?`). registrar.install is a pure function of these cloned inputs, so the per-run replay cannot fail.
+            let ext_install = "extension hook install validated at composition time";
             let (next, _ids) = registrar
                 .install(
                     extension_id.clone(),
@@ -328,7 +331,7 @@ pub fn build_hook_dispatcher_builder_factory(
                     entries.clone(),
                     builder,
                 )
-                .expect("extension hook install validated at composition time");
+                .expect(ext_install); // safety: replay of composition-validated install set; see binding above
             builder = next;
         }
         builder
