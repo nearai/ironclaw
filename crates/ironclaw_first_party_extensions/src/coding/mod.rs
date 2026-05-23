@@ -31,11 +31,11 @@ pub const APPLY_PATCH_CAPABILITY_ID: &str = "builtin.apply_patch";
 
 #[derive(Clone)]
 pub struct CodingCapabilityRequest {
-    pub capability_id: CapabilityId,
-    pub scope: ResourceScope,
-    pub mounts: Option<MountView>,
-    pub filesystem: Arc<dyn RootFilesystem>,
-    pub input: Value,
+    pub(crate) capability_id: CapabilityId,
+    pub(crate) scope: ResourceScope,
+    pub(crate) mounts: Option<MountView>,
+    pub(crate) filesystem: Arc<dyn RootFilesystem>,
+    pub(crate) input: Value,
 }
 
 impl CodingCapabilityRequest {
@@ -111,4 +111,21 @@ fn input_error() -> CodingCapabilityError {
 
 fn guest_error() -> CodingCapabilityError {
     CodingCapabilityError::new(RuntimeDispatchErrorKind::Guest)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn coding_tools_do_not_select_runtime_backends() {
+        let sources = [
+            include_str!("file.rs"),
+            include_str!("glob_tool.rs"),
+            include_str!("grep_tool.rs"),
+            include_str!("paths.rs"),
+        ];
+        for source in sources {
+            assert!(!source.contains("ProcessBackendKind"));
+            assert!(!source.contains("FilesystemBackendKind"));
+        }
+    }
 }

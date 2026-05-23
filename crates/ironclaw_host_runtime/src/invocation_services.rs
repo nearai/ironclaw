@@ -778,9 +778,6 @@ mod tests {
         let sources = [
             include_str!("first_party_tools/shell.rs"),
             include_str!("first_party_tools/http.rs"),
-            include_str!("../../ironclaw_first_party_extensions/src/coding/file.rs"),
-            include_str!("../../ironclaw_first_party_extensions/src/coding/glob_tool.rs"),
-            include_str!("../../ironclaw_first_party_extensions/src/coding/grep_tool.rs"),
         ];
         for source in sources {
             assert!(!source.contains("ProcessBackendKind"));
