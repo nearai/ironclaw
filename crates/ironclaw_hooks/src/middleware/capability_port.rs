@@ -390,21 +390,54 @@ impl LoopCapabilityPort for HookedLoopCapabilityPort {
 
         // Merge: walk slots in order, splicing inner outcomes into pending
         // slots. Dispatch AfterCapability observer per merged entry.
+        //
+        // Suspension handling preserves the per-entry observer contract
+        // from PR #3573 (serrrfirat P2 #3): a hook-resolved suspension
+        // slot that follows an allowed slot must still fire its
+        // observer, and must still surface in `outcomes`, even when
+        // `stop_on_first_suspension` is set. The pre-fix loop seeded
+        // `stopped_on_suspension` from `stopped_in_preflight` and broke
+        // on the first iteration, dropping any trailing Resolved
+        // suspension slot — see the
+        // `batch_invocation_fires_observer_for_hook_suspended_entry_after_allowed_entry_with_stop_on_first_suspension`
+        // regression test (henrypark133 review M1 on PR #3911).
+        //
+        // Today the loop runs to completion when only Resolved
+        // (hook-resolved) entries remain — every observer fires and
+        // every outcome is pushed — and only breaks early when a
+        // Pending slot has no inner outcome (inner port stopped on its
+        // own suspension and consumed fewer outcomes than we queued).
         let mut outcomes = Vec::with_capacity(slots.len());
         let mut stopped_on_suspension = stopped_in_preflight;
+        let mut pending_after_stop = false;
         for slot in slots {
-            let (outcome, provider) = match slot {
-                Slot::Resolved { outcome, provider } => (outcome, provider),
-                Slot::Pending { provider } => match inner_outcomes.pop() {
-                    Some(inner) => (inner, provider),
-                    None => {
-                        // Inner port stopped early (suspension) and consumed
-                        // fewer outcomes than we queued. Remaining pending
-                        // slots have no outcome — drop them, matching the
-                        // pre-refactor sequential break-out semantics.
-                        break;
+            let outcome_and_provider = match slot {
+                Slot::Resolved { outcome, provider } => Some((outcome, provider)),
+                Slot::Pending { provider } => {
+                    if pending_after_stop {
+                        // We already stopped on a prior suspension and
+                        // queued no work for the inner port past that
+                        // point. A trailing Pending slot has no outcome
+                        // to surface; drop it.
+                        None
+                    } else {
+                        match inner_outcomes.pop() {
+                            Some(inner) => Some((inner, provider)),
+                            None => {
+                                // Inner port stopped early (its own
+                                // suspension) and consumed fewer
+                                // outcomes than we queued. Drop
+                                // remaining Pending slots and continue
+                                // — observers on any trailing Resolved
+                                // slots must still fire.
+                                None
+                            }
+                        }
                     }
-                },
+                }
+            };
+            let Some((outcome, provider)) = outcome_and_provider else {
+                continue;
             };
             let _ = self
                 .dispatcher
@@ -416,11 +449,9 @@ impl LoopCapabilityPort for HookedLoopCapabilityPort {
                 .await;
             if outcome.is_suspension() && stop_on_first_suspension {
                 stopped_on_suspension = true;
+                pending_after_stop = true;
             }
             outcomes.push(outcome);
-            if stopped_on_suspension {
-                break;
-            }
         }
         if inner_stopped {
             stopped_on_suspension = true;
@@ -1618,5 +1649,163 @@ mod tests {
             size_hint_seq < resolve_seq,
             "size_hint (seq {size_hint_seq}) must be consulted before resolve (seq {resolve_seq}) so oversized inputs never get materialized"
         );
+    }
+
+    /// henrypark133 M1 on PR #3911: in the merged-batch path, when an
+    /// allowed (Pending) entry precedes a hook-resolved suspension entry
+    /// and `stop_on_first_suspension` is true, the merge loop must still
+    /// fire the `AfterCapability` observer for the suspension slot. The
+    /// pre-fix loop initialized `stopped_on_suspension` from
+    /// `stopped_in_preflight` and broke after the first iteration —
+    /// dropping the observer for the trailing Resolved suspension slot
+    /// and losing it from `outcomes` entirely. This pins the fixed
+    /// behavior: every slot's observer fires and every Resolved slot
+    /// surfaces in `outcomes`, even when `stop_on_first_suspension` is
+    /// set and the suspension appears after an allowed entry.
+    #[tokio::test]
+    async fn batch_invocation_fires_observer_for_hook_suspended_entry_after_allowed_entry_with_stop_on_first_suspension()
+     {
+        use crate::points::ObserverHookContext;
+        use crate::sink::{ObserverHook, ObserverSink};
+
+        /// Allows `cap.alpha`, pauses `cap.beta` for approval. The
+        /// mixed-batch scenario the merge loop has to handle correctly.
+        struct SelectivePauseHook;
+        #[async_trait]
+        impl RestrictedBeforeCapabilityHook for SelectivePauseHook {
+            async fn evaluate(
+                &self,
+                ctx: &BeforeCapabilityHookContext,
+                sink: &mut dyn RestrictedGateSink,
+            ) {
+                if ctx.capability_name == "cap.beta" {
+                    sink.pause_approval("needs approval");
+                } else {
+                    sink.pass();
+                }
+            }
+        }
+
+        struct CountingObserver {
+            seen: Arc<Mutex<u32>>,
+        }
+        #[async_trait]
+        impl ObserverHook for CountingObserver {
+            async fn observe(&self, _ctx: &ObserverHookContext, _sink: &mut dyn ObserverSink) {
+                *self.seen.lock().expect("not poisoned") += 1;
+            }
+        }
+
+        // Set up a dispatcher with both the gating hook AND an
+        // AfterCapability observer so we can count per-entry observer
+        // dispatch.
+        let gating_id = HookId::derive(
+            &ExtensionId::new("ext").expect("valid ExtensionId in test"),
+            "1.0",
+            &HookLocalId::new("selective-pause").expect("valid HookLocalId in test"),
+            HookVersion::ONE,
+        );
+        let gating_binding = HookBinding {
+            hook_id: gating_id,
+            hook_version: HookVersion::ONE,
+            trust_class: HookTrustClass::Installed,
+            phase: HookPhase::Policy,
+            priority: HookPriority::DEFAULT,
+            point: HookPointSpec::BeforeCapability,
+            owning_extension: None,
+            scope: HookBindingScope::Global,
+            poisoned: false,
+        };
+
+        let observer_id = HookId::for_builtin("test::after_cap_mixed_susp", HookVersion::ONE);
+        let observer_binding = HookBinding {
+            hook_id: observer_id,
+            hook_version: HookVersion::ONE,
+            trust_class: HookTrustClass::Builtin,
+            phase: HookPhase::Telemetry,
+            priority: HookPriority::DEFAULT,
+            point: HookPointSpec::AfterCapability,
+            owning_extension: None,
+            scope: HookBindingScope::Global,
+            poisoned: false,
+        };
+
+        let mut registry = HookRegistry::new();
+        registry.insert(gating_binding).expect("insert gating");
+        registry.insert(observer_binding).expect("insert observer");
+        let mut dispatcher = HookDispatcher::new(registry);
+        dispatcher.install_before_capability(
+            gating_id,
+            BeforeCapabilityHookImpl::Restricted(Box::new(SelectivePauseHook)),
+        );
+        let seen = Arc::new(Mutex::new(0u32));
+        dispatcher.install_observer_impl(
+            observer_id,
+            crate::dispatch::ObserverHookImpl::Any(Box::new(CountingObserver {
+                seen: seen.clone(),
+            })),
+        );
+
+        let inner = Arc::new(AlwaysCompletedPort::new());
+        let wrapped = HookedLoopCapabilityPort::new(inner.clone(), Arc::new(dispatcher), tenant())
+            .with_gate_ref_factory(Arc::new(UuidHookGateRefFactory));
+
+        // alpha (hook-allowed → Pending) precedes beta (hook-suspension
+        // → Resolved). `stop_on_first_suspension` is true so the bug
+        // path: the merge loop sees `stopped_in_preflight = true` from
+        // Phase 1 (beta was the suspension trigger), pushes alpha, then
+        // breaks before reaching beta's slot — dropping beta's observer
+        // and outcome.
+        let batch = CapabilityBatchInvocation {
+            invocations: vec![invocation("cap.alpha"), invocation("cap.beta")],
+            stop_on_first_suspension: true,
+        };
+        let outcome = wrapped.invoke_capability_batch(batch).await.expect("ok");
+
+        assert_eq!(
+            outcome.outcomes.len(),
+            2,
+            "merged outcomes must contain both entries: the hook-allowed alpha \
+             (from inner) and the hook-suspended beta (from hook resolution). \
+             Pre-fix this dropped beta to a length of 1.",
+        );
+        assert!(
+            matches!(outcome.outcomes[0], CapabilityOutcome::Completed(_)),
+            "alpha was hook-allowed and inner produced a Completed outcome",
+        );
+        assert!(
+            matches!(outcome.outcomes[1], CapabilityOutcome::ApprovalRequired { .. }),
+            "beta was hook-resolved to ApprovalRequired",
+        );
+        assert!(
+            outcome.stopped_on_suspension,
+            "stop_on_first_suspension was set and a suspension surfaced",
+        );
+        assert_eq!(
+            *seen.lock().expect("not poisoned"),
+            2,
+            "AfterCapability observer must fire for BOTH entries — the \
+             hook-allowed alpha AND the hook-resolved suspension beta. \
+             Pre-fix the merge loop broke before firing beta's observer.",
+        );
+        // No inner work for beta — the hook short-circuited it. The
+        // inner test port's `invoke_capability_batch` impl delegates
+        // per-entry to `invoke_capability`, so `calls()` counts the
+        // entries the inner port saw; only alpha should appear.
+        let calls = inner.calls();
+        assert_eq!(
+            calls.len(),
+            1,
+            "only alpha must reach the inner port; beta was hook-suspended",
+        );
+        assert_eq!(calls[0].as_str(), "cap.alpha");
+        let batch_calls = inner.batch_calls();
+        assert_eq!(
+            batch_calls.len(),
+            1,
+            "the inner port must be batched-called exactly once with just alpha",
+        );
+        assert_eq!(batch_calls[0].len(), 1);
+        assert_eq!(batch_calls[0][0].as_str(), "cap.alpha");
     }
 }
