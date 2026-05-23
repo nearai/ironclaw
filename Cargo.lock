@@ -4027,6 +4027,7 @@ dependencies = [
  "ironclaw_product_workflow",
  "ironclaw_reborn",
  "ironclaw_reborn_composition",
+ "ironclaw_reborn_traces",
  "ironclaw_resources",
  "ironclaw_runtime_policy",
  "ironclaw_safety",
@@ -4309,6 +4310,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -4555,6 +4557,7 @@ dependencies = [
  "async-trait",
  "ironclaw_filesystem",
  "ironclaw_host_api",
+ "ironclaw_memory",
  "ironclaw_safety",
  "jsonschema",
  "serde",
@@ -4750,18 +4753,25 @@ name = "ironclaw_reborn_cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "clap_complete",
+ "hex",
  "ironclaw_reborn_composition",
  "ironclaw_reborn_config",
+ "ironclaw_reborn_traces",
  "ironclaw_reborn_webui_ingress",
+ "reqwest",
  "secrecy",
+ "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -4856,6 +4866,33 @@ dependencies = [
  "tracing",
  "urlencoding",
  "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "ironclaw_reborn_traces"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum 0.8.9",
+ "base64 0.22.1",
+ "chrono",
+ "dirs",
+ "hex",
+ "ironclaw_common",
+ "ironclaw_llm",
+ "ironclaw_safety",
+ "jsonwebtoken",
+ "regex",
+ "reqwest",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

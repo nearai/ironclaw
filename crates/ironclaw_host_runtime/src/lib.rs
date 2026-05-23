@@ -84,7 +84,8 @@ pub use invocation_services::{
     InvocationServicesResolver, LocalInvocationServicesResolver,
 };
 pub use obligations::{
-    BuiltinObligationHandler, BuiltinObligationServices, ProcessObligationLifecycleStore,
+    BuiltinObligationHandler, BuiltinObligationServices, LEAK_REDACT_FAILED_CODE,
+    ProcessObligationLifecycleStore,
 };
 use obligations::{NetworkObligationPolicyStore, RuntimeSecretInjectionStore};
 pub use planner::{ExecutionPlan, PlannerError, plan_capability};

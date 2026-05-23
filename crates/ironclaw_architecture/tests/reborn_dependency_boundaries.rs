@@ -162,9 +162,10 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
         [
             "ironclaw_reborn_composition",
             "ironclaw_reborn_config",
+            "ironclaw_reborn_traces",
             "ironclaw_reborn_webui_ingress",
         ],
-        "ironclaw_reborn_cli should enter Reborn through ironclaw_reborn_composition (assembled-runtime facade), ironclaw_reborn_config (boot-config contract), and ironclaw_reborn_webui_ingress (host-owned WebUI serve lifecycle) only. Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
+        "ironclaw_reborn_cli should enter Reborn through ironclaw_reborn_composition (assembled-runtime facade), ironclaw_reborn_config (boot-config contract), ironclaw_reborn_traces (contributor-side TraceCommons client extracted from the legacy monolith), and ironclaw_reborn_webui_ingress (host-owned WebUI serve lifecycle) only. Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
     );
     assert_workspace_deps_exactly(
         &dependencies_all_kinds,
