@@ -13,6 +13,11 @@ default = []
 # on-trusted-path invariant. Intended exclusively as a `dev-dependency` feature
 # for hook authors writing predicate tests outside `ironclaw_reborn`.
 test-support = []
+# Exposes the `predicate_state::contract` trait-level test harness so
+# out-of-crate durable backends (durable-backend PRs 2/3 — Postgres,
+# libSQL) can run the same `PredicateStateBackend` contract suite against
+# their impl. Mirrors `ironclaw_memory`'s `contract-tests` feature.
+contract-tests = []
 
 [dependencies]
 async-trait = "0.1"

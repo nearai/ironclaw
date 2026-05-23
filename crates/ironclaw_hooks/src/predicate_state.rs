@@ -7,20 +7,20 @@
 //! (Postgres-backed, libSQL-backed) implement the same trait so the
 //! evaluator's predicate logic stays backend-agnostic.
 //!
-//! # Visibility
+//! # Visibility — stable public contract
 //!
-//! The backend trait and the in-memory impl are intentionally
-//! `pub(crate)` until the durable contract is stable. The trait's `now:
-//! Instant` is correct for the in-memory backend but not serializable
-//! across processes, so a future durable trait will accept
-//! `chrono::DateTime<Utc>` (see successor doc 03-persistent-counter.md).
-//! Holding the public surface back until then avoids shipping a public
-//! API we know we'll break (serrrfirat MED on PR #3635).
+//! [`PredicateStateBackend`] and its supporting types ([`InvocationKey`],
+//! [`ValueKey`], [`PredicateBackendError`]) are **public** and form the
+//! stable contract that durable backends (Postgres-backed, libSQL-backed)
+//! implement out-of-crate. The contract was widened from `pub(crate)` in
+//! the durable-backend split (PR 1/4): the trait is now `async` (durable
+//! backends are async; a sync trait would force `block_on` on the dispatch
+//! hot path) and the clock is [`chrono::DateTime<Utc>`] rather than
+//! [`Instant`] (`Instant` is not serializable across processes).
 //!
-//! [`PredicateEventId`] stays `pub` because it flows through
-//! [`BeforeCapabilityHookContext::caller_event_id`] on the public hook
-//! surface; only the backend trait and its keys/error type are crate-
-//! internal until the durable contract is ready.
+//! Backends are exercised against the shared [`contract`] harness so every
+//! impl is proven to honor the same isolation / dedup / window invariants
+//! by construction, not per-impl.
 //!
 //! # Why a trait
 //!
@@ -43,20 +43,28 @@
 //! letting the cap drift past `max`. Implementations must hold a
 //! single lock / transaction across the write + read.
 //!
-//! # Sync trait, monotonic clock
+//! # Async trait, serializable clock
 //!
-//! The trait is **synchronous** in this PR to minimize call-site churn.
-//! [`Instant`] is monotonic (process-local) and is the right clock for
-//! the in-memory backend; durable backends will accept a
-//! [`std::time::SystemTime`]-based companion via a separate trait or
-//! adapter (tracked in the scope doc) since `Instant` cannot be
-//! serialized across processes.
+//! The trait is **async** ([`async_trait`]) so durable backends can do
+//! `tokio-postgres` / libSQL I/O without blocking the dispatch hot path.
+//! The in-memory backend completes synchronously inside the async body.
+//!
+//! The clock is [`chrono::DateTime<Utc>`] rather than [`Instant`]: a
+//! serializable wall-clock timestamp is required for durable rows that
+//! survive process restarts and are written by one host and read by
+//! another. Window trimming is age-based — an entry is trimmed when its
+//! timestamp is strictly older than `now - window`. Because
+//! `DateTime<Utc>` arithmetic saturates rather than panicking, the
+//! `Instant::checked_sub` underflow hazard of the prior design does not
+//! arise.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use ironclaw_host_api::TenantId;
 use rust_decimal::Decimal;
 
@@ -65,7 +73,7 @@ use crate::identity::HookId;
 /// Identity of an invocation-history bucket. The `tenant_id` field is
 /// the trust boundary — one tenant's counter must never affect another's.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct InvocationKey {
+pub struct InvocationKey {
     pub hook_id: HookId,
     pub tenant_id: TenantId,
     pub capability: String,
@@ -74,7 +82,7 @@ pub(crate) struct InvocationKey {
 /// Identity of a value-sum-history bucket. Extends [`InvocationKey`]
 /// with the numeric field path the predicate is summing over.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct ValueKey {
+pub struct ValueKey {
     pub hook_id: HookId,
     pub tenant_id: TenantId,
     pub capability: String,
@@ -248,7 +256,7 @@ impl PredicateEventId {
 /// transient failures (connection lost, DB unavailable); the in-memory
 /// backend never returns errors.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum PredicateBackendError {
+pub enum PredicateBackendError {
     #[error("predicate state backend is unavailable: {0}")]
     #[allow(dead_code)] // populated by future durable backends; in-memory is infallible
     Unavailable(String),
@@ -257,7 +265,7 @@ pub(crate) enum PredicateBackendError {
 /// Backend for the predicate evaluator's sliding-window state.
 ///
 /// Each method is bracketed by `now` so tests can drive a deterministic
-/// clock; production callers pass [`Instant::now()`].
+/// clock; production callers pass [`Utc::now()`].
 ///
 /// # Atomicity contract
 ///
@@ -308,27 +316,28 @@ pub(crate) enum PredicateBackendError {
 /// (henrypark133 security note on PR #3635). Threat-model finding D5a
 /// also captures the high-cardinality-key LRU-eviction variant that lets
 /// an attacker reset another tenant's counter on the in-memory backend.
-pub(crate) trait PredicateStateBackend: Send + Sync {
+#[async_trait]
+pub trait PredicateStateBackend: Send + Sync {
     /// Record an invocation at `now` against `key` (idempotent against
     /// `event_id`) and return the resulting in-window count after
     /// trimming entries older than `window`. Atomic against concurrent
     /// writers.
-    fn record_invocation(
+    async fn record_invocation(
         &self,
         key: &InvocationKey,
         event_id: &PredicateEventId,
-        now: Instant,
+        now: DateTime<Utc>,
         window: Duration,
     ) -> Result<u32, PredicateBackendError>;
 
     /// Record a numeric value at `now` against `key` (idempotent
     /// against `event_id`) and return the resulting in-window sum
     /// after trimming. Atomic against concurrent writers.
-    fn record_value(
+    async fn record_value(
         &self,
         key: &ValueKey,
         event_id: &PredicateEventId,
-        now: Instant,
+        now: DateTime<Utc>,
         value: Decimal,
         window: Duration,
     ) -> Result<Decimal, PredicateBackendError>;
@@ -347,7 +356,7 @@ pub(crate) trait PredicateStateBackend: Send + Sync {
     /// backend PR) so trait-object callers don't break when the durable
     /// impl lands — henrypark133 important #5 on PR #3635.
     #[allow(dead_code)] // operator reaper hook for future durable backends
-    fn evict_older_than(&self, _cutoff: Instant) -> Result<u64, PredicateBackendError> {
+    async fn evict_older_than(&self, _cutoff: DateTime<Utc>) -> Result<u64, PredicateBackendError> {
         Ok(0)
     }
 }
@@ -369,7 +378,7 @@ pub(crate) trait PredicateStateBackend: Send + Sync {
 ///   become a zombie LRU-skip.
 #[derive(Debug, Default)]
 struct InvocationBucket {
-    entries: VecDeque<(Instant, PredicateEventId)>,
+    entries: VecDeque<(DateTime<Utc>, PredicateEventId)>,
     dedup_ids: HashSet<PredicateEventId>,
 }
 
@@ -380,7 +389,7 @@ impl InvocationBucket {
         }
     }
 
-    fn push_back(&mut self, ts: Instant, event_id: PredicateEventId) {
+    fn push_back(&mut self, ts: DateTime<Utc>, event_id: PredicateEventId) {
         self.dedup_ids.insert(event_id.clone());
         self.entries.push_back((ts, event_id));
     }
@@ -396,7 +405,7 @@ impl InvocationBucket {
 /// two ways the deque mutates.
 #[derive(Debug, Default)]
 struct ValueBucket {
-    entries: VecDeque<(Instant, Decimal, PredicateEventId)>,
+    entries: VecDeque<(DateTime<Utc>, Decimal, PredicateEventId)>,
     dedup_ids: HashSet<PredicateEventId>,
     running_sum: Decimal,
 }
@@ -409,7 +418,7 @@ impl ValueBucket {
         }
     }
 
-    fn push_back(&mut self, ts: Instant, value: Decimal, event_id: PredicateEventId) {
+    fn push_back(&mut self, ts: DateTime<Utc>, value: Decimal, event_id: PredicateEventId) {
         self.dedup_ids.insert(event_id.clone());
         self.running_sum += value;
         self.entries.push_back((ts, value, event_id));
@@ -423,7 +432,7 @@ impl ValueBucket {
 ///
 /// State is per-instance; cross-process consistency + restart survival
 /// require a durable backend (separate PR).
-pub(crate) struct InMemoryPredicateStateBackend {
+pub struct InMemoryPredicateStateBackend {
     invocation_history: Mutex<HashMap<InvocationKey, InvocationBucket>>,
     value_history: Mutex<HashMap<ValueKey, ValueBucket>>,
     evictions: AtomicU64,
@@ -483,12 +492,28 @@ impl Default for InMemoryPredicateStateBackend {
     }
 }
 
+/// Compute the sliding-window cutoff `now - window` as a wall-clock
+/// timestamp. `window` is a [`std::time::Duration`] (always non-negative);
+/// `chrono::Duration::from_std` only fails if the window exceeds chrono's
+/// `i64`-millisecond range (~292 million years), which no parsed predicate
+/// window can reach — in that pathological case we saturate to `now`,
+/// meaning nothing is trimmed (conservative for a rate/value cap). Unlike
+/// the prior `Instant::checked_sub`, `DateTime<Utc>` subtraction never
+/// panics or underflows.
+fn window_cutoff(now: DateTime<Utc>, window: Duration) -> DateTime<Utc> {
+    match chrono::Duration::from_std(window) {
+        Ok(d) => now.checked_sub_signed(d).unwrap_or(now),
+        Err(_) => now,
+    }
+}
+
+#[async_trait]
 impl PredicateStateBackend for InMemoryPredicateStateBackend {
-    fn record_invocation(
+    async fn record_invocation(
         &self,
         key: &InvocationKey,
         event_id: &PredicateEventId,
-        now: Instant,
+        now: DateTime<Utc>,
         window: Duration,
     ) -> Result<u32, PredicateBackendError> {
         // Single-lock atomic record-and-read (codex Critical: must not
@@ -519,7 +544,7 @@ impl PredicateStateBackend for InMemoryPredicateStateBackend {
             }
         }
         let bucket = history.entry(key.clone()).or_default();
-        let cutoff = now.checked_sub(window).unwrap_or(now);
+        let cutoff = window_cutoff(now, window);
         // Trim entries outside the window via the bucket helper so the
         // `dedup_ids` set stays in sync.
         while let Some((front_ts, _)) = bucket.entries.front() {
@@ -555,11 +580,11 @@ impl PredicateStateBackend for InMemoryPredicateStateBackend {
         Ok(count)
     }
 
-    fn record_value(
+    async fn record_value(
         &self,
         key: &ValueKey,
         event_id: &PredicateEventId,
-        now: Instant,
+        now: DateTime<Utc>,
         value: Decimal,
         window: Duration,
     ) -> Result<Decimal, PredicateBackendError> {
@@ -579,7 +604,7 @@ impl PredicateStateBackend for InMemoryPredicateStateBackend {
             }
         }
         let bucket = history.entry(key.clone()).or_default();
-        let cutoff = now.checked_sub(window).unwrap_or(now);
+        let cutoff = window_cutoff(now, window);
         while let Some((ts, _, _)) = bucket.entries.front() {
             if *ts < cutoff {
                 bucket.pop_front();
@@ -624,7 +649,7 @@ impl PredicateStateBackend for InMemoryPredicateStateBackend {
     /// is hitting those keys (henrypark133 MED on PR #3635 5-19 review:
     /// the default no-op was misleading because callers expected it to
     /// reclaim memory).
-    fn evict_older_than(&self, cutoff: Instant) -> Result<u64, PredicateBackendError> {
+    async fn evict_older_than(&self, cutoff: DateTime<Utc>) -> Result<u64, PredicateBackendError> {
         let mut dropped: u64 = 0;
         {
             let mut history = match self.invocation_history.lock() {
@@ -767,6 +792,368 @@ fn evict_lru_value_for_tenant(
     }
 }
 
+/// Trait-level contract test harness for [`PredicateStateBackend`].
+///
+/// This establishes the **scaffolding pattern** (mirrors
+/// `ironclaw_memory::contract_tests`, #3918): every invariant the trait
+/// promises is defined once here as a `pub async fn` taking a factory
+/// closure, and every impl wires the suite once. Durable backends added
+/// in the durable-backend split (PRs 2/3 — Postgres, libSQL) drop into
+/// the same suite so isolation / dedup / window / atomicity invariants
+/// are proven for every impl by construction, not per-impl.
+///
+/// The in-memory backend is wired below via [`contract_test!`]; that is
+/// the proof that the harness shape works with one backend before the
+/// durable impls land.
+///
+/// Gated on `any(test, feature = "contract-tests")` so out-of-crate
+/// durable backends can depend on `ironclaw_hooks` with the
+/// `contract-tests` feature and run the same suite against their impl.
+#[cfg(any(test, feature = "contract-tests"))]
+pub mod contract {
+    use super::*;
+
+    use crate::identity::{ExtensionId, HookLocalId, HookVersion};
+
+    /// Factory closure shape every contract takes. Must return a fresh,
+    /// empty backend — contracts assume nothing leaks between calls.
+    fn hook_id() -> HookId {
+        HookId::derive(
+            &ExtensionId::new("ext").expect("ext id is valid"),
+            "1.0",
+            &HookLocalId::new("h").expect("hook local id is valid"),
+            HookVersion::ONE,
+        )
+    }
+
+    fn tenant_named(name: &str) -> TenantId {
+        TenantId::new(name).expect("valid tenant id")
+    }
+
+    fn ev(s: &str) -> PredicateEventId {
+        PredicateEventId::new_unchecked(s)
+    }
+
+    fn inv_key(tenant: &str, capability: &str) -> InvocationKey {
+        InvocationKey {
+            hook_id: hook_id(),
+            tenant_id: tenant_named(tenant),
+            capability: capability.to_string(),
+        }
+    }
+
+    fn val_key(tenant: &str, capability: &str, field: &str) -> ValueKey {
+        ValueKey {
+            hook_id: hook_id(),
+            tenant_id: tenant_named(tenant),
+            capability: capability.to_string(),
+            field: field.to_string(),
+        }
+    }
+
+    /// Shared fixed wall-clock base so contracts are deterministic.
+    fn base() -> DateTime<Utc> {
+        DateTime::from_timestamp(1_700_000_000, 0).expect("valid fixed timestamp")
+    }
+
+    fn at(secs: i64) -> DateTime<Utc> {
+        base() + chrono::Duration::seconds(secs)
+    }
+
+    /// Contract: invocations within the window accumulate.
+    pub async fn invocation_counts_within_window<B, F>(factory: F)
+    where
+        B: PredicateStateBackend,
+        F: Fn() -> B,
+    {
+        let backend = factory();
+        let key = inv_key("alpha", "cap.x");
+        let c1 = backend
+            .record_invocation(&key, &ev("e1"), at(0), Duration::from_secs(60))
+            .await
+            .expect("ok");
+        let c2 = backend
+            .record_invocation(&key, &ev("e2"), at(1), Duration::from_secs(60))
+            .await
+            .expect("ok");
+        assert_eq!(c1, 1);
+        assert_eq!(c2, 2);
+    }
+
+    /// Contract: entries older than the window are trimmed.
+    pub async fn invocation_trims_outside_window<B, F>(factory: F)
+    where
+        B: PredicateStateBackend,
+        F: Fn() -> B,
+    {
+        let backend = factory();
+        let key = inv_key("alpha", "cap.x");
+        let _ = backend
+            .record_invocation(&key, &ev("e1"), at(0), Duration::from_secs(10))
+            .await
+            .expect("ok");
+        let count = backend
+            .record_invocation(&key, &ev("e2"), at(100), Duration::from_secs(10))
+            .await
+            .expect("ok");
+        assert_eq!(count, 1, "earlier entry should be trimmed");
+    }
+
+    /// Contract: numeric values within the window sum.
+    pub async fn value_sums_within_window<B, F>(factory: F)
+    where
+        B: PredicateStateBackend,
+        F: Fn() -> B,
+    {
+        let backend = factory();
+        let key = val_key("alpha", "cap.x", "amount");
+        let s1 = backend
+            .record_value(
+                &key,
+                &ev("e1"),
+                at(0),
+                Decimal::from(50),
+                Duration::from_secs(60),
+            )
+            .await
+            .expect("ok");
+        let s2 = backend
+            .record_value(
+                &key,
+                &ev("e2"),
+                at(1),
+                Decimal::from(75),
+                Duration::from_secs(60),
+            )
+            .await
+            .expect("ok");
+        assert_eq!(s1, Decimal::from(50));
+        assert_eq!(s2, Decimal::from(125));
+    }
+
+    /// Contract: one tenant's counter never inherits another's increments.
+    pub async fn tenant_isolation<B, F>(factory: F)
+    where
+        B: PredicateStateBackend,
+        F: Fn() -> B,
+    {
+        let backend = factory();
+        let alpha = inv_key("alpha", "cap.x");
+        let beta = inv_key("beta", "cap.x");
+        for e in ["e1", "e2", "e3"] {
+            backend
+                .record_invocation(&alpha, &ev(e), at(0), Duration::from_secs(60))
+                .await
+                .expect("ok");
+        }
+        let beta_count = backend
+            .record_invocation(&beta, &ev("b1"), at(0), Duration::from_secs(60))
+            .await
+            .expect("ok");
+        assert_eq!(
+            beta_count, 1,
+            "tenant β's counter must not inherit α's increments"
+        );
+    }
+
+    /// Contract: re-emitting a recorded `event_id` is a no-op against the
+    /// invocation count (replay refusal — load-bearing, codex Critical on
+    /// PR #3635).
+    pub async fn duplicate_event_id_is_noop_for_invocations<B, F>(factory: F)
+    where
+        B: PredicateStateBackend,
+        F: Fn() -> B,
+    {
+        let backend = factory();
+        let key = inv_key("alpha", "cap.x");
+        let c1 = backend
+            .record_invocation(&key, &ev("event-A"), at(0), Duration::from_secs(60))
+            .await
+            .expect("ok");
+        let c2 = backend
+            .record_invocation(&key, &ev("event-A"), at(1), Duration::from_secs(60))
+            .await
+            .expect("ok");
+        let c3 = backend
+            .record_invocation(&key, &ev("event-B"), at(2), Duration::from_secs(60))
+            .await
+            .expect("ok");
+        assert_eq!(c1, 1);
+        assert_eq!(c2, 1, "duplicate event-A must not increment");
+        assert_eq!(c3, 2, "distinct event-B advances the count");
+    }
+
+    /// Contract: replayed `event_id` is a no-op against the value sum.
+    pub async fn duplicate_event_id_is_noop_for_values<B, F>(factory: F)
+    where
+        B: PredicateStateBackend,
+        F: Fn() -> B,
+    {
+        let backend = factory();
+        let key = val_key("alpha", "cap.x", "amount");
+        let s1 = backend
+            .record_value(
+                &key,
+                &ev("event-A"),
+                at(0),
+                Decimal::from(50),
+                Duration::from_secs(60),
+            )
+            .await
+            .expect("ok");
+        let s2 = backend
+            .record_value(
+                &key,
+                &ev("event-A"),
+                at(1),
+                Decimal::from(50),
+                Duration::from_secs(60),
+            )
+            .await
+            .expect("ok");
+        let s3 = backend
+            .record_value(
+                &key,
+                &ev("event-B"),
+                at(2),
+                Decimal::from(75),
+                Duration::from_secs(60),
+            )
+            .await
+            .expect("ok");
+        assert_eq!(s1, Decimal::from(50));
+        assert_eq!(
+            s2,
+            Decimal::from(50),
+            "duplicate event-A must not double-count"
+        );
+        assert_eq!(s3, Decimal::from(125));
+    }
+
+    /// Contract: an entry whose timestamp equals the cutoff is RETAINED
+    /// (`< cutoff` trim, not `<=`).
+    pub async fn invocation_retains_entry_at_exact_window_cutoff<B, F>(factory: F)
+    where
+        B: PredicateStateBackend,
+        F: Fn() -> B,
+    {
+        let backend = factory();
+        let key = inv_key("alpha", "cap.boundary");
+        let window = Duration::from_secs(60);
+        let _ = backend
+            .record_invocation(&key, &ev("e-at-t0"), at(0), window)
+            .await
+            .expect("ok");
+        let at_cutoff = backend
+            .record_invocation(&key, &ev("e-at-boundary"), at(60), window)
+            .await
+            .expect("ok");
+        assert_eq!(
+            at_cutoff, 2,
+            "entry whose timestamp equals the cutoff is retained (< cutoff, not <=)"
+        );
+    }
+
+    /// Contract: dedup is isolated across the invocation and value maps —
+    /// the same `event_id` in both must not collide.
+    pub async fn event_id_dedup_isolated_across_maps<B, F>(factory: F)
+    where
+        B: PredicateStateBackend,
+        F: Fn() -> B,
+    {
+        let backend = factory();
+        let inv = inv_key("alpha", "cap.cross");
+        let val = val_key("alpha", "cap.cross", "amount");
+        let shared = ev("shared-event-id");
+        let inv_count = backend
+            .record_invocation(&inv, &shared, at(0), Duration::from_secs(60))
+            .await
+            .expect("ok");
+        let val_sum = backend
+            .record_value(
+                &val,
+                &shared,
+                at(0),
+                Decimal::from(42),
+                Duration::from_secs(60),
+            )
+            .await
+            .expect("ok");
+        assert_eq!(
+            inv_count, 1,
+            "value map's dedup must not pre-empt invocation"
+        );
+        assert_eq!(
+            val_sum,
+            Decimal::from(42),
+            "invocation map's dedup must not pre-empt value"
+        );
+    }
+
+    /// Run every contract against `factory`. Per-impl test files invoke
+    /// this via [`contract_test!`].
+    #[macro_export]
+    macro_rules! predicate_backend_contract_test {
+        ($label:ident, $factory:expr) => {
+            mod $label {
+                #[tokio::test]
+                async fn invocation_counts_within_window() {
+                    $crate::predicate_state::contract::invocation_counts_within_window($factory)
+                        .await;
+                }
+                #[tokio::test]
+                async fn invocation_trims_outside_window() {
+                    $crate::predicate_state::contract::invocation_trims_outside_window($factory)
+                        .await;
+                }
+                #[tokio::test]
+                async fn value_sums_within_window() {
+                    $crate::predicate_state::contract::value_sums_within_window($factory).await;
+                }
+                #[tokio::test]
+                async fn tenant_isolation() {
+                    $crate::predicate_state::contract::tenant_isolation($factory).await;
+                }
+                #[tokio::test]
+                async fn duplicate_event_id_is_noop_for_invocations() {
+                    $crate::predicate_state::contract::duplicate_event_id_is_noop_for_invocations(
+                        $factory,
+                    )
+                    .await;
+                }
+                #[tokio::test]
+                async fn duplicate_event_id_is_noop_for_values() {
+                    $crate::predicate_state::contract::duplicate_event_id_is_noop_for_values(
+                        $factory,
+                    )
+                    .await;
+                }
+                #[tokio::test]
+                async fn invocation_retains_entry_at_exact_window_cutoff() {
+                    $crate::predicate_state::contract::invocation_retains_entry_at_exact_window_cutoff(
+                        $factory,
+                    )
+                    .await;
+                }
+                #[tokio::test]
+                async fn event_id_dedup_isolated_across_maps() {
+                    $crate::predicate_state::contract::event_id_dedup_isolated_across_maps($factory)
+                        .await;
+                }
+            }
+        };
+    }
+}
+
+// Wire the in-memory backend through the shared contract suite. This is
+// the proof that the harness shape works with one backend before the
+// durable impls (PRs 2/3) drop in.
+#[cfg(test)]
+crate::predicate_backend_contract_test!(
+    in_memory,
+    crate::predicate_state::InMemoryPredicateStateBackend::new
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -789,6 +1176,22 @@ mod tests {
     fn ev(s: &str) -> PredicateEventId {
         // Test fixture ids are well-formed; use unchecked.
         PredicateEventId::new_unchecked(s)
+    }
+
+    /// Fixed wall-clock base so window arithmetic is deterministic. The
+    /// clock is now `DateTime<Utc>` (serializable across processes) rather
+    /// than `Instant`; `+ chrono::Duration` advances it without the
+    /// `Instant::checked_sub` underflow hazard of the prior design.
+    fn base() -> DateTime<Utc> {
+        DateTime::from_timestamp(1_700_000_000, 0).expect("valid fixed timestamp")
+    }
+
+    fn at_secs(secs: i64) -> DateTime<Utc> {
+        base() + chrono::Duration::seconds(secs)
+    }
+
+    fn at_millis(ms: i64) -> DateTime<Utc> {
+        base() + chrono::Duration::milliseconds(ms)
     }
 
     /// serrrfirat MEDIUM regression on PR #3635: caller-facing
@@ -828,11 +1231,7 @@ mod tests {
 
     /// henrypark133 LOW on PR #3635 5-19 review (equality-oracle closure):
     /// two calls with bit-identical `(hook_id_bytes, capability_name)` must
-    /// produce DISTINCT synth ids. Otherwise the 64-char hex output would be
-    /// an equality oracle: an observer of two event ids could correlate
-    /// "same hook + same capability" across tenants. The process-global
-    /// counter + thread-local nonce in the hash input must drive divergence
-    /// even when the caller's inputs collide.
+    /// produce DISTINCT synth ids.
     #[test]
     fn synth_diverges_on_identical_inputs() {
         let a = PredicateEventId::synth(b"hookid-bytes", "cap.x");
@@ -855,245 +1254,36 @@ mod tests {
         );
     }
 
-    #[test]
-    fn in_memory_invocation_counts_within_window() {
-        let backend = InMemoryPredicateStateBackend::new();
-        let key = InvocationKey {
-            hook_id: hook_id(),
-            tenant_id: tenant(),
-            capability: "cap.x".to_string(),
-        };
-        let now = Instant::now();
-        let count_1 = backend
-            .record_invocation(&key, &ev("e1"), now, Duration::from_secs(60))
-            .expect("ok");
-        let count_2 = backend
-            .record_invocation(
-                &key,
-                &ev("e2"),
-                now + Duration::from_secs(1),
-                Duration::from_secs(60),
-            )
-            .expect("ok");
-        assert_eq!(count_1, 1);
-        assert_eq!(count_2, 2);
-    }
-
-    #[test]
-    fn in_memory_invocation_trims_outside_window() {
-        let backend = InMemoryPredicateStateBackend::new();
-        let key = InvocationKey {
-            hook_id: hook_id(),
-            tenant_id: tenant(),
-            capability: "cap.x".to_string(),
-        };
-        let t0 = Instant::now();
-        let _ = backend
-            .record_invocation(&key, &ev("e1"), t0, Duration::from_secs(10))
-            .expect("ok");
-        let count = backend
-            .record_invocation(
-                &key,
-                &ev("e2"),
-                t0 + Duration::from_secs(100),
-                Duration::from_secs(10),
-            )
-            .expect("ok");
-        assert_eq!(count, 1, "earlier entry should be trimmed");
-    }
-
-    #[test]
-    fn in_memory_value_sums_within_window() {
-        let backend = InMemoryPredicateStateBackend::new();
-        let key = ValueKey {
-            hook_id: hook_id(),
-            tenant_id: tenant(),
-            capability: "cap.x".to_string(),
-            field: "amount".to_string(),
-        };
-        let now = Instant::now();
-        let sum_1 = backend
-            .record_value(
-                &key,
-                &ev("e1"),
-                now,
-                Decimal::from(50),
-                Duration::from_secs(60),
-            )
-            .expect("ok");
-        let sum_2 = backend
-            .record_value(
-                &key,
-                &ev("e2"),
-                now + Duration::from_secs(1),
-                Decimal::from(75),
-                Duration::from_secs(60),
-            )
-            .expect("ok");
-        assert_eq!(sum_1, Decimal::from(50));
-        assert_eq!(sum_2, Decimal::from(125));
-    }
-
-    #[test]
-    fn in_memory_tenant_isolation() {
-        let backend = InMemoryPredicateStateBackend::new();
-        let alpha_key = InvocationKey {
-            hook_id: hook_id(),
-            tenant_id: TenantId::new("alpha").expect("ok"),
-            capability: "cap.x".to_string(),
-        };
-        let beta_key = InvocationKey {
-            hook_id: hook_id(),
-            tenant_id: TenantId::new("beta").expect("ok"),
-            capability: "cap.x".to_string(),
-        };
-        let now = Instant::now();
-        backend
-            .record_invocation(&alpha_key, &ev("e1"), now, Duration::from_secs(60))
-            .expect("ok");
-        backend
-            .record_invocation(&alpha_key, &ev("e2"), now, Duration::from_secs(60))
-            .expect("ok");
-        backend
-            .record_invocation(&alpha_key, &ev("e3"), now, Duration::from_secs(60))
-            .expect("ok");
-        let beta_count = backend
-            .record_invocation(&beta_key, &ev("b1"), now, Duration::from_secs(60))
-            .expect("ok");
-        assert_eq!(
-            beta_count, 1,
-            "tenant β's counter must not inherit α's increments"
-        );
-    }
-
-    /// Replay refusal: re-emitting the same `event_id` against an
-    /// already-recorded invocation must NOT increment the count.
-    /// Load-bearing for safe replay across host restarts (codex
-    /// Critical on PR #3635).
-    #[test]
-    fn in_memory_duplicate_event_id_is_a_noop_for_invocations() {
-        let backend = InMemoryPredicateStateBackend::new();
-        let key = InvocationKey {
-            hook_id: hook_id(),
-            tenant_id: tenant(),
-            capability: "cap.x".to_string(),
-        };
-        let now = Instant::now();
-        let count_1 = backend
-            .record_invocation(&key, &ev("event-A"), now, Duration::from_secs(60))
-            .expect("ok");
-        let count_2 = backend
-            .record_invocation(
-                &key,
-                &ev("event-A"),
-                now + Duration::from_secs(1),
-                Duration::from_secs(60),
-            )
-            .expect("ok");
-        let count_3 = backend
-            .record_invocation(
-                &key,
-                &ev("event-B"),
-                now + Duration::from_secs(2),
-                Duration::from_secs(60),
-            )
-            .expect("ok");
-        assert_eq!(count_1, 1);
-        assert_eq!(count_2, 1, "duplicate event-A must not increment");
-        assert_eq!(count_3, 2, "distinct event-B advances the count");
-    }
-
-    #[test]
-    fn in_memory_duplicate_event_id_is_a_noop_for_values() {
-        let backend = InMemoryPredicateStateBackend::new();
-        let key = ValueKey {
-            hook_id: hook_id(),
-            tenant_id: tenant(),
-            capability: "cap.x".to_string(),
-            field: "amount".to_string(),
-        };
-        let now = Instant::now();
-        let sum_1 = backend
-            .record_value(
-                &key,
-                &ev("event-A"),
-                now,
-                Decimal::from(50),
-                Duration::from_secs(60),
-            )
-            .expect("ok");
-        let sum_2 = backend
-            .record_value(
-                &key,
-                &ev("event-A"),
-                now + Duration::from_secs(1),
-                Decimal::from(50),
-                Duration::from_secs(60),
-            )
-            .expect("ok");
-        let sum_3 = backend
-            .record_value(
-                &key,
-                &ev("event-B"),
-                now + Duration::from_secs(2),
-                Decimal::from(75),
-                Duration::from_secs(60),
-            )
-            .expect("ok");
-        assert_eq!(sum_1, Decimal::from(50));
-        assert_eq!(
-            sum_2,
-            Decimal::from(50),
-            "duplicate event-A must not double-count the value"
-        );
-        assert_eq!(sum_3, Decimal::from(125));
-    }
-
     /// codex P1 #1 regression: dedup memory must be tied to the window,
     /// not a fixed-size ring. Under high-throughput keys (>256 distinct
     /// in-window events), an event re-emitted from far back in the
-    /// window was previously silently re-counted because its event-id
-    /// had aged out of the `recent_ids` ring. Now dedup checks against
-    /// every in-window entry, so this can't happen.
-    #[test]
-    fn dedup_memory_covers_full_window_under_high_throughput() {
+    /// window must still be deduped.
+    #[tokio::test]
+    async fn dedup_memory_covers_full_window_under_high_throughput() {
         let backend = InMemoryPredicateStateBackend::new();
         let key = InvocationKey {
             hook_id: hook_id(),
             tenant_id: tenant(),
             capability: "cap.busy".to_string(),
         };
-        let t0 = Instant::now();
         let window = Duration::from_secs(3600);
-        // Push 512 distinct events into the bucket within the window.
-        // The old implementation capped the dedup ring at 256, so
-        // event-0's id had aged out — a replay would have silently
-        // counted again. With the new design (dedup vs in-window
-        // entries), every replay is a no-op.
-        for i in 0..512u32 {
+        for i in 0..512i64 {
             let _ = backend
-                .record_invocation(
-                    &key,
-                    &ev(&format!("event-{i}")),
-                    t0 + Duration::from_millis(i as u64),
-                    window,
-                )
+                .record_invocation(&key, &ev(&format!("event-{i}")), at_millis(i), window)
+                .await
                 .expect("ok");
         }
         let count_after_inserts = backend
-            .record_invocation(
-                &key,
-                &ev("event-fresh"),
-                t0 + Duration::from_secs(1),
-                window,
-            )
+            .record_invocation(&key, &ev("event-fresh"), at_secs(1), window)
+            .await
             .expect("ok");
         assert_eq!(count_after_inserts, 513);
 
-        // Replay the FIRST event id — should be a no-op because
-        // event-0's timestamp is still in the window.
+        // Replay the FIRST event id — should be a no-op because event-0's
+        // timestamp is still in the window.
         let count_after_replay = backend
-            .record_invocation(&key, &ev("event-0"), t0 + Duration::from_secs(2), window)
+            .record_invocation(&key, &ev("event-0"), at_secs(2), window)
+            .await
             .expect("ok");
         assert_eq!(
             count_after_replay, 513,
@@ -1101,22 +1291,10 @@ mod tests {
         );
     }
 
-    /// codex P1 #2: in the prior design, `recent_ids` was a separate
-    /// ring from `entries`. A duplicate-replay after the window expired
-    /// would trim `entries` to empty, then the duplicate check would
-    /// hit `recent_ids` (still populated) and skip the new entry —
-    /// leaving the bucket empty AND retained, where the LRU search
-    /// filtered it out as a zombie. The new design dedupes against
-    /// `entries` directly, so once `entries` is empty there are no
-    /// dedup hits and the call adds a fresh entry. The unreachable-by-
-    /// record-flow empty-bucket case is still defended at the LRU
-    /// level (see `lru_evicts_empty_buckets_first`).
-    ///
-    /// LRU defense-in-depth: even if some path leaves an empty bucket,
-    /// the LRU eviction must prefer it as the first victim instead of
-    /// skipping it (which would let zombies accumulate).
-    #[test]
-    fn lru_evicts_empty_buckets_first() {
+    /// codex P1 #2 / LRU defense-in-depth: even if some path leaves an
+    /// empty bucket, the LRU eviction must prefer it as the first victim.
+    #[tokio::test]
+    async fn lru_evicts_empty_buckets_first() {
         let backend = InMemoryPredicateStateBackend::new();
         let empty_key = InvocationKey {
             hook_id: hook_id(),
@@ -1128,16 +1306,13 @@ mod tests {
             tenant_id: tenant(),
             capability: "cap.live".to_string(),
         };
-        // Manually craft an empty bucket alongside a live one to
-        // simulate the bug condition.
         {
             let mut map = backend.invocation_history.lock().expect("ok");
             map.insert(empty_key.clone(), InvocationBucket::default());
             let mut live = InvocationBucket::default();
-            live.entries.push_back((Instant::now(), ev("live-evt")));
+            live.entries.push_back((at_secs(0), ev("live-evt")));
             map.insert(live_key.clone(), live);
         }
-        // Force an LRU pass.
         {
             let mut map = backend.invocation_history.lock().expect("ok");
             evict_lru_invocation(&mut map, &backend.evictions);
@@ -1154,21 +1329,11 @@ mod tests {
         assert_eq!(backend.evictions_observed(), 1);
     }
 
-    /// henrypark133 missing-coverage on PR #3635: drive the LRU eviction
-    /// path through the **public** `record_invocation` API. A single
-    /// tenant inserting more than [`MAX_KEYS_PER_TENANT`] distinct keys
-    /// triggers the per-tenant eviction path (henrypark133 MED on PR
-    /// #3635 5-19 review); the global [`MAX_HISTORY_KEYS`] cap is still
-    /// the outer bound but the per-tenant quota fires first when a
-    /// single tenant is the noisy one.
-    #[test]
-    fn per_tenant_quota_holds_single_tenant_at_its_cap() {
+    /// henrypark133 missing-coverage on PR #3635: drive the per-tenant
+    /// eviction path through the public `record_invocation` API.
+    #[tokio::test]
+    async fn per_tenant_quota_holds_single_tenant_at_its_cap() {
         let backend = InMemoryPredicateStateBackend::new();
-        let now = Instant::now();
-        // Insert MAX_KEYS_PER_TENANT + 1 distinct keys for a single
-        // tenant via the public API. The (MAX_KEYS_PER_TENANT + 1)th
-        // record_invocation must trigger the per-tenant eviction so the
-        // map never exceeds MAX_KEYS_PER_TENANT for that tenant.
         for i in 0..=MAX_KEYS_PER_TENANT {
             let key = InvocationKey {
                 hook_id: hook_id(),
@@ -1176,7 +1341,13 @@ mod tests {
                 capability: format!("cap.{i}"),
             };
             let _ = backend
-                .record_invocation(&key, &ev(&format!("e{i}")), now, Duration::from_secs(60))
+                .record_invocation(
+                    &key,
+                    &ev(&format!("e{i}")),
+                    at_secs(0),
+                    Duration::from_secs(60),
+                )
+                .await
                 .expect("record ok");
         }
         let map = backend.invocation_history.lock().expect("lock ok");
@@ -1192,30 +1363,29 @@ mod tests {
         );
     }
 
-    /// henrypark133 MED on PR #3635 5-19 review: the per-tenant quota
-    /// must guarantee that a noisy tenant cannot evict another tenant's
-    /// bucket. Tenant α fills its quota; tenant β's prior bucket must
-    /// survive.
-    #[test]
-    fn per_tenant_quota_isolates_tenants_from_each_other() {
+    /// henrypark133 MED on PR #3635 5-19 review: the per-tenant quota must
+    /// guarantee that a noisy tenant cannot evict another tenant's bucket.
+    #[tokio::test]
+    async fn per_tenant_quota_isolates_tenants_from_each_other() {
         let backend = InMemoryPredicateStateBackend::new();
-        let now = Instant::now();
         let alpha = TenantId::new("alpha").expect("ok");
         let beta = TenantId::new("beta").expect("ok");
 
-        // β records first so its bucket is the "oldest" in the global
-        // map by insertion order. Without the per-tenant quota, α's
-        // overflow would evict β's bucket as the global LRU victim.
         let beta_key = InvocationKey {
             hook_id: hook_id(),
             tenant_id: beta.clone(),
             capability: "beta.cap".to_string(),
         };
         backend
-            .record_invocation(&beta_key, &ev("beta-evt"), now, Duration::from_secs(60))
+            .record_invocation(
+                &beta_key,
+                &ev("beta-evt"),
+                at_secs(0),
+                Duration::from_secs(60),
+            )
+            .await
             .expect("ok");
 
-        // α then floods past its per-tenant cap.
         for i in 0..=MAX_KEYS_PER_TENANT {
             let key = InvocationKey {
                 hook_id: hook_id(),
@@ -1226,14 +1396,13 @@ mod tests {
                 .record_invocation(
                     &key,
                     &ev(&format!("alpha-e{i}")),
-                    now + Duration::from_millis(i as u64 + 1),
+                    at_millis(i as i64 + 1),
                     Duration::from_secs(60),
                 )
+                .await
                 .expect("ok");
         }
 
-        // β's bucket must still be present — α's overflow evicted its
-        // own oldest-front bucket, not β's.
         let map = backend.invocation_history.lock().expect("ok");
         assert!(
             map.contains_key(&beta_key),
@@ -1246,15 +1415,11 @@ mod tests {
         );
     }
 
-    /// henrypark133 MED on PR #3635 5-19 review: `evict_older_than` was
-    /// previously a no-op `Ok(0)` default. The in-memory backend now
-    /// implements it to drop entries whose timestamp is strictly older
-    /// than the cutoff and remove buckets that become empty. Operator
-    /// reaper tasks rely on this to reclaim memory from idle keys.
-    #[test]
-    fn evict_older_than_drops_expired_entries_and_empty_buckets() {
+    /// henrypark133 MED on PR #3635 5-19 review: `evict_older_than` drops
+    /// entries strictly older than the cutoff and removes empty buckets.
+    #[tokio::test]
+    async fn evict_older_than_drops_expired_entries_and_empty_buckets() {
         let backend = InMemoryPredicateStateBackend::new();
-        let t0 = Instant::now();
         let window = Duration::from_secs(3600);
 
         let stale_key = InvocationKey {
@@ -1267,20 +1432,21 @@ mod tests {
             tenant_id: tenant(),
             capability: "cap.live".to_string(),
         };
-        // Two stale entries that should be reaped.
         backend
-            .record_invocation(&stale_key, &ev("s1"), t0, window)
+            .record_invocation(&stale_key, &ev("s1"), at_secs(0), window)
+            .await
             .expect("ok");
         backend
-            .record_invocation(&stale_key, &ev("s2"), t0 + Duration::from_secs(1), window)
+            .record_invocation(&stale_key, &ev("s2"), at_secs(1), window)
+            .await
             .expect("ok");
-        // One live entry from later in time.
         backend
-            .record_invocation(&live_key, &ev("l1"), t0 + Duration::from_secs(120), window)
+            .record_invocation(&live_key, &ev("l1"), at_secs(120), window)
+            .await
             .expect("ok");
 
-        let cutoff = t0 + Duration::from_secs(60);
-        let dropped = backend.evict_older_than(cutoff).expect("evict ok");
+        let cutoff = at_secs(60);
+        let dropped = backend.evict_older_than(cutoff).await.expect("evict ok");
         assert_eq!(dropped, 2, "two stale entries must be dropped");
 
         let map = backend.invocation_history.lock().expect("ok");
@@ -1295,13 +1461,10 @@ mod tests {
     }
 
     /// henrypark133 HIGH on PR #3635 5-19 review: NumericSum sums must be
-    /// O(1) per call via an incrementally-maintained `running_sum`. The
-    /// observable contract is unchanged, but the invariant is that
-    /// `running_sum` matches the deque sum after every push/pop. This
-    /// test exercises mixed insert + window-trim + replay scenarios and
-    /// confirms the reported sum tracks the actual deque content.
-    #[test]
-    fn numeric_sum_running_sum_matches_deque_after_trim_and_replay() {
+    /// O(1) via an incrementally-maintained `running_sum`; the invariant
+    /// is that `running_sum` matches the deque sum after every push/pop.
+    #[tokio::test]
+    async fn numeric_sum_running_sum_matches_deque_after_trim_and_replay() {
         let backend = InMemoryPredicateStateBackend::new();
         let key = ValueKey {
             hook_id: hook_id(),
@@ -1310,45 +1473,30 @@ mod tests {
             field: "amount".to_string(),
         };
         let window = Duration::from_secs(60);
-        let t0 = Instant::now();
 
         let s1 = backend
-            .record_value(&key, &ev("v1"), t0, Decimal::from(10), window)
+            .record_value(&key, &ev("v1"), at_secs(0), Decimal::from(10), window)
+            .await
             .expect("ok");
         assert_eq!(s1, Decimal::from(10));
 
         let s2 = backend
-            .record_value(
-                &key,
-                &ev("v2"),
-                t0 + Duration::from_secs(1),
-                Decimal::from(25),
-                window,
-            )
+            .record_value(&key, &ev("v2"), at_secs(1), Decimal::from(25), window)
+            .await
             .expect("ok");
         assert_eq!(s2, Decimal::from(35));
 
         // Replay v1: dedup, sum unchanged.
         let s_replay = backend
-            .record_value(
-                &key,
-                &ev("v1"),
-                t0 + Duration::from_secs(2),
-                Decimal::from(10),
-                window,
-            )
+            .record_value(&key, &ev("v1"), at_secs(2), Decimal::from(10), window)
+            .await
             .expect("ok");
         assert_eq!(s_replay, Decimal::from(35), "replay must not double-count");
 
         // Advance past window so both prior entries trim.
         let s_after_trim = backend
-            .record_value(
-                &key,
-                &ev("v3"),
-                t0 + Duration::from_secs(120),
-                Decimal::from(7),
-                window,
-            )
+            .record_value(&key, &ev("v3"), at_secs(120), Decimal::from(7), window)
+            .await
             .expect("ok");
         assert_eq!(
             s_after_trim,
@@ -1357,148 +1505,23 @@ mod tests {
         );
     }
 
-    /// henrypark133 missing-coverage on PR #3635: exact-cutoff boundary
-    /// behavior. The trim condition is `front_ts < cutoff`, so an entry
-    /// recorded at exactly `cutoff` is RETAINED, not trimmed. Pin that
-    /// boundary so a future refactor to `<=` would fail loud.
-    #[test]
-    fn in_memory_invocation_retains_entry_at_exact_window_cutoff() {
-        let backend = InMemoryPredicateStateBackend::new();
-        let key = InvocationKey {
-            hook_id: hook_id(),
-            tenant_id: tenant(),
-            capability: "cap.boundary".to_string(),
-        };
-        let window = Duration::from_secs(60);
-        let t0 = Instant::now();
-        // Record at t0.
-        let _ = backend
-            .record_invocation(&key, &ev("e-at-t0"), t0, window)
-            .expect("ok");
-        // At t0 + window, the cutoff is exactly t0; t0 is NOT strictly less
-        // than t0, so the original entry must still be in-window.
-        let count_at_exact_cutoff = backend
-            .record_invocation(&key, &ev("e-at-boundary"), t0 + window, window)
-            .expect("ok");
-        assert_eq!(
-            count_at_exact_cutoff, 2,
-            "entry whose timestamp equals the cutoff is retained (< cutoff trim, not <=)"
-        );
-        // One nanosecond past the cutoff, the original entry IS trimmed.
-        let count_just_past = backend
-            .record_invocation(
-                &key,
-                &ev("e-just-past"),
-                t0 + window + Duration::from_nanos(1),
-                window,
-            )
-            .expect("ok");
-        // After the just-past call: e-at-t0 is now strictly older than
-        // cutoff and gets trimmed; e-at-boundary and e-just-past remain.
-        assert_eq!(
-            count_just_past, 2,
-            "entry strictly older than cutoff is trimmed"
-        );
-    }
-
-    /// henrypark133 missing-coverage on PR #3635: cross-type event-id
-    /// isolation. The same `event_id` used in BOTH
-    /// `record_invocation` and `record_value` must NOT collide — the two
-    /// maps key on disjoint types (`InvocationKey` vs `ValueKey`), so
-    /// dedup in one must not suppress the other.
-    #[test]
-    fn event_id_dedup_is_isolated_across_invocation_and_value_maps() {
-        let backend = InMemoryPredicateStateBackend::new();
-        let inv_key = InvocationKey {
-            hook_id: hook_id(),
-            tenant_id: tenant(),
-            capability: "cap.cross".to_string(),
-        };
-        let val_key = ValueKey {
-            hook_id: hook_id(),
-            tenant_id: tenant(),
-            capability: "cap.cross".to_string(),
-            field: "amount".to_string(),
-        };
-        let shared = ev("shared-event-id");
-        let now = Instant::now();
-        let inv_count = backend
-            .record_invocation(&inv_key, &shared, now, Duration::from_secs(60))
-            .expect("ok");
-        let val_sum = backend
-            .record_value(
-                &val_key,
-                &shared,
-                now,
-                Decimal::from(42),
-                Duration::from_secs(60),
-            )
-            .expect("ok");
-        assert_eq!(
-            inv_count, 1,
-            "invocation count records normally; value map's dedup state must not pre-empt it"
-        );
-        assert_eq!(
-            val_sum,
-            Decimal::from(42),
-            "value sum records normally; invocation map's dedup state must not pre-empt it"
-        );
-        // Replay each — within its own map the shared id is now a dup.
-        let inv_count_replay = backend
-            .record_invocation(&inv_key, &shared, now, Duration::from_secs(60))
-            .expect("ok");
-        let val_sum_replay = backend
-            .record_value(
-                &val_key,
-                &shared,
-                now,
-                Decimal::from(42),
-                Duration::from_secs(60),
-            )
-            .expect("ok");
-        assert_eq!(inv_count_replay, 1, "intra-map dedup still works");
-        assert_eq!(
-            val_sum_replay,
-            Decimal::from(42),
-            "intra-map dedup still works"
-        );
-    }
-
-    /// henrypark133 missing-coverage on PR #3635: prove the atomic
-    /// record-and-read contract holds under concurrent writers. N threads
-    /// each call `record_invocation` once with a distinct `event_id`; the
-    /// final observed count must equal N (no lost-update race).
-    /// Threat-model finding **D5** regression: an attacker that triggers a
-    /// hot capability with a very large declared window can otherwise force
-    /// the backend to retain every invocation in the window, exhausting
-    /// memory. The per-key sample cap drops oldest samples first, so the
-    /// bucket never grows past [`MAX_SAMPLES_PER_KEY`].
-    ///
-    /// Round 3 of PR #3573 introduced this defense inline in
-    /// `evaluator.rs`; the predicate-state extraction in PR #3635 moved the
-    /// bookkeeping into [`PredicateStateBackend`] but initially missed
-    /// porting the cap — this test pins it in the backend.
-    #[test]
-    fn record_invocation_caps_samples_per_key_under_attacker_pressure() {
+    /// Threat-model finding D5: per-key sample cap drops oldest samples
+    /// first so the bucket never grows past `MAX_SAMPLES_PER_KEY` under
+    /// attacker-triggered hot capabilities.
+    #[tokio::test]
+    async fn record_invocation_caps_samples_per_key_under_attacker_pressure() {
         let backend = InMemoryPredicateStateBackend::new();
         let key = InvocationKey {
             hook_id: hook_id(),
             tenant_id: tenant(),
             capability: "cap.hot".to_string(),
         };
-        let t0 = Instant::now();
-        // Window large enough that no entry trims for time; the cap is the
-        // only thing keeping the bucket bounded.
         let window = Duration::from_secs(3600);
         let overflow = MAX_SAMPLES_PER_KEY + 64;
         for i in 0..overflow {
             let _ = backend
-                .record_invocation(
-                    &key,
-                    &ev(&format!("evt-{i}")),
-                    t0 + Duration::from_millis(i as u64),
-                    window,
-                )
+                .record_invocation(&key, &ev(&format!("evt-{i}")), at_millis(i as i64), window)
+                .await
                 .expect("ok");
         }
         let history = backend.invocation_history.lock().expect("lock");
@@ -1508,15 +1531,11 @@ mod tests {
             "bucket must not grow past per-key cap; got {}",
             bucket.entries.len()
         );
-        // The cap drop-oldest path; with a fresh insert each iteration the
-        // bucket should sit exactly at the cap.
         assert_eq!(
             bucket.entries.len(),
             MAX_SAMPLES_PER_KEY,
             "drop-oldest must keep the bucket pinned at the cap under sustained pressure"
         );
-        // dedup_ids must stay in sync with entries — pop_front decrements
-        // both via the bucket helper.
         assert_eq!(
             bucket.dedup_ids.len(),
             bucket.entries.len(),
@@ -1524,14 +1543,10 @@ mod tests {
         );
     }
 
-    /// Threat-model finding **D5** regression for the NumericSum path. In
-    /// addition to bounding bucket size, the `running_sum` invariant
-    /// (`running_sum == sum(entries values)`) must survive cap-driven
-    /// eviction — `pop_front` is responsible for decrementing the sum on
-    /// each drop, so the reported sum tracks only the retained
-    /// most-recent `MAX_SAMPLES_PER_KEY` values.
-    #[test]
-    fn record_value_evicts_oldest_keeping_running_sum_consistent() {
+    /// Threat-model finding D5 for the NumericSum path: `running_sum`
+    /// invariant must survive cap-driven eviction.
+    #[tokio::test]
+    async fn record_value_evicts_oldest_keeping_running_sum_consistent() {
         let backend = InMemoryPredicateStateBackend::new();
         let key = ValueKey {
             hook_id: hook_id(),
@@ -1539,22 +1554,19 @@ mod tests {
             capability: "cap.spend".to_string(),
             field: "amount".to_string(),
         };
-        let t0 = Instant::now();
         let window = Duration::from_secs(3600);
         let overflow = MAX_SAMPLES_PER_KEY + 32;
-        // Use a constant value so the expected post-cap sum is easy to
-        // compute: it must equal MAX_SAMPLES_PER_KEY * value once the cap
-        // is saturated.
         let value = Decimal::from(3);
         for i in 0..overflow {
             let _ = backend
                 .record_value(
                     &key,
                     &ev(&format!("v-{i}")),
-                    t0 + Duration::from_millis(i as u64),
+                    at_millis(i as i64),
                     value,
                     window,
                 )
+                .await
                 .expect("ok");
         }
         let history = backend.value_history.lock().expect("lock");
@@ -1565,9 +1577,6 @@ mod tests {
             bucket.entries.len()
         );
         assert_eq!(bucket.entries.len(), MAX_SAMPLES_PER_KEY);
-        // Running-sum invariant: must match the actual deque content
-        // exactly. If `pop_front` failed to decrement on eviction, the
-        // sum would still reflect the dropped values.
         let deque_sum: Decimal = bucket.entries.iter().map(|(_, v, _)| *v).sum();
         assert_eq!(
             bucket.running_sum, deque_sum,
@@ -1585,37 +1594,41 @@ mod tests {
         );
     }
 
-    #[test]
-    fn in_memory_record_invocation_is_atomic_under_concurrent_writers() {
+    /// henrypark133 missing-coverage on PR #3635: prove the atomic
+    /// record-and-read contract holds under concurrent writers. N tasks
+    /// each call `record_invocation` once with a distinct `event_id`; the
+    /// final observed count must equal N (no lost-update race).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn record_invocation_is_atomic_under_concurrent_writers() {
         use std::sync::Arc as StdArc;
-        use std::thread;
         let backend = StdArc::new(InMemoryPredicateStateBackend::new());
         let key = InvocationKey {
             hook_id: hook_id(),
             tenant_id: tenant(),
             capability: "cap.concurrent".to_string(),
         };
-        let now = Instant::now();
+        let now = at_secs(0);
         const N: usize = 32;
-        let handles: Vec<_> = (0..N)
-            .map(|i| {
-                let backend = StdArc::clone(&backend);
-                let key = key.clone();
-                let ev = ev(&format!("event-{i}"));
-                thread::spawn(move || {
-                    backend
-                        .record_invocation(&key, &ev, now, Duration::from_secs(60))
-                        .expect("ok")
-                })
-            })
-            .collect();
+        let mut handles = Vec::with_capacity(N);
+        for i in 0..N {
+            let backend = StdArc::clone(&backend);
+            let key = key.clone();
+            let ev = ev(&format!("event-{i}"));
+            handles.push(tokio::spawn(async move {
+                backend
+                    .record_invocation(&key, &ev, now, Duration::from_secs(60))
+                    .await
+                    .expect("ok")
+            }));
+        }
         for h in handles {
-            h.join().expect("thread joined");
+            h.await.expect("task joined");
         }
         // Re-read via a no-op record with a duplicate id to observe the
         // final count without inserting a new entry.
         let final_count = backend
             .record_invocation(&key, &ev("event-0"), now, Duration::from_secs(60))
+            .await
             .expect("ok");
         assert_eq!(
             final_count as usize, N,

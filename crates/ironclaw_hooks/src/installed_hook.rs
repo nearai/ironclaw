@@ -61,7 +61,7 @@ impl RestrictedBeforeCapabilityHook for PredicateBackedBeforeCapabilityHook {
         // `&'static str` — so we can surface a richer model-visible label
         // (`hook_rate_limit`, `hook_value_cap`, ...) without opening a
         // free-form text channel.
-        match self.evaluator.evaluate(self.hook_id, &self.spec, ctx) {
+        match self.evaluator.evaluate(self.hook_id, &self.spec, ctx).await {
             EvaluatorDecision::Allow => {
                 // The predicate did not match — the hook has no opinion. The
                 // dispatcher recognizes `pass()` as a no-opinion contribution
