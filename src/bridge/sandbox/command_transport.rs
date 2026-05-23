@@ -49,6 +49,11 @@ impl SandboxCommandTransport for DockerSandboxCommandTransport {
         &self,
         request: CommandExecutionRequest,
     ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+        if request.command.contains('\0') {
+            return Err(RuntimeProcessError::ExecutionFailed(
+                "sandbox shell command must not contain null bytes".to_string(),
+            ));
+        }
         if !request.extra_env.is_empty() {
             return Err(RuntimeProcessError::ExecutionFailed(
                 "sandbox shell environment overrides are not supported yet".to_string(),
@@ -134,9 +139,14 @@ fn parse_shell_output(output: Value) -> Result<(String, i64), RuntimeProcessErro
     let stdout = output
         .get("stdout")
         .and_then(Value::as_str)
-        .or_else(|| output.get("output").and_then(Value::as_str))
-        .unwrap_or("");
+        .or_else(|| output.get("output").and_then(Value::as_str));
     let stderr = output.get("stderr").and_then(Value::as_str).unwrap_or("");
+    if stdout.is_none() && stderr.is_empty() {
+        return Err(RuntimeProcessError::ExecutionFailed(
+            "sandbox daemon shell output missing stdout/output".to_string(),
+        ));
+    }
+    let stdout = stdout.unwrap_or("");
     let exit_code = output
         .get("exit_code")
         .and_then(Value::as_i64)
@@ -173,6 +183,11 @@ fn container_workdir(workdir: Option<&str>) -> Result<String, RuntimeProcessErro
     let Some(workdir) = workdir.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(CONTAINER_PROJECT_ROOT.to_string());
     };
+    if workdir.contains('\0') {
+        return Err(RuntimeProcessError::ExecutionFailed(
+            "sandbox shell workdir must not contain null bytes".to_string(),
+        ));
+    }
     if workdir == CONTAINER_PROJECT_ROOT {
         return Ok(CONTAINER_PROJECT_ROOT.to_string());
     }
@@ -309,6 +324,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejects_null_byte_command() {
+        let transport = ScriptedTransport::new(vec![]);
+        let adapter = DockerSandboxCommandTransport::new(transport);
+
+        let error = adapter
+            .run_command(request("printf ok\0ignored"))
+            .await
+            .unwrap_err();
+
+        assert!(format!("{error}").contains("null bytes"));
+    }
+
+    #[tokio::test]
     async fn accepts_merged_daemon_output_field() {
         let transport = ScriptedTransport::new(vec![Ok(ok_response(serde_json::json!({
             "output": "compiler says no",
@@ -336,6 +364,14 @@ mod tests {
         assert!(container_workdir(Some("/tmp")).is_err());
         assert!(container_workdir(Some("../escape")).is_err());
         assert!(container_workdir(Some("/project/../escape")).is_err());
+        assert!(container_workdir(Some("/project/\0/../etc")).is_err());
+    }
+
+    #[test]
+    fn container_workdir_handles_empty_and_whitespace_only_input() {
+        assert_eq!(container_workdir(Some("")).unwrap(), "/project");
+        assert_eq!(container_workdir(Some("   ")).unwrap(), "/project");
+        assert_eq!(container_workdir(Some("/project/")).unwrap(), "/project/");
     }
 
     #[tokio::test]
@@ -415,6 +451,14 @@ mod tests {
             ok_response(serde_json::json!({
                 "stdout": "missing exit code",
             })),
+            ok_response(serde_json::json!({
+                "exit_code": 0,
+            })),
+            ok_response(serde_json::json!({
+                "stdout": null,
+                "output": null,
+                "exit_code": 0,
+            })),
         ];
 
         for response in cases {
@@ -439,5 +483,17 @@ mod tests {
         let output = adapter.run_command(request("cargo test")).await.unwrap();
 
         assert_eq!(output.output, "out\nerr");
+    }
+
+    #[tokio::test]
+    async fn missing_stdout_and_output_fields_are_rejected() {
+        let transport = ScriptedTransport::new(vec![Ok(ok_response(serde_json::json!({
+            "exit_code": 0,
+        })))]);
+        let adapter = DockerSandboxCommandTransport::new(transport);
+
+        let error = adapter.run_command(request("pwd")).await.unwrap_err();
+
+        assert!(format!("{error}").contains("missing stdout/output"));
     }
 }

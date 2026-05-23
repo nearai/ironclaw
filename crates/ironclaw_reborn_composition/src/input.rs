@@ -164,9 +164,11 @@ impl RebornBuildInput {
         mut self,
         process_port: Arc<TenantSandboxProcessPort>,
     ) -> Self {
-        self.tenant_sandbox_process_port = Some(
-            TenantSandboxProcessPortInput::ProductionCandidate(process_port),
-        );
+        self.tenant_sandbox_process_port = Some(if process_port.is_scope_bound() {
+            TenantSandboxProcessPortInput::ProductionCandidate(process_port)
+        } else {
+            TenantSandboxProcessPortInput::Unverified(process_port)
+        });
         self
     }
 

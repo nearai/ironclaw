@@ -528,6 +528,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tenant_sandbox_process_port_scoped_accepts_matching_scope() {
+        let transport = std::sync::Arc::new(RecordingSandboxTransport::default());
+        let port = TenantSandboxProcessPort::new_scoped(
+            transport.clone(),
+            TenantSandboxProcessScope::new(
+                TenantId::new("tenant-a").unwrap(),
+                ProjectId::new("project-a").unwrap(),
+            ),
+        );
+
+        let output = port
+            .run_command(CommandExecutionRequest {
+                scope: ResourceScope {
+                    tenant_id: TenantId::new("tenant-a").unwrap(),
+                    user_id: ironclaw_host_api::UserId::new("user-a").unwrap(),
+                    agent_id: None,
+                    project_id: Some(ProjectId::new("project-a").unwrap()),
+                    mission_id: None,
+                    thread_id: None,
+                    invocation_id: ironclaw_host_api::InvocationId::new(),
+                },
+                mounts: None,
+                command: "echo sandbox".to_string(),
+                workdir: None,
+                timeout_secs: None,
+                extra_env: HashMap::new(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(output.output, "echo sandbox");
+        let requests = transport.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].scope.project_id,
+            Some(ProjectId::new("project-a").unwrap())
+        );
+    }
+
+    #[tokio::test]
     async fn tenant_sandbox_process_port_propagates_transport_error() {
         let port = TenantSandboxProcessPort::new(std::sync::Arc::new(FailingSandboxTransport));
 

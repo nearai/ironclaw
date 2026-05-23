@@ -104,6 +104,27 @@ fn production_config(
     config
 }
 
+fn apply_tenant_sandbox_process_port<F, G, S, R>(
+    services: HostRuntimeServices<F, G, S, R>,
+    process_port: Option<TenantSandboxProcessPortInput>,
+) -> HostRuntimeServices<F, G, S, R>
+where
+    F: ironclaw_filesystem::RootFilesystem + 'static,
+    G: ironclaw_resources::ResourceGovernor + 'static,
+    S: ironclaw_processes::ProcessStore + 'static,
+    R: ironclaw_processes::ProcessResultStore + 'static,
+{
+    match process_port {
+        Some(TenantSandboxProcessPortInput::ProductionCandidate(process_port)) => {
+            services.with_production_tenant_sandbox_process_port(process_port)
+        }
+        Some(TenantSandboxProcessPortInput::Unverified(process_port)) => {
+            services.with_tenant_sandbox_process_port_dyn(process_port)
+        }
+        None => services,
+    }
+}
+
 async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, RebornBuildError> {
     let RebornStorageInput::LocalDev {
         root,
@@ -180,16 +201,9 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     if let Some(runtime_policy) = input.runtime_policy {
         services = services.with_runtime_policy(runtime_policy);
     }
-    if let Some(process_port) = input.tenant_sandbox_process_port {
-        services = match process_port {
-            TenantSandboxProcessPortInput::ProductionCandidate(process_port) => {
-                services.with_production_tenant_sandbox_process_port(process_port)
-            }
-            TenantSandboxProcessPortInput::Unverified(process_port) => {
-                services.with_tenant_sandbox_process_port_dyn(process_port)
-            }
-        };
-    }
+    // Local-dev deliberately accepts injected process ports so composition tests
+    // can exercise tenant-sandbox routing without requiring Docker.
+    services = apply_tenant_sandbox_process_port(services, input.tenant_sandbox_process_port);
 
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
         Arc::new(services.host_runtime_for_local_testing());
@@ -495,16 +509,8 @@ async fn build_libsql_production(
     .with_filesystem_turn_state_store(scoped_filesystem)
     .with_run_profile_resolver(planned_run_profile_resolver()?)
     .with_turn_run_wake_notifier(production_wiring.turn_run_wake_notifier);
-    if let Some(process_port) = production_wiring.tenant_sandbox_process_port {
-        services = match process_port {
-            TenantSandboxProcessPortInput::ProductionCandidate(process_port) => {
-                services.with_production_tenant_sandbox_process_port(process_port)
-            }
-            TenantSandboxProcessPortInput::Unverified(process_port) => {
-                services.with_tenant_sandbox_process_port_dyn(process_port)
-            }
-        };
-    }
+    services =
+        apply_tenant_sandbox_process_port(services, production_wiring.tenant_sandbox_process_port);
 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
         Arc::new(services.turn_coordinator_for_production()?);
@@ -573,16 +579,8 @@ async fn build_postgres_production(
     .with_filesystem_turn_state_store(scoped_filesystem)
     .with_run_profile_resolver(planned_run_profile_resolver()?)
     .with_turn_run_wake_notifier(production_wiring.turn_run_wake_notifier);
-    if let Some(process_port) = production_wiring.tenant_sandbox_process_port {
-        services = match process_port {
-            TenantSandboxProcessPortInput::ProductionCandidate(process_port) => {
-                services.with_production_tenant_sandbox_process_port(process_port)
-            }
-            TenantSandboxProcessPortInput::Unverified(process_port) => {
-                services.with_tenant_sandbox_process_port_dyn(process_port)
-            }
-        };
-    }
+    services =
+        apply_tenant_sandbox_process_port(services, production_wiring.tenant_sandbox_process_port);
 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
         Arc::new(services.turn_coordinator_for_production()?);
