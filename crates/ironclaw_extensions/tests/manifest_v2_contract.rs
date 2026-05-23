@@ -46,7 +46,6 @@ default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/example/echo.input.v1.json"
 output_schema_ref = "schemas/example/echo.output.v1.json"
-prompt_doc_ref = "prompt/example/echo.md"
 "#,
         schema = MANIFEST_SCHEMA_VERSION,
         ext = extension_id,
@@ -70,7 +69,7 @@ fn parses_minimum_valid_v2_manifest_for_installed_third_party_extension() {
     let cap = &manifest.capabilities[0];
     assert_eq!(cap.visibility, CapabilityVisibility::Model);
     assert_eq!(cap.default_permission, PermissionMode::Allow);
-    assert!(cap.prompt_doc_ref.is_some());
+    assert!(cap.prompt_doc_ref.is_none());
 }
 
 #[test]
@@ -302,7 +301,7 @@ required_host_ports = ["host.does.not.exist"]
 }
 
 #[test]
-fn rejects_model_visible_capability_without_prompt_doc_ref() {
+fn parses_model_visible_capability_without_prompt_doc_ref() {
     let toml = format!(
         r#"
 schema_version = "{schema}"
@@ -326,12 +325,10 @@ output_schema_ref = "schemas/acme/echo.output.v1.json"
 "#,
         schema = MANIFEST_SCHEMA_VERSION,
     );
-    let err =
-        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap_err();
-    assert!(
-        matches!(err, ManifestV2Error::MissingPromptDocRef { .. }),
-        "{err:?}"
-    );
+    let manifest =
+        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap();
+    assert_eq!(manifest.capabilities.len(), 1);
+    assert!(manifest.capabilities[0].prompt_doc_ref.is_none());
 }
 
 #[test]

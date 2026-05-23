@@ -133,9 +133,7 @@ fn first_party_capability_manifest(
         output_schema_ref: CapabilityProfileSchemaRef::new(format!(
             "schemas/builtin/{schema_name}.output.v1.json"
         ))?,
-        prompt_doc_ref: Some(CapabilityProfileSchemaRef::new(format!(
-            "prompts/builtin/{schema_name}.md"
-        ))?),
+        prompt_doc_ref: None,
         required_host_ports: Vec::new(),
         resource_profile,
     })

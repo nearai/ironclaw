@@ -11,9 +11,8 @@
 //! - extension IDs starting with `ironclaw.` are reserved for HostBundled;
 //! - installed manifests must use `wasm` / `mcp` / `script` runtimes only;
 //! - every capability declares `visibility`, relative
-//!   [`CapabilityProfileSchemaRef`] input/output schema refs, optional
-//!   `prompt_doc_ref` (required when visibility is `model`), and the set of
-//!   host ports it needs;
+//!   [`CapabilityProfileSchemaRef`] input/output schema refs, optional lazy
+//!   `prompt_doc_ref`, and the set of host ports it needs;
 //! - host port names validate against a host-defined [`HostPortCatalog`].
 //!
 //! This module does **not** dispatch capabilities, load WASM modules, evaluate
@@ -475,8 +474,6 @@ pub enum ManifestV2Error {
         capability: CapabilityId,
         port: HostPortId,
     },
-    #[error("capability {capability} is model-visible but has no prompt_doc_ref")]
-    MissingPromptDocRef { capability: CapabilityId },
     #[error("duplicate capability id {id}")]
     DuplicateCapability { id: CapabilityId },
     #[error("capability id {id} must be provider-prefixed with '{expected}.' (extension id)")]
@@ -814,10 +811,6 @@ impl CapabilityDeclV2 {
                 })
             })
             .transpose()?;
-
-        if matches!(raw.visibility, CapabilityVisibility::Model) && prompt_doc_ref.is_none() {
-            return Err(ManifestV2Error::MissingPromptDocRef { capability: id });
-        }
 
         let mut required_host_ports_seen = BTreeSet::new();
         let mut required_host_ports = Vec::with_capacity(raw.required_host_ports.len());

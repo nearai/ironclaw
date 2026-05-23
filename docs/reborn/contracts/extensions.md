@@ -114,7 +114,6 @@ default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/echo/say.input.v1.json"
 output_schema_ref = "schemas/echo/say.output.v1.json"
-prompt_doc_ref = "prompts/echo/say.md"
 ```
 
 Legacy host-bundled script/CLI manifest:
@@ -142,7 +141,6 @@ default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/project-tools/pytest.input.v1.json"
 output_schema_ref = "schemas/project-tools/pytest.output.v1.json"
-prompt_doc_ref = "prompts/project-tools/pytest.md"
 ```
 
 Legacy host-bundled MCP adapter manifest:
@@ -217,8 +215,8 @@ Rules:
 - `ironclaw_extensions` parses the envelope, validates host API refs, and dispatches to a composition-wired host API contract registry.
 - Domain contract handlers own section pattern validation, cardinality, typed section schema validation, and catalog/read-model projection.
 - Domain contract handlers must not treat manifest `trust` / `descriptor_trust_default` as effective runtime authority. Effective trust and grants come from composition-owned trust policy evaluation, not self-declared manifest metadata.
-- Model-visible capability-provider sections must carry enough cold metadata to project an LLM-facing tool descriptor: stable capability ID, human description, input schema ref, output schema ref, prompt docs ref, effects, permission default, and visibility.
-- The LLM consumes the projected hot capability surface, not the raw manifest section. Catalog publication resolves schema/doc refs into compact per-turn tool descriptors.
+- Model-visible capability-provider sections must carry enough cold metadata to project an LLM-facing tool descriptor: stable capability ID, human description, input schema ref, output schema ref, effects, permission default, and visibility. `prompt_doc_ref` is optional lazy help metadata, not part of the mandatory per-turn surface.
+- The LLM consumes the projected hot capability surface, not the raw manifest section. Catalog publication resolves schema refs into compact per-turn tool descriptors and resolves `prompt_doc_ref` only when one is declared.
 - Unknown `host_api.id` values fail closed.
 - Repeating the same `host_api.id` is allowed only when that contract declares multi-instance support.
 - Every `[[host_api]]` must reference an existing explicit `section` path.
@@ -275,8 +273,7 @@ Rules:
 - effects must parse as `EffectKind`.
 - default permission must parse as `PermissionMode`.
 - top-level legacy capabilities must provide `input_schema_ref` and
-  `output_schema_ref`; model-visible capabilities must also provide
-  `prompt_doc_ref`.
+  `output_schema_ref`; `prompt_doc_ref` is optional lazy help metadata.
 - during this cutover, `CapabilityDescriptor.parameters_schema` is a projection
   placeholder of the form `{ "$ref": input_schema_ref }`. Catalog publication is
   responsible for resolving schema/doc refs into hot per-turn tool descriptors.

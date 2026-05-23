@@ -27,6 +27,8 @@ use ironclaw_turns::{
 };
 use tokio::sync::Notify;
 
+use crate::capability_info::{self, CapabilityInfoEntry};
+
 const PROVIDER_TOOL_NAME_MAX_BYTES: usize = 64;
 const PROVIDER_TOOL_NAME_DIGEST_BYTES: usize = 32;
 
@@ -196,6 +198,7 @@ struct SurfaceCapabilitySnapshot {
     estimate: ResourceEstimate,
     safe_description: String,
     parameters_schema: serde_json::Value,
+    effects: Vec<EffectKind>,
     provider_tool_name: String,
 }
 
@@ -205,11 +208,104 @@ struct SurfaceSnapshot {
     provider_names: HashMap<String, CapabilityId>,
 }
 
+impl SurfaceSnapshot {
+    fn capability_info(&self, requested: &str) -> Option<CapabilityInfoEntry<'_>> {
+        if let Some(capability_id) = self.provider_names.get(requested)
+            && !capability_info::is_capability_id(capability_id)
+            && let Some(capability) = self.capabilities.get(capability_id)
+        {
+            return Some(capability.capability_info(capability_id));
+        }
+        let requested_id = CapabilityId::new(requested).ok()?;
+        self.capabilities
+            .iter()
+            .find(|(capability_id, _)| *capability_id == &requested_id)
+            .map(|(capability_id, capability)| capability.capability_info(capability_id))
+    }
+}
+
+impl SurfaceCapabilitySnapshot {
+    fn capability_info<'a>(&'a self, capability_id: &'a CapabilityId) -> CapabilityInfoEntry<'a> {
+        CapabilityInfoEntry {
+            capability_id,
+            provider_tool_name: &self.provider_tool_name,
+            safe_description: &self.safe_description,
+            parameters_schema: &self.parameters_schema,
+            runtime: self.runtime,
+            effects: &self.effects,
+        }
+    }
+}
+
 struct PreparedProviderToolCall {
     surface_version: ironclaw_turns::run_profile::CapabilitySurfaceVersion,
     capability_id: CapabilityId,
     provider_turn_id: String,
     normalized_arguments: serde_json::Value,
+}
+
+#[derive(Clone, Copy, Default)]
+struct SyntheticCapabilityTools;
+
+struct PreparedSyntheticToolCall {
+    capability_id: CapabilityId,
+    normalized_arguments: serde_json::Value,
+}
+
+impl SyntheticCapabilityTools {
+    fn reserve_provider_names(
+        self,
+        provider_names: &mut HashMap<String, CapabilityId>,
+    ) -> Result<(), AgentLoopHostError> {
+        provider_names.insert(
+            capability_info::TOOL_NAME.to_string(),
+            capability_info::capability_id()?,
+        );
+        Ok(())
+    }
+
+    fn tool_definitions(self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
+        Ok(vec![capability_info::tool_definition()?])
+    }
+
+    fn prepare_provider_tool_call(
+        self,
+        snapshot: &SurfaceSnapshot,
+        tool_call: &ProviderToolCall,
+    ) -> Result<Option<PreparedSyntheticToolCall>, AgentLoopHostError> {
+        if tool_call.name != capability_info::TOOL_NAME {
+            return Ok(None);
+        }
+        let normalized_arguments = normalize_provider_arguments(
+            &tool_call.arguments,
+            &capability_info::schema(),
+            "provider arguments",
+        )?;
+        validate_provider_arguments(&normalized_arguments)?;
+        capability_info::validate_input(&normalized_arguments, |requested| {
+            snapshot.capability_info(requested)
+        })?;
+        Ok(Some(PreparedSyntheticToolCall {
+            capability_id: capability_info::capability_id()?,
+            normalized_arguments,
+        }))
+    }
+
+    fn contains_capability(self, capability_id: &CapabilityId) -> bool {
+        capability_info::is_capability_id(capability_id)
+    }
+
+    fn output<'a>(
+        self,
+        capability_id: &CapabilityId,
+        input: &serde_json::Value,
+        resolve: impl FnOnce(&str) -> Option<CapabilityInfoEntry<'a>>,
+    ) -> Result<Option<serde_json::Value>, AgentLoopHostError> {
+        if !self.contains_capability(capability_id) {
+            return Ok(None);
+        }
+        capability_info::output(input, resolve).map(Some)
+    }
 }
 
 const MAX_IN_MEMORY_DISPATCH_RECORDS: usize = 128;
@@ -388,6 +484,7 @@ pub struct HostRuntimeLoopCapabilityPort {
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
+    synthetic_tools: SyntheticCapabilityTools,
     execution_mounts: MountView,
     capability_execution_mounts: HashMap<CapabilityId, MountView>,
     snapshots: Mutex<HashMap<String, SurfaceSnapshot>>,
@@ -429,6 +526,7 @@ impl HostRuntimeLoopCapabilityPort {
             input_resolver,
             result_writer,
             milestone_sink,
+            synthetic_tools: SyntheticCapabilityTools,
             execution_mounts: MountView::default(),
             capability_execution_mounts: HashMap::new(),
             snapshots: Mutex::new(HashMap::new()),
@@ -639,6 +737,37 @@ impl HostRuntimeLoopCapabilityPort {
         milestones.capability_invoked(capability_id).await
     }
 
+    async fn invoke_synthetic_capability(
+        &self,
+        request: CapabilityInvocation,
+    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        let snapshot = self.snapshot_for(&request.surface_version)?;
+        let input = self
+            .input_resolver
+            .resolve_capability_input(&self.run_context, &request.input_ref)
+            .await?;
+        let Some(output) =
+            self.synthetic_tools
+                .output(&request.capability_id, &input, |requested| {
+                    snapshot.capability_info(requested)
+                })?
+        else {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "capability is not a synthetic loop capability",
+            ));
+        };
+        let result_ref = self
+            .result_writer
+            .write_capability_result(&self.run_context, &request.capability_id, output)
+            .await?;
+        Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
+            result_ref,
+            safe_summary: "capability info returned".to_string(),
+            terminate_hint: false,
+        }))
+    }
+
     fn prepare_provider_tool_call(
         &self,
         tool_call: &ProviderToolCall,
@@ -657,6 +786,17 @@ impl HostRuntimeLoopCapabilityPort {
                 "capability surface is unavailable",
             ));
         };
+        if let Some(prepared) = self
+            .synthetic_tools
+            .prepare_provider_tool_call(&snapshot, tool_call)?
+        {
+            return Ok(PreparedProviderToolCall {
+                surface_version: loop_surface_version(&version)?,
+                capability_id: prepared.capability_id,
+                provider_turn_id,
+                normalized_arguments: prepared.normalized_arguments,
+            });
+        }
         let Some(capability_id) = snapshot.provider_names.get(&tool_call.name).cloned() else {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::InvalidInvocation,
@@ -716,6 +856,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                 })
             })
             .collect::<Vec<_>>();
+        definitions.extend(self.synthetic_tools.tool_definitions()?);
         definitions.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(definitions)
     }
@@ -768,6 +909,8 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             .map_err(host_runtime_error)?;
         let version = loop_surface_version(runtime_surface.version.as_str())?;
         let mut snapshot = SurfaceSnapshot::default();
+        self.synthetic_tools
+            .reserve_provider_names(&mut snapshot.provider_names)?;
         let descriptors = runtime_surface
             .capabilities
             .into_iter()
@@ -786,6 +929,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                         estimate: capability.estimated_resources.clone(),
                         safe_description: capability.descriptor.description.clone(),
                         parameters_schema: capability.descriptor.parameters_schema.clone(),
+                        effects: capability.descriptor.effects.clone(),
                         provider_tool_name,
                     },
                 );
@@ -819,6 +963,12 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
         &self,
         request: CapabilityInvocation,
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        if self
+            .synthetic_tools
+            .contains_capability(&request.capability_id)
+        {
+            return self.invoke_synthetic_capability(request).await;
+        }
         let snapshot = self.snapshot_for(&request.surface_version)?;
         let Some(capability) = snapshot.capabilities.get(&request.capability_id).cloned() else {
             return Ok(CapabilityOutcome::Denied(CapabilityDenied {
@@ -2230,6 +2380,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn capability_info_is_advertised_and_returns_lazy_schema_on_request() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let context = execution_context("thread-capability-info");
+        let run_context = loop_run_context(&context).await;
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+            capability_id.clone(),
+            provider_id,
+        )]));
+        let result_writer = Arc::new(RecordingResultWriter::default());
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            runtime.clone(),
+            visible_request(context),
+            dummy_input_resolver(),
+            result_writer.clone(),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+        let tool_definitions = port.tool_definitions().expect("tool definitions");
+        assert!(
+            tool_definitions
+                .iter()
+                .any(|definition| definition.name == capability_info::TOOL_NAME)
+        );
+        assert!(
+            tool_definitions
+                .iter()
+                .any(|definition| definition.capability_id == capability_id)
+        );
+
+        let mut call = provider_tool_call();
+        call.name = capability_info::TOOL_NAME.to_string();
+        call.arguments = serde_json::json!({
+            "capability_id": capability_id.as_str(),
+            "include_schema": true
+        });
+        let candidate = port
+            .register_provider_tool_call(call)
+            .await
+            .expect("capability_info call should register");
+        assert_eq!(
+            candidate.capability_id.as_str(),
+            capability_info::CAPABILITY_ID
+        );
+
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: surface.version,
+                capability_id: candidate.capability_id,
+                input_ref: candidate.input_ref,
+            })
+            .await
+            .expect("capability_info invocation succeeds");
+
+        assert!(matches!(outcome, CapabilityOutcome::Completed(_)));
+        let records = result_writer.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].0.as_str(), capability_info::CAPABILITY_ID);
+        assert_eq!(records[0].1["capability_id"], capability_id.as_str());
+        assert_eq!(records[0].1["schema"], serde_json::json!({"type":"object"}));
+        assert!(
+            runtime.take_requests().is_empty(),
+            "capability_info must be served by the loop port without dispatching to the host runtime"
+        );
+    }
+
+    #[tokio::test]
     async fn factory_with_execution_mounts_propagates_to_port() {
         let context = execution_context("thread-factory-mounts");
         let run_context = loop_run_context(&context).await;
@@ -2356,6 +2578,7 @@ mod tests {
             estimate: ResourceEstimate::default(),
             safe_description: "demo capability".to_string(),
             parameters_schema: serde_json::json!({"type":"object"}),
+            effects: vec![EffectKind::ReadFilesystem],
             provider_tool_name: "demo__echo".to_string(),
         };
 
@@ -2407,6 +2630,7 @@ mod tests {
             estimate: ResourceEstimate::default(),
             safe_description: "demo capability".to_string(),
             parameters_schema: serde_json::json!({"type":"object"}),
+            effects: vec![EffectKind::ReadFilesystem],
             provider_tool_name: "demo__echo".to_string(),
         };
 
@@ -2455,6 +2679,7 @@ mod tests {
             estimate: ResourceEstimate::default(),
             safe_description: "demo capability".to_string(),
             parameters_schema: serde_json::json!({"type":"object"}),
+            effects: vec![EffectKind::ReadFilesystem],
             provider_tool_name: "demo__echo".to_string(),
         };
 
@@ -2504,6 +2729,7 @@ mod tests {
             estimate: ResourceEstimate::default(),
             safe_description: "demo echo".to_string(),
             parameters_schema: serde_json::json!({ "type": "object" }),
+            effects: vec![EffectKind::DispatchCapability],
             provider_tool_name: "demo_echo".to_string(),
         };
 
@@ -2586,6 +2812,7 @@ mod tests {
             estimate: ResourceEstimate::default(),
             safe_description: "demo capability".to_string(),
             parameters_schema: serde_json::json!({"type":"object"}),
+            effects: vec![EffectKind::ExecuteCode],
             provider_tool_name: "demo__echo".to_string(),
         };
 
@@ -2798,6 +3025,38 @@ mod tests {
             _output: serde_json::Value,
         ) -> Result<LoopResultRef, AgentLoopHostError> {
             LoopResultRef::new("result:mount-test").map_err(|_| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Internal,
+                    "result ref could not be built",
+                )
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingResultWriter {
+        records: Mutex<Vec<(CapabilityId, serde_json::Value)>>,
+    }
+
+    impl RecordingResultWriter {
+        fn records(&self) -> Vec<(CapabilityId, serde_json::Value)> {
+            self.records.lock().expect("records lock").clone()
+        }
+    }
+
+    #[async_trait]
+    impl LoopCapabilityResultWriter for RecordingResultWriter {
+        async fn write_capability_result(
+            &self,
+            _run_context: &LoopRunContext,
+            capability_id: &CapabilityId,
+            output: serde_json::Value,
+        ) -> Result<LoopResultRef, AgentLoopHostError> {
+            self.records
+                .lock()
+                .expect("records lock")
+                .push((capability_id.clone(), output));
+            LoopResultRef::new("result:capability-info").map_err(|_| {
                 AgentLoopHostError::new(
                     AgentLoopHostErrorKind::Internal,
                     "result ref could not be built",

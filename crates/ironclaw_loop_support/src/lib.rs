@@ -16,6 +16,7 @@ use std::{
 mod budget_accountant;
 mod cancellation_port;
 mod capability_allow_set;
+mod capability_info;
 mod capability_port;
 mod capability_surface_filter;
 mod filesystem_skill_bundle_source;

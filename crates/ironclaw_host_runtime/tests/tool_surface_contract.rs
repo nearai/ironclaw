@@ -195,7 +195,7 @@ async fn hot_capability_catalog_fails_closed_for_missing_prompt_doc_file() {
 }
 
 #[tokio::test]
-async fn hot_capability_catalog_fails_closed_for_model_visible_capability_without_prompt_doc_ref() {
+async fn hot_capability_catalog_allows_model_visible_capability_without_prompt_doc_ref() {
     let (_storage, fs, registry) = hot_catalog_fixture_with_manifest(
         Some(r#"{"type":"object"}"#),
         r#"{"type":"object"}"#,
@@ -203,15 +203,12 @@ async fn hot_capability_catalog_fails_closed_for_model_visible_capability_withou
         manifest_without_prompt_doc_ref(),
     );
 
-    let err = publish_hot_capability_catalog(&fs, &registry)
+    let catalog = publish_hot_capability_catalog(&fs, &registry)
         .await
-        .unwrap_err();
+        .unwrap();
 
-    assert!(
-        matches!(err, ironclaw_host_runtime::HostRuntimeError::InvalidRequest { ref reason }
-            if reason.contains("model-visible capability echo.say is missing prompt_doc_ref")),
-        "unexpected error: {err:?}"
-    );
+    let record = catalog.get(&capability_id("echo.say")).unwrap();
+    assert!(record.prompt_doc.is_none());
 }
 
 #[tokio::test]
