@@ -416,6 +416,7 @@ fn terminal_ack_for_error(error: &ProductWorkflowError) -> Option<ProductInbound
         | ProductWorkflowError::TurnSubmissionRejected { .. }
         | ProductWorkflowError::TurnSubmissionFailed { .. }
         | ProductWorkflowError::TurnResumeRejected { .. }
+        | ProductWorkflowError::AuthContinuationRejected { .. }
         | ProductWorkflowError::TurnResumeDenied { .. }
         | ProductWorkflowError::Transient { .. }
         | ProductWorkflowError::BeforeInboundPolicyFailed {

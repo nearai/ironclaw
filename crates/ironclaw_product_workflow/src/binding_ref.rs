@@ -31,6 +31,10 @@ pub(crate) fn bounded_idempotency_key(
     IdempotencyKey::new(bounded_binding_ref_value(prefix, raw, max_raw_len))
 }
 
+pub(crate) fn binding_ref_segment(name: &str, value: &str) -> String {
+    format!("{name}:{}:{value};", value.len())
+}
+
 fn bounded_binding_ref_value(prefix: &str, raw: &str, max_raw_len: usize) -> String {
     if raw.len() <= max_raw_len && !raw.chars().any(|c| c == '\0' || c.is_control()) {
         format!("{prefix}:{raw}")
@@ -43,6 +47,18 @@ fn bounded_binding_ref_value(prefix: &str, raw: &str, max_raw_len: usize) -> Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_binding_ref_preserves_raw_at_exact_limit() {
+        let raw = "abcd";
+
+        let value = bounded_reply_target_binding_ref("prefix", raw, raw.len())
+            .expect("boundary ref")
+            .as_str()
+            .to_string();
+
+        assert_eq!(value, "prefix:abcd");
+    }
 
     #[test]
     fn bounded_binding_ref_uses_uuid_fallback_for_oversized_raw() {

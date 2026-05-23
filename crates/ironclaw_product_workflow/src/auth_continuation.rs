@@ -14,11 +14,11 @@ use ironclaw_turns::{
 };
 use uuid::Uuid;
 
-use crate::ProductWorkflowError;
 use crate::binding_ref::{
-    AUTH_CONTINUATION_BINDING_REF_RAW_MAX_BYTES, bounded_idempotency_key,
+    AUTH_CONTINUATION_BINDING_REF_RAW_MAX_BYTES, binding_ref_segment, bounded_idempotency_key,
     bounded_reply_target_binding_ref, bounded_source_binding_ref,
 };
+use crate::{AuthContinuationRejectionKind, ProductWorkflowError};
 
 #[derive(Clone)]
 pub struct ProductAuthTurnGateResumeDispatcher {
@@ -39,8 +39,8 @@ impl ProductAuthTurnGateResumeDispatcher {
             gate_ref,
         } = &event.continuation
         else {
-            return Err(ProductWorkflowError::TurnSubmissionRejected {
-                reason: "auth continuation is not a turn-gate resume".to_string(),
+            return Err(ProductWorkflowError::AuthContinuationRejected {
+                kind: AuthContinuationRejectionKind::NotTurnGateResume,
             });
         };
 
@@ -48,7 +48,7 @@ impl ProductAuthTurnGateResumeDispatcher {
         let actor = TurnActor::new(event.scope.resource.user_id.clone());
         let run_id = parse_turn_run_id(turn_run_ref.as_str())?;
         let gate_resolution_ref = parse_gate_ref(gate_ref.as_str())?;
-        let binding_id = format!("{}|{}|{}", event.flow_id, run_id, gate_ref.as_str());
+        let binding_id = auth_continuation_binding_id(event.flow_id, &run_id, gate_ref.as_str());
         let idempotency_key = idempotency_key_for_binding(&binding_id)?;
 
         self.turn_coordinator
@@ -82,9 +82,8 @@ impl ProductAuthTurnGateResumeDispatcher {
 fn map_auth_resume_error(error: TurnError) -> ProductWorkflowError {
     match error {
         TurnError::InvalidTransition { .. } | TurnError::InvalidRequest { .. } => {
-            ProductWorkflowError::TurnResumeRejected {
-                reason: "auth continuation does not match an authorized blocked auth gate"
-                    .to_string(),
+            ProductWorkflowError::AuthContinuationRejected {
+                kind: AuthContinuationRejectionKind::UnauthorizedBlockedGate,
             }
         }
         TurnError::Unauthorized | TurnError::ScopeNotFound | TurnError::LeaseMismatch => {
@@ -94,12 +93,26 @@ fn map_auth_resume_error(error: TurnError) -> ProductWorkflowError {
     }
 }
 
+fn auth_continuation_binding_id(
+    flow_id: ironclaw_auth::AuthFlowId,
+    run_id: &TurnRunId,
+    gate_ref: &str,
+) -> String {
+    format!(
+        "{}{}{}{}",
+        binding_ref_segment("surface", "auth-continuation"),
+        binding_ref_segment("flow", &flow_id.to_string()),
+        binding_ref_segment("run", &run_id.to_string()),
+        binding_ref_segment("gate", gate_ref)
+    )
+}
+
 fn turn_scope_from_auth_event(
     event: &AuthContinuationEvent,
 ) -> Result<TurnScope, ProductWorkflowError> {
     let Some(thread_id) = event.scope.resource.thread_id.clone() else {
-        return Err(ProductWorkflowError::TurnSubmissionRejected {
-            reason: "auth turn-gate continuation is missing thread scope".to_string(),
+        return Err(ProductWorkflowError::AuthContinuationRejected {
+            kind: AuthContinuationRejectionKind::MissingThreadScope,
         });
     };
     Ok(TurnScope::new(
@@ -113,14 +126,14 @@ fn turn_scope_from_auth_event(
 fn parse_turn_run_id(value: &str) -> Result<TurnRunId, ProductWorkflowError> {
     Uuid::parse_str(value)
         .map(TurnRunId::from_uuid)
-        .map_err(|_| ProductWorkflowError::TurnSubmissionRejected {
-            reason: "invalid auth continuation turn_run_ref".to_string(),
+        .map_err(|_| ProductWorkflowError::AuthContinuationRejected {
+            kind: AuthContinuationRejectionKind::InvalidTurnRunRef,
         })
 }
 
 fn parse_gate_ref(value: &str) -> Result<GateRef, ProductWorkflowError> {
-    GateRef::new(value.to_string()).map_err(|reason| ProductWorkflowError::TurnSubmissionRejected {
-        reason: format!("invalid auth continuation gate_ref: {reason}"),
+    GateRef::new(value.to_string()).map_err(|_| ProductWorkflowError::AuthContinuationRejected {
+        kind: AuthContinuationRejectionKind::InvalidGateRef,
     })
 }
 
@@ -130,14 +143,14 @@ fn idempotency_key_for_binding(binding_id: &str) -> Result<IdempotencyKey, Produ
         binding_id,
         AUTH_CONTINUATION_BINDING_REF_RAW_MAX_BYTES,
     )
-    .map_err(|reason| ProductWorkflowError::TurnSubmissionRejected {
-        reason: format!("invalid auth continuation idempotency key: {reason}"),
+    .map_err(|_| ProductWorkflowError::AuthContinuationRejected {
+        kind: AuthContinuationRejectionKind::InvalidIdempotencyKey,
     })
 }
 
-fn binding_ref_error(reason: String) -> ProductWorkflowError {
-    ProductWorkflowError::TurnSubmissionRejected {
-        reason: format!("invalid auth continuation binding ref: {reason}"),
+fn binding_ref_error(_reason: String) -> ProductWorkflowError {
+    ProductWorkflowError::AuthContinuationRejected {
+        kind: AuthContinuationRejectionKind::InvalidBindingRef,
     }
 }
 
@@ -353,6 +366,10 @@ mod tests {
                 .as_str()
                 .starts_with("auth-continuation:")
         );
+        assert!(resumes[0].idempotency_key.as_str().contains("surface:"));
+        assert!(resumes[0].idempotency_key.as_str().contains("flow:"));
+        assert!(resumes[0].idempotency_key.as_str().contains("run:"));
+        assert!(resumes[0].idempotency_key.as_str().contains("gate:"));
     }
 
     #[tokio::test]
@@ -377,7 +394,9 @@ mod tests {
 
         assert!(matches!(
             err,
-            ProductWorkflowError::TurnResumeRejected { .. }
+            ProductWorkflowError::AuthContinuationRejected {
+                kind: AuthContinuationRejectionKind::UnauthorizedBlockedGate
+            }
         ));
         assert!(coordinator.resumes().is_empty());
     }
@@ -404,7 +423,9 @@ mod tests {
 
         assert!(matches!(
             err,
-            ProductWorkflowError::TurnResumeRejected { .. }
+            ProductWorkflowError::AuthContinuationRejected {
+                kind: AuthContinuationRejectionKind::UnauthorizedBlockedGate
+            }
         ));
         assert!(coordinator.resumes().is_empty());
     }
@@ -518,7 +539,9 @@ mod tests {
 
         assert!(matches!(
             err,
-            ProductWorkflowError::TurnSubmissionRejected { .. }
+            ProductWorkflowError::AuthContinuationRejected {
+                kind: AuthContinuationRejectionKind::InvalidTurnRunRef
+            }
         ));
         assert!(coordinator.resumes().is_empty());
     }
@@ -538,7 +561,9 @@ mod tests {
 
         assert!(matches!(
             err,
-            ProductWorkflowError::TurnSubmissionRejected { .. }
+            ProductWorkflowError::AuthContinuationRejected {
+                kind: AuthContinuationRejectionKind::NotTurnGateResume
+            }
         ));
         assert!(coordinator.resumes().is_empty());
     }
@@ -561,7 +586,9 @@ mod tests {
 
         assert!(matches!(
             err,
-            ProductWorkflowError::TurnSubmissionRejected { .. }
+            ProductWorkflowError::AuthContinuationRejected {
+                kind: AuthContinuationRejectionKind::MissingThreadScope
+            }
         ));
     }
 }
