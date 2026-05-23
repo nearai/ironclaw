@@ -4751,23 +4751,32 @@ fn trace_upload_claim_refresh_after(
 /// enum keeps the diagnostic mapping closed: any unknown label falls through
 /// to the generic HTTP-status diagnostic, which is what we want for
 /// future-extension safety.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// The on-wire labels are driven by serde `#[serde(rename = ...)]` so the
+/// issuer wire contract lives in one place and cannot drift from the parsing
+/// logic. `rename_all` is intentionally not used: the exact PascalCase labels
+/// are part of the issuer contract and the round-trip test
+/// (`pilot_allowlist_refusal_wire_labels_are_stable`) pins them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum PilotAllowlistRefusal {
+    #[serde(rename = "PilotAllowlistNotMatched")]
     NotMatched,
+    #[serde(rename = "PilotAllowlistInviteCodeMissing")]
     InviteCodeMissing,
+    #[serde(rename = "PilotAllowlistStale")]
     Stale,
+    #[serde(rename = "PilotAllowlistMalformed")]
     Malformed,
 }
 
 impl PilotAllowlistRefusal {
+    /// Parse the issuer's typed refusal label into the closed enum. Any unknown
+    /// label returns `None`, falling through to the generic HTTP-status
+    /// diagnostic — the desired behaviour for future-extension safety.
     fn from_label(label: &str) -> Option<Self> {
-        match label {
-            "PilotAllowlistNotMatched" => Some(Self::NotMatched),
-            "PilotAllowlistInviteCodeMissing" => Some(Self::InviteCodeMissing),
-            "PilotAllowlistStale" => Some(Self::Stale),
-            "PilotAllowlistMalformed" => Some(Self::Malformed),
-            _ => None,
-        }
+        // Route through serde so the wire-string mapping has a single source of
+        // truth (the `#[serde(rename)]` attributes above).
+        serde_json::from_value(Value::String(label.to_owned())).ok()
     }
 
     fn label_str(&self) -> &'static str {
@@ -5008,12 +5017,39 @@ fn validate_trace_upload_claim_response(
     Ok(())
 }
 
+// Test-only seam that relaxes the SSRF guards in
+// `validate_trace_upload_claim_issuer_url` and
+// `resolve_trace_upload_claim_issuer_host` so caller-level tests can drive the
+// real `fetch_trace_upload_claim_from_issuer` request path against a local
+// `http://127.0.0.1` mock issuer. When the flag is unset (the only state in
+// production — the symbol does not exist outside `cfg(test)`) every guard
+// runs exactly as before.
+#[cfg(test)]
+thread_local! {
+    static TRACE_UPLOAD_CLAIM_ISSUER_TEST_BYPASS: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn trace_upload_claim_issuer_test_bypass() -> bool {
+    TRACE_UPLOAD_CLAIM_ISSUER_TEST_BYPASS.with(std::cell::Cell::get)
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn trace_upload_claim_issuer_test_bypass() -> bool {
+    false
+}
+
 fn validate_trace_upload_claim_issuer_url(
     url: &reqwest::Url,
     allowed_hosts: &BTreeSet<String>,
 ) -> anyhow::Result<()> {
+    // In tests the bypass permits http + loopback so a local mock issuer can
+    // exercise the real request/error path; production always enforces https.
     anyhow::ensure!(
-        url.scheme() == "https",
+        url.scheme() == "https"
+            || (trace_upload_claim_issuer_test_bypass() && url.scheme() == "http"),
         "Trace Commons upload token issuer URL must use https"
     );
     anyhow::ensure!(
@@ -5028,13 +5064,14 @@ fn validate_trace_upload_claim_issuer_url(
         .host_str()
         .map(str::to_ascii_lowercase)
         .ok_or_else(|| anyhow::anyhow!("Trace Commons upload token issuer URL requires a host"))?;
+    let bypass = trace_upload_claim_issuer_test_bypass();
     anyhow::ensure!(
-        !is_internal_trace_upload_claim_issuer_hostname(&host),
+        bypass || !is_internal_trace_upload_claim_issuer_hostname(&host),
         "Trace Commons upload token issuer URL must not use localhost or internal hostnames"
     );
     if let Ok(ip) = host.parse::<IpAddr>() {
         anyhow::ensure!(
-            !is_disallowed_trace_upload_claim_issuer_ip(ip),
+            bypass || !is_disallowed_trace_upload_claim_issuer_ip(ip),
             "Trace Commons upload token issuer URL must not use private, local, or reserved IP addresses"
         );
     }
@@ -5063,9 +5100,10 @@ async fn resolve_trace_upload_claim_issuer_host(
         !addrs.is_empty(),
         "Trace Commons upload token issuer host {host} resolved to no addresses"
     );
+    let bypass = trace_upload_claim_issuer_test_bypass();
     for addr in &addrs {
         anyhow::ensure!(
-            !is_disallowed_trace_upload_claim_issuer_ip(addr.ip()),
+            bypass || !is_disallowed_trace_upload_claim_issuer_ip(addr.ip()),
             "Trace Commons upload token issuer host {host} resolved to disallowed address"
         );
     }
@@ -12118,45 +12156,117 @@ mod tests {
         assert!(parse_trace_upload_claim_error_label(r#"{"error":null}"#).is_none());
     }
 
-    #[tokio::test]
-    async fn fetch_trace_upload_claim_from_issuer_returns_typed_pilot_allowlist_error() {
-        // Spin up a mock HTTP server that returns the issuer's typed
-        // PilotAllowlistNotMatched refusal. The URL-validation seam in
-        // fetch_trace_upload_claim_from_issuer requires https + non-loopback
-        // hosts, so we exercise the same error-formatting path via the
-        // factored-out helper directly. The mock server confirms the body
-        // shape the real issuer emits, then we drive the helper with that
-        // body to assert the user-actionable diagnostic.
+    /// Round-trip test pinning the on-wire PilotAllowlist refusal labels. If a
+    /// future refactor changes a `#[serde(rename)]` (or drops it for
+    /// `rename_all`), this fails — the issuer wire contract must not drift.
+    #[test]
+    fn pilot_allowlist_refusal_wire_labels_are_stable() {
+        let cases = [
+            (
+                PilotAllowlistRefusal::NotMatched,
+                "PilotAllowlistNotMatched",
+            ),
+            (
+                PilotAllowlistRefusal::InviteCodeMissing,
+                "PilotAllowlistInviteCodeMissing",
+            ),
+            (PilotAllowlistRefusal::Stale, "PilotAllowlistStale"),
+            (PilotAllowlistRefusal::Malformed, "PilotAllowlistMalformed"),
+        ];
+        for (variant, wire) in cases {
+            // Serialize side: enum -> exact wire string.
+            assert_eq!(
+                serde_json::to_value(variant).expect("serialize refusal"),
+                Value::String(wire.to_string()),
+                "serialized wire label drifted for {variant:?}"
+            );
+            // Deserialize side (via from_label, the production parse path):
+            // exact wire string -> enum.
+            assert_eq!(
+                PilotAllowlistRefusal::from_label(wire),
+                Some(variant),
+                "from_label did not round-trip wire label {wire}"
+            );
+            // label_str must agree with the serde wire string.
+            assert_eq!(variant.label_str(), wire);
+        }
+        // Unknown labels fall through to None (generic HTTP fallback).
+        assert_eq!(
+            PilotAllowlistRefusal::from_label("PilotAllowlistSomethingNew"),
+            None
+        );
+        assert_eq!(PilotAllowlistRefusal::from_label(""), None);
+    }
+
+    /// Spawn a mock issuer that answers the upload-claim POST with the given
+    /// status code and raw body, then drive the *real*
+    /// `fetch_trace_upload_claim_from_issuer` against it and return the error it
+    /// produces. The `cfg(test)` SSRF bypass lets the caller reach an
+    /// `http://127.0.0.1` mock so the typed-error and fallback branches are
+    /// exercised through the actual request/response path — not just the
+    /// factored-out `build_trace_upload_claim_http_error` helper.
+    ///
+    /// The whole request is run inside `spawn_blocking` + a current-thread
+    /// runtime so the thread-local bypass flag (set on the same thread that
+    /// runs the caller) is visible to `fetch_trace_upload_claim_from_issuer`.
+    async fn drive_fetch_against_mock_issuer(
+        status: axum::http::StatusCode,
+        body: &'static str,
+    ) -> anyhow::Error {
         let app = axum::Router::new().route(
             "/v1/trace-upload-claim",
-            axum::routing::post(|| async {
-                (
-                    axum::http::StatusCode::BAD_REQUEST,
-                    axum::Json(serde_json::json!({"error": "PilotAllowlistNotMatched"})),
-                )
-            }),
+            axum::routing::post(move || async move { (status, body) }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("mock issuer listener binds");
         let addr = listener.local_addr().expect("local addr");
-        tokio::spawn(async move {
+        let server = tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
-        let client = reqwest::Client::builder()
-            .build()
-            .expect("reqwest client builds");
-        let response = client
-            .post(format!("http://{addr}/v1/trace-upload-claim"))
-            .json(&serde_json::json!({}))
-            .send()
-            .await
-            .expect("mock issuer responds");
-        let status = response.status().as_u16();
-        let body_text = response.text().await.expect("mock issuer body");
-        assert_eq!(status, 400);
 
-        let error = build_trace_upload_claim_http_error("issuer.example", status, &body_text);
+        let issuer_url = format!("http://{addr}/v1/trace-upload-claim");
+        let policy = StandingTraceContributionPolicy {
+            upload_token_issuer_url: Some(issuer_url),
+            upload_token_issuer_allowed_hosts: {
+                let mut hosts = BTreeSet::new();
+                hosts.insert(addr.ip().to_string());
+                hosts
+            },
+            ..StandingTraceContributionPolicy::default()
+        };
+        let context = TraceUploadClaimContext::for_status_sync();
+
+        // The bypass is thread-local; run the caller on a dedicated thread that
+        // sets the flag, using a current-thread runtime so the request future
+        // never migrates threads.
+        let result = tokio::task::spawn_blocking(move || {
+            TRACE_UPLOAD_CLAIM_ISSUER_TEST_BYPASS.with(|b| b.set(true));
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("current-thread runtime builds");
+            let outcome = rt.block_on(fetch_trace_upload_claim_from_issuer(&policy, &context));
+            TRACE_UPLOAD_CLAIM_ISSUER_TEST_BYPASS.with(|b| b.set(false));
+            outcome
+        })
+        .await
+        .expect("mock-issuer driver thread joins");
+
+        server.abort();
+        result.expect_err("mock issuer returned an error status; caller must surface an error")
+    }
+
+    #[tokio::test]
+    async fn fetch_trace_upload_claim_from_issuer_returns_typed_pilot_allowlist_error() {
+        // Drive the real caller against a mock issuer that returns the typed
+        // PilotAllowlistNotMatched refusal; assert the user-actionable
+        // diagnostic flows all the way out of fetch_trace_upload_claim_from_issuer.
+        let error = drive_fetch_against_mock_issuer(
+            axum::http::StatusCode::BAD_REQUEST,
+            r#"{"error":"PilotAllowlistNotMatched"}"#,
+        )
+        .await;
         let chain = format!("{error:#}");
         assert!(
             chain.contains("PilotAllowlistNotMatched"),
@@ -12170,39 +12280,13 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_trace_upload_claim_from_issuer_generic_http_error_when_label_unknown() {
-        // Issuer returns a non-JSON 500 — the helper must fall back to the
-        // generic "HTTP 500" diagnostic without naming any PilotAllowlist
-        // refusal label.
-        let app = axum::Router::new().route(
-            "/v1/trace-upload-claim",
-            axum::routing::post(|| async {
-                (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal error",
-                )
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("mock issuer listener binds");
-        let addr = listener.local_addr().expect("local addr");
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-        let client = reqwest::Client::builder()
-            .build()
-            .expect("reqwest client builds");
-        let response = client
-            .post(format!("http://{addr}/v1/trace-upload-claim"))
-            .json(&serde_json::json!({}))
-            .send()
-            .await
-            .expect("mock issuer responds");
-        let status = response.status().as_u16();
-        let body_text = response.text().await.expect("mock issuer body");
-        assert_eq!(status, 500);
-
-        let error = build_trace_upload_claim_http_error("issuer.example", status, &body_text);
+        // Issuer returns a non-JSON 500 — the real caller must fall back to the
+        // generic "HTTP 500" diagnostic without naming any PilotAllowlist label.
+        let error = drive_fetch_against_mock_issuer(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "internal error",
+        )
+        .await;
         let chain = format!("{error:#}");
         assert!(
             chain.contains("HTTP 500"),
