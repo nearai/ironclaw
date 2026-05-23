@@ -113,6 +113,14 @@ The shared Reborn runtime HTTP egress service uses this surface to:
 - strip sensitive response headers and block credential-shaped response bodies before they reach runtime callers
 - support header, query parameter, and path-placeholder credential targets. Request-body credential injection remains out of scope.
 
+Path-placeholder injection has the weakest ambient-redaction story: upstream
+access logs, CDN/proxy logs, crash dumps, and `Referer` values commonly retain
+URL paths. It must be used only for a capability with a documented upstream
+requirement that cannot use headers or query parameters. Host-runtime egress
+keeps this target HTTPS-only, rejects empty, `.`/`..`, control-character, and
+reserved-character values, and requires exactly one full-segment placeholder so
+secret material cannot rewrite the destination path structure.
+
 Runtime HTTP credential injection is authority-bearing and must be host-derived.
 `RuntimeCredentialInjection` is not a permission request supplied by guest code,
 runtime code, or an extension process. The upstream capability/obligation owner

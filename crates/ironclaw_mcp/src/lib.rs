@@ -249,6 +249,11 @@ pub struct McpHostHttpEgressPlanRequest<'a> {
 /// runtime/plugin inputs can affect the JSON-RPC body, but only this host-owned
 /// planner can provide network policy, credential handles, response limits, and
 /// timeouts for the shared egress service.
+///
+/// `plan` must be deterministic and side-effect-free. The concrete HTTP client
+/// calls it once before the MCP handshake to fail closed on disallowed
+/// `tools/call` credential plans, then again while building each JSON-RPC
+/// exchange so request headers and body bytes match the actual transport call.
 pub trait McpHostHttpEgressPlanner: Send + Sync {
     fn plan(&self, request: McpHostHttpEgressPlanRequest<'_>) -> McpHostHttpEgressPlan;
 }

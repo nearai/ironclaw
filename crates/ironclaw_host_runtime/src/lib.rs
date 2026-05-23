@@ -43,7 +43,7 @@ use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStoreError};
 use ironclaw_trust::TrustDecision;
 use secrecy::ExposeSecret;
 use serde_json::Value;
-use std::{borrow::Cow, collections::BTreeMap, env, fmt, sync::Arc};
+use std::{collections::BTreeMap, env, fmt, sync::Arc};
 use thiserror::Error;
 
 mod capability_catalog;
@@ -1450,17 +1450,12 @@ fn apply_credential_injection(
             request.url = url.to_string();
         }
         RuntimeCredentialTarget::PathPlaceholder { placeholder } => {
-            if placeholder.is_empty()
-                || placeholder.contains('/')
-                || placeholder.contains('?')
-                || placeholder.contains('#')
-            {
+            if !valid_path_credential_segment(placeholder) {
                 return Err(RuntimeHttpEgressError::Credential {
                     reason: "credential injection path placeholder is invalid".to_string(),
                 });
             }
-            if value.is_empty() || value.contains('/') || value.contains('?') || value.contains('#')
-            {
+            if !valid_path_credential_segment(value) {
                 return Err(RuntimeHttpEgressError::Credential {
                     reason: "credential injection path value is invalid".to_string(),
                 });
@@ -1469,6 +1464,11 @@ fn apply_credential_injection(
                 url::Url::parse(&request.url).map_err(|_| RuntimeHttpEgressError::Credential {
                     reason: "credential injection target URL is invalid".to_string(),
                 })?;
+            if url.scheme() != "https" {
+                return Err(RuntimeHttpEgressError::Credential {
+                    reason: "credential injection path placeholder requires HTTPS".to_string(),
+                });
+            }
             let Some(_) = url.path_segments() else {
                 return Err(RuntimeHttpEgressError::Credential {
                     reason: "credential injection target URL has no path segments".to_string(),
@@ -1476,10 +1476,23 @@ fn apply_credential_injection(
             };
             let path = url.path().to_string();
             let path = path.strip_prefix('/').unwrap_or(&path);
-            if !path.split('/').any(|segment| segment == placeholder) {
-                return Err(RuntimeHttpEgressError::Credential {
-                    reason: "credential injection path placeholder was not found".to_string(),
-                });
+            let placeholder_count = path
+                .split('/')
+                .filter(|segment| *segment == placeholder)
+                .count();
+            match placeholder_count {
+                0 => {
+                    return Err(RuntimeHttpEgressError::Credential {
+                        reason: "credential injection path placeholder was not found".to_string(),
+                    });
+                }
+                1 => {}
+                _ => {
+                    return Err(RuntimeHttpEgressError::Credential {
+                        reason: "credential injection path placeholder must appear exactly once"
+                            .to_string(),
+                    });
+                }
             }
             let mut path_segments =
                 url.path_segments_mut()
@@ -1489,17 +1502,26 @@ fn apply_credential_injection(
             path_segments.clear();
             for segment in path.split('/') {
                 let rewritten = if segment == placeholder {
-                    Cow::Borrowed(value)
+                    value
                 } else {
-                    Cow::Borrowed(segment)
+                    segment
                 };
-                path_segments.push(rewritten.as_ref());
+                path_segments.push(rewritten);
             }
             drop(path_segments);
             request.url = url.to_string();
         }
     }
     Ok(())
+}
+
+fn valid_path_credential_segment(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment != "."
+        && segment != ".."
+        && segment
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~'))
 }
 
 fn runtime_network_error(

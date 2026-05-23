@@ -103,13 +103,15 @@ fn runtime_credential_target_serializes_path_placeholder() {
     let target = RuntimeCredentialTarget::PathPlaceholder {
         placeholder: "__credential__".to_string(),
     };
+    let wire = json!({
+        "type": "path_placeholder",
+        "placeholder": "__credential__"
+    });
 
+    assert_eq!(serde_json::to_value(&target).unwrap(), wire);
     assert_eq!(
-        serde_json::to_value(target).unwrap(),
-        json!({
-            "type": "path_placeholder",
-            "placeholder": "__credential__"
-        })
+        serde_json::from_value::<RuntimeCredentialTarget>(wire).unwrap(),
+        target
     );
 }
 

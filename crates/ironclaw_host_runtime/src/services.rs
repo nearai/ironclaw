@@ -135,6 +135,9 @@ where
     event_sink: Option<Arc<dyn EventSink>>,
     audit_sink: Option<Arc<dyn AuditSink>>,
     secret_store: Option<Arc<dyn SecretStore>>,
+    // arch-exempt: optional_arc, broker remains optional while #3088 migration
+    // keeps legacy/test host-runtime constructors alive; split ProductionWiringValidator
+    // before the next component in #3946.
     credential_account_store: Option<Arc<dyn CredentialAccountStore>>,
     credential_session_store: Option<Arc<dyn CredentialSessionStore>>,
     network_policy_store: Arc<NetworkObligationPolicyStore>,
