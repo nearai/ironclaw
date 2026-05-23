@@ -16,7 +16,10 @@ test-support = []
 # Exposes the `predicate_state::contract` trait-level test harness so
 # out-of-crate durable backends (durable-backend PRs 2/3 — Postgres,
 # libSQL) can run the same `PredicateStateBackend` contract suite against
-# their impl. Mirrors `ironclaw_memory`'s `contract-tests` feature.
+# their impl. Mirrors `ironclaw_memory`'s `contract-tests` feature. The
+# libSQL backend lives in the sibling `ironclaw_hooks_libsql` crate and
+# the Postgres backend in `ironclaw_hooks_postgres`; both depend on this
+# crate with `contract-tests` enabled to run the shared suite.
 contract-tests = []
 
 [dependencies]
