@@ -16,7 +16,7 @@
 //! (`("a","bc")` vs `("ab","c")`).
 
 use chrono::{DateTime, Utc};
-use ironclaw_hooks::predicate_state::{InvocationKey, ValueKey};
+use ironclaw_hooks::predicate_state::{InvocationKey, ValueKey, window_cutoff};
 
 /// Map discriminants folded into `key_hash` so the invocation and value tables
 /// never produce the same `key_hash` for a shared `(hook, tenant, capability)`.
@@ -65,14 +65,16 @@ pub(crate) fn to_epoch_millis(now: DateTime<Utc>) -> i64 {
     now.timestamp_millis()
 }
 
-/// Window cutoff in epoch milliseconds. `window` is a non-negative
-/// [`std::time::Duration`]; we saturate on overflow so a pathological
-/// multi-million-year window trims nothing (conservative for a rate/value
-/// cap), matching the in-memory backend's `window_cutoff` saturation behavior.
-/// The trim comparison is `occurred_at < cutoff` (strictly older), so an entry
-/// exactly at the cutoff is retained — the `< cutoff, not <=` contract.
+/// Window cutoff in epoch milliseconds. Delegates to the **canonical**
+/// [`ironclaw_hooks::predicate_state::window_cutoff`] so the overflow/boundary
+/// behaviour is byte-for-byte identical to the in-memory backend (and any other
+/// durable backend), then projects the resulting wall-clock instant onto the
+/// epoch-millis grain the columns store. We do NOT reimplement the
+/// `Duration → cutoff` math here: an independent `saturating_sub` shortcut
+/// diverges on a pathological oversized window (it would trim nothing, while
+/// the canonical rule trims to `now`). The trim comparison remains
+/// `occurred_at < cutoff` (strictly older), so an entry exactly at the cutoff
+/// is retained — the `< cutoff, not <=` contract.
 pub(crate) fn window_cutoff_millis(now: DateTime<Utc>, window: std::time::Duration) -> i64 {
-    let now_ms = now.timestamp_millis();
-    let window_ms = i64::try_from(window.as_millis()).unwrap_or(i64::MAX);
-    now_ms.saturating_sub(window_ms)
+    window_cutoff(now, window).timestamp_millis()
 }
