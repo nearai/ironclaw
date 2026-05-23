@@ -6,7 +6,7 @@ use ironclaw_filesystem::{FilesystemError, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::ScopedPath;
 use ironclaw_turns::run_profile::LoopRunContext;
 
-use crate::{SetupMarkerSource, SkillActivationSelectionError};
+use crate::{SkillActivationSelectionError, activation::SetupMarkerSource};
 
 pub(crate) struct FilesystemSetupMarkerSource<F>
 where

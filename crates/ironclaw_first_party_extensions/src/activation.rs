@@ -176,7 +176,7 @@ where
 
 /// Source of already-satisfied setup markers for one-time setup skills.
 #[async_trait]
-pub trait SetupMarkerSource: std::fmt::Debug + Send + Sync {
+pub(crate) trait SetupMarkerSource: std::fmt::Debug + Send + Sync {
     async fn satisfied_setup_markers(
         &self,
         run_context: &LoopRunContext,
@@ -199,7 +199,7 @@ where
         }
     }
 
-    pub fn with_setup_marker_source<T>(mut self, source: Arc<T>) -> Self
+    pub(crate) fn with_setup_marker_source<T>(mut self, source: Arc<T>) -> Self
     where
         T: SetupMarkerSource + 'static,
     {
