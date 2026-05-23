@@ -4405,6 +4405,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_hooks_libsql"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "blake3",
+ "chrono",
+ "ironclaw_hooks",
+ "ironclaw_host_api",
+ "libsql",
+ "rust_decimal",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ironclaw_host_api"
 version = "0.1.0"
 dependencies = [
