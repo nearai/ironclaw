@@ -585,11 +585,11 @@ async fn per_tenant_quota_isolates_under_concurrent_pressure() {
         "quiet tenant β's scope must survive noisy tenant α's flood (replay no-op confirms it persists)"
     );
 
-    // α must be held at its per-tenant quota.
-    let alpha_scopes = count_distinct_scopes(&db, "hooks_predicate_invocations", "alpha").await;
+    // α must be held at its per-tenant quota (distinct keys under α's scope).
+    let alpha_keys = count_distinct_keys(&db, "hooks_predicate_invocations", "alpha").await;
     assert!(
-        alpha_scopes <= MAX_KEYS_PER_TENANT,
-        "noisy tenant α must be capped at its per-tenant quota; got {alpha_scopes}"
+        alpha_keys <= MAX_KEYS_PER_TENANT,
+        "noisy tenant α must be capped at its per-tenant quota; got {alpha_keys}"
     );
 }
 
@@ -729,12 +729,16 @@ async fn no_global_key_cap_only_per_tenant() {
     );
 }
 
-async fn count_distinct_scopes(db: &Arc<libsql::Database>, table: &str, tenant: &str) -> usize {
+/// Count the distinct keys (`key_hash`) recorded under a tenant's scope. The
+/// tenant grain is now the `scope_hash` digest (the raw `tenant_id` column is
+/// gone), so resolve the digest via the crate's test_support and filter on it.
+async fn count_distinct_keys(db: &Arc<libsql::Database>, table: &str, tenant: &str) -> usize {
+    let scope = ironclaw_hooks_libsql::test_support::tenant_scope_hash_bytes(tenant);
     let conn = db.connect().expect("connect");
     let mut rows = conn
         .query(
-            &format!("SELECT count(DISTINCT scope_hash) FROM {table} WHERE tenant_id = ?1"),
-            libsql::params![tenant],
+            &format!("SELECT count(DISTINCT key_hash) FROM {table} WHERE scope_hash = ?1"),
+            libsql::params![scope],
         )
         .await
         .expect("query");
