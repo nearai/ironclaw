@@ -1,8 +1,12 @@
 //! Embedded idempotent schema for the durable predicate backend.
 //!
-//! The DDL mirrors `migrations/V1__predicate_counters.sql` verbatim and
-//! is applied via [`PostgresPredicateStateBackend::run_migrations`] using
-//! a single `batch_execute`, the same per-crate pattern
+//! The DDL is the *single source of truth* file
+//! `migrations/V1__predicate_counters.sql`, pulled in verbatim at compile
+//! time via `include_str!`. There is no hand-maintained second copy to
+//! drift against. It is applied via
+//! [`PostgresPredicateStateBackend::run_migrations`] using
+//! a single `batch_execute` (which tolerates the file's `--` SQL
+//! comments), the same per-crate pattern
 //! `ironclaw_filesystem::PostgresRootFilesystem::run_migrations` uses. We
 //! deliberately do NOT route through the legacy main-binary refinery
 //! `migrations/` directory: that system is scoped to `src/db/` and the
@@ -39,22 +43,8 @@
 //! `READ COMMITTED` transaction guarded by a per-key advisory lock, also
 //! clock-independent.
 
-/// Idempotent schema applied by `run_migrations()`. Kept byte-compatible
-/// with `migrations/V1__predicate_counters.sql`.
-pub const POSTGRES_PREDICATE_SCHEMA: &str = "\
-CREATE TABLE IF NOT EXISTS hook_predicate_counters (
-    scope_hash         BYTEA       NOT NULL,
-    key_hash           BYTEA       NOT NULL,
-    kind               CHAR(1)     NOT NULL,
-    id                 TEXT        NOT NULL,
-    ts                 TIMESTAMPTZ NOT NULL,
-    value              NUMERIC,
-    PRIMARY KEY (key_hash, id)
-);
-CREATE INDEX IF NOT EXISTS hook_predicate_counters_key_ts_idx
-    ON hook_predicate_counters (key_hash, ts);
-CREATE INDEX IF NOT EXISTS hook_predicate_counters_scope_idx
-    ON hook_predicate_counters (scope_hash, kind);
-CREATE INDEX IF NOT EXISTS hook_predicate_counters_ts_idx
-    ON hook_predicate_counters (ts);
-";
+/// Idempotent schema applied by `run_migrations()`. Sourced directly from
+/// `migrations/V1__predicate_counters.sql` via `include_str!` so the file
+/// is the only copy — no embedded duplicate can drift out of sync.
+pub const POSTGRES_PREDICATE_SCHEMA: &str =
+    include_str!("../migrations/V1__predicate_counters.sql");
