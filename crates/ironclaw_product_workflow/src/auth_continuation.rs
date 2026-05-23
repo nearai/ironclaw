@@ -81,13 +81,15 @@ impl ProductAuthTurnGateResumeDispatcher {
 
 fn map_auth_resume_error(error: TurnError) -> ProductWorkflowError {
     match error {
-        TurnError::InvalidTransition { .. }
-        | TurnError::InvalidRequest { .. }
-        | TurnError::Unauthorized
-        | TurnError::ScopeNotFound
-        | TurnError::LeaseMismatch => ProductWorkflowError::TurnResumeRejected {
-            reason: "auth continuation does not match an authorized blocked auth gate".to_string(),
-        },
+        TurnError::InvalidTransition { .. } | TurnError::InvalidRequest { .. } => {
+            ProductWorkflowError::TurnResumeRejected {
+                reason: "auth continuation does not match an authorized blocked auth gate"
+                    .to_string(),
+            }
+        }
+        TurnError::Unauthorized | TurnError::ScopeNotFound | TurnError::LeaseMismatch => {
+            ProductWorkflowError::TurnResumeDenied { error }
+        }
         error => ProductWorkflowError::TurnSubmissionFailed { error },
     }
 }
@@ -468,10 +470,7 @@ mod tests {
             .await
             .expect_err("cross-scope continuation must not resume");
 
-        assert!(matches!(
-            err,
-            ProductWorkflowError::TurnResumeRejected { .. }
-        ));
+        assert!(matches!(err, ProductWorkflowError::TurnResumeDenied { .. }));
     }
 
     #[tokio::test]

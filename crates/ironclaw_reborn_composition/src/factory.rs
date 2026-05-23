@@ -199,13 +199,9 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
         Arc::new(DefaultTurnCoordinator::new(turn_state));
     let product_auth = Some(product_auth_services.unwrap_or_else(|| {
-        Arc::new(
-            RebornProductAuthServices::local_dev_in_memory().with_continuation_dispatcher(
-                Arc::new(RebornProductWorkflowAuthContinuationDispatcher::new(
-                    turn_coordinator.clone(),
-                )),
-            ),
-        )
+        Arc::new(RebornProductAuthServices::local_dev_in_memory(Arc::new(
+            RebornProductWorkflowAuthContinuationDispatcher::new(turn_coordinator.clone()),
+        )))
     }));
     let product_auth_ready = product_auth.is_some();
 

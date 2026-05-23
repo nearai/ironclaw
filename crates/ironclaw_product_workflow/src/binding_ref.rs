@@ -39,3 +39,34 @@ fn bounded_binding_ref_value(prefix: &str, raw: &str, max_raw_len: usize) -> Str
         format!("{prefix}:{id}")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bounded_binding_ref_uses_uuid_fallback_for_oversized_raw() {
+        let raw = "x".repeat(12);
+
+        let value = bounded_source_binding_ref("prefix", &raw, 4)
+            .expect("fallback ref")
+            .as_str()
+            .to_string();
+
+        assert!(value.starts_with("prefix:"));
+        assert!(!value.contains(&raw));
+    }
+
+    #[test]
+    fn bounded_binding_ref_uses_uuid_fallback_for_control_chars() {
+        let raw = "tenant\0thread";
+
+        let value = bounded_idempotency_key("prefix", raw, 64)
+            .expect("fallback key")
+            .as_str()
+            .to_string();
+
+        assert!(value.starts_with("prefix:"));
+        assert!(!value.contains(raw));
+    }
+}

@@ -45,6 +45,10 @@ pub enum ProductWorkflowError {
     #[error("turn resume rejected: {reason}")]
     TurnResumeRejected { reason: String },
 
+    /// Turn coordinator rejected a resume with typed category/status information.
+    #[error("turn resume denied: {error}")]
+    TurnResumeDenied { error: TurnError },
+
     /// A transient store or service failure.
     #[error("transient workflow failure: {reason}")]
     Transient { reason: String },
@@ -133,6 +137,15 @@ impl From<ProductWorkflowError> for ProductAdapterError {
             ProductWorkflowError::TurnResumeRejected { reason } => ProductAdapterError::Internal {
                 detail: RedactedString::new(reason),
             },
+            ProductWorkflowError::TurnResumeDenied { error } => {
+                let status_code = error.adapter_status_code();
+                ProductAdapterError::WorkflowRejected {
+                    kind: workflow_rejection_kind(error.category()),
+                    status_code,
+                    retryable: false,
+                    reason: RedactedString::new(error.to_string()),
+                }
+            }
             ProductWorkflowError::Transient { reason } => ProductAdapterError::WorkflowTransient {
                 reason: RedactedString::new(reason),
             },

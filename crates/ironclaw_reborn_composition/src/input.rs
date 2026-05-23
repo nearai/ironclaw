@@ -203,9 +203,11 @@ mod tests {
 
     #[test]
     fn with_product_auth_services_records_injected_bundle() {
-        let product_auth = Arc::new(RebornProductAuthServices::from_shared(Arc::new(
-            InMemoryAuthProductServices::new(),
-        )));
+        let product_auth = Arc::new(
+            RebornProductAuthServices::from_shared_with_noop_dispatcher_for_tests(Arc::new(
+                InMemoryAuthProductServices::new(),
+            )),
+        );
 
         let input = RebornBuildInput::disabled("test-owner")
             .with_product_auth_services(Arc::clone(&product_auth));

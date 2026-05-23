@@ -2,23 +2,56 @@ use chrono::{Duration, Utc};
 use ironclaw_auth::{
     AuthChallenge, AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowKind, AuthGateRef,
     AuthProductScope, AuthProviderId, AuthSessionId, AuthSurface, AuthorizationCodeHash,
-    CredentialAccountLabel, LifecyclePackageRef, NewAuthFlow, OAuthAuthorizationCode,
-    OAuthAuthorizationUrl, OAuthProviderCallbackRequest, OpaqueStateHash, PkceVerifierHash,
-    PkceVerifierSecret, ProviderScope, TurnRunRef,
+    CredentialAccountLabel, InMemoryAuthProductServices, LifecyclePackageRef, NewAuthFlow,
+    OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthProviderCallbackRequest, OpaqueStateHash,
+    PkceVerifierHash, PkceVerifierSecret, ProviderScope, TurnRunRef,
 };
 use ironclaw_host_api::{
     AgentId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, BlockedReason, GetRunStateRequest, IdempotencyKey, LoopCheckpointStateRef,
-    ReplyTargetBindingRef, RunProfileRequest, SourceBindingRef, SubmitTurnRequest,
-    SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnLeaseToken, TurnRunnerId, TurnScope,
+    AcceptedMessageRef, BlockedReason, CancelRunRequest, CancelRunResponse, GetRunStateRequest,
+    IdempotencyKey, LoopCheckpointStateRef, ReplyTargetBindingRef, RunProfileRequest,
+    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId,
+    TurnCoordinator, TurnError, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnScope,
     TurnStatus,
     runner::{BlockRunRequest, ClaimRunRequest, TurnRunTransitionPort},
 };
 use secrecy::SecretString;
 
+use crate::auth::RebornProductWorkflowAuthContinuationDispatcher;
+
 use super::*;
+
+#[derive(Clone)]
+struct ErrorTurnCoordinator {
+    resume_error: TurnError,
+}
+
+#[async_trait::async_trait]
+impl TurnCoordinator for ErrorTurnCoordinator {
+    async fn submit_turn(
+        &self,
+        _request: SubmitTurnRequest,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        panic!("submit_turn is not used by auth continuation error mapping tests");
+    }
+
+    async fn resume_turn(
+        &self,
+        _request: ironclaw_turns::ResumeTurnRequest,
+    ) -> Result<ironclaw_turns::ResumeTurnResponse, TurnError> {
+        Err(self.resume_error.clone())
+    }
+
+    async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
+        panic!("cancel_run is not used by auth continuation error mapping tests");
+    }
+
+    async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        panic!("get_run_state is not used by auth continuation error mapping tests");
+    }
+}
 
 #[tokio::test]
 async fn local_dev_oauth_turn_gate_callback_resumes_default_turn_coordinator() {
@@ -213,6 +246,59 @@ async fn oauth_callback_with_lifecycle_activation_returns_ok_without_resume() {
 
     assert_eq!(response.flow_id, flow_id);
     assert_eq!(response.continuation, continuation);
+}
+
+#[tokio::test]
+async fn oauth_callback_continuation_dispatch_maps_turn_error_categories() {
+    for (turn_error, expected_code, expected_retryable) in [
+        (
+            TurnError::Unavailable {
+                reason: "turn coordinator offline".to_string(),
+            },
+            AuthErrorCode::BackendUnavailable,
+            true,
+        ),
+        (
+            TurnError::Unauthorized,
+            AuthErrorCode::CrossScopeDenied,
+            false,
+        ),
+        (
+            TurnError::ScopeNotFound,
+            AuthErrorCode::UnknownOrExpiredFlow,
+            false,
+        ),
+    ] {
+        let coordinator = Arc::new(ErrorTurnCoordinator {
+            resume_error: turn_error,
+        });
+        let services = RebornProductAuthServices::from_shared(
+            Arc::new(InMemoryAuthProductServices::new()),
+            Arc::new(RebornProductWorkflowAuthContinuationDispatcher::new(
+                coordinator,
+            )),
+        );
+        let scope = turn_scope();
+        let actor = TurnActor::new(UserId::new("alice").unwrap());
+        let auth_scope = auth_scope_for_turn(&scope, &actor);
+        let flow_id = create_flow(
+            &services,
+            auth_scope.clone(),
+            AuthContinuationRef::TurnGateResume {
+                turn_run_ref: TurnRunRef::new(TurnRunId::new().to_string()).unwrap(),
+                gate_ref: AuthGateRef::new("gate:auth-error").unwrap(),
+            },
+        )
+        .await;
+
+        let error = services
+            .handle_oauth_callback(authorized_request(auth_scope, flow_id))
+            .await
+            .expect_err("continuation dispatch error should surface");
+
+        assert_eq!(error.code, expected_code);
+        assert_eq!(error.retryable, expected_retryable);
+    }
 }
 
 fn turn_scope() -> TurnScope {
