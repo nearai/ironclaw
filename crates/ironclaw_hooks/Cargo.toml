@@ -18,6 +18,12 @@ test-support = []
 # libSQL) can run the same `PredicateStateBackend` contract suite against
 # their impl. Mirrors `ironclaw_memory`'s `contract-tests` feature.
 contract-tests = []
+# Compiles the durable libSQL-backed `PredicateStateBackend` impl
+# (`predicate_state::libsql`). Pulls in the `libsql` crate. Off by default
+# so postgres / no-DB builds of `ironclaw_hooks` stay lean (durable-backend
+# PR 3/4). The sibling postgres backend (PR 2/4) is gated on its own
+# feature; the two are independent and may both be enabled.
+libsql = ["dep:libsql"]
 
 [dependencies]
 async-trait = "0.1"
@@ -29,6 +35,7 @@ ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_prompt_envelope = { path = "../ironclaw_prompt_envelope" }
 ironclaw_turns = { path = "../ironclaw_turns" }
 ironclaw_wasm_limiter = { path = "../ironclaw_wasm_limiter" }
+libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
 lru = "0.16"
 rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 serde = { version = "1", features = ["derive"] }
@@ -40,6 +47,12 @@ uuid = { version = "1", features = ["v4"] }
 wasmtime = "44.0.2"
 
 [dev-dependencies]
+# Mirrors the optional runtime dep so the libSQL contract / adversarial
+# integration test (`tests/predicate_state_libsql_contract.rs`, itself gated
+# on the `libsql` feature) can build a database handle. Same version/features
+# as the optional dependency above.
+libsql = { version = "0.6", default-features = false, features = ["core", "replication", "remote", "tls"] }
+tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
 toml = "0.8"
 wat = "1"

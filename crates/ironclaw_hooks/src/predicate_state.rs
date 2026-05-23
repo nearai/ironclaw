@@ -70,6 +70,13 @@ use rust_decimal::Decimal;
 
 use crate::identity::HookId;
 
+/// Durable libSQL-backed [`PredicateStateBackend`] (durable-backend PR
+/// 3/4). Gated on the `libsql` cargo feature so default / postgres / no-DB
+/// builds don't pull in the `libsql` crate.
+#[cfg(feature = "libsql")]
+#[path = "predicate_state_libsql.rs"]
+pub mod libsql;
+
 /// Identity of an invocation-history bucket. The `tenant_id` field is
 /// the trust boundary — one tenant's counter must never affect another's.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
