@@ -80,6 +80,10 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                 capabilities.extend(coding::manifests()?);
                 capabilities
             },
+            // The built-in first-party package declares no manifest hooks;
+            // first-party builtin hooks are installed by the composition
+            // loader directly, not via this manifest surface.
+            hooks: Vec::new(),
         },
         VirtualPath::new("/system/extensions/builtin")?,
     )

@@ -159,6 +159,10 @@ pub struct ExtensionManifest {
     pub runtime: ExtensionRuntime,
     pub host_apis: Vec<HostApiRefV2>,
     pub capabilities: Vec<CapabilityManifest>,
+    /// Declarative hook entries the extension declared. Structurally
+    /// validated by the v2 parser; projected into typed hook entries by the
+    /// composition loader. Empty for the common no-hooks case.
+    pub hooks: Vec<HookSectionEntryV2>,
 }
 
 impl ExtensionManifest {
@@ -221,6 +225,7 @@ impl TryFrom<ExtensionManifestV2> for ExtensionManifest {
             runtime: ExtensionRuntime::from_v2(manifest.runtime)?,
             host_apis: manifest.host_apis,
             capabilities: manifest.capabilities,
+            hooks: manifest.hooks,
         })
     }
 }
@@ -337,10 +342,10 @@ pub use host_api::capability_provider::{
 };
 pub use v2::{
     CapabilityDeclV2, CapabilityVisibility, ExtensionManifestV2, ExtensionRuntimeV2,
-    HostApiContractRegistry, HostApiId, HostApiManifestContext, HostApiManifestContract,
-    HostApiManifestProjection, HostApiMultiplicity, HostApiRefV2, MANIFEST_SCHEMA_VERSION,
-    MAX_MANIFEST_BYTES, ManifestSectionPath, ManifestSource, ManifestV2Error,
-    RESERVED_HOST_BUNDLED_ID_PREFIX,
+    HookSectionEntryV2, HostApiContractRegistry, HostApiId, HostApiManifestContext,
+    HostApiManifestContract, HostApiManifestProjection, HostApiMultiplicity, HostApiRefV2,
+    MANIFEST_SCHEMA_VERSION, MAX_HOOK_ENTRY_BYTES, MAX_MANIFEST_BYTES, MAX_MANIFEST_HOOKS,
+    ManifestSectionPath, ManifestSource, ManifestV2Error, RESERVED_HOST_BUNDLED_ID_PREFIX,
 };
 
 pub type CapabilityManifest = CapabilityDeclV2;

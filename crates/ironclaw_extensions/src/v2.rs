@@ -59,6 +59,61 @@ pub const RESERVED_HOST_BUNDLED_ID_PREFIX: &str = "ironclaw.";
 /// Tune cautiously — raising this also raises peak loader memory.
 pub const MAX_MANIFEST_BYTES: usize = 256 * 1024;
 
+/// Maximum number of `[[hooks]]` entries a single manifest may declare.
+///
+/// This is a *structural* bound enforced by `ironclaw_extensions` at parse
+/// time so a hostile or buggy manifest cannot make the parser allocate an
+/// unbounded vector of hook entries. It intentionally matches the
+/// per-extension registration ceiling enforced downstream by the hook
+/// registrar (`ironclaw_hooks::registrar::MAX_HOOKS_PER_EXTENSION`); the
+/// registrar re-checks the cap (cumulatively across install batches) when
+/// the composition loader installs these entries, so this crate does not
+/// depend on the hook crate to know the value — it just refuses to parse a
+/// manifest that could never install cleanly anyway.
+pub const MAX_MANIFEST_HOOKS: usize = 32;
+
+/// Maximum serialized size, in bytes, of a single `[[hooks]]` entry's body.
+///
+/// The hook-declaration section is carried as an opaque, structurally-typed
+/// TOML payload (see [`HookSectionEntryV2`]) so `ironclaw_extensions` never
+/// imports the hook predicate vocabulary. This cap bounds the per-entry blob
+/// the parser retains before the composition loader projects it into a typed
+/// `ironclaw_hooks::HookManifestEntry` (which applies its own field-level
+/// bounds during validation).
+pub const MAX_HOOK_ENTRY_BYTES: usize = 8 * 1024;
+
+/// A single hook declaration carried on an `ExtensionManifestV2`.
+///
+/// **Clean-boundary contract:** `ironclaw_extensions` is substrate and must
+/// not depend on `ironclaw_hooks`. So this DTO does *not* embed the typed
+/// hook entry (`ironclaw_hooks::manifest::HookManifestEntry`). Instead it
+/// captures the raw, deserialized TOML for the entry as a structurally-typed
+/// [`toml::Value`] table plus the local id string. The composition-layer
+/// loader (`ironclaw_reborn_composition`, which depends on *both* crates)
+/// is the single seam that projects this raw payload into a typed
+/// `HookManifestEntry`, validates it, and installs it through
+/// `HookRegistrar::install` at the `Installed` trust tier.
+///
+/// What this crate validates: the entry is a table, carries a non-empty
+/// `id`, and its serialized size is within [`MAX_HOOK_ENTRY_BYTES`]. It does
+/// **not** interpret `kind`, `body`, `phase`, predicate trees, or windows —
+/// that is the hook crate's job, applied at the composition seam.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookSectionEntryV2 {
+    /// The manifest-local hook id (the `id` field of the TOML entry).
+    /// Surfaced separately so the loader and diagnostics can identify the
+    /// entry without re-parsing the raw payload.
+    pub local_id: String,
+    /// The complete raw TOML body for this hook entry, including `id`,
+    /// re-serialized to a canonical TOML string. Projected into a typed
+    /// `ironclaw_hooks::HookManifestEntry` by the composition loader (via
+    /// `toml::from_str`). Kept as an opaque string — rather than a
+    /// `toml::Value` — so this crate stays free of the hook predicate
+    /// vocabulary *and* so the enclosing manifest can keep deriving `Eq`
+    /// (`toml::Value` is not `Eq` because it can hold floats).
+    pub raw_toml: String,
+}
+
 /// Loader-supplied source for a manifest. Never read from TOML.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ManifestSource {
@@ -409,6 +464,13 @@ pub struct ExtensionManifestV2 {
     /// [`requested_trust`](Self::requested_trust) request.
     pub host_apis: Vec<HostApiRefV2>,
     pub capabilities: Vec<CapabilityDeclV2>,
+    /// Declarative hook entries the extension wants installed. Carried as
+    /// structurally-typed [`HookSectionEntryV2`] payloads; the composition
+    /// loader projects them into typed `ironclaw_hooks::HookManifestEntry`
+    /// values at the `Installed` trust tier. Empty for manifests that
+    /// declare no hooks (the common case). See [`HookSectionEntryV2`] for
+    /// the clean-boundary rationale.
+    pub hooks: Vec<HookSectionEntryV2>,
 }
 
 /// v2 manifest parser/validator errors.
@@ -511,6 +573,20 @@ pub enum ManifestV2Error {
     InvalidWasmModuleRef { value: String, reason: String },
     #[error("invalid mcp runtime: {reason}")]
     InvalidMcpRuntime { reason: String },
+    #[error("manifest declares {count} hooks, exceeding the maximum of {max}")]
+    TooManyHooks { count: usize, max: usize },
+    #[error("hook entry {index} is invalid: {reason}")]
+    InvalidHookEntry { index: usize, reason: String },
+    #[error(
+        "hook entry '{id}' body is {bytes} bytes, exceeding the per-entry maximum of {max} bytes"
+    )]
+    HookEntryTooLarge {
+        id: String,
+        bytes: usize,
+        max: usize,
+    },
+    #[error("duplicate hook id '{id}' declared in manifest")]
+    DuplicateHookId { id: String },
 }
 
 impl ExtensionManifestV2 {
@@ -706,6 +782,8 @@ impl ExtensionManifestV2 {
 
         let host_apis = validate_host_api_refs(raw.host_api, sections)?;
 
+        let hooks = validate_hook_entries(raw.hooks)?;
+
         let mut seen_capabilities = BTreeSet::new();
         let mut capabilities = Vec::with_capacity(raw.capabilities.len());
         for raw_cap in raw.capabilities {
@@ -728,8 +806,69 @@ impl ExtensionManifestV2 {
             runtime,
             host_apis,
             capabilities,
+            hooks,
         })
     }
+}
+
+/// Validate the raw `[[hooks]]` entries: enforce the count cap, that each
+/// entry is a table carrying a non-empty `id`, that ids are unique within the
+/// manifest, and that each entry's serialized body is within the per-entry
+/// size bound. Returns the structurally-typed [`HookSectionEntryV2`] payloads
+/// for the composition loader to project into typed hook entries.
+fn validate_hook_entries(
+    raw_hooks: Vec<toml::Value>,
+) -> Result<Vec<HookSectionEntryV2>, ManifestV2Error> {
+    if raw_hooks.len() > MAX_MANIFEST_HOOKS {
+        return Err(ManifestV2Error::TooManyHooks {
+            count: raw_hooks.len(),
+            max: MAX_MANIFEST_HOOKS,
+        });
+    }
+    let mut seen_ids = HashSet::new();
+    let mut entries = Vec::with_capacity(raw_hooks.len());
+    for (index, raw) in raw_hooks.into_iter().enumerate() {
+        let table = raw
+            .as_table()
+            .ok_or_else(|| ManifestV2Error::InvalidHookEntry {
+                index,
+                reason: "hook entry must be a TOML table".to_string(),
+            })?;
+        let local_id = table
+            .get("id")
+            .and_then(toml::Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| ManifestV2Error::InvalidHookEntry {
+                index,
+                reason: "hook entry must declare a string `id`".to_string(),
+            })?;
+        if local_id.trim().is_empty() {
+            return Err(ManifestV2Error::InvalidHookEntry {
+                index,
+                reason: "hook entry `id` must not be empty".to_string(),
+            });
+        }
+        // Size-bound the per-entry payload before retaining it. Serialize
+        // back to canonical TOML — this is both the size measurement and the
+        // exact payload the loader re-parses. Structural guard, not semantic.
+        let raw_toml =
+            toml::to_string(&raw).map_err(|error| ManifestV2Error::InvalidHookEntry {
+                index,
+                reason: format!("hook entry is not serializable TOML: {error}"),
+            })?;
+        if raw_toml.len() > MAX_HOOK_ENTRY_BYTES {
+            return Err(ManifestV2Error::HookEntryTooLarge {
+                id: local_id,
+                bytes: raw_toml.len(),
+                max: MAX_HOOK_ENTRY_BYTES,
+            });
+        }
+        if !seen_ids.insert(local_id.clone()) {
+            return Err(ManifestV2Error::DuplicateHookId { id: local_id });
+        }
+        entries.push(HookSectionEntryV2 { local_id, raw_toml });
+    }
+    Ok(entries)
 }
 
 impl CapabilityDeclV2 {
@@ -1194,6 +1333,7 @@ fn is_envelope_key(key: &str) -> bool {
             | "runtime"
             | "capabilities"
             | "host_api"
+            | "hooks"
     )
 }
 
@@ -1215,6 +1355,12 @@ struct RawManifestV2 {
     host_api: Vec<RawHostApiRefV2>,
     #[serde(default)]
     capabilities: Vec<RawCapabilityV2>,
+    /// Raw `[[hooks]]` entries. Each is an arbitrary TOML table validated
+    /// structurally here (table shape, non-empty `id`, size bound) and
+    /// projected into a typed hook entry by the composition loader. Kept as
+    /// raw `toml::Value` so this crate never imports the hook vocabulary.
+    #[serde(default)]
+    hooks: Vec<toml::Value>,
 }
 
 fn default_requested_trust() -> RequestedTrustClass {
