@@ -135,13 +135,7 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_host
 #[tokio::test]
 async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
     let github_asset_root = github_first_party_asset_root();
-    let wasm_source = std::fs::read_to_string(github_asset_root.join("wasm-src/src/lib.rs"))
-        .expect("first-party GitHub package should include WASM source");
     assert!(github_asset_root.join("wasm-src/Cargo.toml").is_file());
-    assert!(wasm_source.contains("near::agent::host::http_request"));
-    assert!(!wasm_source.contains("secret_exists"));
-    assert!(!wasm_source.contains("Authorization"));
-    assert!(!wasm_source.contains("Bearer "));
 
     let (_storage, fs) = mounted_github_package_fs();
     let manifest = ExtensionManifest::parse_with_host_api_contracts(

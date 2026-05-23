@@ -6,6 +6,7 @@
 #
 # Prerequisites:
 #   rustup target add wasm32-wasip2
+#   rustup target add wasm32-wasip1
 #   cargo install cargo-component --locked
 #
 # Usage:
@@ -57,16 +58,29 @@ build_extension() {
     echo "  OK   $name"
 }
 
-build_first_party_github() {
-    local name="first-party/github"
-    local source_dir="crates/ironclaw_first_party_extensions/assets/github/wasm-src"
-    local output_dir="crates/ironclaw_first_party_extensions/assets/github/wasm"
-    local artifact="$source_dir/target/wasm32-wasip1/release/github_tool.wasm"
+build_first_party_extension() {
+    local manifest_path="$1"
+    local extension_root
+    local source_dir
+    local module_path
+    local artifact
+    local name
+
+    extension_root=$(dirname "$manifest_path")
+    source_dir="$extension_root/wasm-src"
+    name="first-party/$(basename "$extension_root")"
+    module_path=$(awk -F'"' '/^[[:space:]]*module[[:space:]]*=/{ print $2; exit }' "$manifest_path")
 
     if [ ! -d "$source_dir" ]; then
         echo "  SKIP $name (source dir $source_dir not found)"
         return 0
     fi
+    if [ -z "$module_path" ]; then
+        echo "  FAIL $name (manifest missing runtime module)"
+        FAILED+=("$name")
+        return 1
+    fi
+    artifact="$source_dir/target/wasm32-wasip1/release/$(basename "$module_path")"
 
     echo "  BUILD $name from $source_dir"
     if ! cargo component build --release --target wasm32-wasip2 --manifest-path "$source_dir/Cargo.toml" 2>&1; then
@@ -75,8 +89,8 @@ build_first_party_github() {
         return 1
     fi
 
-    mkdir -p "$output_dir"
-    cp "$artifact" "$output_dir/github_tool.wasm"
+    mkdir -p "$(dirname "$extension_root/$module_path")"
+    cp "$artifact" "$extension_root/$module_path"
     echo "  OK   $name"
 }
 
@@ -89,7 +103,9 @@ fi
 
 if $BUILD_FIRST_PARTY; then
     echo "Building first-party WASM extensions..."
-    build_first_party_github || true
+    for manifest in crates/ironclaw_first_party_extensions/assets/*/manifest.toml; do
+        build_first_party_extension "$manifest" || true
+    done
 fi
 
 if $BUILD_CHANNELS; then

@@ -26,7 +26,7 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_authorization::GrantAuthorizer;
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
+use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     AgentId, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
@@ -42,7 +42,6 @@ use ironclaw_host_runtime::{
     GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HostRuntime, HostRuntimeServices, JSON_CAPABILITY_ID,
     LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SurfaceKind, TIME_CAPABILITY_ID,
     WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers, builtin_first_party_package,
-    default_host_api_contract_registry, default_host_port_catalog,
 };
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
@@ -104,6 +103,7 @@ use tokio_util::sync::CancellationToken;
 use super::{
     config::WaitConfig,
     filesystem::local_filesystem,
+    github as github_support,
     model_replay::RebornTraceReplayModelGateway,
     product_workflow::{RebornProductWorkflowHarness, resource_scope},
     session_thread::RebornThreadHarness,
@@ -1411,9 +1411,9 @@ impl HostRuntimeCapabilityHarness {
         std::fs::create_dir_all(&workspace_root)?;
         let runtime = local_dev_host_runtime_with_registry_and_http_egress(
             storage_root.clone(),
-            github_extension_registry()?,
+            github_support::extension_registry()?,
             Arc::new(RecordingRuntimeHttpEgress::with_body(
-                br#"{"items":[]}"#.to_vec(),
+                github_support::search_response_body(),
             )),
         )?;
         let mounts = workspace_mounts(MountPermissions::read_write_list_delete())?;
@@ -1423,20 +1423,11 @@ impl HostRuntimeCapabilityHarness {
             root,
             workspace_root,
             mounts,
-            capability_ids: vec![
-                CapabilityId::new("github.search_issues")?,
-                CapabilityId::new("github.get_issue")?,
-                CapabilityId::new("github.comment_issue")?,
-            ],
-            effect_kinds: vec![
-                EffectKind::DispatchCapability,
-                EffectKind::Network,
-                EffectKind::UseSecret,
-                EffectKind::ExternalWrite,
-            ],
-            network_policy: github_api_policy(),
-            secrets: vec![SecretHandle::new("github_token")?],
-            provider_id: ExtensionId::new("github")?,
+            capability_ids: github_support::issue_capability_ids()?,
+            effect_kinds: github_support::issue_effect_kinds(),
+            network_policy: github_support::api_policy(),
+            secrets: github_support::secret_handles()?,
+            provider_id: github_support::provider_id()?,
             user_id: UserId::new("reborn-e2e-github-user")?,
             invocations: Arc::new(Mutex::new(Vec::new())),
             results: Arc::new(Mutex::new(Vec::new())),
@@ -1609,22 +1600,6 @@ fn local_dev_host_runtime_with_registry_and_http_egress(
     Ok(Arc::new(services.host_runtime_for_local_testing()))
 }
 
-fn github_extension_registry() -> HarnessResult<ExtensionRegistry> {
-    let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("crates/ironclaw_first_party_extensions/assets/github/manifest.toml");
-    let manifest = ExtensionManifest::parse_with_host_api_contracts(
-        &std::fs::read_to_string(manifest_path)?,
-        ManifestSource::HostBundled,
-        &default_host_port_catalog()?,
-        &default_host_api_contract_registry()?,
-    )?;
-    let package =
-        ExtensionPackage::from_manifest(manifest, VirtualPath::new("/system/extensions/github")?)?;
-    let mut registry = ExtensionRegistry::new();
-    registry.insert(package)?;
-    Ok(registry)
-}
-
 fn first_party_trust_policy() -> HarnessResult<HostTrustPolicy> {
     Ok(HostTrustPolicy::new(vec![Box::new(
         AdminConfig::with_entries(vec![AdminEntry::for_local_manifest(
@@ -1648,18 +1623,6 @@ fn http_test_policy() -> NetworkPolicy {
         allowed_targets: vec![NetworkTargetPattern {
             scheme: Some(NetworkScheme::Https),
             host_pattern: "api.example.test".to_string(),
-            port: None,
-        }],
-        deny_private_ip_ranges: true,
-        max_egress_bytes: Some(10_000),
-    }
-}
-
-fn github_api_policy() -> NetworkPolicy {
-    NetworkPolicy {
-        allowed_targets: vec![NetworkTargetPattern {
-            scheme: Some(NetworkScheme::Https),
-            host_pattern: "api.github.com".to_string(),
             port: None,
         }],
         deny_private_ip_ranges: true,

@@ -19,6 +19,18 @@ const MAX_TEXT_LENGTH: usize = 65_536;
 
 struct GitHubTool;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GitHubOperation {
+    SearchIssues,
+    GetIssue,
+    CommentIssue,
+}
+
+#[derive(Debug, Deserialize)]
+struct ToolContext {
+    capability_id: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct SearchIssuesParams {
     query: String,
@@ -45,7 +57,7 @@ struct CommentIssueParams {
 
 impl exports::near::agent::tool::Guest for GitHubTool {
     fn execute(req: exports::near::agent::tool::Request) -> exports::near::agent::tool::Response {
-        match execute_inner(&req.params) {
+        match execute_inner(&req.params, req.context.as_deref()) {
             Ok(result) => exports::near::agent::tool::Response {
                 output: Some(result),
                 error: None,
@@ -58,40 +70,16 @@ impl exports::near::agent::tool::Guest for GitHubTool {
     }
 
     fn schema() -> String {
+        let search = schema_value(include_str!(
+            "../../schemas/github/search_issues.input.v1.json"
+        ));
+        let get_issue = schema_value(include_str!("../../schemas/github/get_issue.input.v1.json"));
+        let comment_issue = schema_value(include_str!(
+            "../../schemas/github/comment_issue.input.v1.json"
+        ));
         serde_json::json!({
             "type": "object",
-            "oneOf": [
-                {
-                    "additionalProperties": false,
-                    "required": ["query"],
-                    "properties": {
-                        "query": { "type": "string" },
-                        "page": { "type": "integer", "minimum": 1 },
-                        "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
-                        "sort": { "type": "string" },
-                        "order": { "type": "string", "enum": ["asc", "desc"] }
-                    }
-                },
-                {
-                    "additionalProperties": false,
-                    "required": ["owner", "repo", "issue_number"],
-                    "properties": {
-                        "owner": { "type": "string" },
-                        "repo": { "type": "string" },
-                        "issue_number": { "type": "integer", "minimum": 1 }
-                    }
-                },
-                {
-                    "additionalProperties": false,
-                    "required": ["owner", "repo", "issue_number", "body"],
-                    "properties": {
-                        "owner": { "type": "string" },
-                        "repo": { "type": "string" },
-                        "issue_number": { "type": "integer", "minimum": 1 },
-                        "body": { "type": "string" }
-                    }
-                }
-            ]
+            "oneOf": [search, get_issue, comment_issue]
         })
         .to_string()
     }
@@ -102,25 +90,34 @@ impl exports::near::agent::tool::Guest for GitHubTool {
     }
 }
 
-fn execute_inner(params: &str) -> Result<String, String> {
-    let value: serde_json::Value =
-        serde_json::from_str(params).map_err(|_| "invalid_parameters".to_string())?;
+fn schema_value(schema: &str) -> serde_json::Value {
+    serde_json::from_str(schema).unwrap_or_else(|_| serde_json::json!({"type": "object"}))
+}
 
-    if value.get("query").is_some() {
-        let params: SearchIssuesParams =
-            serde_json::from_value(value).map_err(|_| "invalid_parameters".to_string())?;
-        return search_issues(params);
+fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> {
+    match operation_from_context(context)? {
+        GitHubOperation::SearchIssues => search_issues(
+            serde_json::from_str(params).map_err(|_| "invalid_parameters".to_string())?,
+        ),
+        GitHubOperation::GetIssue => {
+            get_issue(serde_json::from_str(params).map_err(|_| "invalid_parameters".to_string())?)
+        }
+        GitHubOperation::CommentIssue => comment_issue(
+            serde_json::from_str(params).map_err(|_| "invalid_parameters".to_string())?,
+        ),
     }
+}
 
-    if value.get("body").is_some() {
-        let params: CommentIssueParams =
-            serde_json::from_value(value).map_err(|_| "invalid_parameters".to_string())?;
-        return comment_issue(params);
+fn operation_from_context(context: Option<&str>) -> Result<GitHubOperation, String> {
+    let context = context.ok_or_else(|| "missing_invocation_context".to_string())?;
+    let context: ToolContext =
+        serde_json::from_str(context).map_err(|_| "invalid_invocation_context".to_string())?;
+    match context.capability_id.as_str() {
+        "github.search_issues" => Ok(GitHubOperation::SearchIssues),
+        "github.get_issue" => Ok(GitHubOperation::GetIssue),
+        "github.comment_issue" => Ok(GitHubOperation::CommentIssue),
+        _ => Err("unsupported_github_capability".to_string()),
     }
-
-    let params: GetIssueParams =
-        serde_json::from_value(value).map_err(|_| "invalid_parameters".to_string())?;
-    get_issue(params)
 }
 
 fn search_issues(params: SearchIssuesParams) -> Result<String, String> {
@@ -309,3 +306,28 @@ fn url_encode_query(value: &str) -> String {
 }
 
 export!(GitHubTool);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn operation_comes_from_host_context_not_param_shape() {
+        assert_eq!(
+            operation_from_context(Some(r#"{"capability_id":"github.get_issue"}"#)).unwrap(),
+            GitHubOperation::GetIssue
+        );
+    }
+
+    #[test]
+    fn operation_rejects_missing_or_unknown_context() {
+        assert_eq!(
+            operation_from_context(None).unwrap_err(),
+            "missing_invocation_context"
+        );
+        assert_eq!(
+            operation_from_context(Some(r#"{"capability_id":"github.create_issue"}"#)).unwrap_err(),
+            "unsupported_github_capability"
+        );
+    }
+}
