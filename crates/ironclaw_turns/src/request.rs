@@ -9,7 +9,10 @@ use crate::{
 pub type TurnTimestamp = DateTime<Utc>;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ResumeTurnPrecondition {
+    // Default preserves the historical WebUI resume behavior. Auth
+    // continuations opt into BlockedAuthGate explicitly.
     #[default]
     AnyBlockedGate,
     BlockedApprovalGate,
@@ -50,11 +53,11 @@ pub struct ResumeTurnRequest {
     pub actor: TurnActor,
     pub run_id: TurnRunId,
     pub gate_resolution_ref: GateRef,
-    #[serde(default, skip_serializing_if = "ResumeTurnPrecondition::is_default")]
-    pub precondition: ResumeTurnPrecondition,
     pub source_binding_ref: SourceBindingRef,
     pub reply_target_binding_ref: ReplyTargetBindingRef,
     pub idempotency_key: IdempotencyKey,
+    #[serde(default, skip_serializing_if = "ResumeTurnPrecondition::is_default")]
+    pub precondition: ResumeTurnPrecondition,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

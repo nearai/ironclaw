@@ -10,8 +10,8 @@ use ironclaw_auth::{
     OAuthCallbackInput, OAuthProviderCallbackRequest, OpaqueStateHash, ProviderCallbackOutcome,
     SecretCleanupService,
 };
-use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
-use ironclaw_turns::TurnCoordinator;
+use ironclaw_product_workflow::{ProductAuthTurnGateResumeDispatcher, ProductWorkflowError};
+use ironclaw_turns::{TurnCoordinator, TurnErrorCategory};
 use serde::{Deserialize, Serialize};
 
 #[async_trait]
@@ -63,16 +63,68 @@ impl RebornAuthContinuationDispatcher for RebornProductWorkflowAuthContinuationD
                 .await
                 .map(|_| ())
                 .map_err(|error| {
+                    let auth_error = auth_error_for_continuation_dispatch(&error);
                     tracing::debug!(
                         %flow_id,
+                        auth_error_code = ?auth_error.code(),
                         error = %error,
                         "product auth turn-gate continuation dispatch failed"
                     );
-                    AuthProductError::BackendUnavailable
+                    auth_error
                 })
         } else {
+            tracing::debug!(
+                flow_id = %event.flow_id,
+                continuation_kind = continuation_kind(&event.continuation),
+                "non-turn auth continuation deferred to follow-up handler"
+            );
             Ok(())
         }
+    }
+}
+
+fn continuation_kind(continuation: &AuthContinuationRef) -> &'static str {
+    match continuation {
+        AuthContinuationRef::SetupOnly => "setup_only",
+        AuthContinuationRef::LifecycleActivation { .. } => "lifecycle_activation",
+        AuthContinuationRef::ProductActionResume { .. } => "product_action_resume",
+        AuthContinuationRef::TurnGateResume { .. } => "turn_gate_resume",
+    }
+}
+
+fn auth_error_for_continuation_dispatch(error: &ProductWorkflowError) -> AuthProductError {
+    match error {
+        ProductWorkflowError::TurnSubmissionFailed { error }
+            if error.category() == TurnErrorCategory::Unavailable =>
+        {
+            AuthProductError::BackendUnavailable
+        }
+        ProductWorkflowError::TurnSubmissionFailed { error }
+            if error.category() == TurnErrorCategory::Unauthorized =>
+        {
+            AuthProductError::CrossScopeDenied
+        }
+        ProductWorkflowError::TurnSubmissionFailed { error }
+            if error.category() == TurnErrorCategory::ScopeNotFound =>
+        {
+            AuthProductError::UnknownOrExpiredFlow
+        }
+        ProductWorkflowError::TurnSubmissionFailed { error } => AuthProductError::InvalidRequest {
+            reason: format!(
+                "auth continuation turn resume failed: {:?}",
+                error.category()
+            ),
+        },
+        ProductWorkflowError::Transient { .. } => AuthProductError::BackendUnavailable,
+        ProductWorkflowError::TurnResumeRejected { reason }
+        | ProductWorkflowError::TurnSubmissionRejected { reason } => {
+            AuthProductError::InvalidRequest {
+                reason: reason.clone(),
+            }
+        }
+        _ => AuthProductError::InvalidRequest {
+            reason: "auth continuation dispatch failed".to_string(),
+        },
     }
 }
 
@@ -361,10 +413,7 @@ impl RebornProductAuthServices {
                 error_code = ?error.code(),
                 "reborn auth callback completed but continuation dispatch failed"
             );
-            return Err(RebornOAuthCallbackError {
-                code: AuthErrorCode::BackendUnavailable,
-                retryable: true,
-            });
+            return Err(error.into());
         }
 
         Ok(RebornOAuthCallbackResponse {

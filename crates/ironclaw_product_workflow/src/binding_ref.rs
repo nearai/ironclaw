@@ -1,6 +1,12 @@
 use ironclaw_turns::{IdempotencyKey, ReplyTargetBindingRef, SourceBindingRef};
 use uuid::Uuid;
 
+// Binding/idempotency newtypes cap at 256 bytes. The default leaves room for
+// short product prefixes; auth continuations reserve extra space because their
+// raw material combines flow, run, and gate identifiers.
+pub(crate) const DEFAULT_BINDING_REF_RAW_MAX_BYTES: usize = 240;
+pub(crate) const AUTH_CONTINUATION_BINDING_REF_RAW_MAX_BYTES: usize = 220;
+
 pub(crate) fn bounded_source_binding_ref(
     prefix: &str,
     raw: &str,

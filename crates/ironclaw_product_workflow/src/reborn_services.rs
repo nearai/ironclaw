@@ -31,7 +31,10 @@ use crate::{
     WebUiInboundCommand, WebUiInboundValidationCode, WebUiInboundValidationError,
     WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
     WebUiSetupExtensionRequest,
-    binding_ref::{bounded_reply_target_binding_ref, bounded_source_binding_ref},
+    binding_ref::{
+        DEFAULT_BINDING_REF_RAW_MAX_BYTES, bounded_reply_target_binding_ref,
+        bounded_source_binding_ref,
+    },
 };
 
 mod error;
@@ -998,7 +1001,7 @@ fn webui_source_binding_ref_from_raw(
     prefix: &str,
     raw: &str,
 ) -> Result<ironclaw_turns::SourceBindingRef, RebornServicesError> {
-    bounded_source_binding_ref(prefix, raw, 240).map_err(|_| {
+    bounded_source_binding_ref(prefix, raw, DEFAULT_BINDING_REF_RAW_MAX_BYTES).map_err(|_| {
         RebornServicesError::from_status(RebornServicesErrorCode::Internal, 500, false)
     })
 }
@@ -1007,7 +1010,7 @@ fn webui_reply_target_binding_ref_from_raw(
     prefix: &str,
     raw: &str,
 ) -> Result<ironclaw_turns::ReplyTargetBindingRef, RebornServicesError> {
-    bounded_reply_target_binding_ref(prefix, raw, 240).map_err(|_| {
+    bounded_reply_target_binding_ref(prefix, raw, DEFAULT_BINDING_REF_RAW_MAX_BYTES).map_err(|_| {
         RebornServicesError::from_status(RebornServicesErrorCode::Internal, 500, false)
     })
 }

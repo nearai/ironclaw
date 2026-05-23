@@ -30,7 +30,8 @@ use crate::binding::{
     ResolvedBinding,
 };
 use crate::binding_ref::{
-    bounded_idempotency_key, bounded_reply_target_binding_ref, bounded_source_binding_ref,
+    DEFAULT_BINDING_REF_RAW_MAX_BYTES, bounded_idempotency_key, bounded_reply_target_binding_ref,
+    bounded_source_binding_ref,
 };
 use crate::error::ProductWorkflowError;
 use crate::policy::{
@@ -548,23 +549,31 @@ impl AcceptedProductInboundTurn {
             binding.thread_id.clone(),
         );
         let actor = TurnActor::new(binding.user_id.clone());
-        let source_binding_ref = bounded_source_binding_ref("src", &source_binding_id, 240)
-            .map_err(|e| ProductWorkflowError::TurnSubmissionRejected {
-                reason: format!("invalid src ref: {e}"),
-            })?;
+        let source_binding_ref = bounded_source_binding_ref(
+            "src",
+            &source_binding_id,
+            DEFAULT_BINDING_REF_RAW_MAX_BYTES,
+        )
+        .map_err(|e| ProductWorkflowError::TurnSubmissionRejected {
+            reason: format!("invalid src ref: {e}"),
+        })?;
         let accepted_message_ref = accepted_message_ref(message_id)?;
-        let reply_target_binding_ref =
-            bounded_reply_target_binding_ref("reply", &reply_target_binding_id, 240).map_err(
-                |e| ProductWorkflowError::TurnSubmissionRejected {
-                    reason: format!("invalid reply ref: {e}"),
-                },
-            )?;
-        let idempotency_key =
-            bounded_idempotency_key("turn", &idempotency_key_raw, 240).map_err(|e| {
-                ProductWorkflowError::TurnSubmissionRejected {
-                    reason: format!("invalid turn ref: {e}"),
-                }
-            })?;
+        let reply_target_binding_ref = bounded_reply_target_binding_ref(
+            "reply",
+            &reply_target_binding_id,
+            DEFAULT_BINDING_REF_RAW_MAX_BYTES,
+        )
+        .map_err(|e| ProductWorkflowError::TurnSubmissionRejected {
+            reason: format!("invalid reply ref: {e}"),
+        })?;
+        let idempotency_key = bounded_idempotency_key(
+            "turn",
+            &idempotency_key_raw,
+            DEFAULT_BINDING_REF_RAW_MAX_BYTES,
+        )
+        .map_err(|e| ProductWorkflowError::TurnSubmissionRejected {
+            reason: format!("invalid turn ref: {e}"),
+        })?;
 
         let request = SubmitTurnRequest {
             scope: turn_scope,

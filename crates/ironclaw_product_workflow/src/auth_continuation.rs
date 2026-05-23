@@ -15,7 +15,10 @@ use ironclaw_turns::{
 use uuid::Uuid;
 
 use crate::ProductWorkflowError;
-use crate::binding_ref::{bounded_reply_target_binding_ref, bounded_source_binding_ref};
+use crate::binding_ref::{
+    AUTH_CONTINUATION_BINDING_REF_RAW_MAX_BYTES, bounded_idempotency_key,
+    bounded_reply_target_binding_ref, bounded_source_binding_ref,
+};
 
 #[derive(Clone)]
 pub struct ProductAuthTurnGateResumeDispatcher {
@@ -46,6 +49,7 @@ impl ProductAuthTurnGateResumeDispatcher {
         let run_id = parse_turn_run_id(turn_run_ref.as_str())?;
         let gate_resolution_ref = parse_gate_ref(gate_ref.as_str())?;
         let binding_id = format!("{}|{}|{}", event.flow_id, run_id, gate_ref.as_str());
+        let idempotency_key = idempotency_key_for_binding(&binding_id)?;
 
         self.turn_coordinator
             .resume_turn(ResumeTurnRequest {
@@ -53,20 +57,20 @@ impl ProductAuthTurnGateResumeDispatcher {
                 actor,
                 run_id,
                 gate_resolution_ref,
-                precondition: ResumeTurnPrecondition::BlockedAuthGate,
                 source_binding_ref: bounded_source_binding_ref(
                     "auth-continuation-src",
                     &binding_id,
-                    220,
+                    AUTH_CONTINUATION_BINDING_REF_RAW_MAX_BYTES,
                 )
                 .map_err(binding_ref_error)?,
                 reply_target_binding_ref: bounded_reply_target_binding_ref(
                     "auth-continuation-reply",
                     &binding_id,
-                    220,
+                    AUTH_CONTINUATION_BINDING_REF_RAW_MAX_BYTES,
                 )
                 .map_err(binding_ref_error)?,
-                idempotency_key: idempotency_key_for_flow(event.flow_id.to_string())?,
+                idempotency_key,
+                precondition: ResumeTurnPrecondition::BlockedAuthGate,
             })
             .await
             .map_err(map_auth_resume_error)?;
@@ -77,11 +81,13 @@ impl ProductAuthTurnGateResumeDispatcher {
 
 fn map_auth_resume_error(error: TurnError) -> ProductWorkflowError {
     match error {
-        TurnError::InvalidTransition { .. } | TurnError::InvalidRequest { .. } => {
-            ProductWorkflowError::TurnResumeRejected {
-                reason: "auth continuation does not match a blocked auth gate".to_string(),
-            }
-        }
+        TurnError::InvalidTransition { .. }
+        | TurnError::InvalidRequest { .. }
+        | TurnError::Unauthorized
+        | TurnError::ScopeNotFound
+        | TurnError::LeaseMismatch => ProductWorkflowError::TurnResumeRejected {
+            reason: "auth continuation does not match an authorized blocked auth gate".to_string(),
+        },
         error => ProductWorkflowError::TurnSubmissionFailed { error },
     }
 }
@@ -116,11 +122,14 @@ fn parse_gate_ref(value: &str) -> Result<GateRef, ProductWorkflowError> {
     })
 }
 
-fn idempotency_key_for_flow(flow_id: String) -> Result<IdempotencyKey, ProductWorkflowError> {
-    IdempotencyKey::new(format!("auth-continuation:{flow_id}")).map_err(|reason| {
-        ProductWorkflowError::TurnSubmissionRejected {
-            reason: format!("invalid auth continuation idempotency key: {reason}"),
-        }
+fn idempotency_key_for_binding(binding_id: &str) -> Result<IdempotencyKey, ProductWorkflowError> {
+    bounded_idempotency_key(
+        "auth-continuation",
+        binding_id,
+        AUTH_CONTINUATION_BINDING_REF_RAW_MAX_BYTES,
+    )
+    .map_err(|reason| ProductWorkflowError::TurnSubmissionRejected {
+        reason: format!("invalid auth continuation idempotency key: {reason}"),
     })
 }
 
@@ -144,10 +153,14 @@ mod tests {
         AgentId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
     };
     use ironclaw_turns::{
-        AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GetRunStateRequest,
-        ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
-        RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
-        TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnStatus,
+        AcceptedMessageRef, BlockedReason, CancelRunRequest, CancelRunResponse,
+        DefaultTurnCoordinator, EventCursor, GetRunStateRequest, IdempotencyKey,
+        InMemoryTurnStateStore, LoopCheckpointStateRef, ReplyTargetBindingRef, ResumeTurnRequest,
+        ResumeTurnResponse, RunProfileId, RunProfileRequest, RunProfileVersion, SourceBindingRef,
+        SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnCoordinator,
+        TurnError, TurnId, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnScope,
+        TurnStatus,
+        runner::{BlockRunRequest, ClaimRunRequest, TurnRunTransitionPort},
     };
 
     use super::*;
@@ -392,6 +405,73 @@ mod tests {
             ProductWorkflowError::TurnResumeRejected { .. }
         ));
         assert!(coordinator.resumes().is_empty());
+    }
+
+    #[tokio::test]
+    async fn turn_gate_continuation_rejects_cross_scope_resume_through_real_coordinator() {
+        let store = Arc::new(InMemoryTurnStateStore::default());
+        let coordinator = Arc::new(DefaultTurnCoordinator::new(store.clone()));
+        let dispatcher = ProductAuthTurnGateResumeDispatcher::new(coordinator.clone());
+        let scope = TurnScope::new(
+            TenantId::new("tenant-auth").unwrap(),
+            Some(AgentId::new("agent-auth").unwrap()),
+            Some(ProjectId::new("project-auth").unwrap()),
+            ThreadId::new("thread-auth").unwrap(),
+        );
+        let actor = TurnActor::new(UserId::new("alice").unwrap());
+        let submit = coordinator
+            .submit_turn(SubmitTurnRequest {
+                scope: scope.clone(),
+                actor: actor.clone(),
+                accepted_message_ref: AcceptedMessageRef::new("message-auth-real").unwrap(),
+                source_binding_ref: SourceBindingRef::new("source-auth-real").unwrap(),
+                reply_target_binding_ref: ReplyTargetBindingRef::new("reply-auth-real").unwrap(),
+                requested_run_profile: Some(RunProfileRequest::new("default").unwrap()),
+                idempotency_key: IdempotencyKey::new("idem-auth-real-submit").unwrap(),
+                received_at: Utc::now(),
+            })
+            .await
+            .expect("submit turn");
+        let SubmitTurnResponse::Accepted { run_id, .. } = submit;
+        let runner_id = TurnRunnerId::new();
+        let lease_token = TurnLeaseToken::new();
+        store
+            .claim_next_run(ClaimRunRequest {
+                runner_id,
+                lease_token,
+                scope_filter: Some(scope),
+            })
+            .await
+            .expect("claim run")
+            .expect("queued run exists");
+        store
+            .block_run(BlockRunRequest {
+                run_id,
+                runner_id,
+                lease_token,
+                checkpoint_id: TurnCheckpointId::new(),
+                state_ref: LoopCheckpointStateRef::new("checkpoint:auth-real").unwrap(),
+                reason: BlockedReason::Auth {
+                    gate_ref: GateRef::new("gate:auth-real").unwrap(),
+                },
+            })
+            .await
+            .expect("block auth gate");
+        let mut event = scoped_event(AuthContinuationRef::TurnGateResume {
+            turn_run_ref: TurnRunRef::new(run_id.to_string()).unwrap(),
+            gate_ref: AuthGateRef::new("gate:auth-real").unwrap(),
+        });
+        event.scope.resource.tenant_id = TenantId::new("tenant-other").unwrap();
+
+        let err = dispatcher
+            .dispatch_turn_gate_resume(event)
+            .await
+            .expect_err("cross-scope continuation must not resume");
+
+        assert!(matches!(
+            err,
+            ProductWorkflowError::TurnResumeRejected { .. }
+        ));
     }
 
     #[tokio::test]

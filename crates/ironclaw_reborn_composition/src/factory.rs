@@ -525,6 +525,10 @@ async fn build_libsql_production(
         Arc::new(services.turn_coordinator_for_production()?);
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
         Arc::new(services.host_runtime_for_production(&wiring_config)?);
+    // TODO(reborn-auth-continuation-prod): when production auth services are
+    // composed here instead of injected, attach the same
+    // RebornProductWorkflowAuthContinuationDispatcher used by local-dev so
+    // OAuth turn-gate completions resume through this TurnCoordinator.
     let product_auth_ready = product_auth_services.is_some();
 
     Ok(RebornServices {
@@ -600,6 +604,10 @@ async fn build_postgres_production(
         Arc::new(services.turn_coordinator_for_production()?);
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
         Arc::new(services.host_runtime_for_production(&wiring_config)?);
+    // TODO(reborn-auth-continuation-prod): when production auth services are
+    // composed here instead of injected, attach the same
+    // RebornProductWorkflowAuthContinuationDispatcher used by local-dev so
+    // OAuth turn-gate completions resume through this TurnCoordinator.
     let product_auth_ready = product_auth_services.is_some();
 
     Ok(RebornServices {
