@@ -892,6 +892,18 @@ impl HookDispatcher {
         let observer_facts = Vec::new();
         let mut failures = Vec::new();
         let mut short_circuited = false;
+        // Provenance tracking for the security-audit `HookDeny` event. We only
+        // record a `HookDeny` when the *winning* composed decision is an
+        // explicit `Deny` returned by a hook via
+        // `Ok(GateHookOutcome::Decision { .. })`. Fail-closed denials (a hook
+        // failing closed, a missing binding implementation) are represented by
+        // `HookFailed`, not `HookDeny`; pause/auth gates are not denials at
+        // all. Because composition keeps the *first* observed deny
+        // (`Deny > PauseAuth > PauseApproval > Allow`), this flag records the
+        // provenance of the deny that actually established the composed
+        // `Deny` state — it flips to `true` only at the transition where an
+        // explicit decision first turns `composed` into a `Deny`.
+        let mut explicit_deny = false;
 
         for (key, binding) in ordered {
             if short_circuited && !matches!(key.phase, crate::ordering::HookPhase::Telemetry) {
@@ -960,7 +972,18 @@ impl HookDispatcher {
                         Some(ctx.capability_name.as_str()),
                     )
                     .await;
+                    let was_deny = matches!(composed.inner(), GateDecisionInner::Deny { .. });
                     composed = compose_gate_decision(composed, decision);
+                    let is_deny = matches!(composed.inner(), GateDecisionInner::Deny { .. });
+                    // The deny that wins is the *first* one observed. If this
+                    // explicit decision is what first turned `composed` into a
+                    // `Deny`, the winning deny is explicit. A later explicit
+                    // deny that arrives after `composed` is already `Deny`
+                    // (e.g. behind a fail-closed deny) does not flip the flag,
+                    // because composition keeps the earlier deny.
+                    if is_deny && !was_deny {
+                        explicit_deny = true;
+                    }
                     if !matches!(composed.inner(), GateDecisionInner::Allow) {
                         short_circuited = true;
                     }
@@ -990,7 +1013,13 @@ impl HookDispatcher {
         // correct ownership boundary: it fires off the *composed* decision
         // after all hooks (including telemetry-exempt ones) ran, so multiple
         // denying hooks cannot multiply the recorded event count.
-        if !matches!(composed.inner(), GateDecisionInner::Allow) {
+        //
+        // Narrowing (PR #3922 review): only an *explicit* hook `Deny` produces
+        // a `HookDeny` event. Fail-closed denials surface as `HookFailed`, and
+        // `PauseApproval`/`PauseAuth` gates are not denials — none of them
+        // should emit `HookDeny`. `explicit_deny` is only set when the winning
+        // composed `Deny` came from `Ok(GateHookOutcome::Decision { .. })`.
+        if explicit_deny && matches!(composed.inner(), GateDecisionInner::Deny { .. }) {
             self.record_capability_block_audit(ctx.capability_name.as_str());
         }
 
@@ -2511,6 +2540,213 @@ mod tests {
                 .as_ref()
                 .map(ironclaw_host_api::CapabilityId::as_str),
             Some("cap.x"),
+        );
+    }
+
+    /// A privileged (builtin) `before_capability` binding, needed by the
+    /// pause-gate negative tests below: `PauseApproval`/`PauseAuth` are only
+    /// reachable through the privileged sink.
+    fn builtin_capability_binding(id: HookId, phase: HookPhase) -> HookBinding {
+        HookBinding {
+            hook_id: id,
+            hook_version: HookVersion::ONE,
+            trust_class: HookTrustClass::Builtin,
+            phase,
+            priority: HookPriority::DEFAULT,
+            point: HookPointSpec::BeforeCapability,
+            event_kind_filter: None,
+            owning_extension: None,
+            scope: HookBindingScope::Global,
+            poisoned: false,
+        }
+    }
+
+    /// Negative provenance contract (PR #3922 review): a `PauseApproval` gate
+    /// is NOT a denial and must not emit a `HookDeny` security-audit event,
+    /// even though the composed decision is non-permit (it short-circuits the
+    /// gate). `HookDeny` is reserved for explicit hook denies.
+    #[tokio::test]
+    async fn pause_approval_does_not_record_hook_deny_event() {
+        use ironclaw_events::{InMemorySecurityAuditSink, SecurityAuditSink};
+
+        let sink: Arc<InMemorySecurityAuditSink> = Arc::new(InMemorySecurityAuditSink::new());
+        let sink_dyn: Arc<dyn SecurityAuditSink> = sink.clone();
+        let pause_id = HookId::for_builtin("test::pause-approval", HookVersion::ONE);
+
+        let mut registry = HookRegistry::new();
+        registry
+            .insert(builtin_capability_binding(pause_id, HookPhase::Policy))
+            .expect("binding insertable");
+        let mut dispatcher = HookDispatcher::new(registry).with_security_audit_sink(sink_dyn);
+        dispatcher.install_before_capability(
+            pause_id,
+            BeforeCapabilityHookImpl::Privileged(Box::new(PauseApprovalBuiltinHook)),
+        );
+
+        let outcome = dispatcher.dispatch_before_capability(&ctx()).await;
+        assert!(
+            !outcome.decision.permits(),
+            "PauseApproval is a non-permit gate"
+        );
+        assert!(
+            sink.snapshot().is_empty(),
+            "PauseApproval must not record a HookDeny event, got {:?}",
+            sink.snapshot()
+        );
+    }
+
+    /// Negative provenance contract (PR #3922 review): a `PauseAuth` gate is
+    /// not a denial and must not emit a `HookDeny` security-audit event.
+    #[tokio::test]
+    async fn pause_auth_does_not_record_hook_deny_event() {
+        use ironclaw_events::{InMemorySecurityAuditSink, SecurityAuditSink};
+
+        let sink: Arc<InMemorySecurityAuditSink> = Arc::new(InMemorySecurityAuditSink::new());
+        let sink_dyn: Arc<dyn SecurityAuditSink> = sink.clone();
+        let pause_id = HookId::for_builtin("test::pause-auth", HookVersion::ONE);
+
+        let mut registry = HookRegistry::new();
+        registry
+            .insert(builtin_capability_binding(pause_id, HookPhase::Policy))
+            .expect("binding insertable");
+        let mut dispatcher = HookDispatcher::new(registry).with_security_audit_sink(sink_dyn);
+        dispatcher.install_before_capability(
+            pause_id,
+            BeforeCapabilityHookImpl::Privileged(Box::new(PauseAuthBuiltinHook)),
+        );
+
+        let outcome = dispatcher.dispatch_before_capability(&ctx()).await;
+        assert!(
+            !outcome.decision.permits(),
+            "PauseAuth is a non-permit gate"
+        );
+        assert!(
+            sink.snapshot().is_empty(),
+            "PauseAuth must not record a HookDeny event, got {:?}",
+            sink.snapshot()
+        );
+    }
+
+    /// Negative provenance contract (PR #3922 review): a hook that fails closed
+    /// via a panic produces a fail-closed `Deny`, but that denial is
+    /// represented by `HookFailed`, not `HookDeny`. No `HookDeny` security-
+    /// audit event must be recorded.
+    #[tokio::test]
+    async fn fail_closed_panic_does_not_record_hook_deny_event() {
+        use ironclaw_events::{InMemorySecurityAuditSink, SecurityAuditSink};
+
+        let sink: Arc<InMemorySecurityAuditSink> = Arc::new(InMemorySecurityAuditSink::new());
+        let sink_dyn: Arc<dyn SecurityAuditSink> = sink.clone();
+        let panic_id = ext_hook_id("panic");
+
+        let mut registry = HookRegistry::new();
+        registry
+            .insert(installed_binding(
+                panic_id,
+                HookPointSpec::BeforeCapability,
+                HookPhase::Policy,
+            ))
+            .expect("binding insertable");
+        let mut dispatcher = HookDispatcher::new(registry).with_security_audit_sink(sink_dyn);
+        dispatcher.install_before_capability(
+            panic_id,
+            BeforeCapabilityHookImpl::Restricted(Box::new(PanickingHook)),
+        );
+
+        let outcome = dispatcher.dispatch_before_capability(&ctx()).await;
+        assert!(
+            !outcome.decision.permits(),
+            "a panicking gate hook must fail closed (non-permit)"
+        );
+        assert_eq!(
+            outcome.failures.len(),
+            1,
+            "the panic must surface as a recorded failure (HookFailed), got {:?}",
+            outcome.failures
+        );
+        assert!(
+            sink.snapshot().is_empty(),
+            "a fail-closed (panic) deny must not record a HookDeny event, got {:?}",
+            sink.snapshot()
+        );
+    }
+
+    /// Negative provenance contract (PR #3922 review): a hook that fails closed
+    /// via a timeout produces a fail-closed `Deny` represented by
+    /// `HookFailed`, not `HookDeny`. No `HookDeny` event must be recorded.
+    #[tokio::test]
+    async fn fail_closed_timeout_does_not_record_hook_deny_event() {
+        use ironclaw_events::{InMemorySecurityAuditSink, SecurityAuditSink};
+
+        let sink: Arc<InMemorySecurityAuditSink> = Arc::new(InMemorySecurityAuditSink::new());
+        let sink_dyn: Arc<dyn SecurityAuditSink> = sink.clone();
+        let slow_id = ext_hook_id("slow");
+
+        let mut registry = HookRegistry::new();
+        registry
+            .insert(installed_binding(
+                slow_id,
+                HookPointSpec::BeforeCapability,
+                HookPhase::Policy,
+            ))
+            .expect("binding insertable");
+        let mut dispatcher = HookDispatcher::new(registry)
+            .with_timeout(Duration::from_millis(20))
+            .with_security_audit_sink(sink_dyn);
+        dispatcher.install_before_capability(
+            slow_id,
+            BeforeCapabilityHookImpl::Restricted(Box::new(SlowHook)),
+        );
+
+        let outcome = dispatcher.dispatch_before_capability(&ctx()).await;
+        assert!(
+            !outcome.decision.permits(),
+            "a timed-out gate hook must fail closed (non-permit)"
+        );
+        assert_eq!(
+            outcome.failures.len(),
+            1,
+            "the timeout must surface as a recorded failure (HookFailed), got {:?}",
+            outcome.failures
+        );
+        assert!(
+            sink.snapshot().is_empty(),
+            "a fail-closed (timeout) deny must not record a HookDeny event, got {:?}",
+            sink.snapshot()
+        );
+    }
+
+    /// Negative provenance contract (PR #3922 review): a missing binding
+    /// implementation is a protocol violation that fails closed (malformed).
+    /// It must surface as `HookFailed`, never `HookDeny`.
+    #[tokio::test]
+    async fn fail_closed_missing_impl_does_not_record_hook_deny_event() {
+        use ironclaw_events::{InMemorySecurityAuditSink, SecurityAuditSink};
+
+        let sink: Arc<InMemorySecurityAuditSink> = Arc::new(InMemorySecurityAuditSink::new());
+        let sink_dyn: Arc<dyn SecurityAuditSink> = sink.clone();
+        let missing_id = ext_hook_id("missing-impl");
+
+        let mut registry = HookRegistry::new();
+        registry
+            .insert(installed_binding(
+                missing_id,
+                HookPointSpec::BeforeCapability,
+                HookPhase::Policy,
+            ))
+            .expect("binding insertable");
+        // Intentionally do NOT install an implementation for `missing_id`.
+        let dispatcher = HookDispatcher::new(registry).with_security_audit_sink(sink_dyn);
+
+        let outcome = dispatcher.dispatch_before_capability(&ctx()).await;
+        assert!(
+            !outcome.decision.permits(),
+            "a missing-impl binding must fail closed (non-permit)"
+        );
+        assert!(
+            sink.snapshot().is_empty(),
+            "a fail-closed (missing-impl) deny must not record a HookDeny event, got {:?}",
+            sink.snapshot()
         );
     }
 
