@@ -523,8 +523,8 @@ fn wasm_dispatcher_from_wat_with_timeout(
         kind,
         body,
     )
-        .with_scope(HookManifestScope::SameTenant)
-        .with_requires_grant("integration-test-wasm-hooks");
+    .with_scope(HookManifestScope::SameTenant)
+    .with_requires_grant("integration-test-wasm-hooks");
     let mut builder = HookDispatcherBuilder::new(HookRegistry::new());
     if let Some(timeout) = dispatcher_timeout {
         builder = builder.with_timeout(timeout);
