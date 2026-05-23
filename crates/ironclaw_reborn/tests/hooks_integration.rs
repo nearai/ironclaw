@@ -59,11 +59,13 @@ use ironclaw_threads::{
     SessionThreadService, ThreadScope,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, CheckpointStateStore, EventCursor, InMemoryCheckpointStateStore,
-    InMemoryRunProfileResolver, InMemoryTurnStateStore, LoopResultRef,
-    PutCheckpointStateRequest, ReplyTargetBindingRef, RunProfileId, RunProfileResolutionRequest,
-    RunProfileResolver, RunProfileVersion, SourceBindingRef, TurnActor, TurnLeaseToken, TurnRunId,
-    TurnRunnerId, TurnScope, TurnStatus,
+    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, CheckpointStateStore, EventCursor,
+    GetRunStateRequest, InMemoryCheckpointStateStore, InMemoryRunProfileResolver,
+    InMemoryTurnStateStore, LoopResultRef, PutCheckpointStateRequest, ReplyTargetBindingRef,
+    ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileResolutionRequest,
+    RunProfileResolver, RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
+    TurnActor, TurnAdmissionPolicy, TurnError, TurnLeaseToken, TurnRunId, TurnRunState,
+    TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostError, CapabilityBatchInvocation, CapabilityBatchOutcome,
         CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityInputRef,
@@ -75,6 +77,55 @@ use ironclaw_turns::{
     },
     runner::ClaimedTurnRun,
 };
+
+// ─── Static turn state store ──────────────────────────────────────────────
+//
+// The factory's cancellation handle builder looks up the run by id from
+// the supplied `TurnStateStore`. `InMemoryTurnStateStore::default()` is
+// empty, so we wrap the claimed state directly. This mirrors the
+// `StaticTurnStateStore` pattern used by `tests/loop_driver_host.rs`.
+
+struct StaticTurnStateStore {
+    state: Mutex<TurnRunState>,
+}
+
+impl StaticTurnStateStore {
+    fn new(state: TurnRunState) -> Self {
+        Self {
+            state: Mutex::new(state),
+        }
+    }
+}
+
+#[async_trait]
+impl TurnStateStore for StaticTurnStateStore {
+    async fn submit_turn(
+        &self,
+        _request: SubmitTurnRequest,
+        _admission_policy: &dyn TurnAdmissionPolicy,
+        _run_profile_resolver: &dyn RunProfileResolver,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        panic!("submit_turn should not be called by static test turn state store")
+    }
+
+    async fn resume_turn(
+        &self,
+        _request: ResumeTurnRequest,
+    ) -> Result<ResumeTurnResponse, TurnError> {
+        panic!("resume_turn should not be called by static test turn state store")
+    }
+
+    async fn request_cancel(
+        &self,
+        _request: CancelRunRequest,
+    ) -> Result<CancelRunResponse, TurnError> {
+        panic!("request_cancel should not be called by static test turn state store")
+    }
+
+    async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        Ok(self.state.lock().expect("static turn state lock not poisoned").clone())
+    }
+}
 
 // ─── Inner-port stub ───────────────────────────────────────────────────────
 
@@ -393,7 +444,7 @@ fn selective_deny_dispatcher(target: &str) -> Arc<HookDispatcher> {
 struct Fixture {
     thread_service: Arc<InMemorySessionThreadService>,
     checkpoint_state_store: Arc<InMemoryCheckpointStateStore>,
-    turn_state_store: Arc<InMemoryTurnStateStore>,
+    loop_checkpoint_store: Arc<InMemoryTurnStateStore>,
     milestone_sink: Arc<InMemoryLoopHostMilestoneSink>,
     gateway: Arc<UnusedGateway>,
     thread_scope: ThreadScope,
@@ -406,7 +457,7 @@ impl Fixture {
     async fn new() -> Self {
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
-        let turn_state_store = Arc::new(InMemoryTurnStateStore::default());
+        let loop_checkpoint_store = Arc::new(InMemoryTurnStateStore::default());
         let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
         let gateway = Arc::new(UnusedGateway);
 
@@ -492,7 +543,7 @@ impl Fixture {
         Self {
             thread_service,
             checkpoint_state_store,
-            turn_state_store,
+            loop_checkpoint_store,
             milestone_sink,
             gateway,
             thread_scope,
@@ -509,8 +560,8 @@ impl Fixture {
             self.thread_scope.clone(),
             Arc::clone(&self.gateway),
             Arc::clone(&self.checkpoint_state_store) as _,
-            Arc::clone(&self.turn_state_store) as _,
-            Arc::clone(&self.turn_state_store) as _,
+            Arc::new(StaticTurnStateStore::new(self.claimed.state.clone())),
+            Arc::clone(&self.loop_checkpoint_store) as _,
             Arc::clone(&self.milestone_sink) as _,
             TextOnlyLoopHostConfig {
                 max_messages: 8,
