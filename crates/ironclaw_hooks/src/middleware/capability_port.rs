@@ -1389,9 +1389,9 @@ mod tests {
         evaluator: Arc<PredicateEvaluator>,
     ) -> HookId {
         let hook_id = HookId::derive(
-            &ExtensionId("ext".to_string()),
+            &ExtensionId::new("ext").expect("ext literal is valid"),
             "1.0",
-            &HookLocalId(local.to_string()),
+            &HookLocalId::new(local).expect("local id literal is valid"),
             HookVersion::ONE,
         );
         let hook = PredicateBackedBeforeCapabilityHook::new(hook_id, spec, evaluator);
