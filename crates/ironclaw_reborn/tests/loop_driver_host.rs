@@ -2119,6 +2119,7 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
         model_policy_guard: None,
         model_budget_accountant: None,
         safety_context: None,
+        hook_security_audit_sink: None,
     })
     .unwrap();
 
@@ -2237,6 +2238,7 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
         model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         safety_context: Some(test_safety_context()),
+        hook_security_audit_sink: None,
     })
     .expect("all product-live adapters should satisfy readiness");
 
@@ -2305,6 +2307,7 @@ async fn product_live_parts_for_gate_test(
         model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         safety_context: Some(test_safety_context()),
+        hook_security_audit_sink: None,
     }
 }
 

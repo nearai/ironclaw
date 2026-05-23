@@ -1060,7 +1060,8 @@ where
     /// Only the [`Self::with_hook_dispatcher_builder_factory`] path picks
     /// this up; the legacy/deprecated shared-dispatcher path does not, since
     /// callers using that path own the dispatcher entirely and can attach
-    /// the sink themselves via [`HookDispatcherBuilder::with_audit_sink`].
+    /// the sink themselves via
+    /// [`HookDispatcherBuilder::with_security_audit_sink`].
     pub fn with_hook_security_audit_sink(mut self, sink: Arc<dyn SecurityAuditSink>) -> Self {
         self.hook_security_audit_sink = Some(sink);
         self
@@ -1246,7 +1247,7 @@ where
                     ));
                 let mut builder = builder.with_milestone_sink(run_scoped);
                 if let Some(audit_sink) = self.hook_security_audit_sink.as_ref() {
-                    builder = builder.with_audit_sink(Arc::clone(audit_sink));
+                    builder = builder.with_security_audit_sink(Arc::clone(audit_sink));
                 }
                 Some(builder.build_arc())
             }

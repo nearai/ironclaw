@@ -37,7 +37,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_events::{
     DurableEventLog, DurableEventSink, EventCursor as RuntimeEventCursor, EventSink,
-    EventStreamKey, InMemoryDurableEventLog, ReadScope, RuntimeEvent, RuntimeEventKind,
+    EventStreamKey, InMemoryDurableEventLog, InMemorySecurityAuditSink, ReadScope, RuntimeEvent,
+    RuntimeEventKind, SecurityAuditSink, SecurityBoundary, SecurityDecision,
 };
 use ironclaw_hooks::HookRegistrar;
 use ironclaw_hooks::dispatch::{HookDispatcher, HookDispatcherBuilder};
@@ -569,6 +570,38 @@ fn predicate_deny_dispatcher() -> Arc<HookDispatcher> {
         )
         .expect("Installed-tier predicate hook installs at policy phase")
         .build_arc()
+}
+
+/// Same predicate-deny hook as [`predicate_deny_dispatcher`], but returns the
+/// pre-`build_arc` [`HookDispatcherBuilder`] so the host factory's
+/// builder-factory path can attach a security-audit sink before sealing. This
+/// is the only dispatcher-installation path that consumes
+/// `RebornLoopDriverHostFactory::with_hook_security_audit_sink`.
+fn predicate_deny_builder() -> HookDispatcherBuilder {
+    let hook_id = HookId::derive(
+        &ExtensionId::new("integration-tests").expect("valid ExtensionId in test"),
+        "0.0.1",
+        &HookLocalId::new("deny-cap-blocked").expect("valid HookLocalId in test"),
+        HookVersion::ONE,
+    );
+    let spec = HookPredicateSpec::DenyCapability {
+        when: CapabilityPredicate::NameEquals {
+            name: "cap.blocked".to_string(),
+        },
+        reason: "integration-test deny rule".to_string(),
+    };
+    let evaluator = Arc::new(PredicateEvaluator::new());
+    let hook = PredicateBackedBeforeCapabilityHook::new(hook_id, spec, evaluator);
+
+    HookDispatcherBuilder::new(HookRegistry::new())
+        .install_installed_before_capability(
+            hook_id,
+            HookPhase::Policy,
+            ironclaw_host_api::ExtensionId::new("integration-tests").expect("valid ext id"),
+            HookBindingScope::Global,
+            Box::new(hook),
+        )
+        .expect("Installed-tier predicate hook installs at policy phase")
 }
 
 fn selective_deny_dispatcher(target: &str) -> Arc<HookDispatcher> {
@@ -1873,6 +1906,64 @@ async fn predicate_deny_hook_short_circuits_inner_port() {
         inner.invocations().is_empty(),
         "inner port must NOT be invoked when a hook denies; got {:?}",
         inner.invocations()
+    );
+}
+
+/// Caller-level regression for
+/// `RebornLoopDriverHostFactory::with_hook_security_audit_sink`. The
+/// dispatcher-level unit test in `ironclaw_hooks` proves a manually wired
+/// dispatcher records `HookDeny`, but it bypasses the factory and would not
+/// catch a regression where the factory forgets to attach the sink to the
+/// per-build builder before `build_arc()` (henrypark133 / serrrfirat MEDIUM
+/// on PR #3922). This drives the full factory → builder-factory → host →
+/// `invoke_capability` deny path and asserts the sink received exactly one
+/// `HookDeny` event.
+#[tokio::test]
+async fn factory_hook_security_audit_sink_records_deny_through_build() {
+    let fixture = Fixture::new().await;
+    let inner = Arc::new(RecordingCapabilityPort::new());
+    let surface_version = fixture.surface_version.clone();
+
+    let sink: Arc<InMemorySecurityAuditSink> = Arc::new(InMemorySecurityAuditSink::new());
+    let sink_dyn: Arc<dyn SecurityAuditSink> = sink.clone();
+
+    // The builder-factory path is the only one that consumes the factory's
+    // security-audit sink; pair it with `with_hook_security_audit_sink`.
+    let host = fixture
+        .factory()
+        .with_hook_dispatcher_builder_factory(predicate_deny_builder)
+        .with_hook_security_audit_sink(sink_dyn)
+        .build_text_only_host_with_capabilities(fixture.request(), inner.clone())
+        .await
+        .expect("host builds with hook dispatcher + security-audit sink installed");
+
+    let outcome = host
+        .invoke_capability(invocation(&surface_version, "cap.blocked"))
+        .await
+        .expect("invoke_capability returns a (denied) outcome, not an error");
+    expect_denied_with(outcome, "hook_denied");
+    assert!(
+        inner.invocations().is_empty(),
+        "inner port must NOT be invoked when a hook denies"
+    );
+
+    let events = sink.snapshot();
+    assert_eq!(
+        events.len(),
+        1,
+        "factory wiring must record exactly one HookDeny event, got {events:?}"
+    );
+    let event = &events[0];
+    assert_eq!(event.boundary, SecurityBoundary::HookDeny);
+    assert_eq!(event.decision, SecurityDecision::Blocked);
+    assert_eq!(event.code, "hook_deny_predicate");
+    assert_eq!(
+        event
+            .capability_id
+            .as_ref()
+            .map(ironclaw_host_api::CapabilityId::as_str),
+        Some("cap.blocked"),
+        "capability id should propagate from the invoked capability"
     );
 }
 

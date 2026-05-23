@@ -419,10 +419,6 @@ impl BuiltinObligationServices {
         self
     }
 
-    pub fn security_audit_sink(&self) -> Option<Arc<dyn SecurityAuditSink>> {
-        self.security_audit_sink.clone()
-    }
-
     pub fn audit_sink(&self) -> Arc<dyn AuditSink> {
         self.audit_sink.clone()
     }

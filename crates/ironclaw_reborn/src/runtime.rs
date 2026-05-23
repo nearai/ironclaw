@@ -78,6 +78,14 @@ where
     pub model_policy_guard: Option<Arc<dyn LoopModelPolicyGuard>>,
     pub model_budget_accountant: Option<Arc<dyn LoopModelBudgetAccountant>>,
     pub safety_context: Option<InstructionSafetyContext>,
+    /// Optional security-audit sink for hook-driven `Deny` decisions. When
+    /// set, [`build_default_planned_runtime`] threads it onto the
+    /// [`RebornLoopDriverHostFactory`] so the per-build `HookDispatcher`
+    /// records explicit hook denies to the retention sink. Production
+    /// composition supplies [`ironclaw_events::TracingSecurityAuditSink`];
+    /// it takes effect once a hook dispatcher builder factory is also
+    /// installed (the sink is inert without a dispatcher, by design).
+    pub hook_security_audit_sink: Option<Arc<dyn ironclaw_events::SecurityAuditSink>>,
 }
 
 pub struct RebornRuntimeLoopComposition<T, S, G>
@@ -350,6 +358,9 @@ where
         host_factory = host_factory.with_safety_context(safety);
     }
     host_factory = host_factory.with_identity_context_source(parts.identity_context_source);
+    if let Some(sink) = parts.hook_security_audit_sink {
+        host_factory = host_factory.with_hook_security_audit_sink(sink);
+    }
     let host_factory = Arc::new(host_factory);
 
     let transition_port: Arc<dyn TurnRunTransitionPort> = parts.turn_state;

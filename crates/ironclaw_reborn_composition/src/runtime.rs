@@ -840,6 +840,12 @@ pub async fn build_reborn_runtime(
         model_policy_guard: None,
         model_budget_accountant: None,
         safety_context: None,
+        // Production retention shape for hook-driven `Deny` decisions. Inert
+        // until a hook dispatcher builder factory is also installed on the
+        // host factory, but the seam is wired so the sink flows the moment
+        // hooks are composed into this graph. A durable backing behind
+        // `TracingSecurityAuditSink` is a follow-up.
+        hook_security_audit_sink: Some(Arc::new(ironclaw_events::TracingSecurityAuditSink)),
     })?;
     let default_resolved_run_profile = composition
         .run_profile_resolver

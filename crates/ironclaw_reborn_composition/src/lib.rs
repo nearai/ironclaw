@@ -427,6 +427,15 @@ where
     .with_run_profile_resolver(Arc::new(
         ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver()?,
     ))
+    // Wire the production security-audit sink so obligation-boundary
+    // security decisions (leak-detector / output-redaction blocks today) are
+    // recorded for SRE/forensics retention instead of silently dropped. The
+    // event-store config above only wires the general `event_sink`/`audit_sink`
+    // pair; the `SecurityAuditSink` is a distinct boundary that must be wired
+    // explicitly. `TracingSecurityAuditSink` is the documented production
+    // retention shape (emits `tracing::debug!`); a durable backing behind it
+    // is a follow-up (see `TracingSecurityAuditSink` docs in `ironclaw_events`).
+    .with_security_audit_sink(Arc::new(ironclaw_events::TracingSecurityAuditSink))
     .with_reborn_event_store_config(RebornProfile::Production, config.event_store)
     .await?;
 
@@ -492,6 +501,15 @@ where
     .with_run_profile_resolver(Arc::new(
         ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver()?,
     ))
+    // Wire the production security-audit sink so obligation-boundary
+    // security decisions (leak-detector / output-redaction blocks today) are
+    // recorded for SRE/forensics retention instead of silently dropped. The
+    // event-store config above only wires the general `event_sink`/`audit_sink`
+    // pair; the `SecurityAuditSink` is a distinct boundary that must be wired
+    // explicitly. `TracingSecurityAuditSink` is the documented production
+    // retention shape (emits `tracing::debug!`); a durable backing behind it
+    // is a follow-up (see `TracingSecurityAuditSink` docs in `ironclaw_events`).
+    .with_security_audit_sink(Arc::new(ironclaw_events::TracingSecurityAuditSink))
     .with_reborn_event_store_config(RebornProfile::Production, config.event_store)
     .await?;
 
