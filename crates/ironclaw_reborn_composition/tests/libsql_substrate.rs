@@ -13,7 +13,7 @@ use ironclaw_host_runtime::{
     VerifiedTenantSandboxProcessPort,
 };
 use ironclaw_reborn_composition::{
-    LibSqlProductionSubstrateConfig, RebornCompositionError,
+    LibSqlProductionSubstrateConfig, RebornCompositionError, RebornProductionRuntimePolicy,
     build_libsql_production_host_runtime_services,
 };
 use ironclaw_reborn_event_store::RebornEventStoreConfig;
@@ -41,8 +41,11 @@ async fn libsql_substrate_builder_wires_production_components_without_local_only
         },
         secret_master_key: Some(SecretString::from("01234567890123456789012345678901")),
         trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
-        runtime_policy: production_runtime_policy(),
-        verified_tenant_sandbox_process_port: Some(verified_sandbox_process_port()),
+        runtime_policy: RebornProductionRuntimePolicy::with_tenant_sandbox_process_port(
+            production_runtime_policy(),
+            verified_sandbox_process_port(),
+        )
+        .unwrap(),
         turn_run_wake_notifier: Arc::new(RecordingSchedulerWakeNotifier),
         surface_version: CapabilitySurfaceVersion::new("test-surface").unwrap(),
     })
@@ -75,8 +78,11 @@ async fn libsql_substrate_builder_rejects_missing_secret_master_key() {
         },
         secret_master_key: None,
         trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
-        runtime_policy: production_runtime_policy(),
-        verified_tenant_sandbox_process_port: None,
+        runtime_policy: RebornProductionRuntimePolicy::with_tenant_sandbox_process_port(
+            production_runtime_policy(),
+            verified_sandbox_process_port(),
+        )
+        .unwrap(),
         turn_run_wake_notifier: Arc::new(RecordingSchedulerWakeNotifier),
         surface_version: CapabilitySurfaceVersion::new("test-surface").unwrap(),
     })
@@ -85,6 +91,34 @@ async fn libsql_substrate_builder_rejects_missing_secret_master_key() {
     assert!(matches!(
         result,
         Err(RebornCompositionError::MissingSecretMasterKey)
+    ));
+}
+
+#[test]
+fn production_runtime_policy_requires_tenant_sandbox_process_port() {
+    let result = RebornProductionRuntimePolicy::without_process_port(production_runtime_policy());
+
+    assert!(matches!(
+        result,
+        Err(RebornCompositionError::MissingTenantSandboxProcessPort)
+    ));
+}
+
+#[test]
+fn production_runtime_policy_rejects_unexpected_tenant_sandbox_process_port() {
+    let mut policy = production_runtime_policy();
+    policy.process_backend = ProcessBackendKind::None;
+
+    let result = RebornProductionRuntimePolicy::with_tenant_sandbox_process_port(
+        policy,
+        verified_sandbox_process_port(),
+    );
+
+    assert!(matches!(
+        result,
+        Err(RebornCompositionError::UnexpectedTenantSandboxProcessPort {
+            process_backend: ProcessBackendKind::None
+        })
     ));
 }
 
@@ -103,7 +137,7 @@ fn production_runtime_policy() -> EffectiveRuntimePolicy {
 }
 
 fn verified_sandbox_process_port() -> VerifiedTenantSandboxProcessPort {
-    VerifiedTenantSandboxProcessPort::from_transport(Arc::new(RecordingSandboxTransport))
+    VerifiedTenantSandboxProcessPort::assume_verified_transport(Arc::new(RecordingSandboxTransport))
 }
 
 #[derive(Debug)]

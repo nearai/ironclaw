@@ -14,7 +14,7 @@ use ironclaw_host_runtime::{
     VerifiedTenantSandboxProcessPort,
 };
 use ironclaw_reborn_composition::{
-    PostgresProductionSubstrateConfig, RebornCompositionError,
+    PostgresProductionSubstrateConfig, RebornCompositionError, RebornProductionRuntimePolicy,
     build_postgres_production_host_runtime_services,
 };
 use ironclaw_reborn_event_store::RebornEventStoreConfig;
@@ -35,8 +35,11 @@ async fn postgres_substrate_builder_wires_production_components_without_local_on
             },
             secret_master_key: Some(SecretString::from("01234567890123456789012345678901")),
             trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
-            runtime_policy: production_runtime_policy(),
-            verified_tenant_sandbox_process_port: Some(verified_sandbox_process_port()),
+            runtime_policy: RebornProductionRuntimePolicy::with_tenant_sandbox_process_port(
+                production_runtime_policy(),
+                verified_sandbox_process_port(),
+            )
+            .unwrap(),
             turn_run_wake_notifier: Arc::new(RecordingSchedulerWakeNotifier),
             surface_version: CapabilitySurfaceVersion::new("test-surface").unwrap(),
         })
@@ -63,8 +66,11 @@ async fn postgres_substrate_builder_rejects_missing_secret_master_key() {
             },
             secret_master_key: None,
             trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
-            runtime_policy: production_runtime_policy(),
-            verified_tenant_sandbox_process_port: None,
+            runtime_policy: RebornProductionRuntimePolicy::with_tenant_sandbox_process_port(
+                production_runtime_policy(),
+                verified_sandbox_process_port(),
+            )
+            .unwrap(),
             turn_run_wake_notifier: Arc::new(RecordingSchedulerWakeNotifier),
             surface_version: CapabilitySurfaceVersion::new("test-surface").unwrap(),
         })
@@ -91,7 +97,7 @@ fn production_runtime_policy() -> EffectiveRuntimePolicy {
 }
 
 fn verified_sandbox_process_port() -> VerifiedTenantSandboxProcessPort {
-    VerifiedTenantSandboxProcessPort::from_transport(Arc::new(RecordingSandboxTransport))
+    VerifiedTenantSandboxProcessPort::assume_verified_transport(Arc::new(RecordingSandboxTransport))
 }
 
 #[derive(Debug)]

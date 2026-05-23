@@ -1224,7 +1224,7 @@ fn production_wiring_validation_tracks_tenant_sandbox_process_port_for_builtin_s
     .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
     .with_runtime_policy(hosted_dev_runtime_policy())
     .with_verified_tenant_sandbox_process_port(
-        VerifiedTenantSandboxProcessPort::from_transport(Arc::new(
+        VerifiedTenantSandboxProcessPort::assume_verified_transport(Arc::new(
             ProductionCandidateSandboxTransport,
         )),
     );

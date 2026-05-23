@@ -339,9 +339,10 @@ async fn local_dev_builds_facades_without_production_claim() {
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 fn test_verified_sandbox_process_ports() -> RebornHostRuntimePorts {
-    let process_port = ironclaw_host_runtime::VerifiedTenantSandboxProcessPort::from_transport(
-        Arc::new(ProductionReadySandboxTransport),
-    );
+    let process_port =
+        ironclaw_host_runtime::VerifiedTenantSandboxProcessPort::assume_verified_transport(
+            Arc::new(ProductionReadySandboxTransport),
+        );
     RebornHostRuntimePorts::new().with_verified_tenant_sandbox_process_port(process_port)
 }
 

@@ -27,7 +27,12 @@ use ironclaw_host_runtime::{
     CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
     TenantSandboxProcessPort, VerifiedTenantSandboxProcessPort,
 };
-use sha2::{Digest, Sha256};
+
+mod container_identity;
+mod scope_key;
+
+pub use container_identity::RebornSandboxContainerIdentity;
+pub use scope_key::RebornSandboxScopeKey;
 
 const DEFAULT_IMAGE: &str = "ironclaw-worker:latest";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -45,7 +50,7 @@ pub struct RebornSandboxConfig {
     cpu_shares: u32,
     max_output_bytes: usize,
     disable_network: bool,
-    container_user: Option<String>,
+    container_identity: RebornSandboxContainerIdentity,
 }
 
 impl RebornSandboxConfig {
@@ -60,7 +65,7 @@ impl RebornSandboxConfig {
             cpu_shares: DEFAULT_CPU_SHARES,
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
             disable_network: true,
-            container_user: None,
+            container_identity: RebornSandboxContainerIdentity::image_default(),
         }
     }
 
@@ -79,51 +84,15 @@ impl RebornSandboxConfig {
         self
     }
 
-    pub fn with_container_user(mut self, user: impl Into<String>) -> Self {
-        self.container_user = Some(user.into());
+    pub fn with_container_identity(mut self, identity: RebornSandboxContainerIdentity) -> Self {
+        self.container_identity = identity;
         self
     }
-}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RebornSandboxScopeKey {
-    raw: String,
-    digest: String,
-}
-
-impl RebornSandboxScopeKey {
-    pub fn from_scope(scope: &ResourceScope) -> Self {
-        let mut raw_parts = vec![
-            ("tenant", scope.tenant_id.as_str().to_string()),
-            ("user", scope.user_id.as_str().to_string()),
-        ];
-        raw_parts.push((
-            "agent",
-            scope
-                .agent_id
-                .as_ref()
-                .map(|id| id.as_str().to_string())
-                .unwrap_or_else(|| "_none".to_string()),
-        ));
-        if let Some(project_id) = &scope.project_id {
-            raw_parts.push(("project", project_id.as_str().to_string()));
-        } else if let Some(thread_id) = &scope.thread_id {
-            raw_parts.push(("thread", thread_id.as_str().to_string()));
-        } else {
-            raw_parts.push(("invocation", scope.invocation_id.to_string()));
-        }
-
-        let raw = encode_scope_parts(&raw_parts);
-        let digest = scope_digest(&raw);
-        Self { raw, digest }
-    }
-
-    pub fn workspace_path(&self, root: &Path) -> PathBuf {
-        root.join("scopes").join(&self.digest)
-    }
-
-    pub fn container_name_prefix(&self) -> String {
-        format!("ironclaw-reborn-sandbox-{}", &self.digest[..24])
+    pub fn with_container_user(mut self, user: impl Into<String>, workspace_mode: u32) -> Self {
+        self.container_identity =
+            RebornSandboxContainerIdentity::configured_user(user, workspace_mode);
+        self
     }
 }
 
@@ -140,7 +109,7 @@ impl std::fmt::Debug for RebornScopedSandboxCommandTransport {
             .field("workspace_root", &self.config.workspace_root)
             .field("image", &self.config.image)
             .field("disable_network", &self.config.disable_network)
-            .field("container_user", &self.config.container_user)
+            .field("container_identity", &self.config.container_identity)
             .finish_non_exhaustive()
     }
 }
@@ -160,7 +129,7 @@ impl RebornScopedSandboxCommandTransport {
     }
 
     pub fn into_verified_process_port(self) -> VerifiedTenantSandboxProcessPort {
-        VerifiedTenantSandboxProcessPort::new(Arc::new(self.into_process_port()))
+        VerifiedTenantSandboxProcessPort::assume_verified(Arc::new(self.into_process_port()))
     }
 
     fn prepare_workspace(&self, scope: &ResourceScope) -> Result<PathBuf, RuntimeProcessError> {
@@ -174,13 +143,15 @@ impl RebornScopedSandboxCommandTransport {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&workspace, std::fs::Permissions::from_mode(0o700)).map_err(
-                |error| {
-                    RuntimeProcessError::ExecutionFailed(format!(
-                        "sandbox workspace permissions could not be set: {error}"
-                    ))
-                },
-            )?;
+            std::fs::set_permissions(
+                &workspace,
+                std::fs::Permissions::from_mode(self.config.container_identity.workspace_mode()),
+            )
+            .map_err(|error| {
+                RuntimeProcessError::ExecutionFailed(format!(
+                    "sandbox workspace permissions could not be set: {error}"
+                ))
+            })?;
         }
         workspace.canonicalize().map_err(|error| {
             RuntimeProcessError::ExecutionFailed(format!(
@@ -250,12 +221,7 @@ impl RebornScopedSandboxCommandTransport {
             uuid::Uuid::new_v4()
         );
         let env = validate_env(request.extra_env)?;
-        let container_user = self
-            .config
-            .container_user
-            .as_deref()
-            .map(validate_container_user)
-            .transpose()?;
+        let container_user = self.config.container_identity.container_user()?;
         let binds = vec![format!(
             "{}:{CONTAINER_WORKSPACE_ROOT}:rw",
             workspace.display()
@@ -524,16 +490,6 @@ fn validate_env(env: HashMap<String, String>) -> Result<Vec<String>, RuntimeProc
         .collect()
 }
 
-fn validate_container_user(user: &str) -> Result<String, RuntimeProcessError> {
-    reject_nul("sandbox container user", user)?;
-    if user.trim().is_empty() {
-        return Err(RuntimeProcessError::ExecutionFailed(
-            "sandbox container user must not be empty".to_string(),
-        ));
-    }
-    Ok(user.to_string())
-}
-
 fn validate_relative_workdir(path: &Path) -> Result<(), RuntimeProcessError> {
     for component in path.components() {
         match component {
@@ -548,86 +504,9 @@ fn validate_relative_workdir(path: &Path) -> Result<(), RuntimeProcessError> {
     Ok(())
 }
 
-fn encode_scope_parts(parts: &[(&str, String)]) -> String {
-    let mut encoded = String::new();
-    for (kind, value) in parts {
-        encoded.push_str(&kind.len().to_string());
-        encoded.push(':');
-        encoded.push_str(kind);
-        encoded.push('=');
-        encoded.push_str(&value.len().to_string());
-        encoded.push(':');
-        encoded.push_str(value);
-        encoded.push(';');
-    }
-    encoded
-}
-
-fn scope_digest(raw: &str) -> String {
-    hex::encode(Sha256::digest(raw.as_bytes()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::{AgentId, InvocationId, ProjectId, TenantId, ThreadId, UserId};
-
-    fn scope(
-        tenant: &str,
-        user: &str,
-        project: Option<&str>,
-        thread: Option<&str>,
-    ) -> ResourceScope {
-        ResourceScope {
-            tenant_id: TenantId::new(tenant).unwrap(),
-            user_id: UserId::new(user).unwrap(),
-            agent_id: Some(AgentId::new("agent").unwrap()),
-            project_id: project.map(|value| ProjectId::new(value).unwrap()),
-            mission_id: None,
-            thread_id: thread.map(|value| ThreadId::new(value).unwrap()),
-            invocation_id: InvocationId::new(),
-        }
-    }
-
-    #[test]
-    fn scope_key_isolates_tenants_with_same_user_and_project() {
-        let root = Path::new("/tmp/reborn-sandbox");
-        let left = RebornSandboxScopeKey::from_scope(&scope(
-            "tenant-a",
-            "same-user",
-            Some("same-project"),
-            None,
-        ));
-        let right = RebornSandboxScopeKey::from_scope(&scope(
-            "tenant-b",
-            "same-user",
-            Some("same-project"),
-            None,
-        ));
-
-        assert_ne!(left.workspace_path(root), right.workspace_path(root));
-        assert_ne!(left.container_name_prefix(), right.container_name_prefix());
-    }
-
-    #[test]
-    fn scope_key_uses_thread_when_project_is_absent() {
-        let root = Path::new("/tmp/reborn-sandbox");
-        let left = RebornSandboxScopeKey::from_scope(&scope("tenant", "user", None, Some("a")));
-        let right = RebornSandboxScopeKey::from_scope(&scope("tenant", "user", None, Some("b")));
-
-        assert_ne!(left.workspace_path(root), right.workspace_path(root));
-        assert_ne!(left.container_name_prefix(), right.container_name_prefix());
-    }
-
-    #[test]
-    fn scope_key_does_not_collapse_path_special_characters() {
-        let root = Path::new("/tmp/reborn-sandbox");
-        let left = RebornSandboxScopeKey::from_scope(&scope("tenant:a", "user", Some("p"), None));
-        let right = RebornSandboxScopeKey::from_scope(&scope("tenant_a", "user", Some("p"), None));
-
-        assert_ne!(left.workspace_path(root), right.workspace_path(root));
-        assert_ne!(left.container_name_prefix(), right.container_name_prefix());
-    }
 
     #[test]
     fn relative_workdir_rejects_escape() {

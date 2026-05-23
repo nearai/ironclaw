@@ -25,6 +25,8 @@ mod input;
 #[cfg(feature = "root-llm-provider")]
 mod llm_catalog;
 mod product_live_adapters;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+mod production_runtime_policy;
 mod profile;
 mod projection;
 mod readiness;
@@ -63,6 +65,8 @@ pub use product_live_adapters::{
     ProductLivePlannedRuntimeAdapters, ProductLiveVisibleCapabilityRequestConfig,
     capability_allowlist, visible_capability_request_for_run,
 };
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub use production_runtime_policy::RebornProductionRuntimePolicy;
 pub use profile::{RebornCompositionProfile, RebornCompositionProfileParseError};
 pub use readiness::{RebornFacadeReadiness, RebornReadiness, RebornReadinessState};
 pub use runtime::{
@@ -77,7 +81,8 @@ pub use runtime_input::{
 #[cfg(feature = "root-llm-provider")]
 pub use runtime_input::{RebornLlmConfig, ResolvedRebornLlm};
 pub use sandbox_process::{
-    RebornSandboxConfig, RebornSandboxScopeKey, RebornScopedSandboxCommandTransport,
+    RebornSandboxConfig, RebornSandboxContainerIdentity, RebornSandboxScopeKey,
+    RebornScopedSandboxCommandTransport,
 };
 pub use webui::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]
@@ -195,15 +200,13 @@ use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::PostgresRootFilesystem;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
+use ironclaw_host_api::ProcessBackendKind;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{
     MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, SecretHandle, VirtualPath,
-    runtime_policy::EffectiveRuntimePolicy,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_host_runtime::{
-    CapabilitySurfaceVersion, HostRuntimeServices, VerifiedTenantSandboxProcessPort,
-};
+use ironclaw_host_runtime::{CapabilitySurfaceVersion, HostRuntimeServices};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_network::{PolicyNetworkHttpEgress, ReqwestNetworkTransport};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -337,8 +340,7 @@ where
     pub event_store: RebornEventStoreConfig,
     pub secret_master_key: Option<SecretMaterial>,
     pub trust_policy: Arc<TPolicy>,
-    pub runtime_policy: EffectiveRuntimePolicy,
-    pub verified_tenant_sandbox_process_port: Option<VerifiedTenantSandboxProcessPort>,
+    pub runtime_policy: RebornProductionRuntimePolicy,
     pub turn_run_wake_notifier: Arc<TWake>,
     pub surface_version: CapabilitySurfaceVersion,
 }
@@ -354,8 +356,7 @@ where
     pub event_store: RebornEventStoreConfig,
     pub secret_master_key: Option<SecretMaterial>,
     pub trust_policy: Arc<TPolicy>,
-    pub runtime_policy: EffectiveRuntimePolicy,
-    pub verified_tenant_sandbox_process_port: Option<VerifiedTenantSandboxProcessPort>,
+    pub runtime_policy: RebornProductionRuntimePolicy,
     pub turn_run_wake_notifier: Arc<TWake>,
     pub surface_version: CapabilitySurfaceVersion,
 }
@@ -364,6 +365,12 @@ where
 pub enum RebornCompositionError {
     #[error("reborn production composition requires explicit secret master key")]
     MissingSecretMasterKey,
+    #[error("reborn production runtime policy uses tenant sandbox without a verified process port")]
+    MissingTenantSandboxProcessPort,
+    #[error(
+        "reborn production runtime policy uses {process_backend:?} but a tenant sandbox process port was supplied"
+    )]
+    UnexpectedTenantSandboxProcessPort { process_backend: ProcessBackendKind },
     #[error("reborn mount view construction failed: {0}")]
     Mount(#[from] ironclaw_host_api::HostApiError),
     #[error("reborn filesystem substrate failed: {0}")]
@@ -417,6 +424,7 @@ where
     let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
         &scoped_filesystem,
     )));
+    let (runtime_policy, tenant_sandbox_process_port) = config.runtime_policy.into_parts();
 
     let mut services = HostRuntimeServices::new(
         Arc::new(ExtensionRegistry::new()),
@@ -427,7 +435,7 @@ where
         config.surface_version,
     )
     .with_trust_policy(config.trust_policy)
-    .with_runtime_policy(config.runtime_policy)
+    .with_runtime_policy(runtime_policy)
     .with_capability_leases(capability_leases)
     .with_secret_store(Arc::clone(&secret_store))
     .with_turn_run_wake_notifier(config.turn_run_wake_notifier)
@@ -436,7 +444,7 @@ where
     .with_run_profile_resolver(Arc::new(
         ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver()?,
     ));
-    if let Some(process_port) = config.verified_tenant_sandbox_process_port {
+    if let Some(process_port) = tenant_sandbox_process_port {
         services = services.with_verified_tenant_sandbox_process_port(process_port);
     }
     let services = services
@@ -486,6 +494,7 @@ where
     let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
         &scoped_filesystem,
     )));
+    let (runtime_policy, tenant_sandbox_process_port) = config.runtime_policy.into_parts();
 
     let mut services = HostRuntimeServices::new(
         Arc::new(ExtensionRegistry::new()),
@@ -496,7 +505,7 @@ where
         config.surface_version,
     )
     .with_trust_policy(config.trust_policy)
-    .with_runtime_policy(config.runtime_policy)
+    .with_runtime_policy(runtime_policy)
     .with_capability_leases(capability_leases)
     .with_secret_store(Arc::clone(&secret_store))
     .with_turn_run_wake_notifier(config.turn_run_wake_notifier)
@@ -505,7 +514,7 @@ where
     .with_run_profile_resolver(Arc::new(
         ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver()?,
     ));
-    if let Some(process_port) = config.verified_tenant_sandbox_process_port {
+    if let Some(process_port) = tenant_sandbox_process_port {
         services = services.with_verified_tenant_sandbox_process_port(process_port);
     }
     let services = services

@@ -151,12 +151,14 @@ impl std::fmt::Debug for VerifiedTenantSandboxProcessPort {
 }
 
 impl VerifiedTenantSandboxProcessPort {
-    pub fn new(process_port: std::sync::Arc<TenantSandboxProcessPort>) -> Self {
+    pub fn assume_verified(process_port: std::sync::Arc<TenantSandboxProcessPort>) -> Self {
         Self { process_port }
     }
 
-    pub fn from_transport(transport: std::sync::Arc<dyn SandboxCommandTransport>) -> Self {
-        Self::new(std::sync::Arc::new(TenantSandboxProcessPort::new(
+    pub fn assume_verified_transport(
+        transport: std::sync::Arc<dyn SandboxCommandTransport>,
+    ) -> Self {
+        Self::assume_verified(std::sync::Arc::new(TenantSandboxProcessPort::new(
             transport,
         )))
     }
