@@ -12,9 +12,11 @@ use ironclaw_host_api::{
     NetworkPolicy, NetworkTargetPattern, Principal, RuntimeKind, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
-    CapabilitySurfacePolicy, HostRuntime, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
-    SKILL_REMOVE_CAPABILITY_ID, SurfaceKind,
-    VisibleCapabilityRequest as HostVisibleCapabilityRequest,
+    APPLY_PATCH_CAPABILITY_ID, CapabilitySurfacePolicy, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID,
+    GREP_CAPABILITY_ID, HostRuntime, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID,
+    READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
+    SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SurfaceKind, TIME_CAPABILITY_ID,
+    VisibleCapabilityRequest as HostVisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID,
 };
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
@@ -531,7 +533,7 @@ enum LocalDevCapabilityKind {
 }
 
 fn local_dev_capability_kind(capability_id: &str) -> LocalDevCapabilityKind {
-    if capability_id == "builtin.shell" {
+    if capability_id == SHELL_CAPABILITY_ID {
         LocalDevCapabilityKind::AmbientShell
     } else if capability_id == SKILL_LIST_CAPABILITY_ID
         || capability_id == SKILL_INSTALL_CAPABILITY_ID
@@ -595,19 +597,19 @@ fn local_dev_grant_constraints(
 
 fn local_dev_builtin_capability_ids() -> [&'static str; 13] {
     [
-        "builtin.echo",
-        "builtin.time",
-        "builtin.json",
-        "builtin.shell",
-        "builtin.read_file",
-        "builtin.write_file",
-        "builtin.list_dir",
-        "builtin.glob",
-        "builtin.grep",
-        "builtin.apply_patch",
-        "builtin.skill_list",
-        "builtin.skill_install",
-        "builtin.skill_remove",
+        ECHO_CAPABILITY_ID,
+        TIME_CAPABILITY_ID,
+        JSON_CAPABILITY_ID,
+        SHELL_CAPABILITY_ID,
+        READ_FILE_CAPABILITY_ID,
+        WRITE_FILE_CAPABILITY_ID,
+        LIST_DIR_CAPABILITY_ID,
+        GLOB_CAPABILITY_ID,
+        GREP_CAPABILITY_ID,
+        APPLY_PATCH_CAPABILITY_ID,
+        SKILL_LIST_CAPABILITY_ID,
+        SKILL_INSTALL_CAPABILITY_ID,
+        SKILL_REMOVE_CAPABILITY_ID,
     ]
 }
 
@@ -822,12 +824,12 @@ mod tests {
     fn local_dev_builtin_surface_grants_shell_as_ambient_escape_hatch() {
         let capability_ids = local_dev_builtin_capability_ids();
 
-        assert!(capability_ids.contains(&"builtin.write_file"));
-        assert!(capability_ids.contains(&"builtin.apply_patch"));
-        assert!(capability_ids.contains(&"builtin.skill_list"));
-        assert!(capability_ids.contains(&"builtin.skill_install"));
-        assert!(capability_ids.contains(&"builtin.skill_remove"));
-        assert!(capability_ids.contains(&"builtin.shell"));
+        assert!(capability_ids.contains(&WRITE_FILE_CAPABILITY_ID));
+        assert!(capability_ids.contains(&APPLY_PATCH_CAPABILITY_ID));
+        assert!(capability_ids.contains(&SKILL_LIST_CAPABILITY_ID));
+        assert!(capability_ids.contains(&SKILL_INSTALL_CAPABILITY_ID));
+        assert!(capability_ids.contains(&SKILL_REMOVE_CAPABILITY_ID));
+        assert!(capability_ids.contains(&SHELL_CAPABILITY_ID));
         assert_eq!(
             local_dev_allowed_effects(),
             vec![
@@ -882,7 +884,7 @@ mod tests {
                 .expect("capability grant exists")
         };
 
-        let shell_grant = grant_for("builtin.shell");
+        let shell_grant = grant_for(SHELL_CAPABILITY_ID);
         assert_eq!(
             shell_grant.constraints.allowed_effects,
             vec![
@@ -900,7 +902,7 @@ mod tests {
             local_dev_shell_network_policy()
         );
 
-        let read_file_grant = grant_for("builtin.read_file");
+        let read_file_grant = grant_for(READ_FILE_CAPABILITY_ID);
         assert_eq!(
             read_file_grant.constraints.allowed_effects,
             local_dev_allowed_effects()
@@ -911,7 +913,7 @@ mod tests {
             NetworkPolicy::default()
         );
 
-        let skill_install_grant = grant_for("builtin.skill_install");
+        let skill_install_grant = grant_for(SKILL_INSTALL_CAPABILITY_ID);
         assert_eq!(skill_install_grant.constraints.mounts, skill_mounts);
         assert_eq!(
             skill_install_grant.constraints.network,
