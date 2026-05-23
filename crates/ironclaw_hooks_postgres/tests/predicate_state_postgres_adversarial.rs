@@ -79,7 +79,7 @@ async fn hosts(url: &str, n: usize) -> Vec<Arc<PostgresPredicateStateBackend>> {
         if i == 0 {
             let client = pool.get().await.expect("client");
             client
-                .batch_execute("TRUNCATE TABLE hook_predicate_counters")
+                .batch_execute("TRUNCATE TABLE hooks_predicate_invocations, hooks_predicate_values")
                 .await
                 .expect("truncate");
         }
@@ -326,8 +326,7 @@ async fn per_scope_lru_eviction_bounds_distinct_keys() {
         .query_one(
             "SELECT COALESCE(MAX(kc), 0)::BIGINT FROM (
                  SELECT COUNT(DISTINCT key_hash) AS kc
-                   FROM hook_predicate_counters
-                  WHERE kind = 'i'
+                   FROM hooks_predicate_invocations
                   GROUP BY scope_hash
              ) per_scope",
             &[],
@@ -459,8 +458,8 @@ async fn scope_lru_eviction_serializes_against_victim_writes_no_deadlock() {
     let hot_hash = ironclaw_hooks_postgres::test_support::invocation_key_hash_bytes(&hot);
     let rows: i64 = client
         .query_one(
-            "SELECT COUNT(*)::BIGINT FROM hook_predicate_counters \
-             WHERE key_hash = $1 AND ts >= $2",
+            "SELECT COUNT(*)::BIGINT FROM hooks_predicate_invocations \
+             WHERE key_hash = $1 AND occurred_at >= $2",
             &[&&hot_hash[..], &cutoff],
         )
         .await
@@ -475,8 +474,8 @@ async fn scope_lru_eviction_serializes_against_victim_writes_no_deadlock() {
     let scope = ironclaw_hooks_postgres::test_support::scope_hash_bytes(tenant);
     let distinct: i64 = client
         .query_one(
-            "SELECT COUNT(DISTINCT key_hash)::BIGINT FROM hook_predicate_counters \
-             WHERE scope_hash = $1 AND kind = 'i'",
+            "SELECT COUNT(DISTINCT key_hash)::BIGINT FROM hooks_predicate_invocations \
+             WHERE scope_hash = $1",
             &[&&scope[..]],
         )
         .await

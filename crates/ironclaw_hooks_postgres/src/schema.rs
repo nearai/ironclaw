@@ -1,7 +1,7 @@
 //! Embedded idempotent schema for the durable predicate backend.
 //!
 //! The DDL is the *single source of truth* file
-//! `migrations/V1__predicate_counters.sql`, pulled in verbatim at compile
+//! `migrations/V1__predicate_state.sql`, pulled in verbatim at compile
 //! time via `include_str!`. There is no hand-maintained second copy to
 //! drift against. It is applied via
 //! [`PostgresPredicateStateBackend::run_migrations`] using
@@ -37,14 +37,21 @@
 //! assumption the rest of the system makes for `occurred_at` timestamps.
 //! The load-bearing cross-host property — *replay dedup* — does NOT
 //! depend on clock agreement: it is enforced by the
-//! `PRIMARY KEY (key_hash, id)` constraint and `ON CONFLICT DO NOTHING`,
+//! `PRIMARY KEY (key_hash, event_id)` constraint and `ON CONFLICT DO NOTHING`,
 //! which is exact regardless of clock skew. Atomicity is enforced by
 //! running prune + dedup-check + insert + aggregate inside one
 //! `READ COMMITTED` transaction guarded by a per-key advisory lock, also
 //! clock-independent.
 
 /// Idempotent schema applied by `run_migrations()`. Sourced directly from
-/// `migrations/V1__predicate_counters.sql` via `include_str!` so the file
+/// `migrations/V1__predicate_state.sql` via `include_str!` so the file
 /// is the only copy — no embedded duplicate can drift out of sync.
-pub const POSTGRES_PREDICATE_SCHEMA: &str =
-    include_str!("../migrations/V1__predicate_counters.sql");
+pub const POSTGRES_PREDICATE_SCHEMA: &str = include_str!("../migrations/V1__predicate_state.sql");
+
+/// Table holding invocation-count samples (one row per recorded invocation
+/// event; the in-window `COUNT(*)` is the invocation count).
+pub(crate) const INVOCATIONS_TABLE: &str = "hooks_predicate_invocations";
+
+/// Table holding numeric-value samples (one row per recorded value event;
+/// the in-window `SUM(value)` is the running sum).
+pub(crate) const VALUES_TABLE: &str = "hooks_predicate_values";
