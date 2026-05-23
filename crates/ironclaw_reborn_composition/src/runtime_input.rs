@@ -27,6 +27,7 @@ use std::time::Duration;
 use ironclaw_loop_support::HostManagedModelGateway;
 use ironclaw_loop_support::HostSkillContextSource;
 
+use crate::hooks::HooksActivationConfig;
 use crate::input::RebornBuildInput;
 
 /// Caller-owned identity for an assembled Reborn runtime.
@@ -212,6 +213,12 @@ pub struct RebornRuntimeInput {
     pub poll: PollSettings,
     pub identity: RebornRuntimeIdentity,
     pub skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
+    /// Hook-framework activation knobs. Default OFF (the rollout-safety
+    /// contract). The env var (`HOOKS_ENABLED`) is read ONCE at the edge that
+    /// populates this input (the CLI / ingress adapter) via
+    /// [`HooksActivationConfig::from_env`]; the composition root consumes this
+    /// typed config and never touches the environment itself.
+    pub hooks: HooksActivationConfig,
     #[cfg(test)]
     pub(crate) model_gateway_override: Option<Arc<dyn HostManagedModelGateway>>,
 }
@@ -230,6 +237,7 @@ impl RebornRuntimeInput {
             poll: PollSettings::default(),
             identity: RebornRuntimeIdentity::default(),
             skill_context_source: None,
+            hooks: HooksActivationConfig::default(),
             #[cfg(test)]
             model_gateway_override: None,
         }
@@ -264,6 +272,15 @@ impl RebornRuntimeInput {
 
     pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {
         self.skill_context_source = Some(source);
+        self
+    }
+
+    /// Set the hook-framework activation config. Callers at the edge resolve
+    /// this once (e.g. [`HooksActivationConfig::from_env`]) and thread the typed
+    /// value through rather than letting the composition root read the
+    /// environment itself.
+    pub fn with_hooks_config(mut self, hooks: HooksActivationConfig) -> Self {
+        self.hooks = hooks;
         self
     }
 

@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use anyhow::Context;
 use ironclaw_reborn_composition::{
-    PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TurnRunnerSettings,
-    build_reborn_runtime, local_dev_runtime_policy,
+    HooksActivationConfig, PollSettings, RebornRuntimeIdentity, RebornRuntimeInput,
+    TurnRunnerSettings, build_reborn_runtime, local_dev_runtime_policy,
 };
 use ironclaw_reborn_config::{REBORN_PROFILE_ENV, RebornBootConfig, RebornProfile};
 use tokio_util::sync::CancellationToken;
@@ -247,7 +247,11 @@ pub(crate) fn build_runtime_input(
             interval: Duration::from_millis(200),
             max_total: Duration::from_secs(180),
         })
-        .with_identity(runtime_identity(config_file.as_ref()));
+        .with_identity(runtime_identity(config_file.as_ref()))
+        // Resolve the hook-activation flag from the environment ONCE here at the
+        // edge (default OFF), then thread the typed config down. The composition
+        // root no longer reads `HOOKS_ENABLED` itself.
+        .with_hooks_config(HooksActivationConfig::from_env());
 
     #[cfg(feature = "root-llm-provider")]
     {

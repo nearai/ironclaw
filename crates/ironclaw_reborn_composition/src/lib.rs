@@ -52,7 +52,7 @@ pub use auth::{
 pub use error::RebornBuildError;
 pub use factory::{RebornServices, build_reborn_services};
 pub use hooks::{
-    HOOKS_ENABLED_ENV, HookDispatcherBuilderFactory, HooksActivationConfig, NoOpObserverHook,
+    HOOKS_ENABLED_ENV, HookDispatcherBuilderFactory, HooksActivationConfig,
     build_hook_dispatcher_builder_factory,
 };
 pub use input::RebornBuildInput;

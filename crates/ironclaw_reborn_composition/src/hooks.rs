@@ -8,10 +8,15 @@
 //!    runtime composes exactly as it did before hooks existed (zero behavior
 //!    change). This is the hard rollout-safety contract for the activation.
 //! 2. **The first-party builtin hook set** ([`install_first_party_hooks`]) —
-//!    installed regardless of extensions. Today this is a single illustrative
-//!    no-op observer ([`NoOpObserverHook`]); the production catalog is TBD and
-//!    deliberately not invented here. The deliverable is the activation
-//!    machinery, not a hook catalog.
+//!    installed regardless of extensions. The production catalog is
+//!    deliberately **EMPTY**: no real first-party builtin hook has been
+//!    productized, so we ship none. A production type + install path + behavior
+//!    for a hook that does nothing is scaffolding, not a deliverable. The
+//!    activation machinery is exercised end-to-end with test-only hooks (see
+//!    the `#[cfg(test)]` `NoOpObserverHook` and the test-only first-party
+//!    installer seam below), not with a shipped no-op. An empty first-party set
+//!    composed with no extension hooks is a legitimate state — the dispatcher
+//!    composes with zero bindings, which is valid (not a panic/error).
 //! 3. **The manifest → registry loader** ([`install_extension_hooks`]) — takes
 //!    installed extension packages, projects each declared
 //!    [`HookSectionEntryV2`] payload into a typed
@@ -47,21 +52,14 @@
 use std::sync::Arc;
 
 use ironclaw_extensions::ExtensionRegistry;
-use ironclaw_hooks::HookPhase;
 use ironclaw_hooks::dispatch::HookDispatcherBuilder;
 use ironclaw_hooks::evaluator::PredicateEvaluator;
-use ironclaw_hooks::identity::{HookId, HookVersion};
 use ironclaw_hooks::manifest::HookManifestEntry;
-use ironclaw_hooks::points::ObserverHookContext;
 use ironclaw_hooks::predicate_state::{InMemoryPredicateStateBackend, PredicateStateBackend};
 use ironclaw_hooks::registrar::HookRegistrar;
-use ironclaw_hooks::registry::{HookPointSpec, HookRegistry};
-use ironclaw_hooks::sink::{ObserverHook, ObserverSink};
+use ironclaw_hooks::registry::HookRegistry;
 
 use crate::error::RebornBuildError;
-
-/// Canonical identity path for the first-party no-op observer hook.
-const NOOP_OBSERVER_CANONICAL_PATH: &str = "ironclaw_reborn_composition::hooks::NoOpObserverHook";
 
 /// Per-host-build factory closure passed to
 /// `RebornLoopDriverHostFactory::with_hook_dispatcher_builder_factory`. The
@@ -129,45 +127,26 @@ fn is_truthy(value: &str) -> bool {
     )
 }
 
-/// A first-party, builtin no-op observer hook.
-///
-/// This is the *only* hook shipped in the first-party set today. It proves the
-/// builtin install + dispatch path end to end while making zero
-/// driver-visible changes even with the flag ON: observers cannot affect
-/// outcomes, and this one records nothing. The production first-party catalog
-/// is TBD — no real first-party deny/policy hook has been productized, and
-/// this PR deliberately does not invent one.
-#[derive(Debug, Default)]
-pub struct NoOpObserverHook;
-
-#[async_trait::async_trait]
-impl ObserverHook for NoOpObserverHook {
-    async fn observe(&self, _ctx: &ObserverHookContext, _sink: &mut dyn ObserverSink) {
-        // Intentionally empty. The activation deliverable is the install +
-        // dispatch path; this hook ships dark.
-    }
-}
-
 /// Install the first-party builtin hook set into `builder`.
 ///
 /// Builtin hooks are `Builtin`-tier (full authority within the framework) and
 /// are identified by a stable canonical path, not a content-addressed
 /// extension id. They are installed regardless of which extensions are
 /// present.
+///
+/// **The production catalog is empty.** No real first-party builtin hook has
+/// been productized, so this installs nothing and returns the builder
+/// unchanged. An empty first-party set is a legitimate composed state — the
+/// activation machinery below composes a valid (possibly zero-binding)
+/// dispatcher with the flag ON. First-party hooks are added here when (and
+/// only when) a real one exists; the machinery is otherwise exercised with
+/// test-only hooks through the [`build_hook_dispatcher_builder_factory_with`]
+/// seam (see tests).
 fn install_first_party_hooks(
-    mut builder: HookDispatcherBuilder,
+    builder: HookDispatcherBuilder,
 ) -> Result<HookDispatcherBuilder, RebornBuildError> {
-    let hook_id = HookId::for_builtin(NOOP_OBSERVER_CANONICAL_PATH, HookVersion::ONE);
-    builder = builder
-        .install_builtin_observer(
-            hook_id,
-            HookPhase::Telemetry,
-            HookPointSpec::AfterCapability,
-            Box::new(NoOpObserverHook),
-        )
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("failed to install first-party no-op observer hook: {error}"),
-        })?;
+    // Empty production catalog. See the module docs (item 2) for why no no-op
+    // hook is shipped here.
     Ok(builder)
 }
 
@@ -197,11 +176,15 @@ fn install_first_party_hooks(
 /// extension package in `registry`. However, the production composition root
 /// ([`crate::runtime::build_reborn_runtime`]) currently invokes
 /// [`build_hook_dispatcher_builder_factory`] with the *builtin* extension
-/// registry only (`builtin_extension_registry()`). Consequently, with the flag
-/// ON the live runtime activates exactly two hook sources:
+/// registry only (`builtin_extension_registry()`). The first-party builtin
+/// catalog ([`install_first_party_hooks`]) is currently **empty**, so with the
+/// flag ON the live runtime activates exactly one hook source:
 ///
-/// 1. the first-party builtin set ([`install_first_party_hooks`]), and
-/// 2. `[[hooks]]` declared by builtin / host-bundled packages.
+/// - `[[hooks]]` declared by builtin / host-bundled packages.
+///
+/// (When a real first-party builtin hook is productized it joins this list; the
+/// activation machinery for it is already in place and exercised by test-only
+/// hooks.)
 ///
 /// Hooks declared by third-party *installed* extensions are **not** yet
 /// surfaced into the runtime path — not because this loader can't install them
@@ -274,6 +257,33 @@ pub fn build_hook_dispatcher_builder_factory(
     config: HooksActivationConfig,
     registry: &ExtensionRegistry,
 ) -> Result<Option<HookDispatcherBuilderFactory>, RebornBuildError> {
+    // Production path: the first-party catalog is empty
+    // (`install_first_party_hooks` is a no-op). All other wiring lives in the
+    // shared helper.
+    build_hook_dispatcher_builder_factory_with(config, registry, install_first_party_hooks)
+}
+
+/// Shared implementation behind [`build_hook_dispatcher_builder_factory`],
+/// parameterized on the first-party install step.
+///
+/// `install_first_party` is invoked both at composition-time validation and on
+/// every per-run builder mint, so it must be a pure replayable function of its
+/// builder input (no external/fallible input beyond what is validated up
+/// front). Production passes [`install_first_party_hooks`] (the empty catalog);
+/// tests pass a closure that installs a test-only first-party hook, exercising
+/// the activation machinery end-to-end through the real composition path
+/// without shipping a production no-op.
+fn build_hook_dispatcher_builder_factory_with<F>(
+    config: HooksActivationConfig,
+    registry: &ExtensionRegistry,
+    install_first_party: F,
+) -> Result<Option<HookDispatcherBuilderFactory>, RebornBuildError>
+where
+    F: Fn(HookDispatcherBuilder) -> Result<HookDispatcherBuilder, RebornBuildError>
+        + Send
+        + Sync
+        + 'static,
+{
     if !config.is_enabled() {
         return Ok(None);
     }
@@ -292,12 +302,12 @@ pub fn build_hook_dispatcher_builder_factory(
     let registrar = HookRegistrar::new(Arc::clone(&evaluator));
 
     // Validate the full install set up front against a scratch builder. If
-    // this fails, the build fails loudly (fail-closed). An empty registry
-    // (first-party-only) is a legitimate state — the no-op observer alone is
-    // a valid composed dispatcher.
+    // this fails, the build fails loudly (fail-closed). An empty install set
+    // (empty first-party catalog + no extension hooks) is a legitimate state —
+    // a zero-binding dispatcher composes fine and is valid.
     {
         let scratch = HookDispatcherBuilder::new(HookRegistry::new());
-        let scratch = install_first_party_hooks(scratch)?;
+        let scratch = install_first_party(scratch)?;
         let _validated = install_extension_hooks(registry, &registrar, scratch)?;
     }
 
@@ -336,9 +346,9 @@ pub fn build_hook_dispatcher_builder_factory(
     let factory: HookDispatcherBuilderFactory = Arc::new(move || {
         // Fresh registry + builder per run: no cross-run state leak.
         let mut builder = HookDispatcherBuilder::new(HookRegistry::new());
-        // safety: install_first_party_hooks installs a single static NoOpObserverHook with no external input; the identical call was proven to succeed against a scratch builder in the composition-time validation block above (fail-closed via `?`). It is a pure function of its inputs, so a per-run replay cannot fail.
+        // safety: `install_first_party` is a pure replayable function of the builder; the identical call was proven to succeed against a scratch builder in the composition-time validation block above (fail-closed via `?`). A per-run replay therefore cannot fail.
         let first_party = "first-party hook install validated at composition time";
-        builder = install_first_party_hooks(builder).expect(first_party); // safety: replay of composition-validated static install; see binding above
+        builder = install_first_party(builder).expect(first_party); // safety: replay of composition-validated install; see binding above
         let registrar = HookRegistrar::new(Arc::clone(&evaluator_for_factory));
         for (extension_id, version, entries) in &extension_install_sets {
             // safety: `entries` were already projected from TOML (the only fallible, external-input step) and the same install set was validated against a scratch builder above (fail-closed via `?`). registrar.install is a pure function of these cloned inputs, so the per-run replay cannot fail.
@@ -365,7 +375,51 @@ mod tests {
 
     use ironclaw_extensions::v2::ManifestSource;
     use ironclaw_extensions::{ExtensionManifest, ExtensionPackage};
+    use ironclaw_hooks::HookPhase;
+    use ironclaw_hooks::identity::{HookId, HookVersion};
+    use ironclaw_hooks::points::ObserverHookContext;
+    use ironclaw_hooks::registry::HookPointSpec;
+    use ironclaw_hooks::sink::{ObserverHook, ObserverSink};
     use ironclaw_host_api::{HostPortCatalog, VirtualPath};
+
+    /// Canonical identity path for the TEST-ONLY first-party no-op observer.
+    /// Lives here (not in the production catalog) so the activation machinery
+    /// can be exercised end-to-end through the real composition path without
+    /// shipping a no-op hook in production.
+    const TEST_NOOP_OBSERVER_CANONICAL_PATH: &str =
+        "ironclaw_reborn_composition::hooks::tests::NoOpObserverHook";
+
+    /// A test-only first-party no-op observer. Observers cannot affect
+    /// outcomes; this one records nothing. It proves the builtin install +
+    /// dispatch path end to end through `build_hook_dispatcher_builder_factory_with`.
+    #[derive(Debug, Default)]
+    struct NoOpObserverHook;
+
+    #[async_trait::async_trait]
+    impl ObserverHook for NoOpObserverHook {
+        async fn observe(&self, _ctx: &ObserverHookContext, _sink: &mut dyn ObserverSink) {}
+    }
+
+    /// Test-only first-party installer: installs the [`NoOpObserverHook`] at
+    /// `AfterCapability`. Passed to
+    /// [`build_hook_dispatcher_builder_factory_with`] in place of the empty
+    /// production catalog so the activation machinery is covered with a real
+    /// first-party binding.
+    fn install_test_first_party_hook(
+        builder: HookDispatcherBuilder,
+    ) -> Result<HookDispatcherBuilder, RebornBuildError> {
+        let hook_id = HookId::for_builtin(TEST_NOOP_OBSERVER_CANONICAL_PATH, HookVersion::ONE);
+        builder
+            .install_builtin_observer(
+                hook_id,
+                HookPhase::Telemetry,
+                HookPointSpec::AfterCapability,
+                Box::new(NoOpObserverHook),
+            )
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("failed to install test first-party no-op observer hook: {error}"),
+            })
+    }
 
     /// Build a single-capability `reborn.extension_manifest.v2` manifest TOML
     /// for `id`, optionally carrying a `[[hooks]]` block. The capability id is
@@ -443,22 +497,45 @@ prompt_doc_ref = "prompts/{id}/run.md"
     }
 
     #[test]
-    fn enabled_config_with_empty_registry_yields_first_party_only_factory() {
-        // First-party-only is a legitimate composed state: the no-op observer
-        // alone is a valid dispatcher.
+    fn enabled_config_with_empty_production_catalog_yields_valid_zero_binding_factory() {
+        // The PRODUCTION first-party catalog is empty. Flag ON + empty
+        // first-party set + no extension hooks must still compose a valid
+        // dispatcher — a zero-binding dispatcher, not a panic/error. This pins
+        // the empty-catalog-is-valid contract.
         let registry = ExtensionRegistry::new();
         let factory =
             build_hook_dispatcher_builder_factory(HooksActivationConfig::enabled(), &registry)
-                .expect("enabled build with empty registry succeeds")
-                .expect("flag ON yields a factory");
-        // The factory mints a builder; build it and confirm the first-party
-        // hook is present at the AfterCapability point.
+                .expect("enabled build with empty registry + empty catalog succeeds")
+                .expect("flag ON yields a factory even with an empty catalog");
+        // The factory mints a valid dispatcher with no first-party bindings.
         let dispatcher = factory().build_arc();
-        let builtin_id = HookId::for_builtin(NOOP_OBSERVER_CANONICAL_PATH, HookVersion::ONE);
         let bindings = dispatcher.active_bindings_snapshot(HookPointSpec::AfterCapability);
         assert!(
-            bindings.iter().any(|binding| binding.hook_id == builtin_id),
-            "first-party no-op observer must be installed when the flag is ON"
+            bindings.is_empty(),
+            "empty production catalog must yield zero first-party bindings, saw {bindings:?}"
+        );
+    }
+
+    #[test]
+    fn activation_installs_a_test_first_party_hook_through_the_real_path() {
+        // The activation machinery is exercised end-to-end with a TEST-ONLY
+        // first-party hook (not a production-shipped no-op). We drive the same
+        // composition path via the `*_with` seam and confirm the test hook is
+        // bound at AfterCapability.
+        let registry = ExtensionRegistry::new();
+        let factory = build_hook_dispatcher_builder_factory_with(
+            HooksActivationConfig::enabled(),
+            &registry,
+            install_test_first_party_hook,
+        )
+        .expect("enabled build with a test first-party hook succeeds")
+        .expect("flag ON yields a factory");
+        let dispatcher = factory().build_arc();
+        let test_id = HookId::for_builtin(TEST_NOOP_OBSERVER_CANONICAL_PATH, HookVersion::ONE);
+        let bindings = dispatcher.active_bindings_snapshot(HookPointSpec::AfterCapability);
+        assert!(
+            bindings.iter().any(|binding| binding.hook_id == test_id),
+            "test-only first-party hook must be installed through the real composition path"
         );
     }
 
@@ -492,7 +569,10 @@ prompt_doc_ref = "prompts/{id}/run.md"
     /// A registry package declaring a VALID `own_capabilities` predicate hook
     /// installs at the `Installed` trust tier, and the resulting dispatcher
     /// carries a binding for that extension's hook id at the
-    /// `BeforeCapability` point alongside the first-party no-op observer.
+    /// `BeforeCapability` point alongside a (test-only) first-party hook —
+    /// proving the extension install does not displace the first-party set.
+    /// Driven through the `*_with` seam so the first-party hook is test-only,
+    /// not a production-shipped no-op.
     #[test]
     fn valid_extension_hook_manifest_installs_at_installed_tier() {
         use ironclaw_hooks::identity::{ExtensionId as HookExtensionId, HookLocalId};
@@ -510,10 +590,13 @@ body = { mode = "predicate", spec = { type = "deny_capability", reason = "blocke
         let registry =
             registry_with_manifest("valid-ext", &manifest_toml("valid-ext", hooks_block));
 
-        let factory =
-            build_hook_dispatcher_builder_factory(HooksActivationConfig::enabled(), &registry)
-                .expect("enabled build with a valid extension hook succeeds")
-                .expect("flag ON yields a factory");
+        let factory = build_hook_dispatcher_builder_factory_with(
+            HooksActivationConfig::enabled(),
+            &registry,
+            install_test_first_party_hook,
+        )
+        .expect("enabled build with a valid extension hook succeeds")
+        .expect("flag ON yields a factory");
         let dispatcher = factory().build_arc();
 
         // The extension hook id is derived deterministically from the
@@ -531,13 +614,13 @@ body = { mode = "predicate", spec = { type = "deny_capability", reason = "blocke
             "installed extension hook must be bound at BeforeCapability; saw {bindings:?}"
         );
 
-        // The first-party no-op observer still rides along at AfterCapability —
-        // the extension install does not displace the builtin set.
-        let builtin_id = HookId::for_builtin(NOOP_OBSERVER_CANONICAL_PATH, HookVersion::ONE);
+        // The test-only first-party hook still rides along at AfterCapability —
+        // the extension install does not displace the first-party set.
+        let test_id = HookId::for_builtin(TEST_NOOP_OBSERVER_CANONICAL_PATH, HookVersion::ONE);
         let after = dispatcher.active_bindings_snapshot(HookPointSpec::AfterCapability);
         assert!(
-            after.iter().any(|binding| binding.hook_id == builtin_id),
-            "first-party no-op observer must remain installed alongside extension hooks"
+            after.iter().any(|binding| binding.hook_id == test_id),
+            "test-only first-party hook must remain installed alongside extension hooks"
         );
     }
 

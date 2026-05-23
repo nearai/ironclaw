@@ -68,7 +68,7 @@ use ironclaw_turns::{
 };
 
 use crate::factory::builtin_extension_registry;
-use crate::hooks::{HooksActivationConfig, build_hook_dispatcher_builder_factory};
+use crate::hooks::build_hook_dispatcher_builder_factory;
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
 use crate::{RebornBuildError, RebornCompositionProfile, RebornServices, build_reborn_services};
@@ -675,6 +675,7 @@ pub async fn build_reborn_runtime(
         poll,
         identity,
         skill_context_source: configured_skill_context_source,
+        hooks: hooks_config,
         #[cfg(test)]
         model_gateway_override,
     } = input;
@@ -813,18 +814,21 @@ pub async fn build_reborn_runtime(
     let capability_factory = local_dev_capabilities.capability_factory;
     let model_gateway = local_dev_capabilities.model_gateway;
 
-    // Hook framework activation (#3934), gated behind HOOKS_ENABLED (default
-    // OFF). When OFF this is `None` and `build_default_planned_runtime`
+    // Hook framework activation (#3934), gated behind the typed
+    // `HooksActivationConfig` carried in `RebornRuntimeInput` (default OFF).
+    // The env var (`HOOKS_ENABLED`) is resolved ONCE at the edge that builds
+    // the input (the CLI / ingress adapter); this composition root consumes the
+    // typed config and never reads the environment itself — testable without
+    // env mutation. When OFF this is `None` and `build_default_planned_runtime`
     // composes no dispatcher — zero behavior change. When ON, the per-run
     // dispatcher builder factory is built against this tenant's extension
     // registry (per-tenant scoping by construction: this whole function runs
     // once per identity). Fail-closed: a malformed manifest hook fails the
     // build here rather than silently composing a broken dispatcher.
-    let hooks_config = HooksActivationConfig::from_env();
     let hook_dispatcher_builder_factory = {
         // Activation scope today: this passes the *builtin* extension registry
-        // only. So when the flag is ON, the live runtime activates exactly two
-        // hook sources — the first-party builtin set and any `[[hooks]]`
+        // only, and the first-party builtin catalog is empty. So when the flag
+        // is ON, the live runtime activates exactly one hook source — `[[hooks]]`
         // declared by builtin/host-bundled packages. Hooks declared by
         // third-party *installed* extensions are NOT yet surfaced into this
         // path (no installed-extension registry is threaded here). The loader
