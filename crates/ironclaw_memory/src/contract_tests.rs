@@ -50,14 +50,17 @@ use crate::search::MemorySearchRequest;
 /// leaks between calls.
 pub type RepoFactory<R> = fn() -> R;
 
+#[cfg(any(test, feature = "contract-tests"))]
 fn scope_a() -> MemoryDocumentScope {
     MemoryDocumentScope::new("tenant-a", "alice", Some("project-1")).expect("valid scope a")
 }
 
+#[cfg(any(test, feature = "contract-tests"))]
 fn scope_b() -> MemoryDocumentScope {
     MemoryDocumentScope::new("tenant-b", "bob", Some("project-1")).expect("valid scope b")
 }
 
+#[cfg(any(test, feature = "contract-tests"))]
 fn path_in(scope: &MemoryDocumentScope, relative: &str) -> MemoryDocumentPath {
     MemoryDocumentPath::new(
         scope.tenant_id(),
@@ -69,6 +72,7 @@ fn path_in(scope: &MemoryDocumentScope, relative: &str) -> MemoryDocumentPath {
 }
 
 /// Contract: a put followed by a get returns the same bytes.
+#[cfg(any(test, feature = "contract-tests"))]
 pub async fn round_trip_returns_written_bytes<R, F>(factory: F)
 where
     R: MemoryDocumentRepository,
@@ -90,6 +94,7 @@ where
 /// This is the load-bearing invariant flagged in #3890 — search and
 /// list isolation across tenants. Every impl must honor it; the
 /// harness is the place to assert it once.
+#[cfg(any(test, feature = "contract-tests"))]
 pub async fn writes_isolated_across_scopes<R, F>(factory: F)
 where
     R: MemoryDocumentRepository,
@@ -115,6 +120,7 @@ where
 }
 
 /// Contract: list_documents honors scope.
+#[cfg(any(test, feature = "contract-tests"))]
 pub async fn list_documents_honors_scope<R, F>(factory: F)
 where
     R: MemoryDocumentRepository,
@@ -165,6 +171,7 @@ where
 /// contract asserts the **stronger of**: either search is unsupported,
 /// or it is scope-isolated. Either is acceptable; a search that
 /// returns cross-tenant hits is a bug.
+#[cfg(any(test, feature = "contract-tests"))]
 pub async fn search_documents_isolated_across_scopes<R, F>(factory: F)
 where
     R: MemoryDocumentRepository,

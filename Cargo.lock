@@ -4549,6 +4549,7 @@ dependencies = [
  "async-trait",
  "ironclaw_filesystem",
  "ironclaw_host_api",
+ "ironclaw_memory",
  "ironclaw_safety",
  "jsonschema",
  "serde",
