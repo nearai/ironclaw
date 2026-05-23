@@ -456,9 +456,9 @@ mod tests {
 
     fn make_dispatcher(trust_class: HookTrustClass, impl_: BeforePromptHookImpl) -> HookDispatcher {
         let hook_id = HookId::derive(
-            &ExtensionId("ext".to_string()),
+            &ExtensionId::new("ext").expect("valid ExtensionId in test"),
             "1.0",
-            &HookLocalId("envelope".to_string()),
+            &HookLocalId::new("envelope").expect("valid HookLocalId in test"),
             HookVersion::ONE,
         );
         let binding = HookBinding {

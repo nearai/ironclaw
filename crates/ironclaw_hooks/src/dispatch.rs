@@ -1460,9 +1460,9 @@ mod tests {
 
     fn ext_hook_id(local: &str) -> HookId {
         HookId::derive(
-            &ExtensionId("ext".to_string()),
+            &ExtensionId::new("ext").expect("valid ExtensionId in test"),
             "1.0",
-            &HookLocalId(local.to_string()),
+            &HookLocalId::new(local).expect("valid HookLocalId in test"),
             HookVersion::ONE,
         )
     }
@@ -1887,9 +1887,9 @@ mod tests {
         let owner = ironclaw_host_api::ExtensionId::new("ext.owner").expect("ok");
         let other = ironclaw_host_api::ExtensionId::new("ext.other").expect("ok");
         let id = HookId::derive(
-            &crate::identity::ExtensionId("ext.owner".to_string()),
+            &crate::identity::ExtensionId::new("ext.owner").expect("valid ExtensionId in test"),
             "1.0",
-            &crate::identity::HookLocalId("obs".to_string()),
+            &crate::identity::HookLocalId::new("obs").expect("valid HookLocalId in test"),
             HookVersion::ONE,
         );
         let mut registry = HookRegistry::new();
@@ -2876,7 +2876,7 @@ mod tests {
         // Installed hook authored by ext-A, scoped to OwnCapabilities. The
         // capability under invocation is provided by ext-B; the hook must
         // not fire and the composed decision is allow.
-        let id = ext_hook_id("c3-own-A");
+        let id = ext_hook_id("c3-own-a");
         let mut dispatcher = HookDispatcher::new(HookRegistry::new());
         dispatcher
             .install_installed_before_capability(
@@ -2906,7 +2906,7 @@ mod tests {
 
     #[tokio::test]
     async fn own_capabilities_scope_fires_for_matching_extension() {
-        let id = ext_hook_id("c3-own-A-self");
+        let id = ext_hook_id("c3-own-a-self");
         let mut dispatcher = HookDispatcher::new(HookRegistry::new());
         dispatcher
             .install_installed_before_capability(

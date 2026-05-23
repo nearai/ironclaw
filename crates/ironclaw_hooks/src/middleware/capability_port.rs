@@ -660,9 +660,9 @@ mod tests {
         hook: Box<dyn RestrictedBeforeCapabilityHook>,
     ) -> (Arc<HookDispatcher>, HookId) {
         let hook_id = HookId::derive(
-            &ExtensionId("ext".to_string()),
+            &ExtensionId::new("ext").expect("valid ExtensionId in test"),
             "1.0",
-            &HookLocalId(local.to_string()),
+            &HookLocalId::new(local).expect("valid HookLocalId in test"),
             HookVersion::ONE,
         );
         let binding = HookBinding {
@@ -718,9 +718,9 @@ mod tests {
 
     fn dispatcher_with_deny_hook() -> (Arc<HookDispatcher>, HookId) {
         let hook_id = HookId::derive(
-            &ExtensionId("ext".to_string()),
+            &ExtensionId::new("ext").expect("valid ExtensionId in test"),
             "1.0",
-            &HookLocalId("deny".to_string()),
+            &HookLocalId::new("deny").expect("valid HookLocalId in test"),
             HookVersion::ONE,
         );
         let binding = HookBinding {
@@ -1278,9 +1278,9 @@ mod tests {
         // Use Global scope so the hook fires; we're testing the *context*,
         // not the scope filter.
         let hook_id = HookId::derive(
-            &ExtensionId("ext".to_string()),
+            &ExtensionId::new("ext").expect("valid ExtensionId in test"),
             "1.0",
-            &HookLocalId("recording".to_string()),
+            &HookLocalId::new("recording").expect("valid HookLocalId in test"),
             HookVersion::ONE,
         );
         let observed = Arc::new(Mutex::new(None));

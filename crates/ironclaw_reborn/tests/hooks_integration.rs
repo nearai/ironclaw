@@ -376,9 +376,9 @@ impl RestrictedBeforeCapabilityHook for PauseApprovalHook {
 
 fn pause_approval_dispatcher() -> Arc<HookDispatcher> {
     let hook_id = HookId::derive(
-        &ExtensionId("integration-tests".to_string()),
+        &ExtensionId::new("integration-tests").expect("valid ExtensionId in test"),
         "0.0.1",
-        &HookLocalId("pause-approval".to_string()),
+        &HookLocalId::new("pause-approval").expect("valid HookLocalId in test"),
         HookVersion::ONE,
     );
     HookDispatcherBuilder::new(HookRegistry::new())
@@ -400,9 +400,9 @@ fn predicate_deny_dispatcher() -> Arc<HookDispatcher> {
     // Restricted variant — there is no public path that pairs Installed with
     // a Privileged impl.
     let hook_id = HookId::derive(
-        &ExtensionId("integration-tests".to_string()),
+        &ExtensionId::new("integration-tests").expect("valid ExtensionId in test"),
         "0.0.1",
-        &HookLocalId("deny-cap-blocked".to_string()),
+        &HookLocalId::new("deny-cap-blocked").expect("valid HookLocalId in test"),
         HookVersion::ONE,
     );
     let spec = HookPredicateSpec::DenyCapability {
@@ -1327,9 +1327,9 @@ fn numeric_sum_dispatcher() -> Arc<HookDispatcher> {
     // be denied. The first invocation (sum = 50) is below the cap and is
     // expected to pass through to the inner port.
     let hook_id = HookId::derive(
-        &ExtensionId("integration-tests".to_string()),
+        &ExtensionId::new("integration-tests").expect("valid ExtensionId in test"),
         "0.0.1",
-        &HookLocalId("numeric-sum-amount".to_string()),
+        &HookLocalId::new("numeric-sum-amount").expect("valid HookLocalId in test"),
         HookVersion::ONE,
     );
     let spec = HookPredicateSpec::RateOrValueCap {
@@ -1429,9 +1429,9 @@ async fn installed_hook_with_own_scope_does_not_fire_on_other_provider_capabilit
     // resolver in the factory, every invocation surfaces as
     // `ctx.provider == None`, which never satisfies OwnCapabilities.
     let hook_id = HookId::derive(
-        &ExtensionId("ext-a".to_string()),
+        &ExtensionId::new("ext-a").expect("valid ExtensionId in test"),
         "0.0.1",
-        &HookLocalId("c3-own-scope-deny".to_string()),
+        &HookLocalId::new("c3-own-scope-deny").expect("valid HookLocalId in test"),
         HookVersion::ONE,
     );
     struct AlwaysDeny;
@@ -1488,9 +1488,9 @@ async fn installed_hook_with_own_scope_does_not_fire_on_other_provider_capabilit
 /// `owning_ext`, scoped to `OwnCapabilities`.
 fn own_capabilities_dispatcher(owning_ext: &str, local_id: &str) -> Arc<HookDispatcher> {
     let hook_id = HookId::derive(
-        &ExtensionId(owning_ext.to_string()),
+        &ExtensionId::new(owning_ext).expect("valid ExtensionId in test"),
         "0.0.1",
-        &HookLocalId(local_id.to_string()),
+        &HookLocalId::new(local_id).expect("valid HookLocalId in test"),
         HookVersion::ONE,
     );
     struct AlwaysDeny;
@@ -1642,9 +1642,9 @@ async fn hook_telemetry_attribution_is_per_run_not_captured() {
         use ironclaw_hooks::dispatch::HookDispatcherBuilder as HDBuilder;
         use ironclaw_hooks::registry::HookRegistry as HReg;
         let hook_id = HookId::derive(
-            &ExtensionId("ext-tele".to_string()),
+            &ExtensionId::new("ext-tele").expect("valid ExtensionId in test"),
             "0.0.1",
-            &HookLocalId("deny-everything".to_string()),
+            &HookLocalId::new("deny-everything").expect("valid HookLocalId in test"),
             HookVersion::ONE,
         );
         struct AlwaysDeny;
@@ -1770,9 +1770,9 @@ async fn before_prompt_hook_message_is_resolvable_via_factory_wiring() {
     let inner = Arc::new(RecordingCapabilityPort::new());
 
     let hook_id = HookId::derive(
-        &ExtensionId("ext-prompt".to_string()),
+        &ExtensionId::new("ext-prompt").expect("valid ExtensionId in test"),
         "0.0.1",
-        &HookLocalId("prompt-inject".to_string()),
+        &HookLocalId::new("prompt-inject").expect("valid HookLocalId in test"),
         HookVersion::ONE,
     );
 

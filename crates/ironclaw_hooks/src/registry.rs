@@ -324,9 +324,9 @@ mod tests {
 
     fn installed_binding(local: &str, phase: HookPhase, point: HookPointSpec) -> HookBinding {
         let hook_id = HookId::derive(
-            &ExtensionId("ext".to_string()),
+            &ExtensionId::new("ext").expect("valid ExtensionId in test"),
             "1.0",
-            &HookLocalId(local.to_string()),
+            &HookLocalId::new(local).expect("valid HookLocalId in test"),
             HookVersion::ONE,
         );
         HookBinding {

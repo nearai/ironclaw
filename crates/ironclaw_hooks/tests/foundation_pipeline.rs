@@ -43,7 +43,7 @@ impl RestrictedBeforeCapabilityHook for DenyEverythingFromManifest {
 async fn manifest_to_dispatch_pipeline() {
     // 1. Author publishes a manifest entry.
     let manifest_entry = HookManifestEntry::new(
-        HookLocalId("daily-order-cap".to_string()),
+        HookLocalId::new("daily-order-cap").expect("valid HookLocalId in test"),
         HookManifestKind::BeforeCapability,
         HookManifestBody::Predicate {
             spec: HookPredicateSpec::RateOrValueCap {
@@ -67,7 +67,7 @@ async fn manifest_to_dispatch_pipeline() {
     //    this happens inside the installer; here we drive the same pieces
     //    directly through the tier-specific public installer.)
     let hook_id = HookId::derive(
-        &ExtensionId("polymarket-trader".to_string()),
+        &ExtensionId::new("polymarket-trader").expect("valid ExtensionId in test"),
         "0.4.2",
         &manifest_entry.id,
         HookVersion::ONE,

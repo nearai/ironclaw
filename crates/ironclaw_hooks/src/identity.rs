@@ -23,6 +23,77 @@
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+/// Maximum byte length of an identity string segment. Mirrors the
+/// `validate_name_segment` limit in `ironclaw_host_api::ids` so the two
+/// `ExtensionId` types share the same envelope.
+pub const MAX_IDENTITY_BYTES: usize = 128;
+
+/// Validation failures for identity newtypes. Construction sites convert these
+/// to richer errors at their layer; the variants here are deliberately small
+/// and side-effect-free so that any caller can reuse the same checks.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum InvalidIdentity {
+    #[error("{kind} id must not be empty")]
+    Empty { kind: &'static str },
+    #[error("{kind} id `{value}` exceeds {max} bytes")]
+    TooLong {
+        kind: &'static str,
+        value: String,
+        max: usize,
+    },
+    #[error("{kind} id `{value}` must start with a lowercase ASCII letter or digit")]
+    BadLeadingChar { kind: &'static str, value: String },
+    #[error(
+        "{kind} id `{value}` may only contain lowercase ASCII letters, digits, '_', '-', and '.'"
+    )]
+    BadChar { kind: &'static str, value: String },
+    #[error("{kind} id `{value}` may not contain '..' or empty dot segments")]
+    BadDotSegment { kind: &'static str, value: String },
+}
+
+fn validate_identity_segment(kind: &'static str, value: &str) -> Result<(), InvalidIdentity> {
+    if value.is_empty() {
+        return Err(InvalidIdentity::Empty { kind });
+    }
+    if value.len() > MAX_IDENTITY_BYTES {
+        return Err(InvalidIdentity::TooLong {
+            kind,
+            value: value.to_string(),
+            max: MAX_IDENTITY_BYTES,
+        });
+    }
+    let first = value.as_bytes()[0];
+    if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
+        return Err(InvalidIdentity::BadLeadingChar {
+            kind,
+            value: value.to_string(),
+        });
+    }
+    if value == "." || value == ".." || value.contains("..") {
+        return Err(InvalidIdentity::BadDotSegment {
+            kind,
+            value: value.to_string(),
+        });
+    }
+    let bad_char = value.bytes().any(|b| {
+        !(b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-' || b == b'.')
+    });
+    if bad_char {
+        return Err(InvalidIdentity::BadChar {
+            kind,
+            value: value.to_string(),
+        });
+    }
+    if value.split('.').any(str::is_empty) {
+        return Err(InvalidIdentity::BadDotSegment {
+            kind,
+            value: value.to_string(),
+        });
+    }
+    Ok(())
+}
 
 /// 32-byte blake3 digest identifying a hook.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -38,9 +109,9 @@ impl HookId {
         hook_version: HookVersion,
     ) -> Self {
         let mut hasher = blake3::Hasher::new();
-        feed_field(&mut hasher, extension.0.as_bytes());
+        feed_field(&mut hasher, extension.as_str().as_bytes());
         feed_field(&mut hasher, extension_version.as_bytes());
-        feed_field(&mut hasher, local.0.as_bytes());
+        feed_field(&mut hasher, local.as_str().as_bytes());
         feed_field(&mut hasher, &hook_version.0.to_le_bytes());
         Self(hasher.finalize().into())
     }
@@ -125,7 +196,26 @@ impl fmt::Display for HookVersion {
 /// let id = HookId::derive(&identity_ext, "1.0.0", &local, HookVersion::ONE);
 /// ```
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
-pub struct ExtensionId(pub String);
+#[serde(try_from = "String")]
+pub struct ExtensionId(String);
+
+impl ExtensionId {
+    /// Construct a new `ExtensionId`, validating that the value meets the
+    /// identity segment rules.
+    pub fn new(value: impl Into<String>) -> Result<Self, InvalidIdentity> {
+        let value = value.into();
+        validate_identity_segment("extension", &value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
 
 impl fmt::Display for ExtensionId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -133,20 +223,76 @@ impl fmt::Display for ExtensionId {
     }
 }
 
+impl TryFrom<String> for ExtensionId {
+    type Error = InvalidIdentity;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<&str> for ExtensionId {
+    type Error = InvalidIdentity;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
 impl From<&ironclaw_host_api::ExtensionId> for ExtensionId {
     fn from(host: &ironclaw_host_api::ExtensionId) -> Self {
-        ExtensionId(host.as_str().to_string())
+        // The host-api `ExtensionId` is already validated against the same
+        // segment grammar that `validate_identity_segment` enforces here
+        // (both mirror `ironclaw_host_api::ids::validate_name_segment`).
+        // We still go through `new` to keep a single validation path. The
+        // round-trip is asserted by `extension_id_from_host_api_round_trips`
+        // and `extension_id_from_host_api_round_trips_grammar_corners` below;
+        // if the two grammars ever diverge those tests will fail before this
+        // call site can panic in production.
+        let msg = "ironclaw_host_api::ExtensionId is pre-validated and shares the identity grammar";
+        Self::new(host.as_str().to_string()).expect(msg) // safety: host-api ExtensionId shares identity grammar; round-trip covered by unit tests above.
     }
 }
 
 /// Extension-author-chosen identifier for the hook within their manifest.
 /// Combined with `ExtensionId` and versions to form a globally-unique `HookId`.
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
-pub struct HookLocalId(pub String);
+#[serde(try_from = "String")]
+pub struct HookLocalId(String);
+
+impl HookLocalId {
+    /// Construct a new `HookLocalId`, validating that the value meets the
+    /// identity segment rules.
+    pub fn new(value: impl Into<String>) -> Result<Self, InvalidIdentity> {
+        let value = value.into();
+        validate_identity_segment("hook_local", &value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
 
 impl fmt::Display for HookLocalId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+impl TryFrom<String> for HookLocalId {
+    type Error = InvalidIdentity;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<&str> for HookLocalId {
+    type Error = InvalidIdentity;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::new(value)
     }
 }
 
@@ -159,18 +305,26 @@ fn feed_field(hasher: &mut blake3::Hasher, bytes: &[u8]) {
 mod tests {
     use super::*;
 
+    fn ext(s: &str) -> ExtensionId {
+        ExtensionId::new(s).expect("test extension id is valid")
+    }
+
+    fn local(s: &str) -> HookLocalId {
+        HookLocalId::new(s).expect("test hook local id is valid")
+    }
+
     #[test]
     fn derive_is_deterministic() {
         let a = HookId::derive(
-            &ExtensionId("polymarket-trader".to_string()),
+            &ext("polymarket-trader"),
             "0.4.2",
-            &HookLocalId("daily-order-cap".to_string()),
+            &local("daily-order-cap"),
             HookVersion::ONE,
         );
         let b = HookId::derive(
-            &ExtensionId("polymarket-trader".to_string()),
+            &ext("polymarket-trader"),
             "0.4.2",
-            &HookLocalId("daily-order-cap".to_string()),
+            &local("daily-order-cap"),
             HookVersion::ONE,
         );
         assert_eq!(a, b);
@@ -178,35 +332,15 @@ mod tests {
 
     #[test]
     fn version_bump_changes_id() {
-        let a = HookId::derive(
-            &ExtensionId("ext".to_string()),
-            "1.0",
-            &HookLocalId("h".to_string()),
-            HookVersion(1),
-        );
-        let b = HookId::derive(
-            &ExtensionId("ext".to_string()),
-            "1.0",
-            &HookLocalId("h".to_string()),
-            HookVersion(2),
-        );
+        let a = HookId::derive(&ext("ext"), "1.0", &local("h"), HookVersion(1));
+        let b = HookId::derive(&ext("ext"), "1.0", &local("h"), HookVersion(2));
         assert_ne!(a, b);
     }
 
     #[test]
     fn extension_version_bump_changes_id() {
-        let a = HookId::derive(
-            &ExtensionId("ext".to_string()),
-            "1.0",
-            &HookLocalId("h".to_string()),
-            HookVersion::ONE,
-        );
-        let b = HookId::derive(
-            &ExtensionId("ext".to_string()),
-            "1.1",
-            &HookLocalId("h".to_string()),
-            HookVersion::ONE,
-        );
+        let a = HookId::derive(&ext("ext"), "1.0", &local("h"), HookVersion::ONE);
+        let b = HookId::derive(&ext("ext"), "1.1", &local("h"), HookVersion::ONE);
         assert_ne!(a, b);
     }
 
@@ -214,27 +348,19 @@ mod tests {
     fn length_prefix_prevents_field_concatenation_collision() {
         // Without length-prefixing, ("ab", "c") and ("a", "bc") would collide.
         // Length-prefixing must keep them distinct.
-        let a = HookId::derive(
-            &ExtensionId("ab".to_string()),
-            "1.0",
-            &HookLocalId("c".to_string()),
-            HookVersion::ONE,
-        );
-        let b = HookId::derive(
-            &ExtensionId("a".to_string()),
-            "1.0",
-            &HookLocalId("bc".to_string()),
-            HookVersion::ONE,
-        );
+        let a = HookId::derive(&ext("ab"), "1.0", &local("c"), HookVersion::ONE);
+        let b = HookId::derive(&ext("a"), "1.0", &local("bc"), HookVersion::ONE);
         assert_ne!(a, b);
     }
 
     #[test]
     fn builtin_id_distinct_from_extension_id() {
+        // Use a `.`-separated local id, which is permitted by the segment
+        // grammar (mirroring host-api's `validate_name_segment`).
         let installed = HookId::derive(
-            &ExtensionId("builtin".to_string()),
+            &ext("builtin"),
             "x",
-            &HookLocalId("path::module".to_string()),
+            &local("path.module"),
             HookVersion::ONE,
         );
         let builtin = HookId::for_builtin("path::module", HookVersion::ONE);
@@ -258,12 +384,7 @@ mod tests {
             "hex must be ASCII lowercase 0-9a-f, got {hex}"
         );
         // Also exercise the derive path to ensure no per-constructor drift.
-        let derived = HookId::derive(
-            &ExtensionId("ext".to_string()),
-            "1.0",
-            &HookLocalId("h".to_string()),
-            HookVersion::ONE,
-        );
+        let derived = HookId::derive(&ext("ext"), "1.0", &local("h"), HookVersion::ONE);
         let derived_hex = derived.to_hex();
         assert_eq!(derived_hex.len(), 64);
         assert!(
@@ -280,5 +401,181 @@ mod tests {
         assert!(debug.starts_with("HookId("));
         assert!(debug.ends_with("…)"));
         assert!(debug.len() < 24, "debug should be short, got {debug}");
+    }
+
+    // -----------------------------------------------------------------
+    // Validation regression tests — these guard the invariants that
+    // ExtensionId and HookLocalId enforce at construction time.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn extension_id_rejects_empty() {
+        assert!(matches!(
+            ExtensionId::new(""),
+            Err(InvalidIdentity::Empty { .. })
+        ));
+    }
+
+    #[test]
+    fn extension_id_rejects_oversized() {
+        let too_long = "a".repeat(MAX_IDENTITY_BYTES + 1);
+        assert!(matches!(
+            ExtensionId::new(too_long),
+            Err(InvalidIdentity::TooLong { .. })
+        ));
+    }
+
+    #[test]
+    fn extension_id_rejects_invalid_chars() {
+        // Uppercase, slashes, NUL, spaces, colons — all rejected.
+        for bad in ["Github", "ext/sub", "ext\0nul", "ext name", "ext:sub"] {
+            assert!(
+                ExtensionId::new(bad).is_err(),
+                "expected `{bad}` to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn extension_id_rejects_bad_leading_char() {
+        for bad in ["-leading-dash", "_leading-underscore", ".leading-dot"] {
+            assert!(
+                matches!(
+                    ExtensionId::new(bad),
+                    Err(InvalidIdentity::BadLeadingChar { .. })
+                ),
+                "expected leading-char rejection for `{bad}`"
+            );
+        }
+    }
+
+    #[test]
+    fn extension_id_rejects_dot_dot_and_empty_segments() {
+        for bad in ["..", "a..b", "a.", ".a"] {
+            assert!(
+                ExtensionId::new(bad).is_err(),
+                "expected `{bad}` to be rejected (dot/segment rules)"
+            );
+        }
+    }
+
+    #[test]
+    fn extension_id_accepts_valid_value() {
+        for ok in [
+            "github",
+            "github-mcp.v1",
+            "0day",
+            "a",
+            "ext_with_underscore",
+        ] {
+            assert!(
+                ExtensionId::new(ok).is_ok(),
+                "expected `{ok}` to be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn hook_local_id_rejects_empty() {
+        assert!(matches!(
+            HookLocalId::new(""),
+            Err(InvalidIdentity::Empty { .. })
+        ));
+    }
+
+    #[test]
+    fn hook_local_id_rejects_oversized() {
+        let too_long = "a".repeat(MAX_IDENTITY_BYTES + 1);
+        assert!(matches!(
+            HookLocalId::new(too_long),
+            Err(InvalidIdentity::TooLong { .. })
+        ));
+    }
+
+    #[test]
+    fn hook_local_id_rejects_invalid_chars() {
+        for bad in ["Daily", "h::path", "h/sub", "h\0nul", "h space"] {
+            assert!(
+                HookLocalId::new(bad).is_err(),
+                "expected `{bad}` to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn hook_local_id_accepts_valid_value() {
+        for ok in ["daily-order-cap", "h", "path.module", "v2_handler"] {
+            assert!(
+                HookLocalId::new(ok).is_ok(),
+                "expected `{ok}` to be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn extension_id_deserialize_fails_closed_on_invalid_input() {
+        let err = serde_json::from_str::<ExtensionId>("\"Bad/Value\"")
+            .expect_err("uppercase and slash must reject");
+        assert!(
+            err.to_string().to_lowercase().contains("extension"),
+            "error should mention `extension`: {err}"
+        );
+    }
+
+    #[test]
+    fn extension_id_deserialize_accepts_valid_input() {
+        let id: ExtensionId =
+            serde_json::from_str("\"github-mcp.v1\"").expect("valid extension id must deserialize");
+        assert_eq!(id.as_str(), "github-mcp.v1");
+    }
+
+    #[test]
+    fn hook_local_id_deserialize_fails_closed_on_invalid_input() {
+        let err = serde_json::from_str::<HookLocalId>("\"\"").expect_err("empty must reject");
+        assert!(err.to_string().to_lowercase().contains("hook_local"));
+    }
+
+    #[test]
+    fn hook_local_id_deserialize_accepts_valid_input() {
+        let id: HookLocalId =
+            serde_json::from_str("\"daily-cap\"").expect("valid hook local id must deserialize");
+        assert_eq!(id.as_str(), "daily-cap");
+    }
+
+    #[test]
+    fn extension_id_from_host_api_round_trips() {
+        let host = ironclaw_host_api::ExtensionId::new("github-mcp.v1").expect("valid host id");
+        let mirrored: ExtensionId = (&host).into();
+        assert_eq!(mirrored.as_str(), "github-mcp.v1");
+    }
+
+    /// Walks the grammar corners that `validate_name_segment` and
+    /// `validate_identity_segment` both accept, asserting the host-api ->
+    /// identity round-trip is infallible at each boundary. This is the
+    /// regression guard that backs the `expect()` in
+    /// `From<&ironclaw_host_api::ExtensionId> for ExtensionId`: if the two
+    /// validators ever drift apart, one of these constructions will fail
+    /// the host-api `::new` call (because that path runs first) and surface
+    /// the divergence here instead of panicking in production.
+    #[test]
+    fn extension_id_from_host_api_round_trips_grammar_corners() {
+        let corners = [
+            "a",                             // 1-byte minimum
+            "0",                             // leading digit
+            "abc",                           // plain lowercase
+            "abc-def",                       // dash
+            "abc_def",                       // underscore
+            "abc.def",                       // single dot
+            "github-mcp.v1",                 // dash + dot
+            "a.b.c.d.e",                     // multiple dot segments
+            "0123456789",                    // digits only
+            &"a".repeat(MAX_IDENTITY_BYTES), // max length
+        ];
+        for raw in corners {
+            let host = ironclaw_host_api::ExtensionId::new(raw)
+                .unwrap_or_else(|e| panic!("host-api rejected corner {raw:?}: {e}"));
+            let mirrored: ExtensionId = (&host).into();
+            assert_eq!(mirrored.as_str(), raw);
+        }
     }
 }
