@@ -6,8 +6,8 @@ use ironclaw_auth::{
     AuthContinuationEvent, AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowManager,
     AuthFlowStatus, AuthInteractionService, AuthProductError, AuthProductScope, AuthProviderClient,
     CredentialAccountId, CredentialAccountService, CredentialSetupService,
-    InMemoryAuthProductServices, OAuthCallbackInput, OAuthProviderCallbackRequest, OpaqueStateHash,
-    ProviderCallbackOutcome, SecretCleanupService,
+    InMemoryAuthProductServices, OAuthCallbackClaimRequest, OAuthCallbackInput,
+    OAuthProviderCallbackRequest, OpaqueStateHash, ProviderCallbackOutcome, SecretCleanupService,
 };
 use serde::Serialize;
 
@@ -221,33 +221,59 @@ impl RebornProductAuthServices {
         &self,
         request: RebornOAuthCallbackRequest,
     ) -> Result<RebornOAuthCallbackResponse, RebornOAuthCallbackError> {
-        let outcome = match request.outcome {
+        let completed = match request.outcome {
             RebornOAuthCallbackOutcome::Authorized { provider_request } => {
-                let exchange = self
-                    .provider_client
-                    .exchange_callback(provider_request)
+                let claimed = self
+                    .flow_manager
+                    .claim_oauth_callback(
+                        &request.scope,
+                        OAuthCallbackClaimRequest {
+                            flow_id: request.flow_id,
+                            opaque_state_hash: request.opaque_state_hash.clone(),
+                            provider: provider_request.provider.clone(),
+                            pkce_verifier_hash: provider_request.pkce_verifier_hash.clone(),
+                        },
+                    )
                     .await
                     .map_err(RebornOAuthCallbackError::from)?;
-                ProviderCallbackOutcome::Authorized { exchange }
+
+                if claimed.status == AuthFlowStatus::Completed {
+                    claimed
+                } else {
+                    let exchange = self
+                        .provider_client
+                        .exchange_callback(provider_request)
+                        .await
+                        .map_err(RebornOAuthCallbackError::from)?;
+                    self.flow_manager
+                        .complete_oauth_callback(
+                            &request.scope,
+                            OAuthCallbackInput {
+                                flow_id: request.flow_id,
+                                opaque_state_hash: request.opaque_state_hash,
+                                outcome: ProviderCallbackOutcome::Authorized { exchange },
+                            },
+                        )
+                        .await
+                        .map_err(RebornOAuthCallbackError::from)?
+                }
             }
-            RebornOAuthCallbackOutcome::ProviderDenied => ProviderCallbackOutcome::Denied,
+            RebornOAuthCallbackOutcome::ProviderDenied => self
+                .flow_manager
+                .complete_oauth_callback(
+                    &request.scope,
+                    OAuthCallbackInput {
+                        flow_id: request.flow_id,
+                        opaque_state_hash: request.opaque_state_hash,
+                        outcome: ProviderCallbackOutcome::Denied,
+                    },
+                )
+                .await
+                .map_err(RebornOAuthCallbackError::from)?,
             RebornOAuthCallbackOutcome::Malformed => {
                 return Err(AuthProductError::MalformedCallback.into());
             }
         };
-
-        let completed = self
-            .flow_manager
-            .complete_oauth_callback(
-                &request.scope,
-                OAuthCallbackInput {
-                    flow_id: request.flow_id,
-                    opaque_state_hash: request.opaque_state_hash,
-                    outcome,
-                },
-            )
-            .await
-            .map_err(RebornOAuthCallbackError::from)?;
 
         let event = AuthContinuationEvent {
             flow_id: completed.id,
@@ -261,11 +287,15 @@ impl RebornProductAuthServices {
             .dispatch_auth_continuation(event)
             .await
         {
-            tracing::warn!(
+            tracing::debug!(
                 flow_id = %completed.id,
                 error_code = ?error.code(),
                 "reborn auth callback completed but continuation dispatch failed"
             );
+            return Err(RebornOAuthCallbackError {
+                code: AuthErrorCode::BackendUnavailable,
+                retryable: true,
+            });
         }
 
         Ok(RebornOAuthCallbackResponse {
@@ -289,9 +319,9 @@ mod tests {
         CredentialAccount, CredentialAccountId, CredentialAccountListPage,
         CredentialAccountListRequest, CredentialAccountMutation, CredentialAccountProjection,
         CredentialAccountSelectionRequest, CredentialAccountStatus, NewAuthFlow,
-        NewCredentialAccount, OAuthCallbackInput, OAuthProviderCallbackRequest,
-        OAuthProviderExchange, SecretCleanupReport, SecretCleanupRequest, SecretSubmitRequest,
-        SecretSubmitResult,
+        NewCredentialAccount, OAuthCallbackClaimRequest, OAuthCallbackInput,
+        OAuthProviderCallbackRequest, OAuthProviderExchange, SecretCleanupReport,
+        SecretCleanupRequest, SecretSubmitRequest, SecretSubmitResult,
     };
 
     struct SharedAuthTestDouble;
@@ -381,6 +411,14 @@ mod tests {
             _scope: &AuthProductScope,
             _flow_id: AuthFlowId,
         ) -> Result<Option<AuthFlowRecord>, AuthProductError> {
+            unreachable!("constructor tests do not call auth-flow methods")
+        }
+
+        async fn claim_oauth_callback(
+            &self,
+            _scope: &AuthProductScope,
+            _request: OAuthCallbackClaimRequest,
+        ) -> Result<AuthFlowRecord, AuthProductError> {
             unreachable!("constructor tests do not call auth-flow methods")
         }
 

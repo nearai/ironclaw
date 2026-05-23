@@ -12,12 +12,12 @@ use crate::{
     CredentialAccountListRequest, CredentialAccountMutation, CredentialAccountProjection,
     CredentialAccountSelectionRequest, CredentialAccountService, CredentialAccountStatus,
     CredentialOwnership, CredentialSetupService, ManualTokenSetupRequest, NewAuthFlow,
-    NewCredentialAccount, OAuthCallbackInput, OAuthProviderCallbackRequest, OAuthProviderExchange,
-    ProviderCallbackOutcome, SecretCleanupAction, SecretCleanupReport, SecretCleanupRequest,
-    SecretCleanupService, SecretSubmitRequest, SecretSubmitResult,
-    cleanup::SecretCleanupAction::Deactivate, flow::credential_status_for_completed_flow,
-    interaction::PendingSecretInteraction, provider::validate_provider_callback_request,
-    scope_matches,
+    NewCredentialAccount, OAuthCallbackClaimRequest, OAuthCallbackInput,
+    OAuthProviderCallbackRequest, OAuthProviderExchange, ProviderCallbackOutcome,
+    SecretCleanupAction, SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
+    SecretSubmitRequest, SecretSubmitResult, cleanup::SecretCleanupAction::Deactivate,
+    flow::credential_status_for_completed_flow, interaction::PendingSecretInteraction,
+    provider::validate_provider_callback_request, scope_matches,
 };
 
 #[derive(Default)]
@@ -101,6 +101,50 @@ impl AuthFlowManager for InMemoryAuthProductServices {
             return Err(AuthProductError::CrossScopeDenied);
         }
         Ok(Some(record.clone()))
+    }
+
+    async fn claim_oauth_callback(
+        &self,
+        scope: &crate::AuthProductScope,
+        request: OAuthCallbackClaimRequest,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        let now = Utc::now();
+        let mut state = self.lock_state();
+        let record = state
+            .flows
+            .get_mut(&request.flow_id)
+            .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
+        if !scope_matches(scope, &record.scope) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if record.opaque_state_hash.as_ref() != Some(&request.opaque_state_hash) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if record.provider != request.provider {
+            return Err(AuthProductError::TokenExchangeFailed);
+        }
+        if record.pkce_verifier_hash.as_ref() != Some(&request.pkce_verifier_hash) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if crate::is_terminal_status(record.status) {
+            return match record.status {
+                AuthFlowStatus::Completed => Ok(record.clone()),
+                AuthFlowStatus::Canceled => Err(AuthProductError::Canceled),
+                _ => Err(AuthProductError::FlowAlreadyTerminal),
+            };
+        }
+        if now > record.expires_at {
+            record.status = AuthFlowStatus::Expired;
+            record.error = Some(crate::AuthErrorCode::UnknownOrExpiredFlow);
+            record.updated_at = now;
+            return Err(AuthProductError::UnknownOrExpiredFlow);
+        }
+        if record.status != AuthFlowStatus::AwaitingUser {
+            return Err(AuthProductError::FlowAlreadyTerminal);
+        }
+        record.status = AuthFlowStatus::CallbackReceived;
+        record.updated_at = now;
+        Ok(record.clone())
     }
 
     async fn complete_oauth_callback(

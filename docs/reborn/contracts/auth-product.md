@@ -48,11 +48,15 @@ stores, provider clients, or cleanup services locally.
 
 Host-owned OAuth callback routes should parse and validate their HTTP input,
 derive hashes for opaque state/code/verifier values, then call
-`RebornProductAuthServices::handle_oauth_callback`. The handler performs
-provider exchange through `AuthProviderClient`, completes the auth flow through
-`AuthFlowManager`, and dispatches an `AuthContinuationEvent` to the injected
-continuation dispatcher. Callback route code must not activate extensions,
-resume turns, replay prompts, or dispatch runtime work directly.
+`RebornProductAuthServices::handle_oauth_callback`. The handler claims the flow
+through `AuthFlowManager`, performs provider exchange through
+`AuthProviderClient`, completes the auth flow through `AuthFlowManager`, and
+dispatches an `AuthContinuationEvent` to the injected continuation dispatcher.
+If continuation dispatch fails, the handler returns a sanitized retryable error
+instead of reporting callback success; retrying an already-completed callback
+may re-dispatch the typed continuation without re-exchanging provider code.
+Callback route code must not activate extensions, resume turns, replay prompts,
+or dispatch runtime work directly.
 
 The blocked-run interaction loop is separate: #3094 owns listing/rendering
 approval/auth gates from blocked run-state and routing user decisions back into
@@ -100,8 +104,9 @@ Rules:
   redacted metadata only.
 - Raw OAuth state, authorization code, PKCE verifier, access token, refresh
   token, and provider response bodies must not be serialized or projected.
-- Public callbacks exchange raw code/verifier through non-serializable one-shot
-  provider inputs before completing the flow.
+- Public callbacks must validate and claim the scoped flow/state/provider/PKCE
+  hash before exchanging raw code/verifier through non-serializable one-shot
+  provider inputs and completing the flow.
 - Callback completion emits typed continuations; callback routes must not
   directly activate extensions, resume turns, replay messages, or dispatch work.
 - Terminal flows cannot be completed or canceled again.

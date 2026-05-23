@@ -164,6 +164,16 @@ pub struct OAuthCallbackInput {
     pub outcome: ProviderCallbackOutcome,
 }
 
+/// Pre-egress claim for an authorized OAuth callback. This validates and marks
+/// the scoped flow before one-shot provider exchange can consume a raw code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthCallbackClaimRequest {
+    pub flow_id: AuthFlowId,
+    pub opaque_state_hash: OpaqueStateHash,
+    pub provider: AuthProviderId,
+    pub pkce_verifier_hash: crate::PkceVerifierHash,
+}
+
 #[async_trait]
 pub trait AuthFlowManager: Send + Sync {
     async fn create_flow(&self, request: NewAuthFlow) -> Result<AuthFlowRecord, AuthProductError>;
@@ -173,6 +183,12 @@ pub trait AuthFlowManager: Send + Sync {
         scope: &AuthProductScope,
         flow_id: AuthFlowId,
     ) -> Result<Option<AuthFlowRecord>, AuthProductError>;
+
+    async fn claim_oauth_callback(
+        &self,
+        scope: &AuthProductScope,
+        request: OAuthCallbackClaimRequest,
+    ) -> Result<AuthFlowRecord, AuthProductError>;
 
     async fn complete_oauth_callback(
         &self,

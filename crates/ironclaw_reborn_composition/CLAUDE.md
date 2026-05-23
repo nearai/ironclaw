@@ -11,9 +11,10 @@
   wire product auth through V1 OAuth routes, V1 pending maps, V1
   `ExtensionManager`, V1 secret stores, or route-local raw HTTP clients.
 - OAuth callback routes should only parse/validate HTTP input and call
-  `RebornProductAuthServices::handle_oauth_callback`; the handler must exchange
-  provider material through `AuthProviderClient`, complete the flow through
-  `AuthFlowManager`, and emit typed continuations.
+  `RebornProductAuthServices::handle_oauth_callback`; the handler must claim
+  the scoped flow/state/provider through `AuthFlowManager` before exchanging
+  provider material through `AuthProviderClient`, then complete the flow and
+  emit typed continuations.
 - Blocked run-state approval/auth gate rendering and resume belongs to #3094;
   keep this crate's #3811 auth seam reusable by that layer without implementing
   a second gate-resolution path.

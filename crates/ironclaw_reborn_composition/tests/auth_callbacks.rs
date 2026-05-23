@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
@@ -56,6 +59,28 @@ impl AuthProviderClient for FailingProviderClient {
         _request: OAuthProviderCallbackRequest,
     ) -> Result<OAuthProviderExchange, AuthProductError> {
         Err(self.error.clone())
+    }
+}
+
+#[derive(Default)]
+struct CountingProviderClient {
+    calls: AtomicUsize,
+}
+
+impl CountingProviderClient {
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl AuthProviderClient for CountingProviderClient {
+    async fn exchange_callback(
+        &self,
+        _request: OAuthProviderCallbackRequest,
+    ) -> Result<OAuthProviderExchange, AuthProductError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Err(AuthProductError::TokenExchangeFailed)
     }
 }
 
@@ -213,34 +238,53 @@ async fn oauth_callback_handler_completes_flow_and_dispatches_typed_continuation
 }
 
 #[tokio::test]
-async fn oauth_callback_handler_preserves_success_when_continuation_dispatch_fails() {
-    let services =
-        RebornProductAuthServices::from_shared(Arc::new(InMemoryAuthProductServices::new()))
-            .with_continuation_dispatcher(Arc::new(FailingContinuationDispatcher {
-                error: AuthProductError::BackendUnavailable,
-            }));
+async fn oauth_callback_handler_returns_retryable_error_when_continuation_dispatch_fails() {
+    let shared_auth = Arc::new(InMemoryAuthProductServices::new());
+    let services = RebornProductAuthServices::from_shared(shared_auth.clone())
+        .with_continuation_dispatcher(Arc::new(FailingContinuationDispatcher {
+            error: AuthProductError::TokenExchangeFailed,
+        }));
     let owner = scope("alice");
     let flow_id = create_flow(&services, owner.clone()).await;
 
-    let response = services
+    let error = services
         .handle_oauth_callback(authorized_request(owner.clone(), flow_id))
         .await
-        .expect("completed flow success is preserved");
+        .expect_err("dispatch failure is reported to caller");
 
-    assert_eq!(response.flow_id, flow_id);
-    assert_eq!(response.status, ironclaw_auth::AuthFlowStatus::Completed);
-    assert!(response.credential_account_id.is_some());
+    assert_eq!(error.code, AuthErrorCode::BackendUnavailable);
+    assert!(error.retryable);
 
-    let retry = services
-        .handle_oauth_callback(RebornOAuthCallbackRequest {
-            scope: owner,
-            flow_id,
-            opaque_state_hash: state_hash("state-hash"),
-            outcome: RebornOAuthCallbackOutcome::ProviderDenied,
-        })
+    let dispatcher = Arc::new(RecordingContinuationDispatcher::default());
+    let retry = RebornProductAuthServices::from_shared(shared_auth)
+        .with_continuation_dispatcher(dispatcher.clone())
+        .handle_oauth_callback(authorized_request(owner.clone(), flow_id))
         .await
-        .expect_err("terminal flow rejects retry");
-    assert_eq!(retry.code, AuthErrorCode::FlowAlreadyTerminal);
+        .expect("completed callback can be retried for continuation dispatch");
+
+    assert_eq!(retry.flow_id, flow_id);
+    assert_eq!(retry.status, ironclaw_auth::AuthFlowStatus::Completed);
+    assert_eq!(dispatcher.events().len(), 1);
+}
+
+#[tokio::test]
+async fn oauth_callback_handler_rejects_wrong_state_without_provider_exchange_or_dispatch() {
+    let dispatcher = Arc::new(RecordingContinuationDispatcher::default());
+    let provider_client = Arc::new(CountingProviderClient::default());
+    let services = auth_services(dispatcher.clone()).with_provider_client(provider_client.clone());
+    let owner = scope("alice");
+    let flow_id = create_flow(&services, owner.clone()).await;
+    let mut request = authorized_request(owner, flow_id);
+    request.opaque_state_hash = state_hash("wrong-state");
+
+    let error = services
+        .handle_oauth_callback(request)
+        .await
+        .expect_err("wrong state is rejected before provider exchange");
+
+    assert_eq!(error.code, AuthErrorCode::CrossScopeDenied);
+    assert_eq!(provider_client.calls(), 0);
+    assert!(dispatcher.events().is_empty());
 }
 
 #[tokio::test]
