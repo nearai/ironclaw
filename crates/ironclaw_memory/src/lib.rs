@@ -6,6 +6,7 @@
 
 mod backend;
 mod chunking;
+pub mod contract_tests;
 mod embedding;
 mod events;
 mod filesystem;
