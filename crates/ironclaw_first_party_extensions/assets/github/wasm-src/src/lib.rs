@@ -15,7 +15,9 @@ use serde::Deserialize;
 const GITHUB_API_ROOT: &str = "https://api.github.com";
 const GITHUB_API_VERSION: &str = "2026-03-10";
 const HTTP_TIMEOUT_MS: u32 = 10_000;
-const MAX_TEXT_LENGTH: usize = 65_536;
+const MAX_QUERY_LENGTH: usize = 512;
+const MAX_COMMENT_BODY_LENGTH: usize = 65_536;
+const MAX_REPOSITORY_SEGMENT_LENGTH: usize = 100;
 
 struct GitHubTool;
 
@@ -27,11 +29,13 @@ enum GitHubOperation {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ToolContext {
     capability_id: String,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SearchIssuesParams {
     query: String,
     page: Option<u32>,
@@ -41,6 +45,7 @@ struct SearchIssuesParams {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GetIssueParams {
     owner: String,
     repo: String,
@@ -48,6 +53,7 @@ struct GetIssueParams {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CommentIssueParams {
     owner: String,
     repo: String,
@@ -91,7 +97,7 @@ impl exports::near::agent::tool::Guest for GitHubTool {
 }
 
 fn schema_value(schema: &str) -> serde_json::Value {
-    serde_json::from_str(schema).unwrap_or_else(|_| serde_json::json!({"type": "object"}))
+    serde_json::from_str(schema).expect("bundled GitHub schema must be valid JSON")
 }
 
 fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> {
@@ -121,11 +127,13 @@ fn operation_from_context(context: Option<&str>) -> Result<GitHubOperation, Stri
 }
 
 fn search_issues(params: SearchIssuesParams) -> Result<String, String> {
-    validate_text(&params.query, "query")?;
+    validate_text(&params.query, "query", MAX_QUERY_LENGTH)?;
+    validate_search_page(params.page)?;
+    validate_search_limit(params.limit)?;
     validate_search_sort(params.sort.as_deref())?;
     validate_order(params.order.as_deref())?;
 
-    let limit = params.limit.unwrap_or(30).min(100);
+    let limit = params.limit.unwrap_or(30);
     let mut path = format!(
         "/search/issues?q={}&per_page={}",
         url_encode_query(&params.query),
@@ -150,6 +158,7 @@ fn search_issues(params: SearchIssuesParams) -> Result<String, String> {
 
 fn get_issue(params: GetIssueParams) -> Result<String, String> {
     validate_repo(&params.owner, &params.repo)?;
+    validate_issue_number(params.issue_number)?;
 
     let path = format!(
         "/repos/{}/{}/issues/{}",
@@ -163,7 +172,8 @@ fn get_issue(params: GetIssueParams) -> Result<String, String> {
 
 fn comment_issue(params: CommentIssueParams) -> Result<String, String> {
     validate_repo(&params.owner, &params.repo)?;
-    validate_text(&params.body, "body")?;
+    validate_issue_number(params.issue_number)?;
+    validate_text(&params.body, "body", MAX_COMMENT_BODY_LENGTH)?;
 
     let path = format!(
         "/repos/{}/{}/issues/{}/comments",
@@ -198,8 +208,6 @@ fn github_request(method: &str, path: &str, body: Option<String>) -> Result<Stri
     if (200..300).contains(&response.status) {
         let body =
             String::from_utf8(response.body).map_err(|_| "github_api_invalid_utf8".to_string())?;
-        let _: serde_json::Value =
-            serde_json::from_str(&body).map_err(|_| "github_api_invalid_json".to_string())?;
         return Ok(body);
     }
 
@@ -238,8 +246,10 @@ fn validate_repo(owner: &str, repo: &str) -> Result<(), String> {
     }
 }
 
-fn validate_text(value: &str, field: &str) -> Result<(), String> {
-    if value.len() > MAX_TEXT_LENGTH {
+fn validate_text(value: &str, field: &str, max_length: usize) -> Result<(), String> {
+    if value.is_empty() {
+        Err(format!("invalid_{field}_empty"))
+    } else if value.len() > max_length {
         Err(format!("invalid_{field}_too_large"))
     } else {
         Ok(())
@@ -248,6 +258,7 @@ fn validate_text(value: &str, field: &str) -> Result<(), String> {
 
 fn validate_path_segment(value: &str) -> bool {
     !value.is_empty()
+        && value.len() <= MAX_REPOSITORY_SEGMENT_LENGTH
         && !value.contains('/')
         && !value.contains("..")
         && !value.contains('?')
@@ -259,20 +270,7 @@ fn validate_path_segment(value: &str) -> bool {
 
 fn validate_search_sort(sort: Option<&str>) -> Result<(), String> {
     match sort {
-        None => Ok(()),
-        Some(
-            "comments"
-            | "reactions"
-            | "reactions-+1"
-            | "reactions--1"
-            | "reactions-smile"
-            | "reactions-thinking_face"
-            | "reactions-heart"
-            | "reactions-tada"
-            | "interactions"
-            | "created"
-            | "updated",
-        ) => Ok(()),
+        None | Some("comments" | "created" | "updated") => Ok(()),
         Some(_) => Err("invalid_sort".to_string()),
     }
 }
@@ -281,6 +279,28 @@ fn validate_order(order: Option<&str>) -> Result<(), String> {
     match order {
         None | Some("asc" | "desc") => Ok(()),
         Some(_) => Err("invalid_order".to_string()),
+    }
+}
+
+fn validate_search_page(page: Option<u32>) -> Result<(), String> {
+    match page {
+        None | Some(1..=100) => Ok(()),
+        Some(_) => Err("invalid_page".to_string()),
+    }
+}
+
+fn validate_search_limit(limit: Option<u32>) -> Result<(), String> {
+    match limit {
+        None | Some(1..=100) => Ok(()),
+        Some(_) => Err("invalid_limit".to_string()),
+    }
+}
+
+fn validate_issue_number(issue_number: u32) -> Result<(), String> {
+    if issue_number == 0 {
+        Err("invalid_issue_number".to_string())
+    } else {
+        Ok(())
     }
 }
 
@@ -310,6 +330,7 @@ export!(GitHubTool);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::exports::near::agent::tool::Guest;
 
     #[test]
     fn operation_comes_from_host_context_not_param_shape() {
@@ -328,6 +349,114 @@ mod tests {
         assert_eq!(
             operation_from_context(Some(r#"{"capability_id":"github.create_issue"}"#)).unwrap_err(),
             "unsupported_github_capability"
+        );
+    }
+
+    #[test]
+    fn rejects_parameters_that_do_not_match_advertised_schema() {
+        assert_eq!(
+            search_issues(SearchIssuesParams {
+                query: String::new(),
+                page: None,
+                limit: None,
+                sort: None,
+                order: None,
+            })
+            .unwrap_err(),
+            "invalid_query_empty"
+        );
+        assert_eq!(
+            search_issues(SearchIssuesParams {
+                query: "repo:nearai/ironclaw is:issue".to_string(),
+                page: Some(0),
+                limit: None,
+                sort: None,
+                order: None,
+            })
+            .unwrap_err(),
+            "invalid_page"
+        );
+        assert_eq!(
+            search_issues(SearchIssuesParams {
+                query: "repo:nearai/ironclaw is:issue".to_string(),
+                page: None,
+                limit: Some(0),
+                sort: None,
+                order: None,
+            })
+            .unwrap_err(),
+            "invalid_limit"
+        );
+        assert_eq!(
+            search_issues(SearchIssuesParams {
+                query: "repo:nearai/ironclaw is:issue".to_string(),
+                page: None,
+                limit: None,
+                sort: Some("reactions".to_string()),
+                order: None,
+            })
+            .unwrap_err(),
+            "invalid_sort"
+        );
+        assert_eq!(
+            comment_issue(CommentIssueParams {
+                owner: "nearai".to_string(),
+                repo: "ironclaw".to_string(),
+                issue_number: 0,
+                body: "comment".to_string(),
+            })
+            .unwrap_err(),
+            "invalid_issue_number"
+        );
+        assert_eq!(
+            comment_issue(CommentIssueParams {
+                owner: "nearai".to_string(),
+                repo: "ironclaw".to_string(),
+                issue_number: 1,
+                body: String::new(),
+            })
+            .unwrap_err(),
+            "invalid_body_empty"
+        );
+    }
+
+    #[test]
+    fn serde_rejects_unknown_fields_before_egress() {
+        assert_eq!(
+            execute_inner(
+                r#"{"query":"repo:nearai/ironclaw","extra":"ignored?"}"#,
+                Some(r#"{"capability_id":"github.search_issues"}"#),
+            )
+            .unwrap_err(),
+            "invalid_parameters"
+        );
+    }
+
+    #[test]
+    fn validates_static_schema_json() {
+        let schema = GitHubTool::schema();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&schema).expect("schema should be valid JSON");
+        assert_eq!(parsed["type"], "object");
+        assert!(parsed["oneOf"].as_array().is_some_and(|schemas| schemas.len() == 3));
+    }
+
+    #[test]
+    fn sanitizes_host_egress_errors_without_leaking_details() {
+        assert_eq!(
+            sanitize_host_error("missing token ghp_secret_value"),
+            "AuthRequired"
+        );
+        assert_eq!(sanitize_host_error("deadline exceeded"), "github_api_timeout");
+        assert_eq!(sanitize_host_error("redirect blocked"), "github_api_redirect_denied");
+        assert_eq!(
+            sanitize_host_error("response body too large"),
+            "github_api_body_limit"
+        );
+        assert_eq!(sanitize_host_error("host not allowed"), "github_api_egress_denied");
+        assert_eq!(
+            sanitize_host_error("connection reset with token ghp_secret_value"),
+            "AuthRequired"
         );
     }
 }

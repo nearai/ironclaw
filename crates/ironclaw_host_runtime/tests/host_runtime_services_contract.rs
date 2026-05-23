@@ -92,7 +92,8 @@ use ironclaw_turns::{NoopTurnRunWakeNotifier, TurnRunWake, TurnRunWakeNotifier};
 use ironclaw_wasm::{
     RecordingWasmHostHttp, WasmHostError, WasmHostHttp, WasmHttpRequest, WasmHttpResponse,
     WasmRuntimeCredentialProvider, WasmRuntimeCredentialRequest, WasmStagedRuntimeCredential,
-    WasmStagedRuntimeCredentials, WitToolHost, WitToolRuntimeConfig,
+    WasmStagedRuntimeCredentials, WitToolExecution, WitToolHost, WitToolRequest, WitToolRuntime,
+    WitToolRuntimeConfig,
 };
 use serde_json::json;
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
@@ -3699,6 +3700,161 @@ async fn host_runtime_services_routes_github_wasm_read_through_runtime_http_egre
     );
 }
 
+#[test]
+fn bundled_github_wasm_executes_search_get_and_comment_operations() {
+    let search_http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 200,
+        headers_json: "{}".to_string(),
+        body: br#"{"total_count":0,"incomplete_results":false,"items":[]}"#.to_vec(),
+    }));
+    let search = execute_bundled_github_wasm(
+        "github.search_issues",
+        json!({"query": "repo:nearai/ironclaw is:issue", "limit": 1}),
+        Arc::clone(&search_http),
+    );
+    assert_eq!(search.error, None);
+    assert_eq!(
+        search.output_json.as_deref(),
+        Some(r#"{"total_count":0,"incomplete_results":false,"items":[]}"#)
+    );
+    assert_single_wasm_request(
+        &search_http,
+        "GET",
+        "https://api.github.com/search/issues?q=repo%3Anearai%2Fironclaw%20is%3Aissue&per_page=1",
+        None,
+    );
+
+    let get_issue_http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 200,
+        headers_json: "{}".to_string(),
+        body: br#"{"number":2,"title":"Reborn GitHub issue","state":"open","html_url":"https://github.com/nearai/ironclaw/issues/2"}"#.to_vec(),
+    }));
+    let get_issue = execute_bundled_github_wasm(
+        "github.get_issue",
+        json!({"owner": "nearai", "repo": "ironclaw", "issue_number": 2}),
+        Arc::clone(&get_issue_http),
+    );
+    assert_eq!(get_issue.error, None);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(get_issue.output_json.as_deref().unwrap())
+            .unwrap()["number"],
+        json!(2)
+    );
+    assert_single_wasm_request(
+        &get_issue_http,
+        "GET",
+        "https://api.github.com/repos/nearai/ironclaw/issues/2",
+        None,
+    );
+
+    let comment_http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 201,
+        headers_json: "{}".to_string(),
+        body: br##"{"id":44,"html_url":"https://github.com/nearai/ironclaw/issues/2#issuecomment-44","body":"Reborn WASM comment"}"##.to_vec(),
+    }));
+    let comment = execute_bundled_github_wasm(
+        "github.comment_issue",
+        json!({
+            "owner": "nearai",
+            "repo": "ironclaw",
+            "issue_number": 2,
+            "body": "Reborn WASM comment",
+        }),
+        Arc::clone(&comment_http),
+    );
+    assert_eq!(comment.error, None);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(comment.output_json.as_deref().unwrap()).unwrap()
+            ["body"],
+        json!("Reborn WASM comment")
+    );
+    assert_single_wasm_request(
+        &comment_http,
+        "POST",
+        "https://api.github.com/repos/nearai/ironclaw/issues/2/comments",
+        Some(br#"{"body":"Reborn WASM comment"}"#),
+    );
+}
+
+#[test]
+fn bundled_github_wasm_sanitizes_host_http_and_api_failures() {
+    let cases = [
+        (
+            RecordingWasmHostHttp::err(WasmHostError::Unavailable(
+                "missing auth token ghp_fake_fixture_token".to_string(),
+            )),
+            "AuthRequired",
+        ),
+        (
+            RecordingWasmHostHttp::err(WasmHostError::Failed(
+                "deadline exceeded while token ghp_fake_fixture_token was present".to_string(),
+            )),
+            "AuthRequired",
+        ),
+        (
+            RecordingWasmHostHttp::err(WasmHostError::Failed("redirect blocked".to_string())),
+            "github_api_redirect_denied",
+        ),
+        (
+            RecordingWasmHostHttp::err(WasmHostError::FailedAfterRequestSent(
+                "response body too large".to_string(),
+            )),
+            "github_api_body_limit",
+        ),
+        (
+            RecordingWasmHostHttp::err(WasmHostError::Denied(
+                "host not allowed: api.evil.test".to_string(),
+            )),
+            "github_api_egress_denied",
+        ),
+        (
+            RecordingWasmHostHttp::ok(WasmHttpResponse {
+                status: 403,
+                headers_json: "{}".to_string(),
+                body: br#"{"message":"bad credentials ghp_fake_fixture_token"}"#.to_vec(),
+            }),
+            "github_api_error_status_403",
+        ),
+        (
+            RecordingWasmHostHttp::ok(WasmHttpResponse {
+                status: 200,
+                headers_json: "{}".to_string(),
+                body: vec![0xff, 0xfe],
+            }),
+            "github_api_invalid_utf8",
+        ),
+    ];
+
+    for (http, expected_error) in cases {
+        let execution = execute_bundled_github_wasm(
+            "github.search_issues",
+            json!({"query": "repo:nearai/ironclaw is:issue", "limit": 1}),
+            Arc::new(http),
+        );
+        assert_eq!(execution.error.as_deref(), Some(expected_error));
+        assert!(
+            !format!("{execution:?}").contains("ghp_fake_fixture_token"),
+            "guest-visible failure must not leak credential material"
+        );
+    }
+}
+
+#[test]
+fn bundled_github_wasm_leaves_success_json_for_host_output_decode() {
+    let execution = execute_bundled_github_wasm(
+        "github.search_issues",
+        json!({"query": "repo:nearai/ironclaw is:issue", "limit": 1}),
+        Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+            status: 200,
+            headers_json: "{}".to_string(),
+            body: b"not-json".to_vec(),
+        })),
+    );
+
+    assert_eq!(execution.output_json.as_deref(), Some("not-json"));
+    assert_eq!(execution.error, None);
+}
+
 #[tokio::test]
 async fn host_runtime_services_routes_cached_wasm_http_through_per_invocation_policy_handoff() {
     let parsed_manifest = parse_manifest(WASM_HTTP_SUCCESS_MANIFEST);
@@ -6604,6 +6760,54 @@ fn wasm_runtime_request_for_scope(
         input,
         trust_decision_with_dispatch_authority(),
     )
+}
+
+fn execute_bundled_github_wasm(
+    capability_id: &str,
+    input: serde_json::Value,
+    http: Arc<RecordingWasmHostHttp>,
+) -> WitToolExecution {
+    let runtime = WitToolRuntime::new(WitToolRuntimeConfig::default()).unwrap();
+    let wasm_bytes = std::fs::read(github_first_party_wasm_path())
+        .expect("first-party GitHub WASM must be built before running this contract");
+    let prepared = runtime.prepare("github", &wasm_bytes).unwrap();
+    runtime
+        .execute(
+            &prepared,
+            WitToolHost::deny_all().with_http(http),
+            WitToolRequest::new(input.to_string()).with_context(
+                json!({
+                    "capability_id": capability_id,
+                })
+                .to_string(),
+            ),
+        )
+        .unwrap()
+}
+
+fn github_first_party_wasm_path() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("crates/ironclaw_first_party_extensions/assets/github/wasm/github_tool.wasm")
+}
+
+fn assert_single_wasm_request(
+    http: &RecordingWasmHostHttp,
+    expected_method: &str,
+    expected_url: &str,
+    expected_body: Option<&[u8]>,
+) {
+    let requests = http.requests().unwrap();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(request.method, expected_method);
+    assert_eq!(request.url, expected_url);
+    assert_eq!(request.timeout_ms, Some(10_000));
+    assert_eq!(request.body.as_deref(), expected_body);
+
+    let headers: serde_json::Value = serde_json::from_str(&request.headers_json).unwrap();
+    assert_eq!(headers["User-Agent"], "IronClaw-GitHub-Reborn-WASM");
+    assert_eq!(headers["X-GitHub-Api-Version"], "2026-03-10");
 }
 
 fn wasm_http_estimate() -> ResourceEstimate {

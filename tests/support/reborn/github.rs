@@ -35,7 +35,7 @@ pub fn secret_handles() -> GithubSupportResult<Vec<SecretHandle>> {
 }
 
 pub fn search_response_body() -> Vec<u8> {
-    br#"{"items":[]}"#.to_vec()
+    br#"{"total_count":0,"incomplete_results":false,"items":[]}"#.to_vec()
 }
 
 pub fn api_policy() -> NetworkPolicy {
