@@ -12,8 +12,26 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::FutureExt;
-use ironclaw_events::{EventCursor, RuntimeEvent, RuntimeEventKind};
+use ironclaw_events::{
+    EventCursor, RuntimeEvent, RuntimeEventKind, SecurityAuditEvent, SecurityAuditSink,
+    SecurityBoundary, SecurityDecision,
+};
 use ironclaw_turns::run_profile::{HookDecisionSummary, HookMilestoneSink, LoopHostMilestoneKind};
+
+/// Stable `&'static str` reason code recorded on the
+/// [`SecurityAuditEvent`] when a `before_capability` hook explicitly
+/// returns a `Deny` decision.
+///
+/// Note: this code covers *explicit* hook-emitted denies, surfaced via
+/// [`HookDecisionSummary::Deny`] at the canonical emit point. Fail-closed
+/// denies driven by a [`crate::failure_policy::FailureDisposition::FailClosed`]
+/// (timeout/panic/malformed) already have their own milestone signal —
+/// [`LoopHostMilestoneKind::HookFailed`] — so they are *not* additionally
+/// emitted here, to avoid double-recording the same hook outcome under two
+/// different SRE codes. If the SRE need ever diverges (e.g. separate
+/// dashboards for "extension said no" vs. "extension misbehaved"), the
+/// fail-closed path can adopt its own code without affecting this one.
+pub const HOOK_DENY_PREDICATE_CODE: &str = "hook_deny_predicate";
 
 use crate::error::SanitizedReason;
 use crate::failure_policy::{FailureCategory, FailureDisposition};
@@ -174,6 +192,13 @@ pub struct HookDispatcher {
     event_triggered: HashMap<HookId, EventTriggeredHookImpl>,
     timeout: Duration,
     milestone_sink: Option<Arc<dyn HookMilestoneSink>>,
+    /// Best-effort recording sink for security-boundary decisions made by
+    /// the dispatcher itself (today: hook-driven `Deny`). Distinct from
+    /// [`Self::milestone_sink`], which carries run-context loop telemetry;
+    /// the security-audit sink carries the payload-free
+    /// [`SecurityAuditEvent`] shape consumed by SRE/forensics retention.
+    /// Optional: when unset, the dispatcher behaves exactly as before.
+    audit_sink: Option<Arc<dyn SecurityAuditSink>>,
 }
 
 impl HookDispatcher {
@@ -193,6 +218,7 @@ impl HookDispatcher {
             event_triggered: HashMap::new(),
             timeout: DEFAULT_HOOK_TIMEOUT,
             milestone_sink: None,
+            audit_sink: None,
         }
     }
 
@@ -220,6 +246,17 @@ impl HookDispatcher {
     /// host's `LoopHostMilestoneSink`.
     pub(crate) fn with_milestone_sink(mut self, sink: Arc<dyn HookMilestoneSink>) -> Self {
         self.milestone_sink = Some(sink);
+        self
+    }
+
+    /// Attach a [`SecurityAuditSink`] for hook-driven security-boundary
+    /// decisions (currently: explicit `Deny` from `before_capability`).
+    ///
+    /// Like [`Self::with_milestone_sink`], this must be wired before the
+    /// dispatcher is Arc-wrapped; see [`HookDispatcherBuilder`] for the
+    /// type-enforced composition order.
+    pub(crate) fn with_audit_sink(mut self, sink: Arc<dyn SecurityAuditSink>) -> Self {
+        self.audit_sink = Some(sink);
         self
     }
 
@@ -916,8 +953,13 @@ impl HookDispatcher {
                     audit_reason,
                 }) => {
                     let summary = telemetry::gate_decision_summary(&decision);
-                    self.emit_decision_with_audit(&binding, summary, audit_reason)
-                        .await;
+                    self.emit_decision_with_audit(
+                        &binding,
+                        summary,
+                        audit_reason,
+                        Some(ctx.capability_name.as_str()),
+                    )
+                    .await;
                     composed = compose_gate_decision(composed, decision);
                     if !matches!(composed.inner(), GateDecisionInner::Allow) {
                         short_circuited = true;
@@ -1700,15 +1742,50 @@ impl HookDispatcher {
     }
 
     async fn emit_decision(&self, binding: &HookBinding, decision: HookDecisionSummary) {
-        self.emit_decision_with_audit(binding, decision, None).await;
+        self.emit_decision_with_audit(binding, decision, None, None)
+            .await;
     }
 
+    /// Emit a hook decision to the milestone sink and, when the decision is
+    /// an explicit `Deny`, additionally record a payload-free
+    /// [`SecurityAuditEvent`] on the [`SecurityAuditSink`] (when wired).
+    ///
+    /// `capability_name` is the raw capability name from
+    /// [`BeforeCapabilityHookContext::capability_name`]; it is converted to
+    /// [`ironclaw_host_api::CapabilityId`] on a best-effort basis. If the
+    /// conversion fails (already-validated capability names should not, but
+    /// the parse is guarded for safety), the event still records with no
+    /// capability id. The free-form audit reason is intentionally NOT
+    /// forwarded to the security-audit event — the `code` field
+    /// ([`HOOK_DENY_PREDICATE_CODE`]) is the only descriptive content per the
+    /// `SecurityAuditEvent` payload-free invariant. The reason still flows
+    /// to the milestone sink (already sanitized).
     async fn emit_decision_with_audit(
         &self,
         binding: &HookBinding,
         decision: HookDecisionSummary,
         audit_reason: Option<String>,
+        capability_name: Option<&str>,
     ) {
+        // Security-audit recording happens at the canonical decision emit
+        // point so an explicit Deny is captured exactly once, regardless of
+        // whether a milestone sink is configured.
+        if matches!(decision, HookDecisionSummary::Deny { .. })
+            && let Some(sink) = &self.audit_sink
+        {
+            let mut event = SecurityAuditEvent::new(
+                SecurityBoundary::HookDeny,
+                SecurityDecision::Blocked,
+                HOOK_DENY_PREDICATE_CODE,
+            );
+            if let Some(name) = capability_name
+                && let Ok(cap_id) = ironclaw_host_api::CapabilityId::new(name.to_string())
+            {
+                event = event.with_capability_id(cap_id);
+            }
+            sink.record(event);
+        }
+
         if self.milestone_sink.is_none() {
             return;
         }
@@ -1868,6 +1945,15 @@ impl HookDispatcherBuilder {
     /// the only safe time to do so.
     pub fn with_milestone_sink(mut self, sink: Arc<dyn HookMilestoneSink>) -> Self {
         self.dispatcher = self.dispatcher.with_milestone_sink(sink);
+        self
+    }
+
+    /// Attach a [`SecurityAuditSink`] for hook-driven security-boundary
+    /// decisions (explicit `Deny`). Optional: production composition wires
+    /// this via `RebornLoopDriverHostFactory` so deny decisions are
+    /// retained per the `CLAUDE.md` "LLM data is never deleted" rule.
+    pub fn with_audit_sink(mut self, sink: Arc<dyn SecurityAuditSink>) -> Self {
+        self.dispatcher = self.dispatcher.with_audit_sink(sink);
         self
     }
 
@@ -2260,6 +2346,107 @@ mod tests {
         ) {
             // Deliberately returns without calling any sink method.
         }
+    }
+
+    /// Caller-level regression for the audit-sink wiring on the
+    /// `before_capability` dispatch path. Installs a `Deny`-returning hook
+    /// against a fully composed dispatcher (registry + impl + audit sink)
+    /// via the same builder API that production composition uses, drives
+    /// the dispatch end-to-end, and asserts the recorded
+    /// `SecurityAuditEvent` shape.
+    ///
+    /// Per the testing rule ("Test Through the Caller"), this is the
+    /// canonical regression for the wiring — a unit test that calls
+    /// `emit_decision_with_audit` directly would miss a missed wire-up
+    /// inside `dispatch_before_capability`'s `Decision { … }` arm.
+    #[tokio::test]
+    async fn hook_deny_records_security_audit_event_with_no_payload() {
+        use ironclaw_events::{
+            InMemorySecurityAuditSink, SecurityAuditSink, SecurityBoundary, SecurityDecision,
+        };
+
+        // Wire a recording sink the same way production code threads it
+        // through the dispatcher builder.
+        let sink: Arc<InMemorySecurityAuditSink> = Arc::new(InMemorySecurityAuditSink::new());
+        let sink_dyn: Arc<dyn SecurityAuditSink> = sink.clone();
+        let deny_id = ext_hook_id("deny");
+
+        let mut registry = HookRegistry::new();
+        registry
+            .insert(installed_binding(
+                deny_id,
+                HookPointSpec::BeforeCapability,
+                HookPhase::Policy,
+            ))
+            .expect("binding insertable");
+        // Drive the dispatcher through its full builder-shaped pipeline so
+        // this regression covers the production wiring path (audit sink
+        // attached pre-`Arc`, then sealed).
+        let mut dispatcher = HookDispatcher::new(registry).with_audit_sink(sink_dyn);
+        dispatcher.install_before_capability(
+            deny_id,
+            BeforeCapabilityHookImpl::Restricted(Box::new(DenyingInstalledHook)),
+        );
+
+        let outcome = dispatcher.dispatch_before_capability(&ctx()).await;
+        assert!(
+            !outcome.decision.permits(),
+            "DenyingInstalledHook must drive a non-permit composed decision"
+        );
+
+        // The boundary recorded exactly one event with the expected shape.
+        // `ctx()` uses capability name `"cap.x"` which is a valid
+        // `CapabilityId`.
+        let events = sink.snapshot();
+        assert_eq!(
+            events.len(),
+            1,
+            "exactly one hook-deny event should have been recorded, got {events:?}"
+        );
+        let event = &events[0];
+        assert_eq!(event.boundary, SecurityBoundary::HookDeny);
+        assert_eq!(event.decision, SecurityDecision::Blocked);
+        assert_eq!(event.code, HOOK_DENY_PREDICATE_CODE);
+        assert_eq!(event.code, "hook_deny_predicate"); // stability lock
+        assert_eq!(
+            event
+                .capability_id
+                .as_ref()
+                .map(ironclaw_host_api::CapabilityId::as_str),
+            Some("cap.x"),
+            "capability id should propagate from ctx.capability_name"
+        );
+
+        // Payload-free invariant: `SecurityAuditEvent` has no String field
+        // for the audit reason. The hook's deny reason ("blocked by
+        // extension") does not appear anywhere on the recorded event by
+        // construction — only `code` carries descriptive content, and it
+        // is a `&'static str` (so cannot encode caller input). The reason
+        // still flows to the milestone sink (sanitized, capped) for
+        // operator-visible telemetry.
+    }
+
+    /// Negative half of the audit-sink wiring contract: when no audit sink
+    /// is configured, a denying hook still produces the original composed
+    /// non-permit decision. The wiring is purely additive.
+    #[tokio::test]
+    async fn hook_deny_without_audit_sink_does_not_panic() {
+        let deny_id = ext_hook_id("deny");
+        let mut registry = HookRegistry::new();
+        registry
+            .insert(installed_binding(
+                deny_id,
+                HookPointSpec::BeforeCapability,
+                HookPhase::Policy,
+            ))
+            .expect("binding insertable");
+        let mut dispatcher = HookDispatcher::new(registry);
+        dispatcher.install_before_capability(
+            deny_id,
+            BeforeCapabilityHookImpl::Restricted(Box::new(DenyingInstalledHook)),
+        );
+        let outcome = dispatcher.dispatch_before_capability(&ctx()).await;
+        assert!(!outcome.decision.permits());
     }
 
     /// Documents the load-bearing invariant introduced by the builder: from

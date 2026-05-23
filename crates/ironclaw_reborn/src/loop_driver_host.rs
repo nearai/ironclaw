@@ -8,7 +8,7 @@ use std::{
 
 use async_trait::async_trait;
 use futures_util::FutureExt;
-use ironclaw_events::{DurableEventLog, EventCursor, EventStreamKey, ReadScope};
+use ironclaw_events::{DurableEventLog, EventCursor, EventStreamKey, ReadScope, SecurityAuditSink};
 use ironclaw_hooks::dispatch::{HookDispatcher, HookDispatcherBuilder};
 use ironclaw_hooks::middleware::{
     CapabilityInputResolver as HookCapabilityInputResolver,
@@ -834,6 +834,12 @@ where
     /// Optional durable runtime-event subscription for event-triggered hooks.
     /// The subscription starts only when a hook dispatcher is also installed.
     event_subscription: Option<EventTriggeredHookSubscription>,
+    /// Optional security-audit sink. When set, the host factory attaches it
+    /// to the per-build hook dispatcher so explicit hook `Deny` decisions
+    /// produce a payload-free [`ironclaw_events::SecurityAuditEvent`] for
+    /// SRE/forensics retention. Defaults to unset (dispatcher behaves as
+    /// before the audit-sink wiring landed).
+    hook_security_audit_sink: Option<Arc<dyn SecurityAuditSink>>,
     safety_context: Option<InstructionSafetyContext>,
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
     input_queue: Option<Arc<dyn HostInputQueue>>,
@@ -893,6 +899,7 @@ where
             hook_gate_ref_factory: None,
             hook_gate_ref_factory_builder: None,
             event_subscription: None,
+            hook_security_audit_sink: None,
             safety_context: None,
             identity_context_source: None,
             input_queue: None,
@@ -1038,6 +1045,24 @@ where
     /// outside the loop's inline tick.
     pub fn with_event_subscription(mut self, subscription: EventTriggeredHookSubscription) -> Self {
         self.event_subscription = Some(subscription);
+        self
+    }
+
+    /// Install a [`SecurityAuditSink`] that the host factory attaches to
+    /// every per-build [`HookDispatcher`]. Hook-driven `Deny` decisions then
+    /// record a payload-free
+    /// [`ironclaw_events::SecurityAuditEvent`] keyed on
+    /// [`ironclaw_events::SecurityBoundary::HookDeny`] alongside the
+    /// existing milestone signal. Defaults to unset; without it, deny
+    /// decisions reach only the milestone sink (and `tracing` via
+    /// hook-internal logging).
+    ///
+    /// Only the [`Self::with_hook_dispatcher_builder_factory`] path picks
+    /// this up; the legacy/deprecated shared-dispatcher path does not, since
+    /// callers using that path own the dispatcher entirely and can attach
+    /// the sink themselves via [`HookDispatcherBuilder::with_audit_sink`].
+    pub fn with_hook_security_audit_sink(mut self, sink: Arc<dyn SecurityAuditSink>) -> Self {
+        self.hook_security_audit_sink = Some(sink);
         self
     }
 
@@ -1219,7 +1244,11 @@ where
                         run_context.clone(),
                         Arc::clone(&self.milestone_sink) as _,
                     ));
-                Some(builder.with_milestone_sink(run_scoped).build_arc())
+                let mut builder = builder.with_milestone_sink(run_scoped);
+                if let Some(audit_sink) = self.hook_security_audit_sink.as_ref() {
+                    builder = builder.with_audit_sink(Arc::clone(audit_sink));
+                }
+                Some(builder.build_arc())
             }
             (None, Some(factory)) => Some(factory()),
             (None, None) => None,
