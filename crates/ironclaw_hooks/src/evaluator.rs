@@ -21,8 +21,9 @@
 
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 
 use crate::identity::HookId;
@@ -120,23 +121,23 @@ impl PredicateEvaluator {
 
     /// Evaluate `spec` against the given context. Mutates internal counters
     /// for stateful predicates.
-    pub fn evaluate(
+    pub async fn evaluate(
         &self,
         hook_id: HookId,
         spec: &HookPredicateSpec,
         ctx: &BeforeCapabilityHookContext,
     ) -> EvaluatorDecision {
-        self.evaluate_at(hook_id, spec, ctx, Instant::now())
+        self.evaluate_at(hook_id, spec, ctx, Utc::now()).await
     }
 
     /// Test-only variant accepting an explicit `now` so sliding-window tests
     /// don't depend on real wall-clock progress.
-    pub fn evaluate_at(
+    pub async fn evaluate_at(
         &self,
         hook_id: HookId,
         spec: &HookPredicateSpec,
         ctx: &BeforeCapabilityHookContext,
-        now: Instant,
+        now: DateTime<Utc>,
     ) -> EvaluatorDecision {
         match spec {
             HookPredicateSpec::DenyCapability { when, reason } => {
@@ -185,6 +186,7 @@ impl PredicateEvaluator {
                         let count = match self
                             .backend
                             .record_invocation(&key, &event_id, now, window_dur)
+                            .await
                         {
                             Ok(c) => c,
                             Err(error) => {
@@ -248,6 +250,7 @@ impl PredicateEvaluator {
                         let sum = match self
                             .backend
                             .record_value(&key, &event_id, now, value, window_dur)
+                            .await
                         {
                             Ok(s) => s,
                             Err(error) => {
@@ -439,8 +442,15 @@ mod tests {
         )
     }
 
-    #[test]
-    fn deny_capability_fires_on_match() {
+    /// Fixed wall-clock base for deterministic sliding-window tests. The
+    /// evaluator clock is now `DateTime<Utc>` (serializable) rather than
+    /// `Instant`.
+    fn base() -> DateTime<Utc> {
+        DateTime::from_timestamp(1_700_000_000, 0).expect("valid fixed timestamp")
+    }
+
+    #[tokio::test]
+    async fn deny_capability_fires_on_match() {
         let evaluator = PredicateEvaluator::new();
         let spec = HookPredicateSpec::DenyCapability {
             when: CapabilityPredicate::NameEquals {
@@ -448,7 +458,9 @@ mod tests {
             },
             reason: "shell disabled".to_string(),
         };
-        let denied = evaluator.evaluate(hook_id(), &spec, &ctx("shell.exec"));
+        let denied = evaluator
+            .evaluate(hook_id(), &spec, &ctx("shell.exec"))
+            .await;
         assert_eq!(
             denied,
             EvaluatorDecision::Deny {
@@ -457,12 +469,14 @@ mod tests {
             }
         );
 
-        let allowed = evaluator.evaluate(hook_id(), &spec, &ctx("memory.read"));
+        let allowed = evaluator
+            .evaluate(hook_id(), &spec, &ctx("memory.read"))
+            .await;
         assert_eq!(allowed, EvaluatorDecision::Allow);
     }
 
-    #[test]
-    fn nested_predicate_matches_correctly() {
+    #[tokio::test]
+    async fn nested_predicate_matches_correctly() {
         let evaluator = PredicateEvaluator::new();
         let spec = HookPredicateSpec::DenyCapability {
             when: CapabilityPredicate::All {
@@ -485,15 +499,21 @@ mod tests {
             reason: "wallet locked".to_string(),
         };
         assert!(matches!(
-            evaluator.evaluate(hook_id(), &spec, &ctx("wallet.sign")),
+            evaluator
+                .evaluate(hook_id(), &spec, &ctx("wallet.sign"))
+                .await,
             EvaluatorDecision::Deny { .. }
         ));
         assert_eq!(
-            evaluator.evaluate(hook_id(), &spec, &ctx("wallet.balance")),
+            evaluator
+                .evaluate(hook_id(), &spec, &ctx("wallet.balance"))
+                .await,
             EvaluatorDecision::Allow
         );
         assert_eq!(
-            evaluator.evaluate(hook_id(), &spec, &ctx("memory.read")),
+            evaluator
+                .evaluate(hook_id(), &spec, &ctx("memory.read"))
+                .await,
             EvaluatorDecision::Allow
         );
     }
@@ -504,8 +524,8 @@ mod tests {
     /// invocation, even if all other context (capability, args, hook,
     /// timestamp) is bit-identical — because that's the very case durable
     /// backends face on retry/replay.
-    #[test]
-    fn duplicate_caller_event_id_is_deduped_in_invocation_count() {
+    #[tokio::test]
+    async fn duplicate_caller_event_id_is_deduped_in_invocation_count() {
         let evaluator = PredicateEvaluator::new();
         let spec = HookPredicateSpec::RateOrValueCap {
             when: CapabilityPredicate::NameEquals {
@@ -524,17 +544,21 @@ mod tests {
         )
         .expect("fixture id passes format validation");
         let ctx_with_id = ctx("cap.x").with_caller_event_id(stable_id);
-        let now = Instant::now();
+        let now = base();
 
         // First evaluation with the stable id — counted.
         assert_eq!(
-            evaluator.evaluate_at(hook_id(), &spec, &ctx_with_id, now),
+            evaluator
+                .evaluate_at(hook_id(), &spec, &ctx_with_id, now)
+                .await,
             EvaluatorDecision::Allow
         );
         // Replay with the same caller_event_id — backend dedupes, count
         // remains 1, still under the cap of 2.
         assert_eq!(
-            evaluator.evaluate_at(hook_id(), &spec, &ctx_with_id, now),
+            evaluator
+                .evaluate_at(hook_id(), &spec, &ctx_with_id, now)
+                .await,
             EvaluatorDecision::Allow
         );
         // A second logical invocation gets a different stable id and counts
@@ -545,7 +569,9 @@ mod tests {
         .expect("fixture id passes format validation");
         let ctx_second = ctx("cap.x").with_caller_event_id(second_id);
         assert_eq!(
-            evaluator.evaluate_at(hook_id(), &spec, &ctx_second, now),
+            evaluator
+                .evaluate_at(hook_id(), &spec, &ctx_second, now)
+                .await,
             EvaluatorDecision::Allow
         );
         // A third logical invocation crosses the cap.
@@ -556,7 +582,9 @@ mod tests {
         .expect("fixture id passes format validation");
         let ctx_third = ctx("cap.x").with_caller_event_id(third_id);
         assert!(matches!(
-            evaluator.evaluate_at(hook_id(), &spec, &ctx_third, now),
+            evaluator
+                .evaluate_at(hook_id(), &spec, &ctx_third, now)
+                .await,
             EvaluatorDecision::Deny { .. }
         ));
 
@@ -565,18 +593,22 @@ mod tests {
         let plain = PredicateEvaluator::new();
         for _ in 0..2 {
             assert_eq!(
-                plain.evaluate_at(hook_id(), &spec, &ctx("cap.x"), now),
+                plain
+                    .evaluate_at(hook_id(), &spec, &ctx("cap.x"), now)
+                    .await,
                 EvaluatorDecision::Allow
             );
         }
         assert!(matches!(
-            plain.evaluate_at(hook_id(), &spec, &ctx("cap.x"), now),
+            plain
+                .evaluate_at(hook_id(), &spec, &ctx("cap.x"), now)
+                .await,
             EvaluatorDecision::Deny { .. }
         ));
     }
 
-    #[test]
-    fn invocation_count_cap_denies_after_limit() {
+    #[tokio::test]
+    async fn invocation_count_cap_denies_after_limit() {
         let evaluator = PredicateEvaluator::new();
         let spec = HookPredicateSpec::RateOrValueCap {
             when: CapabilityPredicate::NameEquals {
@@ -590,12 +622,16 @@ mod tests {
                 reason: "rate cap".to_string(),
             },
         };
-        let now = Instant::now();
+        let now = base();
         for _ in 0..3 {
-            let outcome = evaluator.evaluate_at(hook_id(), &spec, &ctx("cap.x"), now);
+            let outcome = evaluator
+                .evaluate_at(hook_id(), &spec, &ctx("cap.x"), now)
+                .await;
             assert_eq!(outcome, EvaluatorDecision::Allow);
         }
-        let blocked = evaluator.evaluate_at(hook_id(), &spec, &ctx("cap.x"), now);
+        let blocked = evaluator
+            .evaluate_at(hook_id(), &spec, &ctx("cap.x"), now)
+            .await;
         assert_eq!(
             blocked,
             EvaluatorDecision::Deny {
@@ -605,8 +641,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn invocation_count_resets_after_window_expires() {
+    #[tokio::test]
+    async fn invocation_count_resets_after_window_expires() {
         let evaluator = PredicateEvaluator::new();
         let spec = HookPredicateSpec::RateOrValueCap {
             when: CapabilityPredicate::Always,
@@ -618,34 +654,40 @@ mod tests {
                 reason: "exceeded".to_string(),
             },
         };
-        let start = Instant::now();
+        let start = base();
         assert_eq!(
-            evaluator.evaluate_at(hook_id(), &spec, &ctx("cap.x"), start),
+            evaluator
+                .evaluate_at(hook_id(), &spec, &ctx("cap.x"), start)
+                .await,
             EvaluatorDecision::Allow
         );
         assert!(matches!(
-            evaluator.evaluate_at(
-                hook_id(),
-                &spec,
-                &ctx("cap.x"),
-                start + Duration::from_secs(1)
-            ),
+            evaluator
+                .evaluate_at(
+                    hook_id(),
+                    &spec,
+                    &ctx("cap.x"),
+                    start + chrono::Duration::seconds(1)
+                )
+                .await,
             EvaluatorDecision::Deny { .. }
         ));
         // After the window expires, both prior entries are trimmed.
         assert_eq!(
-            evaluator.evaluate_at(
-                hook_id(),
-                &spec,
-                &ctx("cap.x"),
-                start + Duration::from_secs(20)
-            ),
+            evaluator
+                .evaluate_at(
+                    hook_id(),
+                    &spec,
+                    &ctx("cap.x"),
+                    start + chrono::Duration::seconds(20)
+                )
+                .await,
             EvaluatorDecision::Allow
         );
     }
 
-    #[test]
-    fn invocation_count_partitions_by_capability_name() {
+    #[tokio::test]
+    async fn invocation_count_partitions_by_capability_name() {
         let evaluator = PredicateEvaluator::new();
         let spec = HookPredicateSpec::RateOrValueCap {
             when: CapabilityPredicate::NameStartsWith {
@@ -659,19 +701,25 @@ mod tests {
                 reason: "exceeded".to_string(),
             },
         };
-        let now = Instant::now();
+        let now = base();
         // shell.run hits its cap.
         assert_eq!(
-            evaluator.evaluate_at(hook_id(), &spec, &ctx("shell.run"), now),
+            evaluator
+                .evaluate_at(hook_id(), &spec, &ctx("shell.run"), now)
+                .await,
             EvaluatorDecision::Allow
         );
         assert!(matches!(
-            evaluator.evaluate_at(hook_id(), &spec, &ctx("shell.run"), now),
+            evaluator
+                .evaluate_at(hook_id(), &spec, &ctx("shell.run"), now)
+                .await,
             EvaluatorDecision::Deny { .. }
         ));
         // shell.exec has its own counter.
         assert_eq!(
-            evaluator.evaluate_at(hook_id(), &spec, &ctx("shell.exec"), now),
+            evaluator
+                .evaluate_at(hook_id(), &spec, &ctx("shell.exec"), now)
+                .await,
             EvaluatorDecision::Allow
         );
     }
@@ -703,160 +751,188 @@ mod tests {
         }
     }
 
-    #[test]
-    fn numeric_sum_denies_after_total_exceeds_max() {
+    #[tokio::test]
+    async fn numeric_sum_denies_after_total_exceeds_max() {
         let evaluator = PredicateEvaluator::new();
         let spec = numeric_sum_spec("100", "amount", "1h");
-        let now = Instant::now();
+        let now = base();
         // 40 + 40 = 80, under cap
         assert_eq!(
-            evaluator.evaluate_at(
-                hook_id(),
-                &spec,
-                &ctx_with_args("wallet.spend", serde_json::json!({"amount": "40"})),
-                now,
-            ),
+            evaluator
+                .evaluate_at(
+                    hook_id(),
+                    &spec,
+                    &ctx_with_args("wallet.spend", serde_json::json!({"amount": "40"})),
+                    now,
+                )
+                .await,
             EvaluatorDecision::Allow,
         );
         assert_eq!(
-            evaluator.evaluate_at(
-                hook_id(),
-                &spec,
-                &ctx_with_args("wallet.spend", serde_json::json!({"amount": "40"})),
-                now,
-            ),
+            evaluator
+                .evaluate_at(
+                    hook_id(),
+                    &spec,
+                    &ctx_with_args("wallet.spend", serde_json::json!({"amount": "40"})),
+                    now,
+                )
+                .await,
             EvaluatorDecision::Allow,
         );
         // Third spend pushes 120 > 100.
         assert!(matches!(
-            evaluator.evaluate_at(
-                hook_id(),
-                &spec,
-                &ctx_with_args("wallet.spend", serde_json::json!({"amount": "40"})),
-                now,
-            ),
+            evaluator
+                .evaluate_at(
+                    hook_id(),
+                    &spec,
+                    &ctx_with_args("wallet.spend", serde_json::json!({"amount": "40"})),
+                    now,
+                )
+                .await,
             EvaluatorDecision::Deny { .. }
         ));
     }
 
-    #[test]
-    fn numeric_sum_fails_closed_with_unresolved_args() {
+    #[tokio::test]
+    async fn numeric_sum_fails_closed_with_unresolved_args() {
         let evaluator = PredicateEvaluator::new();
         let spec = numeric_sum_spec("100", "amount", "1h");
         // Unresolved args -> Deny, even though the cap is enormous relative to nothing.
         assert!(matches!(
-            evaluator.evaluate(hook_id(), &spec, &ctx("wallet.spend")),
+            evaluator
+                .evaluate(hook_id(), &spec, &ctx("wallet.spend"))
+                .await,
             EvaluatorDecision::Deny { .. }
         ));
     }
 
-    #[test]
-    fn numeric_sum_fails_closed_with_missing_field() {
+    #[tokio::test]
+    async fn numeric_sum_fails_closed_with_missing_field() {
         let evaluator = PredicateEvaluator::new();
         let spec = numeric_sum_spec("100", "amount", "1h");
         assert!(matches!(
-            evaluator.evaluate(
-                hook_id(),
-                &spec,
-                &ctx_with_args("wallet.spend", serde_json::json!({"other": "5"})),
-            ),
+            evaluator
+                .evaluate(
+                    hook_id(),
+                    &spec,
+                    &ctx_with_args("wallet.spend", serde_json::json!({"other": "5"})),
+                )
+                .await,
             EvaluatorDecision::Deny { .. }
         ));
     }
 
-    #[test]
-    fn numeric_sum_resets_after_window() {
+    #[tokio::test]
+    async fn numeric_sum_resets_after_window() {
         let evaluator = PredicateEvaluator::new();
         let spec = numeric_sum_spec("50", "amount", "10s");
-        let start = Instant::now();
+        let start = base();
         // First call: 40 <= 50, allow.
         assert_eq!(
-            evaluator.evaluate_at(
-                hook_id(),
-                &spec,
-                &ctx_with_args("wallet.spend", serde_json::json!({"amount": 40})),
-                start,
-            ),
+            evaluator
+                .evaluate_at(
+                    hook_id(),
+                    &spec,
+                    &ctx_with_args("wallet.spend", serde_json::json!({"amount": 40})),
+                    start,
+                )
+                .await,
             EvaluatorDecision::Allow,
         );
         // Second call within window: 40 + 40 = 80 > 50, deny.
         assert!(matches!(
-            evaluator.evaluate_at(
-                hook_id(),
-                &spec,
-                &ctx_with_args("wallet.spend", serde_json::json!({"amount": 40})),
-                start + Duration::from_secs(1),
-            ),
+            evaluator
+                .evaluate_at(
+                    hook_id(),
+                    &spec,
+                    &ctx_with_args("wallet.spend", serde_json::json!({"amount": 40})),
+                    start + chrono::Duration::seconds(1),
+                )
+                .await,
             EvaluatorDecision::Deny { .. }
         ));
         // After window: prior entries trimmed; only the new 40 counts.
         assert_eq!(
-            evaluator.evaluate_at(
-                hook_id(),
-                &spec,
-                &ctx_with_args("wallet.spend", serde_json::json!({"amount": 40})),
-                start + Duration::from_secs(20),
-            ),
+            evaluator
+                .evaluate_at(
+                    hook_id(),
+                    &spec,
+                    &ctx_with_args("wallet.spend", serde_json::json!({"amount": 40})),
+                    start + chrono::Duration::seconds(20),
+                )
+                .await,
             EvaluatorDecision::Allow,
         );
     }
 
-    #[test]
-    fn numeric_sum_partitions_by_tenant() {
+    #[tokio::test]
+    async fn numeric_sum_partitions_by_tenant() {
         let evaluator = PredicateEvaluator::new();
         let spec = numeric_sum_spec("50", "amount", "1h");
-        let now = Instant::now();
+        let now = base();
         let alpha = TenantId::new("alpha").expect("ok");
         let beta = TenantId::new("beta").expect("ok");
         // alpha: 30 + 30 = 60 > 50 -> second spend denied.
         assert_eq!(
-            evaluator.evaluate_at(
-                hook_id(),
-                &spec,
-                &ctx_with_args_for_tenant(
-                    alpha.clone(),
-                    "wallet.spend",
-                    serde_json::json!({"amount": 30}),
-                ),
-                now,
-            ),
+            evaluator
+                .evaluate_at(
+                    hook_id(),
+                    &spec,
+                    &ctx_with_args_for_tenant(
+                        alpha.clone(),
+                        "wallet.spend",
+                        serde_json::json!({"amount": 30}),
+                    ),
+                    now,
+                )
+                .await,
             EvaluatorDecision::Allow,
         );
         assert!(matches!(
-            evaluator.evaluate_at(
-                hook_id(),
-                &spec,
-                &ctx_with_args_for_tenant(
-                    alpha,
-                    "wallet.spend",
-                    serde_json::json!({"amount": 30}),
-                ),
-                now,
-            ),
+            evaluator
+                .evaluate_at(
+                    hook_id(),
+                    &spec,
+                    &ctx_with_args_for_tenant(
+                        alpha,
+                        "wallet.spend",
+                        serde_json::json!({"amount": 30}),
+                    ),
+                    now,
+                )
+                .await,
             EvaluatorDecision::Deny { .. }
         ));
         // beta has its own bucket and is unaffected by alpha's spend.
         assert_eq!(
-            evaluator.evaluate_at(
-                hook_id(),
-                &spec,
-                &ctx_with_args_for_tenant(beta, "wallet.spend", serde_json::json!({"amount": 30}),),
-                now,
-            ),
+            evaluator
+                .evaluate_at(
+                    hook_id(),
+                    &spec,
+                    &ctx_with_args_for_tenant(
+                        beta,
+                        "wallet.spend",
+                        serde_json::json!({"amount": 30}),
+                    ),
+                    now,
+                )
+                .await,
             EvaluatorDecision::Allow,
         );
     }
 
-    #[test]
-    fn numeric_sum_fails_closed_with_unparseable_max() {
+    #[tokio::test]
+    async fn numeric_sum_fails_closed_with_unparseable_max() {
         let evaluator = PredicateEvaluator::new();
         let spec = numeric_sum_spec("not-a-number", "amount", "1h");
         assert!(matches!(
-            evaluator.evaluate(
-                hook_id(),
-                &spec,
-                &ctx_with_args("wallet.spend", serde_json::json!({"amount": 1})),
-            ),
+            evaluator
+                .evaluate(
+                    hook_id(),
+                    &spec,
+                    &ctx_with_args("wallet.spend", serde_json::json!({"amount": 1})),
+                )
+                .await,
             EvaluatorDecision::Deny { .. }
         ));
     }
@@ -883,8 +959,8 @@ mod tests {
         assert_eq!(parse_window("™"), None);
     }
 
-    #[test]
-    fn invocation_counter_partitions_by_tenant() {
+    #[tokio::test]
+    async fn invocation_counter_partitions_by_tenant() {
         let evaluator = PredicateEvaluator::new();
         let spec = HookPredicateSpec::RateOrValueCap {
             when: CapabilityPredicate::Always,
@@ -897,7 +973,7 @@ mod tests {
             },
         };
 
-        let now = Instant::now();
+        let now = base();
         let alpha = ironclaw_host_api::TenantId::new("alpha").expect("ok");
         let beta = ironclaw_host_api::TenantId::new("beta").expect("ok");
 
@@ -908,16 +984,22 @@ mod tests {
 
         // Alpha hits the cap with one allowed call and a second deny.
         assert_eq!(
-            evaluator.evaluate_at(hook_id(), &spec, &ctx_alpha, now),
+            evaluator
+                .evaluate_at(hook_id(), &spec, &ctx_alpha, now)
+                .await,
             EvaluatorDecision::Allow
         );
         assert!(matches!(
-            evaluator.evaluate_at(hook_id(), &spec, &ctx_alpha, now),
+            evaluator
+                .evaluate_at(hook_id(), &spec, &ctx_alpha, now)
+                .await,
             EvaluatorDecision::Deny { .. }
         ));
         // Beta is a separate tenant and must NOT inherit alpha's counter.
         assert_eq!(
-            evaluator.evaluate_at(hook_id(), &spec, &ctx_beta, now),
+            evaluator
+                .evaluate_at(hook_id(), &spec, &ctx_beta, now)
+                .await,
             EvaluatorDecision::Allow,
             "tenants must not share rate-cap counters"
         );
@@ -942,8 +1024,8 @@ mod tests {
         assert_eq!(evaluator.evictions_observed(), 0);
     }
 
-    #[test]
-    fn unparseable_window_fails_closed() {
+    #[tokio::test]
+    async fn unparseable_window_fails_closed() {
         let evaluator = PredicateEvaluator::new();
         let spec = HookPredicateSpec::RateOrValueCap {
             when: CapabilityPredicate::Always,
@@ -956,7 +1038,7 @@ mod tests {
             },
         };
         assert!(matches!(
-            evaluator.evaluate(hook_id(), &spec, &ctx("cap.x")),
+            evaluator.evaluate(hook_id(), &spec, &ctx("cap.x")).await,
             EvaluatorDecision::Deny { .. }
         ));
     }
@@ -967,17 +1049,17 @@ mod tests {
     /// more invocation through `evaluate_at`. The backend returns
     /// `WindowOverflow`, which the evaluator must translate into the
     /// restrictive `on_exceeded` action (DENY), never `Allow`.
-    #[test]
-    fn numeric_sum_backend_overflow_surfaces_as_deny_through_evaluator() {
+    #[tokio::test]
+    async fn numeric_sum_backend_overflow_surfaces_as_deny_through_evaluator() {
         use crate::predicate_state::{
             InMemoryPredicateStateBackend, MAX_SAMPLES_PER_KEY, PredicateEventId, ValueKey,
         };
         use rust_decimal::Decimal;
-        use std::time::{Duration, Instant};
+        use std::time::Duration;
 
         let backend = Arc::new(InMemoryPredicateStateBackend::new());
         let hid = hook_id();
-        let t0 = Instant::now();
+        let t0 = base();
         let window = Duration::from_secs(3600);
         let field = "amount";
         let capability = "cap.spend";
@@ -993,10 +1075,11 @@ mod tests {
                 .record_value(
                     &key,
                     &PredicateEventId::new_unchecked(format!("seed-{i}")),
-                    t0 + Duration::from_millis(i as u64),
+                    t0 + chrono::Duration::milliseconds(i as i64),
                     Decimal::from(1),
                     window,
                 )
+                .await
                 .expect("seed insert ok");
         }
 
@@ -1017,7 +1100,9 @@ mod tests {
             },
         };
         let ctx = ctx_with_args(capability, serde_json::json!({ "amount": 1 }));
-        let decision = evaluator.evaluate_at(hook_id(), &spec, &ctx, t0 + Duration::from_secs(1));
+        let decision = evaluator
+            .evaluate_at(hook_id(), &spec, &ctx, t0 + chrono::Duration::seconds(1))
+            .await;
         assert!(
             matches!(decision, EvaluatorDecision::Deny { .. }),
             "backend WindowOverflow must fail closed as DENY, got {decision:?}"
