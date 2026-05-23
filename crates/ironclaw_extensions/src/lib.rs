@@ -269,6 +269,7 @@ impl ExtensionPackage {
                     parameters_schema: descriptor_schema_ref(capability),
                     effects: capability.effects.clone(),
                     default_permission: capability.default_permission,
+                    runtime_credentials: capability.runtime_credentials.clone(),
                     resource_profile: capability.resource_profile.clone(),
                 })
             })

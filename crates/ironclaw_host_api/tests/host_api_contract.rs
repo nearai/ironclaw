@@ -5,6 +5,91 @@ use rust_decimal_macros::dec;
 use serde_json::json;
 
 #[test]
+fn runtime_credential_targets_validate_declaration_shape() {
+    assert!(
+        RuntimeCredentialTarget::Header {
+            name: "authorization".to_string(),
+            prefix: Some("Bearer ".to_string()),
+        }
+        .validate_declaration()
+        .is_ok()
+    );
+    assert!(
+        RuntimeCredentialTarget::Header {
+            name: "bad header".to_string(),
+            prefix: None,
+        }
+        .validate_declaration()
+        .is_err()
+    );
+    assert!(
+        RuntimeCredentialTarget::Header {
+            name: "authorization".to_string(),
+            prefix: Some("Bearer\r\nx-evil: ".to_string()),
+        }
+        .validate_declaration()
+        .is_err()
+    );
+    assert!(
+        RuntimeCredentialTarget::QueryParam {
+            name: "access_token".to_string(),
+        }
+        .validate_declaration()
+        .is_ok()
+    );
+    assert!(
+        RuntimeCredentialTarget::QueryParam {
+            name: " ".to_string(),
+        }
+        .validate_declaration()
+        .is_err()
+    );
+}
+
+#[test]
+fn network_target_patterns_validate_declaration_shape() {
+    let pattern = NetworkTargetPattern {
+        scheme: Some(NetworkScheme::Https),
+        host_pattern: "*.example.test".to_string(),
+        port: Some(443),
+    };
+    assert!(pattern.validate_declaration().is_ok());
+    assert!(
+        NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: "".to_string(),
+            port: None,
+        }
+        .validate_declaration()
+        .is_err()
+    );
+}
+
+#[test]
+fn network_target_patterns_reject_control_and_invalid_label_characters() {
+    for invalid in [
+        "api.example.test\0",
+        "api.example.test\n",
+        ".example.test",
+        "example.test.",
+        "api..example.test",
+        "api example.test",
+        "api/example.test",
+    ] {
+        assert!(
+            NetworkTargetPattern {
+                scheme: Some(NetworkScheme::Https),
+                host_pattern: invalid.to_string(),
+                port: None,
+            }
+            .validate_declaration()
+            .is_err(),
+            "{invalid:?} should be rejected"
+        );
+    }
+}
+
+#[test]
 fn extension_id_rejects_path_like_or_uppercase_values() {
     assert!(ExtensionId::new("github").is_ok());
     assert!(ExtensionId::new("github-mcp.v1").is_ok());
@@ -812,6 +897,39 @@ fn obligations_are_unique_and_canonicalized() {
     );
 
     assert!(Obligations::new(vec![Obligation::AuditBefore, Obligation::AuditBefore]).is_err());
+    let first_secret = SecretHandle::new("first_token").unwrap();
+    let second_secret = SecretHandle::new("second_token").unwrap();
+    let multi_secret = Obligations::new(vec![
+        Obligation::InjectSecretOnce {
+            handle: second_secret.clone(),
+        },
+        Obligation::InjectSecretOnce {
+            handle: first_secret.clone(),
+        },
+    ])
+    .unwrap();
+    assert_eq!(
+        multi_secret.as_slice(),
+        &[
+            Obligation::InjectSecretOnce {
+                handle: second_secret.clone(),
+            },
+            Obligation::InjectSecretOnce {
+                handle: first_secret.clone(),
+            }
+        ]
+    );
+    assert!(
+        Obligations::new(vec![
+            Obligation::InjectSecretOnce {
+                handle: first_secret.clone()
+            },
+            Obligation::InjectSecretOnce {
+                handle: first_secret
+            },
+        ])
+        .is_err()
+    );
 
     let duplicate_json = json!([
         {"type":"audit_before"},

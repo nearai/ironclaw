@@ -5621,6 +5621,7 @@ fn capability_descriptor(id: &str) -> CapabilityDescriptor {
         parameters_schema: json!({"type": "object"}),
         effects: vec![EffectKind::DispatchCapability],
         default_permission: PermissionMode::Allow,
+        runtime_credentials: Vec::new(),
         resource_profile: None,
     }
 }

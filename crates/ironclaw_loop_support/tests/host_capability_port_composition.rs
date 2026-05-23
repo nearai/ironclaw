@@ -309,6 +309,7 @@ impl HostRuntime for SingleToolHostRuntime {
                     }),
                     effects: Vec::new(),
                     default_permission: PermissionMode::Allow,
+                    runtime_credentials: Vec::new(),
                     resource_profile: None,
                 },
                 access: VisibleCapabilityAccess::Available,

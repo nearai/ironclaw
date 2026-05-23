@@ -137,6 +137,7 @@ fn first_party_capability_manifest(
             "prompts/builtin/{schema_name}.md"
         ))?),
         required_host_ports: Vec::new(),
+        runtime_credentials: Vec::new(),
         resource_profile,
     })
 }

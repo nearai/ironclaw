@@ -157,9 +157,15 @@ impl WasmRuntimeCredentialProvider for EmptyWasmRuntimeCredentials {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WasmStagedRuntimeCredential {
     pub handle: SecretHandle,
+    pub scope: WasmStagedRuntimeCredentialScope,
     pub target: RuntimeCredentialTarget,
     pub required: bool,
-    exact_url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WasmStagedRuntimeCredentialScope {
+    AnyRequest,
+    ExactUrl(String),
 }
 
 impl WasmStagedRuntimeCredential {
@@ -170,9 +176,9 @@ impl WasmStagedRuntimeCredential {
     ) -> Self {
         Self {
             handle,
+            scope: WasmStagedRuntimeCredentialScope::AnyRequest,
             target,
             required,
-            exact_url: None,
         }
     }
 
@@ -184,16 +190,16 @@ impl WasmStagedRuntimeCredential {
     ) -> Self {
         Self {
             handle,
+            scope: WasmStagedRuntimeCredentialScope::ExactUrl(exact_url),
             target,
             required,
-            exact_url: Some(exact_url),
         }
     }
 
     fn matches_request(&self, request: &WasmRuntimeCredentialRequest) -> bool {
-        match &self.exact_url {
-            Some(exact_url) => exact_url == &request.url,
-            None => true,
+        match &self.scope {
+            WasmStagedRuntimeCredentialScope::AnyRequest => true,
+            WasmStagedRuntimeCredentialScope::ExactUrl(exact_url) => exact_url == &request.url,
         }
     }
 }
@@ -222,17 +228,10 @@ impl WasmRuntimeCredentialProvider for WasmStagedRuntimeCredentials {
         &self,
         request: &WasmRuntimeCredentialRequest,
     ) -> Result<Vec<RuntimeCredentialInjection>, WasmHostError> {
-        let matched = self
+        Ok(self
             .credentials
             .iter()
             .filter(|credential| credential.matches_request(request))
-            .collect::<Vec<_>>();
-        if matched.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        Ok(matched
-            .into_iter()
             .map(|credential| RuntimeCredentialInjection {
                 handle: credential.handle.clone(),
                 source: RuntimeCredentialSource::StagedObligation {

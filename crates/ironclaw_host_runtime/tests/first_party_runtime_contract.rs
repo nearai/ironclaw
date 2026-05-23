@@ -676,6 +676,7 @@ fn first_party_registry_with_effects(effects: Vec<EffectKind>) -> ExtensionRegis
                     CapabilityProfileSchemaRef::new("prompts/host/status.md").unwrap(),
                 ),
                 required_host_ports: Vec::new(),
+                runtime_credentials: Vec::new(),
                 resource_profile: None,
             }],
         },

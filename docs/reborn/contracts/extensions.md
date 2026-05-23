@@ -172,6 +172,24 @@ output_schema_ref = "schemas/github-mcp/search_issues.output.v1.json"
 prompt_doc_ref = "prompts/github-mcp/search_issues.md"
 ```
 
+Host-mediated runtime credential manifest excerpt:
+
+```toml
+[[capability_provider.tools.capabilities]]
+id = "github.search_issues"
+description = "Search GitHub issues and pull requests."
+effects = ["network", "use_secret"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/search_issues.input.v1.json"
+output_schema_ref = "schemas/github/search_issues.output.v1.json"
+prompt_doc_ref = "prompts/github/search_issues.md"
+required_host_ports = ["host.runtime.http_egress"]
+runtime_credentials = [
+  { handle = "github_token", audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+```
+
 ### Host API contracts
 
 V2 keeps one extension identity and lets that extension implement one or more host API contracts. `host_api.id` is the only top-level contract/type discriminator; there is no separate manifest `kind`.
@@ -274,6 +292,12 @@ Rules:
   `descriptor_trust_default`, not from effective runtime trust.
 - effects must parse as `EffectKind`.
 - default permission must parse as `PermissionMode`.
+- `runtime_credentials` declares host-owned credential injection metadata for
+  runtime HTTP egress. Each entry names a secret handle, HTTPS-only audience
+  `NetworkTargetPattern`, injection target (`header` or `query_param`), and
+  optional `required` flag. The field is only valid when the capability declares
+  `use_secret`; duplicate handles within one capability are invalid. The
+  manifest never contains raw secret material.
 - top-level legacy capabilities must provide `input_schema_ref` and
   `output_schema_ref`; model-visible capabilities must also provide
   `prompt_doc_ref`.
