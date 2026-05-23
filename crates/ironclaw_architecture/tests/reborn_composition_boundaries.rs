@@ -1,4 +1,8 @@
-use std::{collections::HashMap, path::PathBuf, process::Command};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use serde_json::Value;
 
@@ -106,32 +110,38 @@ fn composition_public_api_is_facade_shaped() {
     }
 }
 
-/// The third-party hook-projection path in `hooks.rs` MUST install exclusively
-/// through `HookRegistrar::install`, never the lower-level
-/// `HookDispatcherBuilder::install_installed_*` methods. The registrar is the
-/// single seam that (a) enforces the Installed-tier ceiling and the
-/// per-extension caps, and (b) derives `owning_extension` from the installer
-/// argument (spoof-blocked). The direct builder installers accept
-/// `owning_extension` as a free parameter and would bypass both. This source
-/// assertion pins the registrar-only invariant so a future refactor cannot
-/// silently introduce a bypass for untrusted extensions.
+/// The third-party hook-projection path MUST install installed-tier bindings
+/// EXCLUSIVELY through `HookRegistrar::install`, never any lower-level
+/// `HookDispatcherBuilder` primitive that could mint an `Installed`-tier binding
+/// with a caller-chosen `owning_extension`. The registrar is the single seam
+/// that (a) enforces the Installed-tier ceiling and the per-extension caps, and
+/// (b) derives `owning_extension` from the installer argument (spoof-blocked).
+///
+/// # Why scan the WHOLE composition crate, not just `hooks.rs`
+///
+/// A substring scan limited to `hooks.rs` is evadable by a future refactor that
+/// moves a bypass into a sibling helper module, or that hand-builds a
+/// `HookBinding { trust_class: Installed, .. }` and calls `insert_binding`, or
+/// that calls the generic `install_observer(.. HookTrustClass::Installed ..)`.
+/// This test therefore scans EVERY non-test source line of
+/// `ironclaw_reborn_composition` (the crate that owns the untrusted projection
+/// path) and forbids ALL of those Installed-tier-minting primitives crate-wide.
+/// The only sanctioned way for this crate to install an installed-tier binding
+/// is `HookRegistrar::install`.
 #[test]
-fn hook_projection_path_never_calls_direct_installed_builder_api() {
-    let hooks = std::fs::read_to_string(
-        workspace_root().join("crates/ironclaw_reborn_composition/src/hooks.rs"),
-    )
-    .expect("composition hooks.rs readable");
+fn composition_crate_installs_installed_tier_only_through_registrar() {
+    let crate_src = workspace_root().join("crates/ironclaw_reborn_composition/src");
+    let sources = rust_sources(&crate_src);
+    assert!(
+        !sources.is_empty(),
+        "expected to find composition crate source files under {crate_src:?}"
+    );
 
-    // Strip the unit-test module: tests legitimately exercise builder APIs
-    // directly, and the architecture invariant is about the production
-    // projection path only. Match the module attribute line specifically (a
-    // bare `#[cfg(test)]` substring also appears in a module doc comment).
-    let production = match hooks.find("#[cfg(test)]\nmod tests") {
-        Some(idx) => &hooks[..idx],
-        None => hooks.as_str(),
-    };
-
-    for forbidden in [
+    // Direct builder/dispatcher primitives that can mint an Installed-tier
+    // binding while accepting `owning_extension` (or a hand-built trust class)
+    // as a free parameter — every one of these bypasses the registrar's
+    // ceiling + spoof-blocked attribution.
+    const FORBIDDEN_INSTALLED_PRIMITIVES: &[&str] = &[
         "install_installed_before_capability",
         "install_installed_before_prompt",
         "install_installed_observer",
@@ -139,22 +149,72 @@ fn hook_projection_path_never_calls_direct_installed_builder_api() {
         "install_installed_wasm_before_capability",
         "install_installed_wasm_before_prompt",
         "install_installed_wasm_observer",
-    ] {
-        assert!(
-            !production.contains(forbidden),
-            "third-party hook projection in hooks.rs must go through \
-             HookRegistrar::install, never the direct builder installer \
-             `{forbidden}` (registrar-only invariant: ceiling + spoof-blocked \
-             owning_extension)"
-        );
+        // Generic, trust-class-parameterized installer + the raw binding
+        // insertion path: either could carry `HookTrustClass::Installed`.
+        "install_observer(",
+        "insert_binding(",
+        // A hand-constructed installed-tier binding is the lowest-level bypass.
+        "HookTrustClass::Installed",
+    ];
+
+    let mut saw_registrar_install = false;
+    for (path, contents) in &sources {
+        let production = strip_test_module(contents);
+        if production.contains("registrar.install(") {
+            saw_registrar_install = true;
+        }
+        for forbidden in FORBIDDEN_INSTALLED_PRIMITIVES {
+            assert!(
+                !production.contains(forbidden),
+                "{path:?}: third-party hook projection must install installed-tier \
+                 bindings ONLY through HookRegistrar::install, never the direct \
+                 primitive `{forbidden}` (registrar-only invariant: ceiling + \
+                 spoof-blocked owning_extension). Move this into the registrar or \
+                 use HookRegistrar::install."
+            );
+        }
     }
 
     // Positive anchor: the projection path DOES route through the registrar, so
     // the negative assertions above are not vacuously true.
     assert!(
-        production.contains("registrar.install("),
-        "the projection path must install through HookRegistrar::install"
+        saw_registrar_install,
+        "the projection path must install through HookRegistrar::install \
+         somewhere in the composition crate"
     );
+}
+
+/// Strip a trailing `#[cfg(test)] mod tests { .. }` unit-test module so the
+/// architecture invariant applies to production code only (tests legitimately
+/// exercise builder APIs directly). Matches the module attribute line
+/// specifically — a bare `#[cfg(test)]` substring also appears in doc comments.
+fn strip_test_module(contents: &str) -> &str {
+    match contents.find("#[cfg(test)]\nmod tests") {
+        Some(idx) => &contents[..idx],
+        None => contents,
+    }
+}
+
+/// Recursively collect `(path, contents)` for every `.rs` file under `dir`.
+fn rust_sources(dir: &Path) -> Vec<(PathBuf, String)> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let Ok(read) = std::fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in read.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+                let contents = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|error| panic!("readable rust source {path:?}: {error}"));
+                out.push((path, contents));
+            }
+        }
+    }
+    out
 }
 
 fn workspace_dependencies() -> HashMap<String, Vec<String>> {

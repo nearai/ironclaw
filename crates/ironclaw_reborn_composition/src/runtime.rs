@@ -824,12 +824,14 @@ pub async fn build_reborn_runtime(
     // composes no dispatcher — zero behavior change.
     //
     // Hook-only projection containment: third-party `[[hooks]]` are discovered
-    // and projected into a `HookProjectionRegistry` that reaches ONLY this hook
-    // factory — never `HostRuntimeServices::new` / the capability catalog /
-    // surface resolver. The newtype is the type-enforced boundary (no conversion
-    // back to `ExtensionRegistry`). Per-tenant scoping is by construction: this
-    // function runs once per authenticated identity, and the discovery root is
-    // DERIVED from `tenant_id`, never caller-supplied.
+    // and projected into a `HookProjectionRegistry` that carries ONLY hook
+    // metadata (no `ExtensionRegistry`, no `ExtensionPackage`) and reaches ONLY
+    // this hook factory — never `HostRuntimeServices::new` / the capability
+    // catalog / surface resolver. Containment is structural (by data shape):
+    // there is no capability surface inside the projection type to leak.
+    // Per-tenant scoping is by construction: this function runs once per
+    // authenticated identity, and the discovery root is DERIVED from
+    // `tenant_id`, never caller-supplied.
     //
     // FS-hardening gate: `HOOKS_THIRD_PARTY_ENABLED` MUST NOT be enabled in
     // multi-tenant production until `openat2(RESOLVE_BENEATH)` / `O_NOFOLLOW`

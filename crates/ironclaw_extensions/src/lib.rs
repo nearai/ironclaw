@@ -400,62 +400,220 @@ impl ExtensionDiscovery {
 
         let mut registry = ExtensionRegistry::new();
         for entry in entries {
-            if entry.file_type != FileType::Directory {
-                continue;
-            }
-            let Ok(expected) = ExtensionId::new(entry.name.clone()) else {
+            let Some(expected) = Self::extension_dir_id(&entry) else {
                 continue;
             };
-            let manifest_path = VirtualPath::new(format!(
-                "{}/{}/manifest.toml",
-                root.as_str().trim_end_matches('/'),
-                entry.name
-            ))?;
-            // DoS pre-read bound (threat-model: oversized manifest). Stat the
-            // file and refuse to read it at all if it exceeds the manifest size
-            // ceiling, rather than materializing the whole body first and only
-            // then rejecting in `parse` (`MAX_MANIFEST_BYTES` is also re-checked
-            // there as defense-in-depth). `read_file_bounded` stats before it
-            // materializes, so an attacker-controlled multi-gigabyte manifest is
-            // rejected without a full read.
-            let bytes = match fs
-                .read_file_bounded(&manifest_path, v2::MAX_MANIFEST_BYTES)
-                .await?
-            {
-                Some(bytes) => bytes,
-                None => {
-                    return Err(ExtensionError::InvalidManifest {
-                        reason: format!(
-                            "extension manifest at {} exceeds the {}-byte ceiling and was \
-                             rejected before reading",
-                            manifest_path.as_str(),
-                            v2::MAX_MANIFEST_BYTES
-                        ),
-                    });
-                }
-            };
-            let text = String::from_utf8(bytes).map_err(|error| ExtensionError::ManifestParse {
-                reason: error.to_string(),
-            })?;
-            let manifest = ExtensionManifest::parse_with_optional_host_api_contracts(
-                &text,
+            // All-or-nothing: any per-package failure fails the whole discovery.
+            let package = Self::load_package_entry(
+                fs,
+                root,
+                &entry,
+                expected,
                 source,
                 host_port_catalog,
                 host_api_contracts,
-            )?;
-            if manifest.id != expected {
-                return Err(ExtensionError::ManifestIdMismatch {
-                    root: entry.path,
-                    expected,
-                    actual: manifest.id,
-                });
-            }
-            let package = ExtensionPackage::from_manifest(manifest, entry.path)?;
+            )
+            .await?;
             registry.insert(package)?;
         }
 
         Ok(registry)
     }
+
+    /// Tolerant + **bounded** discovery (DoS-hardened entry point).
+    ///
+    /// Two security properties separate this from
+    /// [`Self::discover_with_manifest_contracts`]:
+    ///
+    /// 1. **Bounded** — caps the expensive per-manifest read/parse/validate work
+    ///    to at most `max_extensions` extension directories. The directory is
+    ///    listed and sorted once (cheap), then only the FIRST `max_extensions`
+    ///    valid extension directory entries are read; the remainder are recorded
+    ///    as [`DiscoveryQuarantine`]s WITHOUT ever being read or parsed. A tenant
+    ///    with thousands of extension directories therefore cannot force
+    ///    unbounded read/parse work — the count cap fires *before* the read
+    ///    storm, not after (the per-file `MAX_MANIFEST_BYTES` pre-read bound is
+    ///    orthogonal and still applies to every read we do perform).
+    /// 2. **Tolerant** — a single malformed / oversized / id-mismatched package
+    ///    quarantines ONLY that package (collected into
+    ///    [`TolerantBoundedDiscovery::quarantined`]) and discovery CONTINUES. The
+    ///    only error that aborts the whole call is failure to LIST THE ROOT
+    ///    itself (the directory is unreadable) — surfaced as the outer `Err`.
+    ///
+    /// `max_extensions` counts *valid extension directory entries considered*
+    /// (post sort, post name-validation), so the surplus tail is quarantined
+    /// deterministically by sorted name. A `max_extensions` of `0` reads nothing.
+    pub async fn discover_with_manifest_contracts_tolerant_bounded<F>(
+        fs: &F,
+        root: &VirtualPath,
+        source: ManifestSource,
+        host_port_catalog: &HostPortCatalog,
+        host_api_contracts: &HostApiContractRegistry,
+        max_extensions: usize,
+    ) -> Result<TolerantBoundedDiscovery, ExtensionError>
+    where
+        F: RootFilesystem,
+    {
+        // Listing the root is the ONLY fatal step: if the tenant's extension
+        // directory is unreadable we cannot make a per-package decision, so the
+        // caller falls back (e.g. to builtin-only). A FilesystemError here
+        // propagates as the outer Err.
+        let mut entries = fs.list_dir(root).await?;
+        entries.sort_by(|left, right| left.name.cmp(&right.name));
+
+        let mut registry = ExtensionRegistry::new();
+        let mut quarantined: Vec<DiscoveryQuarantine> = Vec::new();
+        let mut considered = 0usize;
+
+        for entry in entries {
+            let Some(expected) = Self::extension_dir_id(&entry) else {
+                // Not an extension directory (file, or non-id name): skip
+                // silently, do not count against the bound.
+                continue;
+            };
+
+            // ── Bound BEFORE the expensive read/parse. ──
+            // Once the count cap is hit, record the surplus as quarantined
+            // without reading its manifest at all. This is the DoS ceiling.
+            if considered >= max_extensions {
+                quarantined.push(DiscoveryQuarantine {
+                    extension_id: expected.as_str().to_string(),
+                    reason: format!(
+                        "exceeded discovery bound of {max_extensions} extension(s); \
+                         not read"
+                    ),
+                });
+                continue;
+            }
+            considered += 1;
+
+            match Self::load_package_entry(
+                fs,
+                root,
+                &entry,
+                expected.clone(),
+                source,
+                host_port_catalog,
+                host_api_contracts,
+            )
+            .await
+            {
+                Ok(package) => {
+                    if let Err(error) = registry.insert(package) {
+                        quarantined.push(DiscoveryQuarantine {
+                            extension_id: expected.as_str().to_string(),
+                            reason: error.to_string(),
+                        });
+                    }
+                }
+                Err(error) => {
+                    // Tolerant: one bad package drops only itself.
+                    quarantined.push(DiscoveryQuarantine {
+                        extension_id: expected.as_str().to_string(),
+                        reason: error.to_string(),
+                    });
+                }
+            }
+        }
+
+        Ok(TolerantBoundedDiscovery {
+            registry,
+            quarantined,
+        })
+    }
+
+    /// Map a directory entry to its expected [`ExtensionId`], or `None` if the
+    /// entry is not a usable extension directory (not a directory, or a name
+    /// that is not a valid extension id). Cheap: no filesystem read.
+    fn extension_dir_id(entry: &ironclaw_filesystem::DirEntry) -> Option<ExtensionId> {
+        if entry.file_type != FileType::Directory {
+            return None;
+        }
+        ExtensionId::new(entry.name.clone()).ok()
+    }
+
+    /// Read + parse + validate a single extension directory entry into an
+    /// [`ExtensionPackage`]. Shared by the all-or-nothing and tolerant+bounded
+    /// discovery paths so the per-package semantics are identical; only the
+    /// caller's handling of the `Err` differs (propagate vs quarantine).
+    async fn load_package_entry<F>(
+        fs: &F,
+        root: &VirtualPath,
+        entry: &ironclaw_filesystem::DirEntry,
+        expected: ExtensionId,
+        source: ManifestSource,
+        host_port_catalog: &HostPortCatalog,
+        host_api_contracts: &HostApiContractRegistry,
+    ) -> Result<ExtensionPackage, ExtensionError>
+    where
+        F: RootFilesystem,
+    {
+        let manifest_path = VirtualPath::new(format!(
+            "{}/{}/manifest.toml",
+            root.as_str().trim_end_matches('/'),
+            entry.name
+        ))?;
+        // DoS pre-read bound (threat-model: oversized manifest). Stat the
+        // file and refuse to read it at all if it exceeds the manifest size
+        // ceiling, rather than materializing the whole body first and only
+        // then rejecting in `parse` (`MAX_MANIFEST_BYTES` is also re-checked
+        // there as defense-in-depth). `read_file_bounded` stats before it
+        // materializes, so an attacker-controlled multi-gigabyte manifest is
+        // rejected without a full read.
+        let bytes = match fs
+            .read_file_bounded(&manifest_path, v2::MAX_MANIFEST_BYTES)
+            .await?
+        {
+            Some(bytes) => bytes,
+            None => {
+                return Err(ExtensionError::InvalidManifest {
+                    reason: format!(
+                        "extension manifest at {} exceeds the {}-byte ceiling and was \
+                         rejected before reading",
+                        manifest_path.as_str(),
+                        v2::MAX_MANIFEST_BYTES
+                    ),
+                });
+            }
+        };
+        let text = String::from_utf8(bytes).map_err(|error| ExtensionError::ManifestParse {
+            reason: error.to_string(),
+        })?;
+        let manifest = ExtensionManifest::parse_with_optional_host_api_contracts(
+            &text,
+            source,
+            host_port_catalog,
+            host_api_contracts,
+        )?;
+        if manifest.id != expected {
+            return Err(ExtensionError::ManifestIdMismatch {
+                root: entry.path.clone(),
+                expected,
+                actual: manifest.id,
+            });
+        }
+        ExtensionPackage::from_manifest(manifest, entry.path.clone())
+    }
+}
+
+/// A package dropped during tolerant discovery, with a human-readable reason.
+/// The caller (the hook projection) turns each into a `hook.quarantined` audit
+/// event. Carries the extension id (directory name) so the audit names the
+/// offending package even when the manifest failed to parse.
+#[derive(Debug, Clone)]
+pub struct DiscoveryQuarantine {
+    pub extension_id: String,
+    pub reason: String,
+}
+
+/// Result of [`ExtensionDiscovery::discover_with_manifest_contracts_tolerant_bounded`]:
+/// the registry of packages that loaded successfully within the bound, plus the
+/// per-package quarantine record for every package that was dropped (malformed,
+/// duplicate, or beyond the discovery bound).
+#[derive(Debug)]
+pub struct TolerantBoundedDiscovery {
+    pub registry: ExtensionRegistry,
+    pub quarantined: Vec<DiscoveryQuarantine>,
 }
 
 fn ensure_extension_root_matches(
