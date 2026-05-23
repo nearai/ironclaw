@@ -12,11 +12,19 @@ mod input;
 mod loop_exit;
 mod mapping;
 mod model;
+mod pipeline;
+mod prompt;
 
+use capabilities::*;
 use capability_helpers::*;
+use checkpoint::*;
 use exit_helpers::*;
+use gates::*;
+use loop_exit::*;
 use mapping::*;
-use model::ModelStep;
+use model::*;
+use pipeline::*;
+use prompt::*;
 
 use async_trait::async_trait;
 use ironclaw_turns::{
@@ -108,7 +116,9 @@ impl AgentLoopExecutor for CanonicalAgentLoopExecutor {
         host: &(dyn AgentLoopDriverHost + Send + Sync),
         initial_state: LoopExecutionState,
     ) -> Result<LoopExit, AgentLoopExecutorError> {
-        self.execute_canonical(family, host, initial_state).await
+        DefaultExecutorPipeline::default()
+            .execute(family, host, initial_state)
+            .await
     }
 }
 

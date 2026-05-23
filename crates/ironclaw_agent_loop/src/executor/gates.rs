@@ -1,56 +1,70 @@
 use super::*;
 
-impl CanonicalAgentLoopExecutor {
-    pub(super) async fn handle_gate(
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct GateStage;
+
+pub(super) struct GateInput {
+    pub(super) state: LoopExecutionState,
+    pub(super) call: CapabilityCallCandidate,
+    pub(super) kind: GateKind,
+    pub(super) gate_ref: ironclaw_turns::LoopGateRef,
+}
+
+#[async_trait]
+impl ExecutorStage<GateInput> for GateStage {
+    type Output = BatchStep;
+
+    async fn process(
         &self,
-        planner: &dyn AgentLoopPlannerInternal,
-        host: &(dyn AgentLoopDriverHost + Send + Sync),
-        mut state: LoopExecutionState,
-        call: CapabilityCallCandidate,
-        kind: GateKind,
-        gate_ref: ironclaw_turns::LoopGateRef,
+        ctx: StageContext<'_>,
+        input: GateInput,
     ) -> Result<BatchStep, AgentLoopExecutorError> {
+        let mut state = input.state;
+        let call = input.call;
+        let kind = input.kind;
+        let gate_ref = input.gate_ref;
         let summary = crate::strategies::GateSummary {
             kind,
             gate_ref: gate_ref.clone(),
         };
-        match planner.gate().handle(&state, &summary).await {
+        match ctx.planner.gate().handle(&state, &summary).await {
             GateOutcome::Block { gate } => {
                 state.gate_state = gate;
                 state.last_gate = Some(gate_ref.clone());
-                match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+                match CheckpointStage.cancel_if_requested(ctx, state).await? {
                     CancelCheck::Continue(next) => state = *next,
                     CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
                 }
-                self.emit_progress(
-                    host,
-                    LoopProgressEvent::GateBlocked {
-                        iteration: state.iteration,
-                        gate_kind: loop_gate_kind(kind),
-                    },
-                )
-                .await;
-                let checked = self
-                    .checkpoint(host, state, CheckpointKind::BeforeBlock)
+                CheckpointStage
+                    .emit_progress(
+                        ctx,
+                        LoopProgressEvent::GateBlocked {
+                            iteration: state.iteration,
+                            gate_kind: loop_gate_kind(kind),
+                        },
+                    )
+                    .await;
+                let checked = CheckpointStage
+                    .write(ctx, state, CheckpointKind::BeforeBlock)
                     .await?;
                 Ok(BatchStep::Exit(LoopExit::Blocked(LoopBlocked {
                     kind: blocked_kind(kind),
                     gate_ref,
                     checkpoint_id: checked.checkpoint_id,
                     state_ref: checked.state_ref,
-                    exit_id: exit_id(host, "blocked")?,
+                    exit_id: exit_id(ctx.host, "blocked")?,
                 })))
             }
             GateOutcome::SkipAndContinue { gate } => {
                 state.gate_state = gate;
                 append_capability_safe_summary_ref(
-                    host,
+                    ctx.host,
                     &mut state,
                     &call,
                     gate_tool_result_summary(kind, "skipped"),
                 )
                 .await?;
-                match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+                match CheckpointStage.cancel_if_requested(ctx, state).await? {
                     CancelCheck::Continue(next) => state = *next,
                     CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
                 }
@@ -59,19 +73,21 @@ impl CanonicalAgentLoopExecutor {
             GateOutcome::Abort { gate, failure_kind } => {
                 state.gate_state = gate;
                 append_capability_safe_summary_ref(
-                    host,
+                    ctx.host,
                     &mut state,
                     &call,
                     gate_tool_result_summary(kind, "aborted"),
                 )
                 .await?;
-                match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+                match CheckpointStage.cancel_if_requested(ctx, state).await? {
                     CancelCheck::Continue(next) => state = *next,
                     CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
                 }
-                let checked = self.checkpoint(host, state, CheckpointKind::Final).await?;
+                let checked = CheckpointStage
+                    .write(ctx, state, CheckpointKind::Final)
+                    .await?;
                 Ok(BatchStep::Exit(failed_exit(
-                    host,
+                    ctx.host,
                     checked.state,
                     failure_kind,
                     Some(checked.checkpoint_id),

@@ -1,10 +1,13 @@
 use super::input::{UserFacingInputDrainMode, consume_drainable_inputs};
 use super::*;
 
-impl CanonicalAgentLoopExecutor {
-    pub(super) async fn checkpoint(
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct CheckpointStage;
+
+impl CheckpointStage {
+    pub(super) async fn write(
         &self,
-        host: &(dyn AgentLoopDriverHost + Send + Sync),
+        ctx: StageContext<'_>,
         mut state: LoopExecutionState,
         kind: CheckpointKind,
     ) -> Result<CheckpointWrite, AgentLoopExecutorError> {
@@ -15,7 +18,8 @@ impl CanonicalAgentLoopExecutor {
         let payload = serde_json::to_vec(&state)
             .map_err(|_| AgentLoopExecutorError::CheckpointFailed { stage: kind })?;
         let host_kind = checkpoint_kind_to_host(kind);
-        let state_ref = host
+        let state_ref = ctx
+            .host
             .stage_checkpoint_payload(StageCheckpointPayloadRequest {
                 kind: host_kind,
                 schema_id: crate::state::CHECKPOINT_SCHEMA_ID.to_string(),
@@ -23,7 +27,8 @@ impl CanonicalAgentLoopExecutor {
             })
             .await
             .map_err(|_| AgentLoopExecutorError::CheckpointFailed { stage: kind })?;
-        let checkpoint_id = host
+        let checkpoint_id = ctx
+            .host
             .checkpoint(LoopCheckpointRequest {
                 kind: host_kind,
                 state_ref: state_ref.clone(),
@@ -31,7 +36,7 @@ impl CanonicalAgentLoopExecutor {
             .await
             .map_err(|_| AgentLoopExecutorError::CheckpointFailed { stage: kind })?;
         self.emit_progress(
-            host,
+            ctx,
             LoopProgressEvent::CheckpointWritten {
                 iteration: state.iteration,
                 kind: host_kind,
@@ -45,29 +50,25 @@ impl CanonicalAgentLoopExecutor {
         })
     }
 
-    pub(super) async fn emit_progress(
-        &self,
-        host: &(dyn AgentLoopDriverHost + Send + Sync),
-        event: LoopProgressEvent,
-    ) {
-        let _ = host.emit_loop_progress(event).await;
+    pub(super) async fn emit_progress(&self, ctx: StageContext<'_>, event: LoopProgressEvent) {
+        let _ = ctx.host.emit_loop_progress(event).await;
     }
 
     // Cancellation is checked cooperatively at N boundary points between external calls.
     // A macro refactor was considered but deferred; the explicit sites are self-documenting.
-    pub(super) async fn checkpoint_and_exit_if_cancelled(
+    pub(super) async fn cancel_if_requested(
         &self,
-        host: &(dyn AgentLoopDriverHost + Send + Sync),
+        ctx: StageContext<'_>,
         state: LoopExecutionState,
     ) -> Result<CancelCheck, AgentLoopExecutorError> {
-        let Some(signal) = host.observe_cancellation() else {
+        let Some(signal) = ctx.host.observe_cancellation() else {
             return Ok(CancelCheck::Continue(Box::new(state)));
         };
 
         let fallback_state = state.clone();
-        match self.checkpoint(host, state, CheckpointKind::Final).await {
+        match self.write(ctx, state, CheckpointKind::Final).await {
             Ok(checked) => Ok(CancelCheck::Exit(cancelled_exit_with_reason(
-                host,
+                ctx.host,
                 checked.state,
                 cancelled_reason_from_signal(&signal),
                 Some(checked.checkpoint_id),
@@ -77,14 +78,15 @@ impl CanonicalAgentLoopExecutor {
             // `HostUnavailable`) must propagate so the runner can apply its
             // recovery policy.
             Err(AgentLoopExecutorError::CheckpointFailed { .. })
-                if !host
+                if !ctx
+                    .host
                     .run_context()
                     .resolved_run_profile
                     .checkpoint_policy
                     .require_final_checkpoint =>
             {
                 Ok(CancelCheck::Exit(cancelled_exit_with_reason(
-                    host,
+                    ctx.host,
                     fallback_state,
                     cancelled_reason_from_signal(&signal),
                     None,
@@ -94,22 +96,22 @@ impl CanonicalAgentLoopExecutor {
         }
     }
 
-    pub(super) async fn checkpoint_and_exit_if_cancelled_after_pending_input_ack(
+    pub(super) async fn cancel_if_requested_after_pending_input_ack(
         &self,
-        host: &(dyn AgentLoopDriverHost + Send + Sync),
+        ctx: StageContext<'_>,
         state: LoopExecutionState,
         pending_input_ack: &mut PendingInputAck,
     ) -> Result<CancelCheck, AgentLoopExecutorError> {
-        let Some(signal) = host.observe_cancellation() else {
+        let Some(signal) = ctx.host.observe_cancellation() else {
             return Ok(CancelCheck::Continue(Box::new(state)));
         };
 
         let fallback_state = state.clone();
-        match self.checkpoint(host, state, CheckpointKind::Final).await {
+        match self.write(ctx, state, CheckpointKind::Final).await {
             Ok(checked) => {
-                pending_input_ack.ack(host).await?;
+                pending_input_ack.ack(ctx.host).await?;
                 Ok(CancelCheck::Exit(cancelled_exit_with_reason(
-                    host,
+                    ctx.host,
                     checked.state,
                     cancelled_reason_from_signal(&signal),
                     Some(checked.checkpoint_id),
@@ -120,14 +122,15 @@ impl CanonicalAgentLoopExecutor {
             // checkpoint was written, so advancing the input cursor would
             // commit progress that the runner has no record of.
             Err(AgentLoopExecutorError::CheckpointFailed { .. })
-                if !host
+                if !ctx
+                    .host
                     .run_context()
                     .resolved_run_profile
                     .checkpoint_policy
                     .require_final_checkpoint =>
             {
                 Ok(CancelCheck::Exit(cancelled_exit_with_reason(
-                    host,
+                    ctx.host,
                     fallback_state,
                     cancelled_reason_from_signal(&signal),
                     None,
@@ -144,10 +147,11 @@ impl CanonicalAgentLoopExecutor {
 
     pub(super) async fn drain_user_inputs(
         &self,
-        host: &(dyn AgentLoopDriverHost + Send + Sync),
+        ctx: StageContext<'_>,
         mut state: LoopExecutionState,
     ) -> Result<DrainedInputs, AgentLoopExecutorError> {
-        let batch = host
+        let batch = ctx
+            .host
             .poll_inputs(state.input_cursor.clone(), MAX_INPUT_DRAIN)
             .await
             .map_err(|_| AgentLoopExecutorError::HostUnavailable {
@@ -165,10 +169,11 @@ impl CanonicalAgentLoopExecutor {
 
     pub(super) async fn drain_followup(
         &self,
-        host: &(dyn AgentLoopDriverHost + Send + Sync),
+        ctx: StageContext<'_>,
         mut state: LoopExecutionState,
     ) -> Result<DrainedInputs, AgentLoopExecutorError> {
-        let batch = host
+        let batch = ctx
+            .host
             .poll_inputs(state.input_cursor.clone(), MAX_INPUT_DRAIN)
             .await
             .map_err(|_| AgentLoopExecutorError::HostUnavailable {
@@ -182,5 +187,34 @@ impl CanonicalAgentLoopExecutor {
             ack_tokens,
             cancelled_reason_kind,
         })
+    }
+}
+
+#[cfg(test)]
+impl CanonicalAgentLoopExecutor {
+    pub(super) async fn drain_user_inputs(
+        &self,
+        host: &(dyn AgentLoopDriverHost + Send + Sync),
+        state: LoopExecutionState,
+    ) -> Result<DrainedInputs, AgentLoopExecutorError> {
+        let family = crate::families::default();
+        let ctx = StageContext {
+            planner: family.planner(),
+            host,
+        };
+        CheckpointStage.drain_user_inputs(ctx, state).await
+    }
+
+    pub(super) async fn drain_followup(
+        &self,
+        host: &(dyn AgentLoopDriverHost + Send + Sync),
+        state: LoopExecutionState,
+    ) -> Result<DrainedInputs, AgentLoopExecutorError> {
+        let family = crate::families::default();
+        let ctx = StageContext {
+            planner: family.planner(),
+            host,
+        };
+        CheckpointStage.drain_followup(ctx, state).await
     }
 }

@@ -2,15 +2,32 @@ use std::collections::HashSet;
 
 use super::*;
 
-impl CanonicalAgentLoopExecutor {
-    pub(super) async fn execute_capability_batch(
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct CapabilityStage;
+
+pub(super) struct CapabilityBatchInput<G> {
+    pub(super) state: LoopExecutionState,
+    pub(super) surface: VisibleCapabilitySurface,
+    pub(super) calls: Vec<CapabilityCallCandidate>,
+    pub(super) gates: G,
+}
+
+#[async_trait]
+impl<G> ExecutorStage<CapabilityBatchInput<G>> for CapabilityStage
+where
+    G: ExecutorStage<GateInput, Output = BatchStep> + Send + Sync + Copy + 'static,
+{
+    type Output = BatchStep;
+
+    async fn process(
         &self,
-        planner: &dyn AgentLoopPlannerInternal,
-        host: &(dyn AgentLoopDriverHost + Send + Sync),
-        mut state: LoopExecutionState,
-        surface: &VisibleCapabilitySurface,
-        calls: Vec<CapabilityCallCandidate>,
+        ctx: StageContext<'_>,
+        input: CapabilityBatchInput<G>,
     ) -> Result<BatchStep, AgentLoopExecutorError> {
+        let mut state = input.state;
+        let surface = &input.surface;
+        let calls = input.calls;
+        let gates = &input.gates;
         state.stop_state.last_batch_total = 0;
         state.stop_state.terminate_hints_in_last_batch = 0;
 
@@ -29,18 +46,18 @@ impl CanonicalAgentLoopExecutor {
             .iter()
             .map(|call| capability_summary(surface, call))
             .collect::<Vec<_>>();
-        let policy = planner.batch().policy(&state, &summaries);
+        let policy = ctx.planner.batch().policy(&state, &summaries);
         let stop_on_first_suspension = matches!(policy, BatchPolicy::Sequential);
-        match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+        match CheckpointStage.cancel_if_requested(ctx, state).await? {
             CancelCheck::Continue(next) => state = *next,
             CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
         }
 
-        state = self
-            .checkpoint(host, state, CheckpointKind::BeforeSideEffect)
+        state = CheckpointStage
+            .write(ctx, state, CheckpointKind::BeforeSideEffect)
             .await?
             .state;
-        match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+        match CheckpointStage.cancel_if_requested(ctx, state).await? {
             CancelCheck::Continue(next) => state = *next,
             CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
         }
@@ -59,7 +76,7 @@ impl CanonicalAgentLoopExecutor {
                 diagnostic_ref: None,
             };
             match self
-                .handle_capability_error(planner, host, state, call, summary)
+                .handle_capability_error(ctx, gates, state, call, summary)
                 .await?
             {
                 BatchStep::Continue(next) => state = *next,
@@ -72,17 +89,19 @@ impl CanonicalAgentLoopExecutor {
             return Ok(BatchStep::Continue(Box::new(state)));
         }
 
-        self.emit_progress(
-            host,
-            LoopProgressEvent::CapabilityBatchStarted {
-                iteration: state.iteration,
-                call_count: visible_calls.len() as u32,
-                policy: batch_policy_kind(policy),
-            },
-        )
-        .await;
+        CheckpointStage
+            .emit_progress(
+                ctx,
+                LoopProgressEvent::CapabilityBatchStarted {
+                    iteration: state.iteration,
+                    call_count: visible_calls.len() as u32,
+                    policy: batch_policy_kind(policy),
+                },
+            )
+            .await;
 
-        let batch = host
+        let batch = ctx
+            .host
             .invoke_capability_batch(CapabilityBatchInvocation {
                 invocations: visible_calls
                     .iter()
@@ -105,24 +124,25 @@ impl CanonicalAgentLoopExecutor {
 
         let (result_count, denied_count, gated_count, failed_count) =
             capability_batch_counts(&batch.outcomes);
-        self.emit_progress(
-            host,
-            LoopProgressEvent::CapabilityBatchCompleted {
-                iteration: state.iteration,
-                result_count,
-                denied_count,
-                gated_count,
-                failed_count,
-            },
-        )
-        .await;
+        CheckpointStage
+            .emit_progress(
+                ctx,
+                LoopProgressEvent::CapabilityBatchCompleted {
+                    iteration: state.iteration,
+                    result_count,
+                    denied_count,
+                    gated_count,
+                    failed_count,
+                },
+            )
+            .await;
 
         let outcomes = batch.outcomes;
         if !batch.stopped_on_suspension {
             for (call, outcome) in visible_calls.iter().zip(&outcomes) {
                 if let CapabilityOutcome::Completed(result) = outcome {
                     push_call_signature_once(&mut state, &mut signatures, call)?;
-                    append_capability_result_ref(host, call, result).await?;
+                    append_capability_result_ref(ctx.host, call, result).await?;
                     push_completed_result(&mut state, result.clone());
                 }
             }
@@ -134,7 +154,7 @@ impl CanonicalAgentLoopExecutor {
             }
             push_call_signature_once(&mut state, &mut signatures, &call)?;
             match self
-                .handle_capability_outcome(planner, host, state, call, outcome)
+                .handle_capability_outcome(ctx, gates, state, call, outcome)
                 .await?
             {
                 BatchStep::Continue(next) => {
@@ -146,35 +166,67 @@ impl CanonicalAgentLoopExecutor {
 
         Ok(BatchStep::Continue(Box::new(state)))
     }
+}
 
-    pub(super) async fn handle_capability_outcome(
+impl CapabilityStage {
+    async fn handle_capability_outcome<G>(
         &self,
-        planner: &dyn AgentLoopPlannerInternal,
-        host: &(dyn AgentLoopDriverHost + Send + Sync),
+        ctx: StageContext<'_>,
+        gates: &G,
         mut state: LoopExecutionState,
         call: CapabilityCallCandidate,
         outcome: CapabilityOutcome,
-    ) -> Result<BatchStep, AgentLoopExecutorError> {
+    ) -> Result<BatchStep, AgentLoopExecutorError>
+    where
+        G: ExecutorStage<GateInput, Output = BatchStep> + Send + Sync,
+    {
         match outcome {
             CapabilityOutcome::Completed(result) => {
-                append_capability_result_ref(host, &call, &result).await?;
+                append_capability_result_ref(ctx.host, &call, &result).await?;
                 push_completed_result(&mut state, result);
                 Ok(BatchStep::Continue(Box::new(state)))
             }
             CapabilityOutcome::ApprovalRequired { gate_ref, .. } => {
-                self.handle_gate(planner, host, state, call, GateKind::Approval, gate_ref)
+                gates
+                    .process(
+                        ctx,
+                        GateInput {
+                            state,
+                            call,
+                            kind: GateKind::Approval,
+                            gate_ref,
+                        },
+                    )
                     .await
             }
             CapabilityOutcome::AuthRequired { gate_ref, .. } => {
-                self.handle_gate(planner, host, state, call, GateKind::Auth, gate_ref)
+                gates
+                    .process(
+                        ctx,
+                        GateInput {
+                            state,
+                            call,
+                            kind: GateKind::Auth,
+                            gate_ref,
+                        },
+                    )
                     .await
             }
             CapabilityOutcome::ResourceBlocked { gate_ref, .. } => {
-                self.handle_gate(planner, host, state, call, GateKind::Resource, gate_ref)
+                gates
+                    .process(
+                        ctx,
+                        GateInput {
+                            state,
+                            call,
+                            kind: GateKind::Resource,
+                            gate_ref,
+                        },
+                    )
                     .await
             }
             CapabilityOutcome::SpawnedProcess(handle) => {
-                self.fail_unsupported_process_wait(host, state, &call, &handle.process_ref)
+                self.fail_unsupported_process_wait(ctx, state, &call, &handle.process_ref)
                     .await
             }
             CapabilityOutcome::Denied(denied) => {
@@ -186,12 +238,12 @@ impl CanonicalAgentLoopExecutor {
                     safe_summary: sanitized_strategy_summary(denied.safe_summary)?,
                     diagnostic_ref: None,
                 };
-                self.handle_capability_error(planner, host, state, call, summary)
+                self.handle_capability_error(ctx, gates, state, call, summary)
                     .await
             }
             CapabilityOutcome::Failed(failure) => {
                 if failure.error_kind == CapabilityFailureKind::Cancelled {
-                    return self.cancelled_after_checkpoint(host, state).await;
+                    return self.cancelled_after_checkpoint(ctx, state).await;
                 }
                 state
                     .recent_failure_kinds
@@ -201,30 +253,34 @@ impl CanonicalAgentLoopExecutor {
                     safe_summary: sanitized_strategy_summary(failure.safe_summary)?,
                     diagnostic_ref: None,
                 };
-                self.handle_capability_error(planner, host, state, call, summary)
+                self.handle_capability_error(ctx, gates, state, call, summary)
                     .await
             }
         }
     }
 
-    pub(super) async fn handle_capability_error(
+    async fn handle_capability_error<G>(
         &self,
-        planner: &dyn AgentLoopPlannerInternal,
-        host: &(dyn AgentLoopDriverHost + Send + Sync),
+        ctx: StageContext<'_>,
+        gates: &G,
         mut state: LoopExecutionState,
         call: CapabilityCallCandidate,
         mut summary: CapabilityErrorSummary,
-    ) -> Result<BatchStep, AgentLoopExecutorError> {
+    ) -> Result<BatchStep, AgentLoopExecutorError>
+    where
+        G: ExecutorStage<GateInput, Output = BatchStep> + Send + Sync,
+    {
         for _ in 0..MAX_CAPABILITY_RETRIES {
-            match planner
+            match ctx
+                .planner
                 .recovery()
                 .on_capability_error(&state, &summary)
                 .await
             {
                 RecoveryOutcome::SkipResult { recovery } => {
                     state.recovery_state = recovery;
-                    append_capability_error_ref(host, &mut state, &call, &summary).await?;
-                    match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+                    append_capability_error_ref(ctx.host, &mut state, &call, &summary).await?;
+                    match CheckpointStage.cancel_if_requested(ctx, state).await? {
                         CancelCheck::Continue(next) => state = *next,
                         CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
                     }
@@ -235,14 +291,16 @@ impl CanonicalAgentLoopExecutor {
                     failure_kind,
                 } => {
                     state.recovery_state = recovery;
-                    append_capability_error_ref(host, &mut state, &call, &summary).await?;
-                    match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+                    append_capability_error_ref(ctx.host, &mut state, &call, &summary).await?;
+                    match CheckpointStage.cancel_if_requested(ctx, state).await? {
                         CancelCheck::Continue(next) => state = *next,
                         CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
                     }
-                    let checked = self.checkpoint(host, state, CheckpointKind::Final).await?;
+                    let checked = CheckpointStage
+                        .write(ctx, state, CheckpointKind::Final)
+                        .await?;
                     return Ok(BatchStep::Exit(failed_exit(
-                        host,
+                        ctx.host,
                         checked.state,
                         failure_kind,
                         Some(checked.checkpoint_id),
@@ -252,32 +310,34 @@ impl CanonicalAgentLoopExecutor {
                     recovery, alter, ..
                 } => {
                     state.recovery_state = recovery;
-                    match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+                    match CheckpointStage.cancel_if_requested(ctx, state).await? {
                         CancelCheck::Continue(next) => state = *next,
                         CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
                     }
                     honor_retry_alteration(alter.as_ref())?;
-                    self.emit_progress(
-                        host,
-                        LoopProgressEvent::driver_note(
-                            LoopDriverNoteKind::Retrying,
-                            "retrying capability invocation",
+                    CheckpointStage
+                        .emit_progress(
+                            ctx,
+                            LoopProgressEvent::driver_note(
+                                LoopDriverNoteKind::Retrying,
+                                "retrying capability invocation",
+                            )
+                            .map_err(|_| {
+                                AgentLoopExecutorError::PlannerContract {
+                                    detail: "retry progress summary was invalid",
+                                }
+                            })?,
                         )
-                        .map_err(|_| {
-                            AgentLoopExecutorError::PlannerContract {
-                                detail: "retry progress summary was invalid",
-                            }
-                        })?,
-                    )
-                    .await;
-                    let retry = host
+                        .await;
+                    let retry = ctx
+                        .host
                         .invoke_capability(capability_invocation_from_candidate(call.clone()))
                         .await
                         .map_err(capability_host_error)?;
                     match retry {
                         CapabilityOutcome::Failed(failure) => {
                             if failure.error_kind == CapabilityFailureKind::Cancelled {
-                                return self.cancelled_after_checkpoint(host, state).await;
+                                return self.cancelled_after_checkpoint(ctx, state).await;
                             }
                             summary = CapabilityErrorSummary {
                                 class: capability_error_class(&failure.error_kind),
@@ -287,50 +347,53 @@ impl CanonicalAgentLoopExecutor {
                         }
                         promoted => match promoted {
                             CapabilityOutcome::Completed(result) => {
-                                append_capability_result_ref(host, &call, &result).await?;
+                                append_capability_result_ref(ctx.host, &call, &result).await?;
                                 push_completed_result(&mut state, result);
                                 return Ok(BatchStep::Continue(Box::new(state)));
                             }
                             CapabilityOutcome::ApprovalRequired { gate_ref, .. } => {
-                                return self
-                                    .handle_gate(
-                                        planner,
-                                        host,
-                                        state,
-                                        call,
-                                        GateKind::Approval,
-                                        gate_ref,
+                                return gates
+                                    .process(
+                                        ctx,
+                                        GateInput {
+                                            state,
+                                            call,
+                                            kind: GateKind::Approval,
+                                            gate_ref,
+                                        },
                                     )
                                     .await;
                             }
                             CapabilityOutcome::AuthRequired { gate_ref, .. } => {
-                                return self
-                                    .handle_gate(
-                                        planner,
-                                        host,
-                                        state,
-                                        call,
-                                        GateKind::Auth,
-                                        gate_ref,
+                                return gates
+                                    .process(
+                                        ctx,
+                                        GateInput {
+                                            state,
+                                            call,
+                                            kind: GateKind::Auth,
+                                            gate_ref,
+                                        },
                                     )
                                     .await;
                             }
                             CapabilityOutcome::ResourceBlocked { gate_ref, .. } => {
-                                return self
-                                    .handle_gate(
-                                        planner,
-                                        host,
-                                        state,
-                                        call,
-                                        GateKind::Resource,
-                                        gate_ref,
+                                return gates
+                                    .process(
+                                        ctx,
+                                        GateInput {
+                                            state,
+                                            call,
+                                            kind: GateKind::Resource,
+                                            gate_ref,
+                                        },
                                     )
                                     .await;
                             }
                             CapabilityOutcome::SpawnedProcess(handle) => {
                                 return self
                                     .fail_unsupported_process_wait(
-                                        host,
+                                        ctx,
                                         state,
                                         &call,
                                         &handle.process_ref,
@@ -360,41 +423,46 @@ impl CanonicalAgentLoopExecutor {
             }
         }
 
-        append_capability_error_ref(host, &mut state, &call, &summary).await?;
-        let checked = self.checkpoint(host, state, CheckpointKind::Final).await?;
+        append_capability_error_ref(ctx.host, &mut state, &call, &summary).await?;
+        let checked = CheckpointStage
+            .write(ctx, state, CheckpointKind::Final)
+            .await?;
         Ok(BatchStep::Exit(failed_exit(
-            host,
+            ctx.host,
             checked.state,
             LoopFailureKind::DriverBug,
             Some(checked.checkpoint_id),
         )?))
     }
-    pub(super) async fn fail_unsupported_process_wait(
+
+    async fn fail_unsupported_process_wait(
         &self,
-        host: &(dyn AgentLoopDriverHost + Send + Sync),
+        ctx: StageContext<'_>,
         mut state: LoopExecutionState,
         call: &CapabilityCallCandidate,
         _process_ref: &ironclaw_turns::run_profile::LoopProcessRef,
     ) -> Result<BatchStep, AgentLoopExecutorError> {
         append_capability_safe_summary_ref(
-            host,
+            ctx.host,
             &mut state,
             call,
             "capability process wait is not supported".to_string(),
         )
         .await?;
-        let checked = self.checkpoint(host, state, CheckpointKind::Final).await?;
+        let checked = CheckpointStage
+            .write(ctx, state, CheckpointKind::Final)
+            .await?;
         Ok(BatchStep::Exit(failed_exit(
-            host,
+            ctx.host,
             checked.state,
             LoopFailureKind::CapabilityProtocolError,
             Some(checked.checkpoint_id),
         )?))
     }
 
-    pub(super) async fn cancelled_after_checkpoint(
+    async fn cancelled_after_checkpoint(
         &self,
-        host: &(dyn AgentLoopDriverHost + Send + Sync),
+        ctx: StageContext<'_>,
         state: LoopExecutionState,
     ) -> Result<BatchStep, AgentLoopExecutorError> {
         // Called when a capability invocation surfaced `CapabilityFailureKind::Cancelled`
@@ -404,9 +472,11 @@ impl CanonicalAgentLoopExecutor {
         // every reason variant; if `LoopCancelledReasonKind` gains finer-grained
         // variants this site must switch to `cancelled_exit_with_reason` with the
         // capability-specific reason.
-        let checked = self.checkpoint(host, state, CheckpointKind::Final).await?;
+        let checked = CheckpointStage
+            .write(ctx, state, CheckpointKind::Final)
+            .await?;
         Ok(BatchStep::Exit(cancelled_exit(
-            host,
+            ctx.host,
             checked.state,
             Some(checked.checkpoint_id),
         )?))

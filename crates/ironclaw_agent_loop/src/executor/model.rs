@@ -1,5 +1,15 @@
 use super::*;
 
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct ModelStage;
+
+pub(super) struct ModelInput {
+    pub(super) state: LoopExecutionState,
+    pub(super) messages: Vec<ironclaw_turns::run_profile::LoopModelMessage>,
+    pub(super) surface_version: ironclaw_turns::run_profile::CapabilitySurfaceVersion,
+    pub(super) capability_view: LoopModelCapabilityView,
+}
+
 pub(super) enum ModelStep {
     Response(
         Box<LoopExecutionState>,
@@ -8,17 +18,37 @@ pub(super) enum ModelStep {
     Exit(LoopExit),
 }
 
-impl CanonicalAgentLoopExecutor {
-    pub(super) async fn stream_model_with_recovery(
+#[async_trait]
+impl ExecutorStage<ModelInput> for ModelStage {
+    type Output = ModelStep;
+
+    async fn process(
         &self,
-        planner: &dyn AgentLoopPlannerInternal,
-        host: &(dyn AgentLoopDriverHost + Send + Sync),
-        mut state: LoopExecutionState,
-        request: LoopModelRequest,
+        ctx: StageContext<'_>,
+        input: ModelInput,
     ) -> Result<ModelStep, AgentLoopExecutorError> {
+        let mut state = input.state;
+        state = match CheckpointStage.cancel_if_requested(ctx, state).await? {
+            CancelCheck::Continue(state) => *state,
+            CancelCheck::Exit(exit) => return Ok(ModelStep::Exit(exit)),
+        };
+
+        let model_preference =
+            model_preference_to_host(ctx.planner.model().preference(&state).await)?;
+        state = match CheckpointStage.cancel_if_requested(ctx, state).await? {
+            CancelCheck::Continue(state) => *state,
+            CancelCheck::Exit(exit) => return Ok(ModelStep::Exit(exit)),
+        };
+        let request = LoopModelRequest {
+            messages: input.messages,
+            surface_version: Some(input.surface_version),
+            model_preference,
+            capability_view: Some(input.capability_view),
+        };
+
         let mut recorded_failure = false;
         for _ in 0..MAX_MODEL_RETRIES {
-            match host.stream_model(request.clone()).await {
+            match ctx.host.stream_model(request.clone()).await {
                 Ok(response) => {
                     state.recovery_state = state.recovery_state.cleared_attempts();
                     return Ok(ModelStep::Response(Box::new(state), response));
@@ -41,29 +71,35 @@ impl CanonicalAgentLoopExecutor {
                         safe_summary: sanitized_strategy_summary(error.safe_summary)?,
                         diagnostic_ref: error.diagnostic_ref,
                     };
-                    match planner.recovery().on_model_error(&state, &summary).await {
+                    match ctx
+                        .planner
+                        .recovery()
+                        .on_model_error(&state, &summary)
+                        .await
+                    {
                         RecoveryOutcome::Retry {
                             recovery, alter, ..
                         } => {
                             state.recovery_state = recovery;
-                            match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+                            match CheckpointStage.cancel_if_requested(ctx, state).await? {
                                 CancelCheck::Continue(next) => state = *next,
                                 CancelCheck::Exit(exit) => return Ok(ModelStep::Exit(exit)),
                             }
                             honor_retry_alteration(alter.as_ref())?;
-                            self.emit_progress(
-                                host,
-                                LoopProgressEvent::driver_note(
-                                    LoopDriverNoteKind::Retrying,
-                                    "retrying model request",
+                            CheckpointStage
+                                .emit_progress(
+                                    ctx,
+                                    LoopProgressEvent::driver_note(
+                                        LoopDriverNoteKind::Retrying,
+                                        "retrying model request",
+                                    )
+                                    .map_err(|_| {
+                                        AgentLoopExecutorError::PlannerContract {
+                                            detail: "retry progress summary was invalid",
+                                        }
+                                    })?,
                                 )
-                                .map_err(|_| {
-                                    AgentLoopExecutorError::PlannerContract {
-                                        detail: "retry progress summary was invalid",
-                                    }
-                                })?,
-                            )
-                            .await;
+                                .await;
                         }
                         RecoveryOutcome::SkipResult { .. } => {
                             return Err(AgentLoopExecutorError::PlannerContract {
@@ -75,14 +111,15 @@ impl CanonicalAgentLoopExecutor {
                             failure_kind,
                         } => {
                             state.recovery_state = recovery;
-                            match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+                            match CheckpointStage.cancel_if_requested(ctx, state).await? {
                                 CancelCheck::Continue(next) => state = *next,
                                 CancelCheck::Exit(exit) => return Ok(ModelStep::Exit(exit)),
                             }
-                            let checked =
-                                self.checkpoint(host, state, CheckpointKind::Final).await?;
+                            let checked = CheckpointStage
+                                .write(ctx, state, CheckpointKind::Final)
+                                .await?;
                             return Ok(ModelStep::Exit(failed_exit(
-                                host,
+                                ctx.host,
                                 checked.state,
                                 failure_kind,
                                 Some(checked.checkpoint_id),
@@ -93,9 +130,11 @@ impl CanonicalAgentLoopExecutor {
             }
         }
 
-        let checked = self.checkpoint(host, state, CheckpointKind::Final).await?;
+        let checked = CheckpointStage
+            .write(ctx, state, CheckpointKind::Final)
+            .await?;
         Ok(ModelStep::Exit(failed_exit(
-            host,
+            ctx.host,
             checked.state,
             LoopFailureKind::DriverBug,
             Some(checked.checkpoint_id),
