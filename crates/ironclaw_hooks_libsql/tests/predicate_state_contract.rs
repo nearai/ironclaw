@@ -103,50 +103,24 @@ where
 fn main() {
     let mut ok = true;
 
-    // Shared PredicateStateBackend contract suite (mirrors the cases the
-    // `predicate_backend_contract_test!` macro would generate). All run on a
-    // single-threaded runtime; the overflow case is a heavy 4 096 fill.
-    ok &= run(
-        "contract::invocation_counts_within_window",
-        Rt::Current,
-        || contract::invocation_counts_within_window(contract_factory),
-    );
-    ok &= run(
-        "contract::invocation_trims_outside_window",
-        Rt::Current,
-        || contract::invocation_trims_outside_window(contract_factory),
-    );
-    ok &= run("contract::value_sums_within_window", Rt::Current, || {
-        contract::value_sums_within_window(contract_factory)
-    });
-    ok &= run("contract::tenant_isolation", Rt::Current, || {
-        contract::tenant_isolation(contract_factory)
-    });
-    ok &= run(
-        "contract::duplicate_event_id_is_noop_for_invocations",
-        Rt::Current,
-        || contract::duplicate_event_id_is_noop_for_invocations(contract_factory),
-    );
-    ok &= run(
-        "contract::duplicate_event_id_is_noop_for_values",
-        Rt::Current,
-        || contract::duplicate_event_id_is_noop_for_values(contract_factory),
-    );
-    ok &= run(
-        "contract::invocation_retains_entry_at_exact_window_cutoff",
-        Rt::Current,
-        || contract::invocation_retains_entry_at_exact_window_cutoff(contract_factory),
-    );
-    ok &= run(
-        "contract::event_id_dedup_isolated_across_maps",
-        Rt::Current,
-        || contract::event_id_dedup_isolated_across_maps(contract_factory),
-    );
-    ok &= run(
-        "contract::record_invocation_overflow_is_fail_closed",
-        Rt::Current,
-        || contract::record_invocation_overflow_is_fail_closed(contract_factory),
-    );
+    // Shared PredicateStateBackend contract suite. The case inventory is driven
+    // directly from the canonical `predicate_backend_contract_cases!` list in
+    // `ironclaw_hooks` (P1) — adding a contract upstream automatically runs it
+    // here too, with no hand-maintained second list to drift. We cannot use the
+    // default-harness `predicate_backend_contract_test!` (this binary is
+    // `harness = false`, see the module docs), so we supply our own per-case
+    // emitter that wraps each canonical case in the serial `run` helper. All run
+    // on a single-threaded runtime; the overflow case is a heavy 4 096 fill.
+    macro_rules! run_contract_case {
+        ([$factory:expr] $case:ident) => {
+            ok &= run(
+                concat!("contract::", stringify!($case)),
+                Rt::Current,
+                || contract::$case($factory),
+            );
+        };
+    }
+    ironclaw_hooks::predicate_backend_contract_cases!(run_contract_case, contract_factory);
 
     // libSQL-specific adversarial cases.
     ok &= run(

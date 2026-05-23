@@ -520,7 +520,20 @@ impl Default for InMemoryPredicateStateBackend {
 /// meaning nothing is trimmed (conservative for a rate/value cap). Unlike
 /// the prior `Instant::checked_sub`, `DateTime<Utc>` subtraction never
 /// panics or underflows.
-fn window_cutoff(now: DateTime<Utc>, window: Duration) -> DateTime<Utc> {
+///
+/// # Canonical cross-backend cutoff (do not reimplement)
+///
+/// This is the **single source of truth** for the sliding-window cutoff rule
+/// (`occurred_at < cutoff` is trimmed; an entry exactly at `cutoff` is
+/// retained). Durable backends (libSQL, Postgres) MUST derive their cutoff from
+/// this function rather than reimplementing the `Duration → wall-clock`
+/// conversion, so the overflow/boundary behaviour cannot drift per backend. A
+/// libSQL backend storing epoch-millis converts the result with
+/// [`DateTime::timestamp_millis`]; the `i64::MAX`-saturating-then-`saturating_sub`
+/// shortcut a backend might write independently is **not** equivalent — on an
+/// oversized window it trims nothing, whereas this canonical rule trims to
+/// `now`. The cross-backend parity suite (#3937) covers this boundary.
+pub fn window_cutoff(now: DateTime<Utc>, window: Duration) -> DateTime<Utc> {
     match chrono::Duration::from_std(window) {
         Ok(d) => now.checked_sub_signed(d).unwrap_or(now),
         Err(_) => now,
@@ -1203,63 +1216,54 @@ pub mod contract {
         );
     }
 
-    /// Run every contract against `factory`. Per-impl test files invoke
-    /// this via [`contract_test!`].
+    /// The **single canonical inventory** of `PredicateStateBackend` contract
+    /// cases. Every shared invariant is listed here exactly once, by the
+    /// `pub async fn` name in this module. Both the default-harness wiring
+    /// ([`predicate_backend_contract_test!`]) and any out-of-crate custom
+    /// runner (e.g. the libSQL serial runner, which cannot use the default
+    /// libtest harness) drive their case lists from this macro, so a contract
+    /// added here is automatically run against every backend — there is no
+    /// hand-maintained second list to drift out of sync.
+    ///
+    /// `$emit` is a `macro_rules!`-style callback macro the caller supplies; it
+    /// is invoked once per case as `$emit!([$($ctx)*] case_name);` where
+    /// `case_name` is the identifier of the `contract::` function and `$ctx` is
+    /// arbitrary caller context (e.g. a factory expression) threaded through
+    /// unchanged. The caller decides what each expansion becomes (a
+    /// `#[tokio::test]` fn, a serial-runner line, …).
+    #[macro_export]
+    macro_rules! predicate_backend_contract_cases {
+        ($emit:ident, $($ctx:tt)*) => {
+            $emit!([$($ctx)*] invocation_counts_within_window);
+            $emit!([$($ctx)*] invocation_trims_outside_window);
+            $emit!([$($ctx)*] value_sums_within_window);
+            $emit!([$($ctx)*] tenant_isolation);
+            $emit!([$($ctx)*] duplicate_event_id_is_noop_for_invocations);
+            $emit!([$($ctx)*] duplicate_event_id_is_noop_for_values);
+            $emit!([$($ctx)*] invocation_retains_entry_at_exact_window_cutoff);
+            $emit!([$($ctx)*] event_id_dedup_isolated_across_maps);
+            $emit!([$($ctx)*] record_invocation_overflow_is_fail_closed);
+        };
+    }
+
+    /// Run every contract against `factory` under the default libtest harness.
+    /// Per-impl test files invoke this via [`predicate_backend_contract_test!`].
+    /// The case inventory is the canonical [`predicate_backend_contract_cases!`]
+    /// list — this macro only decides that each case becomes a
+    /// `#[tokio::test]`.
     #[macro_export]
     macro_rules! predicate_backend_contract_test {
         ($label:ident, $factory:expr) => {
             mod $label {
-                #[tokio::test]
-                async fn invocation_counts_within_window() {
-                    $crate::predicate_state::contract::invocation_counts_within_window($factory)
-                        .await;
+                macro_rules! emit_case {
+                    ([$factory_expr:expr] $case:ident) => {
+                        #[tokio::test]
+                        async fn $case() {
+                            $crate::predicate_state::contract::$case($factory_expr).await;
+                        }
+                    };
                 }
-                #[tokio::test]
-                async fn invocation_trims_outside_window() {
-                    $crate::predicate_state::contract::invocation_trims_outside_window($factory)
-                        .await;
-                }
-                #[tokio::test]
-                async fn value_sums_within_window() {
-                    $crate::predicate_state::contract::value_sums_within_window($factory).await;
-                }
-                #[tokio::test]
-                async fn tenant_isolation() {
-                    $crate::predicate_state::contract::tenant_isolation($factory).await;
-                }
-                #[tokio::test]
-                async fn duplicate_event_id_is_noop_for_invocations() {
-                    $crate::predicate_state::contract::duplicate_event_id_is_noop_for_invocations(
-                        $factory,
-                    )
-                    .await;
-                }
-                #[tokio::test]
-                async fn duplicate_event_id_is_noop_for_values() {
-                    $crate::predicate_state::contract::duplicate_event_id_is_noop_for_values(
-                        $factory,
-                    )
-                    .await;
-                }
-                #[tokio::test]
-                async fn invocation_retains_entry_at_exact_window_cutoff() {
-                    $crate::predicate_state::contract::invocation_retains_entry_at_exact_window_cutoff(
-                        $factory,
-                    )
-                    .await;
-                }
-                #[tokio::test]
-                async fn event_id_dedup_isolated_across_maps() {
-                    $crate::predicate_state::contract::event_id_dedup_isolated_across_maps($factory)
-                        .await;
-                }
-                #[tokio::test]
-                async fn record_invocation_overflow_is_fail_closed() {
-                    $crate::predicate_state::contract::record_invocation_overflow_is_fail_closed(
-                        $factory,
-                    )
-                    .await;
-                }
+                $crate::predicate_backend_contract_cases!(emit_case, $factory);
             }
         };
     }

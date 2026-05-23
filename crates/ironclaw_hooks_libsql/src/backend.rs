@@ -55,6 +55,8 @@
 //! trimming, so it is always exactly the sum of the rows that survive —
 //! consistency under eviction is structural.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -200,6 +202,138 @@ impl LibSqlPredicateStateBackend {
                 .fetch_add(n, std::sync::atomic::Ordering::Relaxed);
         }
     }
+
+    /// The one load-bearing record state machine shared by `record_invocation`
+    /// and `record_value` (P2: the two paths used to duplicate this exact
+    /// sequence, so every correctness fix had to be applied twice in the same
+    /// order). The sequence is invariant across both tables:
+    ///
+    /// 1. acquire the in-process `write_lock`, open a connection, `BEGIN IMMEDIATE`;
+    /// 2. trim out-of-window rows for the key;
+    /// 3. dedup short-circuit on a replayed `event_id`;
+    /// 4. fail-closed per-key sample cap;
+    /// 5. per-tenant LRU quota eviction (only when inserting a brand-new key);
+    /// 6. insert (`ON CONFLICT DO NOTHING` belt-and-suspenders);
+    /// 7. read the in-window result under the same lock; commit / rollback.
+    ///
+    /// The two callers differ ONLY in which table they touch, how the row is
+    /// inserted, and how the in-window result is read — all carried by `spec`
+    /// ([`RecordSpec`]). The atomicity / fail-closed guarantees live here, once.
+    async fn record<T>(&self, spec: RecordSpec<'_, T>) -> Result<T, PredicateBackendError> {
+        let RecordSpec {
+            table,
+            scope,
+            key_hash,
+            event_id,
+            now_ms,
+            cutoff,
+            overflow_key,
+            insert,
+            read_result,
+        } = spec;
+
+        // Serialise in-process writers before touching SQLite (see the
+        // concurrency contract on the struct). Held for the whole transaction.
+        let _write_guard = self.write_lock.lock().await;
+        let conn = self.connect().await?;
+        conn.execute("BEGIN IMMEDIATE", ()).await.map_err(map_err)?;
+
+        let result = async {
+            // 1. Trim entries outside the window for THIS key first, so the
+            //    per-key cap and the final read both see only in-window rows.
+            conn.execute(
+                &format!("DELETE FROM {table} WHERE key_hash = ?1 AND occurred_at < ?2"),
+                params![key_hash.clone(), cutoff],
+            )
+            .await
+            .map_err(map_err)?;
+
+            // 2. Dedup short-circuit: a replayed id is a no-op against the
+            //    result and must NOT trip the overflow check (replay refusal
+            //    survives the cap boundary). If the id is already present for
+            //    this key, skip the insert + cap check entirely.
+            let is_replay = event_id_exists(&conn, table, &key_hash, event_id).await?;
+
+            let mut evicted = 0u64;
+            if !is_replay {
+                // 3. Per-key sample cap: FAIL CLOSED. If the key is already at
+                //    the cap with in-window rows, a NEW distinct id cannot be
+                //    recorded without dropping an existing in-window sample, so
+                //    reject (#3929) rather than silently evicting the oldest.
+                let in_window = key_in_window_count(&conn, table, &key_hash, cutoff).await?;
+                if in_window as usize >= MAX_SAMPLES_PER_KEY {
+                    return Err(PredicateBackendError::WindowOverflow {
+                        key: overflow_key.clone(),
+                        cap: MAX_SAMPLES_PER_KEY,
+                    });
+                }
+
+                // 4. Per-tenant LRU quota: only relevant when inserting a NEW
+                //    key (a fresh PRIMARY KEY). Mirror the in-memory backend's
+                //    "evict before insert when at quota" semantics, ranking the
+                //    tenant's keys by oldest-front (MIN(occurred_at)).
+                if !key_exists(&conn, table, &key_hash).await? {
+                    evicted += enforce_caps(&conn, table, &scope).await?;
+                }
+
+                // 5. Insert (table-specific shape via the spec). The dedup
+                //    short-circuit already excludes replays, but keep
+                //    ON CONFLICT DO NOTHING as a belt-and-suspenders guard
+                //    against a concurrent insert of the same id.
+                insert(&conn, &scope, &key_hash, event_id, now_ms).await?;
+            }
+
+            // 6. In-window result read under the same lock (count or sum).
+            let value = read_result(&conn, &key_hash, cutoff).await?;
+            Ok::<(T, u64), PredicateBackendError>((value, evicted))
+        }
+        .await;
+
+        finish_txn(&conn, result, self).await
+    }
+}
+
+/// Per-table inputs to the shared [`LibSqlPredicateStateBackend::record`] state
+/// machine. Everything that differs between the invocation and value paths —
+/// the table name, the precomputed hashes/timestamps, the human-readable
+/// overflow key, the insert shape, and the in-window result read — is carried
+/// here so the transaction template itself stays single-sourced.
+struct RecordSpec<'a, T> {
+    table: &'static str,
+    scope: Vec<u8>,
+    key_hash: Vec<u8>,
+    event_id: &'a PredicateEventId,
+    now_ms: i64,
+    cutoff: i64,
+    overflow_key: String,
+    /// Table-specific insert. Receives the open connection plus the
+    /// precomputed scope/key/event/timestamp; owns the column list and values.
+    #[allow(clippy::type_complexity)]
+    insert: Box<
+        dyn for<'c> FnOnce(
+                &'c Connection,
+                &'c [u8],
+                &'c [u8],
+                &'c PredicateEventId,
+                i64,
+            ) -> Pin<
+                Box<dyn Future<Output = Result<(), PredicateBackendError>> + Send + 'c>,
+            > + Send
+            + 'a,
+    >,
+    /// Table-specific in-window result read (count for invocations, decimal sum
+    /// for values), returning the value the public method hands back.
+    #[allow(clippy::type_complexity)]
+    read_result: Box<
+        dyn for<'c> FnOnce(
+                &'c Connection,
+                &'c [u8],
+                i64,
+            ) -> Pin<
+                Box<dyn Future<Output = Result<T, PredicateBackendError>> + Send + 'c>,
+            > + Send
+            + 'a,
+    >,
 }
 
 /// The libSQL migration body. Mirrors the schema documented in
@@ -232,74 +366,35 @@ impl PredicateStateBackend for LibSqlPredicateStateBackend {
         let now_ms = to_epoch_millis(now);
         let overflow_key = format!("{}/{}", key.tenant_id.as_str(), key.capability);
 
-        // Serialise in-process writers before touching SQLite (see the
-        // concurrency contract on the struct). Held for the whole transaction.
-        let _write_guard = self.write_lock.lock().await;
-        let conn = self.connect().await?;
-        conn.execute("BEGIN IMMEDIATE", ()).await.map_err(map_err)?;
-
-        let result = async {
-            // 1. Trim entries outside the window for THIS key first, so the
-            //    per-key cap and the final count both see only in-window rows.
-            conn.execute(
-                &format!(
-                    "DELETE FROM {INVOCATIONS_TABLE} WHERE key_hash = ?1 AND occurred_at < ?2"
-                ),
-                params![key_hash.clone(), cutoff],
-            )
-            .await
-            .map_err(map_err)?;
-
-            // 2. Dedup short-circuit: a replayed id is a no-op against the
-            //    count and must NOT trip the overflow check (replay refusal
-            //    survives the cap boundary). If the id is already present for
-            //    this key, skip the insert + cap check entirely.
-            let is_replay = event_id_exists(&conn, INVOCATIONS_TABLE, &key_hash, event_id).await?;
-
-            let mut evicted = 0u64;
-            if !is_replay {
-                // 3. Per-key sample cap: FAIL CLOSED. If the key is already at
-                //    the cap with in-window rows, a NEW distinct id cannot be
-                //    recorded without dropping an existing in-window sample, so
-                //    reject (#3929) rather than silently evicting the oldest.
-                let in_window = key_in_window_count(&conn, INVOCATIONS_TABLE, &key_hash, cutoff).await?;
-                if in_window as usize >= MAX_SAMPLES_PER_KEY {
-                    return Err(PredicateBackendError::WindowOverflow {
-                        key: overflow_key.clone(),
-                        cap: MAX_SAMPLES_PER_KEY,
-                    });
-                }
-
-                // 4. Per-tenant LRU quota: only relevant when inserting a NEW
-                //    key (a fresh PRIMARY KEY). Mirror the in-memory backend's
-                //    "evict before insert when at quota" semantics, ranking the
-                //    tenant's keys by oldest-front (MIN(occurred_at)).
-                let key_exists = key_exists(&conn, INVOCATIONS_TABLE, &key_hash).await?;
-                if !key_exists {
-                    evicted += enforce_caps(&conn, INVOCATIONS_TABLE, &scope).await?;
-                }
-
-                // 5. Insert. The dedup short-circuit above already excludes
-                //    replays, but keep ON CONFLICT DO NOTHING as a belt-and-
-                //    suspenders guard against a concurrent insert of the same id.
-                conn.execute(
-                    &format!(
-                        "INSERT INTO {INVOCATIONS_TABLE} (scope_hash, key_hash, event_id, occurred_at) \
-                         VALUES (?1, ?2, ?3, ?4) ON CONFLICT (key_hash, event_id) DO NOTHING"
-                    ),
-                    params![scope.clone(), key_hash.clone(), event_id.as_str(), now_ms],
+        self.record(RecordSpec {
+            table: INVOCATIONS_TABLE,
+            scope,
+            key_hash,
+            event_id,
+            now_ms,
+            cutoff,
+            overflow_key,
+            insert: Box::new(|conn, scope, key_hash, event_id, now_ms| {
+                Box::pin(async move {
+                    conn.execute(
+                        &format!(
+                            "INSERT INTO {INVOCATIONS_TABLE} (scope_hash, key_hash, event_id, occurred_at) \
+                             VALUES (?1, ?2, ?3, ?4) ON CONFLICT (key_hash, event_id) DO NOTHING"
+                        ),
+                        params![scope.to_vec(), key_hash.to_vec(), event_id.as_str(), now_ms],
+                    )
+                    .await
+                    .map(|_| ())
+                    .map_err(map_err)
+                })
+            }),
+            read_result: Box::new(|conn, key_hash, cutoff| {
+                Box::pin(
+                    async move { key_in_window_count(conn, INVOCATIONS_TABLE, key_hash, cutoff).await },
                 )
-                .await
-                .map_err(map_err)?;
-            }
-
-            // 6. In-window count read under the same lock.
-            let count = key_in_window_count(&conn, INVOCATIONS_TABLE, &key_hash, cutoff).await?;
-            Ok::<(u32, u64), PredicateBackendError>((count, evicted))
-        }
-        .await;
-
-        finish_txn(&conn, result, self).await
+            }),
+        })
+        .await
     }
 
     async fn record_value(
@@ -322,72 +417,46 @@ impl PredicateStateBackend for LibSqlPredicateStateBackend {
             key.field
         );
 
-        // Serialise in-process writers before touching SQLite (see the
-        // concurrency contract on the struct). Held for the whole transaction.
-        let _write_guard = self.write_lock.lock().await;
-        let conn = self.connect().await?;
-        conn.execute("BEGIN IMMEDIATE", ()).await.map_err(map_err)?;
-
-        let result = async {
-            conn.execute(
-                &format!("DELETE FROM {VALUES_TABLE} WHERE key_hash = ?1 AND occurred_at < ?2"),
-                params![key_hash.clone(), cutoff],
-            )
-            .await
-            .map_err(map_err)?;
-
-            // Dedup short-circuit (see record_invocation).
-            let is_replay = event_id_exists(&conn, VALUES_TABLE, &key_hash, event_id).await?;
-
-            let mut evicted = 0u64;
-            if !is_replay {
-                // Per-key sample cap: FAIL CLOSED. Unlike InvocationCount,
-                // NumericSum has no per-sample count threshold to bound the
-                // window at validation time, so the per-key cap is the only
-                // sample bound. The old drop-oldest silently UNDERCOUNTED the
-                // sum (in-window values discarded) — a fail-OPEN weakening of
-                // the value cap. We now reject (#3929).
-                let in_window = key_in_window_count(&conn, VALUES_TABLE, &key_hash, cutoff).await?;
-                if in_window as usize >= MAX_SAMPLES_PER_KEY {
-                    return Err(PredicateBackendError::WindowOverflow {
-                        key: overflow_key.clone(),
-                        cap: MAX_SAMPLES_PER_KEY,
-                    });
-                }
-
-                let key_exists = key_exists(&conn, VALUES_TABLE, &key_hash).await?;
-                if !key_exists {
-                    evicted += enforce_caps(&conn, VALUES_TABLE, &scope).await?;
-                }
-
-                conn.execute(
-                    &format!(
-                        "INSERT INTO {VALUES_TABLE} (scope_hash, key_hash, event_id, occurred_at, value) \
-                         VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT (key_hash, event_id) DO NOTHING"
-                    ),
-                    params![scope.clone(), key_hash.clone(), event_id.as_str(), now_ms, value_str],
-                )
-                .await
-                .map_err(map_err)?;
-            }
-
-            // In-window sum computed from surviving rows — exact under
-            // eviction by construction (no external running sum to drift).
-            // rust_decimal preserved exactly via the TEXT value column; sum in
-            // Rust to avoid SQLite float accumulation.
-            let sum = sum_decimal(
-                &conn,
-                &format!(
-                    "SELECT value FROM {VALUES_TABLE} WHERE key_hash = ?1 AND occurred_at >= ?2"
-                ),
-                params![key_hash.clone(), cutoff],
-            )
-            .await?;
-            Ok::<(Decimal, u64), PredicateBackendError>((sum, evicted))
-        }
-        .await;
-
-        finish_txn(&conn, result, self).await
+        self.record(RecordSpec {
+            table: VALUES_TABLE,
+            scope,
+            key_hash,
+            event_id,
+            now_ms,
+            cutoff,
+            overflow_key,
+            insert: Box::new(move |conn, scope, key_hash, event_id, now_ms| {
+                Box::pin(async move {
+                    conn.execute(
+                        &format!(
+                            "INSERT INTO {VALUES_TABLE} (scope_hash, key_hash, event_id, occurred_at, value) \
+                             VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT (key_hash, event_id) DO NOTHING"
+                        ),
+                        params![scope.to_vec(), key_hash.to_vec(), event_id.as_str(), now_ms, value_str],
+                    )
+                    .await
+                    .map(|_| ())
+                    .map_err(map_err)
+                })
+            }),
+            read_result: Box::new(|conn, key_hash, cutoff| {
+                Box::pin(async move {
+                    // In-window sum computed from surviving rows — exact under
+                    // eviction by construction (no external running sum to drift).
+                    // rust_decimal preserved exactly via the TEXT value column;
+                    // sum in Rust to avoid SQLite float accumulation.
+                    sum_decimal(
+                        conn,
+                        &format!(
+                            "SELECT value FROM {VALUES_TABLE} WHERE key_hash = ?1 AND occurred_at >= ?2"
+                        ),
+                        params![key_hash.to_vec(), cutoff],
+                    )
+                    .await
+                })
+            }),
+        })
+        .await
     }
 
     fn evictions_observed(&self) -> u64 {
