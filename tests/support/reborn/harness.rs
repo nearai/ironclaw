@@ -1610,11 +1610,11 @@ fn local_dev_host_runtime_with_registry_and_http_egress(
 }
 
 fn github_extension_registry() -> HarnessResult<ExtensionRegistry> {
-    let manifest_path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools-src/github-reborn/manifest.toml");
+    let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("crates/ironclaw_first_party_extensions/assets/github/manifest.toml");
     let manifest = ExtensionManifest::parse_with_host_api_contracts(
         &std::fs::read_to_string(manifest_path)?,
-        ManifestSource::InstalledLocal,
+        ManifestSource::HostBundled,
         &default_host_port_catalog()?,
         &default_host_api_contract_registry()?,
     )?;

@@ -9,7 +9,8 @@ use ironclaw_dispatcher::{
     RuntimeAdapterResult, RuntimeDispatchErrorKind, RuntimeDispatcher,
 };
 use ironclaw_extensions::{
-    ExtensionError, ExtensionLifecycleService, ExtensionRegistry, ExtensionRuntime, ManifestV2Error,
+    ExtensionError, ExtensionLifecycleService, ExtensionManifest, ExtensionPackage,
+    ExtensionRegistry, ExtensionRuntime, ManifestSource, ManifestV2Error,
 };
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::{
@@ -18,6 +19,7 @@ use ironclaw_host_api::{
     UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
+    default_host_api_contract_registry, default_host_port_catalog,
     discover_extensions_with_default_host_api_contracts, publish_hot_capability_catalog,
 };
 use ironclaw_resources::{
@@ -133,12 +135,20 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_host
 #[tokio::test]
 async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
     let (_storage, fs) = mounted_github_package_fs();
-    let registry = discover_extensions_with_default_host_api_contracts(
-        &fs,
-        &VirtualPath::new("/system/extensions").unwrap(),
+    let manifest = ExtensionManifest::parse_with_host_api_contracts(
+        &std::fs::read_to_string(github_first_party_asset_root().join("manifest.toml")).unwrap(),
+        ManifestSource::HostBundled,
+        &default_host_port_catalog().unwrap(),
+        &default_host_api_contract_registry().unwrap(),
     )
-    .await
     .unwrap();
+    let package = ExtensionPackage::from_manifest(
+        manifest,
+        VirtualPath::new("/system/extensions/github").unwrap(),
+    )
+    .unwrap();
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(package).unwrap();
     let extension_id = ExtensionId::new("github").unwrap();
     let package = registry.get_extension(&extension_id).unwrap();
 
@@ -410,9 +420,7 @@ fn mounted_extension_fs(id: &str, manifest: &str) -> (tempfile::TempDir, LocalFi
 
 fn mounted_github_package_fs() -> (tempfile::TempDir, LocalFilesystem) {
     let storage = tempdir().unwrap();
-    let source_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join("tools-src/github-reborn");
+    let source_root = github_first_party_asset_root();
     let package_root = storage.path().join("github");
 
     for relative in [
@@ -437,6 +445,12 @@ fn mounted_github_package_fs() -> (tempfile::TempDir, LocalFilesystem) {
     )
     .unwrap();
     (storage, fs)
+}
+
+fn github_first_party_asset_root() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("crates/ironclaw_first_party_extensions/assets/github")
 }
 
 fn copy_package_file(source_root: &Path, package_root: &Path, relative: &str) {

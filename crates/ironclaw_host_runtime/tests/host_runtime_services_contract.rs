@@ -3618,16 +3618,19 @@ async fn host_runtime_services_routes_github_wasm_read_through_runtime_http_egre
         .await,
     );
     let governor = Arc::new(governor_with_default_limit(sample_account()));
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_handle = SecretHandle::new("github_token").unwrap();
     let policy = github_issues_policy();
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
         Arc::new(ObligatingAuthorizer::new(vec![
             Obligation::ApplyNetworkPolicy {
                 policy: policy.clone(),
             },
+            Obligation::InjectSecretOnce {
+                handle: secret_handle.clone(),
+            },
         ]));
-    let egress = Arc::new(RecordingRuntimeHttpEgress::with_response_body(
-        br#"[{"number":3806,"state":"open","title":"GitHub WASM read proof"}]"#.to_vec(),
-    ));
+    let network = RecordingNetworkHttpEgress::new();
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(GITHUB_WASM_READ_MANIFEST)),
         filesystem,
@@ -3636,11 +3639,33 @@ async fn host_runtime_services_routes_github_wasm_read_through_runtime_http_egre
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_runtime_http_egress(Arc::clone(&egress))
-    .try_with_wasm_runtime(WitToolRuntimeConfig::for_testing(), WitToolHost::deny_all())
-    .unwrap();
+    .with_secret_store(Arc::clone(&secret_store))
+    .with_wasm_runtime_credential_provider(Arc::new(WasmStagedRuntimeCredentials::new(vec![
+        WasmStagedRuntimeCredential::for_exact_url(
+            secret_handle.clone(),
+            RuntimeCredentialTarget::Header {
+                name: "authorization".to_string(),
+                prefix: Some("Bearer ".to_string()),
+            },
+            true,
+            "https://api.github.com/repos/nearai/ironclaw/issues?state=open&per_page=1".to_string(),
+        ),
+    ])));
+    let services = services
+        .try_with_host_http_egress(network.clone())
+        .unwrap()
+        .try_with_wasm_runtime(WitToolRuntimeConfig::for_testing(), WitToolHost::deny_all())
+        .unwrap();
     let capability_id = CapabilityId::new("github.search_issues").unwrap();
     let scope = sample_scope(InvocationId::new());
+    secret_store
+        .put(
+            scope.clone(),
+            secret_handle,
+            SecretMaterial::from("ghp_fake_fixture_token"),
+        )
+        .await
+        .unwrap();
 
     let outcome = services
         .host_runtime_for_local_testing()
@@ -3653,19 +3678,25 @@ async fn host_runtime_services_routes_github_wasm_read_through_runtime_http_egre
         .unwrap();
 
     assert_completed_outcome(outcome, &capability_id);
-    let requests = egress.requests();
+    let requests = network.requests();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].runtime, RuntimeKind::Wasm);
-    assert_eq!(requests[0].scope, scope);
-    assert_eq!(requests[0].capability_id, capability_id);
-    assert_eq!(requests[0].network_policy, policy);
     assert_eq!(requests[0].method, NetworkMethod::Get);
     assert_eq!(
         requests[0].url,
         "https://api.github.com/repos/nearai/ironclaw/issues?state=open&per_page=1"
     );
     assert_eq!(requests[0].body, Vec::<u8>::new());
-    assert!(requests[0].credential_injections.is_empty());
+    assert_eq!(requests[0].policy, policy);
+    assert_eq!(
+        requests[0]
+            .headers
+            .iter()
+            .find(|(name, _)| name == "authorization"),
+        Some(&(
+            "authorization".to_string(),
+            "Bearer ghp_fake_fixture_token".to_string(),
+        ))
+    );
 }
 
 #[tokio::test]
@@ -5434,13 +5465,6 @@ struct RecordingRuntimeHttpEgress {
 }
 
 impl RecordingRuntimeHttpEgress {
-    fn with_response_body(response_body: impl Into<Vec<u8>>) -> Self {
-        Self {
-            response_body: response_body.into(),
-            ..Self::default()
-        }
-    }
-
     fn requests(&self) -> Vec<RuntimeHttpEgressRequest> {
         self.requests.lock().unwrap().clone()
     }
@@ -6797,7 +6821,7 @@ module = "wasm/github-issues-read.wasm"
 [[capabilities]]
 id = "github.search_issues"
 description = "Search GitHub issues"
-effects = ["dispatch_capability", "network"]
+effects = ["dispatch_capability", "network", "use_secret"]
 default_permission = "allow"
 parameters_schema = { type = "object" }
 "#;

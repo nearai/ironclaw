@@ -3,7 +3,7 @@ id = "github"
 name = "GitHub"
 version = "0.2.5"
 description = "GitHub issue lookup and issue comment capabilities."
-trust = "third_party"
+trust = "first_party_requested"
 
 [runtime]
 kind = "wasm"
