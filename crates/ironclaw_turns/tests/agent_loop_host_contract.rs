@@ -1530,6 +1530,9 @@ fn loop_host_refs_are_bounded_opaque_tokens() {
     assert!(CapabilityInputRef::new(format!("input:{}", "x".repeat(256))).is_err());
     assert!(LoopCheckpointStateRef::new("checkpoint:state-ref").is_ok());
     assert!(LoopCheckpointStateRef::new("/host/path/checkpoint.json").is_err());
+    assert!(LoopCheckpointStateRef::new("checkpoint:../state").is_err());
+    assert!(LoopCheckpointStateRef::new("checkpoint:dir/state").is_err());
+    assert!(LoopCheckpointStateRef::new("checkpoint:state\nref").is_err());
     assert!(LoopInputCursorToken::new("input-cursor:seen-1").is_ok());
     assert!(LoopInputCursorToken::new("999").is_err());
     assert!(LoopProgressEvent::driver_note(LoopDriverNoteKind::Planning, "safe note").is_ok());

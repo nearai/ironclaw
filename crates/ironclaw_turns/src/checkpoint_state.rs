@@ -212,7 +212,7 @@ impl CheckpointStateStore for InMemoryCheckpointStateStore {
     ) -> Result<CheckpointStateRecord, TurnError> {
         validate_checkpoint_payload_len(request.payload.len())
             .map_err(|reason| TurnError::InvalidRequest { reason })?;
-        let state_ref = new_state_ref()?;
+        let state_ref = new_checkpoint_state_ref()?;
         let payload = RedactedCheckpointPayload::new(request.payload)
             .map_err(|reason| TurnError::InvalidRequest { reason })?;
         let record = CheckpointStateRecord {
@@ -295,11 +295,12 @@ impl LoopCheckpointStore for InMemoryLoopCheckpointStore {
     }
 }
 
-fn checkpoint_state_record_matches_request(
+pub fn checkpoint_state_record_matches_request(
     record: &CheckpointStateRecord,
     request: &GetCheckpointStateRequest,
 ) -> bool {
-    record.scope == request.scope
+    record.state_ref == request.state_ref
+        && record.scope == request.scope
         && record.turn_id == request.turn_id
         && record.run_id == request.run_id
         && record.schema_id == request.schema_id
@@ -317,7 +318,7 @@ fn loop_checkpoint_record_matches_request(
         && record.checkpoint_id == request.checkpoint_id
 }
 
-fn new_state_ref() -> Result<LoopCheckpointStateRef, TurnError> {
+pub fn new_checkpoint_state_ref() -> Result<LoopCheckpointStateRef, TurnError> {
     LoopCheckpointStateRef::new(format!("checkpoint:{}", Uuid::new_v4())).map_err(|reason| {
         TurnError::Unavailable {
             reason: format!("generated checkpoint state ref was invalid: {reason}"),

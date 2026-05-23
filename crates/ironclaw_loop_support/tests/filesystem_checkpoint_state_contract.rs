@@ -8,11 +8,12 @@ use ironclaw_host_api::{
     AgentId, HostPath, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId,
     ThreadId, VirtualPath,
 };
+use ironclaw_loop_support::FilesystemCheckpointStateStore;
 use ironclaw_turns::{
-    CheckpointSchemaId, CheckpointStateRecord, CheckpointStateStore,
-    FilesystemCheckpointStateStore, GetCheckpointStateRequest, MAX_CHECKPOINT_STATE_PAYLOAD_BYTES,
-    PutCheckpointStateRequest, RunProfileVersion, TurnError, TurnId, TurnRunId, TurnScope,
-    run_profile::LoopCheckpointKind,
+    CheckpointSchemaId, CheckpointStateRecord, CheckpointStateStore, GetCheckpointStateRequest,
+    MAX_CHECKPOINT_STATE_PAYLOAD_BYTES, PutCheckpointStateRequest, RunProfileVersion, TurnError,
+    TurnId, TurnRunId, TurnScope, run_profile::LoopCheckpointKind,
+    run_profile::LoopCheckpointStateRef,
 };
 
 fn engine_filesystem() -> LocalFilesystem {
@@ -56,6 +57,15 @@ fn turn_scope(tenant: &str, thread: &str) -> TurnScope {
         TenantId::new(tenant).unwrap(),
         Some(AgentId::new("agent1").unwrap()),
         Some(ProjectId::new("project1").unwrap()),
+        ThreadId::new(thread).unwrap(),
+    )
+}
+
+fn minimal_scope(tenant: &str, thread: &str) -> TurnScope {
+    TurnScope::new(
+        TenantId::new(tenant).unwrap(),
+        None,
+        None,
         ThreadId::new(thread).unwrap(),
     )
 }
@@ -214,6 +224,48 @@ async fn filesystem_checkpoint_state_store_rejects_schema_or_kind_mismatch() {
             .unwrap()
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn filesystem_checkpoint_state_store_returns_none_for_unknown_state_ref() {
+    let backend = Arc::new(engine_filesystem());
+    let store = FilesystemCheckpointStateStore::new(scoped_checkpoint_state_fs(backend));
+    let scope = turn_scope("tenant1", "thread-missing-state-ref");
+
+    let missing = GetCheckpointStateRequest {
+        scope,
+        turn_id: TurnId::new(),
+        run_id: TurnRunId::new(),
+        state_ref: LoopCheckpointStateRef::new("checkpoint:missing-state").unwrap(),
+        schema_id: CheckpointSchemaId::new("interactive_checkpoint_v1").unwrap(),
+        schema_version: RunProfileVersion::new(7),
+        kind: LoopCheckpointKind::BeforeSideEffect,
+    };
+
+    assert!(store.get_checkpoint_state(missing).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn filesystem_checkpoint_state_store_round_trips_minimal_scope() {
+    let backend = Arc::new(engine_filesystem());
+    let store = FilesystemCheckpointStateStore::new(scoped_checkpoint_state_fs(backend));
+    let scope = minimal_scope("tenant1", "thread-minimal-scope");
+    let turn_id = TurnId::new();
+    let run_id = TurnRunId::new();
+    let payload = b"minimal scope checkpoint".to_vec();
+
+    let record = store
+        .put_checkpoint_state(put_request(scope.clone(), turn_id, run_id, payload.clone()))
+        .await
+        .unwrap();
+    let loaded = store
+        .get_checkpoint_state(get_request(&record, scope, turn_id, run_id))
+        .await
+        .unwrap()
+        .expect("minimal scope checkpoint should be readable");
+
+    assert_eq!(loaded.payload.as_bytes(), payload.as_slice());
+    assert_eq!(loaded, record);
 }
 
 #[tokio::test]
