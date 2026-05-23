@@ -482,7 +482,7 @@ impl WasmHookModuleResolver for InMemoryWasmHookModules {
         self.modules
             .lock()
             .expect("wasm module resolver mutex not poisoned")
-            .get(&request.hook_local_id.0)
+            .get(request.hook_local_id.as_str())
             .cloned()
             .ok_or_else(|| {
                 WasmHookRuntimeError::module_unavailable(format!(
@@ -518,7 +518,11 @@ fn wasm_dispatcher_from_wat_with_timeout(
         export: "evaluate".to_string(),
         budget,
     };
-    let entry = HookManifestEntry::new(HookLocalId(local_id.to_string()), kind, body)
+    let entry = HookManifestEntry::new(
+        HookLocalId::new(local_id).expect("valid HookLocalId in test"),
+        kind,
+        body,
+    )
         .with_scope(HookManifestScope::SameTenant)
         .with_requires_grant("integration-test-wasm-hooks");
     let mut builder = HookDispatcherBuilder::new(HookRegistry::new());
@@ -551,7 +555,7 @@ fn wasm_before_prompt_dispatcher_from_wat(
         budget,
     };
     let entry = HookManifestEntry::new(
-        HookLocalId(local_id.to_string()),
+        HookLocalId::new(local_id).expect("valid HookLocalId in test"),
         HookManifestKind::BeforePrompt,
         body,
     )
@@ -1392,7 +1396,7 @@ async fn wasm_unsupported_host_import_is_rejected_at_install_time() {
         .with_wasm_runtime(runtime)
         .with_verified_grants(["integration-test-wasm-hooks".to_string()]);
     let entry = HookManifestEntry::new(
-        HookLocalId("wasm-bad-import".to_string()),
+        HookLocalId::new("wasm-bad-import").expect("valid HookLocalId in test"),
         HookManifestKind::BeforeCapability,
         HookManifestBody::Wasm {
             export: "evaluate".to_string(),
@@ -1443,7 +1447,7 @@ async fn wasm_missing_export_is_rejected_at_install_time() {
         .with_wasm_runtime(runtime)
         .with_verified_grants(["integration-test-wasm-hooks".to_string()]);
     let entry = HookManifestEntry::new(
-        HookLocalId("wasm-missing-export".to_string()),
+        HookLocalId::new("wasm-missing-export").expect("valid HookLocalId in test"),
         HookManifestKind::BeforeCapability,
         HookManifestBody::Wasm {
             export: "evaluate".to_string(),

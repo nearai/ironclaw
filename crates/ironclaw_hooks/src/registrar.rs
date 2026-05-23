@@ -489,7 +489,7 @@ mod tests {
             .with_wasm_runtime(runtime)
             .with_verified_grants(["installed-wasm-happy".to_string()]);
         let entry = HookManifestEntry {
-            id: HookLocalId("wasm-happy".to_string()),
+            id: HookLocalId::new("wasm-happy").expect("valid local id"),
             kind: HookManifestKind::BeforeCapability,
             scope: HookManifestScope::SameTenant,
             phase: HookPhase::Policy,
