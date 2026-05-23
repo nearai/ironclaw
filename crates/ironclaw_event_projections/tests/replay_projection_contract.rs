@@ -2192,3 +2192,166 @@ async fn non_hook_runtime_events_project_with_no_hook_metadata() {
     assert!(entry.hook_failure_category.is_none());
     assert!(entry.hook_failure_disposition.is_none());
 }
+
+// ─── PR #3573 deferred test: run-status projection of hook events ─────────
+
+/// Deferred from the PR #3573 round-3 review. Pins the contract documented
+/// in `run_status_for_event`: hook events are pure observability telemetry
+/// and never change a run's lifecycle status. The runner-level test ensures
+/// the contract survives via the full snapshot path (durable log →
+/// `apply_run_event` → projection), not just the private helper.
+///
+/// Specifically:
+/// - A `HookFailed` event for a run already `Completed` must not downgrade
+///   the run to `Failed` (or `Running`).
+/// - A `HookDecisionEmitted` event must not change a `Completed` run's
+///   status either.
+/// - When a run is observed only via hook events (boundary case), the
+///   projection defaults to `Running`, never silently dropping the run.
+#[tokio::test]
+async fn hook_runtime_events_do_not_alter_run_status_projection() {
+    let scope = scope_for_thread(ThreadId::new("thread-hook-runs").unwrap());
+
+    // 1. Drive the run to `Completed` via a terminal lifecycle event …
+    let loop_completed = RuntimeEvent {
+        event_id: RuntimeEventId::new(),
+        timestamp: Utc::now(),
+        kind: RuntimeEventKind::LoopCompleted,
+        scope: scope.clone(),
+        capability_id: capability_id(),
+        provider: Some(provider_id()),
+        runtime: None,
+        process_id: None,
+        output_bytes: None,
+        error_kind: None,
+        hook_id: None,
+        hook_point: None,
+        hook_trust_class: None,
+        hook_decision: None,
+        hook_failure_category: None,
+        hook_failure_disposition: None,
+    };
+    // … then emit hook telemetry that, if the projection mistakenly treated
+    // hook events as lifecycle transitions, would either flip the run to
+    // `Failed` (HookFailed) or back to `Running` (HookDecisionEmitted).
+    let hook_failed_after_completion = RuntimeEvent {
+        event_id: RuntimeEventId::new(),
+        timestamp: Utc::now(),
+        kind: RuntimeEventKind::HookFailed,
+        scope: scope.clone(),
+        capability_id: capability_id(),
+        provider: Some(provider_id()),
+        runtime: None,
+        process_id: None,
+        output_bytes: None,
+        error_kind: None,
+        hook_id: Some("0123456789abcdef".repeat(4)),
+        hook_point: None,
+        hook_trust_class: None,
+        hook_decision: None,
+        hook_failure_category: Some("timeout".to_string()),
+        hook_failure_disposition: Some("fail_closed".to_string()),
+    };
+    let hook_decision_after_completion = RuntimeEvent {
+        event_id: RuntimeEventId::new(),
+        timestamp: Utc::now(),
+        kind: RuntimeEventKind::HookDecisionEmitted,
+        scope: scope.clone(),
+        capability_id: capability_id(),
+        provider: Some(provider_id()),
+        runtime: None,
+        process_id: None,
+        output_bytes: None,
+        error_kind: None,
+        hook_id: Some("0123456789abcdef".repeat(4)),
+        hook_point: None,
+        hook_trust_class: None,
+        hook_decision: Some("allow".to_string()),
+        hook_failure_category: None,
+        hook_failure_disposition: None,
+    };
+
+    let backend = Arc::new(StaticDurableEventLog {
+        entries: vec![
+            EventLogEntry {
+                cursor: EventCursor::new(1),
+                record: loop_completed,
+            },
+            EventLogEntry {
+                cursor: EventCursor::new(2),
+                record: hook_failed_after_completion,
+            },
+            EventLogEntry {
+                cursor: EventCursor::new(3),
+                record: hook_decision_after_completion,
+            },
+        ],
+    });
+    let service = ReplayEventProjectionService::new(Arc::clone(&backend));
+    let snapshot = service
+        .snapshot(ProjectionRequest {
+            scope: ProjectionScope::from_resource_scope(&scope),
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(snapshot.runs.len(), 1, "single invocation, single run");
+    assert_eq!(
+        snapshot.runs[0].status,
+        RunProjectionStatus::Completed,
+        "post-completion hook events must not alter run status",
+    );
+}
+
+/// Boundary case: when the only events observed for a run are hook events,
+/// the run's status defaults to `Running`. Confirms the projection still
+/// surfaces the run rather than silently dropping it (consumers rely on
+/// `runs` containing every invocation that produced at least one event).
+#[tokio::test]
+async fn hook_only_runtime_events_default_run_status_to_running() {
+    let scope = scope_for_thread(ThreadId::new("thread-hook-only").unwrap());
+
+    let dispatched = RuntimeEvent {
+        event_id: RuntimeEventId::new(),
+        timestamp: Utc::now(),
+        kind: RuntimeEventKind::HookDispatched,
+        scope: scope.clone(),
+        capability_id: capability_id(),
+        provider: Some(provider_id()),
+        runtime: None,
+        process_id: None,
+        output_bytes: None,
+        error_kind: None,
+        hook_id: Some("0123456789abcdef".repeat(4)),
+        hook_point: Some("before_capability".to_string()),
+        hook_trust_class: Some("installed".to_string()),
+        hook_decision: None,
+        hook_failure_category: None,
+        hook_failure_disposition: None,
+    };
+
+    let backend = Arc::new(StaticDurableEventLog {
+        entries: vec![EventLogEntry {
+            cursor: EventCursor::new(1),
+            record: dispatched,
+        }],
+    });
+    let service = ReplayEventProjectionService::new(Arc::clone(&backend));
+    let snapshot = service
+        .snapshot(ProjectionRequest {
+            scope: ProjectionScope::from_resource_scope(&scope),
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(snapshot.runs.len(), 1, "hook-only run still surfaces");
+    assert_eq!(
+        snapshot.runs[0].status,
+        RunProjectionStatus::Running,
+        "boundary case: hook-only runs default to Running",
+    );
+}

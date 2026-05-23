@@ -672,6 +672,40 @@ mod tests {
         assert!(inner.calls().is_empty(), "inner must not be invoked");
     }
 
+    /// Companion to `gate_ref_factory_failure_falls_back_to_denied` covering
+    /// the `PauseAuth` arm. Deferred from the PR #3573 round-3 review.
+    /// When the gate-ref factory's `mint_auth_ref` errors, the middleware
+    /// must fail closed: surface `Denied` with the `hook_gate_ref_unavailable`
+    /// reason_kind, preserve the hook's sanitized summary, and never reach
+    /// the inner port.
+    #[tokio::test]
+    async fn gate_ref_factory_failure_for_pause_auth_falls_back_to_denied() {
+        let inner = Arc::new(AlwaysCompletedPort::new());
+        let (dispatcher, _) =
+            dispatcher_with_restricted_hook("pause-auth-fail", Box::new(PauseAuthHook));
+        let wrapped = HookedLoopCapabilityPort::new(inner.clone(), dispatcher, tenant())
+            .with_gate_ref_factory(Arc::new(FailingGateRefFactory));
+
+        let outcome = wrapped
+            .invoke_capability(invocation("cap.x"))
+            .await
+            .expect("ok");
+
+        match outcome {
+            CapabilityOutcome::Denied(denied) => {
+                assert_eq!(
+                    denied.reason_kind,
+                    CapabilityDeniedReasonKind::unknown("hook_gate_ref_unavailable").expect("ok"),
+                );
+                // Sanitized hook reason is preserved; underlying error text
+                // ("no router") must not leak.
+                assert_eq!(denied.safe_summary, "needs auth for this capability");
+            }
+            other => panic!("expected Denied fallback, got {other:?}"),
+        }
+        assert!(inner.calls().is_empty(), "inner must not be invoked");
+    }
+
     /// serrrfirat P2 #3 on PR #3573: when an inner-port `invoke_capability`
     /// in the batch loop returns `Err`, the previous implementation
     /// propagated the error before dispatching `AfterCapability` observers.
