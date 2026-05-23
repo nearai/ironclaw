@@ -25,3 +25,17 @@ mod hashing;
 mod schema;
 
 pub use backend::LibSqlPredicateStateBackend;
+
+/// Test-only accessors for the crate-internal bucket hashing, used by the
+/// contract/parity tests to compute the `scope_hash` a tenant maps to so a
+/// test can query rows directly by the canonical tenant grain (the raw
+/// `tenant_id` is no longer a column). Not part of the public API surface
+/// (this crate is `publish = false`); kept out of the rendered docs.
+/// Production code must never depend on this module.
+#[doc(hidden)]
+pub mod test_support {
+    /// `scope_hash` (tenant digest) bytes — see `crate::hashing::tenant_scope_hash`.
+    pub fn tenant_scope_hash_bytes(tenant_id: &str) -> Vec<u8> {
+        crate::hashing::tenant_scope_hash(tenant_id)
+    }
+}
