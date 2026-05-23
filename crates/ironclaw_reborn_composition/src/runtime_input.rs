@@ -276,8 +276,14 @@ impl RebornRuntimeInput {
         self
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_model_gateway_override(
+    /// Test-only hook: drive `build_reborn_runtime` with a stub
+    /// `HostManagedModelGateway` (e.g. [`crate::test_support::BudgetTestGateway`])
+    /// instead of the LLM-backed gateway. Gated on `cfg(any(test,
+    /// feature = "test-support"))` so it is available to this crate's
+    /// own tests and to downstream integration tests that opt in via
+    /// the `test-support` feature.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_model_gateway_override(
         mut self,
         gateway: Arc<dyn HostManagedModelGateway>,
     ) -> Self {
@@ -285,26 +291,14 @@ impl RebornRuntimeInput {
         self
     }
 
-    /// Test-only hook used by `test_support::RebornRuntimeInputTestExt`
-    /// and by integration tests in this crate. Exposed under the
-    /// `test-support` feature so downstream tests can drive
-    /// `build_reborn_runtime` with a stub `HostManagedModelGateway`
-    /// (e.g. `BudgetTestGateway`) without reaching into private fields.
-    #[cfg(feature = "test-support")]
-    pub fn with_model_gateway_override_for_tests(
-        mut self,
-        gateway: Arc<dyn HostManagedModelGateway>,
-    ) -> Self {
-        self.model_gateway_override = Some(gateway);
-        self
-    }
-
-    /// Test-only hook to pair a model gateway override with a custom
-    /// cost table. The accountant uses this table to compute USD spend
-    /// from the gateway's reported tokens, so tests that want to assert
-    /// specific ledger movements provide deterministic prices here.
-    #[cfg(feature = "test-support")]
-    pub fn with_model_cost_table_override_for_tests(
+    /// Test-only hook: pair the model gateway override with a custom
+    /// cost table. Without this, gateway overrides produce no
+    /// accountant and budget tests cannot assert ledger state — the
+    /// LLM-derived cost table comes from
+    /// `LlmModelProfilePolicy::build_cost_table()` which the test
+    /// override skips.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_model_cost_table_override(
         mut self,
         cost_table: Arc<dyn ironclaw_loop_support::ModelCostTable>,
     ) -> Self {

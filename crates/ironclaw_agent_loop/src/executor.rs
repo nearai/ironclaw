@@ -350,15 +350,16 @@ impl CanonicalAgentLoopExecutor {
                 }
                 ModelStep::Exit(exit) => return Ok(exit),
             };
-            // Feed provider-reported output token count into the
-            // rolling window so the stop strategy can detect
-            // diminishing-returns loops (#3841 follow-up F1). When the
-            // gateway didn't surface usage we push 0 — same as a
-            // zero-output turn, which is what diminishing-returns
-            // wants to detect anyway.
-            state
-                .recent_output_token_counts
-                .push(model_response.usage.map(|u| u.output_tokens).unwrap_or(0));
+            // Extract output-token usage before the `match` consumes
+            // `model_response`. Only assistant-reply turns feed the
+            // diminishing-returns window (#3841 follow-up F1): a
+            // capability-batch turn produces tool calls, not output
+            // tokens, and would otherwise look like four "no progress"
+            // turns in a row. Likewise we only push when the gateway
+            // actually reported usage — `None` is "unknown", which
+            // must NOT count as a zero-output turn against the
+            // detector.
+            let response_output_tokens = model_response.usage.map(|u| u.output_tokens);
             match model_response.output {
                 ParentLoopOutput::AssistantReply(reply) => {
                     let reply_ref = host
@@ -372,6 +373,9 @@ impl CanonicalAgentLoopExecutor {
                         CancelCheck::Continue(state) => *state,
                         CancelCheck::Exit(exit) => return Ok(exit),
                     };
+                    if let Some(tokens) = response_output_tokens {
+                        state.recent_output_token_counts.push(tokens);
+                    }
 
                     let summary = TurnSummary {
                         kind: TurnEndKind::ReplyOnly,

@@ -4,9 +4,11 @@
 //! Gated behind the `test-support` feature so production builds never pay
 //! the cost of the mock gateway / introspection accessors. The shapes here
 //! are deliberately small: a mock [`HostManagedModelGateway`] with
-//! per-turn scripted responses (including token usage), and the public
-//! `with_model_gateway_override` test hook that mirrors the crate-private
-//! one used inside `runtime.rs`.
+//! per-turn scripted responses (including token usage), plus its companion
+//! cost-table helper. Tests inject these via
+//! [`RebornRuntimeInput::with_model_gateway_override`] and
+//! [`RebornRuntimeInput::with_model_cost_table_override`], which are
+//! exposed under the same `test-support` feature.
 
 use std::sync::{Arc, Mutex};
 
@@ -16,8 +18,6 @@ use ironclaw_loop_support::{
     HostManagedModelRequest, HostManagedModelResponse,
 };
 use ironclaw_turns::run_profile::{LoopCapabilityPort, LoopModelUsage};
-
-use crate::runtime_input::RebornRuntimeInput;
 
 /// One scripted reply from the mock LLM.
 ///
@@ -165,40 +165,5 @@ impl HostManagedModelGateway for FailingTestGateway {
         _request: HostManagedModelRequest,
     ) -> Result<HostManagedModelResponse, HostManagedModelError> {
         Err(HostManagedModelError::safe(self.kind, self.summary.clone()))
-    }
-}
-
-/// Extension trait that gives integration tests the same crate-private
-/// `with_model_gateway_override` hook the in-crate tests use, without
-/// promoting the field-level setter to `pub` outside `test-support`.
-pub trait RebornRuntimeInputTestExt {
-    /// Inject a stub `HostManagedModelGateway` (typically a
-    /// [`BudgetTestGateway`]) so `send_user_message` flows through it
-    /// instead of the LLM-backed gateway.
-    fn with_test_model_gateway(self, gateway: Arc<dyn HostManagedModelGateway>) -> Self;
-
-    /// Pair the test gateway with a deterministic cost table so the
-    /// budget accountant reconciles real per-token prices on every
-    /// `post_model_call`. Without this, gateway overrides produce no
-    /// accountant and budget tests can't assert ledger state.
-    fn with_test_model_cost_table(
-        self,
-        cost_table: Arc<dyn ironclaw_loop_support::ModelCostTable>,
-    ) -> Self;
-}
-
-impl RebornRuntimeInputTestExt for RebornRuntimeInput {
-    fn with_test_model_gateway(self, gateway: Arc<dyn HostManagedModelGateway>) -> Self {
-        // The crate-private setter is only `pub(crate)`; we forward through
-        // the public test-support surface so integration tests do not need
-        // to reach into the runtime's internal fields directly.
-        self.with_model_gateway_override_for_tests(gateway)
-    }
-
-    fn with_test_model_cost_table(
-        self,
-        cost_table: Arc<dyn ironclaw_loop_support::ModelCostTable>,
-    ) -> Self {
-        self.with_model_cost_table_override_for_tests(cost_table)
     }
 }

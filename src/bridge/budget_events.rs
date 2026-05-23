@@ -3,21 +3,18 @@
 //!
 //! Producer: [`spawn_budget_event_projection`] runs in a tokio task that
 //! reads from a `tokio::sync::broadcast::Receiver<BudgetEvent>` and
-//! emits [`AppEvent::BudgetWarn`] / [`AppEvent::BudgetPause`] /
-//! [`AppEvent::BudgetDenied`] / [`AppEvent::BudgetLimitChanged`] via the
-//! [`SseManager`].
-//!
-//! This is the only producer of those `AppEvent` variants per
-//! `.claude/rules/gateway-events.md` — `sse.broadcast_for_user` calls
-//! from anywhere else would split the producer surface.
+//! emits [`AppEvent::Budget`] via the [`SseManager`]. This is the only
+//! producer of `AppEvent::Budget` per `.claude/rules/gateway-events.md`
+//! — `sse.broadcast_for_user` calls from anywhere else would split the
+//! producer surface.
 //!
 //! Implements #3841 follow-up A2 (audit/SSE projection).
 
 use std::sync::Arc;
 
-use ironclaw_common::AppEvent;
+use ironclaw_common::{AppBudgetEvent, AppEvent};
 use ironclaw_host_api::UserId;
-use ironclaw_resources::{BudgetEvent, BudgetGateId, BudgetWarning, ResourceAccount};
+use ironclaw_resources::{BudgetEvent, ResourceAccount};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
@@ -73,104 +70,56 @@ pub(crate) fn project_budget_event(sse: &SseManager, event: BudgetEvent) {
         tracing::debug!(?event, "skipping system-scoped BudgetEvent — no user id");
         return;
     };
-    let app_event = match event {
-        BudgetEvent::Warned { warning, .. } => Some(app_event_from_warning(warning)),
-        BudgetEvent::ApprovalRequested { needed, .. } => {
-            let gate_id = BudgetGateId::new();
-            Some(AppEvent::BudgetPause {
-                gate_id: gate_id.to_string(),
-                account: account_label(&needed.account),
-                dimension: needed.dimension.to_string(),
-                utilization: needed.utilization,
-                period_end_iso: needed.period_end.map(|t| t.to_rfc3339()),
-            })
-        }
-        BudgetEvent::Denied { denial, .. } => Some(AppEvent::BudgetDenied {
-            account: account_label(&denial.account),
+    let Some(payload) = to_app_budget_event(&event) else {
+        // Accounting bookkeeping (Reserved / Reconciled / Released /
+        // ApprovalResolved) is captured by the in-memory audit sink
+        // but too noisy for the client SSE stream.
+        return;
+    };
+    // projection-exempt: bridge dispatcher, budget event sink
+    sse.broadcast_for_user(user_id.as_str(), AppEvent::Budget(payload));
+}
+
+/// Pure mapping from `BudgetEvent` to its wire-projected
+/// [`AppBudgetEvent`] (or `None` for accounting-only variants). Exposed
+/// `pub(crate)` so tests can drive the mapping without standing up an
+/// `SseManager`.
+pub(crate) fn to_app_budget_event(event: &BudgetEvent) -> Option<AppBudgetEvent> {
+    match event {
+        BudgetEvent::Warned { warning, .. } => Some(AppBudgetEvent::Warn {
+            account: warning.account.to_string(),
+            dimension: warning.dimension.to_string(),
+            utilization: warning.utilization,
+            period_end_iso: warning.period_end.map(|t| t.to_rfc3339()),
+        }),
+        BudgetEvent::GateOpened {
+            gate_id, needed, ..
+        } => Some(AppBudgetEvent::Pause {
+            gate_id: gate_id.to_string(),
+            account: needed.account.to_string(),
+            dimension: needed.dimension.to_string(),
+            utilization: needed.utilization,
+            period_end_iso: needed.period_end.map(|t| t.to_rfc3339()),
+        }),
+        BudgetEvent::Denied { denial, .. } => Some(AppBudgetEvent::Denied {
+            account: denial.account.to_string(),
             dimension: denial.dimension.to_string(),
         }),
-        BudgetEvent::LimitChanged { account, .. } => Some(AppEvent::BudgetLimitChanged {
-            account: account_label(&account),
+        BudgetEvent::LimitChanged { account, .. } => Some(AppBudgetEvent::LimitChanged {
+            account: account.to_string(),
         }),
-        // Reserved / Reconciled / Released / ApprovalResolved are
-        // accounting bookkeeping — useful for audit log but too noisy
+        // The governor's `ApprovalRequested` is an internal signal that
+        // precedes the gate-open; the accountant's `GateOpened` is the
+        // user-facing event with the real gate id. Skip the governor's
+        // raw signal so consumers don't see a phantom Pause without a
+        // resolvable gate.
+        BudgetEvent::ApprovalRequested { .. } => None,
+        // Accounting bookkeeping — useful for audit log but too noisy
         // to broadcast to clients. Skip.
         BudgetEvent::Reserved { .. }
         | BudgetEvent::Reconciled { .. }
         | BudgetEvent::Released { .. }
         | BudgetEvent::ApprovalResolved { .. } => None,
-    };
-    if let Some(event) = app_event {
-        sse.broadcast_for_user(user_id.as_str(), event); // projection-exempt: bridge dispatcher, budget event sink
-    }
-}
-
-fn app_event_from_warning(warning: BudgetWarning) -> AppEvent {
-    AppEvent::BudgetWarn {
-        account: account_label(&warning.account),
-        dimension: warning.dimension.to_string(),
-        utilization: warning.utilization,
-        period_end_iso: warning.period_end.map(|t| t.to_rfc3339()),
-    }
-}
-
-/// Stable string label for an account: `tenant/user/...` joined with
-/// `/`. The SSE event has no other place to carry hierarchical scope;
-/// frontend code splits on `/` when rendering.
-fn account_label(account: &ResourceAccount) -> String {
-    match account {
-        ResourceAccount::Tenant { tenant_id } => format!("tenant/{}", tenant_id.as_str()),
-        ResourceAccount::User { tenant_id, user_id } => {
-            format!("tenant/{}/user/{}", tenant_id.as_str(), user_id.as_str())
-        }
-        ResourceAccount::Project {
-            tenant_id,
-            user_id,
-            project_id,
-        } => format!(
-            "tenant/{}/user/{}/project/{}",
-            tenant_id.as_str(),
-            user_id.as_str(),
-            project_id.as_str()
-        ),
-        ResourceAccount::Agent {
-            tenant_id,
-            user_id,
-            project_id,
-            agent_id,
-        } => format!(
-            "tenant/{}/user/{}/project/{}/agent/{}",
-            tenant_id.as_str(),
-            user_id.as_str(),
-            project_id.as_ref().map(|p| p.as_str()).unwrap_or("_"),
-            agent_id.as_str()
-        ),
-        ResourceAccount::Mission {
-            tenant_id,
-            user_id,
-            project_id,
-            mission_id,
-        } => format!(
-            "tenant/{}/user/{}/project/{}/mission/{}",
-            tenant_id.as_str(),
-            user_id.as_str(),
-            project_id.as_ref().map(|p| p.as_str()).unwrap_or("_"),
-            mission_id.as_str()
-        ),
-        ResourceAccount::Thread {
-            tenant_id,
-            user_id,
-            project_id,
-            mission_id,
-            thread_id,
-        } => format!(
-            "tenant/{}/user/{}/project/{}/mission/{}/thread/{}",
-            tenant_id.as_str(),
-            user_id.as_str(),
-            project_id.as_ref().map(|p| p.as_str()).unwrap_or("_"),
-            mission_id.as_ref().map(|m| m.as_str()).unwrap_or("_"),
-            thread_id.as_str()
-        ),
     }
 }
 
@@ -184,7 +133,9 @@ fn sse_user_id_for(event: &BudgetEvent) -> Option<UserId> {
         | BudgetEvent::LimitChanged { account, .. } => account,
         BudgetEvent::Warned { warning, .. } => &warning.account,
         BudgetEvent::Denied { denial, .. } => &denial.account,
-        BudgetEvent::ApprovalRequested { needed, .. } => &needed.account,
+        BudgetEvent::ApprovalRequested { needed, .. } | BudgetEvent::GateOpened { needed, .. } => {
+            &needed.account
+        }
         BudgetEvent::ApprovalResolved { gate, .. } => &gate.needed.account,
     };
     match account {
@@ -203,8 +154,8 @@ mod tests {
     use chrono::Utc;
     use ironclaw_host_api::TenantId;
     use ironclaw_resources::{
-        BudgetEvent, BudgetWarning, ResourceAccount, ResourceApprovalNeeded, ResourceDenial,
-        ResourceDimension, ResourceValue,
+        BudgetEvent, BudgetGateId, BudgetWarning, ResourceAccount, ResourceApprovalNeeded,
+        ResourceDenial, ResourceDimension, ResourceValue,
     };
     use rust_decimal::Decimal;
 
@@ -243,37 +194,82 @@ mod tests {
     }
 
     #[test]
-    fn account_label_handles_every_cascade_level() {
-        let tenant = ResourceAccount::tenant(TenantId::new("t").unwrap());
-        assert_eq!(account_label(&tenant), "tenant/t");
-        let user = ResourceAccount::user(TenantId::new("t").unwrap(), UserId::new("u").unwrap());
-        assert_eq!(account_label(&user), "tenant/t/user/u");
-    }
-
-    #[test]
-    fn budget_event_to_app_event_warn_carries_dimension_and_utilization() {
-        // We can't construct an SseManager easily, so test the
-        // BudgetEvent → AppEvent mapping by reaching into the helper
-        // directly.
-        let event = AppEvent::BudgetWarn {
-            account: account_label(&user_warning().account),
-            dimension: user_warning().dimension.to_string(),
-            utilization: user_warning().utilization,
-            period_end_iso: None,
+    fn warned_maps_to_warn_payload_with_canonical_account_label() {
+        let event = BudgetEvent::Warned {
+            warning: user_warning(),
+            at: Utc::now(),
         };
-        let AppEvent::BudgetWarn {
+        let payload = to_app_budget_event(&event).expect("warn maps");
+        let AppBudgetEvent::Warn {
             account,
             dimension,
             utilization,
             period_end_iso,
-        } = event
+        } = payload
         else {
-            panic!("expected BudgetWarn");
+            panic!("expected Warn");
         };
         assert_eq!(account, "tenant/t/user/u");
         assert_eq!(dimension, "usd");
         assert!((utilization - 0.85).abs() < 1e-9);
         assert!(period_end_iso.is_none());
+    }
+
+    /// Regression for the invented-gate-id bug: the projected
+    /// `Pause` event carries the real `BudgetGateId` from
+    /// `BudgetEvent::GateOpened`, not a freshly-minted phantom.
+    #[test]
+    fn gate_opened_carries_real_gate_id_into_pause_payload() {
+        let real_gate_id = BudgetGateId::new();
+        let event = BudgetEvent::GateOpened {
+            gate_id: real_gate_id,
+            needed: user_approval_needed(),
+            at: Utc::now(),
+        };
+        let payload = to_app_budget_event(&event).expect("gate-opened maps");
+        let AppBudgetEvent::Pause {
+            gate_id, account, ..
+        } = payload
+        else {
+            panic!("expected Pause");
+        };
+        assert_eq!(
+            gate_id,
+            real_gate_id.to_string(),
+            "Pause must carry the real gate id from the accountant, \
+             not a freshly invented UUID"
+        );
+        assert_eq!(account, "tenant/t/user/u");
+    }
+
+    /// Regression: the governor's raw `ApprovalRequested` (no gate id)
+    /// is suppressed from the wire so consumers never see a phantom
+    /// Pause without a resolvable gate.
+    #[test]
+    fn approval_requested_alone_does_not_project() {
+        let event = BudgetEvent::ApprovalRequested {
+            needed: user_approval_needed(),
+            at: Utc::now(),
+        };
+        assert!(
+            to_app_budget_event(&event).is_none(),
+            "the governor's gateless ApprovalRequested must not project; \
+             the accountant's GateOpened is the user-facing event"
+        );
+    }
+
+    #[test]
+    fn denied_maps_to_denied_payload() {
+        let event = BudgetEvent::Denied {
+            denial: user_denial(),
+            at: Utc::now(),
+        };
+        let payload = to_app_budget_event(&event).expect("denied maps");
+        let AppBudgetEvent::Denied { account, dimension } = payload else {
+            panic!("expected Denied");
+        };
+        assert_eq!(account, "tenant/t/user/u");
+        assert_eq!(dimension, "usd");
     }
 
     #[test]
@@ -291,11 +287,12 @@ mod tests {
         };
         assert_eq!(sse_user_id_for(&denied).unwrap().as_str(), "u");
 
-        let approval = BudgetEvent::ApprovalRequested {
+        let gate_opened = BudgetEvent::GateOpened {
+            gate_id: BudgetGateId::new(),
             needed: user_approval_needed(),
             at: Utc::now(),
         };
-        assert_eq!(sse_user_id_for(&approval).unwrap().as_str(), "u");
+        assert_eq!(sse_user_id_for(&gate_opened).unwrap().as_str(), "u");
     }
 
     #[test]

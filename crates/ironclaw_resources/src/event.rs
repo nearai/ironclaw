@@ -9,8 +9,8 @@
 use chrono::{DateTime, Utc};
 
 use crate::{
-    BudgetApprovalGate, BudgetGateOutcome, BudgetWarning, ResourceAccount, ResourceApprovalNeeded,
-    ResourceDenial, ResourceReceipt, ResourceReservation,
+    BudgetApprovalGate, BudgetGateId, BudgetGateOutcome, BudgetWarning, ResourceAccount,
+    ResourceApprovalNeeded, ResourceDenial, ResourceReceipt, ResourceReservation,
 };
 
 /// One observable budget event.
@@ -43,7 +43,25 @@ pub enum BudgetEvent {
         denial: ResourceDenial,
         at: DateTime<Utc>,
     },
+    /// The governor's cascade said approval is needed but no gate has been
+    /// opened yet. Internal signal from the governor — the accountant
+    /// (or any other handler that holds a [`BudgetGateStore`]) reacts to
+    /// this by opening a gate and emitting [`BudgetEvent::GateOpened`]
+    /// with the real `BudgetGateId`.
+    ///
+    /// SSE projection consumers should ignore this variant and listen
+    /// for `GateOpened` instead (review feedback: invented-gate-id bug).
     ApprovalRequested {
+        needed: ResourceApprovalNeeded,
+        at: DateTime<Utc>,
+    },
+    /// A pending approval gate has been opened in the
+    /// [`BudgetGateStore`]. Carries the real `BudgetGateId` so the
+    /// SSE projection / audit log can route the user to a resolvable
+    /// gate. Produced by `GovernorBackedAccountant` after a successful
+    /// `BudgetGateStore::open`.
+    GateOpened {
+        gate_id: BudgetGateId,
         needed: ResourceApprovalNeeded,
         at: DateTime<Utc>,
     },

@@ -14,6 +14,8 @@ use std::{
 };
 
 mod budget_accountant;
+mod budget_cost_table;
+mod budget_seeding;
 mod cancellation_port;
 mod capability_allow_set;
 mod capability_port;
@@ -26,10 +28,9 @@ mod skill_bundle_context_source;
 mod skill_bundle_source;
 mod skill_context;
 
-pub use budget_accountant::{
-    BudgetSeedingPolicy, GovernorBackedAccountant, ModelCost, ModelCostTable, StaticModelCostTable,
-    ZeroCostTable,
-};
+pub use budget_accountant::GovernorBackedAccountant;
+pub use budget_cost_table::{ModelCost, ModelCostTable, StaticModelCostTable, ZeroCostTable};
+pub use budget_seeding::BudgetSeedingPolicy;
 pub use cancellation_port::{
     AlwaysAliveLoopCancellationPort, AlwaysAliveRunCancellationFactory,
     CompositeTurnRunWakeNotifier, ProductLiveCancellationProbe, ProductLiveCancellationReadiness,

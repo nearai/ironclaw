@@ -40,9 +40,7 @@ use ironclaw_host_api::runtime_policy::{
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
 };
 use ironclaw_loop_support::{ModelCost, ModelCostTable, StaticModelCostTable};
-use ironclaw_reborn_composition::test_support::{
-    BudgetTestGateway, RebornRuntimeInputTestExt, ScriptedReply,
-};
+use ironclaw_reborn_composition::test_support::{BudgetTestGateway, ScriptedReply};
 use ironclaw_reborn_composition::{
     PollSettings, RebornBuildInput, RebornRuntimeIdentity, RebornRuntimeInput, build_reborn_runtime,
 };
@@ -111,8 +109,8 @@ fn build_input(
         interval: Duration::from_millis(10),
         max_total: Duration::from_secs(3),
     })
-    .with_test_model_gateway(gateway)
-    .with_test_model_cost_table(cost_table)
+    .with_model_gateway_override(gateway)
+    .with_model_cost_table_override(cost_table)
 }
 
 /// F1: happy path — request fires, budget depletes by the gateway-reported

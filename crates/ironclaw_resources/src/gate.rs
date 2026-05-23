@@ -104,6 +104,12 @@ pub enum BudgetGateError {
     Storage { reason: String },
 }
 
+impl crate::cas_snapshot::StorageError for BudgetGateError {
+    fn storage(reason: String) -> Self {
+        Self::Storage { reason }
+    }
+}
+
 /// Transactional store for budget approval gates.
 pub trait BudgetGateStore: Send + Sync + std::fmt::Debug {
     fn open(&self, gate: BudgetApprovalGate) -> Result<(), BudgetGateError>;

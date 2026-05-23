@@ -12,7 +12,9 @@ use std::sync::Arc;
 
 use ironclaw_loop_support::{BudgetSeedingPolicy, GovernorBackedAccountant, ModelCostTable};
 use ironclaw_reborn_config::{BudgetDefaults, BudgetDefaultsError};
-use ironclaw_resources::{BudgetGateStore, BudgetPeriod, BudgetThresholds, ResourceGovernor};
+use ironclaw_resources::{
+    BudgetEventSink, BudgetGateStore, BudgetPeriod, BudgetThresholds, ResourceGovernor,
+};
 use ironclaw_turns::run_profile::LoopModelBudgetAccountant;
 use rust_decimal::Decimal;
 
@@ -40,13 +42,20 @@ use rust_decimal::Decimal;
 /// **Production composition note**: this helper is the single source of
 /// truth for how the accountant gets built. Production runtime
 /// composers should call it with the persistent governor + filesystem
-/// gate store + LLM-policy-derived cost table, then thread the
-/// returned `Arc<dyn LoopModelBudgetAccountant>` into the
+/// gate store + LLM-policy-derived cost table + the same event sink
+/// wired into the governor, then thread the returned
+/// `Arc<dyn LoopModelBudgetAccountant>` into the
 /// `RebornLoopDriverHostFactory::with_model_budget_accountant` builder.
+///
+/// The accountant uses the supplied `event_sink` to emit
+/// `BudgetEvent::GateOpened` after persisting a pending gate so SSE /
+/// audit consumers receive the real `BudgetGateId` (the governor's
+/// earlier `ApprovalRequested` event carries no gate id).
 pub fn build_default_budget_accountant(
     governor: Arc<dyn ResourceGovernor>,
     cost_table: Arc<dyn ModelCostTable>,
     gate_store: Arc<dyn BudgetGateStore>,
+    event_sink: Arc<dyn BudgetEventSink>,
 ) -> Result<Arc<dyn LoopModelBudgetAccountant>, BudgetDefaultsError> {
     let defaults = BudgetDefaults::compiled_defaults().with_env()?;
     let user_daily_usd = Decimal::from_f64_retain(defaults.user_daily_usd).unwrap_or_default();
@@ -66,7 +75,8 @@ pub fn build_default_budget_accountant(
     let accountant = GovernorBackedAccountant::new(governor, cost_table)
         .with_overestimate_factor(overestimate_factor)
         .with_seeding_policy(seeding_policy)
-        .with_gate_store(gate_store);
+        .with_gate_store(gate_store)
+        .with_event_sink(event_sink);
     Ok(Arc::new(accountant))
 }
 
@@ -75,7 +85,9 @@ mod tests {
     use super::*;
     use ironclaw_host_api::{InvocationId, ResourceEstimate, ResourceScope, TenantId, UserId};
     use ironclaw_loop_support::ZeroCostTable;
-    use ironclaw_resources::{InMemoryBudgetGateStore, InMemoryResourceGovernor, ResourceAccount};
+    use ironclaw_resources::{
+        InMemoryBudgetEventSink, InMemoryBudgetGateStore, InMemoryResourceGovernor, ResourceAccount,
+    };
     use rust_decimal_macros::dec;
 
     /// The helper installs the compiled-default $5 user cap on the
@@ -88,9 +100,14 @@ mod tests {
         let governor: Arc<dyn ResourceGovernor> = Arc::new(InMemoryResourceGovernor::new());
         let gate_store: Arc<dyn BudgetGateStore> = Arc::new(InMemoryBudgetGateStore::new());
         let cost_table: Arc<dyn ModelCostTable> = Arc::new(ZeroCostTable);
-        let accountant =
-            build_default_budget_accountant(Arc::clone(&governor), cost_table, gate_store)
-                .expect("budget defaults env-load succeeds");
+        let event_sink: Arc<dyn BudgetEventSink> = Arc::new(InMemoryBudgetEventSink::new());
+        let accountant = build_default_budget_accountant(
+            Arc::clone(&governor),
+            cost_table,
+            gate_store,
+            event_sink,
+        )
+        .expect("budget defaults env-load succeeds");
 
         // Drive one `pre_model_call` to fire the seeding policy.
         let context = test_run_context("tenant-shared-helper", "alice-shared-helper");

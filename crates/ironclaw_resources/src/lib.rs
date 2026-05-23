@@ -18,8 +18,8 @@
 //! reservation operation succeeds.
 #![warn(unreachable_pub)]
 
+mod cas_snapshot;
 mod event;
-mod filesystem_gate_store;
 mod filesystem_store;
 mod gate;
 mod period;
@@ -28,8 +28,7 @@ pub use event::{
     BroadcastBudgetEventSink, BudgetEvent, BudgetEventSink, CompositeBudgetEventSink,
     InMemoryBudgetEventSink, NoOpBudgetEventSink,
 };
-pub use filesystem_gate_store::FilesystemBudgetGateStore;
-pub use filesystem_store::FilesystemResourceGovernorStore;
+pub use filesystem_store::{FilesystemBudgetGateStore, FilesystemResourceGovernorStore};
 pub use gate::{
     BudgetApprovalGate, BudgetGateError, BudgetGateId, BudgetGateOutcome, BudgetGateStatus,
     BudgetGateStore, InMemoryBudgetGateStore,
@@ -263,6 +262,73 @@ impl ResourceAccount {
         }
 
         accounts
+    }
+}
+
+/// Stable string label of the form `tenant/<t>/user/<u>/project/<p>/...`
+/// — the canonical wire representation used by SSE projections, audit
+/// logs, and CLI status surfaces. Missing optional segments render as
+/// `_` so the slot count is stable per variant.
+impl std::fmt::Display for ResourceAccount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Tenant { tenant_id } => write!(f, "tenant/{}", tenant_id.as_str()),
+            Self::User { tenant_id, user_id } => {
+                write!(f, "tenant/{}/user/{}", tenant_id.as_str(), user_id.as_str())
+            }
+            Self::Project {
+                tenant_id,
+                user_id,
+                project_id,
+            } => write!(
+                f,
+                "tenant/{}/user/{}/project/{}",
+                tenant_id.as_str(),
+                user_id.as_str(),
+                project_id.as_str()
+            ),
+            Self::Agent {
+                tenant_id,
+                user_id,
+                project_id,
+                agent_id,
+            } => write!(
+                f,
+                "tenant/{}/user/{}/project/{}/agent/{}",
+                tenant_id.as_str(),
+                user_id.as_str(),
+                project_id.as_ref().map(|p| p.as_str()).unwrap_or("_"),
+                agent_id.as_str()
+            ),
+            Self::Mission {
+                tenant_id,
+                user_id,
+                project_id,
+                mission_id,
+            } => write!(
+                f,
+                "tenant/{}/user/{}/project/{}/mission/{}",
+                tenant_id.as_str(),
+                user_id.as_str(),
+                project_id.as_ref().map(|p| p.as_str()).unwrap_or("_"),
+                mission_id.as_str()
+            ),
+            Self::Thread {
+                tenant_id,
+                user_id,
+                project_id,
+                mission_id,
+                thread_id,
+            } => write!(
+                f,
+                "tenant/{}/user/{}/project/{}/mission/{}/thread/{}",
+                tenant_id.as_str(),
+                user_id.as_str(),
+                project_id.as_ref().map(|p| p.as_str()).unwrap_or("_"),
+                mission_id.as_ref().map(|m| m.as_str()).unwrap_or("_"),
+                thread_id.as_str()
+            ),
+        }
     }
 }
 
@@ -670,6 +736,18 @@ impl Default for ResourceGovernorSnapshot {
             schema_version: RESOURCE_GOVERNOR_SNAPSHOT_SCHEMA_VERSION,
             state: ResourceState::default(),
         }
+    }
+}
+
+impl crate::cas_snapshot::Snapshot for ResourceGovernorSnapshot {
+    fn fresh() -> Self {
+        Self::default()
+    }
+}
+
+impl crate::cas_snapshot::StorageError for ResourceError {
+    fn storage(reason: String) -> Self {
+        Self::Storage { reason }
     }
 }
 

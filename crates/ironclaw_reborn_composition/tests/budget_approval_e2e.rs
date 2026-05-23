@@ -23,7 +23,7 @@ use ironclaw_host_api::runtime_policy::{
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
 };
 use ironclaw_loop_support::{ModelCost, ModelCostTable, StaticModelCostTable};
-use ironclaw_reborn_composition::test_support::{BudgetTestGateway, RebornRuntimeInputTestExt};
+use ironclaw_reborn_composition::test_support::BudgetTestGateway;
 use ironclaw_reborn_composition::{
     PollSettings, RebornBuildInput, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
     build_reborn_runtime,
@@ -86,8 +86,8 @@ async fn build_runtime_with_pause_inducing_setup(
         interval: Duration::from_millis(10),
         max_total: Duration::from_secs(3),
     })
-    .with_test_model_gateway(gateway.clone())
-    .with_test_model_cost_table(pause_inducing_cost_table());
+    .with_model_gateway_override(gateway.clone())
+    .with_model_cost_table_override(pause_inducing_cost_table());
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
 
     // Tight user cap so the estimate crosses pause but not the hard
@@ -293,6 +293,51 @@ async fn f5_expiry_marks_gate_terminal_and_keeps_budget_blocked() {
         gateway.call_count(),
         0,
         "expired gate must NOT unblock the budget; gateway stays untouched"
+    );
+
+    runtime.shutdown().await.expect("shutdown");
+}
+
+/// Regression for the invented-gate-id bug: when the cascade pauses,
+/// the accountant emits `BudgetEvent::GateOpened` with the *real*
+/// `BudgetGateId` it just persisted in the gate store. The broadcast
+/// sink must see that real id (not a phantom freshly minted at
+/// projection time), so subscribers can resolve the gate they were
+/// notified about.
+#[tokio::test]
+async fn gate_opened_event_carries_id_that_matches_persisted_gate() {
+    let root = tempfile::tempdir().unwrap();
+    let (runtime, gateway) =
+        build_runtime_with_pause_inducing_setup("gate-id", root.path().to_path_buf()).await;
+
+    // Subscribe BEFORE the send so we don't miss the GateOpened event.
+    let broadcast = runtime
+        .broadcast_budget_event_sink()
+        .expect("broadcast sink");
+    let mut subscriber = broadcast.subscribe();
+
+    let _real_id = pump_until_pending_gate(&runtime, &gateway).await;
+
+    // The pending gate's id (from the store).
+    let store = runtime.budget_gate_store().expect("gate store");
+    let pending = store.list_pending().expect("list pending");
+    assert_eq!(pending.len(), 1, "exactly one pending gate after pause");
+    let persisted_id = pending[0].id;
+
+    // Drain the broadcast and find the GateOpened event.
+    let mut received_gate_id = None;
+    while let Ok(Ok(event)) =
+        tokio::time::timeout(Duration::from_millis(200), subscriber.recv()).await
+    {
+        if let ironclaw_resources::BudgetEvent::GateOpened { gate_id, .. } = event {
+            received_gate_id = Some(gate_id);
+            break;
+        }
+    }
+    let received = received_gate_id.expect("GateOpened reached the broadcast");
+    assert_eq!(
+        received, persisted_id,
+        "the GateOpened event's gate_id must match the gate persisted in the store"
     );
 
     runtime.shutdown().await.expect("shutdown");

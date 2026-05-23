@@ -687,67 +687,44 @@ pub async fn build_reborn_runtime(
         mission_id: None,
     };
 
+    // Resolve the model gateway in three flat steps so the cfg gates
+    // don't multiply into a 4-way permutation:
+    //
+    // 1. Normalize the test-only override into a plain `Option`.
+    //    Off-feature builds get a hard `None` so downstream control flow
+    //    stays plain.
+    // 2. Build the production gateway + cost table from the LLM config
+    //    (cfg-gated helper); without `root-llm-provider` the helper
+    //    short-circuits to a stub.
+    // 3. The test override wins over the production gateway when set;
+    //    the LLM-derived cost table is kept regardless so the
+    //    accountant can fire against a stub gateway too.
+    #[cfg(any(test, feature = "test-support"))]
+    let test_model_gateway_override = model_gateway_override;
+    #[cfg(not(any(test, feature = "test-support")))]
+    let test_model_gateway_override: Option<
+        Arc<dyn ironclaw_loop_support::HostManagedModelGateway>,
+    > = None;
+
+    #[cfg(feature = "root-llm-provider")]
+    let (production_gateway, llm_cost_table) = build_production_model_gateway(llm)?;
+    #[cfg(not(feature = "root-llm-provider"))]
+    let (production_gateway, llm_cost_table) = build_production_model_gateway()?;
+
+    let model_gateway = test_model_gateway_override.unwrap_or(production_gateway);
+
     // Resolved cost table is either: the LLM-policy-derived table (real
     // LLM wired), a test override (so tests can drive deterministic
     // prices through stub gateways), or None — in which case the
-    // accountant doesn't get built (no spend, no cascade).
-    let mut resolved_cost_table: Option<Arc<dyn ironclaw_loop_support::ModelCostTable>> = None;
-
-    #[cfg(feature = "root-llm-provider")]
-    let (model_gateway, llm_cost_table) = {
-        #[cfg(any(test, feature = "test-support"))]
-        let bundle = if let Some(gateway) = model_gateway_override {
-            (gateway, None)
-        } else {
-            match llm {
-                Some(cfg) => {
-                    let LlmGatewayBundle { gateway, policy } = build_llm_gateway(cfg)?;
-                    (gateway, Some(policy.build_cost_table()))
-                }
-                None => (build_stub_gateway(), None),
-            }
-        };
-        #[cfg(not(any(test, feature = "test-support")))]
-        let bundle = match llm {
-            Some(cfg) => {
-                let LlmGatewayBundle { gateway, policy } = build_llm_gateway(cfg)?;
-                (gateway, Some(policy.build_cost_table()))
-            }
-            None => (build_stub_gateway(), None),
-        };
-        bundle
-    };
-    #[cfg(not(feature = "root-llm-provider"))]
-    let (model_gateway, llm_cost_table) = {
-        #[cfg(any(test, feature = "test-support"))]
-        let bundle = if let Some(gateway) = model_gateway_override {
-            (gateway, None::<ironclaw_loop_support::StaticModelCostTable>)
-        } else {
-            (
-                build_stub_gateway(),
-                None::<ironclaw_loop_support::StaticModelCostTable>,
-            )
-        };
-        #[cfg(not(any(test, feature = "test-support")))]
-        let bundle = (
-            build_stub_gateway(),
-            None::<ironclaw_loop_support::StaticModelCostTable>,
-        );
-        bundle
-    };
-
-    if let Some(cost_table) = llm_cost_table {
-        resolved_cost_table = Some(Arc::new(cost_table));
-    }
-    // Test-only: callers using `with_test_model_gateway` can pair the
-    // override with a `model_cost_table_override` so the accountant fires
-    // with deterministic per-token prices. When both the LLM-derived
-    // table AND the test override are set, the test override wins (the
-    // test is being explicit about what costs it wants).
+    // accountant doesn't get built (no spend, no cascade). The test
+    // override (when set) wins over the LLM-derived table — the test is
+    // being explicit about the prices it wants.
+    let llm_cost_table_arc: Option<Arc<dyn ironclaw_loop_support::ModelCostTable>> = llm_cost_table
+        .map(|table| Arc::new(table) as Arc<dyn ironclaw_loop_support::ModelCostTable>);
     #[cfg(any(test, feature = "test-support"))]
-    if let Some(table) = model_cost_table_override {
-        resolved_cost_table = Some(table);
-    }
+    let resolved_cost_table = model_cost_table_override.or(llm_cost_table_arc);
+    #[cfg(not(any(test, feature = "test-support")))]
+    let resolved_cost_table = llm_cost_table_arc;
 
     // Build the model budget accountant from the resolved cost table plus
     // the local-dev governor. When neither an LLM policy nor a test
@@ -767,10 +744,18 @@ pub async fn build_reborn_runtime(
         Some(cost_table) => {
             // Shared helper — same wiring shape used by any production
             // loop composer that wants the accountant.
+            // The accountant uses the same broadcast-backed sink that
+            // the governor writes to, so `BudgetEvent::GateOpened`
+            // (emitted by the accountant) lands on the same downstream
+            // projection as the governor's `Warned` / `Denied` events.
+            let event_sink: Arc<dyn ironclaw_resources::BudgetEventSink> =
+                Arc::clone(&local_runtime.broadcast_budget_event_sink)
+                    as Arc<dyn ironclaw_resources::BudgetEventSink>;
             let accountant = crate::build_default_budget_accountant(
                 Arc::clone(&local_runtime.resource_governor),
                 cost_table,
                 Arc::clone(&local_runtime.budget_gate_store),
+                event_sink,
             )
             .map_err(|error| RebornRuntimeError::InvalidArgument {
                 reason: format!("budget defaults env-override invalid: {error}"),
@@ -962,6 +947,39 @@ impl HostIdentityContextSource for EmptyIdentityContextSource {
     ) -> Result<Vec<HostIdentityContextCandidate>, HostIdentityContextBuildError> {
         Ok(Vec::new())
     }
+}
+
+/// Build the production model gateway and its (optional) LLM-derived
+/// cost table. Cfg-gated so off-feature builds short-circuit to the
+/// stub without referencing types that don't exist.
+#[cfg(feature = "root-llm-provider")]
+fn build_production_model_gateway(
+    llm: Option<crate::runtime_input::ResolvedRebornLlm>,
+) -> Result<
+    (
+        Arc<dyn ironclaw_loop_support::HostManagedModelGateway>,
+        Option<ironclaw_loop_support::StaticModelCostTable>,
+    ),
+    RebornRuntimeError,
+> {
+    match llm {
+        Some(cfg) => {
+            let LlmGatewayBundle { gateway, policy } = build_llm_gateway(cfg)?;
+            Ok((gateway, Some(policy.build_cost_table())))
+        }
+        None => Ok((build_stub_gateway(), None)),
+    }
+}
+
+#[cfg(not(feature = "root-llm-provider"))]
+fn build_production_model_gateway() -> Result<
+    (
+        Arc<dyn ironclaw_loop_support::HostManagedModelGateway>,
+        Option<ironclaw_loop_support::StaticModelCostTable>,
+    ),
+    RebornRuntimeError,
+> {
+    Ok((build_stub_gateway(), None))
 }
 
 #[cfg(feature = "root-llm-provider")]

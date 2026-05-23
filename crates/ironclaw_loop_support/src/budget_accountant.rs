@@ -21,9 +21,9 @@ use ironclaw_host_api::{
     SYSTEM_RESERVED_ID, UserId,
 };
 use ironclaw_resources::{
-    BudgetApprovalGate, BudgetGateId, BudgetGateStatus, BudgetGateStore, BudgetPeriod,
-    BudgetThresholds, ResourceAccount, ResourceApprovalNeeded, ResourceError, ResourceGovernor,
-    ResourceLimits,
+    BudgetApprovalGate, BudgetEvent, BudgetEventSink, BudgetGateId, BudgetGateStatus,
+    BudgetGateStore, NoOpBudgetEventSink, ResourceAccount, ResourceApprovalNeeded, ResourceError,
+    ResourceGovernor, ResourceLimits,
 };
 use ironclaw_turns::TurnRunId;
 use ironclaw_turns::run_profile::{
@@ -33,132 +33,8 @@ use ironclaw_turns::run_profile::{
 use rust_decimal::Decimal;
 use rust_decimal::prelude::FromPrimitive;
 
-/// Static cost-per-token + max-output-tokens table for a single model.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ModelCost {
-    /// Input USD per token. `Decimal::ZERO` for free/local models.
-    pub input_per_token: Decimal,
-    /// Output USD per token. `Decimal::ZERO` for free/local models.
-    pub output_per_token: Decimal,
-    /// Model's max output tokens — used for worst-case pre-call estimate.
-    /// `0` is treated as "unknown" and falls back to
-    /// [`ModelCostTable::DEFAULT_MAX_OUTPUT_TOKENS`].
-    pub max_output_tokens: u64,
-}
-
-/// Resolves [`ModelProfileId`] → [`ModelCost`]. Implementations bridge the
-/// `LlmProvider::cost_per_token()` family from `ironclaw_llm` into the loop
-/// layer without re-exporting LLM crate types.
-pub trait ModelCostTable: Send + Sync + std::fmt::Debug {
-    fn cost_for(&self, model: &ModelProfileId) -> Option<ModelCost>;
-}
-
-impl dyn ModelCostTable {
-    /// Conservative fallback when a model's max_output_tokens is unknown.
-    /// 8 KiB tokens covers most chat completions; reservations release the
-    /// overshoot in `reconcile`.
-    pub const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 8_192;
-}
-
-/// Constant cost table used in tests and as a safe baseline for free/local
-/// providers. Every model returns `(0, 0, 0)` so reservation succeeds with a
-/// zero-USD estimate.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct ZeroCostTable;
-
-impl ModelCostTable for ZeroCostTable {
-    fn cost_for(&self, _model: &ModelProfileId) -> Option<ModelCost> {
-        Some(ModelCost {
-            input_per_token: Decimal::ZERO,
-            output_per_token: Decimal::ZERO,
-            max_output_tokens: 0,
-        })
-    }
-}
-
-/// Static `(ModelProfileId → ModelCost)` lookup. Composition layers populate
-/// this from their model-route registry (provider model name → known
-/// per-token price via `ironclaw_llm::costs::model_cost`) so the accountant
-/// can compute actual USD spend on every reconcile.
-///
-/// Profiles missing from the table fall back to `None`, which the accountant
-/// treats as zero-cost (free/local). That matches the safety direction we
-/// want: an unknown provider must not silently overstate spend.
-#[derive(Debug, Default, Clone)]
-pub struct StaticModelCostTable {
-    costs: std::collections::HashMap<ModelProfileId, ModelCost>,
-}
-
-impl StaticModelCostTable {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_entry(mut self, profile: ModelProfileId, cost: ModelCost) -> Self {
-        self.costs.insert(profile, cost);
-        self
-    }
-
-    pub fn insert(&mut self, profile: ModelProfileId, cost: ModelCost) {
-        self.costs.insert(profile, cost);
-    }
-
-    pub fn len(&self) -> usize {
-        self.costs.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.costs.is_empty()
-    }
-}
-
-impl ModelCostTable for StaticModelCostTable {
-    fn cost_for(&self, model: &ModelProfileId) -> Option<ModelCost> {
-        self.costs.get(model).copied()
-    }
-}
-
-/// Composition-supplied first-touch seeding policy.
-///
-/// When set, the accountant installs the bundled limits the first time it
-/// sees a particular `ResourceAccount` in the cascade — only if no limit
-/// is already in place. This lets composition declare defaults once at
-/// boot without forcing a "seed every user" migration: the cost of the
-/// first model call by a fresh user covers the seeding write.
-#[derive(Debug, Clone)]
-pub struct BudgetSeedingPolicy {
-    pub user_daily: ResourceLimits,
-    pub project_daily: ResourceLimits,
-}
-
-impl BudgetSeedingPolicy {
-    /// Construct from typed defaults, expressed as `(usd, period, thresholds)`.
-    /// Use `Decimal::ZERO` for unlimited per the governor's 0 = unlimited
-    /// convention.
-    pub fn new(
-        user_daily_usd: Decimal,
-        project_daily_usd: Decimal,
-        period: BudgetPeriod,
-        thresholds: BudgetThresholds,
-    ) -> Self {
-        let user_daily = ResourceLimits {
-            max_usd: Some(user_daily_usd),
-            period: period.clone(),
-            thresholds,
-            ..ResourceLimits::default()
-        };
-        let project_daily = ResourceLimits {
-            max_usd: Some(project_daily_usd),
-            period,
-            thresholds,
-            ..ResourceLimits::default()
-        };
-        Self {
-            user_daily,
-            project_daily,
-        }
-    }
-}
+use crate::budget_cost_table::{ModelCost, ModelCostTable};
+use crate::budget_seeding::BudgetSeedingPolicy;
 
 /// Production budget accountant.
 ///
@@ -179,6 +55,13 @@ pub struct GovernorBackedAccountant {
     /// Medium #5). Callers that genuinely want zero-cost (Ollama, free
     /// tier) wire a `ZeroCostTable` instead.
     default_cost: ModelCost,
+    /// Sink the accountant uses to emit gate-related events
+    /// (`BudgetEvent::GateOpened`) that the governor cannot produce on
+    /// its own — the governor doesn't know about gates. Composition
+    /// typically wires the same sink to both the governor and the
+    /// accountant so SSE / audit consumers see a single ordered stream
+    /// (review feedback: invented-gate-id bug).
+    event_sink: Arc<dyn BudgetEventSink>,
     /// Tracks in-flight reservations per run so `post_model_call` can
     /// reconcile/release the matching reservation without the caller
     /// threading state through the loop port. Stores the original estimate
@@ -241,7 +124,17 @@ impl GovernorBackedAccountant {
                 output_per_token: Decimal::from_f64(0.00001).unwrap_or(Decimal::ZERO),
                 max_output_tokens: 0,
             },
+            event_sink: Arc::new(NoOpBudgetEventSink),
         }
+    }
+
+    /// Plug a [`BudgetEventSink`] that receives accountant-emitted
+    /// events (today: `BudgetEvent::GateOpened`). Composition passes
+    /// the same sink wired into the governor so SSE / audit consumers
+    /// see a single ordered stream.
+    pub fn with_event_sink(mut self, sink: Arc<dyn BudgetEventSink>) -> Self {
+        self.event_sink = sink;
+        self
     }
 
     pub fn with_overestimate_factor(mut self, factor: Decimal) -> Self {
@@ -289,17 +182,22 @@ impl GovernorBackedAccountant {
     /// new gate id. Best-effort: storage errors are logged and the
     /// caller still sees the `BudgetApprovalRequired` host error so the
     /// run fails closed.
+    ///
+    /// Emits [`BudgetEvent::GateOpened`] through the configured event
+    /// sink on success so SSE / audit projections receive the *real*
+    /// gate id (the governor's earlier `ApprovalRequested` event does
+    /// not — it has no knowledge of the gate store).
     fn open_approval_gate(&self, needed: &ResourceApprovalNeeded) -> Option<BudgetGateId> {
         let store = self.gate_store.as_ref()?;
         let now = Utc::now();
+        let id = BudgetGateId::new();
         let gate = BudgetApprovalGate {
-            id: BudgetGateId::new(),
+            id,
             needed: needed.clone(),
             opened_at: now,
             expires_at: now + self.gate_expires_after,
             status: BudgetGateStatus::Pending,
         };
-        let id = gate.id;
         if let Err(error) = store.open(gate) {
             tracing::warn!(
                 ?error,
@@ -309,6 +207,11 @@ impl GovernorBackedAccountant {
             );
             return None;
         }
+        self.event_sink.emit(BudgetEvent::GateOpened {
+            gate_id: id,
+            needed: needed.clone(),
+            at: now,
+        });
         Some(id)
     }
 
@@ -679,6 +582,7 @@ fn internal_summary_error(reason: String) -> LoopModelGatewayError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::budget_cost_table::ZeroCostTable;
     use chrono::Utc;
     use ironclaw_host_api::{TenantId, ThreadId};
     use ironclaw_resources::{

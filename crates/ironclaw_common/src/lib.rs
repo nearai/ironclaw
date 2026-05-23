@@ -14,8 +14,8 @@ mod util;
 
 pub use attachment::{AttachmentKind, IncomingAttachment};
 pub use event::{
-    AppEvent, CodeExecutionFailureCategory, JobResultStatus, OnboardingStateDto, PlanStepDto,
-    SelfImprovementPhase, ToolDecisionDto,
+    AppBudgetEvent, AppEvent, CodeExecutionFailureCategory, JobResultStatus, OnboardingStateDto,
+    PlanStepDto, SelfImprovementPhase, ToolDecisionDto,
 };
 pub use identity::{
     CredentialName, ExtensionName, ExternalThreadId, ExternalThreadIdError,
