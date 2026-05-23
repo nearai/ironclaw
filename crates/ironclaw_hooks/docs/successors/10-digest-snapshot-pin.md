@@ -23,16 +23,18 @@ digest value.
 
 ## Scope
 
-A single test in `capability_port.rs::tests` (or a snapshot file) that
-pins the digest for one canonical `(capability_id, input_ref)` pair:
+Tests in `capability_port_tests.rs` pin one canonical
+`(capability_id, input_ref)` pair and verify the same digest through the
+public `invoke_capability` / `invoke_capability_batch` paths hooks
+actually observe:
 
 ```rust
 #[test]
 fn invocation_arguments_digest_is_stable_for_known_inputs() {
     let invocation = CapabilityInvocation {
         surface_version: CapabilitySurfaceVersion::new("snapshot:v1").unwrap(),
-        capability_id: CapabilityId::new("cap.snapshot").unwrap(),
-        input_ref: CapabilityInputRef::new("input:snapshot:fixed").unwrap(),
+        capability_id: CapabilityId::new("cap.snapshot.fixture").unwrap(),
+        input_ref: CapabilityInputRef::new("input:cap.snapshot.fixture").unwrap(),
     };
     let digest = invocation_arguments_digest(&invocation);
     let hex = hex::encode(digest);
@@ -41,14 +43,6 @@ fn invocation_arguments_digest_is_stable_for_known_inputs() {
         // captured one-time; if you find yourself updating this, ask
         // whether the digest change is intentional, and document it
         // in the digest stability contract.
-        //
-        // NOTE: this is illustrative pseudocode — the shipped fixture
-        // uses `(cap.snapshot.fixture, input:cap.snapshot.fixture)` and
-        // pins
-        // "4d0ab78e009b32615c2766bd1c26921bd59ef81b5741a75387707f82f0344315".
-        // See `tests::invocation_arguments_digest_is_stable_for_known_inputs`
-        // and the caller-driven
-        // `tests::invoke_capability_arguments_digest_is_stable_at_middleware_boundary`.
         "4d0ab78e009b32615c2766bd1c26921bd59ef81b5741a75387707f82f0344315"
     );
 }
@@ -80,8 +74,8 @@ stability contract:
 
 ## Risk
 
-Tiny. Single test + rustdoc.
+Tiny. Test and documentation only.
 
 ## Effort
 
-Small. ~10 minutes including digest capture.
+Small.
