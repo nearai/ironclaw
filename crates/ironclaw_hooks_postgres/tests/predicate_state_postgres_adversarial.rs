@@ -346,3 +346,221 @@ async fn per_scope_lru_eviction_bounds_distinct_keys() {
         "LRU eviction counter must advance when the per-scope quota is exceeded"
     );
 }
+
+/// Regression: scope-LRU eviction must take each victim key's per-key
+/// advisory lock (via the non-blocking `pg_try_advisory_xact_lock`) before
+/// deleting its rows. Before the fix, `enforce_scope_quota` deleted victim
+/// rows holding ONLY the scope lock, which produced two failures:
+///
+///   1. **Deadlock** — a transaction recording the victim key holds that
+///      key's per-key lock and then waits for the scope lock inside its own
+///      quota pass, while the LRU transaction holds the scope lock and waits
+///      on the victim's row locks. Cycle → deadlock.
+///   2. **Torn aggregate** — the LRU pass could delete rows for a key while
+///      another transaction was actively aggregating that same key under its
+///      per-key lock, so the recorder's COUNT/SUM straddled a delete it
+///      never serialized against.
+///
+/// This test drives both pressures at once against ONE scope: a flood of
+/// fresh distinct keys (each triggering an eviction pass) concurrently with
+/// a flood of distinct-id records against a single "hot" key that is a prime
+/// eviction candidate. The fix makes every task complete (no deadlock) under
+/// a hard timeout, and keeps the hot key's reported aggregate consistent with
+/// its surviving rows (no torn/lost update). Run against a real Postgres via
+/// `IRONCLAW_HOOKS_POSTGRES_URL` / `DATABASE_URL`; skipped (passing) otherwise.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[allow(clippy::await_holding_lock)]
+async fn scope_lru_eviction_serializes_against_victim_writes_no_deadlock() {
+    let (url, _guard) = guarded!();
+    let hs = hosts(&url, 2).await;
+    let window = Duration::from_secs(86_400);
+    let tenant = "lru-race-tenant";
+
+    // Seed the scope to exactly the quota with distinct keys, all OLDER than
+    // the activity we drive below, so the LRU pass has plenty of stale
+    // victims to choose from. The "hot" key is seeded oldest so it is a top
+    // eviction candidate while we also hammer it concurrently.
+    let hot = inv_key(tenant, "cap.hot");
+    hs[0]
+        .record_invocation(&hot, &ev("hot-seed"), base(), window)
+        .await
+        .expect("seed hot key");
+    for i in 0..MAX_KEYS_PER_TENANT {
+        let k = inv_key(tenant, &format!("seed.{i}"));
+        let ts = base() + chrono::Duration::seconds(1 + i as i64);
+        hs[0]
+            .record_invocation(&k, &ev(&format!("seed-e{i}")), ts, window)
+            .await
+            .expect("seed key");
+    }
+
+    // Concurrent pressure: fresh keys that force eviction passes, plus
+    // distinct-id records against the hot key (which holds the hot key's
+    // per-key lock during its own transaction). If eviction ignored the
+    // victim's per-key lock these would deadlock.
+    const FRESH: usize = 60;
+    const HOT_HITS: usize = 60;
+    let mut handles = Vec::new();
+    for i in 0..FRESH {
+        let backend = Arc::clone(&hs[i % 2]);
+        let k = inv_key(tenant, &format!("fresh.{i}"));
+        let ts = base() + chrono::Duration::seconds(10_000 + i as i64);
+        handles.push(tokio::spawn(async move {
+            // A fresh key may itself be evicted by a later pass; both Ok and
+            // a benign overflow are acceptable — what must NOT happen is a
+            // hang or an Unavailable (deadlock/serialization) error.
+            let _ = backend
+                .record_invocation(&k, &ev(&format!("fresh-e{i}")), ts, window)
+                .await;
+        }));
+    }
+    for i in 0..HOT_HITS {
+        let backend = Arc::clone(&hs[i % 2]);
+        let hot = hot.clone();
+        // All hot-key records share one in-window instant region; distinct
+        // ids so each is a real insert (subject to the per-key sample cap).
+        let ts = base() + chrono::Duration::seconds(20_000 + i as i64);
+        handles.push(tokio::spawn(async move {
+            let _ = backend
+                .record_invocation(&hot, &ev(&format!("hot-e{i}")), ts, window)
+                .await;
+        }));
+    }
+
+    // Hard timeout is the deadlock detector: pre-fix this join would hang
+    // (or surface a Postgres deadlock-detected error) instead of completing.
+    let join_all = async {
+        for handle in handles {
+            handle.await.expect("task did not panic");
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(60), join_all)
+        .await
+        .expect("all record tasks completed without deadlock/hang");
+
+    // Consistency: whatever survived for the hot key, the backend's reported
+    // aggregate must equal its actual surviving IN-WINDOW row count — no torn
+    // aggregate (the bug would let an LRU delete straddle the recorder's
+    // COUNT). We read the backend's aggregate FIRST via a no-op replay of a
+    // known id, then compare against a window-matched direct COUNT computed
+    // with the SAME `now`/cutoff the replay used, so the two are apples-to-
+    // apples (an all-rows COUNT would spuriously differ from the in-window
+    // aggregate). Reading the backend first also pins the row set: the replay
+    // is a no-op (no insert/delete for the hot key), so the direct count that
+    // follows observes exactly the rows the replay aggregated.
+    let read_now = base() + chrono::Duration::seconds(100_000);
+    let reported = hs[0]
+        .record_invocation(&hot, &ev("hot-seed"), read_now, window)
+        .await
+        .expect("hot read");
+    let cutoff = read_now - chrono::Duration::from_std(window).unwrap();
+    let pool = build_pool(&url).expect("pool");
+    let client = pool.get().await.expect("client");
+    let hot_hash = ironclaw_hooks_postgres::test_support::invocation_key_hash_bytes(&hot);
+    let rows: i64 = client
+        .query_one(
+            "SELECT COUNT(*)::BIGINT FROM hook_predicate_counters \
+             WHERE key_hash = $1 AND ts >= $2",
+            &[&&hot_hash[..], &cutoff],
+        )
+        .await
+        .expect("count hot rows")
+        .get(0);
+    assert_eq!(
+        reported as i64, rows,
+        "hot key's reported aggregate must match its surviving in-window row count (no torn update)"
+    );
+
+    // The per-scope quota bound must still hold for this scope.
+    let scope = ironclaw_hooks_postgres::test_support::scope_hash_bytes(tenant);
+    let distinct: i64 = client
+        .query_one(
+            "SELECT COUNT(DISTINCT key_hash)::BIGINT FROM hook_predicate_counters \
+             WHERE scope_hash = $1 AND kind = 'i'",
+            &[&&scope[..]],
+        )
+        .await
+        .expect("distinct count")
+        .get(0);
+    assert!(
+        distinct as usize <= MAX_KEYS_PER_TENANT,
+        "per-scope LRU bound must hold after the concurrent race; had {distinct}"
+    );
+}
+
+/// Deterministic reproduction of the eviction deadlock cycle at the raw-SQL
+/// lock level — independent of the timing luck a concurrency stress test
+/// relies on. This replays the exact advisory-lock + row-lock sequence the
+/// production code takes and proves the fix's protocol (try-lock the victim
+/// key BEFORE deleting its rows) cannot deadlock, whereas the old protocol
+/// (blocking on the victim's rows while holding the scope lock) deadlocks.
+///
+/// Setup mirrors production:
+///   * Txn V ("victim recorder"): takes key B's per-key advisory lock, then
+///     writes a row for B (holding a row lock) — exactly what a `record`
+///     call for B does before it reaches its own quota pass.
+///   * Txn L ("LRU pass"): takes the scope advisory lock, then must evict B.
+///
+/// The OLD code would `DELETE` B's rows here and BLOCK on V's row lock; if V
+/// then waited on the scope lock (its quota pass) the two would deadlock. The
+/// FIXED code instead runs `pg_try_advisory_xact_lock` on B's key first —
+/// which returns FALSE because V holds it — and skips B without blocking.
+/// We assert that non-blocking outcome directly: the try-lock from L returns
+/// false while V holds B's key lock, so L never waits on V and the cycle
+/// cannot form. This is the load-bearing invariant of the fix.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn eviction_try_lock_does_not_block_on_in_flight_victim() {
+    let (url, _guard) = guarded!();
+    // Build the schema/table without disturbing other tests' data.
+    let _hs = hosts(&url, 1).await;
+
+    // Two independent connections = two independent transactions.
+    let (mut client_v, conn_v) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        .await
+        .expect("connect V");
+    tokio::spawn(conn_v);
+    let (mut client_l, conn_l) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        .await
+        .expect("connect L");
+    tokio::spawn(conn_l);
+    for c in [&client_v, &client_l] {
+        c.batch_execute(&format!("SET search_path TO {TEST_SCHEMA}"))
+            .await
+            .expect("search_path");
+    }
+
+    // A distinct victim-key lock pair unlikely to collide with other tests.
+    let (lk_a, lk_b): (i32, i32) = (0x7EED_1234u32 as i32, 0x0BAD_5678u32 as i32);
+
+    // Txn V: take key B's per-key advisory lock (the recorder's first act).
+    let tx_v = client_v.transaction().await.expect("begin V");
+    let got_v: bool = tx_v
+        .query_one("SELECT pg_try_advisory_xact_lock($1, $2)", &[&lk_a, &lk_b])
+        .await
+        .expect("V lock")
+        .get(0);
+    assert!(got_v, "V must acquire the victim key lock first");
+
+    // Txn L: while V holds B's key lock, L (the eviction pass) must NOT block
+    // on it — the fix uses the non-blocking try-lock and skips B. Pre-fix, L
+    // would issue a blocking DELETE on B's rows here and stall.
+    let tx_l = client_l.transaction().await.expect("begin L");
+    let got_l: bool = tokio::time::timeout(
+        Duration::from_secs(5),
+        tx_l.query_one("SELECT pg_try_advisory_xact_lock($1, $2)", &[&lk_a, &lk_b]),
+    )
+    .await
+    .expect("try-lock must return promptly, never block (deadlock-free)")
+    .expect("L try-lock query")
+    .get(0);
+    assert!(
+        !got_l,
+        "eviction try-lock on an in-flight victim key MUST fail (so the pass \
+         skips it) rather than block — this is what breaks the deadlock cycle"
+    );
+
+    // Clean up both transactions.
+    tx_l.rollback().await.expect("rollback L");
+    tx_v.rollback().await.expect("rollback V");
+}

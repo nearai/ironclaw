@@ -32,7 +32,12 @@
 //! 4. **Inserts** the new row `ON CONFLICT (key_hash, id) DO NOTHING`.
 //! 5. **Evicts** the scope's least-recently-active key when the scope's
 //!    distinct-key count exceeds [`MAX_KEYS_PER_TENANT`] (the durable
-//!    analogue of the in-memory per-tenant LRU quota).
+//!    analogue of the in-memory per-tenant LRU quota). Each victim's rows
+//!    are deleted only after acquiring that victim key's per-key advisory
+//!    lock with the NON-blocking `pg_try_advisory_xact_lock`, so eviction
+//!    obeys the same per-bucket serialization as a recorder and can never
+//!    deadlock against (or tear the aggregate of) a concurrent write to the
+//!    victim bucket.
 //! 6. **Aggregates** the in-window `COUNT(*)` / `SUM(value)` and returns it.
 //!
 //! Steps 1-6 share one transaction under the bucket advisory lock, so two
@@ -340,6 +345,31 @@ impl PostgresPredicateStateBackend {
     /// least-recently-active key — the key whose newest row is oldest —
     /// matching the in-memory backend's oldest-front victim selection,
     /// and never touches the key we just inserted.
+    ///
+    /// # Lock discipline for victim eviction (deadlock + race fix)
+    ///
+    /// Deleting a victim key's rows is itself a write to that bucket, so it
+    /// MUST participate in the per-key advisory-lock serialization just like
+    /// a `record` call would — otherwise this pass could delete rows for
+    /// key B while another transaction is concurrently recording B under
+    /// B's own per-key lock, producing a torn aggregate (the recorder's
+    /// COUNT/SUM straddling a delete it never serialized against) and a
+    /// deadlock:
+    ///
+    /// - Txn V (recording victim key B): holds B's per-key lock (it trimmed
+    ///   B's out-of-window rows), then *blocks* waiting for the scope lock
+    ///   inside its own `enforce_scope_quota`.
+    /// - Txn L (this LRU pass): holds the scope lock, then *blocks* waiting
+    ///   on B's row locks to DELETE them.
+    /// - Cycle: V waits on the scope lock held by L; L waits on B's row
+    ///   locks held by V → deadlock.
+    ///
+    /// The fix: before deleting a victim's rows, `pg_try_advisory_xact_lock`
+    /// that victim's per-key lock. The *try* variant returns immediately
+    /// (never blocks), so the cycle above can never form — L observes B's
+    /// lock held by V and skips B instead of waiting. Skipped (in-flight)
+    /// victims are passed over for the next-staleest candidate. We over-fetch
+    /// candidates so skips don't leave us under quota.
     async fn enforce_scope_quota(
         &self,
         tx: &deadpool_postgres::Transaction<'_>,
@@ -354,11 +384,9 @@ impl PostgresPredicateStateBackend {
         // under-evict — leaving the scope above the cap. A scope-level
         // advisory lock makes the eviction check serial per scope, so the
         // count is exact. It is taken in the SINGLE-arg `(int8)` advisory
-        // space, disjoint from the per-key `(int4,int4)` lock space, and
-        // always AFTER the per-key lock — a consistent global ordering, so
-        // no deadlock. Hot-path same-key writes never reach here (only
-        // newly-material keys do), so this does not serialize steady-state
-        // traffic.
+        // space, disjoint from the per-key `(int4,int4)` lock space. Hot-path
+        // same-key writes never reach here (only newly-material keys do), so
+        // this does not serialize steady-state traffic.
         let scope_lock = scope_advisory_lock_key(scope_ref, kind);
         tx.execute("SELECT pg_advisory_xact_lock($1)", &[&scope_lock])
             .await
@@ -380,36 +408,71 @@ impl PostgresPredicateStateBackend {
         }
         let to_evict = distinct as usize - MAX_KEYS_PER_TENANT;
 
-        // Victim selection: rank keys in this scope by their most-recent
+        // Victim candidates: rank keys in this scope by their most-recent
         // activity (MAX(ts)); the staleest keys are evicted first. Exclude
         // the key we just inserted so a flood can never evict itself and
-        // mask the new entry.
-        let deleted = tx
-            .execute(
-                "DELETE FROM hook_predicate_counters
-                  WHERE scope_hash = $1 AND kind = $2
-                    AND key_hash IN (
-                        SELECT key_hash FROM (
-                            SELECT key_hash, MAX(ts) AS last_ts
-                              FROM hook_predicate_counters
-                             WHERE scope_hash = $1 AND kind = $2
-                               AND key_hash <> $3
-                             GROUP BY key_hash
-                             ORDER BY last_ts ASC
-                             LIMIT $4
-                        ) victims
-                    )",
-                &[&scope_ref, &kind, &current_key, &(to_evict as i64)],
+        // mask the new entry. We over-fetch beyond `to_evict` so that if some
+        // candidates are in-flight under their own per-key lock (try-lock
+        // fails, see below) we can fall through to the next-staleest key and
+        // still meet the quota. Bound the over-fetch so a pathological scope
+        // can't pull an unbounded candidate set into memory.
+        const CANDIDATE_OVERFETCH: i64 = 64;
+        let candidate_limit = (to_evict as i64).saturating_add(CANDIDATE_OVERFETCH);
+        let candidate_rows = tx
+            .query(
+                "SELECT key_hash FROM (
+                     SELECT key_hash, MAX(ts) AS last_ts
+                       FROM hook_predicate_counters
+                      WHERE scope_hash = $1 AND kind = $2
+                        AND key_hash <> $3
+                      GROUP BY key_hash
+                      ORDER BY last_ts ASC
+                      LIMIT $4
+                 ) victims",
+                &[&scope_ref, &kind, &current_key, &candidate_limit],
             )
             .await
             .map_err(map_pg)?;
 
-        // Count evicted *keys*, not rows. We asked for `to_evict` victim
-        // keys; report that many (or fewer if the scope had fewer evictable
-        // keys). `deleted` is the row count, so derive the key count from
-        // the bounded victim set.
-        let _ = deleted;
-        Ok(to_evict as u64)
+        // Evict victims one at a time, each under its own per-key advisory
+        // lock taken with the NON-blocking `pg_try_advisory_xact_lock`. A
+        // victim whose lock is already held (a concurrent `record` is
+        // mid-flight against that bucket) is skipped — never waited on — so
+        // this pass cannot deadlock against a recorder, and it never deletes
+        // rows out from under a transaction that did not serialize against
+        // us. Skipped victims simply stay in the scope until the next
+        // newly-material insert reruns the quota check.
+        let mut evicted = 0u64;
+        for row in &candidate_rows {
+            if evicted as usize >= to_evict {
+                break;
+            }
+            let victim_key: Vec<u8> = row.get(0);
+            let lock_key = advisory_lock_key_from_bytes(&victim_key);
+            let got_lock: bool = tx
+                .query_one(
+                    "SELECT pg_try_advisory_xact_lock($1, $2)",
+                    &[&lock_key.0, &lock_key.1],
+                )
+                .await
+                .map_err(map_pg)?
+                .get(0);
+            if !got_lock {
+                // In-flight under its own per-key lock; skip and try the
+                // next-staleest candidate rather than block (deadlock-free).
+                continue;
+            }
+            tx.execute(
+                "DELETE FROM hook_predicate_counters
+                  WHERE scope_hash = $1 AND kind = $2 AND key_hash = $3",
+                &[&scope_ref, &kind, &victim_key],
+            )
+            .await
+            .map_err(map_pg)?;
+            evicted += 1;
+        }
+
+        Ok(evicted)
     }
 }
 
@@ -483,8 +546,24 @@ impl PredicateStateBackend for PostgresPredicateStateBackend {
 /// object id. A hash collision across distinct keys merely serializes two
 /// unrelated buckets — a (rare) throughput cost, never a correctness bug.
 fn advisory_lock_key(key: &Digest) -> (i32, i32) {
-    let a = i32::from_le_bytes([key[0], key[1], key[2], key[3]]);
-    let b = i32::from_le_bytes([key[4], key[5], key[6], key[7]]);
+    advisory_lock_key_from_bytes(key)
+}
+
+/// Same derivation as [`advisory_lock_key`] but over a raw byte slice — used
+/// by the scope-LRU eviction path, which reads candidate victims' `key_hash`
+/// back from the `BYTEA` column as bytes (not a typed [`Digest`]). It MUST
+/// produce the identical `(i32, i32)` lock key the recording path uses for
+/// the same bucket, otherwise the victim try-lock would guard a different
+/// lock than the recorder holds and the serialization would be defeated.
+/// `key_hash` is always a 32-byte blake3 digest, so the first 8 bytes are
+/// present; a shorter slice (never expected) is zero-padded so the function
+/// is total rather than panicking on an out-of-range index.
+fn advisory_lock_key_from_bytes(key: &[u8]) -> (i32, i32) {
+    let mut buf = [0u8; 8];
+    let n = key.len().min(8);
+    buf[..n].copy_from_slice(&key[..n]);
+    let a = i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+    let b = i32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
     (a, b)
 }
 
@@ -510,4 +589,58 @@ fn map_pg(e: tokio_postgres::Error) -> PredicateBackendError {
 
 fn map_pool(e: deadpool_postgres::PoolError) -> PredicateBackendError {
     PredicateBackendError::Unavailable(e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The scope-LRU eviction path try-locks each victim key using
+    /// `advisory_lock_key_from_bytes` over the `key_hash` bytes it read back
+    /// from the DB, while the recording path locks via `advisory_lock_key`
+    /// over the typed `Digest`. If these two derivations ever diverged, the
+    /// eviction would guard a DIFFERENT advisory lock than a concurrent
+    /// recorder holds, defeating the per-bucket serialization the fix
+    /// depends on. This pins them equal for the full 32-byte digest — a
+    /// provable-by-inspection guard for the lock-acquisition invariant that
+    /// does not need a live Postgres.
+    #[test]
+    fn eviction_and_record_derive_identical_per_key_lock() {
+        let digest: Digest = {
+            let mut d = [0u8; 32];
+            for (i, b) in d.iter_mut().enumerate() {
+                *b = (i as u8).wrapping_mul(7).wrapping_add(3);
+            }
+            d
+        };
+        let from_digest = advisory_lock_key(&digest);
+        let from_bytes = advisory_lock_key_from_bytes(&digest[..]);
+        assert_eq!(
+            from_digest, from_bytes,
+            "victim try-lock key must equal the recorder's lock key for the same bucket"
+        );
+    }
+
+    /// Distinct buckets must (almost always) map to distinct per-key lock
+    /// keys; a single differing leading byte must change the derived lock.
+    #[test]
+    fn distinct_digests_yield_distinct_lock_keys() {
+        let mut a = [0u8; 32];
+        let mut b = [0u8; 32];
+        a[0] = 1;
+        b[0] = 2;
+        assert_ne!(advisory_lock_key(&a), advisory_lock_key(&b));
+    }
+
+    /// `advisory_lock_key_from_bytes` is total: a short slice (never
+    /// expected from a 32-byte `key_hash`, but defensive) zero-pads rather
+    /// than panicking on an out-of-range index.
+    #[test]
+    fn short_slice_zero_pads_without_panic() {
+        assert_eq!(advisory_lock_key_from_bytes(&[]), (0, 0));
+        assert_eq!(
+            advisory_lock_key_from_bytes(&[0xFF]),
+            (i32::from_le_bytes([0xFF, 0, 0, 0]), 0)
+        );
+    }
 }
