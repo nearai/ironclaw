@@ -258,6 +258,47 @@ fn skill_entry_json(entry: &HubSkillEntry) -> serde_json::Value {
     })
 }
 
+fn info_tool_json(entry: &HubToolEntry, release_tag: &str) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "tool",
+        "name": entry.name,
+        "crate_name": entry.crate_name,
+        "version": entry.version,
+        "description": entry.description,
+        "provenance": entry.provenance.as_wire(),
+        "trust_label": entry.provenance.trust_label(),
+        "release_tag": release_tag,
+        "wasm": {
+            "url": entry.wasm.url,
+            "size_bytes": entry.wasm.size_bytes,
+            "sha256": entry.wasm.sha256,
+        },
+        "capabilities": {
+            "url": entry.capabilities.url,
+            "size_bytes": entry.capabilities.size_bytes,
+            "sha256": entry.capabilities.sha256,
+        }
+    })
+}
+
+fn info_skill_json(entry: &HubSkillEntry, release_tag: &str) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "skill",
+        "name": entry.name,
+        "trunk": entry.trunk,
+        "version": entry.version,
+        "description": entry.description,
+        "provenance": entry.provenance.as_wire(),
+        "trust_label": entry.provenance.trust_label(),
+        "release_tag": release_tag,
+        "skill_md": {
+            "url": entry.skill_md.url,
+            "size_bytes": entry.skill_md.size_bytes,
+            "sha256": entry.skill_md.sha256,
+        }
+    })
+}
+
 fn skill_install_dir(
     registry: &Option<Arc<std::sync::RwLock<SkillRegistry>>>,
 ) -> Option<std::path::PathBuf> {
@@ -298,6 +339,22 @@ impl IronhubInstallTool {
             parsed.kind_hint,
             parsed.acknowledge_unverified,
         )?;
+
+        if let Some(expected) = parsed.version.as_deref() {
+            let actual = match kind {
+                HubEntryKind::Tool => manifest.find_tool(&parsed.name).map(|t| t.version.as_str()),
+                HubEntryKind::Skill => manifest
+                    .find_skill(&parsed.name)
+                    .map(|s| s.version.as_str()),
+            };
+            if actual != Some(expected) {
+                let current = actual.unwrap_or("unknown");
+                return Err(ToolError::InvalidParameters(format!(
+                    "signed install version '{expected}' does not match current IronHub catalog version '{current}' for '{}'; the catalog changed since this install was approved",
+                    parsed.name
+                )));
+            }
+        }
 
         let skills_dir = match kind {
             HubEntryKind::Skill => skill_install_dir(&self.deps.skill_registry),
@@ -370,6 +427,7 @@ struct InstallParams {
     name: String,
     kind_hint: Option<HubEntryKind>,
     release_tag: Option<String>,
+    version: Option<String>,
     force: bool,
     acknowledge_unverified: bool,
 }
@@ -388,6 +446,17 @@ impl InstallParams {
             .get("release_tag")
             .and_then(|v| v.as_str())
             .map(str::to_string);
+        let version = params
+            .get("version")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        if let Some(v) = &version
+            && (v.is_empty() || v.len() > 128)
+        {
+            return Err(ToolError::InvalidParameters(
+                "version must be 1 to 128 characters".into(),
+            ));
+        }
         let force = params
             .get("force")
             .and_then(|v| v.as_bool())
@@ -400,6 +469,7 @@ impl InstallParams {
             name,
             kind_hint,
             release_tag,
+            version,
             force,
             acknowledge_unverified,
         })
@@ -437,6 +507,12 @@ impl Tool for IronhubInstallTool {
                     "pattern": "^[A-Za-z0-9._-]+$",
                     "minLength": 1,
                     "maxLength": 128
+                },
+                "version": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "description": "Exact catalog version this install was signed for; if set, the install fails unless the current IronHub entry matches"
                 },
                 "force": { "type": "boolean", "default": false },
                 "acknowledge_unverified": { "type": "boolean", "default": false }
@@ -714,42 +790,11 @@ impl Tool for IronhubInfoTool {
             .map_err(|_| catalog_unavailable())?;
 
         if let Some(t) = manifest.find_tool(name) {
-            let json = serde_json::json!({
-                "kind": "tool",
-                "name": t.name,
-                "crate_name": t.crate_name,
-                "version": t.version,
-                "description": t.description,
-                "provenance": t.provenance.as_wire(),
-                "release_tag": manifest.release_tag,
-                "wasm": {
-                    "url": t.wasm.url,
-                    "size_bytes": t.wasm.size_bytes,
-                    "sha256": t.wasm.sha256,
-                },
-                "capabilities": {
-                    "url": t.capabilities.url,
-                    "size_bytes": t.capabilities.size_bytes,
-                    "sha256": t.capabilities.sha256,
-                }
-            });
+            let json = info_tool_json(t, &manifest.release_tag);
             return Ok(ToolOutput::success(json, start.elapsed()));
         }
         if let Some(s) = manifest.find_skill(name) {
-            let json = serde_json::json!({
-                "kind": "skill",
-                "name": s.name,
-                "trunk": s.trunk,
-                "version": s.version,
-                "description": s.description,
-                "provenance": s.provenance.as_wire(),
-                "release_tag": manifest.release_tag,
-                "skill_md": {
-                    "url": s.skill_md.url,
-                    "size_bytes": s.skill_md.size_bytes,
-                    "sha256": s.skill_md.sha256,
-                }
-            });
+            let json = info_skill_json(s, &manifest.release_tag);
             return Ok(ToolOutput::success(json, start.elapsed()));
         }
 
@@ -1274,6 +1319,7 @@ mod tests {
             name: "indie-tool".into(),
             kind_hint: None,
             release_tag: None,
+            version: None,
             force: false,
             acknowledge_unverified: false,
         };
@@ -1306,6 +1352,7 @@ mod tests {
             name: "indie-tool".into(),
             kind_hint: None,
             release_tag: None,
+            version: None,
             force: false,
             acknowledge_unverified: true,
         };
@@ -1336,6 +1383,108 @@ mod tests {
         assert!(
             !default.acknowledge_unverified,
             "omitted ack must default to false so community content stays gated"
+        );
+    }
+
+    #[test]
+    fn install_params_from_json_propagates_version() {
+        let parsed = InstallParams::from_json(&serde_json::json!({
+            "name": "clickup",
+            "version": "1.2.3",
+        }))
+        .expect("valid params");
+        assert_eq!(
+            parsed.version.as_deref(),
+            Some("1.2.3"),
+            "signed version must reach the install caller so the catalog entry can be bound to it"
+        );
+        let default = InstallParams::from_json(&serde_json::json!({"name": "clickup"}))
+            .expect("valid params");
+        assert!(
+            default.version.is_none(),
+            "omitted version must stay None so agent/CLI installs remain version-agnostic"
+        );
+    }
+
+    #[tokio::test]
+    async fn install_from_manifest_rejects_version_mismatch() {
+        let (tool, _tools_dir, _channels_dir) = install_tool_with_ext_mgr();
+        let manifest = manifest_with_provenance("clickup", Provenance::Official, None, None);
+        let parsed = InstallParams {
+            name: "clickup".into(),
+            kind_hint: None,
+            release_tag: None,
+            version: Some("9.9.9".into()),
+            force: false,
+            acknowledge_unverified: false,
+        };
+        let ctx = JobContext::with_user("test", "version bind mismatch test", "");
+        let err = tool
+            .install_from_manifest(std::time::Instant::now(), manifest, parsed, &ctx)
+            .await
+            .expect_err("a signed version that does not match the catalog entry must be rejected before install");
+        match err {
+            ToolError::InvalidParameters(msg) => assert!(
+                msg.contains("does not match") && msg.contains("9.9.9"),
+                "version-bind rejection must name the mismatch so the gap is debuggable: {msg}"
+            ),
+            other => panic!(
+                "version mismatch must reject as InvalidParameters before the install side effect; got {other:?}"
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn install_from_manifest_accepts_matching_version() {
+        let (tool, _tools_dir, _channels_dir) = install_tool_with_ext_mgr();
+        let manifest = manifest_with_provenance("clickup", Provenance::Official, None, None);
+        let parsed = InstallParams {
+            name: "clickup".into(),
+            kind_hint: None,
+            release_tag: None,
+            version: Some("0.1.0".into()),
+            force: false,
+            acknowledge_unverified: false,
+        };
+        let ctx = JobContext::with_user("test", "version bind match test", "");
+        let err = tool
+            .install_from_manifest(std::time::Instant::now(), manifest, parsed, &ctx)
+            .await
+            .expect_err("fake artifact URLs make the install fail downstream of the version gate");
+        assert!(
+            !matches!(&err, ToolError::InvalidParameters(m) if m.contains("does not match")),
+            "a matching version must clear the bind check; got the bind rejection instead: {err:?}"
+        );
+    }
+
+    #[test]
+    fn info_tool_json_includes_trust_label() {
+        let manifest = manifest_with_provenance("indie-tool", Provenance::New, None, None);
+        let entry = manifest.find_tool("indie-tool").expect("tool present");
+        let json = info_tool_json(entry, &manifest.release_tag);
+        assert_eq!(
+            json["trust_label"],
+            serde_json::json!(Provenance::New.trust_label()),
+            "ironhub_info tool detail must carry trust_label so the deep-link confirm can render it"
+        );
+        assert_eq!(json["provenance"], "new");
+        assert_eq!(json["version"], "0.1.0");
+    }
+
+    #[test]
+    fn info_skill_json_includes_trust_label() {
+        let manifest = manifest_with_provenance(
+            "official-tool",
+            Provenance::Official,
+            Some("indie-skill"),
+            Some(Provenance::New),
+        );
+        let entry = manifest.find_skill("indie-skill").expect("skill present");
+        let json = info_skill_json(entry, &manifest.release_tag);
+        assert_eq!(
+            json["trust_label"],
+            serde_json::json!(Provenance::New.trust_label()),
+            "ironhub_info skill detail must carry trust_label to match search/list output"
         );
     }
 

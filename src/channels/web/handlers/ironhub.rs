@@ -184,6 +184,7 @@ pub async fn ironhub_install_handler(
     let dispatcher = dispatcher_or_503(&state)?;
     let mut params = serde_json::Map::new();
     params.insert("name".into(), serde_json::Value::String(req.slug));
+    params.insert("version".into(), serde_json::Value::String(req.version));
     params.insert(
         "acknowledge_unverified".into(),
         serde_json::Value::Bool(req.acknowledge_unverified),
@@ -590,6 +591,7 @@ mod tests {
                 "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$", "minLength": 1, "maxLength": 64 },
                 "kind": { "type": "string", "enum": ["tool", "skill"] },
                 "release_tag": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$", "minLength": 1, "maxLength": 128 },
+                "version": { "type": "string", "minLength": 1, "maxLength": 128 },
                 "force": { "type": "boolean", "default": false },
                 "acknowledge_unverified": { "type": "boolean", "default": false }
             },
@@ -973,6 +975,11 @@ mod tests {
             params.get("name").and_then(|v| v.as_str()),
             Some("clickup"),
             "gateway handler must forward the signed slug as the install name"
+        );
+        assert_eq!(
+            params.get("version").and_then(|v| v.as_str()),
+            Some("1.0.0"),
+            "gateway handler must forward the signed version so the tool binds the install to it"
         );
     }
 
