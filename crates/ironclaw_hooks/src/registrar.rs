@@ -321,6 +321,14 @@ impl HookRegistrar {
                             WasmObserverHook::new(Arc::clone(runtime), prepared, point),
                         )?;
                     }
+                    HookManifestKind::EventTriggered => {
+                        return Err(HookError::RegistryConstruction(
+                            "WASM-bodied event-triggered hooks are not yet supported by the \
+                             registrar; register a host-side event-triggered hook via the \
+                             dispatcher builder instead"
+                                .to_string(),
+                        ));
+                    }
                 }
                 dispatcher.set_binding_priority(hook_id, entry.priority);
                 Ok(hook_id)

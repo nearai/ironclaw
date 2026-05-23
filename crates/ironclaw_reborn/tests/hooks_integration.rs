@@ -29,7 +29,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Duration as StdDuration, Instant};
+use std::time::{Duration, Instant};
 
 use tokio::sync::Notify;
 
@@ -63,12 +63,12 @@ use ironclaw_hooks::sink::{
     EventTriggeredHook, ObserverHook, ObserverSink, PrivilegedBeforeCapabilityHook,
     PrivilegedGateSink, RestrictedBeforeCapabilityHook, RestrictedGateSink,
 };
+use ironclaw_hooks::wasm::{
+    WasmHookModuleRequest, WasmHookModuleResolver, WasmHookRuntime, WasmHookRuntimeError,
+};
 use ironclaw_host_api::{
     AgentId, CapabilityId, InvocationId, ProjectId, ResourceScope, RuntimeKind, TenantId, ThreadId,
     UserId,
-};
-use ironclaw_hooks::wasm::{
-    WasmHookModuleRequest, WasmHookModuleResolver, WasmHookRuntime, WasmHookRuntimeError,
 };
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,

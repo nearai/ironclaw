@@ -262,7 +262,7 @@ impl WasmHookRuntime {
         // rather than deferring to first live dispatch. Per-prepare cost is
         // small (one extra `Linker::instantiate`); module-compile output is
         // already cached above.
-        let point = wasm_point_for_kind(request.kind);
+        let point = wasm_point_for_kind(request.kind)?;
         validate_module_abi(&self.engine, &module, &limits, point, request.export)?;
         Ok(PreparedWasmHook {
             module,
@@ -705,17 +705,20 @@ fn serialize_payload(value: &serde_json::Value) -> Vec<u8> {
     serde_json::to_vec(value).unwrap_or_default()
 }
 
-fn wasm_point_for_kind(kind: HookManifestKind) -> WasmHookPoint {
+fn wasm_point_for_kind(kind: HookManifestKind) -> Result<WasmHookPoint, WasmHookRuntimeError> {
     match kind {
-        HookManifestKind::BeforeCapability => WasmHookPoint::BeforeCapability,
-        HookManifestKind::BeforePrompt => WasmHookPoint::BeforePrompt,
-        HookManifestKind::AfterModel => WasmHookPoint::Observer(HookPointSpec::AfterModel),
+        HookManifestKind::BeforeCapability => Ok(WasmHookPoint::BeforeCapability),
+        HookManifestKind::BeforePrompt => Ok(WasmHookPoint::BeforePrompt),
+        HookManifestKind::AfterModel => Ok(WasmHookPoint::Observer(HookPointSpec::AfterModel)),
         HookManifestKind::AfterCapability => {
-            WasmHookPoint::Observer(HookPointSpec::AfterCapability)
+            Ok(WasmHookPoint::Observer(HookPointSpec::AfterCapability))
         }
         HookManifestKind::AfterCheckpoint => {
-            WasmHookPoint::Observer(HookPointSpec::AfterCheckpoint)
+            Ok(WasmHookPoint::Observer(HookPointSpec::AfterCheckpoint))
         }
+        HookManifestKind::EventTriggered => Err(WasmHookRuntimeError::Compilation(
+            "WASM-bodied event-triggered hooks are not yet supported".to_string(),
+        )),
     }
 }
 

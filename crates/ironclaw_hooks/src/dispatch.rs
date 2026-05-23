@@ -502,6 +502,7 @@ impl HookDispatcher {
             phase,
             priority: HookPriority::DEFAULT,
             point: HookPointSpec::BeforeCapability,
+            event_kind_filter: None,
             owning_extension: Some(owning_extension),
             scope,
             poisoned: false,
@@ -601,6 +602,7 @@ impl HookDispatcher {
             phase,
             priority: HookPriority::DEFAULT,
             point: HookPointSpec::BeforePrompt,
+            event_kind_filter: None,
             owning_extension: Some(owning_extension),
             scope,
             poisoned: false,
@@ -839,7 +841,6 @@ impl HookDispatcher {
             hook,
         )
     }
-
 
     /// Dispatch `before_capability`. Hooks run in `(phase, priority, hook_id)`
     /// order. The first `Deny` short-circuits the gate phases; `Telemetry`
