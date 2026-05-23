@@ -195,3 +195,56 @@ impl Obligation {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn obligations_are_canonicalized_into_runtime_evaluation_order() {
+        let reservation_id = ResourceReservationId::new();
+        let obligations = Obligations::new(vec![
+            Obligation::AuditAfter,
+            Obligation::AuditBefore,
+            Obligation::ReserveResources { reservation_id },
+            Obligation::EnforceOutputLimit { bytes: 1024 },
+        ])
+        .unwrap();
+
+        assert_eq!(
+            obligations.as_slice(),
+            &[
+                Obligation::ReserveResources { reservation_id },
+                Obligation::AuditBefore,
+                Obligation::EnforceOutputLimit { bytes: 1024 },
+                Obligation::AuditAfter,
+            ]
+        );
+    }
+
+    #[test]
+    fn obligations_reject_duplicate_or_conflicting_same_kind_entries() {
+        let err = Obligations::new(vec![
+            Obligation::EnforceOutputLimit { bytes: 1024 },
+            Obligation::EnforceOutputLimit { bytes: 2048 },
+        ])
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("duplicate or conflicting EnforceOutputLimit")
+        );
+    }
+
+    #[test]
+    fn obligations_deserialization_fails_closed_on_duplicate_kinds() {
+        let value = serde_json::json!([
+            {"type": "audit_before"},
+            {"type": "audit_before"}
+        ]);
+
+        let err = serde_json::from_value::<Obligations>(value).unwrap_err();
+
+        assert!(err.to_string().contains("duplicate or conflicting"));
+    }
+}
