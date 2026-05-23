@@ -512,22 +512,31 @@ impl EventTriggeredHookSubscription {
         self
     }
 
-    /// Verify that this subscription's stream key and read-scope filter are
-    /// consistent with the host's run scope. The subscription stream
-    /// partitions events by `(tenant, user, agent)`; `ReadScope` filters by
+    /// Verify the subscription's stream key against the host's run scope and
+    /// compute the **effective** [`ReadScope`] that the background task must
+    /// use for replay. The subscription stream partitions events by
+    /// `(tenant, user, agent)`; `ReadScope` filters by
     /// `(project, mission, thread, process)`. If a caller wires a host for
-    /// tenant A but supplies a subscription pointing at tenant B's stream
-    /// (or to a stream-key that names a foreign user), the host would
-    /// dispatch B's hook events into A's dispatcher with A's context tenant
-    /// — a cross-tenant trust-boundary break (NOTE(#3640)). Same for
-    /// `ReadScope` filter dimensions: any `Some(want)` in
-    /// the filter must match the corresponding value in the run scope, so
-    /// the subscription never observes events outside the host's authority.
-    fn validate_against_run_scope(
+    /// tenant A but supplies a subscription pointing at tenant B's stream (or
+    /// to a stream-key that names a foreign user), the host would dispatch B's
+    /// hook events into A's dispatcher with A's context tenant — a
+    /// cross-tenant trust-boundary break (NOTE(#3640)).
+    ///
+    /// PR #3640 followup (Bug 1, cross-thread/project leakage): the supplied
+    /// `read_scope` is **not trusted as-is**. A permissive `ReadScope::any()`
+    /// is rejected (fail-closed) and the effective filter is *derived* from the
+    /// run/thread scope so the subscription can never observe events from other
+    /// threads/projects/missions that share the same `(tenant, user, agent)`
+    /// stream. The derived filter always pins `thread_id` to the run's thread
+    /// and pins `project_id`/`mission_id` whenever the run/thread scope carries
+    /// them. Any explicit `Some(want)` the caller supplied must additionally
+    /// equal the corresponding run/thread value, so a caller cannot *widen* the
+    /// scope below what the run authorizes.
+    fn effective_read_scope(
         &self,
         run_scope: &ironclaw_turns::TurnScope,
         thread_scope: &ironclaw_threads::ThreadScope,
-    ) -> Result<(), String> {
+    ) -> Result<ReadScope, String> {
         if self.stream.tenant_id != run_scope.tenant_id {
             return Err(format!(
                 "event subscription stream tenant_id={} does not match run scope tenant_id={}",
@@ -557,9 +566,20 @@ impl EventTriggeredHookSubscription {
                 owner.as_str(),
             ));
         }
-        // ReadScope tightens the stream; any Some(want) must equal the
-        // corresponding run/thread scope value. None is permissive and is
-        // acceptable (the run scope owns the dimension authoritatively).
+        // Fail-closed: a fully-permissive ReadScope::any() would let the
+        // subscription observe every project/mission/thread in the shared
+        // (tenant, user, agent) stream. Reject it outright — the effective
+        // filter is derived below, not trusted from the caller.
+        if self.read_scope == ReadScope::any() {
+            return Err(
+                "event subscription read_scope must be tightened; ReadScope::any() is rejected \
+                 to prevent cross-thread/project event leakage"
+                    .to_string(),
+            );
+        }
+        // Any explicit Some(want) the caller supplied must equal the
+        // corresponding run/thread scope value — a caller may tighten but
+        // never widen below the run's authority.
         if let Some(want) = self.read_scope.project_id.as_ref()
             && run_scope.project_id.as_ref() != Some(want)
         {
@@ -587,7 +607,27 @@ impl EventTriggeredHookSubscription {
                 run_scope.thread_id.as_str(),
             ));
         }
-        Ok(())
+        // Derive the effective filter from the authoritative run/thread scope.
+        // thread_id is always present on the run scope and is the minimum
+        // tightening that prevents cross-thread leakage. project_id/mission_id
+        // are pinned whenever the run/thread scope carries them. process_id is
+        // preserved from the caller's supplied filter (it is a strictly
+        // narrower partition within the thread and the run scope does not own
+        // it).
+        Ok(ReadScope {
+            project_id: run_scope.project_id.clone(),
+            mission_id: thread_scope.mission_id.clone(),
+            thread_id: Some(run_scope.thread_id.clone()),
+            process_id: self.read_scope.process_id,
+        })
+    }
+
+    /// Override the read scope on a freshly-cloned subscription. Used by the
+    /// host build path to install the derived effective scope before the
+    /// background task spawns. See [`Self::effective_read_scope`].
+    pub(crate) fn with_read_scope(mut self, read_scope: ReadScope) -> Self {
+        self.read_scope = read_scope;
+        self
     }
 
     fn spawn(
@@ -1256,16 +1296,24 @@ where
                 // this host's run scope. Otherwise a
                 // caller wiring tenant A's host with tenant B's stream
                 // would silently dispatch B's hook events into A's
-                // dispatcher with A's context tenant.
-                subscription
-                    .validate_against_run_scope(&run_context.scope, &self.thread_scope)
+                // dispatcher with A's context tenant. Bug 1 followup: the
+                // effective read scope is *derived* from the run/thread scope
+                // (and ReadScope::any() is rejected) so the subscription can
+                // never observe other threads/projects in the shared stream.
+                let effective_read_scope = subscription
+                    .effective_read_scope(&run_context.scope, &self.thread_scope)
                     .map_err(|reason| RebornLoopDriverHostError::ScopeMismatch { reason })?;
-                Some(subscription.clone_for_independent_spawn().spawn(
-                    Arc::clone(dispatcher),
-                    run_context.scope.tenant_id.clone(),
-                    run_context.clone(),
-                    Arc::clone(&self.milestone_sink) as _,
-                ))
+                Some(
+                    subscription
+                        .clone_for_independent_spawn()
+                        .with_read_scope(effective_read_scope)
+                        .spawn(
+                            Arc::clone(dispatcher),
+                            run_context.scope.tenant_id.clone(),
+                            run_context.clone(),
+                            Arc::clone(&self.milestone_sink) as _,
+                        ),
+                )
             }
             _ => None,
         };
@@ -2850,5 +2898,187 @@ mod tests {
         let cap = Duration::from_millis(50);
         assert_eq!(adaptive_poll_interval(base, cap, 0), cap);
         assert_eq!(adaptive_poll_interval(base, cap, 10), cap);
+    }
+}
+
+/// PR #3640 followup (Bug 1, cross-thread/project event leakage via permissive
+/// ReadScope). Unit coverage for [`EventTriggeredHookSubscription::effective_read_scope`].
+#[cfg(test)]
+mod event_subscription_scope_tests {
+    use super::*;
+    use ironclaw_events::{InMemoryDurableEventLog, RuntimeEvent};
+    use ironclaw_host_api::{
+        AgentId, CapabilityId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
+    };
+    use ironclaw_threads::ThreadScope;
+    use ironclaw_turns::TurnScope;
+
+    fn ids() -> (TenantId, AgentId, UserId, ProjectId, ThreadId) {
+        (
+            TenantId::new("tenant-bug1").expect("tenant"),
+            AgentId::new("agent-bug1").expect("agent"),
+            UserId::new("user-bug1").expect("user"),
+            ProjectId::new("project-bug1").expect("project"),
+            ThreadId::new("thread-bug1").expect("thread"),
+        )
+    }
+
+    fn run_scope(
+        tenant: &TenantId,
+        agent: &AgentId,
+        project: &ProjectId,
+        thread: &ThreadId,
+    ) -> TurnScope {
+        TurnScope::new(
+            tenant.clone(),
+            Some(agent.clone()),
+            Some(project.clone()),
+            thread.clone(),
+        )
+    }
+
+    fn thread_scope(
+        tenant: &TenantId,
+        agent: &AgentId,
+        user: &UserId,
+        project: &ProjectId,
+    ) -> ThreadScope {
+        ThreadScope {
+            tenant_id: tenant.clone(),
+            agent_id: agent.clone(),
+            project_id: Some(project.clone()),
+            owner_user_id: Some(user.clone()),
+            mission_id: None,
+        }
+    }
+
+    fn stream_key(tenant: &TenantId, user: &UserId, agent: &AgentId) -> EventStreamKey {
+        EventStreamKey::new(tenant.clone(), user.clone(), Some(agent.clone()))
+    }
+
+    fn subscription(
+        stream: EventStreamKey,
+        read_scope: ReadScope,
+    ) -> EventTriggeredHookSubscription {
+        let log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+        EventTriggeredHookSubscription::new(log, stream, read_scope, EventCursor::origin())
+    }
+
+    #[test]
+    fn event_subscription_rejects_read_scope_any() {
+        let (tenant, agent, user, project, thread) = ids();
+        let sub = subscription(stream_key(&tenant, &user, &agent), ReadScope::any());
+        let err = sub
+            .effective_read_scope(
+                &run_scope(&tenant, &agent, &project, &thread),
+                &thread_scope(&tenant, &agent, &user, &project),
+            )
+            .expect_err("ReadScope::any() must be rejected fail-closed");
+        assert!(
+            err.contains("ReadScope::any()"),
+            "rejection must name the permissive scope: {err}"
+        );
+    }
+
+    #[test]
+    fn effective_read_scope_pins_thread_and_project_from_run_scope() {
+        let (tenant, agent, user, project, thread) = ids();
+        // Caller supplies a thread-pinned (non-any) scope.
+        let supplied = ReadScope {
+            thread_id: Some(thread.clone()),
+            ..ReadScope::any()
+        };
+        let sub = subscription(stream_key(&tenant, &user, &agent), supplied);
+        let effective = sub
+            .effective_read_scope(
+                &run_scope(&tenant, &agent, &project, &thread),
+                &thread_scope(&tenant, &agent, &user, &project),
+            )
+            .expect("valid scope derives");
+        assert_eq!(effective.thread_id, Some(thread));
+        assert_eq!(effective.project_id, Some(project));
+        assert_eq!(effective.mission_id, None);
+    }
+
+    /// End-to-end leakage proof: the derived effective scope, applied by the
+    /// durable log's read filter, must hide events from a *different* project
+    /// that share the same `(tenant, user, agent)` stream.
+    #[tokio::test]
+    async fn event_subscription_does_not_observe_other_project_events() {
+        let (tenant, agent, user, project, thread) = ids();
+        let other_project = ProjectId::new("project-OTHER").expect("project");
+
+        let our_scope = ResourceScope {
+            tenant_id: tenant.clone(),
+            user_id: user.clone(),
+            agent_id: Some(agent.clone()),
+            project_id: Some(project.clone()),
+            mission_id: None,
+            thread_id: Some(thread.clone()),
+            invocation_id: ironclaw_host_api::InvocationId::new(),
+        };
+        let foreign_scope = ResourceScope {
+            project_id: Some(other_project.clone()),
+            invocation_id: ironclaw_host_api::InvocationId::new(),
+            ..our_scope.clone()
+        };
+
+        let log = InMemoryDurableEventLog::new();
+        let cap = CapabilityId::new("bug1.cap").expect("cap");
+        // Foreign-project event appended first.
+        log.append(RuntimeEvent::hook_failed(
+            foreign_scope,
+            cap.clone(),
+            "deadbeef",
+            "panic",
+            "fail_isolated",
+            None,
+        ))
+        .await
+        .expect("append foreign");
+        // Our-project event.
+        log.append(RuntimeEvent::hook_failed(
+            our_scope.clone(),
+            cap,
+            "deadbeef",
+            "panic",
+            "fail_isolated",
+            None,
+        ))
+        .await
+        .expect("append ours");
+
+        let supplied = ReadScope {
+            thread_id: Some(thread.clone()),
+            ..ReadScope::any()
+        };
+        let sub = subscription(EventStreamKey::from_scope(&our_scope), supplied);
+        let effective = sub
+            .effective_read_scope(
+                &run_scope(&tenant, &agent, &project, &thread),
+                &thread_scope(&tenant, &agent, &user, &project),
+            )
+            .expect("derive effective scope");
+
+        let replay = log
+            .read_after_cursor(
+                &EventStreamKey::from_scope(&our_scope),
+                &effective,
+                Some(EventCursor::origin()),
+                16,
+            )
+            .await
+            .expect("read with effective scope");
+
+        assert_eq!(
+            replay.entries.len(),
+            1,
+            "effective scope must observe only our project's event, not the foreign one"
+        );
+        assert_eq!(
+            replay.entries[0].record.scope.project_id.as_ref(),
+            Some(&project),
+            "the single observed event must belong to our project"
+        );
     }
 }
