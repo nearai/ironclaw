@@ -48,7 +48,7 @@ fn db_url() -> Option<String> {
 /// with other integration-test binaries (e.g. the adversarial suite) that
 /// `cargo test` runs in parallel against the same database. Every pooled
 /// connection sets `search_path` to this schema via a `post_create` hook,
-/// so the backend's unqualified `hook_predicate_counters` resolves here.
+/// so the backend's unqualified `hooks_predicate_*` tables resolve here.
 const TEST_SCHEMA: &str = "hooks_predicate_contract_test";
 
 /// Build a pool ON THE CURRENT runtime pinned to the dedicated schema,
@@ -87,7 +87,7 @@ async fn fresh_backend(url: &str) -> Option<Arc<PostgresPredicateStateBackend>> 
     backend.run_migrations().await.ok()?;
     let client = pool.get().await.ok()?;
     client
-        .batch_execute("TRUNCATE TABLE hook_predicate_counters")
+        .batch_execute("TRUNCATE TABLE hooks_predicate_invocations, hooks_predicate_values")
         .await
         .ok()?;
     Some(Arc::new(backend))

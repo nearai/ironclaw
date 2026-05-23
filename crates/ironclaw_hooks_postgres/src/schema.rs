@@ -1,8 +1,12 @@
 //! Embedded idempotent schema for the durable predicate backend.
 //!
-//! The DDL mirrors `migrations/V1__predicate_counters.sql` verbatim and
-//! is applied via [`PostgresPredicateStateBackend::run_migrations`] using
-//! a single `batch_execute`, the same per-crate pattern
+//! The DDL is the *single source of truth* file
+//! `migrations/V1__predicate_state.sql`, pulled in verbatim at compile
+//! time via `include_str!`. There is no hand-maintained second copy to
+//! drift against. It is applied via
+//! [`PostgresPredicateStateBackend::run_migrations`] using
+//! a single `batch_execute` (which tolerates the file's `--` SQL
+//! comments), the same per-crate pattern
 //! `ironclaw_filesystem::PostgresRootFilesystem::run_migrations` uses. We
 //! deliberately do NOT route through the legacy main-binary refinery
 //! `migrations/` directory: that system is scoped to `src/db/` and the
@@ -33,28 +37,21 @@
 //! assumption the rest of the system makes for `occurred_at` timestamps.
 //! The load-bearing cross-host property — *replay dedup* — does NOT
 //! depend on clock agreement: it is enforced by the
-//! `PRIMARY KEY (key_hash, id)` constraint and `ON CONFLICT DO NOTHING`,
+//! `PRIMARY KEY (key_hash, event_id)` constraint and `ON CONFLICT DO NOTHING`,
 //! which is exact regardless of clock skew. Atomicity is enforced by
 //! running prune + dedup-check + insert + aggregate inside one
 //! `READ COMMITTED` transaction guarded by a per-key advisory lock, also
 //! clock-independent.
 
-/// Idempotent schema applied by `run_migrations()`. Kept byte-compatible
-/// with `migrations/V1__predicate_counters.sql`.
-pub const POSTGRES_PREDICATE_SCHEMA: &str = "\
-CREATE TABLE IF NOT EXISTS hook_predicate_counters (
-    scope_hash         BYTEA       NOT NULL,
-    key_hash           BYTEA       NOT NULL,
-    kind               CHAR(1)     NOT NULL,
-    id                 TEXT        NOT NULL,
-    ts                 TIMESTAMPTZ NOT NULL,
-    value              NUMERIC,
-    PRIMARY KEY (key_hash, id)
-);
-CREATE INDEX IF NOT EXISTS hook_predicate_counters_key_ts_idx
-    ON hook_predicate_counters (key_hash, ts);
-CREATE INDEX IF NOT EXISTS hook_predicate_counters_scope_idx
-    ON hook_predicate_counters (scope_hash, kind);
-CREATE INDEX IF NOT EXISTS hook_predicate_counters_ts_idx
-    ON hook_predicate_counters (ts);
-";
+/// Idempotent schema applied by `run_migrations()`. Sourced directly from
+/// `migrations/V1__predicate_state.sql` via `include_str!` so the file
+/// is the only copy — no embedded duplicate can drift out of sync.
+pub const POSTGRES_PREDICATE_SCHEMA: &str = include_str!("../migrations/V1__predicate_state.sql");
+
+/// Table holding invocation-count samples (one row per recorded invocation
+/// event; the in-window `COUNT(*)` is the invocation count).
+pub(crate) const INVOCATIONS_TABLE: &str = "hooks_predicate_invocations";
+
+/// Table holding numeric-value samples (one row per recorded value event;
+/// the in-window `SUM(value)` is the running sum).
+pub(crate) const VALUES_TABLE: &str = "hooks_predicate_values";

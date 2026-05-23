@@ -1,26 +1,52 @@
-//! Scope-hash derivation for predicate-state keys.
+//! Hash derivation for predicate-state keys.
 //!
-//! A "scope" is the durable identity of a counter / value-sum bucket. The
-//! components are blake3-hashed into a fixed 32-byte `scope_hash` BLOB that
-//! becomes part of the table PRIMARY KEY. Components are length-prefixed so
-//! distinct splits can't alias (`("a","bc")` vs `("ab","c")`).
+//! Two digests are derived per bucket, matching the canonical cross-backend
+//! schema (see `crate::schema`):
+//!
+//! - `scope_hash` = blake3 of the length-prefixed `tenant_id`. This is the
+//!   tenant trust boundary and the grain at which the per-tenant LRU quota is
+//!   enforced (`COUNT(DISTINCT key_hash) WHERE scope_hash = ?`). It replaces
+//!   the earlier raw `tenant_id` TEXT column.
+//! - `key_hash` = blake3 of the length-prefixed *whole* bucket identity,
+//!   including a one-byte map discriminant so an invocation key and a value
+//!   key that share `(hook, tenant, capability)` never collide. This is the
+//!   dedup + count/sum grain and the table PRIMARY KEY (with `event_id`).
+//!
+//! Components are length-prefixed so distinct splits can't alias
+//! (`("a","bc")` vs `("ab","c")`).
 
 use chrono::{DateTime, Utc};
 use ironclaw_hooks::predicate_state::{InvocationKey, ValueKey};
 
-/// blake3 of the invocation scope components. Length-prefixed so distinct
-/// component splits can't alias.
-pub(crate) fn invocation_scope_hash(key: &InvocationKey) -> Vec<u8> {
+/// Map discriminants folded into `key_hash` so the invocation and value tables
+/// never produce the same `key_hash` for a shared `(hook, tenant, capability)`.
+const KIND_INVOCATION: u8 = b'i';
+const KIND_VALUE: u8 = b'v';
+
+/// `scope_hash` for a tenant — the trust boundary and per-tenant LRU-quota
+/// grain. blake3 of the length-prefixed `tenant_id`.
+pub(crate) fn tenant_scope_hash(tenant_id: &str) -> Vec<u8> {
     let mut hasher = blake3::Hasher::new();
+    hash_component(&mut hasher, tenant_id.as_bytes());
+    hasher.finalize().as_bytes().to_vec()
+}
+
+/// `key_hash` for an invocation-counter bucket. Length-prefixed so distinct
+/// component splits can't alias; map discriminant keeps it disjoint from the
+/// value table's key space.
+pub(crate) fn invocation_key_hash(key: &InvocationKey) -> Vec<u8> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&[KIND_INVOCATION]);
     hash_component(&mut hasher, key.hook_id.as_bytes());
     hash_component(&mut hasher, key.tenant_id.as_str().as_bytes());
     hash_component(&mut hasher, key.capability.as_bytes());
     hasher.finalize().as_bytes().to_vec()
 }
 
-/// blake3 of the value scope components (invocation scope + numeric field).
-pub(crate) fn value_scope_hash(key: &ValueKey) -> Vec<u8> {
+/// `key_hash` for a numeric-value-sum bucket (invocation components + field).
+pub(crate) fn value_key_hash(key: &ValueKey) -> Vec<u8> {
     let mut hasher = blake3::Hasher::new();
+    hasher.update(&[KIND_VALUE]);
     hash_component(&mut hasher, key.hook_id.as_bytes());
     hash_component(&mut hasher, key.tenant_id.as_str().as_bytes());
     hash_component(&mut hasher, key.capability.as_bytes());

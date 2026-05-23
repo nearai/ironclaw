@@ -4,8 +4,8 @@
 //! (`ironclaw_hooks::predicate_state::InMemoryPredicateStateBackend`) against a
 //! libSQL / SQLite database so predicate counter / value-sum state survives
 //! process restart and is consistent across every host pointing at the same
-//! database file. The schema lives in [`crate::schema`]; scope-hash derivation
-//! in [`crate::hashing`].
+//! database file. The schema lives in [`crate::schema`]; scope/key-hash
+//! derivation in [`crate::hashing`].
 //!
 //! [`PredicateStateBackend`]: ironclaw_hooks::predicate_state::PredicateStateBackend
 //!
@@ -35,7 +35,7 @@
 //!
 //! # Per-key cap: FAIL CLOSED (PR #3635 followup / #3929)
 //!
-//! When a scope already holds [`MAX_SAMPLES_PER_KEY`] in-window rows and a
+//! When a key already holds [`MAX_SAMPLES_PER_KEY`] in-window rows and a
 //! NEW distinct `event_id` arrives, the call returns
 //! [`PredicateBackendError::WindowOverflow`] rather than silently dropping the
 //! oldest sample. Silent drop-oldest weakened cap enforcement (the count could
@@ -69,7 +69,7 @@ use rust_decimal::Decimal;
 use tokio::sync::Mutex;
 
 use crate::hashing::{
-    invocation_scope_hash, to_epoch_millis, value_scope_hash, window_cutoff_millis,
+    invocation_key_hash, tenant_scope_hash, to_epoch_millis, value_key_hash, window_cutoff_millis,
 };
 use crate::schema::{INVOCATIONS_TABLE, LIBSQL_PREDICATE_STATE_SCHEMA, VALUES_TABLE};
 
@@ -226,10 +226,10 @@ impl PredicateStateBackend for LibSqlPredicateStateBackend {
         now: DateTime<Utc>,
         window: Duration,
     ) -> Result<u32, PredicateBackendError> {
-        let scope = invocation_scope_hash(key);
+        let scope = tenant_scope_hash(key.tenant_id.as_str());
+        let key_hash = invocation_key_hash(key);
         let cutoff = window_cutoff_millis(now, window);
         let now_ms = to_epoch_millis(now);
-        let tenant = key.tenant_id.as_str().to_string();
         let overflow_key = format!("{}/{}", key.tenant_id.as_str(), key.capability);
 
         // Serialise in-process writers before touching SQLite (see the
@@ -239,13 +239,13 @@ impl PredicateStateBackend for LibSqlPredicateStateBackend {
         conn.execute("BEGIN IMMEDIATE", ()).await.map_err(map_err)?;
 
         let result = async {
-            // 1. Trim entries outside the window for THIS scope first, so the
+            // 1. Trim entries outside the window for THIS key first, so the
             //    per-key cap and the final count both see only in-window rows.
             conn.execute(
                 &format!(
-                    "DELETE FROM {INVOCATIONS_TABLE} WHERE scope_hash = ?1 AND occurred_at < ?2"
+                    "DELETE FROM {INVOCATIONS_TABLE} WHERE key_hash = ?1 AND occurred_at < ?2"
                 ),
-                params![scope.clone(), cutoff],
+                params![key_hash.clone(), cutoff],
             )
             .await
             .map_err(map_err)?;
@@ -253,16 +253,16 @@ impl PredicateStateBackend for LibSqlPredicateStateBackend {
             // 2. Dedup short-circuit: a replayed id is a no-op against the
             //    count and must NOT trip the overflow check (replay refusal
             //    survives the cap boundary). If the id is already present for
-            //    this scope, skip the insert + cap check entirely.
-            let is_replay = event_id_exists(&conn, INVOCATIONS_TABLE, &scope, event_id).await?;
+            //    this key, skip the insert + cap check entirely.
+            let is_replay = event_id_exists(&conn, INVOCATIONS_TABLE, &key_hash, event_id).await?;
 
             let mut evicted = 0u64;
             if !is_replay {
-                // 3. Per-key sample cap: FAIL CLOSED. If the scope is already at
+                // 3. Per-key sample cap: FAIL CLOSED. If the key is already at
                 //    the cap with in-window rows, a NEW distinct id cannot be
                 //    recorded without dropping an existing in-window sample, so
                 //    reject (#3929) rather than silently evicting the oldest.
-                let in_window = scope_in_window_count(&conn, INVOCATIONS_TABLE, &scope, cutoff).await?;
+                let in_window = key_in_window_count(&conn, INVOCATIONS_TABLE, &key_hash, cutoff).await?;
                 if in_window as usize >= MAX_SAMPLES_PER_KEY {
                     return Err(PredicateBackendError::WindowOverflow {
                         key: overflow_key.clone(),
@@ -270,12 +270,13 @@ impl PredicateStateBackend for LibSqlPredicateStateBackend {
                     });
                 }
 
-                // 4. LRU + per-tenant quota: only relevant when inserting a NEW
-                //    scope (a fresh PRIMARY KEY). Mirror the in-memory backend's
-                //    "evict before insert when at cap" semantics.
-                let scope_exists = scope_exists(&conn, INVOCATIONS_TABLE, &scope).await?;
-                if !scope_exists {
-                    evicted += enforce_caps(&conn, INVOCATIONS_TABLE, &tenant).await?;
+                // 4. Per-tenant LRU quota: only relevant when inserting a NEW
+                //    key (a fresh PRIMARY KEY). Mirror the in-memory backend's
+                //    "evict before insert when at quota" semantics, ranking the
+                //    tenant's keys by oldest-front (MIN(occurred_at)).
+                let key_exists = key_exists(&conn, INVOCATIONS_TABLE, &key_hash).await?;
+                if !key_exists {
+                    evicted += enforce_caps(&conn, INVOCATIONS_TABLE, &scope).await?;
                 }
 
                 // 5. Insert. The dedup short-circuit above already excludes
@@ -283,17 +284,17 @@ impl PredicateStateBackend for LibSqlPredicateStateBackend {
                 //    suspenders guard against a concurrent insert of the same id.
                 conn.execute(
                     &format!(
-                        "INSERT INTO {INVOCATIONS_TABLE} (scope_hash, event_id, occurred_at, tenant_id) \
-                         VALUES (?1, ?2, ?3, ?4) ON CONFLICT (scope_hash, event_id) DO NOTHING"
+                        "INSERT INTO {INVOCATIONS_TABLE} (scope_hash, key_hash, event_id, occurred_at) \
+                         VALUES (?1, ?2, ?3, ?4) ON CONFLICT (key_hash, event_id) DO NOTHING"
                     ),
-                    params![scope.clone(), event_id.as_str(), now_ms, tenant.clone()],
+                    params![scope.clone(), key_hash.clone(), event_id.as_str(), now_ms],
                 )
                 .await
                 .map_err(map_err)?;
             }
 
             // 6. In-window count read under the same lock.
-            let count = scope_in_window_count(&conn, INVOCATIONS_TABLE, &scope, cutoff).await?;
+            let count = key_in_window_count(&conn, INVOCATIONS_TABLE, &key_hash, cutoff).await?;
             Ok::<(u32, u64), PredicateBackendError>((count, evicted))
         }
         .await;
@@ -309,10 +310,10 @@ impl PredicateStateBackend for LibSqlPredicateStateBackend {
         value: Decimal,
         window: Duration,
     ) -> Result<Decimal, PredicateBackendError> {
-        let scope = value_scope_hash(key);
+        let scope = tenant_scope_hash(key.tenant_id.as_str());
+        let key_hash = value_key_hash(key);
         let cutoff = window_cutoff_millis(now, window);
         let now_ms = to_epoch_millis(now);
-        let tenant = key.tenant_id.as_str().to_string();
         let value_str = value.to_string();
         let overflow_key = format!(
             "{}/{}#{}",
@@ -329,14 +330,14 @@ impl PredicateStateBackend for LibSqlPredicateStateBackend {
 
         let result = async {
             conn.execute(
-                &format!("DELETE FROM {VALUES_TABLE} WHERE scope_hash = ?1 AND occurred_at < ?2"),
-                params![scope.clone(), cutoff],
+                &format!("DELETE FROM {VALUES_TABLE} WHERE key_hash = ?1 AND occurred_at < ?2"),
+                params![key_hash.clone(), cutoff],
             )
             .await
             .map_err(map_err)?;
 
             // Dedup short-circuit (see record_invocation).
-            let is_replay = event_id_exists(&conn, VALUES_TABLE, &scope, event_id).await?;
+            let is_replay = event_id_exists(&conn, VALUES_TABLE, &key_hash, event_id).await?;
 
             let mut evicted = 0u64;
             if !is_replay {
@@ -346,7 +347,7 @@ impl PredicateStateBackend for LibSqlPredicateStateBackend {
                 // sample bound. The old drop-oldest silently UNDERCOUNTED the
                 // sum (in-window values discarded) — a fail-OPEN weakening of
                 // the value cap. We now reject (#3929).
-                let in_window = scope_in_window_count(&conn, VALUES_TABLE, &scope, cutoff).await?;
+                let in_window = key_in_window_count(&conn, VALUES_TABLE, &key_hash, cutoff).await?;
                 if in_window as usize >= MAX_SAMPLES_PER_KEY {
                     return Err(PredicateBackendError::WindowOverflow {
                         key: overflow_key.clone(),
@@ -354,17 +355,17 @@ impl PredicateStateBackend for LibSqlPredicateStateBackend {
                     });
                 }
 
-                let scope_exists = scope_exists(&conn, VALUES_TABLE, &scope).await?;
-                if !scope_exists {
-                    evicted += enforce_caps(&conn, VALUES_TABLE, &tenant).await?;
+                let key_exists = key_exists(&conn, VALUES_TABLE, &key_hash).await?;
+                if !key_exists {
+                    evicted += enforce_caps(&conn, VALUES_TABLE, &scope).await?;
                 }
 
                 conn.execute(
                     &format!(
-                        "INSERT INTO {VALUES_TABLE} (scope_hash, event_id, occurred_at, value, tenant_id) \
-                         VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT (scope_hash, event_id) DO NOTHING"
+                        "INSERT INTO {VALUES_TABLE} (scope_hash, key_hash, event_id, occurred_at, value) \
+                         VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT (key_hash, event_id) DO NOTHING"
                     ),
-                    params![scope.clone(), event_id.as_str(), now_ms, value_str, tenant.clone()],
+                    params![scope.clone(), key_hash.clone(), event_id.as_str(), now_ms, value_str],
                 )
                 .await
                 .map_err(map_err)?;
@@ -377,9 +378,9 @@ impl PredicateStateBackend for LibSqlPredicateStateBackend {
             let sum = sum_decimal(
                 &conn,
                 &format!(
-                    "SELECT value FROM {VALUES_TABLE} WHERE scope_hash = ?1 AND occurred_at >= ?2"
+                    "SELECT value FROM {VALUES_TABLE} WHERE key_hash = ?1 AND occurred_at >= ?2"
                 ),
-                params![scope.clone(), cutoff],
+                params![key_hash.clone(), cutoff],
             )
             .await?;
             Ok::<(Decimal, u64), PredicateBackendError>((sum, evicted))
@@ -454,57 +455,61 @@ async fn finish_txn<T>(
     }
 }
 
-/// Count the in-window rows for `scope` (`occurred_at >= cutoff`). Used both
+/// Count the in-window rows for `key_hash` (`occurred_at >= cutoff`). Used both
 /// for the fail-closed cap check and the final returned count.
-async fn scope_in_window_count(
+async fn key_in_window_count(
     conn: &Connection,
     table: &str,
-    scope: &[u8],
+    key_hash: &[u8],
     cutoff: i64,
 ) -> Result<u32, PredicateBackendError> {
     scalar_u32(
         conn,
-        &format!("SELECT count(*) FROM {table} WHERE scope_hash = ?1 AND occurred_at >= ?2"),
-        params![scope.to_vec(), cutoff],
+        &format!("SELECT count(*) FROM {table} WHERE key_hash = ?1 AND occurred_at >= ?2"),
+        params![key_hash.to_vec(), cutoff],
     )
     .await
 }
 
-/// Whether `event_id` is already recorded for `scope` (the dedup short-circuit).
+/// Whether `event_id` is already recorded for `key_hash` (the dedup
+/// short-circuit).
 async fn event_id_exists(
     conn: &Connection,
     table: &str,
-    scope: &[u8],
+    key_hash: &[u8],
     event_id: &PredicateEventId,
 ) -> Result<bool, PredicateBackendError> {
     let count = scalar_u32(
         conn,
-        &format!("SELECT count(*) FROM {table} WHERE scope_hash = ?1 AND event_id = ?2"),
-        params![scope.to_vec(), event_id.as_str()],
+        &format!("SELECT count(*) FROM {table} WHERE key_hash = ?1 AND event_id = ?2"),
+        params![key_hash.to_vec(), event_id.as_str()],
     )
     .await?;
     Ok(count > 0)
 }
 
-async fn scope_exists(
+/// Whether any row exists for `key_hash` — i.e. whether this is an existing
+/// bucket (the quota only runs when inserting a brand-new key).
+async fn key_exists(
     conn: &Connection,
     table: &str,
-    scope: &[u8],
+    key_hash: &[u8],
 ) -> Result<bool, PredicateBackendError> {
     let count = scalar_u32(
         conn,
-        &format!("SELECT count(*) FROM {table} WHERE scope_hash = ?1"),
-        params![scope.to_vec()],
+        &format!("SELECT count(*) FROM {table} WHERE key_hash = ?1"),
+        params![key_hash.to_vec()],
     )
     .await?;
     Ok(count > 0)
 }
 
-/// Enforce the per-tenant [`MAX_KEYS_PER_TENANT`] distinct-scope quota before
-/// inserting a NEW scope. A "scope" is a distinct `scope_hash`; its "front
-/// timestamp" is its `min(occurred_at)`. The victim is the tenant's scope with
-/// the smallest front timestamp — the durable equivalent of the in-memory
-/// `min_by_key(front ts)` LRU. Returns the number of scopes evicted (one
+/// Enforce the per-tenant [`MAX_KEYS_PER_TENANT`] distinct-key quota before
+/// inserting a NEW key. A tenant is a distinct `scope_hash`; its keys are the
+/// distinct `key_hash` values under that scope, each key's "front timestamp"
+/// being its `min(occurred_at)`. The victim is the tenant's key with the
+/// smallest front timestamp — the durable equivalent of the in-memory
+/// `min_by_key(front ts)` LRU. Returns the number of keys evicted (one
 /// increment per evicted bucket, matching the in-memory backend's `evictions`
 /// semantics).
 ///
@@ -526,41 +531,42 @@ async fn scope_exists(
 async fn enforce_caps(
     conn: &Connection,
     table: &str,
-    tenant: &str,
+    scope: &[u8],
 ) -> Result<u64, PredicateBackendError> {
     let mut evicted = 0u64;
 
     // Per-tenant quota (matches in-memory: a tenant at its cap evicts ITS OWN
-    // oldest scope so it can't push out other tenants). No global cap — see
+    // oldest key so it can't push out other tenants). No global cap — see
     // the fn-level doc; durable backends reap by time, not a global key count.
-    let tenant_scopes = scalar_u32(
+    // The tenant grain is `scope_hash`; its keys are the distinct `key_hash`
+    // values under it.
+    let tenant_keys = scalar_u32(
         conn,
-        &format!("SELECT count(DISTINCT scope_hash) FROM {table} WHERE tenant_id = ?1"),
-        params![tenant],
+        &format!("SELECT count(DISTINCT key_hash) FROM {table} WHERE scope_hash = ?1"),
+        params![scope.to_vec()],
     )
     .await?;
-    if tenant_scopes as usize >= MAX_KEYS_PER_TENANT
-        && evict_oldest_scope(conn, table, tenant).await?
-    {
+    if tenant_keys as usize >= MAX_KEYS_PER_TENANT && evict_oldest_key(conn, table, scope).await? {
         evicted += 1;
     }
     Ok(evicted)
 }
 
-/// Delete every row of `tenant`'s scope whose `min(occurred_at)` is smallest.
-/// Returns true if a scope was evicted. Always tenant-scoped: durable backends
-/// only enforce the per-tenant quota (no global cap — see [`enforce_caps`]).
-async fn evict_oldest_scope(
+/// Delete every row of the tenant's key whose `min(occurred_at)` is smallest
+/// (oldest-front victim selection). Returns true if a key was evicted. Always
+/// tenant-scoped: durable backends only enforce the per-tenant quota (no global
+/// cap — see [`enforce_caps`]).
+async fn evict_oldest_key(
     conn: &Connection,
     table: &str,
-    tenant: &str,
+    scope: &[u8],
 ) -> Result<bool, PredicateBackendError> {
     let select_victim = format!(
-        "SELECT scope_hash FROM {table} WHERE tenant_id = ?1 \
-         GROUP BY scope_hash ORDER BY min(occurred_at) ASC, scope_hash ASC LIMIT 1"
+        "SELECT key_hash FROM {table} WHERE scope_hash = ?1 \
+         GROUP BY key_hash ORDER BY min(occurred_at) ASC, key_hash ASC LIMIT 1"
     );
     let mut rows = conn
-        .query(&select_victim, params![tenant])
+        .query(&select_victim, params![scope.to_vec()])
         .await
         .map_err(map_err)?;
     let Some(row) = rows.next().await.map_err(map_err)? else {
@@ -569,7 +575,7 @@ async fn evict_oldest_scope(
     let victim: Vec<u8> = row.get_value(0).map_err(map_err).and_then(blob_value)?;
     drop(rows);
     conn.execute(
-        &format!("DELETE FROM {table} WHERE scope_hash = ?1"),
+        &format!("DELETE FROM {table} WHERE key_hash = ?1"),
         params![victim],
     )
     .await
