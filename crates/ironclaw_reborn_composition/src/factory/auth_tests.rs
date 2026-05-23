@@ -9,6 +9,7 @@ use ironclaw_auth::{
 use ironclaw_host_api::{
     AgentId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
 };
+use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
 use ironclaw_turns::{
     AcceptedMessageRef, BlockedReason, CancelRunRequest, CancelRunResponse, GetRunStateRequest,
     IdempotencyKey, LoopCheckpointStateRef, ReplyTargetBindingRef, RunProfileRequest,
@@ -18,8 +19,6 @@ use ironclaw_turns::{
     runner::{BlockRunRequest, ClaimRunRequest, TurnRunTransitionPort},
 };
 use secrecy::SecretString;
-
-use crate::auth::RebornProductWorkflowAuthContinuationDispatcher;
 
 use super::*;
 
@@ -274,9 +273,7 @@ async fn oauth_callback_continuation_dispatch_maps_turn_error_categories() {
         });
         let services = RebornProductAuthServices::from_shared(
             Arc::new(InMemoryAuthProductServices::new()),
-            Arc::new(RebornProductWorkflowAuthContinuationDispatcher::new(
-                coordinator,
-            )),
+            Arc::new(ProductAuthTurnGateResumeDispatcher::new(coordinator)),
         );
         let scope = turn_scope();
         let actor = TurnActor::new(UserId::new("alice").unwrap());

@@ -7,10 +7,10 @@
 
 use std::sync::Arc;
 
-use ironclaw_auth::{AuthContinuationEvent, AuthContinuationRef};
+use ironclaw_auth::{AuthContinuationEvent, AuthContinuationRef, AuthProductError};
 use ironclaw_turns::{
     GateRef, IdempotencyKey, ResumeTurnPrecondition, ResumeTurnRequest, TurnActor, TurnCoordinator,
-    TurnError, TurnRunId, TurnScope,
+    TurnError, TurnErrorCategory, TurnRunId, TurnScope,
 };
 use uuid::Uuid;
 
@@ -28,6 +28,38 @@ pub struct ProductAuthTurnGateResumeDispatcher {
 impl ProductAuthTurnGateResumeDispatcher {
     pub fn new(turn_coordinator: Arc<dyn TurnCoordinator>) -> Self {
         Self { turn_coordinator }
+    }
+
+    pub async fn dispatch_auth_continuation(
+        &self,
+        event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        if matches!(
+            &event.continuation,
+            AuthContinuationRef::TurnGateResume { .. }
+        ) {
+            let flow_id = event.flow_id;
+            self.dispatch_turn_gate_resume(event)
+                .await
+                .map(|_| ())
+                .map_err(|error| {
+                    let auth_error = auth_error_for_continuation_dispatch(&error);
+                    tracing::debug!(
+                        %flow_id,
+                        auth_error_code = ?auth_error.code(),
+                        workflow_error_kind = workflow_error_kind(&error),
+                        "product auth turn-gate continuation dispatch failed"
+                    );
+                    auth_error
+                })
+        } else {
+            tracing::debug!(
+                flow_id = %event.flow_id,
+                continuation_kind = continuation_kind(&event.continuation),
+                "non-turn auth continuation deferred to follow-up handler"
+            );
+            Ok(())
+        }
     }
 
     pub async fn dispatch_turn_gate_resume(
@@ -76,6 +108,110 @@ impl ProductAuthTurnGateResumeDispatcher {
             .map_err(map_auth_resume_error)?;
 
         Ok(run_id)
+    }
+}
+
+fn continuation_kind(continuation: &AuthContinuationRef) -> &'static str {
+    match continuation {
+        AuthContinuationRef::SetupOnly => "setup_only",
+        AuthContinuationRef::LifecycleActivation { .. } => "lifecycle_activation",
+        AuthContinuationRef::ProductActionResume { .. } => "product_action_resume",
+        AuthContinuationRef::TurnGateResume { .. } => "turn_gate_resume",
+    }
+}
+
+fn auth_error_for_continuation_dispatch(error: &ProductWorkflowError) -> AuthProductError {
+    match error {
+        ProductWorkflowError::TurnSubmissionFailed { error }
+        | ProductWorkflowError::TurnResumeDenied { error }
+            if error.category() == TurnErrorCategory::Unavailable =>
+        {
+            AuthProductError::BackendUnavailable
+        }
+        ProductWorkflowError::TurnResumeDenied { error }
+            if error.category() == TurnErrorCategory::Conflict =>
+        {
+            AuthProductError::BackendUnavailable
+        }
+        ProductWorkflowError::TurnSubmissionFailed { error }
+        | ProductWorkflowError::TurnResumeDenied { error }
+            if error.category() == TurnErrorCategory::Unauthorized =>
+        {
+            AuthProductError::CrossScopeDenied
+        }
+        ProductWorkflowError::TurnSubmissionFailed { error }
+        | ProductWorkflowError::TurnResumeDenied { error }
+            if error.category() == TurnErrorCategory::ScopeNotFound =>
+        {
+            AuthProductError::UnknownOrExpiredFlow
+        }
+        ProductWorkflowError::TurnSubmissionFailed { .. } => AuthProductError::InvalidRequest {
+            reason: "auth continuation turn resume failed".to_string(),
+        },
+        ProductWorkflowError::Transient { .. } => AuthProductError::BackendUnavailable,
+        ProductWorkflowError::TurnResumeDenied { .. } => AuthProductError::InvalidRequest {
+            reason: "auth continuation turn resume denied".to_string(),
+        },
+        ProductWorkflowError::AuthContinuationRejected { kind } => {
+            AuthProductError::InvalidRequest {
+                reason: kind.sanitized_reason().to_string(),
+            }
+        }
+        ProductWorkflowError::TurnResumeRejected { .. }
+        | ProductWorkflowError::TurnSubmissionRejected { .. } => AuthProductError::InvalidRequest {
+            reason: "auth continuation rejected".to_string(),
+        },
+        _ => AuthProductError::InvalidRequest {
+            reason: "auth continuation dispatch failed".to_string(),
+        },
+    }
+}
+
+fn workflow_error_kind(error: &ProductWorkflowError) -> &'static str {
+    match error {
+        ProductWorkflowError::TurnSubmissionRejected { .. } => "turn_submission_rejected",
+        ProductWorkflowError::TurnSubmissionFailed { error } => match error.category() {
+            TurnErrorCategory::ThreadBusy => "turn_thread_busy",
+            TurnErrorCategory::AdmissionRejected => "turn_admission_rejected",
+            TurnErrorCategory::ScopeNotFound => "turn_scope_not_found",
+            TurnErrorCategory::Unauthorized => "turn_unauthorized",
+            TurnErrorCategory::InvalidRequest => "turn_invalid_request",
+            TurnErrorCategory::Unavailable => "turn_unavailable",
+            TurnErrorCategory::Conflict => "turn_conflict",
+        },
+        ProductWorkflowError::TurnResumeRejected { .. } => "turn_resume_rejected",
+        ProductWorkflowError::AuthContinuationRejected { kind } => match kind {
+            AuthContinuationRejectionKind::NotTurnGateResume => {
+                "auth_continuation_not_turn_gate_resume"
+            }
+            AuthContinuationRejectionKind::MissingThreadScope => {
+                "auth_continuation_missing_thread_scope"
+            }
+            AuthContinuationRejectionKind::InvalidTurnRunRef => {
+                "auth_continuation_invalid_turn_run_ref"
+            }
+            AuthContinuationRejectionKind::InvalidGateRef => "auth_continuation_invalid_gate_ref",
+            AuthContinuationRejectionKind::InvalidIdempotencyKey => {
+                "auth_continuation_invalid_idempotency_key"
+            }
+            AuthContinuationRejectionKind::InvalidBindingRef => {
+                "auth_continuation_invalid_binding_ref"
+            }
+            AuthContinuationRejectionKind::UnauthorizedBlockedGate => {
+                "auth_continuation_unauthorized_blocked_gate"
+            }
+        },
+        ProductWorkflowError::TurnResumeDenied { error } => match error.category() {
+            TurnErrorCategory::ThreadBusy => "turn_resume_thread_busy",
+            TurnErrorCategory::AdmissionRejected => "turn_resume_admission_rejected",
+            TurnErrorCategory::ScopeNotFound => "turn_resume_scope_not_found",
+            TurnErrorCategory::Unauthorized => "turn_resume_unauthorized",
+            TurnErrorCategory::InvalidRequest => "turn_resume_invalid_request",
+            TurnErrorCategory::Unavailable => "turn_resume_unavailable",
+            TurnErrorCategory::Conflict => "turn_resume_conflict",
+        },
+        ProductWorkflowError::Transient { .. } => "transient",
+        _ => "workflow_error",
     }
 }
 
@@ -161,8 +297,9 @@ mod tests {
     use async_trait::async_trait;
     use chrono::Utc;
     use ironclaw_auth::{
-        AuthContinuationEvent, AuthContinuationRef, AuthFlowId, AuthGateRef, AuthProductScope,
-        AuthSessionId, AuthSurface, LifecyclePackageRef, TurnRunRef,
+        AuthContinuationEvent, AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthGateRef,
+        AuthProductError, AuthProductScope, AuthSessionId, AuthSurface, LifecyclePackageRef,
+        TurnRunRef,
     };
     use ironclaw_host_api::{
         AgentId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
@@ -521,6 +658,83 @@ mod tests {
             err,
             ProductWorkflowError::TurnSubmissionFailed { .. }
         ));
+    }
+
+    #[test]
+    fn auth_error_for_continuation_dispatch_preserves_retryable_resume_denials() {
+        for error in [
+            TurnError::Unavailable {
+                reason: "turn coordinator offline".to_string(),
+            },
+            TurnError::LeaseMismatch,
+        ] {
+            let auth_error =
+                auth_error_for_continuation_dispatch(&ProductWorkflowError::TurnResumeDenied {
+                    error,
+                });
+
+            assert_eq!(auth_error.code(), AuthErrorCode::BackendUnavailable);
+        }
+    }
+
+    #[test]
+    fn auth_error_for_continuation_dispatch_maps_transient_and_catch_all() {
+        let transient = auth_error_for_continuation_dispatch(&ProductWorkflowError::Transient {
+            reason: "store timeout".to_string(),
+        });
+        assert_eq!(transient.code(), AuthErrorCode::BackendUnavailable);
+
+        let catch_all =
+            auth_error_for_continuation_dispatch(&ProductWorkflowError::UnknownInstallation);
+        assert_eq!(catch_all.code(), AuthErrorCode::InvalidRequest);
+        assert!(matches!(
+            catch_all,
+            AuthProductError::InvalidRequest { reason }
+                if reason == "auth continuation dispatch failed"
+        ));
+    }
+
+    #[test]
+    fn auth_continuation_rejection_kind_returns_stable_static_strings() {
+        for (kind, expected) in [
+            (
+                AuthContinuationRejectionKind::NotTurnGateResume,
+                "auth continuation is not a turn-gate resume",
+            ),
+            (
+                AuthContinuationRejectionKind::MissingThreadScope,
+                "invalid auth continuation scope",
+            ),
+            (
+                AuthContinuationRejectionKind::InvalidTurnRunRef,
+                "invalid auth continuation run reference",
+            ),
+            (
+                AuthContinuationRejectionKind::InvalidGateRef,
+                "invalid auth continuation gate reference",
+            ),
+            (
+                AuthContinuationRejectionKind::InvalidIdempotencyKey,
+                "invalid auth continuation idempotency key",
+            ),
+            (
+                AuthContinuationRejectionKind::InvalidBindingRef,
+                "invalid auth continuation binding ref",
+            ),
+            (
+                AuthContinuationRejectionKind::UnauthorizedBlockedGate,
+                "auth continuation does not match an authorized blocked auth gate",
+            ),
+        ] {
+            let auth_error = auth_error_for_continuation_dispatch(
+                &ProductWorkflowError::AuthContinuationRejected { kind },
+            );
+
+            assert!(matches!(
+                auth_error,
+                AuthProductError::InvalidRequest { reason } if reason == expected
+            ));
+        }
     }
 
     #[tokio::test]

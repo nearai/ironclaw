@@ -10,10 +10,7 @@ use ironclaw_auth::{
     OAuthCallbackInput, OAuthProviderCallbackRequest, OpaqueStateHash, ProviderCallbackOutcome,
     SecretCleanupService,
 };
-use ironclaw_product_workflow::{
-    AuthContinuationRejectionKind, ProductAuthTurnGateResumeDispatcher, ProductWorkflowError,
-};
-use ironclaw_turns::{TurnCoordinator, TurnErrorCategory};
+use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
 use serde::{Deserialize, Serialize};
 
 #[async_trait]
@@ -24,9 +21,11 @@ pub trait RebornAuthContinuationDispatcher: Send + Sync {
     ) -> Result<(), AuthProductError>;
 }
 
+#[cfg(test)]
 #[derive(Debug, Default)]
 struct NoopAuthContinuationDispatcher;
 
+#[cfg(test)]
 #[async_trait]
 impl RebornAuthContinuationDispatcher for NoopAuthContinuationDispatcher {
     async fn dispatch_auth_continuation(
@@ -37,155 +36,13 @@ impl RebornAuthContinuationDispatcher for NoopAuthContinuationDispatcher {
     }
 }
 
-pub(crate) struct RebornProductWorkflowAuthContinuationDispatcher {
-    turn_gate_dispatcher: ProductAuthTurnGateResumeDispatcher,
-}
-
-impl RebornProductWorkflowAuthContinuationDispatcher {
-    pub(crate) fn new(turn_coordinator: Arc<dyn TurnCoordinator>) -> Self {
-        Self {
-            turn_gate_dispatcher: ProductAuthTurnGateResumeDispatcher::new(turn_coordinator),
-        }
-    }
-}
-
 #[async_trait]
-impl RebornAuthContinuationDispatcher for RebornProductWorkflowAuthContinuationDispatcher {
+impl RebornAuthContinuationDispatcher for ProductAuthTurnGateResumeDispatcher {
     async fn dispatch_auth_continuation(
         &self,
         event: AuthContinuationEvent,
     ) -> Result<(), AuthProductError> {
-        if matches!(
-            &event.continuation,
-            AuthContinuationRef::TurnGateResume { .. }
-        ) {
-            let flow_id = event.flow_id;
-            self.turn_gate_dispatcher
-                .dispatch_turn_gate_resume(event)
-                .await
-                .map(|_| ())
-                .map_err(|error| {
-                    let auth_error = auth_error_for_continuation_dispatch(&error);
-                    tracing::debug!(
-                        %flow_id,
-                        auth_error_code = ?auth_error.code(),
-                        workflow_error_kind = workflow_error_kind(&error),
-                        "product auth turn-gate continuation dispatch failed"
-                    );
-                    auth_error
-                })
-        } else {
-            tracing::debug!(
-                flow_id = %event.flow_id,
-                continuation_kind = continuation_kind(&event.continuation),
-                "non-turn auth continuation deferred to follow-up handler"
-            );
-            Ok(())
-        }
-    }
-}
-
-fn continuation_kind(continuation: &AuthContinuationRef) -> &'static str {
-    match continuation {
-        AuthContinuationRef::SetupOnly => "setup_only",
-        AuthContinuationRef::LifecycleActivation { .. } => "lifecycle_activation",
-        AuthContinuationRef::ProductActionResume { .. } => "product_action_resume",
-        AuthContinuationRef::TurnGateResume { .. } => "turn_gate_resume",
-    }
-}
-
-fn auth_error_for_continuation_dispatch(error: &ProductWorkflowError) -> AuthProductError {
-    match error {
-        ProductWorkflowError::TurnSubmissionFailed { error }
-        | ProductWorkflowError::TurnResumeDenied { error }
-            if error.category() == TurnErrorCategory::Unavailable =>
-        {
-            AuthProductError::BackendUnavailable
-        }
-        ProductWorkflowError::TurnResumeDenied { error }
-            if error.category() == TurnErrorCategory::Conflict =>
-        {
-            AuthProductError::BackendUnavailable
-        }
-        ProductWorkflowError::TurnSubmissionFailed { error }
-        | ProductWorkflowError::TurnResumeDenied { error }
-            if error.category() == TurnErrorCategory::Unauthorized =>
-        {
-            AuthProductError::CrossScopeDenied
-        }
-        ProductWorkflowError::TurnSubmissionFailed { error }
-        | ProductWorkflowError::TurnResumeDenied { error }
-            if error.category() == TurnErrorCategory::ScopeNotFound =>
-        {
-            AuthProductError::UnknownOrExpiredFlow
-        }
-        ProductWorkflowError::TurnSubmissionFailed { .. } => AuthProductError::InvalidRequest {
-            reason: "auth continuation turn resume failed".to_string(),
-        },
-        ProductWorkflowError::Transient { .. } => AuthProductError::BackendUnavailable,
-        ProductWorkflowError::TurnResumeDenied { .. } => AuthProductError::InvalidRequest {
-            reason: "auth continuation turn resume denied".to_string(),
-        },
-        ProductWorkflowError::AuthContinuationRejected { kind } => {
-            AuthProductError::InvalidRequest {
-                reason: kind.sanitized_reason().to_string(),
-            }
-        }
-        ProductWorkflowError::TurnResumeRejected { .. }
-        | ProductWorkflowError::TurnSubmissionRejected { .. } => AuthProductError::InvalidRequest {
-            reason: "auth continuation rejected".to_string(),
-        },
-        _ => AuthProductError::InvalidRequest {
-            reason: "auth continuation dispatch failed".to_string(),
-        },
-    }
-}
-
-fn workflow_error_kind(error: &ProductWorkflowError) -> &'static str {
-    match error {
-        ProductWorkflowError::TurnSubmissionRejected { .. } => "turn_submission_rejected",
-        ProductWorkflowError::TurnSubmissionFailed { error } => match error.category() {
-            TurnErrorCategory::ThreadBusy => "turn_thread_busy",
-            TurnErrorCategory::AdmissionRejected => "turn_admission_rejected",
-            TurnErrorCategory::ScopeNotFound => "turn_scope_not_found",
-            TurnErrorCategory::Unauthorized => "turn_unauthorized",
-            TurnErrorCategory::InvalidRequest => "turn_invalid_request",
-            TurnErrorCategory::Unavailable => "turn_unavailable",
-            TurnErrorCategory::Conflict => "turn_conflict",
-        },
-        ProductWorkflowError::TurnResumeRejected { .. } => "turn_resume_rejected",
-        ProductWorkflowError::AuthContinuationRejected { kind } => match kind {
-            AuthContinuationRejectionKind::NotTurnGateResume => {
-                "auth_continuation_not_turn_gate_resume"
-            }
-            AuthContinuationRejectionKind::MissingThreadScope => {
-                "auth_continuation_missing_thread_scope"
-            }
-            AuthContinuationRejectionKind::InvalidTurnRunRef => {
-                "auth_continuation_invalid_turn_run_ref"
-            }
-            AuthContinuationRejectionKind::InvalidGateRef => "auth_continuation_invalid_gate_ref",
-            AuthContinuationRejectionKind::InvalidIdempotencyKey => {
-                "auth_continuation_invalid_idempotency_key"
-            }
-            AuthContinuationRejectionKind::InvalidBindingRef => {
-                "auth_continuation_invalid_binding_ref"
-            }
-            AuthContinuationRejectionKind::UnauthorizedBlockedGate => {
-                "auth_continuation_unauthorized_blocked_gate"
-            }
-        },
-        ProductWorkflowError::TurnResumeDenied { error } => match error.category() {
-            TurnErrorCategory::ThreadBusy => "turn_resume_thread_busy",
-            TurnErrorCategory::AdmissionRejected => "turn_resume_admission_rejected",
-            TurnErrorCategory::ScopeNotFound => "turn_resume_scope_not_found",
-            TurnErrorCategory::Unauthorized => "turn_resume_unauthorized",
-            TurnErrorCategory::InvalidRequest => "turn_resume_invalid_request",
-            TurnErrorCategory::Unavailable => "turn_resume_unavailable",
-            TurnErrorCategory::Conflict => "turn_resume_conflict",
-        },
-        ProductWorkflowError::Transient { .. } => "transient",
-        _ => "workflow_error",
+        ProductAuthTurnGateResumeDispatcher::dispatch_auth_continuation(self, event).await
     }
 }
 
@@ -239,6 +96,102 @@ impl From<AuthProductError> for RebornOAuthCallbackError {
             code,
             retryable: matches!(code, AuthErrorCode::BackendUnavailable),
         }
+    }
+}
+
+/// Product-auth ports supplied to Reborn composition before the turn coordinator
+/// exists. The factory turns these ports into a complete
+/// [`RebornProductAuthServices`] after composing the coordinator, so auth
+/// continuations cannot accidentally keep a stale or no-op resume dispatcher.
+#[derive(Clone)]
+pub struct RebornProductAuthServicePorts {
+    flow_manager: Arc<dyn AuthFlowManager>,
+    interaction_service: Arc<dyn AuthInteractionService>,
+    credential_setup_service: Arc<dyn CredentialSetupService>,
+    credential_account_service: Arc<dyn CredentialAccountService>,
+    provider_client: Arc<dyn AuthProviderClient>,
+    cleanup_service: Arc<dyn SecretCleanupService>,
+}
+
+impl std::fmt::Debug for RebornProductAuthServicePorts {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RebornProductAuthServicePorts")
+            .field("flow_manager", &"Arc<dyn AuthFlowManager>")
+            .field("interaction_service", &"Arc<dyn AuthInteractionService>")
+            .field(
+                "credential_setup_service",
+                &"Arc<dyn CredentialSetupService>",
+            )
+            .field(
+                "credential_account_service",
+                &"Arc<dyn CredentialAccountService>",
+            )
+            .field("provider_client", &"Arc<dyn AuthProviderClient>")
+            .field("cleanup_service", &"Arc<dyn SecretCleanupService>")
+            .finish()
+    }
+}
+
+impl RebornProductAuthServicePorts {
+    pub fn new(
+        flow_manager: Arc<dyn AuthFlowManager>,
+        interaction_service: Arc<dyn AuthInteractionService>,
+        credential_setup_service: Arc<dyn CredentialSetupService>,
+        credential_account_service: Arc<dyn CredentialAccountService>,
+        provider_client: Arc<dyn AuthProviderClient>,
+        cleanup_service: Arc<dyn SecretCleanupService>,
+    ) -> Self {
+        Self {
+            flow_manager,
+            interaction_service,
+            credential_setup_service,
+            credential_account_service,
+            provider_client,
+            cleanup_service,
+        }
+    }
+
+    pub fn from_shared<T>(services: Arc<T>) -> Self
+    where
+        T: AuthFlowManager
+            + AuthInteractionService
+            + CredentialSetupService
+            + CredentialAccountService
+            + AuthProviderClient
+            + SecretCleanupService
+            + 'static,
+    {
+        let flow_manager: Arc<dyn AuthFlowManager> = services.clone();
+        let interaction_service: Arc<dyn AuthInteractionService> = services.clone();
+        let credential_setup_service: Arc<dyn CredentialSetupService> = services.clone();
+        let credential_account_service: Arc<dyn CredentialAccountService> = services.clone();
+        let provider_client: Arc<dyn AuthProviderClient> = services.clone();
+        let cleanup_service: Arc<dyn SecretCleanupService> = services;
+
+        Self::new(
+            flow_manager,
+            interaction_service,
+            credential_setup_service,
+            credential_account_service,
+            provider_client,
+            cleanup_service,
+        )
+    }
+
+    pub(crate) fn into_services(
+        self,
+        continuation_dispatcher: Arc<dyn RebornAuthContinuationDispatcher>,
+    ) -> RebornProductAuthServices {
+        RebornProductAuthServices::new(
+            self.flow_manager,
+            self.interaction_service,
+            self.credential_setup_service,
+            self.credential_account_service,
+            self.provider_client,
+            self.cleanup_service,
+            continuation_dispatcher,
+        )
     }
 }
 
@@ -342,6 +295,7 @@ impl RebornProductAuthServices {
         )
     }
 
+    #[cfg(test)]
     pub fn from_shared_with_noop_dispatcher_for_tests<T>(services: Arc<T>) -> Self
     where
         T: AuthFlowManager
@@ -506,10 +460,8 @@ impl RebornProductAuthServices {
     pub(crate) fn local_dev_in_memory(
         continuation_dispatcher: Arc<dyn RebornAuthContinuationDispatcher>,
     ) -> Self {
-        Self::from_shared(
-            Arc::new(InMemoryAuthProductServices::new()),
-            continuation_dispatcher,
-        )
+        RebornProductAuthServicePorts::from_shared(Arc::new(InMemoryAuthProductServices::new()))
+            .into_services(continuation_dispatcher)
     }
 }
 
@@ -525,7 +477,6 @@ mod tests {
         OAuthCallbackInput, OAuthProviderCallbackRequest, OAuthProviderExchange,
         SecretCleanupReport, SecretCleanupRequest, SecretSubmitRequest, SecretSubmitResult,
     };
-    use ironclaw_turns::TurnError;
 
     struct SharedAuthTestDouble;
 
@@ -602,83 +553,6 @@ mod tests {
         );
         assert_eq!(arc_data_ptr(&services.provider_client()), shared_ptr);
         assert_eq!(arc_data_ptr(&services.cleanup_service()), shared_ptr);
-    }
-
-    #[test]
-    fn auth_error_for_continuation_dispatch_preserves_retryable_resume_denials() {
-        for error in [
-            TurnError::Unavailable {
-                reason: "turn coordinator offline".to_string(),
-            },
-            TurnError::LeaseMismatch,
-        ] {
-            let auth_error =
-                auth_error_for_continuation_dispatch(&ProductWorkflowError::TurnResumeDenied {
-                    error,
-                });
-
-            assert_eq!(auth_error.code(), AuthErrorCode::BackendUnavailable);
-        }
-    }
-
-    #[test]
-    fn auth_error_for_continuation_dispatch_maps_transient_and_catch_all() {
-        let transient = auth_error_for_continuation_dispatch(&ProductWorkflowError::Transient {
-            reason: "store timeout".to_string(),
-        });
-        assert_eq!(transient.code(), AuthErrorCode::BackendUnavailable);
-
-        let catch_all =
-            auth_error_for_continuation_dispatch(&ProductWorkflowError::UnknownInstallation);
-        assert_eq!(catch_all.code(), AuthErrorCode::InvalidRequest);
-        assert!(matches!(
-            catch_all,
-            AuthProductError::InvalidRequest { reason }
-                if reason == "auth continuation dispatch failed"
-        ));
-    }
-
-    #[test]
-    fn auth_continuation_rejection_kind_returns_stable_static_strings() {
-        for (kind, expected) in [
-            (
-                AuthContinuationRejectionKind::NotTurnGateResume,
-                "auth continuation is not a turn-gate resume",
-            ),
-            (
-                AuthContinuationRejectionKind::MissingThreadScope,
-                "invalid auth continuation scope",
-            ),
-            (
-                AuthContinuationRejectionKind::InvalidTurnRunRef,
-                "invalid auth continuation run reference",
-            ),
-            (
-                AuthContinuationRejectionKind::InvalidGateRef,
-                "invalid auth continuation gate reference",
-            ),
-            (
-                AuthContinuationRejectionKind::InvalidIdempotencyKey,
-                "invalid auth continuation idempotency key",
-            ),
-            (
-                AuthContinuationRejectionKind::InvalidBindingRef,
-                "invalid auth continuation binding ref",
-            ),
-            (
-                AuthContinuationRejectionKind::UnauthorizedBlockedGate,
-                "auth continuation does not match an authorized blocked auth gate",
-            ),
-        ] {
-            let auth_error = auth_error_for_continuation_dispatch(
-                &ProductWorkflowError::AuthContinuationRejected { kind },
-            );
-
-            assert!(matches!(
-                auth_error,
-                AuthProductError::InvalidRequest { reason } if reason == expected
-            ));
-        }
     }
 
     #[async_trait::async_trait]
