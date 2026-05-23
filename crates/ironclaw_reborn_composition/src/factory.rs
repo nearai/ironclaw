@@ -47,6 +47,7 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) loop_checkpoint_store: Arc<InMemoryLoopCheckpointStore>,
     pub(crate) thread_service: Arc<InMemorySessionThreadService>,
     pub(crate) skill_filesystem: Arc<ScopedFilesystem<LocalFilesystem>>,
+    pub(crate) workspace_filesystem: Arc<ScopedFilesystem<LocalFilesystem>>,
 }
 
 impl std::fmt::Debug for RebornServices {
@@ -158,6 +159,10 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         Arc::clone(&filesystem),
         local_dev_skill_mount_view()?,
     ));
+    let workspace_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(&filesystem),
+        local_dev_workspace_mount_view()?,
+    ));
 
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
@@ -168,6 +173,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         loop_checkpoint_store: Arc::new(InMemoryLoopCheckpointStore::default()),
         thread_service: Arc::new(InMemorySessionThreadService::default()),
         skill_filesystem,
+        workspace_filesystem,
     });
 
     let mut services = HostRuntimeServices::new(
@@ -264,6 +270,23 @@ fn local_dev_skill_mount_view() -> Result<MountView, RebornBuildError> {
         grant("/tenant-shared/skills", "/projects/tenant-shared/skills")?,
         grant("/system/skills", "/projects/system/skills")?,
     ])
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: error.to_string(),
+    })
+}
+
+fn local_dev_workspace_mount_view() -> Result<MountView, RebornBuildError> {
+    MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").map_err(|error| RebornBuildError::InvalidConfig {
+            reason: error.to_string(),
+        })?,
+        VirtualPath::new("/projects/workspace").map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: error.to_string(),
+            }
+        })?,
+        MountPermissions::read_only(),
+    )])
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: error.to_string(),
     })

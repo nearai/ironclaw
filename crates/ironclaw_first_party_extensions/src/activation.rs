@@ -168,9 +168,20 @@ where
 {
     bundle_source: Arc<S>,
     config: SkillActivationSelectorConfig,
+    setup_marker_source: Option<Arc<dyn SetupMarkerSource>>,
     messages_by_run: Mutex<HashMap<SkillActivationMessageKey, SkillActivationMessage>>,
     activation_cache: Mutex<HashMap<ActivationCandidateCacheKey, CachedActivationCandidate>>,
     plans_by_run: Mutex<HashMap<(TurnScope, TurnRunId), CapturedSkillActivationPlan>>,
+}
+
+/// Source of already-satisfied setup markers for one-time setup skills.
+#[async_trait]
+pub trait SetupMarkerSource: std::fmt::Debug + Send + Sync {
+    async fn satisfied_setup_markers(
+        &self,
+        run_context: &LoopRunContext,
+        markers: &HashSet<String>,
+    ) -> Result<HashSet<String>, SkillActivationSelectionError>;
 }
 
 impl<S> SelectableSkillContextSource<S>
@@ -181,10 +192,16 @@ where
         Self {
             bundle_source,
             config,
+            setup_marker_source: None,
             messages_by_run: Mutex::new(HashMap::new()),
             activation_cache: Mutex::new(HashMap::new()),
             plans_by_run: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub fn with_setup_marker_source(mut self, source: Arc<dyn SetupMarkerSource>) -> Self {
+        self.setup_marker_source = Some(source);
+        self
     }
 
     pub fn record_user_message(
@@ -351,9 +368,39 @@ where
         let candidates = self
             .load_activation_candidates(run_context, &descriptors)
             .await?;
-        let selection = select_skill_activations(message, &candidates, &self.config)?;
+        let satisfied_setup_markers = self
+            .satisfied_setup_markers(run_context, &candidates)
+            .await?;
+        let selection =
+            select_skill_activations(message, &candidates, &self.config, &satisfied_setup_markers)?;
         let plan = activation_plan_for_candidates(selection);
         Ok((plan, candidates))
+    }
+
+    async fn satisfied_setup_markers(
+        &self,
+        run_context: &LoopRunContext,
+        candidates: &[ActivationCandidate],
+    ) -> Result<HashSet<String>, SkillActivationSelectionError> {
+        let markers = candidates
+            .iter()
+            .filter_map(|candidate| {
+                candidate
+                    .loaded
+                    .manifest
+                    .activation
+                    .setup_marker
+                    .as_ref()
+                    .cloned()
+            })
+            .collect::<HashSet<_>>();
+        if markers.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let Some(source) = self.setup_marker_source.as_deref() else {
+            return Ok(HashSet::new());
+        };
+        source.satisfied_setup_markers(run_context, &markers).await
     }
 
     async fn load_activation_candidates(
@@ -576,6 +623,7 @@ fn select_skill_activations(
     message: &str,
     candidates: &[ActivationCandidate],
     config: &SkillActivationSelectorConfig,
+    satisfied_setup_markers: &HashSet<String>,
 ) -> Result<SkillActivationSelection, SkillActivationSelectionError> {
     let loaded_skills: Vec<LoadedSkill> = candidates.iter().map(|c| c.loaded.clone()).collect();
     let mention_normalized_message = normalize_dollar_skill_mentions(message);
@@ -615,7 +663,7 @@ fn select_skill_activations(
         &loaded_skills,
         remaining_slots,
         remaining_tokens,
-        &HashSet::new(),
+        satisfied_setup_markers,
     );
     feedback.extend(outcome.notes);
 
