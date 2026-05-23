@@ -289,7 +289,6 @@ fn hook_decision_label(decision: &HookDecisionSummary) -> &'static str {
     decision.kind_name()
 }
 
-
 fn capability_id(value: &'static str) -> Result<CapabilityId, AgentLoopHostError> {
     CapabilityId::new(value).map_err(|_| {
         AgentLoopHostError::new(

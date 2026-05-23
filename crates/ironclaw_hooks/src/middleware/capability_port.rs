@@ -455,6 +455,7 @@ mod tests {
                     safe_name: "cap.x".to_string(),
                     safe_description: "test capability".to_string(),
                     concurrency_hint: ironclaw_turns::run_profile::ConcurrencyHint::Exclusive,
+                    parameters_schema: serde_json::Value::Null,
                 }],
             })
         }

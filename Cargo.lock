@@ -4392,6 +4392,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_hooks"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "blake3",
+ "chrono",
+ "futures",
+ "ironclaw_host_api",
+ "ironclaw_prompt_envelope",
+ "ironclaw_turns",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml 0.8.23",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "ironclaw_host_api"
 version = "0.1.0"
 dependencies = [
@@ -4434,6 +4455,7 @@ dependencies = [
  "ironclaw_network",
  "ironclaw_processes",
  "ironclaw_product_adapter_registry",
+ "ironclaw_prompt_envelope",
  "ironclaw_reborn_event_store",
  "ironclaw_resources",
  "ironclaw_run_state",
@@ -4695,6 +4717,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_prompt_envelope"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "ironclaw_reborn"
 version = "0.1.0"
 dependencies = [
@@ -4707,6 +4736,7 @@ dependencies = [
  "ironclaw_events",
  "ironclaw_extensions",
  "ironclaw_filesystem",
+ "ironclaw_hooks",
  "ironclaw_host_api",
  "ironclaw_host_runtime",
  "ironclaw_llm",

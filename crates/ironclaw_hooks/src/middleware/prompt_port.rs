@@ -487,6 +487,7 @@ mod tests {
             checkpoint_state_ref: None,
             max_messages: Some(16),
             inline_messages: vec![],
+            capability_view: None,
         }
     }
 

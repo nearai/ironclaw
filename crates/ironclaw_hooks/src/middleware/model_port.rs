@@ -163,6 +163,7 @@ mod tests {
             messages: Vec::new(),
             surface_version: None,
             model_preference: None,
+            capability_view: None,
         }
     }
 

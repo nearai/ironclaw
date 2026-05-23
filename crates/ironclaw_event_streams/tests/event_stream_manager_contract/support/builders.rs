@@ -185,6 +185,12 @@ fn timeline_entry(scope: &ProjectionScope, cursor: u64, kind: TimelineEntryKind)
         process_id: None,
         output_bytes: Some(12),
         error_kind: None,
+        hook_id: None,
+        hook_point: None,
+        hook_trust_class: None,
+        hook_decision: None,
+        hook_failure_category: None,
+        hook_failure_disposition: None,
     }
 }
 

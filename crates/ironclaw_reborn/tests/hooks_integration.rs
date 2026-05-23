@@ -49,11 +49,10 @@ use ironclaw_hooks::sink::{
 use ironclaw_host_api::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
-    HostManagedModelResponse,
+    HostManagedModelResponse, LoopCapabilityInputResolver,
 };
-use ironclaw_reborn::{
-    LoopCapabilityInputResolver, RebornLoopDriverHostFactory, RebornLoopDriverHostRequest,
-    TextOnlyLoopHostConfig,
+use ironclaw_reborn::loop_driver_host::{
+    RebornLoopDriverHostFactory, RebornLoopDriverHostRequest, TextOnlyLoopHostConfig,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, InMemorySessionThreadService, MessageContent,
@@ -61,9 +60,9 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::{
     AcceptedMessageRef, CheckpointStateStore, EventCursor, InMemoryCheckpointStateStore,
-    InMemoryLoopCheckpointStore, InMemoryRunProfileResolver, LoopResultRef,
+    InMemoryRunProfileResolver, InMemoryTurnStateStore, LoopResultRef,
     PutCheckpointStateRequest, ReplyTargetBindingRef, RunProfileId, RunProfileResolutionRequest,
-    RunProfileResolver, RunProfileVersion, SourceBindingRef, TurnLeaseToken, TurnRunId,
+    RunProfileResolver, RunProfileVersion, SourceBindingRef, TurnActor, TurnLeaseToken, TurnRunId,
     TurnRunnerId, TurnScope, TurnStatus,
     run_profile::{
         AgentLoopHostError, CapabilityBatchInvocation, CapabilityBatchOutcome,
@@ -236,6 +235,7 @@ fn descriptor_with_provider(
         safe_name: capability_id.to_string(),
         safe_description: format!("test capability {capability_id}"),
         concurrency_hint: ironclaw_turns::run_profile::ConcurrencyHint::Exclusive,
+        parameters_schema: serde_json::Value::Null,
     }
 }
 
@@ -393,7 +393,7 @@ fn selective_deny_dispatcher(target: &str) -> Arc<HookDispatcher> {
 struct Fixture {
     thread_service: Arc<InMemorySessionThreadService>,
     checkpoint_state_store: Arc<InMemoryCheckpointStateStore>,
-    loop_checkpoint_store: Arc<InMemoryLoopCheckpointStore>,
+    turn_state_store: Arc<InMemoryTurnStateStore>,
     milestone_sink: Arc<InMemoryLoopHostMilestoneSink>,
     gateway: Arc<UnusedGateway>,
     thread_scope: ThreadScope,
@@ -406,7 +406,7 @@ impl Fixture {
     async fn new() -> Self {
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
-        let loop_checkpoint_store = Arc::new(InMemoryLoopCheckpointStore::default());
+        let turn_state_store = Arc::new(InMemoryTurnStateStore::default());
         let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
         let gateway = Arc::new(UnusedGateway);
 
@@ -462,6 +462,7 @@ impl Fixture {
         let run_id = TurnRunId::new();
         let state = ironclaw_turns::TurnRunState {
             scope: turn_scope.clone(),
+            actor: Some(TurnActor::new(user_id.clone())),
             turn_id,
             run_id,
             status: TurnStatus::Running,
@@ -491,7 +492,7 @@ impl Fixture {
         Self {
             thread_service,
             checkpoint_state_store,
-            loop_checkpoint_store,
+            turn_state_store,
             milestone_sink,
             gateway,
             thread_scope,
@@ -508,7 +509,8 @@ impl Fixture {
             self.thread_scope.clone(),
             Arc::clone(&self.gateway),
             Arc::clone(&self.checkpoint_state_store) as _,
-            Arc::clone(&self.loop_checkpoint_store) as _,
+            Arc::clone(&self.turn_state_store) as _,
+            Arc::clone(&self.turn_state_store) as _,
             Arc::clone(&self.milestone_sink) as _,
             TextOnlyLoopHostConfig {
                 max_messages: 8,
@@ -1058,6 +1060,7 @@ async fn after_model_fires_exactly_once_at_durable_boundary() {
             checkpoint_state_ref: None,
             max_messages: Some(8),
             inline_messages: vec![],
+            capability_view: None,
         })
         .await
         .expect("build_prompt_bundle succeeds before stream_model");
@@ -1065,6 +1068,7 @@ async fn after_model_fires_exactly_once_at_durable_boundary() {
         messages: bundle.messages.clone(),
         surface_version: None,
         model_preference: None,
+        capability_view: None,
     })
     .await
     .expect("stream_model returns Ok via the wrapped model port");
@@ -1762,6 +1766,7 @@ async fn before_prompt_hook_message_is_resolvable_via_factory_wiring() {
             checkpoint_state_ref: None,
             max_messages: Some(8),
             inline_messages: vec![],
+            capability_view: None,
         })
         .await
         .expect(
