@@ -299,7 +299,9 @@ pub fn is_sensitive_runtime_response_header(name: &str) -> bool {
         "proxy-authorization",
     ];
     const SENSITIVE_RESPONSE_HEADER_MARKERS: &[&str] = &[
-        "auth",
+        "authorization",
+        "authenticate",
+        "authentication",
         "token",
         "secret",
         "credential",
@@ -334,5 +336,96 @@ where
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
         self.as_ref().execute(request)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_header_sensitivity_trims_and_ignores_case() {
+        for header in [
+            " authorization ",
+            "PROXY-AUTHORIZATION",
+            "cookie",
+            "X-Api-Key",
+            "api-key",
+            "x-auth-token",
+            "x-token",
+            "x-access-token",
+            "x-session-token",
+            "x-csrf-token",
+            "x-secret",
+            "x-api-secret",
+        ] {
+            assert!(
+                is_sensitive_runtime_request_header(header),
+                "{header:?} should be treated as sensitive"
+            );
+        }
+
+        assert!(!is_sensitive_runtime_request_header("x-request-id"));
+        assert!(!is_sensitive_runtime_request_header("authorization-extra"));
+        assert!(!is_sensitive_runtime_request_header(" "));
+    }
+
+    #[test]
+    fn response_header_sensitivity_catches_auth_markers() {
+        for header in [
+            " WWW-Authenticate ",
+            "set-cookie",
+            "X-Refresh-Token",
+            "x-service-credential-id",
+            "x-password-reset",
+            "x-authentication-token",
+        ] {
+            assert!(
+                is_sensitive_runtime_response_header(header),
+                "{header:?} should be treated as sensitive"
+            );
+        }
+
+        assert!(!is_sensitive_runtime_response_header("content-type"));
+        assert!(!is_sensitive_runtime_response_header("x-request-id"));
+        assert!(!is_sensitive_runtime_response_header("x-author"));
+        assert!(!is_sensitive_runtime_response_header("x-authored-by"));
+    }
+
+    #[test]
+    fn runtime_http_errors_expose_only_stable_reason_tokens_and_byte_counts() {
+        let errors = [
+            RuntimeHttpEgressError::Credential {
+                reason: "missing secret: real-name".to_string(),
+            },
+            RuntimeHttpEgressError::Request {
+                reason: "denied".to_string(),
+                request_bytes: 5,
+                response_bytes: 0,
+            },
+            RuntimeHttpEgressError::Network {
+                reason: "dns".to_string(),
+                request_bytes: 6,
+                response_bytes: 7,
+            },
+            RuntimeHttpEgressError::Response {
+                reason: "limit".to_string(),
+                request_bytes: 8,
+                response_bytes: 9,
+            },
+        ];
+
+        assert_eq!(errors[0].stable_runtime_reason(), "credential_unavailable");
+        assert_eq!(errors[1].stable_runtime_reason(), "request_denied");
+        assert_eq!(errors[2].stable_runtime_reason(), "network_error");
+        assert_eq!(errors[3].stable_runtime_reason(), "response_error");
+        assert_eq!(errors[0].request_bytes(), 0);
+        assert_eq!(errors[0].response_bytes(), 0);
+        assert_eq!(errors[1].request_bytes(), 5);
+        assert_eq!(errors[1].response_bytes(), 0);
+        assert_eq!(errors[2].request_bytes(), 6);
+        assert_eq!(errors[2].response_bytes(), 7);
+        assert_eq!(errors[3].request_bytes(), 8);
+        assert_eq!(errors[3].response_bytes(), 9);
     }
 }
