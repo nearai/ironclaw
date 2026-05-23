@@ -20,7 +20,7 @@
 //! property that satisfies the "narrow Reborn public surface" requirement
 //! pinned by `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,14 +32,13 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use ironclaw_events::{DurableEventLog, InMemoryDurableEventLog, RuntimeEvent};
-use ironclaw_filesystem::{FilesystemError, LocalFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_first_party_extensions::{
     FirstPartySkillsExtension, FirstPartySkillsExtensionHandles, SelectableSkillContextSource,
-    SetupMarkerSource, SkillActivationSelectionError, SkillActivationSelectorConfig,
-    SkillExecutionAdapter,
+    SkillActivationSelectorConfig, SkillExecutionAdapter,
 };
 use ironclaw_host_api::{
-    AgentId, CapabilityId, InvocationId, ResourceScope, ScopedPath, TenantId, ThreadId, UserId,
+    AgentId, CapabilityId, InvocationId, ResourceScope, TenantId, ThreadId, UserId,
 };
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
@@ -80,7 +79,7 @@ pub use skills::{
     RebornSkillExecutionPlan, RebornSkillExecutionResult, RebornSkillSourceKind,
 };
 
-use skills::skill_asset_error;
+use skills::{LocalDevWorkspaceSetupMarkerSource, skill_asset_error};
 
 #[cfg(feature = "root-llm-provider")]
 use crate::runtime_input::{ResolvedRebornLlm, ResolvedRebornLlmSource};
@@ -891,34 +890,6 @@ struct LocalDevSkillContextSource {
     execution_adapter: Arc<LocalDevSkillExecutionAdapter>,
 }
 
-#[derive(Debug)]
-struct LocalDevWorkspaceSetupMarkerSource {
-    filesystem: Arc<ScopedFilesystem<LocalFilesystem>>,
-}
-
-#[async_trait::async_trait]
-impl SetupMarkerSource for LocalDevWorkspaceSetupMarkerSource {
-    async fn satisfied_setup_markers(
-        &self,
-        run_context: &LoopRunContext,
-        markers: &HashSet<String>,
-    ) -> Result<HashSet<String>, SkillActivationSelectionError> {
-        let scope = run_context.scope.to_resource_scope();
-        let mut satisfied = HashSet::new();
-        for marker in markers {
-            let path = workspace_setup_marker_path(marker)?;
-            match self.filesystem.stat(&scope, &path).await {
-                Ok(_) => {
-                    satisfied.insert(marker.clone());
-                }
-                Err(FilesystemError::NotFound { .. }) => {}
-                Err(_) => return Err(SkillActivationSelectionError::SourceUnavailable),
-            }
-        }
-        Ok(satisfied)
-    }
-}
-
 fn local_dev_filesystem_skill_context_source(
     local_runtime: &crate::factory::RebornLocalRuntimeServices,
     tenant_id: &TenantId,
@@ -935,10 +906,9 @@ fn local_dev_filesystem_skill_context_source(
     .map_err(|reason| RebornRuntimeError::InvalidArgument {
         reason: format!("first-party skills extension source: {reason}"),
     })?;
-    let setup_marker_source: Arc<dyn SetupMarkerSource> =
-        Arc::new(LocalDevWorkspaceSetupMarkerSource {
-            filesystem: Arc::clone(&local_runtime.workspace_filesystem),
-        });
+    let setup_marker_source = Arc::new(LocalDevWorkspaceSetupMarkerSource::new(Arc::clone(
+        &local_runtime.workspace_filesystem,
+    )));
     let activation_source = Arc::new(
         SelectableSkillContextSource::new(
             extension.bundle_source(),
@@ -953,15 +923,6 @@ fn local_dev_filesystem_skill_context_source(
         activation_source,
         execution_adapter,
     })
-}
-
-fn workspace_setup_marker_path(marker: &str) -> Result<ScopedPath, SkillActivationSelectionError> {
-    let marker = marker.trim_start_matches('/');
-    if marker.is_empty() {
-        return Err(SkillActivationSelectionError::ParseFailed);
-    }
-    ScopedPath::new(format!("/workspace/{marker}"))
-        .map_err(|_| SkillActivationSelectionError::ParseFailed)
 }
 
 struct ValidatedRuntimeIdentity {
@@ -2082,7 +2043,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_dev_runtime_suppresses_setup_skill_when_workspace_marker_exists() {
+    async fn local_dev_runtime_suppresses_explicit_setup_skill_when_workspace_marker_exists() {
         let root = tempfile::tempdir().expect("tempdir");
         let storage_root = root.path().join("local-dev");
         std::fs::create_dir_all(storage_root.join("skills/setup-helper")).expect("user skill dir");
@@ -2127,7 +2088,7 @@ mod tests {
         let conversation = runtime.new_conversation().await.expect("conversation");
         let result = tokio::time::timeout(
             Duration::from_secs(3),
-            runtime.execute_skill_message(&conversation, "please run setup-helper"),
+            runtime.execute_skill_message(&conversation, "$setup-helper"),
         )
         .await
         .expect("skill execution should finish")

@@ -199,7 +199,10 @@ where
         }
     }
 
-    pub fn with_setup_marker_source(mut self, source: Arc<dyn SetupMarkerSource>) -> Self {
+    pub fn with_setup_marker_source<T>(mut self, source: Arc<T>) -> Self
+    where
+        T: SetupMarkerSource + 'static,
+    {
         self.setup_marker_source = Some(source);
         self
     }
@@ -625,12 +628,15 @@ fn select_skill_activations(
     config: &SkillActivationSelectorConfig,
     satisfied_setup_markers: &HashSet<String>,
 ) -> Result<SkillActivationSelection, SkillActivationSelectionError> {
-    let loaded_skills: Vec<LoadedSkill> = candidates.iter().map(|c| c.loaded.clone()).collect();
+    let active_candidates =
+        candidates_with_unsatisfied_setup_markers(candidates, satisfied_setup_markers);
+    let loaded_skills: Vec<LoadedSkill> =
+        active_candidates.iter().map(|c| c.loaded.clone()).collect();
     let mention_normalized_message = normalize_dollar_skill_mentions(message);
     let (explicit, rewritten_message) =
         extract_skill_mentions(&mention_normalized_message, &loaded_skills);
     let explicit_names = extract_explicit_skill_names(message);
-    validate_explicit_mentions_are_unambiguous(&explicit_names, candidates)?;
+    validate_explicit_mentions_are_unambiguous(&explicit_names, &active_candidates)?;
 
     let mut activations = Vec::new();
     let mut selected_keys = HashSet::new();
@@ -639,7 +645,7 @@ fn select_skill_activations(
     let mut remaining_tokens = config.max_context_tokens;
 
     for skill in explicit {
-        let candidate = candidate_for_loaded_skill(skill, candidates)?;
+        let candidate = candidate_for_loaded_skill(skill, &active_candidates)?;
         let key = (
             candidate.descriptor.id().source_kind(),
             candidate.loaded.manifest.name.clone(),
@@ -668,7 +674,7 @@ fn select_skill_activations(
     feedback.extend(outcome.notes);
 
     for skill in outcome.selected {
-        let candidate = candidate_for_loaded_skill(skill, candidates)?;
+        let candidate = candidate_for_loaded_skill(skill, &active_candidates)?;
         let key = (
             candidate.descriptor.id().source_kind(),
             candidate.loaded.manifest.name.clone(),
@@ -682,7 +688,7 @@ fn select_skill_activations(
         }
     }
 
-    validate_selected_names_are_unambiguous(&activations, candidates)?;
+    validate_selected_names_are_unambiguous(&activations)?;
 
     Ok(SkillActivationSelection {
         activations,
@@ -691,9 +697,27 @@ fn select_skill_activations(
     })
 }
 
+fn candidates_with_unsatisfied_setup_markers<'a>(
+    candidates: &'a [ActivationCandidate],
+    satisfied_setup_markers: &HashSet<String>,
+) -> Vec<&'a ActivationCandidate> {
+    candidates
+        .iter()
+        .filter(|candidate| {
+            candidate
+                .loaded
+                .manifest
+                .activation
+                .setup_marker
+                .as_ref()
+                .map_or(true, |marker| !satisfied_setup_markers.contains(marker))
+        })
+        .collect()
+}
+
 fn candidate_for_loaded_skill<'a>(
     skill: &LoadedSkill,
-    candidates: &'a [ActivationCandidate],
+    candidates: &'a [&ActivationCandidate],
 ) -> Result<&'a ActivationCandidate, SkillActivationSelectionError> {
     candidates
         .iter()
@@ -702,11 +726,12 @@ fn candidate_for_loaded_skill<'a>(
                 && candidate.loaded.source == skill.source
         })
         .ok_or(SkillActivationSelectionError::Internal)
+        .copied()
 }
 
 fn validate_explicit_mentions_are_unambiguous(
     explicit_names: &[String],
-    candidates: &[ActivationCandidate],
+    candidates: &[&ActivationCandidate],
 ) -> Result<(), SkillActivationSelectionError> {
     for name in explicit_names {
         let sources: Vec<SkillSourceKind> = candidates
@@ -727,7 +752,6 @@ fn validate_explicit_mentions_are_unambiguous(
 
 fn validate_selected_names_are_unambiguous(
     activations: &[SkillActivationRequest],
-    _candidates: &[ActivationCandidate],
 ) -> Result<(), SkillActivationSelectionError> {
     let mut sources_by_name: HashMap<&str, HashSet<SkillSourceKind>> = HashMap::new();
     for activation in activations {
@@ -930,6 +954,11 @@ mod tests {
         reads: std::sync::atomic::AtomicUsize,
     }
 
+    #[derive(Debug)]
+    struct StaticSetupMarkerSource {
+        satisfied_markers: HashSet<String>,
+    }
+
     impl StaticSkillBundleSource {
         fn new(skills: Vec<(SkillSourceKind, &str, &str)>) -> Self {
             let mut descriptors = Vec::new();
@@ -970,6 +999,17 @@ mod tests {
                 first: first.into_bytes(),
                 second: second.into_bytes(),
                 reads: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl StaticSetupMarkerSource {
+        fn new(satisfied_markers: &[&str]) -> Self {
+            Self {
+                satisfied_markers: satisfied_markers
+                    .iter()
+                    .map(|marker| marker.to_string())
+                    .collect(),
             }
         }
     }
@@ -1036,6 +1076,20 @@ mod tests {
             } else {
                 Ok(self.second.clone())
             }
+        }
+    }
+
+    #[async_trait]
+    impl SetupMarkerSource for StaticSetupMarkerSource {
+        async fn satisfied_setup_markers(
+            &self,
+            _run_context: &LoopRunContext,
+            markers: &HashSet<String>,
+        ) -> Result<HashSet<String>, SkillActivationSelectionError> {
+            Ok(markers
+                .intersection(&self.satisfied_markers)
+                .cloned()
+                .collect())
         }
     }
 
@@ -1167,6 +1221,41 @@ mod tests {
                 .as_ref()
                 .expect("skill context")
                 .contains("CODE_REVIEW_SENTINEL")
+        );
+    }
+
+    #[tokio::test]
+    async fn selector_suppresses_explicit_skill_when_setup_marker_is_satisfied() {
+        let source = Arc::new(StaticSkillBundleSource::new(vec![(
+            SkillSourceKind::User,
+            "setup-helper",
+            &skill_md_with_activation(
+                "setup-helper",
+                "  keywords: [\"setup-helper\"]\n  setup_marker: \"markers/setup-helper.done\"",
+                "SETUP_HELPER_SENTINEL",
+            ),
+        )]));
+        let setup_markers = Arc::new(StaticSetupMarkerSource::new(&["markers/setup-helper.done"]));
+        let selectable =
+            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default())
+                .with_setup_marker_source(setup_markers);
+        let context = run_context().await;
+        selectable
+            .record_user_message(
+                context.scope.clone(),
+                accepted_message_ref(&context),
+                "$setup-helper",
+            )
+            .expect("record message");
+
+        let selected = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("selection succeeds");
+
+        assert!(
+            selected.is_empty(),
+            "setup markers must suppress explicit and natural-language activation"
         );
     }
 
