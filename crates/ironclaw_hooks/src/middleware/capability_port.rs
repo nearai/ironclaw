@@ -597,5 +597,5 @@ fn invocation_arguments_digest(invocation: &CapabilityInvocation) -> [u8; 32] {
 }
 
 #[cfg(test)]
-#[path = "capability_port_tests.rs"]
+#[path = "tests/capability_port.rs"]
 mod tests;
