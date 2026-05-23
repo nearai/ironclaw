@@ -53,6 +53,13 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
         .map(|descriptor| descriptor.id.as_str())
         .collect::<Vec<_>>();
     assert_eq!(ids, all_builtin_capability_ids().to_vec());
+    for descriptor in &package.capabilities {
+        let expected_permission = match descriptor.id.as_str() {
+            HTTP_CAPABILITY_ID | SHELL_CAPABILITY_ID => PermissionMode::Ask,
+            _ => PermissionMode::Allow,
+        };
+        assert_eq!(descriptor.default_permission, expected_permission);
+    }
 
     let handlers = builtin_first_party_handlers().unwrap();
     for id in all_builtin_capability_ids() {

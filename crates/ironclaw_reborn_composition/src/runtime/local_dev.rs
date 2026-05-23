@@ -516,11 +516,17 @@ fn local_dev_builtin_grants(
 enum LocalDevCapabilityKind {
     Workspace,
     AmbientShell,
+    SkillManagement,
 }
 
 fn local_dev_capability_kind(capability_id: &str) -> LocalDevCapabilityKind {
     if capability_id == "builtin.shell" {
         LocalDevCapabilityKind::AmbientShell
+    } else if matches!(
+        capability_id,
+        "builtin.skill_list" | "builtin.skill_install" | "builtin.skill_remove"
+    ) {
+        LocalDevCapabilityKind::SkillManagement
     } else {
         LocalDevCapabilityKind::Workspace
     }
@@ -543,19 +549,21 @@ fn local_dev_grant_constraints(capability_id: &str, mounts: &MountView) -> Grant
             expires_at: None,
             max_invocations: None,
         },
-        LocalDevCapabilityKind::Workspace => GrantConstraints {
-            allowed_effects: local_dev_allowed_effects(),
-            mounts: mounts.clone(),
-            network: NetworkPolicy::default(),
-            secrets: Vec::new(),
-            resource_ceiling: None,
-            expires_at: None,
-            max_invocations: None,
-        },
+        LocalDevCapabilityKind::Workspace | LocalDevCapabilityKind::SkillManagement => {
+            GrantConstraints {
+                allowed_effects: local_dev_allowed_effects(),
+                mounts: mounts.clone(),
+                network: NetworkPolicy::default(),
+                secrets: Vec::new(),
+                resource_ceiling: None,
+                expires_at: None,
+                max_invocations: None,
+            }
+        }
     }
 }
 
-fn local_dev_builtin_capability_ids() -> [&'static str; 10] {
+fn local_dev_builtin_capability_ids() -> [&'static str; 13] {
     [
         "builtin.echo",
         "builtin.time",
@@ -567,6 +575,9 @@ fn local_dev_builtin_capability_ids() -> [&'static str; 10] {
         "builtin.glob",
         "builtin.grep",
         "builtin.apply_patch",
+        "builtin.skill_list",
+        "builtin.skill_install",
+        "builtin.skill_remove",
     ]
 }
 
@@ -609,11 +620,23 @@ fn local_dev_shell_network_policy() -> NetworkPolicy {
 }
 
 fn local_dev_workspace_mounts() -> Result<MountView, AgentLoopHostError> {
-    MountView::new(vec![MountGrant::new(
-        MountAlias::new("/workspace").map_err(host_api_agent_loop_error)?,
-        VirtualPath::new("/projects/workspace").map_err(host_api_agent_loop_error)?,
-        MountPermissions::read_write(),
-    )])
+    MountView::new(vec![
+        MountGrant::new(
+            MountAlias::new("/workspace").map_err(host_api_agent_loop_error)?,
+            VirtualPath::new("/projects/workspace").map_err(host_api_agent_loop_error)?,
+            MountPermissions::read_write(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/skills").map_err(host_api_agent_loop_error)?,
+            VirtualPath::new("/projects/skills").map_err(host_api_agent_loop_error)?,
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/system/skills").map_err(host_api_agent_loop_error)?,
+            VirtualPath::new("/projects/system/skills").map_err(host_api_agent_loop_error)?,
+            MountPermissions::read_only(),
+        ),
+    ])
     .map_err(host_api_agent_loop_error)
 }
 
@@ -767,6 +790,9 @@ mod tests {
 
         assert!(capability_ids.contains(&"builtin.write_file"));
         assert!(capability_ids.contains(&"builtin.apply_patch"));
+        assert!(capability_ids.contains(&"builtin.skill_list"));
+        assert!(capability_ids.contains(&"builtin.skill_install"));
+        assert!(capability_ids.contains(&"builtin.skill_remove"));
         assert!(capability_ids.contains(&"builtin.shell"));
         assert_eq!(
             local_dev_allowed_effects(),
@@ -789,6 +815,21 @@ mod tests {
         );
 
         let workspace_mounts = local_dev_workspace_mounts().expect("workspace mounts build");
+        let mount_for = |alias: &str| {
+            workspace_mounts
+                .mounts
+                .iter()
+                .find(|mount| mount.alias.as_str() == alias)
+                .expect("mount exists")
+        };
+        assert_eq!(
+            mount_for("/skills").permissions,
+            MountPermissions::read_write_list_delete()
+        );
+        assert_eq!(
+            mount_for("/system/skills").permissions,
+            MountPermissions::read_only()
+        );
         let grants = local_dev_builtin_grants(
             &ExtensionId::new("loop-driver").expect("valid extension id"),
             workspace_mounts.clone(),
@@ -828,6 +869,13 @@ mod tests {
         assert_eq!(read_file_grant.constraints.mounts, workspace_mounts);
         assert_eq!(
             read_file_grant.constraints.network,
+            NetworkPolicy::default()
+        );
+
+        let skill_install_grant = grant_for("builtin.skill_install");
+        assert_eq!(skill_install_grant.constraints.mounts, workspace_mounts);
+        assert_eq!(
+            skill_install_grant.constraints.network,
             NetworkPolicy::default()
         );
     }
