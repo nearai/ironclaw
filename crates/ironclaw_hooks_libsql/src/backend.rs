@@ -61,23 +61,71 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_hooks::predicate_state::{
-    InvocationKey, MAX_HISTORY_KEYS, MAX_KEYS_PER_TENANT, MAX_SAMPLES_PER_KEY,
-    PredicateBackendError, PredicateEventId, PredicateStateBackend, ValueKey,
+    InvocationKey, MAX_KEYS_PER_TENANT, MAX_SAMPLES_PER_KEY, PredicateBackendError,
+    PredicateEventId, PredicateStateBackend, ValueKey,
 };
 use libsql::{Connection, params};
 use rust_decimal::Decimal;
+use tokio::sync::Mutex;
 
 use crate::hashing::{
     invocation_scope_hash, to_epoch_millis, value_scope_hash, window_cutoff_millis,
 };
 use crate::schema::{INVOCATIONS_TABLE, LIBSQL_PREDICATE_STATE_SCHEMA, VALUES_TABLE};
 
-/// Durable libSQL-backed predicate-state backend. Holds an
-/// `Arc<libsql::Database>` and opens a fresh connection per operation — the
-/// project's libSQL connection model (no pool; `PRAGMA busy_timeout` lets
-/// concurrent writers wait on the single SQLite write lock).
+/// Connect-retry attempts for transient open failures
+/// (`SQLITE_CANTOPEN` / `SQLITE_BUSY` during concurrent connection creation).
+/// Mirrors `LibSqlBackend::connect` in `src/db/libsql/mod.rs`.
+const CONNECT_ATTEMPTS: u32 = 3;
+
+/// Durable libSQL-backed predicate-state backend.
+///
+/// # Concurrency contract
+///
+/// Mirrors the project's canonical libSQL write-serialisation model (see
+/// `LibSqlBackend` / `LibSqlWorkspaceStore` in `src/db/libsql/`). Three
+/// mechanisms, layered:
+///
+/// 1. **In-process write serialisation (`write_lock`).** Every mutating op
+///    (`record_invocation`, `record_value`, `evict_older_than`,
+///    `run_migrations`) acquires a per-backend `Arc<Mutex<()>>` and holds it
+///    for the whole `BEGIN IMMEDIATE` … `COMMIT` transaction. This is the
+///    primary admission control: it serialises all writers from THIS process
+///    before they ever contend at the SQLite layer. Without it, an unbounded
+///    fan-out (e.g. a heartbeat tick evaluating thousands of hooks at once)
+///    races on the single SQLite write lock; in libSQL's replication-enabled
+///    build a raw `BEGIN IMMEDIATE` statement can return `SQLITE_BUSY`
+///    *immediately* instead of honouring `busy_timeout`, surfacing as
+///    `Unavailable("database is locked")` — which **fail-closes** predicate
+///    evaluation (a hook that should pass gets denied under load). Serialising
+///    in-process keeps each process to one writer at a time, so the file-handle
+///    footprint stays flat and the SQLite write lock is never contended from
+///    within the process. This is exactly the `write_lock: Arc<Mutex<()>>`
+///    pattern `LibSqlWorkspaceStore` uses for the same reason.
+///
+/// 2. **Cross-process serialisation (`PRAGMA busy_timeout = 5000`).** Two
+///    separate processes (or two backend instances over different `Database`
+///    handles) still reduce to two connections contending for the single
+///    SQLite write lock; the busy timeout makes the loser wait up to 5 s
+///    rather than fail. The in-process mutex does not span instances, so this
+///    remains the cross-instance backstop.
+///
+/// 3. **Connect retry.** Connection creation retries with exponential backoff
+///    on transient open failures (`SQLITE_CANTOPEN` during concurrent opens),
+///    matching `LibSqlBackend::connect`.
+///
+/// None of this changes the transactional contract: each op still runs inside
+/// one `BEGIN IMMEDIATE` … `COMMIT`, and a genuinely unavailable backend still
+/// surfaces as [`PredicateBackendError::Unavailable`] /
+/// [`PredicateBackendError::WindowOverflow`], which fail-close predicate
+/// evaluation. The point is to keep *transient* load from being mistaken for a
+/// real outage.
 pub struct LibSqlPredicateStateBackend {
     db: Arc<libsql::Database>,
+    /// Serialises all in-process writers across the whole `BEGIN IMMEDIATE`
+    /// transaction (see the concurrency contract above). Mirrors the
+    /// `write_lock` in `src/db/libsql/`.
+    write_lock: Arc<Mutex<()>>,
     /// LRU evictions observed since construction. Persisted state can't be
     /// reconstructed across restart, so this counts evictions for THIS
     /// process instance (matching the in-memory backend's per-instance
@@ -91,25 +139,45 @@ impl LibSqlPredicateStateBackend {
     pub fn new(db: Arc<libsql::Database>) -> Self {
         Self {
             db,
+            write_lock: Arc::new(Mutex::new(())),
             evictions: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
-    /// Open a fresh connection with the project-standard busy timeout so a
-    /// concurrent writer holding the write lock makes us wait rather than
-    /// fail immediately.
+    /// Open a fresh connection with the project-standard busy timeout. Retries
+    /// connection creation with exponential backoff on transient open failures
+    /// (`SQLITE_CANTOPEN` during concurrent opens) so a brief race doesn't
+    /// fail-close predicate evaluation. Mirrors `LibSqlBackend::connect`.
     async fn connect(&self) -> Result<Connection, PredicateBackendError> {
-        let conn = self.db.connect().map_err(map_err)?;
-        conn.query("PRAGMA busy_timeout = 5000", ())
-            .await
-            .map_err(map_err)?;
-        Ok(conn)
+        let mut last_err = None;
+        for attempt in 0..CONNECT_ATTEMPTS {
+            match self.db.connect() {
+                Ok(conn) => {
+                    conn.query("PRAGMA busy_timeout = 5000", ())
+                        .await
+                        .map_err(map_err)?;
+                    return Ok(conn);
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    if attempt + 1 < CONNECT_ATTEMPTS {
+                        tokio::time::sleep(Duration::from_millis(50 * 2u64.pow(attempt))).await;
+                    }
+                }
+            }
+        }
+        Err(PredicateBackendError::Unavailable(format!(
+            "failed to open libSQL connection after {CONNECT_ATTEMPTS} attempts: {}",
+            last_err.map(|e| e.to_string()).unwrap_or_default()
+        )))
     }
 
     /// Create the predicate-state tables and indexes if absent. Idempotent;
     /// wrapped in `BEGIN IMMEDIATE` so concurrent first-time migrations
     /// serialise. SQLite supports transactional DDL.
     pub async fn run_migrations(&self) -> Result<(), PredicateBackendError> {
+        // Migrations are writers too: serialise with record_* / evict.
+        let _write_guard = self.write_lock.lock().await;
         let conn = self.connect().await?;
         conn.execute("BEGIN IMMEDIATE", ()).await.map_err(map_err)?;
         let result = run_migrations_inner(&conn).await;
@@ -164,6 +232,9 @@ impl PredicateStateBackend for LibSqlPredicateStateBackend {
         let tenant = key.tenant_id.as_str().to_string();
         let overflow_key = format!("{}/{}", key.tenant_id.as_str(), key.capability);
 
+        // Serialise in-process writers before touching SQLite (see the
+        // concurrency contract on the struct). Held for the whole transaction.
+        let _write_guard = self.write_lock.lock().await;
         let conn = self.connect().await?;
         conn.execute("BEGIN IMMEDIATE", ()).await.map_err(map_err)?;
 
@@ -250,6 +321,9 @@ impl PredicateStateBackend for LibSqlPredicateStateBackend {
             key.field
         );
 
+        // Serialise in-process writers before touching SQLite (see the
+        // concurrency contract on the struct). Held for the whole transaction.
+        let _write_guard = self.write_lock.lock().await;
         let conn = self.connect().await?;
         conn.execute("BEGIN IMMEDIATE", ()).await.map_err(map_err)?;
 
@@ -324,6 +398,8 @@ impl PredicateStateBackend for LibSqlPredicateStateBackend {
     /// its own `BEGIN IMMEDIATE` transaction.
     async fn evict_older_than(&self, cutoff: DateTime<Utc>) -> Result<u64, PredicateBackendError> {
         let cutoff_ms = to_epoch_millis(cutoff);
+        // Reaper is a writer too: serialise with record_* / migrations.
+        let _write_guard = self.write_lock.lock().await;
         let conn = self.connect().await?;
         conn.execute("BEGIN IMMEDIATE", ()).await.map_err(map_err)?;
         let result = async {
@@ -424,16 +500,29 @@ async fn scope_exists(
     Ok(count > 0)
 }
 
-/// Enforce the global [`MAX_HISTORY_KEYS`] and per-tenant
-/// [`MAX_KEYS_PER_TENANT`] distinct-scope caps before inserting a NEW scope.
-/// A "scope" is a distinct `scope_hash`; its "front timestamp" is its
-/// `min(occurred_at)`. The victim is the scope with the smallest front
-/// timestamp — the durable equivalent of the in-memory `min_by_key(front ts)`
-/// LRU. Returns the number of scopes evicted (one increment per evicted bucket,
-/// matching the in-memory backend's `evictions` semantics).
+/// Enforce the per-tenant [`MAX_KEYS_PER_TENANT`] distinct-scope quota before
+/// inserting a NEW scope. A "scope" is a distinct `scope_hash`; its "front
+/// timestamp" is its `min(occurred_at)`. The victim is the tenant's scope with
+/// the smallest front timestamp — the durable equivalent of the in-memory
+/// `min_by_key(front ts)` LRU. Returns the number of scopes evicted (one
+/// increment per evicted bucket, matching the in-memory backend's `evictions`
+/// semantics).
+///
+/// # No global cap (parity with the Postgres backend)
+///
+/// Unlike the in-memory backend, the durable backends do NOT enforce the
+/// global [`MAX_HISTORY_KEYS`] cap. That cap is an in-memory-only memory-
+/// footprint bound (threat-model finding **D5**, see the constant's rustdoc);
+/// a disk-backed store is not memory-bound, so durable backends reap instead
+/// via time-based [`PredicateStateBackend::evict_older_than`] plus this
+/// per-tenant quota. Enforcing a global cap here made libSQL diverge from
+/// Postgres (which has none) once total scopes exceed `MAX_HISTORY_KEYS` while
+/// staying under the per-tenant quota — a cross-backend inconsistency the
+/// parity matrix had to exclude. Dropping it restores parity.
 ///
 /// [`MAX_HISTORY_KEYS`]: ironclaw_hooks::predicate_state::MAX_HISTORY_KEYS
 /// [`MAX_KEYS_PER_TENANT`]: ironclaw_hooks::predicate_state::MAX_KEYS_PER_TENANT
+/// [`PredicateStateBackend::evict_older_than`]: ironclaw_hooks::predicate_state::PredicateStateBackend::evict_older_than
 async fn enforce_caps(
     conn: &Connection,
     table: &str,
@@ -441,57 +530,39 @@ async fn enforce_caps(
 ) -> Result<u64, PredicateBackendError> {
     let mut evicted = 0u64;
 
-    // Per-tenant quota first (matches in-memory: a tenant at its cap evicts
-    // ITS OWN oldest scope so it can't push out other tenants).
+    // Per-tenant quota (matches in-memory: a tenant at its cap evicts ITS OWN
+    // oldest scope so it can't push out other tenants). No global cap — see
+    // the fn-level doc; durable backends reap by time, not a global key count.
     let tenant_scopes = scalar_u32(
         conn,
         &format!("SELECT count(DISTINCT scope_hash) FROM {table} WHERE tenant_id = ?1"),
         params![tenant],
     )
     .await?;
-    if tenant_scopes as usize >= MAX_KEYS_PER_TENANT {
-        if evict_oldest_scope(conn, table, Some(tenant)).await? {
-            evicted += 1;
-        }
-    } else {
-        // Global cap: evict the oldest scope across ALL tenants.
-        let total_scopes = scalar_u32(
-            conn,
-            &format!("SELECT count(DISTINCT scope_hash) FROM {table}"),
-            params![],
-        )
-        .await?;
-        if total_scopes as usize >= MAX_HISTORY_KEYS
-            && evict_oldest_scope(conn, table, None).await?
-        {
-            evicted += 1;
-        }
+    if tenant_scopes as usize >= MAX_KEYS_PER_TENANT
+        && evict_oldest_scope(conn, table, tenant).await?
+    {
+        evicted += 1;
     }
     Ok(evicted)
 }
 
-/// Delete every row of the scope whose `min(occurred_at)` is smallest
-/// (optionally restricted to `tenant`). Returns true if a scope was evicted.
+/// Delete every row of `tenant`'s scope whose `min(occurred_at)` is smallest.
+/// Returns true if a scope was evicted. Always tenant-scoped: durable backends
+/// only enforce the per-tenant quota (no global cap — see [`enforce_caps`]).
 async fn evict_oldest_scope(
     conn: &Connection,
     table: &str,
-    tenant: Option<&str>,
+    tenant: &str,
 ) -> Result<bool, PredicateBackendError> {
-    let select_victim = match tenant {
-        Some(_) => format!(
-            "SELECT scope_hash FROM {table} WHERE tenant_id = ?1 \
-             GROUP BY scope_hash ORDER BY min(occurred_at) ASC, scope_hash ASC LIMIT 1"
-        ),
-        None => format!(
-            "SELECT scope_hash FROM {table} \
-             GROUP BY scope_hash ORDER BY min(occurred_at) ASC, scope_hash ASC LIMIT 1"
-        ),
-    };
-    let mut rows = match tenant {
-        Some(t) => conn.query(&select_victim, params![t]).await,
-        None => conn.query(&select_victim, params![]).await,
-    }
-    .map_err(map_err)?;
+    let select_victim = format!(
+        "SELECT scope_hash FROM {table} WHERE tenant_id = ?1 \
+         GROUP BY scope_hash ORDER BY min(occurred_at) ASC, scope_hash ASC LIMIT 1"
+    );
+    let mut rows = conn
+        .query(&select_victim, params![tenant])
+        .await
+        .map_err(map_err)?;
     let Some(row) = rows.next().await.map_err(map_err)? else {
         return Ok(false);
     };
