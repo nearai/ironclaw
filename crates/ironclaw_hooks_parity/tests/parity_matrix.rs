@@ -21,20 +21,31 @@
 //!   only when `IRONCLAW_HOOKS_POSTGRES_URL` / `DATABASE_URL` points at a
 //!   reachable server. Without a URL the Postgres leg is *skipped* (not
 //!   failed), exactly like the per-backend contract suites — but then the
-//!   parity guarantee is only proven for {in-memory, libSQL}. A real-Postgres
-//!   CI run is required before merge to fully exercise the matrix (same caveat
-//!   as #3933).
+//!   parity guarantee is only proven for {in-memory, libSQL}. Set
+//!   `IRONCLAW_REQUIRE_POSTGRES=1` (CI does) to turn a missing/unreachable
+//!   Postgres into a HARD failure so a skip cannot masquerade as a green
+//!   full-matrix run. A real-Postgres CI run is required before merge to fully
+//!   exercise the matrix (same caveat as #3933).
 //!
-//! # Why a captured log rather than ad-hoc asserts
+//! # Why a captured log cross-checked against an independent oracle
 //!
 //! Capturing the full per-step output of one backend and asserting the others
 //! reproduce it exactly means a NEW behavioral divergence (a backend that
 //! fails closed at a different boundary, dedups differently, or returns a
 //! different sum) surfaces as a concrete `assert_eq!` diff naming the diverging
 //! step — instead of silently passing because each backend's own bespoke
-//! assertions happened to be loose. If this file ever fails, it has found a
-//! real bug in one of the backends (see the PR-4/4 description); do NOT loosen
-//! the assertion to make it pass.
+//! assertions happened to be loose.
+//!
+//! Cross-backend equality alone is necessary but not sufficient: if two
+//! backends shared the SAME semantic bug they would agree with each other and
+//! still pass. So each script ALSO carries an independent, hand-computed
+//! `expected_*` oracle log (the count/sum/error sequence worked out from the
+//! semantics, not captured from any backend), and every backend — including the
+//! in-memory reference — is asserted against that oracle. A shared bug now
+//! fails because both backends diverge from the oracle. If this file ever
+//! fails, it has found a real bug in a backend (or a stale oracle — fix the
+//! bug, do NOT silently update the oracle to match a regressed backend); do NOT
+//! loosen the assertion to make it pass.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -455,10 +466,13 @@ async fn run_cap_script(backend: &dyn PredicateStateBackend) -> ObservationLog {
 /// advances, and a quiet co-tenant's scope survives. Asserts the eviction
 /// *count* and the *victim* (the oldest scope no longer counts from where it
 /// left off) match across backends. This is the shared per-tenant quota — the
-/// one LRU dimension all three backends implement (the in-memory backend ALSO
-/// has a global `MAX_HISTORY_KEYS` cap that the durable backends do not; that
-/// intended divergence is documented in 03-persistent-counter.md and is NOT
-/// exercised here so the matrix stays apples-to-apples).
+/// one LRU dimension all three backends implement. The in-memory backend ALSO
+/// has a global `MAX_HISTORY_KEYS` cap that the durable backends do not;
+/// `run_global_cap_parity_script` asserts the three backends AGREE in the
+/// regime below that cap (no global eviction fires), and the divergence ABOVE
+/// 8192 total scopes is an intentional memory-bound difference documented in
+/// 03-persistent-counter.md. This per-tenant LRU script stays under both caps
+/// so a divergence here localizes to the per-tenant dimension.
 async fn run_lru_script(backend: &dyn PredicateStateBackend) -> ObservationLog {
     let mut log = ObservationLog::new();
     let window = Duration::from_secs(3600);
@@ -525,6 +539,70 @@ async fn run_lru_script(backend: &dyn PredicateStateBackend) -> ObservationLog {
         window,
     )
     .await;
+
+    log
+}
+
+/// Global-cap parity script: many tenants each record a handful of distinct
+/// scopes, every tenant staying well under `MAX_KEYS_PER_TENANT` and the total
+/// staying well under the in-memory `MAX_HISTORY_KEYS` (8192) global cap. Every
+/// insert goes through the under-per-tenant-quota branch that — on the in-memory
+/// backend — *consults* the global cap, but the threshold is never crossed, so
+/// no global eviction fires on ANY backend.
+///
+/// This makes the cross-backend equality assertion meaningful for the
+/// global-cap dimension instead of silently excluding it: all three backends
+/// must retain every scope with ZERO evictions. The in-memory backend's global
+/// cap and the durable backends' lack of one are reconciled in this regime —
+/// they only diverge ABOVE 8192 total scopes, which is an intentional
+/// memory-bound divergence documented in 03-persistent-counter.md and not
+/// exercised here (inserting 8192+ scopes through a per-op-connection durable
+/// backend is prohibitively slow for a unit test; the per-backend contract
+/// suites' `no_global_key_cap_only_per_tenant` cover the durable side directly).
+async fn run_global_cap_parity_script(backend: &dyn PredicateStateBackend) -> ObservationLog {
+    let mut log = ObservationLog::new();
+    let window = Duration::from_secs(3600);
+
+    const TENANTS: usize = 40;
+    const SCOPES_PER_TENANT: usize = 5;
+
+    // Phase 1: insert TENANTS × SCOPES_PER_TENANT distinct scopes.
+    for t in 0..TENANTS {
+        for s in 0..SCOPES_PER_TENANT {
+            let key = inv_key(&format!("gtenant{t}"), &format!("gcap.{s}"));
+            step_invocation(
+                backend,
+                &mut log,
+                &format!("global/insert-{t}-{s}"),
+                &key,
+                &ev(&format!("g-{t}-{s}")),
+                at_millis((t * SCOPES_PER_TENANT + s) as i64),
+                window,
+            )
+            .await;
+        }
+    }
+
+    // Phase 2: replay every scope's original id (dedup no-op). If a global cap
+    // had evicted the earliest tenants' scopes, those would restart at 1 here;
+    // with no global cap (durable) or the cap unreached (in-memory) every scope
+    // survives and the replay returns its stable count of 1. Equality across
+    // backends in this phase is the load-bearing global-cap parity assertion.
+    for t in 0..TENANTS {
+        for s in 0..SCOPES_PER_TENANT {
+            let key = inv_key(&format!("gtenant{t}"), &format!("gcap.{s}"));
+            step_invocation(
+                backend,
+                &mut log,
+                &format!("global/replay-{t}-{s}"),
+                &key,
+                &ev(&format!("g-{t}-{s}")),
+                at_millis((TENANTS * SCOPES_PER_TENANT + t * SCOPES_PER_TENANT + s) as i64),
+                window,
+            )
+            .await;
+        }
+    }
 
     log
 }
@@ -620,11 +698,82 @@ async fn postgres_backend() -> Option<Arc<dyn PredicateStateBackend>> {
 // The matrix
 // ---------------------------------------------------------------------------
 
+/// Process-global async mutex serializing the libSQL legs across the parallel
+/// `#[tokio::test]` parity functions. See the call site for why concurrent
+/// independent libSQL `Database` handles must not run heavy fills at once.
+fn libsql_serial_guard() -> &'static tokio::sync::Mutex<()> {
+    static GUARD: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    GUARD.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+/// When `IRONCLAW_REQUIRE_POSTGRES=1`, a missing/unreachable Postgres backend is
+/// a HARD failure rather than a silent skip. CI sets this so a misconfigured DB
+/// (or a forgotten `--features postgres`) cannot turn the Postgres parity leg
+/// into a green skip-pass; local runs without the env var still skip cleanly.
+fn require_postgres_or_skip(script_name: &str) {
+    let required = std::env::var("IRONCLAW_REQUIRE_POSTGRES")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if required {
+        panic!(
+            "[{script_name}] IRONCLAW_REQUIRE_POSTGRES=1 but the Postgres parity leg \
+             did not run (backend not compiled with --features postgres, or \
+             IRONCLAW_HOOKS_POSTGRES_URL / DATABASE_URL unset/unreachable). \
+             Refusing to skip-pass under the CI hard-gate."
+        );
+    }
+    eprintln!(
+        "[{script_name}] Postgres leg SKIPPED (no --features postgres or no reachable \
+         DB URL). Parity proven for in-memory + libSQL only; set \
+         IRONCLAW_REQUIRE_POSTGRES=1 to make this a hard failure in CI."
+    );
+}
+
+/// Helpers to build expected observations concisely.
+fn obs_count(label: &str, count: u32, evictions_after: u64) -> Observation {
+    Observation {
+        label: label.to_string(),
+        outcome: StepOutcome::Count(count),
+        evictions_after,
+    }
+}
+
+fn obs_sum(label: &str, sum: &str, evictions_after: u64) -> Observation {
+    Observation {
+        label: label.to_string(),
+        outcome: StepOutcome::Sum(sum.to_string()),
+        evictions_after,
+    }
+}
+
+fn obs_overflow(label: &str, evictions_after: u64) -> Observation {
+    Observation {
+        label: label.to_string(),
+        outcome: StepOutcome::WindowOverflow,
+        evictions_after,
+    }
+}
+
 /// Run `script` against in-memory, libSQL, and (if available) Postgres, and
-/// cross-assert all produced logs are identical. The in-memory log is the
-/// reference; each other backend must reproduce it exactly. Returns the names
-/// of the legs that actually executed so the caller can print which legs ran.
-async fn assert_parity<F, Fut>(script_name: &str, script: F) -> Vec<&'static str>
+/// cross-assert all produced logs are identical AND equal to an independently
+/// hand-computed `expected` log.
+///
+/// The `expected` log is the *oracle*: it is the per-step count/sum/error
+/// sequence worked out by hand from the predicate-state semantics (see the
+/// per-script `expected_*` builders), NOT captured from any backend. Asserting
+/// every backend matches `expected` — rather than just matching each other —
+/// means two backends that happen to share the same semantic bug can no longer
+/// both pass: they would both diverge from the independent oracle. The
+/// in-memory backend is the reference for the *cross-backend* equality check,
+/// but it is no longer the sole source of truth for *correctness*.
+///
+/// Returns the names of the legs that actually executed so the caller can print
+/// which legs ran.
+async fn assert_parity<F, Fut>(
+    script_name: &str,
+    expected: ObservationLog,
+    script: F,
+) -> Vec<&'static str>
 where
     F: Fn(Arc<dyn PredicateStateBackend>) -> Fut,
     Fut: std::future::Future<Output = ObservationLog>,
@@ -633,13 +782,33 @@ where
 
     // Reference leg: in-memory (always runs).
     let reference = script(in_memory()).await;
+    assert_eq!(
+        reference, expected,
+        "[{script_name}] in-memory backend diverged from the independent \
+         hand-computed oracle — either the backend regressed or the oracle is \
+         stale; do NOT silently update the oracle to match the backend"
+    );
     ran.push("in-memory");
 
     // libSQL leg (always runs — embedded temp-file db).
-    let libsql_log = script(libsql_backend().await).await;
+    //
+    // Serialize across the parallel `#[tokio::test]` functions: each leg builds
+    // its OWN independent libSQL `Database` handle and several scripts do heavy
+    // fills (per-key cap = 4096 connect/BEGIN IMMEDIATE/COMMIT cycles). Running
+    // multiple independent `Database` handles' heavy fills concurrently in one
+    // process intermittently trips `SQLITE_MISUSE` ("bad parameter or other API
+    // misuse") in the replication-enabled libSQL build — a driver-level limit of
+    // concurrent independent handles, NOT a backend bug (the per-backend libSQL
+    // contract suite documents the same and runs serially via `harness=false`).
+    // Holding this guard across the whole libSQL leg gives the same one-heavy-
+    // -fill-at-a-time discipline without rewriting the parity binary's harness.
+    let libsql_log = {
+        let _guard = libsql_serial_guard().lock().await;
+        script(libsql_backend().await).await
+    };
     assert_eq!(
-        libsql_log, reference,
-        "[{script_name}] libSQL diverged from in-memory reference — \
+        libsql_log, expected,
+        "[{script_name}] libSQL diverged from the oracle — \
          a real cross-backend behavioral bug, do NOT loosen this assertion"
     );
     ran.push("libsql");
@@ -650,45 +819,148 @@ where
         if let Some(pg) = postgres_backend().await {
             let pg_log = script(pg).await;
             assert_eq!(
-                pg_log, reference,
-                "[{script_name}] Postgres diverged from in-memory reference — \
+                pg_log, expected,
+                "[{script_name}] Postgres diverged from the oracle — \
                  a real cross-backend behavioral bug, do NOT loosen this assertion"
             );
             ran.push("postgres");
         } else {
-            eprintln!(
-                "[{script_name}] Postgres leg SKIPPED: IRONCLAW_HOOKS_POSTGRES_URL / \
-                 DATABASE_URL not set. Parity proven for in-memory + libSQL only; a \
-                 real-Postgres CI run is required before merge."
-            );
+            require_postgres_or_skip(script_name);
         }
     }
     #[cfg(not(feature = "postgres"))]
     {
-        eprintln!(
-            "[{script_name}] Postgres leg NOT COMPILED (build without --features postgres). \
-             Parity proven for in-memory + libSQL only."
-        );
+        require_postgres_or_skip(script_name);
     }
 
     eprintln!("[{script_name}] parity legs executed: {ran:?}");
     ran
 }
 
+/// Independent oracle for [`run_core_script`]: each step's count/sum, computed
+/// by hand from the sliding-window + dedup + tenant-isolation semantics, NOT
+/// captured from any backend. No LRU/global cap is touched, so every
+/// `evictions_after` is 0.
+fn expected_core_log() -> ObservationLog {
+    vec![
+        // counting within window, then dedup replay, then a fresh id
+        obs_count("count/e1", 1, 0),
+        obs_count("count/e2", 2, 0),
+        obs_count("count/e3", 3, 0),
+        obs_count("count/replay-e2", 3, 0), // replay dedups, no advance
+        obs_count("count/e4", 4, 0),
+        // far-future event (t=10_000s) trims everything older than now-60s
+        obs_count("count/far-future", 1, 0),
+        // exact-cutoff retain boundary: t=0 entry is `< cutoff(=0)` false => kept
+        obs_count("boundary/t0", 1, 0),
+        obs_count("boundary/at-cutoff", 2, 0),
+        // tenant isolation: beta never inherits alpha's count
+        obs_count("iso/alpha-1", 1, 0),
+        obs_count("iso/alpha-2", 2, 0),
+        obs_count("iso/beta-1", 1, 0),
+        // value sums within window, with a dedup replay and a fractional add
+        obs_sum("sum/v1", "50", 0),
+        obs_sum("sum/v2", "125", 0),
+        obs_sum("sum/replay-v2", "125", 0),
+        obs_sum("sum/fractional", "126.25", 0), // 125 + 1.25
+        // cross-map dedup isolation: same id in both maps counts independently
+        obs_count("cross/inv-shared", 1, 0),
+        obs_sum("cross/val-shared", "42", 0),
+    ]
+}
+
+/// Independent oracle for [`run_cap_script`]: fill to the cap (count ==
+/// `MAX_SAMPLES_PER_KEY`), the next distinct id fails closed, and a replay of an
+/// in-window id dedups (count unchanged at the cap). No LRU eviction occurs (a
+/// single hot key under the per-tenant quota), so `evictions_after` is 0.
+fn expected_cap_log() -> ObservationLog {
+    vec![
+        obs_count("cap/at-cap-count", MAX_SAMPLES_PER_KEY as u32, 0),
+        obs_overflow("cap/overflow", 0),
+        obs_count("cap/replay-at-cap", MAX_SAMPLES_PER_KEY as u32, 0),
+    ]
+}
+
+/// Independent oracle for [`run_lru_script`]: beta records 1 scope; alpha floods
+/// `MAX_KEYS_PER_TENANT + OVERFLOW` distinct scopes so exactly `OVERFLOW`
+/// per-tenant evictions fire; alpha's oldest scope is the victim and restarts at
+/// count 1; beta's scope survives (replay dedups to count 1).
+///
+/// `evictions_after` after the flood equals `OVERFLOW` (8) — the per-tenant
+/// quota is the ONLY LRU dimension all three backends share. Re-inserting the
+/// evicted oldest scope (`oldest-victim-restarts`) finds alpha at its quota
+/// again, so it triggers ONE MORE per-tenant eviction (8 -> 9). The final
+/// `beta-survives` step is a replay of an existing beta scope (no new key), so
+/// it adds no eviction and the counter stays at 9.
+///
+/// The in-memory backend's additional global `MAX_HISTORY_KEYS` cap is never
+/// reached here (total scopes stay well under 8192), so it contributes no extra
+/// evictions and the durable backends (which have no global cap at all) match
+/// exactly.
+fn expected_lru_log() -> ObservationLog {
+    const OVERFLOW: u64 = 8;
+    const AFTER_VICTIM_REINSERT: u64 = OVERFLOW + 1; // 9
+    vec![
+        obs_count("lru/beta-initial", 1, 0),
+        obs_count("lru/alpha-flood-evictions", OVERFLOW as u32, OVERFLOW),
+        obs_count("lru/oldest-victim-restarts", 1, AFTER_VICTIM_REINSERT),
+        obs_count("lru/beta-survives", 1, AFTER_VICTIM_REINSERT),
+    ]
+}
+
+/// Independent oracle for [`run_global_cap_parity_script`]: every insert and
+/// every replay returns count 1 with zero evictions — the per-tenant quota
+/// never trips (5 < 2048) and the in-memory global cap (8192) is never reached
+/// (200 < 8192), so all three backends retain every scope.
+fn expected_global_cap_log() -> ObservationLog {
+    const TENANTS: usize = 40;
+    const SCOPES_PER_TENANT: usize = 5;
+    let mut log = ObservationLog::new();
+    for t in 0..TENANTS {
+        for s in 0..SCOPES_PER_TENANT {
+            log.push(obs_count(&format!("global/insert-{t}-{s}"), 1, 0));
+        }
+    }
+    for t in 0..TENANTS {
+        for s in 0..SCOPES_PER_TENANT {
+            log.push(obs_count(&format!("global/replay-{t}-{s}"), 1, 0));
+        }
+    }
+    log
+}
+
 #[tokio::test]
 async fn parity_core_behavioral_script() {
-    let ran = assert_parity("core", |b| async move { run_core_script(&*b).await }).await;
+    let ran = assert_parity("core", expected_core_log(), |b| async move {
+        run_core_script(&*b).await
+    })
+    .await;
     assert!(ran.contains(&"in-memory") && ran.contains(&"libsql"));
 }
 
 #[tokio::test]
 async fn parity_fail_closed_cap_script() {
-    let ran = assert_parity("cap", |b| async move { run_cap_script(&*b).await }).await;
+    let ran = assert_parity("cap", expected_cap_log(), |b| async move {
+        run_cap_script(&*b).await
+    })
+    .await;
     assert!(ran.contains(&"in-memory") && ran.contains(&"libsql"));
 }
 
 #[tokio::test]
 async fn parity_per_tenant_lru_script() {
-    let ran = assert_parity("lru", |b| async move { run_lru_script(&*b).await }).await;
+    let ran = assert_parity("lru", expected_lru_log(), |b| async move {
+        run_lru_script(&*b).await
+    })
+    .await;
+    assert!(ran.contains(&"in-memory") && ran.contains(&"libsql"));
+}
+
+#[tokio::test]
+async fn parity_global_cap_script() {
+    let ran = assert_parity("global-cap", expected_global_cap_log(), |b| async move {
+        run_global_cap_parity_script(&*b).await
+    })
+    .await;
     assert!(ran.contains(&"in-memory") && ran.contains(&"libsql"));
 }

@@ -24,6 +24,9 @@
 //! 2. Cross-host replay — interleaved id submissions, exactly-once counting.
 //! 3. LRU eviction race — concurrent inserts past the per-tenant quota.
 //! 4. Per-key cap under attacker flood — fail-closed `WindowOverflow`, bounded.
+//!    Also (4b) a cap-boundary race: fill to cap-1, race two fresh ids; exactly
+//!    one wins the last slot, the other fails closed (no TOCTOU breach or
+//!    double-reject).
 //! 5. Clock-skew — two hosts pass different `DateTime<Utc>`; window follows the
 //!    caller-supplied clock basis (both durable backends chose caller `now`).
 
@@ -181,9 +184,27 @@ async fn scenario_concurrent_writers_no_desync(
                 .expect("record ok")
         }));
     }
+
+    // Collect EVERY writer's returned count. The evaluator gates on this
+    // returned value, so a backend that durably inserts all N rows but returns
+    // stale counts mid-race (e.g. reads its own pre-commit snapshot) would be a
+    // real bug even though the final row count is correct. For N distinct-id
+    // writers, the N returned counts must be exactly the set {1, 2, ..., N}:
+    // each writer observes a strictly different in-window count and no two see
+    // the same value (no lost-update where two writers both return the same k).
+    let mut counts: Vec<u32> = Vec::with_capacity(N);
     for h in handles {
-        h.await.expect("joined");
+        counts.push(h.await.expect("joined"));
     }
+    counts.sort_unstable();
+    let expected: Vec<u32> = (1..=N as u32).collect();
+    assert_eq!(
+        counts, expected,
+        "the N concurrent distinct-id writers must each return a distinct \
+         in-window count forming exactly 1..=N (no duplicate/stale counts \
+         mid-race), got {counts:?}"
+    );
+
     // Observer re-reads via a duplicate id (no-op insert) — sees the full count.
     let final_count = observer
         .record_invocation(&key, &ev("evt-0"), now, window)
@@ -311,6 +332,99 @@ async fn scenario_per_key_cap_fails_closed_under_flood(
     );
 }
 
+/// 4b. Cap-boundary race: fill to exactly `MAX_SAMPLES_PER_KEY - 1` (one slot
+///     left), then race TWO fresh DISTINCT ids from two hosts at the same
+///     instant. Exactly one must win the last slot (returning the cap as its
+///     count) and the other must fail closed with `WindowOverflow`. This is the
+///     race the bulk-flood scenario can't isolate: at the very boundary a
+///     backend with a check-then-insert TOCTOU could let BOTH writers in
+///     (count = cap + 1, cap breached) or reject BOTH (fail-closed when a slot
+///     was actually free). The atomic record-and-cap path must admit exactly
+///     one.
+async fn scenario_cap_boundary_race_admits_exactly_one(
+    host_a: Arc<dyn PredicateStateBackend>,
+    host_b: Arc<dyn PredicateStateBackend>,
+    observer: Arc<dyn PredicateStateBackend>,
+) {
+    let key = inv_key("alpha", "cap.boundary-race");
+    let window = Duration::from_secs(3600);
+
+    // Fill to MAX_SAMPLES_PER_KEY - 1 distinct ids: one free slot remains.
+    for i in 0..(MAX_SAMPLES_PER_KEY - 1) {
+        host_a
+            .record_invocation(&key, &ev(&format!("fill-{i}")), at_millis(i as i64), window)
+            .await
+            .expect("fill below the cap succeeds");
+    }
+
+    // Race two FRESH distinct ids from the two hosts for the single free slot,
+    // both at the same in-window instant.
+    let now = at_millis(MAX_SAMPLES_PER_KEY as i64);
+    let ha = {
+        let key = key.clone();
+        let host_a = Arc::clone(&host_a);
+        tokio::spawn(async move {
+            host_a
+                .record_invocation(&key, &ev("race-a"), now, window)
+                .await
+        })
+    };
+    let hb = {
+        let key = key.clone();
+        let host_b = Arc::clone(&host_b);
+        tokio::spawn(async move {
+            host_b
+                .record_invocation(&key, &ev("race-b"), now, window)
+                .await
+        })
+    };
+    let ra = ha.await.expect("joined a");
+    let rb = hb.await.expect("joined b");
+
+    // Exactly one Ok (at the cap) and exactly one WindowOverflow.
+    let results = [&ra, &rb];
+    let oks: Vec<u32> = results
+        .iter()
+        .filter_map(|r| r.as_ref().ok().copied())
+        .collect();
+    let overflows = results
+        .iter()
+        .filter(|r| matches!(r, Err(PredicateBackendError::WindowOverflow { .. })))
+        .count();
+    assert_eq!(
+        oks.len(),
+        1,
+        "exactly one writer must win the last slot at the cap boundary; got ra={ra:?}, rb={rb:?}"
+    );
+    assert_eq!(
+        overflows, 1,
+        "the losing writer must fail closed with WindowOverflow; got ra={ra:?}, rb={rb:?}"
+    );
+    assert_eq!(
+        oks[0] as usize, MAX_SAMPLES_PER_KEY,
+        "the winning writer's count must be exactly the cap (no breach, no slot left empty)"
+    );
+
+    // Observer confirms the bucket is exactly at the cap and stays fail-closed:
+    // any further fresh distinct id overflows.
+    let overflow_again = observer
+        .record_invocation(
+            &key,
+            &ev("post-race-fresh"),
+            at_millis(MAX_SAMPLES_PER_KEY as i64 + 1),
+            window,
+        )
+        .await;
+    assert!(
+        matches!(
+            overflow_again,
+            Err(PredicateBackendError::WindowOverflow { .. })
+        ),
+        "after the boundary race the key is at the cap; a further fresh id must fail closed, \
+         got {overflow_again:?}"
+    );
+}
+
 /// 5. Clock-skew: two hosts pass DIFFERENT `now` values for the same key. The
 ///    window follows the caller-supplied clock basis (both durable backends use
 ///    caller `now`, NOT a server clock). Host A records at t=0; host B records a
@@ -427,6 +541,13 @@ async fn libsql_per_key_cap_fails_closed_under_flood() {
     scenario_per_key_cap_fails_closed_under_flood(cluster.host(), cluster.host()).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn libsql_cap_boundary_race_admits_exactly_one() {
+    let cluster = libsql_cluster::Cluster::new().await;
+    scenario_cap_boundary_race_admits_exactly_one(cluster.host(), cluster.host(), cluster.host())
+        .await;
+}
+
 #[tokio::test]
 async fn libsql_clock_skew_follows_caller_clock() {
     let cluster = libsql_cluster::Cluster::new().await;
@@ -501,11 +622,28 @@ mod postgres_cluster {
         ))
     }
 
+    /// `IRONCLAW_REQUIRE_POSTGRES=1` turns a missing/unreachable Postgres into a
+    /// HARD failure (CI sets this) instead of a silent skip-pass; local runs
+    /// without it still skip cleanly.
+    fn require_postgres() -> bool {
+        std::env::var("IRONCLAW_REQUIRE_POSTGRES")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    }
+
     macro_rules! pg_skip_or {
         ($url:ident) => {
             match prepare().await {
                 Some(u) => u,
                 None => {
+                    if require_postgres() {
+                        panic!(
+                            "IRONCLAW_REQUIRE_POSTGRES=1 but Postgres multi-host parity \
+                             could not run (IRONCLAW_HOOKS_POSTGRES_URL / DATABASE_URL \
+                             unset or unreachable). Refusing to skip-pass under the CI \
+                             hard-gate."
+                        );
+                    }
                     eprintln!(
                         "skipping postgres multi-host parity: \
                          IRONCLAW_HOOKS_POSTGRES_URL / DATABASE_URL not set"
@@ -538,6 +676,14 @@ mod postgres_cluster {
         let _g = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let url = pg_skip_or!(url);
         scenario_per_key_cap_fails_closed_under_flood(host(&url), host(&url)).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[allow(clippy::await_holding_lock)]
+    async fn postgres_cap_boundary_race_admits_exactly_one() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let url = pg_skip_or!(url);
+        scenario_cap_boundary_race_admits_exactly_one(host(&url), host(&url), host(&url)).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
