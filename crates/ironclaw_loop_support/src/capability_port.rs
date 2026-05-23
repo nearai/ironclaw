@@ -134,6 +134,7 @@ pub struct HostRuntimeLoopCapabilityPortFactory {
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     execution_mounts: MountView,
+    capability_execution_mounts: HashMap<CapabilityId, MountView>,
 }
 
 impl HostRuntimeLoopCapabilityPortFactory {
@@ -151,11 +152,22 @@ impl HostRuntimeLoopCapabilityPortFactory {
             result_writer,
             milestone_sink,
             execution_mounts: MountView::default(),
+            capability_execution_mounts: HashMap::new(),
         }
     }
 
     pub fn with_execution_mounts(mut self, mounts: MountView) -> Self {
         self.execution_mounts = mounts;
+        self
+    }
+
+    pub fn with_capability_execution_mount(
+        mut self,
+        capability_id: CapabilityId,
+        mounts: MountView,
+    ) -> Self {
+        self.capability_execution_mounts
+            .insert(capability_id, mounts);
         self
     }
 
@@ -173,6 +185,7 @@ impl HostRuntimeLoopCapabilityPortFactory {
             Arc::clone(&self.milestone_sink),
         )
         .with_execution_mounts(self.execution_mounts.clone())
+        .with_capability_execution_mounts(self.capability_execution_mounts.clone())
     }
 }
 
@@ -376,6 +389,7 @@ pub struct HostRuntimeLoopCapabilityPort {
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     execution_mounts: MountView,
+    capability_execution_mounts: HashMap<CapabilityId, MountView>,
     snapshots: Mutex<HashMap<String, SurfaceSnapshot>>,
     current_surface_version: Mutex<Option<String>>,
     dispatch_records: Mutex<DispatchRecordStore>,
@@ -416,6 +430,7 @@ impl HostRuntimeLoopCapabilityPort {
             result_writer,
             milestone_sink,
             execution_mounts: MountView::default(),
+            capability_execution_mounts: HashMap::new(),
             snapshots: Mutex::new(HashMap::new()),
             current_surface_version: Mutex::new(None),
             dispatch_records: Mutex::new(DispatchRecordStore::default()),
@@ -425,6 +440,20 @@ impl HostRuntimeLoopCapabilityPort {
     pub fn with_execution_mounts(mut self, mounts: MountView) -> Self {
         self.execution_mounts = mounts;
         self
+    }
+
+    pub fn with_capability_execution_mounts(
+        mut self,
+        mounts: HashMap<CapabilityId, MountView>,
+    ) -> Self {
+        self.capability_execution_mounts = mounts;
+        self
+    }
+
+    fn execution_mounts_for(&self, capability_id: &CapabilityId) -> &MountView {
+        self.capability_execution_mounts
+            .get(capability_id)
+            .unwrap_or(&self.execution_mounts)
     }
 
     fn snapshot_for(
@@ -852,7 +881,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                         &capability,
                         trust_decision.effective_trust.class(),
                         &trust_decision.authority_ceiling.allowed_effects,
-                        &self.execution_mounts,
+                        self.execution_mounts_for(&request.capability_id),
                     )?,
                     request.capability_id,
                     capability.estimate,
@@ -1804,14 +1833,17 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use ironclaw_host_api::{
-        AgentId, CapabilityGrant, CapabilityGrantId, GrantConstraints, MountAlias, MountGrant,
-        MountPermissions, NetworkPolicy, ProjectId, TenantId, TrustClass, UserId, VirtualPath,
+        AgentId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, GrantConstraints,
+        MountAlias, MountGrant, MountPermissions, NetworkPolicy, PermissionMode, ProjectId,
+        ResourceUsage, TenantId, TrustClass, UserId, VirtualPath,
     };
     use ironclaw_host_runtime::{
-        CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, HostRuntimeHealth, HostRuntimeStatus,
-        RuntimeCapabilityResumeRequest, RuntimeStatusRequest, SurfaceKind,
-        VisibleCapabilitySurface,
+        CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, CapabilitySurfaceVersion,
+        HostRuntimeHealth, HostRuntimeStatus, RuntimeCapabilityCompleted,
+        RuntimeCapabilityResumeRequest, RuntimeStatusRequest, SurfaceKind, VisibleCapability,
+        VisibleCapabilityAccess, VisibleCapabilitySurface,
     };
+    use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
     use ironclaw_turns::{
         InMemoryRunProfileResolver, LoopDriverId, RunProfileResolutionRequest, RunProfileResolver,
         TurnId, TurnRunId, TurnScope,
@@ -2235,6 +2267,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invoke_capability_uses_capability_specific_execution_mounts() {
+        let default_id = CapabilityId::new("demo.default").expect("valid capability id");
+        let override_id = CapabilityId::new("demo.override").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let mut context = execution_context("thread-capability-specific-mounts");
+        let run_context = loop_run_context(&context).await;
+        let loop_driver_extension =
+            loop_driver_execution_extension_id(&run_context).expect("valid extension id");
+        context.grants.grants.extend([
+            dispatch_capability_grant(&default_id, &loop_driver_extension),
+            dispatch_capability_grant(&override_id, &loop_driver_extension),
+        ]);
+
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![
+            visible_capability(default_id.clone(), provider_id.clone()),
+            visible_capability(override_id.clone(), provider_id.clone()),
+        ]));
+        let visible_request = visible_request(context).with_provider_trust(
+            std::collections::BTreeMap::from([(provider_id, dispatch_trust_decision())]),
+        );
+        let default_mounts = mount_view("/workspace", "/projects/workspace");
+        let override_mounts = mount_view("/skills", "/projects/skills");
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            runtime.clone(),
+            visible_request,
+            Arc::new(StaticInputResolver),
+            Arc::new(StaticResultWriter),
+            dummy_milestone_sink(),
+        )
+        .with_execution_mounts(default_mounts.clone())
+        .with_capability_execution_mount(override_id.clone(), override_mounts.clone())
+        .port_for_run_context(run_context);
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+        let input_ref = CapabilityInputRef::new("input:mount-test").expect("valid input ref");
+
+        port.invoke_capability(CapabilityInvocation {
+            surface_version: surface.version.clone(),
+            capability_id: override_id.clone(),
+            input_ref: input_ref.clone(),
+        })
+        .await
+        .expect("override invocation succeeds");
+        port.invoke_capability(CapabilityInvocation {
+            surface_version: surface.version,
+            capability_id: default_id.clone(),
+            input_ref,
+        })
+        .await
+        .expect("default invocation succeeds");
+
+        let requests = runtime.take_requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].capability_id, override_id);
+        assert_eq!(requests[0].context.mounts, override_mounts);
+        assert_eq!(requests[1].capability_id, default_id);
+        assert_eq!(requests[1].context.mounts, default_mounts);
+    }
+
+    #[tokio::test]
     async fn invocation_context_rejects_same_scope_elevated_grant() {
         let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
         let mut context = execution_context("thread-elevated-grant");
@@ -2531,6 +2625,66 @@ mod tests {
         .expect("valid mount view")
     }
 
+    fn mount_view(alias: &str, target: &str) -> MountView {
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new(alias).expect("valid mount alias"),
+            VirtualPath::new(target).expect("valid virtual path"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("valid mount view")
+    }
+
+    fn dispatch_capability_grant(
+        capability_id: &CapabilityId,
+        grantee: &ExtensionId,
+    ) -> CapabilityGrant {
+        CapabilityGrant {
+            id: CapabilityGrantId::new(),
+            capability: capability_id.clone(),
+            grantee: Principal::Extension(grantee.clone()),
+            issued_by: Principal::HostRuntime,
+            constraints: GrantConstraints {
+                allowed_effects: vec![EffectKind::DispatchCapability],
+                mounts: MountView::default(),
+                network: NetworkPolicy::default(),
+                secrets: Vec::new(),
+                resource_ceiling: None,
+                expires_at: None,
+                max_invocations: None,
+            },
+        }
+    }
+
+    fn dispatch_trust_decision() -> TrustDecision {
+        TrustDecision {
+            effective_trust: EffectiveTrustClass::user_trusted(),
+            authority_ceiling: AuthorityCeiling {
+                allowed_effects: vec![EffectKind::DispatchCapability],
+                max_resource_ceiling: None,
+            },
+            provenance: TrustProvenance::Default,
+            evaluated_at: chrono::Utc::now(),
+        }
+    }
+
+    fn visible_capability(id: CapabilityId, provider: ExtensionId) -> VisibleCapability {
+        VisibleCapability {
+            descriptor: CapabilityDescriptor {
+                id,
+                provider,
+                runtime: RuntimeKind::FirstParty,
+                trust_ceiling: TrustClass::UserTrusted,
+                description: "demo capability".to_string(),
+                parameters_schema: serde_json::json!({"type":"object"}),
+                effects: vec![EffectKind::DispatchCapability],
+                default_permission: PermissionMode::Allow,
+                resource_profile: None,
+            },
+            access: VisibleCapabilityAccess::Available,
+            estimated_resources: ResourceEstimate::default(),
+        }
+    }
+
     fn dummy_runtime() -> Arc<dyn HostRuntime> {
         Arc::new(NoopHostRuntime)
     }
@@ -2545,6 +2699,111 @@ mod tests {
 
     fn dummy_milestone_sink() -> Arc<dyn LoopHostMilestoneSink> {
         Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default())
+    }
+
+    struct RecordingHostRuntime {
+        capabilities: Vec<VisibleCapability>,
+        requests: Mutex<Vec<RuntimeCapabilityRequest>>,
+    }
+
+    impl RecordingHostRuntime {
+        fn new(capabilities: Vec<VisibleCapability>) -> Self {
+            Self {
+                capabilities,
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn take_requests(&self) -> Vec<RuntimeCapabilityRequest> {
+            self.requests.lock().expect("requests lock").clone()
+        }
+    }
+
+    #[async_trait]
+    impl HostRuntime for RecordingHostRuntime {
+        async fn invoke_capability(
+            &self,
+            request: RuntimeCapabilityRequest,
+        ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+            self.requests
+                .lock()
+                .expect("requests lock")
+                .push(request.clone());
+            Ok(RuntimeCapabilityOutcome::Completed(Box::new(
+                RuntimeCapabilityCompleted {
+                    capability_id: request.capability_id,
+                    output: serde_json::json!({"ok": true}),
+                    usage: ResourceUsage::default(),
+                },
+            )))
+        }
+
+        async fn resume_capability(
+            &self,
+            _request: RuntimeCapabilityResumeRequest,
+        ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+            unreachable!("recording host runtime should not resume")
+        }
+
+        async fn visible_capabilities(
+            &self,
+            _request: ironclaw_host_runtime::VisibleCapabilityRequest,
+        ) -> Result<VisibleCapabilitySurface, HostRuntimeError> {
+            Ok(VisibleCapabilitySurface {
+                version: CapabilitySurfaceVersion::new("surface-v1").expect("valid version"),
+                capabilities: self.capabilities.clone(),
+            })
+        }
+
+        async fn cancel_work(
+            &self,
+            _request: CancelRuntimeWorkRequest,
+        ) -> Result<CancelRuntimeWorkOutcome, HostRuntimeError> {
+            unreachable!("recording host runtime should not cancel work")
+        }
+
+        async fn runtime_status(
+            &self,
+            _request: RuntimeStatusRequest,
+        ) -> Result<HostRuntimeStatus, HostRuntimeError> {
+            unreachable!("recording host runtime should not report status")
+        }
+
+        async fn health(&self) -> Result<HostRuntimeHealth, HostRuntimeError> {
+            unreachable!("recording host runtime should not report health")
+        }
+    }
+
+    struct StaticInputResolver;
+
+    #[async_trait]
+    impl LoopCapabilityInputResolver for StaticInputResolver {
+        async fn resolve_capability_input(
+            &self,
+            _run_context: &LoopRunContext,
+            _input_ref: &CapabilityInputRef,
+        ) -> Result<serde_json::Value, AgentLoopHostError> {
+            Ok(serde_json::json!({"ok": true}))
+        }
+    }
+
+    struct StaticResultWriter;
+
+    #[async_trait]
+    impl LoopCapabilityResultWriter for StaticResultWriter {
+        async fn write_capability_result(
+            &self,
+            _run_context: &LoopRunContext,
+            _capability_id: &CapabilityId,
+            _output: serde_json::Value,
+        ) -> Result<LoopResultRef, AgentLoopHostError> {
+            LoopResultRef::new("result:mount-test").map_err(|_| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Internal,
+                    "result ref could not be built",
+                )
+            })
+        }
     }
 
     struct NoopHostRuntime;

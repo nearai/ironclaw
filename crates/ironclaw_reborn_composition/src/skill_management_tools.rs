@@ -129,9 +129,8 @@ impl FirstPartyCapabilityHandler for SkillManagementToolHandler {
 async fn dispatch_list(
     request: &FirstPartyCapabilityRequest,
 ) -> Result<Value, FirstPartyCapabilityError> {
-    let skills = list_skills(management_context(request)?)
-        .await
-        .map_err(capability_error)?;
+    let context = management_context(request)?;
+    let skills = list_skills(&context).await.map_err(capability_error)?;
     Ok(json!({
         "skills": skills.iter().map(skill_summary_json).collect::<Vec<_>>(),
         "count": skills.len(),
@@ -147,12 +146,10 @@ async fn dispatch_install(
         .and_then(Value::as_str)
         .ok_or_else(input_error)?;
     let name = request.input.get("name").and_then(Value::as_str);
-    let installed = install_skill(
-        management_context(request)?,
-        SkillInstallRequest { name, content },
-    )
-    .await
-    .map_err(capability_error)?;
+    let context = management_context(request)?;
+    let installed = install_skill(&context, SkillInstallRequest { name, content })
+        .await
+        .map_err(capability_error)?;
 
     Ok(json!({
         "installed": true,
@@ -169,7 +166,8 @@ async fn dispatch_remove(
         .get("name")
         .and_then(Value::as_str)
         .ok_or_else(input_error)?;
-    let removed = remove_skill(management_context(request)?, SkillRemoveRequest { name })
+    let context = management_context(request)?;
+    let removed = remove_skill(&context, SkillRemoveRequest { name })
         .await
         .map_err(capability_error)?;
 
@@ -181,15 +179,16 @@ async fn dispatch_remove(
 
 fn management_context(
     request: &FirstPartyCapabilityRequest,
-) -> Result<SkillManagementContext<'_>, FirstPartyCapabilityError> {
+) -> Result<SkillManagementContext, FirstPartyCapabilityError> {
     let Some(mounts) = request.mounts.as_ref() else {
         return Err(FirstPartyCapabilityError::new(
             RuntimeDispatchErrorKind::FilesystemDenied,
         ));
     };
     Ok(SkillManagementContext::new(
-        request.services.filesystem.as_ref(),
-        mounts,
+        Arc::clone(&request.services.filesystem),
+        mounts.clone(),
+        request.scope.clone(),
     ))
 }
 

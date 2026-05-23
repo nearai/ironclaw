@@ -100,20 +100,28 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
         &self,
         run_context: &LoopRunContext,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
-        let execution_mounts = local_dev_workspace_mounts()?;
+        let workspace_mounts = local_dev_workspace_mounts()?;
+        let skill_mounts = local_dev_skill_mounts()?;
         let visible_request = local_dev_visible_capability_request(
             run_context,
             self.user_id.clone(),
-            execution_mounts.clone(),
+            workspace_mounts.clone(),
+            skill_mounts.clone(),
         )?;
-        let factory = HostRuntimeLoopCapabilityPortFactory::new(
+        let mut factory = HostRuntimeLoopCapabilityPortFactory::new(
             Arc::clone(&self.runtime),
             visible_request,
             Arc::clone(&self.input_resolver),
             Arc::clone(&self.result_writer),
             Arc::clone(&self.milestone_sink),
         )
-        .with_execution_mounts(execution_mounts);
+        .with_execution_mounts(workspace_mounts);
+        for capability_id in local_dev_skill_management_capability_ids() {
+            factory = factory.with_capability_execution_mount(
+                CapabilityId::new(capability_id).map_err(host_api_agent_loop_error)?,
+                skill_mounts.clone(),
+            );
+        }
         Ok(factory.for_run_context(run_context.clone()))
     }
 }
@@ -449,10 +457,11 @@ fn model_capability_io_error(error: AgentLoopHostError) -> HostManagedModelError
 fn local_dev_visible_capability_request(
     run_context: &LoopRunContext,
     user_id: UserId,
-    execution_mounts: MountView,
+    workspace_mounts: MountView,
+    skill_mounts: MountView,
 ) -> Result<HostVisibleCapabilityRequest, AgentLoopHostError> {
     let extension_id = loop_driver_execution_extension_id(run_context)?;
-    let grants = local_dev_builtin_grants(&extension_id, execution_mounts)?;
+    let grants = local_dev_builtin_grants(&extension_id, &workspace_mounts, &skill_mounts)?;
     let mut context = ExecutionContext::local_default(
         user_id,
         extension_id,
@@ -497,7 +506,8 @@ fn local_dev_visible_capability_request(
 
 fn local_dev_builtin_grants(
     grantee: &ExtensionId,
-    mounts: MountView,
+    workspace_mounts: &MountView,
+    skill_mounts: &MountView,
 ) -> Result<CapabilitySet, AgentLoopHostError> {
     let mut grants = Vec::new();
     for capability_id in local_dev_builtin_capability_ids() {
@@ -506,7 +516,7 @@ fn local_dev_builtin_grants(
             capability: CapabilityId::new(capability_id).map_err(host_api_agent_loop_error)?,
             grantee: Principal::Extension(grantee.clone()),
             issued_by: Principal::HostRuntime,
-            constraints: local_dev_grant_constraints(capability_id, &mounts),
+            constraints: local_dev_grant_constraints(capability_id, workspace_mounts, skill_mounts),
         });
     }
     Ok(CapabilitySet { grants })
@@ -532,7 +542,19 @@ fn local_dev_capability_kind(capability_id: &str) -> LocalDevCapabilityKind {
     }
 }
 
-fn local_dev_grant_constraints(capability_id: &str, mounts: &MountView) -> GrantConstraints {
+fn local_dev_skill_management_capability_ids() -> impl Iterator<Item = &'static str> {
+    local_dev_builtin_capability_ids()
+        .into_iter()
+        .filter(|capability_id| {
+            local_dev_capability_kind(capability_id) == LocalDevCapabilityKind::SkillManagement
+        })
+}
+
+fn local_dev_grant_constraints(
+    capability_id: &str,
+    workspace_mounts: &MountView,
+    skill_mounts: &MountView,
+) -> GrantConstraints {
     match local_dev_capability_kind(capability_id) {
         LocalDevCapabilityKind::AmbientShell => GrantConstraints {
             allowed_effects: local_dev_shell_allowed_effects(),
@@ -549,17 +571,24 @@ fn local_dev_grant_constraints(capability_id: &str, mounts: &MountView) -> Grant
             expires_at: None,
             max_invocations: None,
         },
-        LocalDevCapabilityKind::Workspace | LocalDevCapabilityKind::SkillManagement => {
-            GrantConstraints {
-                allowed_effects: local_dev_allowed_effects(),
-                mounts: mounts.clone(),
-                network: NetworkPolicy::default(),
-                secrets: Vec::new(),
-                resource_ceiling: None,
-                expires_at: None,
-                max_invocations: None,
-            }
-        }
+        LocalDevCapabilityKind::Workspace => GrantConstraints {
+            allowed_effects: local_dev_allowed_effects(),
+            mounts: workspace_mounts.clone(),
+            network: NetworkPolicy::default(),
+            secrets: Vec::new(),
+            resource_ceiling: None,
+            expires_at: None,
+            max_invocations: None,
+        },
+        LocalDevCapabilityKind::SkillManagement => GrantConstraints {
+            allowed_effects: local_dev_allowed_effects(),
+            mounts: skill_mounts.clone(),
+            network: NetworkPolicy::default(),
+            secrets: Vec::new(),
+            resource_ceiling: None,
+            expires_at: None,
+            max_invocations: None,
+        },
     }
 }
 
@@ -620,12 +649,16 @@ fn local_dev_shell_network_policy() -> NetworkPolicy {
 }
 
 fn local_dev_workspace_mounts() -> Result<MountView, AgentLoopHostError> {
+    MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").map_err(host_api_agent_loop_error)?,
+        VirtualPath::new("/projects/workspace").map_err(host_api_agent_loop_error)?,
+        MountPermissions::read_write(),
+    )])
+    .map_err(host_api_agent_loop_error)
+}
+
+fn local_dev_skill_mounts() -> Result<MountView, AgentLoopHostError> {
     MountView::new(vec![
-        MountGrant::new(
-            MountAlias::new("/workspace").map_err(host_api_agent_loop_error)?,
-            VirtualPath::new("/projects/workspace").map_err(host_api_agent_loop_error)?,
-            MountPermissions::read_write(),
-        ),
         MountGrant::new(
             MountAlias::new("/skills").map_err(host_api_agent_loop_error)?,
             VirtualPath::new("/projects/skills").map_err(host_api_agent_loop_error)?,
@@ -815,8 +848,12 @@ mod tests {
         );
 
         let workspace_mounts = local_dev_workspace_mounts().expect("workspace mounts build");
+        let skill_mounts = local_dev_skill_mounts().expect("skill mounts build");
+        assert!(workspace_mounts.mounts.iter().all(|mount| {
+            mount.alias.as_str() != "/skills" && mount.alias.as_str() != "/system/skills"
+        }));
         let mount_for = |alias: &str| {
-            workspace_mounts
+            skill_mounts
                 .mounts
                 .iter()
                 .find(|mount| mount.alias.as_str() == alias)
@@ -832,7 +869,8 @@ mod tests {
         );
         let grants = local_dev_builtin_grants(
             &ExtensionId::new("loop-driver").expect("valid extension id"),
-            workspace_mounts.clone(),
+            &workspace_mounts,
+            &skill_mounts,
         )
         .expect("local-dev grants build");
         let grant_for = |capability_id: &str| {
@@ -873,7 +911,7 @@ mod tests {
         );
 
         let skill_install_grant = grant_for("builtin.skill_install");
-        assert_eq!(skill_install_grant.constraints.mounts, workspace_mounts);
+        assert_eq!(skill_install_grant.constraints.mounts, skill_mounts);
         assert_eq!(
             skill_install_grant.constraints.network,
             NetworkPolicy::default()
