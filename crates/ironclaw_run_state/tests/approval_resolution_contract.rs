@@ -60,6 +60,10 @@ async fn approval_resolution_by_guessed_request_id_is_opaque_outside_scope() {
     let mut approval = approval_request(invocation_id);
     approval.reason = "tenant1 secret approval reason".to_string();
     let request_id = approval.id;
+    let action_capability = match approval.action.as_ref() {
+        Action::Dispatch { capability, .. } => capability.as_str().to_string(),
+        _ => unreachable!("approval fixture uses a dispatch action"),
+    };
 
     store
         .save_pending(owner_scope.clone(), approval)
@@ -81,7 +85,7 @@ async fn approval_resolution_by_guessed_request_id_is_opaque_outside_scope() {
     ));
     let rendered = err.to_string();
     assert!(!rendered.contains("tenant1 secret approval reason"));
-    assert!(!rendered.contains("echo.say"));
+    assert!(!rendered.contains(&action_capability));
 
     let owner_record = store
         .get(&owner_scope, request_id)

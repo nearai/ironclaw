@@ -408,7 +408,7 @@ async fn default_runtime_idempotency_key_is_advisory_and_does_not_dedupe() {
 #[tokio::test]
 async fn default_runtime_same_idempotency_key_in_different_scopes_does_not_collide() {
     let registry = Arc::new(registry_with_echo_capability());
-    let dispatcher = Arc::new(CountingDispatcher::default());
+    let dispatcher = Arc::new(RecordingDispatcher::default());
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let runtime = DefaultHostRuntime::new(
         registry,
@@ -432,6 +432,16 @@ async fn default_runtime_same_idempotency_key_in_different_scopes_does_not_colli
     project_b.project_id = Some(ProjectId::new("project-b").unwrap());
     project_b.resource_scope.project_id = project_b.project_id.clone();
 
+    let expected_scopes = [
+        tenant_a.resource_scope.clone(),
+        tenant_b.resource_scope.clone(),
+        project_b.resource_scope.clone(),
+    ];
+    let expected_payloads = [
+        json!({"scope": "tenant-a"}),
+        json!({"scope": "tenant-b"}),
+        json!({"scope": "project-b"}),
+    ];
     for (context, payload) in [
         (tenant_a, json!({"scope": "tenant-a"})),
         (tenant_b, json!({"scope": "tenant-b"})),
@@ -448,11 +458,26 @@ async fn default_runtime_same_idempotency_key_in_different_scopes_does_not_colli
         let _ = runtime.invoke_capability(request).await.unwrap();
     }
 
+    let requests = dispatcher.requests();
     assert_eq!(
-        dispatcher.count(),
+        requests.len(),
         3,
         "identical external idempotency keys must not collapse work across tenant/project scopes"
     );
+    for ((request, expected_scope), expected_payload) in requests
+        .iter()
+        .zip(expected_scopes.iter())
+        .zip(expected_payloads.iter())
+    {
+        assert_eq!(
+            &request.scope, expected_scope,
+            "dispatch must preserve the scope attached to each idempotency-keyed request"
+        );
+        assert_eq!(
+            &request.input, expected_payload,
+            "dispatch input order must match the tenant/project request order"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1503,15 +1528,23 @@ impl TrustAwareCapabilityDispatchAuthorizer for DenyAuthorizer {
 
 #[derive(Default)]
 struct RecordingDispatcher {
-    request: Mutex<Option<CapabilityDispatchRequest>>,
+    requests: Mutex<Vec<CapabilityDispatchRequest>>,
 }
 
 impl RecordingDispatcher {
     fn has_request(&self) -> bool {
-        self.request
+        !self
+            .requests
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .is_some()
+            .is_empty()
+    }
+
+    fn requests(&self) -> Vec<CapabilityDispatchRequest> {
+        self.requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 }
 
@@ -1521,10 +1554,10 @@ impl CapabilityDispatcher for RecordingDispatcher {
         &self,
         request: CapabilityDispatchRequest,
     ) -> Result<CapabilityDispatchResult, DispatchError> {
-        *self
-            .request
+        self.requests
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(request.clone());
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(request.clone());
         Ok(CapabilityDispatchResult {
             capability_id: request.capability_id,
             provider: extension_id(),

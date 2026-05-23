@@ -1757,7 +1757,7 @@ fn host_http_egress_does_not_use_policy_staged_for_other_tenant_user_or_project(
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
-        body: br#"{\"ok\":true}"#.to_vec(),
+        body: br#"{"ok":true}"#.to_vec(),
         usage: NetworkUsage {
             request_bytes: 5,
             response_bytes: 11,

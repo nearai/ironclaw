@@ -2,18 +2,20 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ironclaw_filesystem::{FilesystemError, FilesystemOperation, RootFilesystem};
+use ironclaw_filesystem::{FilesystemError, FilesystemOperation, InMemoryBackend, RootFilesystem};
 use ironclaw_host_api::VirtualPath;
 use ironclaw_memory::{
-    ChunkConfig, DefaultPromptWriteSafetyPolicy, InMemoryMemoryDocumentRepository,
-    MemoryAppendOutcome, MemoryBackend, MemoryBackendCapabilities, MemoryBackendFilesystemAdapter,
-    MemoryContext, MemoryDocumentFilesystem, MemoryDocumentIndexer, MemoryDocumentPath,
-    MemoryDocumentRepository, MemoryDocumentScope, MemoryEventSinkError, MemorySearchRequest,
-    PromptProtectedPathRegistry, PromptSafetyAllowanceId, PromptSafetyPolicyVersion,
-    PromptSafetyReasonCode, PromptSafetySeverity, PromptWriteOperation, PromptWriteSafetyDecision,
-    PromptWriteSafetyError, PromptWriteSafetyEvent, PromptWriteSafetyEventKind,
-    PromptWriteSafetyEventSink, PromptWriteSafetyPolicy, PromptWriteSafetyRequest,
-    PromptWriteSource, RepositoryMemoryBackend, chunk_document, content_sha256,
+    ChunkConfig, DefaultPromptWriteSafetyPolicy, FilesystemMemoryDocumentRepository,
+    InMemoryMemoryDocumentRepository, MemoryAppendOutcome, MemoryBackend,
+    MemoryBackendCapabilities, MemoryBackendFilesystemAdapter, MemoryChunkWrite, MemoryContext,
+    MemoryDocumentFilesystem, MemoryDocumentIndexRepository, MemoryDocumentIndexer,
+    MemoryDocumentPath, MemoryDocumentRepository, MemoryDocumentScope, MemoryEventSinkError,
+    MemorySearchRequest, PromptProtectedPathRegistry, PromptSafetyAllowanceId,
+    PromptSafetyPolicyVersion, PromptSafetyReasonCode, PromptSafetySeverity, PromptWriteOperation,
+    PromptWriteSafetyDecision, PromptWriteSafetyError, PromptWriteSafetyEvent,
+    PromptWriteSafetyEventKind, PromptWriteSafetyEventSink, PromptWriteSafetyPolicy,
+    PromptWriteSafetyRequest, PromptWriteSource, RepositoryMemoryBackend, chunk_document,
+    content_sha256,
 };
 
 #[tokio::test]
@@ -1204,6 +1206,64 @@ async fn repository_memory_backend_search_does_not_cross_tenant_user_or_project_
         .search(
             &alice_context,
             MemorySearchRequest::new(alice_secret)
+                .unwrap()
+                .with_limit(5)
+                .with_vector(false),
+        )
+        .await
+        .unwrap();
+    assert_eq!(alice_results.len(), 1);
+    assert_eq!(alice_results[0].path.relative_path(), "notes/secret.md");
+    assert!(alice_results[0].snippet.contains(alice_secret));
+}
+
+#[tokio::test]
+async fn filesystem_memory_document_repository_search_does_not_cross_tenant_scope() {
+    let repository = FilesystemMemoryDocumentRepository::new(Arc::new(InMemoryBackend::new()));
+    let alice_secret = "TENANT_A_ALICE_PROJECT_A_FILESYSTEM_MEMORY_SECRET";
+    let alice_path =
+        MemoryDocumentPath::new("tenant-a", "alice", Some("project-a"), "notes/secret.md").unwrap();
+    repository
+        .write_document(&alice_path, alice_secret.as_bytes())
+        .await
+        .unwrap();
+    repository
+        .replace_document_chunks_if_current(
+            &alice_path,
+            &content_sha256(alice_secret),
+            &[MemoryChunkWrite {
+                content: alice_secret.to_string(),
+                embedding: None,
+            }],
+        )
+        .await
+        .unwrap();
+
+    for scope in [
+        MemoryDocumentScope::new("tenant-b", "bob", Some("project-a")).unwrap(),
+        MemoryDocumentScope::new("tenant-a", "bob", Some("project-a")).unwrap(),
+        MemoryDocumentScope::new("tenant-a", "alice", Some("project-b")).unwrap(),
+    ] {
+        let results = repository
+            .search_documents(
+                &scope,
+                &MemorySearchRequest::new(alice_secret)
+                    .unwrap()
+                    .with_limit(5)
+                    .with_vector(false),
+            )
+            .await
+            .unwrap();
+        assert!(
+            results.is_empty(),
+            "filesystem-backed search leaked alice's document into {scope:?}: {results:?}"
+        );
+    }
+
+    let alice_results = repository
+        .search_documents(
+            alice_path.scope(),
+            &MemorySearchRequest::new(alice_secret)
                 .unwrap()
                 .with_limit(5)
                 .with_vector(false),

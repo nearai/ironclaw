@@ -344,17 +344,24 @@ async fn concrete_mcp_http_client_scopes_session_ids_per_invocation() {
         StaticMcpHostHttpEgressPlanner::new(host_http_plan()),
     );
 
-    for user in ["user1", "user2"] {
+    let mut cross_tenant_scope = sample_scope_for_user("user2");
+    cross_tenant_scope.tenant_id = TenantId::new("tenant2").unwrap();
+    cross_tenant_scope.project_id = Some(ProjectId::new("project2").unwrap());
+
+    for (scope, query) in [
+        (sample_scope_for_user("user1"), "user1"),
+        (cross_tenant_scope, "user2"),
+    ] {
         client
             .call_tool(McpClientRequest {
                 provider: ExtensionId::new("github-mcp").unwrap(),
                 capability_id: CapabilityId::new("github-mcp.search").unwrap(),
-                scope: sample_scope_for_user(user),
+                scope,
                 transport: "http".to_string(),
                 command: None,
                 args: vec![],
                 url: Some("https://mcp.example.test/mcp".to_string()),
-                input: json!({"query": user}),
+                input: json!({"query": query}),
                 max_output_bytes: 4096,
             })
             .await
