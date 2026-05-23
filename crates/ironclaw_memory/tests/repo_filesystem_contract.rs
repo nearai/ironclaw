@@ -12,8 +12,11 @@
 use std::sync::Arc;
 
 use ironclaw_filesystem::InMemoryBackend;
-use ironclaw_memory::{FilesystemMemoryDocumentRepository, contract_test};
+use ironclaw_memory::{FilesystemMemoryDocumentRepository, contract_test_indexed};
 
-contract_test!(filesystem, || {
+// FilesystemMemoryDocumentRepository implements MemoryDocumentIndexRepository
+// and serves FTS search, so it gets the chunk-seeded search-isolation
+// contract via `contract_test_indexed!`.
+contract_test_indexed!(filesystem, || {
     FilesystemMemoryDocumentRepository::new(Arc::new(InMemoryBackend::new()))
 });
