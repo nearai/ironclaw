@@ -240,11 +240,15 @@ impl TryFrom<&str> for ExtensionId {
 impl From<&ironclaw_host_api::ExtensionId> for ExtensionId {
     fn from(host: &ironclaw_host_api::ExtensionId) -> Self {
         // The host-api `ExtensionId` is already validated against the same
-        // (or a stricter) segment grammar, so the round-trip cannot fail.
-        // We still go through `new` to keep a single validation path.
-        Self::new(host.as_str().to_string()).expect(
-            "ironclaw_host_api::ExtensionId is pre-validated and shares the identity grammar",
-        )
+        // segment grammar that `validate_identity_segment` enforces here
+        // (both mirror `ironclaw_host_api::ids::validate_name_segment`).
+        // We still go through `new` to keep a single validation path. The
+        // round-trip is asserted by `extension_id_from_host_api_round_trips`
+        // and `extension_id_from_host_api_round_trips_grammar_corners` below;
+        // if the two grammars ever diverge those tests will fail before this
+        // call site can panic in production.
+        let msg = "ironclaw_host_api::ExtensionId is pre-validated and shares the identity grammar";
+        Self::new(host.as_str().to_string()).expect(msg) // safety: host-api ExtensionId shares identity grammar; round-trip covered by unit tests above.
     }
 }
 
@@ -543,5 +547,35 @@ mod tests {
         let host = ironclaw_host_api::ExtensionId::new("github-mcp.v1").expect("valid host id");
         let mirrored: ExtensionId = (&host).into();
         assert_eq!(mirrored.as_str(), "github-mcp.v1");
+    }
+
+    /// Walks the grammar corners that `validate_name_segment` and
+    /// `validate_identity_segment` both accept, asserting the host-api ->
+    /// identity round-trip is infallible at each boundary. This is the
+    /// regression guard that backs the `expect()` in
+    /// `From<&ironclaw_host_api::ExtensionId> for ExtensionId`: if the two
+    /// validators ever drift apart, one of these constructions will fail
+    /// the host-api `::new` call (because that path runs first) and surface
+    /// the divergence here instead of panicking in production.
+    #[test]
+    fn extension_id_from_host_api_round_trips_grammar_corners() {
+        let corners = [
+            "a",                             // 1-byte minimum
+            "0",                             // leading digit
+            "abc",                           // plain lowercase
+            "abc-def",                       // dash
+            "abc_def",                       // underscore
+            "abc.def",                       // single dot
+            "github-mcp.v1",                 // dash + dot
+            "a.b.c.d.e",                     // multiple dot segments
+            "0123456789",                    // digits only
+            &"a".repeat(MAX_IDENTITY_BYTES), // max length
+        ];
+        for raw in corners {
+            let host = ironclaw_host_api::ExtensionId::new(raw)
+                .unwrap_or_else(|e| panic!("host-api rejected corner {raw:?}: {e}"));
+            let mirrored: ExtensionId = (&host).into();
+            assert_eq!(mirrored.as_str(), raw);
+        }
     }
 }
