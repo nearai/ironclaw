@@ -654,10 +654,11 @@ fn readiness_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_filesystem::FilesystemError;
     use ironclaw_host_api::{
         CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
-        ExecutionContext, ExtensionId, GrantConstraints, NetworkPolicy, Principal,
-        ResourceEstimate, RuntimeKind, TrustClass, UserId,
+        ExecutionContext, ExtensionId, GrantConstraints, InvocationId, NetworkPolicy, Principal,
+        ResourceEstimate, ResourceScope, RuntimeKind, ScopedPath, TrustClass, UserId,
     };
     use ironclaw_host_runtime::{
         RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind,
@@ -680,6 +681,52 @@ mod tests {
         assert!(services.product_auth.is_some());
         assert!(services.local_runtime.is_some());
         assert_eq!(services.readiness.state, RebornReadinessState::DevOnly);
+    }
+
+    #[tokio::test]
+    async fn local_dev_setup_marker_workspace_filesystem_is_read_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        let marker_path = storage_root.join("workspace/markers/setup.done");
+        std::fs::create_dir_all(marker_path.parent().expect("marker parent"))
+            .expect("marker directory");
+        std::fs::write(&marker_path, "done").expect("marker file");
+        let services = build_reborn_services(RebornBuildInput::local_dev(
+            "local-dev-marker-workspace-owner",
+            storage_root,
+        ))
+        .await
+        .expect("local-dev services build");
+        let local_runtime = services
+            .local_runtime
+            .as_ref()
+            .expect("local-dev runtime substrate");
+        let scope = ResourceScope::local_default(
+            UserId::new("local-dev-marker-user").expect("valid user"),
+            InvocationId::new(),
+        )
+        .expect("valid resource scope");
+
+        let stat = local_runtime
+            .workspace_filesystem
+            .stat(
+                &scope,
+                &ScopedPath::new("/workspace/markers/setup.done").expect("valid marker path"),
+            )
+            .await
+            .expect("marker stat succeeds");
+        assert_eq!(stat.len, 4);
+
+        let error = local_runtime
+            .workspace_filesystem
+            .write_file(
+                &scope,
+                &ScopedPath::new("/workspace/markers/new.done").expect("valid marker path"),
+                b"done",
+            )
+            .await
+            .expect_err("setup marker workspace filesystem should be read-only");
+        assert!(matches!(error, FilesystemError::PermissionDenied { .. }));
     }
 
     #[tokio::test]

@@ -710,7 +710,7 @@ fn candidates_with_unsatisfied_setup_markers<'a>(
                 .activation
                 .setup_marker
                 .as_ref()
-                .map_or(true, |marker| !satisfied_setup_markers.contains(marker))
+                .is_none_or(|marker| !satisfied_setup_markers.contains(marker))
         })
         .collect()
 }
