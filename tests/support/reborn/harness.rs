@@ -740,6 +740,7 @@ impl RebornBinaryE2EHarness {
             model_policy_guard: None,
             model_budget_accountant: None,
             safety_context: None,
+            hook_dispatcher_builder_factory: None,
         })?;
         let binding_service: Arc<dyn ConversationBindingService> =
             Arc::new(product_harness.binding_service()?);

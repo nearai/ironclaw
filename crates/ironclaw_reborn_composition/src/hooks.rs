@@ -81,15 +81,12 @@ pub use ironclaw_reborn::loop_driver_host::HookDispatcherBuilderFactory;
 /// uncomposed, so the production runtime behaves exactly as it did before
 /// hooks existed. The flag is flipped to ON deliberately (canary → on), never
 /// by accident.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// `#[derive(Default)]` gives `enabled: false` (bool's default) — i.e. OFF.
+// The default-OFF contract is load-bearing; the `config_defaults_to_disabled`
+// test pins it so the derive can never silently flip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct HooksActivationConfig {
     enabled: bool,
-}
-
-impl Default for HooksActivationConfig {
-    fn default() -> Self {
-        Self { enabled: false }
-    }
 }
 
 /// Environment variable that flips the hook framework on. Absent / empty /
