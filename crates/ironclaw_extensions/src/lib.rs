@@ -411,7 +411,29 @@ impl ExtensionDiscovery {
                 root.as_str().trim_end_matches('/'),
                 entry.name
             ))?;
-            let bytes = fs.read_file(&manifest_path).await?;
+            // DoS pre-read bound (threat-model: oversized manifest). Stat the
+            // file and refuse to read it at all if it exceeds the manifest size
+            // ceiling, rather than materializing the whole body first and only
+            // then rejecting in `parse` (`MAX_MANIFEST_BYTES` is also re-checked
+            // there as defense-in-depth). `read_file_bounded` stats before it
+            // materializes, so an attacker-controlled multi-gigabyte manifest is
+            // rejected without a full read.
+            let bytes = match fs
+                .read_file_bounded(&manifest_path, v2::MAX_MANIFEST_BYTES)
+                .await?
+            {
+                Some(bytes) => bytes,
+                None => {
+                    return Err(ExtensionError::InvalidManifest {
+                        reason: format!(
+                            "extension manifest at {} exceeds the {}-byte ceiling and was \
+                             rejected before reading",
+                            manifest_path.as_str(),
+                            v2::MAX_MANIFEST_BYTES
+                        ),
+                    });
+                }
+            };
             let text = String::from_utf8(bytes).map_err(|error| ExtensionError::ManifestParse {
                 reason: error.to_string(),
             })?;

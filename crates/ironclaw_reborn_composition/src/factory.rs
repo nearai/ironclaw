@@ -47,12 +47,11 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) loop_checkpoint_store: Arc<InMemoryLoopCheckpointStore>,
     pub(crate) thread_service: Arc<InMemorySessionThreadService>,
     pub(crate) skill_filesystem: Arc<ScopedFilesystem<LocalFilesystem>>,
-    /// The canonical extension registry handed to `HostRuntimeServices::new`
-    /// for capability dispatch. Carried here as a shared composition artifact
-    /// so hook activation (`runtime::build_reborn_runtime`) consumes the *same*
-    /// `Arc<ExtensionRegistry>` as capability dispatch — the two can never
-    /// drift apart because there is only one registry instance per build.
-    pub(crate) extension_registry: Arc<ExtensionRegistry>,
+    /// Tenant-scoped root filesystem used for third-party extension hook
+    /// discovery (`/system/extensions/<tenant>`). The runtime derives the
+    /// discovery root from the authenticated tenant id; this is the same
+    /// backend the rest of local-dev composition uses.
+    pub(crate) extension_filesystem: Arc<LocalFilesystem>,
 }
 
 impl std::fmt::Debug for RebornServices {
@@ -168,26 +167,17 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
     let turn_state = Arc::new(InMemoryTurnStateStore::default());
-
-    // Build the extension registry ONCE and share the same `Arc` between
-    // capability dispatch (`HostRuntimeServices::new`) and hook activation
-    // (carried through `RebornLocalRuntimeServices.extension_registry`). This
-    // is the canonical composition artifact: there is exactly one registry per
-    // build, so the registry hooks are composed against can never drift from
-    // the registry capability dispatch resolves through.
-    let extension_registry = Arc::new(builtin_extension_registry()?);
-
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
         turn_state: Arc::clone(&turn_state),
         checkpoint_state_store: Arc::new(InMemoryCheckpointStateStore::default()),
         loop_checkpoint_store: Arc::new(InMemoryLoopCheckpointStore::default()),
         thread_service: Arc::new(InMemorySessionThreadService::default()),
         skill_filesystem,
-        extension_registry: Arc::clone(&extension_registry),
+        extension_filesystem: Arc::clone(&filesystem),
     });
 
     let mut services = HostRuntimeServices::new(
-        Arc::clone(&extension_registry),
+        Arc::new(builtin_extension_registry()?),
         filesystem,
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),

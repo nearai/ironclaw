@@ -52,8 +52,10 @@ pub use auth::{
 pub use error::RebornBuildError;
 pub use factory::{RebornServices, build_reborn_services};
 pub use hooks::{
-    HOOKS_ENABLED_ENV, HookDispatcherBuilderFactory, HooksActivationConfig,
-    build_hook_dispatcher_builder_factory,
+    HOOKS_ENABLED_ENV, HOOKS_THIRD_PARTY_ENABLED_ENV, HookDispatcherBuilderFactory,
+    HookProjectionRegistry, HooksActivationConfig, MAX_INSTALLED_EXTENSIONS_CONSIDERED,
+    MAX_TOTAL_HOOKS_PER_TENANT, ThirdPartyDiscoveryInput, build_hook_dispatcher_builder_factory,
+    build_hook_projection_registry, tenant_extension_root,
 };
 pub use input::RebornBuildInput;
 #[cfg(feature = "root-llm-provider")]

@@ -339,6 +339,18 @@ impl HookDispatcher {
         registry.count_for_extension(extension)
     }
 
+    /// Total number of bindings installed across every attach point and every
+    /// owning extension (builtin, trusted, installed), poisoned or not.
+    ///
+    /// Public counterpart to the per-extension counters above. Composition-tier
+    /// callers use this to enforce a tenant-wide aggregate cap on third-party
+    /// hook projection (the per-extension caps live in the registrar; this is
+    /// the cross-extension ceiling) before committing more bindings.
+    pub fn count_total_bindings(&self) -> usize {
+        let registry = self.registry.lock().expect("hook registry mutex poisoned"); // safety: mutex poison means another thread panicked; failing closed here is correct
+        registry.len()
+    }
+
     /// Same as [`Self::count_bindings_for_extension`] but restricted to
     /// one attach point. Powers the D4 (per-extension-per-kind) cap.
     pub(crate) fn count_bindings_for_extension_at(
@@ -2101,6 +2113,15 @@ impl HookDispatcherBuilder {
     /// installer surface.
     pub(crate) fn dispatcher_mut(&mut self) -> &mut HookDispatcher {
         &mut self.dispatcher
+    }
+
+    /// Total bindings installed into the in-flight dispatcher so far, across
+    /// every attach point and owning extension. Mirrors
+    /// [`HookDispatcher::count_total_bindings`] on the not-yet-`Arc`'d builder
+    /// so a projection loop can enforce a tenant-wide aggregate cap between
+    /// per-extension installs.
+    pub fn count_total_bindings(&self) -> usize {
+        self.dispatcher.count_total_bindings()
     }
 
     /// Finalize: wrap the configured dispatcher in [`Arc`]. After this call

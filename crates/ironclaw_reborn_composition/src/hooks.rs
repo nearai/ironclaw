@@ -17,60 +17,29 @@
 //!    installer seam below), not with a shipped no-op. An empty first-party set
 //!    composed with no extension hooks is a legitimate state — the dispatcher
 //!    composes with zero bindings, which is valid (not a panic/error).
-//! 3. **The manifest → registry loader** ([`project_extension_install_sets`] +
-//!    [`install_extension_sets`]) — projects each declared
+//! 3. **The manifest → registry loader** ([`install_extension_hooks`]) — takes
+//!    installed extension packages, projects each declared
 //!    [`HookSectionEntryV2`] payload into a typed
-//!    [`ironclaw_hooks::manifest::HookManifestEntry`] (the only fallible,
-//!    external-input step), then installs them through [`HookRegistrar::install`]
-//!    at the `Installed` trust tier. Trust attenuation is enforced by
-//!    construction: the registrar only ever calls `install_installed_*`, so an
-//!    extension hook can never mint `Allow` / `Gate` / `Mutator` without an
-//!    explicit per-extension grant.
-//! 4. **The per-run dispatcher builder factory** — a [`HookInstallPlan`]
-//!    compiled once (parse + validate the full install set, fail-closed),
-//!    returned to the runtime to pass to
-//!    `RebornLoopDriverHostFactory::with_hook_dispatcher_builder_factory`. The
-//!    factory closure calls [`HookInstallPlan::rebuild`] to mint a *fresh*
-//!    [`HookDispatcherBuilder`] per host build (per run), so slot-poisoning and
-//!    registry mutations never leak across runs. `rebuild` is infallible **by
-//!    construction**: a `HookInstallPlan` only exists for an install set that
-//!    already composed cleanly, so replaying it from the identical fresh-empty
-//!    start cannot fail (no per-run `.expect()`/`unwrap`). Telemetry
-//!    attribution is per-run because the host factory attaches the run-scoped
-//!    milestone sink internally to each fresh builder.
+//!    [`ironclaw_hooks::manifest::HookManifestEntry`], and installs them
+//!    through [`HookRegistrar::install`] at the `Installed` trust tier. Trust
+//!    attenuation is enforced by construction: the registrar only ever calls
+//!    `install_installed_*`, so an extension hook can never mint `Allow` /
+//!    `Gate` / `Mutator` without an explicit per-extension grant.
+//! 4. **The per-run dispatcher builder factory** — returned to the runtime to
+//!    pass to `RebornLoopDriverHostFactory::with_hook_dispatcher_builder_
+//!    factory`. The closure mints a *fresh* [`HookDispatcherBuilder`] per host
+//!    build (per run), so slot-poisoning and registry mutations never leak
+//!    across runs. Telemetry attribution is per-run because the host factory
+//!    attaches the run-scoped milestone sink internally to each fresh builder.
 //!
 //! ## Per-tenant scoping (multi-tenant isolation contract, #3890)
 //!
 //! `build_reborn_runtime` is invoked once per identity/owner — one
 //! `tenant_id` per call. Everything this module constructs (the
-//! [`PredicateEvaluator`] + its state backend, the compiled [`HookInstallPlan`],
-//! the per-run dispatcher closure) is built inside that per-tenant call, so one
-//! tenant's hooks can never apply to another. There is no global registry.
-//!
-//! ## Predicate counter scoping (TENANT-scoped, deliberately shared across runs)
-//!
-//! The [`PredicateEvaluator`] and its state backend are constructed **once per
-//! runtime/tenant** ([`build_hook_dispatcher_builder_factory_with`]) and the
-//! same `Arc<PredicateEvaluator>` is captured into the [`HookInstallPlan`], so
-//! every per-run dispatcher minted by [`HookInstallPlan::rebuild`] shares it.
-//! This is intentional, not an isolation leak:
-//!
-//! - Rate-limit and value-cap predicate counters are keyed by
-//!   `(hook, tenant, capability)` with **no `run_id`** — they are *definitionally*
-//!   tenant-scoped. A run-scoped rate limit would reset to zero at the start of
-//!   every run and could never enforce a cross-run budget, which is useless.
-//! - So the counter STATE is deliberately tenant-scoped and shared across runs
-//!   within one tenant. Two host builds minted from the same runtime share the
-//!   same predicate counters — by design.
-//! - What *is* per-run-fresh is the **dispatcher** itself: each `rebuild` mints
-//!   a fresh [`HookDispatcherBuilder`]/registry so slot-poisoning and registry
-//!   mutations never leak across runs.
-//!
-//! That split — per-run-fresh dispatcher, tenant-scoped predicate counters — is
-//! the documented isolation boundary. The
-//! `predicate_counter_state_is_tenant_scoped_across_rebuilds` test pins the
-//! shared-across-runs half; `rebuild_mints_independent_dispatchers_per_call`
-//! pins the fresh-dispatcher half. Both must hold.
+//! [`PredicateEvaluator`] + its state backend, the template registry, the
+//! per-run dispatcher closure) is built inside that per-tenant call, so one
+//! tenant's hooks and predicate counters can never apply to another. There is
+//! no global registry.
 //!
 //! ## Predicate backend (in-memory for v1)
 //!
@@ -116,38 +85,87 @@ pub use ironclaw_reborn::loop_driver_host::HookDispatcherBuilderFactory;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct HooksActivationConfig {
     enabled: bool,
+    /// Sub-flag gating *third-party installed-extension* hook activation. The
+    /// master `enabled` flag activates builtin/host-bundled hooks; this
+    /// additional flag must ALSO be on before any third-party `[[hooks]]`
+    /// declaration is discovered and projected. Default OFF: with this off the
+    /// activation path is byte-identical to the builtin-only #3938 behavior.
+    ///
+    /// **Filesystem-hardening gate (read before flipping in production):**
+    /// `HOOKS_THIRD_PARTY_ENABLED` MUST NOT be enabled in multi-tenant
+    /// production until the `openat2(RESOLVE_BENEATH)` / `O_NOFOLLOW` backend
+    /// hardening lands. v1 ships a projection-layer strict-child / no-`..` /
+    /// no-symlink-escape containment check plus the canonicalizing local
+    /// backend; that is the documented gating follow-up.
+    third_party_enabled: bool,
 }
 
 /// Environment variable that flips the hook framework on. Absent / empty /
 /// any value other than a recognized truthy token ⇒ OFF.
 pub const HOOKS_ENABLED_ENV: &str = "HOOKS_ENABLED";
 
+/// Environment variable that additionally flips *third-party installed
+/// extension* hook activation on. Requires [`HOOKS_ENABLED_ENV`] to also be
+/// truthy. Absent / empty / non-truthy ⇒ OFF.
+pub const HOOKS_THIRD_PARTY_ENABLED_ENV: &str = "HOOKS_THIRD_PARTY_ENABLED";
+
 impl HooksActivationConfig {
-    /// Explicitly enabled.
+    /// Explicitly enabled (master flag only; third-party still OFF).
     pub fn enabled() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            third_party_enabled: false,
+        }
     }
 
     /// Explicitly disabled (the default).
     pub fn disabled() -> Self {
-        Self { enabled: false }
+        Self {
+            enabled: false,
+            third_party_enabled: false,
+        }
+    }
+
+    /// Builder: turn the third-party sub-flag on. Has no effect unless the
+    /// master flag is also on (see [`Self::is_third_party_enabled`]).
+    #[must_use]
+    pub fn with_third_party_enabled(mut self, third_party_enabled: bool) -> Self {
+        self.third_party_enabled = third_party_enabled;
+        self
     }
 
     /// Resolve the activation flag from the process environment. Fail-safe to
     /// OFF: only the canonical truthy tokens (`1`, `true`, `yes`, `on`,
     /// case-insensitive) enable the framework; everything else — including an
     /// unset variable or an unparseable value — leaves it disabled.
+    ///
+    /// The third-party sub-flag is resolved from
+    /// [`HOOKS_THIRD_PARTY_ENABLED_ENV`] by the same rules; it stays inert
+    /// unless the master flag is also on.
     pub fn from_env() -> Self {
-        match std::env::var(HOOKS_ENABLED_ENV) {
-            Ok(value) => Self {
-                enabled: is_truthy(&value),
-            },
-            Err(_) => Self::disabled(),
+        let enabled = match std::env::var(HOOKS_ENABLED_ENV) {
+            Ok(value) => is_truthy(&value),
+            Err(_) => false,
+        };
+        let third_party_enabled = match std::env::var(HOOKS_THIRD_PARTY_ENABLED_ENV) {
+            Ok(value) => is_truthy(&value),
+            Err(_) => false,
+        };
+        Self {
+            enabled,
+            third_party_enabled,
         }
     }
 
     pub fn is_enabled(self) -> bool {
         self.enabled
+    }
+
+    /// True only when BOTH the master flag and the third-party sub-flag are on.
+    /// This is the single gate the projection path consults before discovering
+    /// or projecting any third-party `[[hooks]]` declaration.
+    pub fn is_third_party_enabled(self) -> bool {
+        self.enabled && self.third_party_enabled
     }
 }
 
@@ -156,6 +174,161 @@ fn is_truthy(value: &str) -> bool {
         value.trim().to_ascii_lowercase().as_str(),
         "1" | "true" | "yes" | "on"
     )
+}
+
+/// Maximum number of *installed* extension packages whose `[[hooks]]` will be
+/// considered for projection in a single tenant build. Surplus extensions
+/// beyond this count are quarantined (skipped + audited), never whole-build
+/// failed. A tenant-wide DoS ceiling on top of the per-extension caps the
+/// registrar already enforces (`MAX_HOOKS_PER_EXTENSION`).
+pub const MAX_INSTALLED_EXTENSIONS_CONSIDERED: usize = 64;
+
+/// Maximum number of hook bindings projected from third-party installed
+/// extensions across the whole tenant. An extension whose hooks would push the
+/// running total past this budget is quarantined (skipped + audited), not
+/// whole-build failed. Builtin / host-bundled bindings do not count against
+/// this third-party budget (they are trusted and fail-closed-whole-build).
+pub const MAX_TOTAL_HOOKS_PER_TENANT: usize = 256;
+
+/// Structured target for the security-audit `tracing` channel. Composition is a
+/// pre-run phase (no run-scoped `LoopHostMilestoneSink` exists yet), so
+/// quarantine decisions are surfaced via `tracing` at this stable target rather
+/// than a durable sink. Durable surfacing is a documented follow-up.
+const SECURITY_AUDIT_TARGET: &str = "security_audit";
+
+/// A hook-projection registry: the set of extension packages whose declared
+/// `[[hooks]]` are projected into the hook dispatcher, AND NOTHING ELSE.
+///
+/// # Why this is a distinct newtype (type-enforced containment, hook-only)
+///
+/// Third-party installed extensions must be able to contribute *hooks* without
+/// becoming *capability providers*. The capability-dispatch path is fed by the
+/// `Arc<ExtensionRegistry>` handed to [`ironclaw_host_runtime::HostRuntimeServices::new`]
+/// (it becomes the capability catalog + surface resolver — verified in
+/// `services.rs`). If a third-party registry reached that constructor, those
+/// extensions would gain capability authority — exactly what the hook-only
+/// projection model forbids.
+///
+/// This newtype makes the boundary impossible to cross by accident:
+///
+/// - [`build_hook_dispatcher_builder_factory`] accepts `&HookProjectionRegistry`,
+///   so the projection registry can ONLY reach the hook factory.
+/// - There is deliberately NO `Deref<Target = ExtensionRegistry>`, no
+///   `into_capability_registry()`, no `as_extension_registry()`, and no `pub`
+///   inner field. The only thing you can do with a `HookProjectionRegistry` is
+///   feed it to the hook factory. A developer cannot pass it to
+///   `HostRuntimeServices::new` without first writing an explicit, greppable,
+///   deliberately-absent `ExtensionRegistry` conversion — which does not exist.
+/// - The internal projection loop reads the wrapped registry through a
+///   crate-private accessor ([`Self::packages`]) that only yields `&` package
+///   references for hook projection; it never hands out the owned
+///   `ExtensionRegistry`.
+pub struct HookProjectionRegistry(ExtensionRegistry);
+
+impl HookProjectionRegistry {
+    /// Wrap an [`ExtensionRegistry`] as a hook-projection-only registry.
+    ///
+    /// The wrapped registry is consumed; once wrapped there is no safe path
+    /// back to an `ExtensionRegistry` (no `Deref`, no `into_inner`), which is
+    /// the whole point — see the type docs.
+    fn from_registry(registry: ExtensionRegistry) -> Self {
+        Self(registry)
+    }
+
+    /// Crate-private read-only view of the projected packages, for the hook
+    /// projection loop only. Intentionally returns borrowed package refs, never
+    /// the owned registry, so no caller can recover an `ExtensionRegistry` to
+    /// feed the capability path.
+    fn packages(&self) -> impl Iterator<Item = &ironclaw_extensions::ExtensionPackage> {
+        self.0.extensions()
+    }
+}
+
+impl std::fmt::Debug for HookProjectionRegistry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HookProjectionRegistry")
+            .field("package_count", &self.0.extensions().count())
+            .finish()
+    }
+}
+
+/// Derive the fixed `/system/extensions/<tenant>` discovery root for a tenant.
+///
+/// The shape is fixed by construction: the caller supplies *identity* (the
+/// authenticated [`TenantId`]); the root is *computed* here, never accepted
+/// from a caller-supplied path. This is the tenant-isolation contract for
+/// discovery — changing the identity changes the discovered set, and there is
+/// no parameter through which one tenant could point discovery at another
+/// tenant's extension tree.
+pub fn tenant_extension_root(
+    tenant_id: &ironclaw_host_api::TenantId,
+) -> Result<ironclaw_host_api::VirtualPath, RebornBuildError> {
+    ironclaw_host_api::VirtualPath::new(format!("/system/extensions/{}", tenant_id.as_str()))
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!(
+                "could not derive tenant extension root for `{}`: {error}",
+                tenant_id.as_str()
+            ),
+        })
+}
+
+/// Defense-in-depth containment check applied to a discovered package's root
+/// before its hooks are projected (Step 2 / FS-hardening v1).
+///
+/// The canonicalizing local backend is the primary defense; this projection
+/// layer adds a strict-child / no-`..` / no-symlink-escape check so a package
+/// whose resolved root escapes the tenant root is quarantined rather than
+/// projected. Returns `Ok(())` when the package root is a strict child of
+/// `tenant_root`; otherwise an error naming the violation (the caller turns
+/// this into a quarantine, not a whole-build failure, for untrusted sources).
+fn enforce_root_containment(
+    tenant_root: &ironclaw_host_api::VirtualPath,
+    package_root: &ironclaw_host_api::VirtualPath,
+) -> Result<(), String> {
+    let root = tenant_root.as_str().trim_end_matches('/');
+    let candidate = package_root.as_str();
+    let prefix = format!("{root}/");
+    if !candidate.starts_with(&prefix) {
+        return Err(format!(
+            "package root `{candidate}` is not a strict child of tenant root `{root}`"
+        ));
+    }
+    // Reject any path traversal segment in the child portion. `VirtualPath`
+    // already canonicalizes, but this is the explicit projection-layer
+    // no-`..`/no-empty-segment guard the FS-hardening v1 posture documents.
+    let child = &candidate[prefix.len()..];
+    for segment in child.split('/') {
+        if segment == ".." || segment == "." {
+            return Err(format!(
+                "package root `{candidate}` contains a traversal segment `{segment}`"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Emit a `hook.quarantined` security-audit event for an extension whose hooks
+/// were dropped during projection (Step 4a).
+///
+/// Pre-run composition has no durable milestone sink, so this surfaces via
+/// `tracing` at the stable [`SECURITY_AUDIT_TARGET`]. Per the REPL logging rule
+/// this uses `warn!` (never `info!`, which would corrupt the interactive TUI).
+fn emit_hook_quarantined(
+    tenant_id: &ironclaw_host_api::TenantId,
+    extension_id: &str,
+    reason: &str,
+    hooks_dropped: usize,
+) {
+    tracing::warn!(
+        target: SECURITY_AUDIT_TARGET,
+        event = "hook.quarantined",
+        tenant_id = %tenant_id.as_str(),
+        extension_id = %extension_id,
+        reason = %reason,
+        hooks_dropped = hooks_dropped,
+        "third-party extension hooks quarantined during projection"
+    );
 }
 
 /// Install the first-party builtin hook set into `builder`.
@@ -181,117 +354,306 @@ fn install_first_party_hooks(
     Ok(builder)
 }
 
-/// Project the structurally-typed [`HookSectionEntryV2`] payloads declared by
-/// every extension in `registry` into typed
-/// [`HookManifestEntry`] values and install them at the `Installed` trust tier
-/// through `registrar`.
+/// A surviving extension's projected hook install set: the typed entries that
+/// passed scratch validation and are committed to the real builder per run.
+/// Deterministic replay material — identical inputs each run.
+struct ProjectedExtensionHooks {
+    extension_id: ironclaw_host_api::ExtensionId,
+    extension_version: String,
+    entries: Vec<HookManifestEntry>,
+}
+
+/// Project the structurally-typed `[[hooks]]` payloads declared by each package
+/// in `registry`, applying **atomic per-extension quarantine** for untrusted
+/// (installed/third-party) sources and **fail-closed whole-build** for trusted
+/// (builtin / host-bundled) sources.
 ///
-/// This is the manifest → registry loader. It is the *only* place the
+/// This is the manifest → registry loader and the *only* place the
 /// `ExtensionManifestV2` hook DTO crosses into the hook crate's typed
-/// vocabulary, satisfying the clean-boundary contract: `ironclaw_extensions`
-/// stays free of hook types, and the projection happens here, in the crate
-/// that depends on both.
+/// vocabulary (clean-boundary contract: `ironclaw_extensions` stays free of
+/// hook types; the projection happens here, in the crate that depends on both).
 ///
-/// Trust attenuation is enforced by construction — the registrar only ever
-/// calls `install_installed_*`, which type-level-prevents an extension hook
-/// from minting `Allow` / `Gate` / `Mutator` without an explicit grant
-/// (`ironclaw_hooks::trust`).
+/// # Trust attenuation (registrar-only invariant)
 ///
-/// On any projection or install failure the whole build fails loudly
-/// (fail-closed). A malformed manifest hook must never silently drop into a
-/// half-installed registry.
+/// Installs go EXCLUSIVELY through [`HookRegistrar::install`]. The registrar is
+/// the single seam that (a) installs at the `Installed` trust tier — only ever
+/// calling `install_installed_*`, type-level-preventing an extension hook from
+/// minting `Allow` / `Gate` / `Mutator` without an explicit verified grant —
+/// and (b) derives `owning_extension` from the installer argument, so a
+/// manifest cannot spoof a cross-owner attribution. This function MUST NOT call
+/// the lower-level `HookDispatcherBuilder::install_installed_*` methods
+/// directly: those accept `owning_extension` as a free parameter and would
+/// bypass the registrar's ceiling + attribution. An `ironclaw_architecture`
+/// source assertion pins this invariant so a future refactor cannot regress it.
 ///
-/// # Activation scope (what is live in production today)
+/// # Atomic quarantine
 ///
-/// This loader fully supports installed-tier hooks declared by *any*
-/// extension package in `registry`. The production composition root
-/// ([`crate::runtime::build_reborn_runtime`]) invokes
-/// [`build_hook_dispatcher_builder_factory`] with the **canonical** extension
-/// registry — the same `Arc<ExtensionRegistry>` that
-/// `HostRuntimeServices::new` resolves capability dispatch through (carried as
-/// a shared composition artifact through `RebornLocalRuntimeServices`), not a
-/// freshly-rebuilt builtin-only sidecar. Today that canonical registry carries
-/// only the builtin / host-bundled first-party package, and the first-party
-/// builtin catalog ([`install_first_party_hooks`]) is **empty**, so with the
-/// flag ON the live runtime activates exactly one hook source:
+/// For an untrusted extension, the WHOLE hook set is validated against a
+/// *scratch* builder first; only if every hook in the set validates is the
+/// identical set committed to the real builder. On ANY failure (TOML
+/// projection, cap, ungranted scope, WASM body with no runtime, registry
+/// validation) the extension's hooks are dropped ENTIRELY, a `hook.quarantined`
+/// audit event is emitted, and projection CONTINUES to the next extension. A
+/// trusted extension instead fails the whole build (`?` propagation).
 ///
-/// - `[[hooks]]` declared by builtin / host-bundled packages.
-///
-/// (When a real first-party builtin hook is productized it joins this list; the
-/// activation machinery for it is already in place and exercised by test-only
-/// hooks.)
-///
-/// Hooks declared by third-party *installed* extensions are **not** yet
-/// surfaced into the runtime path — not because this loader can't install them
-/// (it can), but because the canonical registry does not yet carry installed
-/// third-party packages. Because hook activation now reads that *same*
-/// registry, the moment installed extensions are inserted into it upstream
-/// they flow through here with no change to the call site. "Extension-declared
-/// hooks" in this module therefore means "builtin-package-declared hooks" in
-/// production until the canonical registry carries installed packages. Live
-/// third-party activation is a deliberate follow-up that follows the registry,
-/// not a separate wiring path.
-fn project_extension_install_sets(
-    registry: &ExtensionRegistry,
-) -> Result<Vec<ExtensionInstallSet>, RebornBuildError> {
-    let mut sets = Vec::new();
-    for package in registry.extensions() {
-        let manifest = &package.manifest;
+/// Returns the surviving install sets (the trusted set plus every untrusted set
+/// that fully validated), to be replayed deterministically per run.
+fn project_extension_hook_sets(
+    packages: impl Iterator<Item = impl ExtensionPackageView>,
+    registrar: &HookRegistrar,
+    tenant_id: &ironclaw_host_api::TenantId,
+    tenant_root: Option<&ironclaw_host_api::VirtualPath>,
+) -> Result<Vec<ProjectedExtensionHooks>, RebornBuildError> {
+    let mut survivors: Vec<ProjectedExtensionHooks> = Vec::new();
+    let mut considered = 0usize;
+    let mut third_party_hook_total = 0usize;
+
+    for package in packages {
+        let manifest = package.manifest_view();
         if manifest.hooks.is_empty() {
             continue;
         }
-        let mut entries = Vec::with_capacity(manifest.hooks.len());
-        for hook in &manifest.hooks {
-            // Re-parse the canonical TOML the v2 parser preserved into the
-            // typed hook entry. This is the clean-boundary projection: the
-            // extension crate never knew the hook vocabulary; we do. This is
-            // the only fallible, external-input step in the whole loader.
-            let entry: HookManifestEntry = toml::from_str(&hook.raw_toml).map_err(|error| {
-                RebornBuildError::InvalidConfig {
-                    reason: format!(
-                        "extension `{}` hook `{}` is not a valid hook manifest entry: {error}",
-                        manifest.id.as_str(),
-                        hook.local_id
-                    ),
-                }
-            })?;
-            entries.push(entry);
+        let trusted = manifest.source.allows_first_party();
+        let extension_id_str = manifest.id.as_str().to_string();
+        let hook_count = manifest.hooks.len();
+
+        // ── Tenant-wide DoS caps (enforced BEFORE expensive projection). ──
+        // Trusted packages are not subject to these caps (they are host-owned
+        // and fail-closed-whole-build); only untrusted/third-party packages
+        // count against the tenant budget.
+        if !trusted {
+            considered += 1;
+            if considered > MAX_INSTALLED_EXTENSIONS_CONSIDERED {
+                emit_hook_quarantined(
+                    tenant_id,
+                    &extension_id_str,
+                    "exceeded MAX_INSTALLED_EXTENSIONS_CONSIDERED",
+                    hook_count,
+                );
+                continue;
+            }
+            if third_party_hook_total + hook_count > MAX_TOTAL_HOOKS_PER_TENANT {
+                emit_hook_quarantined(
+                    tenant_id,
+                    &extension_id_str,
+                    "exceeded MAX_TOTAL_HOOKS_PER_TENANT",
+                    hook_count,
+                );
+                continue;
+            }
+
+            // ── Path-containment (FS-hardening v1 defense-in-depth). ──
+            if let Some(root) = tenant_root
+                && let Err(reason) = enforce_root_containment(root, package.root_view())
+            {
+                emit_hook_quarantined(tenant_id, &extension_id_str, &reason, hook_count);
+                continue;
+            }
         }
-        sets.push(ExtensionInstallSet {
-            extension_id: manifest.id.clone(),
-            extension_version: manifest.version.clone(),
-            entries,
-        });
+
+        // ── Project TOML → typed entries. ──
+        let entries = match project_manifest_entries(manifest) {
+            Ok(entries) => entries,
+            Err(reason) => {
+                if trusted {
+                    return Err(RebornBuildError::InvalidConfig { reason });
+                }
+                emit_hook_quarantined(tenant_id, &extension_id_str, &reason, hook_count);
+                continue;
+            }
+        };
+
+        let extension_id = manifest.id.clone();
+        let extension_version = manifest.version.clone();
+
+        // ── Validate the WHOLE set against a scratch builder. Commit nothing
+        // here; the survivors are replayed against the real builder later. ──
+        let scratch = HookDispatcherBuilder::new(HookRegistry::new());
+        match registrar.install(
+            extension_id.clone(),
+            extension_version.clone(),
+            entries.clone(),
+            scratch,
+        ) {
+            Ok(_validated) => {
+                if !trusted {
+                    third_party_hook_total += hook_count;
+                }
+                survivors.push(ProjectedExtensionHooks {
+                    extension_id,
+                    extension_version,
+                    entries,
+                });
+            }
+            Err(error) => {
+                let reason = format!(
+                    "failed to install hooks declared by extension `{extension_id_str}`: {error}"
+                );
+                if trusted {
+                    return Err(RebornBuildError::InvalidConfig { reason });
+                }
+                emit_hook_quarantined(tenant_id, &extension_id_str, &reason, hook_count);
+            }
+        }
     }
-    Ok(sets)
+
+    Ok(survivors)
 }
 
-/// Install pre-projected, typed extension install sets through `registrar` at
-/// the `Installed` trust tier. Shared by plan validation and per-run rebuild,
-/// so there is exactly one extension-install code path. Returns the builder
-/// carrying the installed bindings.
-fn install_extension_sets(
-    sets: &[ExtensionInstallSet],
-    registrar: &HookRegistrar,
-    mut builder: HookDispatcherBuilder,
-) -> Result<HookDispatcherBuilder, RebornBuildError> {
-    for set in sets {
-        let (next, _hook_ids) = registrar
-            .install(
-                set.extension_id.clone(),
-                set.extension_version.clone(),
-                set.entries.clone(),
-                builder,
+/// Project a manifest's `[[hooks]]` raw TOML payloads into typed entries.
+/// Returns a human-readable reason string on the first malformed entry so the
+/// caller can decide (per trust) between quarantine and whole-build failure.
+fn project_manifest_entries(
+    manifest: &ironclaw_extensions::ExtensionManifest,
+) -> Result<Vec<HookManifestEntry>, String> {
+    let mut entries = Vec::with_capacity(manifest.hooks.len());
+    for hook in &manifest.hooks {
+        let entry: HookManifestEntry = toml::from_str(&hook.raw_toml).map_err(|error| {
+            format!(
+                "extension `{}` hook `{}` is not a valid hook manifest entry: {error}",
+                manifest.id.as_str(),
+                hook.local_id
             )
-            .map_err(|error| RebornBuildError::InvalidConfig {
-                reason: format!(
-                    "failed to install hooks declared by extension `{}`: {error}",
-                    set.extension_id.as_str()
-                ),
-            })?;
-        builder = next;
+        })?;
+        entries.push(entry);
     }
-    Ok(builder)
+    Ok(entries)
+}
+
+/// Minimal view over an extension package needed by [`project_extension_hook_sets`].
+/// Lets the projection loop accept either borrowed packages from a
+/// [`HookProjectionRegistry`] or (in tests) a plain [`ExtensionPackage`]
+/// iterator without leaking the owned registry.
+trait ExtensionPackageView {
+    fn manifest_view(&self) -> &ironclaw_extensions::ExtensionManifest;
+    fn root_view(&self) -> &ironclaw_host_api::VirtualPath;
+}
+
+impl ExtensionPackageView for &ironclaw_extensions::ExtensionPackage {
+    fn manifest_view(&self) -> &ironclaw_extensions::ExtensionManifest {
+        &self.manifest
+    }
+    fn root_view(&self) -> &ironclaw_host_api::VirtualPath {
+        &self.root
+    }
+}
+
+/// Discovery input for [`build_hook_projection_registry`]: the tenant-scoped
+/// filesystem and the validated authenticated `tenant_id`. The discovery root
+/// is *computed* from the identity ([`tenant_extension_root`]) inside the
+/// builder — never supplied by the caller — which is the tenant-isolation
+/// contract (Step 2). The filesystem is the same tenant-scoped
+/// [`RootFilesystem`] already built in `build_reborn_services`.
+pub struct ThirdPartyDiscoveryInput<'a, F: ironclaw_filesystem::RootFilesystem> {
+    pub filesystem: &'a F,
+    pub tenant_id: &'a ironclaw_host_api::TenantId,
+}
+
+/// Assemble the hook-projection registry (Step 3).
+///
+/// Always seeds with the `builtin` extension registry. When
+/// [`HooksActivationConfig::is_third_party_enabled`] is true AND a discovery
+/// input is supplied, discovers installed extensions under the tenant-derived
+/// root, applies the tenant-wide DoS caps + path-containment (defense in
+/// depth), and merges the surviving third-party packages into the projection
+/// registry. The resulting [`HookProjectionRegistry`] reaches ONLY the hook
+/// factory — never the capability path (see the newtype's docs).
+///
+/// **With the third-party sub-flag OFF, the path is byte-identical to #3938:**
+/// the projection registry is builtin-only and no discovery runs.
+///
+/// Per-extension hook *validity* quarantine is applied later, at install time
+/// in [`project_extension_hook_sets`]; this function applies the *registry
+/// admission* caps + containment that decide which packages are even merged.
+pub async fn build_hook_projection_registry<F>(
+    builtin: ExtensionRegistry,
+    third_party_input: Option<ThirdPartyDiscoveryInput<'_, F>>,
+    config: HooksActivationConfig,
+) -> Result<HookProjectionRegistry, RebornBuildError>
+where
+    F: ironclaw_filesystem::RootFilesystem,
+{
+    let mut registry = builtin;
+
+    if config.is_third_party_enabled()
+        && let Some(input) = third_party_input
+    {
+        let tenant_id = input.tenant_id;
+        let root = tenant_extension_root(tenant_id)?;
+        // Discover under the tenant-derived root. Discovery failure is
+        // fail-safe to "no third-party hooks" — a missing/empty extensions
+        // tree must not block the runtime — so a discovery error is logged and
+        // treated as zero third-party packages rather than a hard build error.
+        let discovered =
+            match ironclaw_host_runtime::discover_extensions_with_default_host_api_contracts(
+                input.filesystem,
+                &root,
+            )
+            .await
+            {
+                Ok(discovered) => discovered,
+                Err(error) => {
+                    tracing::debug!(
+                        tenant_id = %tenant_id.as_str(),
+                        %error,
+                        "third-party extension discovery returned no usable registry; proceeding builtin-only"
+                    );
+                    return Ok(HookProjectionRegistry::from_registry(registry));
+                }
+            };
+
+        let mut considered = 0usize;
+        let mut hook_total = 0usize;
+        for package in discovered.extensions() {
+            let manifest = &package.manifest;
+            if manifest.hooks.is_empty() {
+                // No hooks: nothing to project. Do NOT merge — this registry
+                // feeds the hook factory only, never the capability path.
+                continue;
+            }
+            let extension_id_str = manifest.id.as_str().to_string();
+            let hook_count = manifest.hooks.len();
+
+            considered += 1;
+            if considered > MAX_INSTALLED_EXTENSIONS_CONSIDERED {
+                emit_hook_quarantined(
+                    tenant_id,
+                    &extension_id_str,
+                    "exceeded MAX_INSTALLED_EXTENSIONS_CONSIDERED",
+                    hook_count,
+                );
+                continue;
+            }
+            if hook_total + hook_count > MAX_TOTAL_HOOKS_PER_TENANT {
+                emit_hook_quarantined(
+                    tenant_id,
+                    &extension_id_str,
+                    "exceeded MAX_TOTAL_HOOKS_PER_TENANT",
+                    hook_count,
+                );
+                continue;
+            }
+            if let Err(reason) = enforce_root_containment(&root, &package.root) {
+                emit_hook_quarantined(tenant_id, &extension_id_str, &reason, hook_count);
+                continue;
+            }
+
+            hook_total += hook_count;
+            // Merge surviving third-party package into the projection registry
+            // ONLY. `insert` rejects duplicates; a duplicate id collides with a
+            // builtin/already-merged package and is quarantined, not fatal.
+            if let Err(error) = registry.insert(package.clone()) {
+                emit_hook_quarantined(
+                    tenant_id,
+                    &extension_id_str,
+                    &format!("could not merge into projection registry: {error}"),
+                    hook_count,
+                );
+            }
+        }
+    }
+
+    Ok(HookProjectionRegistry::from_registry(registry))
 }
 
 /// Build the per-run hook dispatcher builder factory for the production
@@ -300,166 +662,59 @@ fn install_extension_sets(
 /// - **Flag OFF** ⇒ returns `Ok(None)`. The runtime never composes a
 ///   dispatcher; behavior is identical to the pre-hooks runtime. This is the
 ///   default and the rollout-safety contract.
-/// - **Flag ON** ⇒ compiles a [`HookInstallPlan`] once (parse every extension's
-///   `[[hooks]]` TOML into typed entries + validate the full install set against
-///   a fresh empty builder, fail-closed on any error), then returns a closure
-///   that calls [`HookInstallPlan::rebuild`] to mint a fresh
-///   [`HookDispatcherBuilder`] per host build. The fresh-per-build construction
-///   gives each run its own dispatcher (no cross-run slot-poison/registry
-///   leak). Predicate counter state is the deliberate exception — it is
-///   tenant-scoped and shared across runs (see the module "Predicate counter
-///   scoping" note).
+/// - **Flag ON** ⇒ projects + installs the first-party builtin hooks and every
+///   admitted extension-declared hook into a *template* registry once, then
+///   returns a closure that mints a fresh [`HookDispatcherBuilder`] per host
+///   build by replaying the same surviving install set. The fresh-per-build
+///   construction gives each run its own dispatcher (no cross-run poison /
+///   counter leak), and the per-tenant `registry` + evaluator keep one tenant's
+///   hooks isolated from another.
 ///
-/// `registry` must be the per-tenant extension registry for the runtime being
-/// composed (in production, the canonical `Arc<ExtensionRegistry>` that
-/// `HostRuntimeServices::new` resolves capability dispatch through). The plan
-/// captures the validated typed inputs, not a built dispatcher, so each
-/// `rebuild` produces an independent dispatcher.
+/// `registry` is a [`HookProjectionRegistry`] — a type-enforced hook-only view
+/// of the per-tenant extension set. It can ONLY reach this factory; there is no
+/// conversion back to an `ExtensionRegistry`, so the projected third-party
+/// packages can never reach the capability-dispatch path.
+///
+/// Trusted (builtin / host-bundled) packages fail the whole build on any
+/// malformed hook (`?`); untrusted (installed/third-party) packages are
+/// quarantined per-extension and projection continues. See
+/// [`project_extension_hook_sets`].
 pub fn build_hook_dispatcher_builder_factory(
     config: HooksActivationConfig,
-    registry: &ExtensionRegistry,
+    registry: &HookProjectionRegistry,
 ) -> Result<Option<HookDispatcherBuilderFactory>, RebornBuildError> {
     // Production path: the first-party catalog is empty
     // (`install_first_party_hooks` is a no-op). All other wiring lives in the
     // shared helper.
-    build_hook_dispatcher_builder_factory_with(config, registry, install_first_party_hooks)
-}
-
-/// Per-extension typed install record captured once at plan-construction so
-/// the per-run rebuild never re-parses TOML (the only fallible, external-input
-/// step). `HookManifestEntry` is cheap to clone relative to per-run dispatch.
-struct ExtensionInstallSet {
-    extension_id: ironclaw_host_api::ExtensionId,
-    extension_version: String,
-    entries: Vec<HookManifestEntry>,
-}
-
-/// A hook install set that has been **parsed once and validated once** against
-/// a fresh empty builder, fail-closed.
-///
-/// This is the single typed artifact behind the per-run dispatcher factory.
-/// Constructing it is the *only* fallible step ([`HookInstallPlan::compile`]):
-/// it projects every extension's `[[hooks]]` TOML into typed entries, then
-/// proves the entire install set composes a valid dispatcher by running it
-/// against a scratch builder (any failure surfaces as a `RebornBuildError`).
-///
-/// Once compiled, [`HookInstallPlan::rebuild`] mints a fresh
-/// [`HookDispatcherBuilder`] per run. That rebuild is **infallible by
-/// construction**: it replays the *exact same* install sequence from the
-/// *exact same* fresh-empty starting state that `compile` already proved
-/// succeeds, and the registrar install is a pure deterministic function of
-/// `(entries, fresh-empty builder, evaluator)`. There is therefore no
-/// per-run error path — no `.expect()`, no prose-justified `unwrap`. The
-/// invariant is carried by the type: a `HookInstallPlan` can only exist if its
-/// install set already composed cleanly.
-struct HookInstallPlan {
-    /// The first-party installer, replayed verbatim per run. Held as a boxed
-    /// `Fn` so production (empty catalog) and tests (a test-only hook) share
-    /// one plan shape. Validated by `compile` against a scratch builder.
-    install_first_party: Box<
-        dyn Fn(HookDispatcherBuilder) -> Result<HookDispatcherBuilder, RebornBuildError>
-            + Send
-            + Sync,
-    >,
-    /// Per-extension typed entries, projected + validated once.
-    extension_install_sets: Vec<ExtensionInstallSet>,
-    /// Shared per-tenant predicate evaluator. Intentionally captured ONCE and
-    /// reused across every per-run rebuild — see the module-level
-    /// "Predicate counter scoping" note: predicate rate/value-cap counters are
-    /// deliberately tenant-scoped, not run-scoped.
-    evaluator: Arc<PredicateEvaluator>,
-}
-
-impl HookInstallPlan {
-    /// Parse + validate the full install set ONCE, fail-closed. Returns the
-    /// compiled plan whose per-run [`rebuild`](Self::rebuild) is infallible by
-    /// construction. An empty install set (empty first-party catalog + no
-    /// extension hooks) is a legitimate state — it compiles a zero-binding
-    /// plan, not an error.
-    fn compile<F>(
-        registry: &ExtensionRegistry,
-        evaluator: Arc<PredicateEvaluator>,
-        install_first_party: F,
-    ) -> Result<Self, RebornBuildError>
-    where
-        F: Fn(HookDispatcherBuilder) -> Result<HookDispatcherBuilder, RebornBuildError>
-            + Send
-            + Sync
-            + 'static,
-    {
-        // Project every extension's `[[hooks]]` TOML into typed entries once
-        // (the only fallible, external-input step; fails the build closed on a
-        // malformed manifest).
-        let extension_install_sets = project_extension_install_sets(registry)?;
-
-        let plan = Self {
-            install_first_party: Box::new(install_first_party),
-            extension_install_sets,
-            evaluator,
-        };
-
-        // Prove the full install set composes a valid dispatcher against a
-        // fresh empty builder. If this succeeds, every future `rebuild` —
-        // which replays the identical sequence from the identical fresh-empty
-        // start — succeeds too, which is what makes `rebuild` infallible. We
-        // discard the validated builder; `rebuild` produces fresh ones per run
-        // so no `Box<dyn Hook>` state leaks across runs.
-        let _validated = plan.try_build_once()?;
-
-        Ok(plan)
-    }
-
-    /// Run the install sequence against a fresh empty builder, fallibly.
-    ///
-    /// Used by [`compile`](Self::compile) to validate the plan. Not called per
-    /// run — [`rebuild`](Self::rebuild) is the per-run entry point and is
-    /// infallible because `compile` already proved this exact sequence
-    /// succeeds.
-    fn try_build_once(&self) -> Result<HookDispatcherBuilder, RebornBuildError> {
-        let builder = HookDispatcherBuilder::new(HookRegistry::new());
-        let builder = (self.install_first_party)(builder)?;
-        // A fresh registrar per build: it only wraps `Arc<evaluator>`, so this
-        // is cheap and keeps no cross-build state of its own.
-        let registrar = HookRegistrar::new(Arc::clone(&self.evaluator));
-        install_extension_sets(&self.extension_install_sets, &registrar, builder)
-    }
-
-    /// Mint a fresh [`HookDispatcherBuilder`] for one run.
-    ///
-    /// Infallible by construction: this replays the exact install sequence
-    /// from the exact fresh-empty starting state that [`compile`](Self::compile)
-    /// already proved succeeds (fail-closed via `?` at compile time). The
-    /// registrar install is a pure deterministic function of
-    /// `(entries, fresh-empty builder, evaluator)`, so a replay cannot reach an
-    /// error the compile-time validation didn't. The `unreachable!` therefore
-    /// guards a true logic invariant carried by the type — a `HookInstallPlan`
-    /// only exists for an install set that compiled cleanly — not an error
-    /// that could occur in practice.
-    fn rebuild(&self) -> HookDispatcherBuilder {
-        match self.try_build_once() {
-            Ok(builder) => builder,
-            Err(error) => unreachable!(
-                "HookInstallPlan::rebuild replayed an install set that \
-                 HookInstallPlan::compile already validated against an \
-                 identical fresh-empty builder; a deterministic replay cannot \
-                 fail where validation passed. Underlying error: {error}"
-            ),
-        }
-    }
+    build_hook_dispatcher_builder_factory_with(
+        config,
+        registry,
+        // No tenant id/root threaded through the convenience entry point; the
+        // projection registry has already passed admission caps + containment
+        // in `build_hook_projection_registry`. A synthetic tenant label is used
+        // only for any quarantine audit emitted during install-time validation.
+        None,
+        install_first_party_hooks,
+    )
 }
 
 /// Shared implementation behind [`build_hook_dispatcher_builder_factory`],
-/// parameterized on the first-party install step.
+/// parameterized on the first-party install step and an optional tenant context
+/// (used for quarantine audit attribution during install-time validation).
 ///
-/// `install_first_party` is invoked at compile-time validation and on every
-/// per-run rebuild, so it must be a pure replayable function of its builder
-/// input. Production passes [`install_first_party_hooks`] (the empty catalog);
-/// tests pass a closure that installs a test-only first-party hook, exercising
-/// the activation machinery end-to-end through the real composition path
-/// without shipping a production no-op.
+/// `install_first_party` is invoked both at composition-time validation and on
+/// every per-run builder mint, so it must be a pure replayable function of its
+/// builder input. Production passes [`install_first_party_hooks`] (the empty
+/// catalog); tests pass a closure that installs a test-only first-party hook,
+/// exercising the activation machinery end-to-end through the real composition
+/// path without shipping a production no-op.
 fn build_hook_dispatcher_builder_factory_with<F>(
     config: HooksActivationConfig,
-    registry: &ExtensionRegistry,
+    registry: &HookProjectionRegistry,
+    tenant_context: Option<(
+        &ironclaw_host_api::TenantId,
+        &ironclaw_host_api::VirtualPath,
+    )>,
     install_first_party: F,
 ) -> Result<Option<HookDispatcherBuilderFactory>, RebornBuildError>
 where
@@ -474,18 +729,65 @@ where
 
     // In-memory predicate-state backend for v1. Swappable: a durable
     // Postgres/libSQL backend (#3933) drops in here without touching the rest
-    // of the wiring. The evaluator is built ONCE per runtime and shared across
-    // every per-run rebuild — predicate counters are deliberately tenant-scoped
-    // (see the module-level "Predicate counter scoping" note).
+    // of the wiring.
     let backend: Arc<dyn PredicateStateBackend> = Arc::new(InMemoryPredicateStateBackend::new());
     let evaluator = Arc::new(PredicateEvaluator::with_state_backend(Arc::clone(&backend)));
     evaluator.warn_in_memory_backend_active_in_production();
 
-    // Parse ONCE + validate ONCE into a typed plan, fail-closed. After this,
-    // the per-run factory closure is infallible by construction.
-    let plan = HookInstallPlan::compile(registry, evaluator, install_first_party)?;
+    let registrar = HookRegistrar::new(Arc::clone(&evaluator));
 
-    let factory: HookDispatcherBuilderFactory = Arc::new(move || plan.rebuild());
+    // Validate the first-party set up front against a scratch builder
+    // (fail-closed). An empty install set is a legitimate state — a zero-binding
+    // dispatcher composes fine.
+    {
+        let scratch = HookDispatcherBuilder::new(HookRegistry::new());
+        let _validated = install_first_party(scratch)?;
+    }
+
+    // Project + validate the extension hook sets ONCE, applying atomic
+    // per-extension quarantine for untrusted sources and fail-closed-whole-build
+    // for trusted (builtin/host-bundled) sources. Survivors are replayed per
+    // run. A fallback synthetic tenant label keeps audit events well-formed when
+    // no explicit tenant context is threaded (the convenience entry point).
+    let fallback_tenant =
+        ironclaw_host_api::TenantId::new("reborn-hook-projection").map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: format!("could not build fallback audit tenant id: {error}"),
+            }
+        })?;
+    let (audit_tenant, audit_root): (
+        &ironclaw_host_api::TenantId,
+        Option<&ironclaw_host_api::VirtualPath>,
+    ) = match tenant_context {
+        Some((tenant, root)) => (tenant, Some(root)),
+        None => (&fallback_tenant, None),
+    };
+    let extension_install_sets =
+        project_extension_hook_sets(registry.packages(), &registrar, audit_tenant, audit_root)?;
+
+    let evaluator_for_factory = Arc::clone(&evaluator);
+    let factory: HookDispatcherBuilderFactory = Arc::new(move || {
+        // Fresh registry + builder per run: no cross-run state leak.
+        let mut builder = HookDispatcherBuilder::new(HookRegistry::new());
+        // safety: `install_first_party` is a pure replayable function of the builder; the identical call was proven to succeed against a scratch builder in the composition-time validation block above (fail-closed via `?`). A per-run replay therefore cannot fail.
+        let first_party = "first-party hook install validated at composition time";
+        builder = install_first_party(builder).expect(first_party); // safety: replay of composition-validated install; see binding above
+        let registrar = HookRegistrar::new(Arc::clone(&evaluator_for_factory));
+        for set in &extension_install_sets {
+            // safety: each surviving set was already projected from TOML (the only fallible, external-input step) AND fully validated against a scratch builder above (quarantined sets never reach here). registrar.install is a deterministic function of these cloned inputs, so the per-run replay of a scratch-validated set cannot fail.
+            let ext_install = "extension hook install validated at composition time";
+            let (next, _ids) = registrar
+                .install(
+                    set.extension_id.clone(),
+                    set.extension_version.clone(),
+                    set.entries.clone(),
+                    builder,
+                )
+                .expect(ext_install); // safety: replay of composition-validated install set; see binding above
+            builder = next;
+        }
+        builder
+    });
 
     Ok(Some(factory))
 }
@@ -573,14 +875,16 @@ prompt_doc_ref = "prompts/{id}/run.md"
     }
 
     /// Parse `toml` into a validated package rooted at the conventional
-    /// extensions path and insert it into a fresh registry.
-    fn registry_with_manifest(id: &str, toml: &str) -> ExtensionRegistry {
-        let manifest = ExtensionManifest::parse(
-            toml,
-            ManifestSource::InstalledLocal,
-            &HostPortCatalog::empty(),
-        )
-        .expect("manifest parses");
+    /// extensions path and insert it into a fresh registry. `source` selects the
+    /// trust posture: `InstalledLocal` (untrusted → quarantine on bad hooks) vs
+    /// `HostBundled` (trusted → fail-closed-whole-build).
+    fn registry_with_manifest_source(
+        id: &str,
+        toml: &str,
+        source: ManifestSource,
+    ) -> ExtensionRegistry {
+        let manifest = ExtensionManifest::parse(toml, source, &HostPortCatalog::empty())
+            .expect("manifest parses");
         let package = ExtensionPackage::from_manifest(
             manifest,
             VirtualPath::new(format!("/system/extensions/{id}")).expect("valid root path"),
@@ -591,11 +895,54 @@ prompt_doc_ref = "prompts/{id}/run.md"
         registry
     }
 
+    /// As [`registry_with_manifest_source`] with the default untrusted
+    /// (`InstalledLocal`) source.
+    fn registry_with_manifest(id: &str, toml: &str) -> ExtensionRegistry {
+        registry_with_manifest_source(id, toml, ManifestSource::InstalledLocal)
+    }
+
+    /// Wrap a plain registry as a [`HookProjectionRegistry`] for the
+    /// hook-factory tests (the factory only accepts the hook-only newtype).
+    fn projection(registry: ExtensionRegistry) -> HookProjectionRegistry {
+        HookProjectionRegistry::from_registry(registry)
+    }
+
     #[test]
     fn config_defaults_to_disabled() {
         assert!(!HooksActivationConfig::default().is_enabled());
         assert!(!HooksActivationConfig::disabled().is_enabled());
         assert!(HooksActivationConfig::enabled().is_enabled());
+    }
+
+    #[test]
+    fn third_party_flag_requires_master_flag_and_defaults_off() {
+        // Default + master-only configs must report third-party OFF.
+        assert!(!HooksActivationConfig::default().is_third_party_enabled());
+        assert!(!HooksActivationConfig::disabled().is_third_party_enabled());
+        assert!(
+            !HooksActivationConfig::enabled().is_third_party_enabled(),
+            "master flag alone must NOT enable third-party"
+        );
+        // Sub-flag on but master off ⇒ still OFF (master gate dominates).
+        assert!(
+            !HooksActivationConfig::disabled()
+                .with_third_party_enabled(true)
+                .is_third_party_enabled(),
+            "sub-flag without the master flag must stay OFF"
+        );
+        // Both on ⇒ ON.
+        assert!(
+            HooksActivationConfig::enabled()
+                .with_third_party_enabled(true)
+                .is_third_party_enabled(),
+            "master + sub-flag both on must enable third-party"
+        );
+        // Setting the sub-flag must never silently flip the master flag.
+        assert!(
+            !HooksActivationConfig::disabled()
+                .with_third_party_enabled(true)
+                .is_enabled()
+        );
     }
 
     #[test]
@@ -610,7 +957,7 @@ prompt_doc_ref = "prompts/{id}/run.md"
 
     #[test]
     fn disabled_config_yields_no_factory() {
-        let registry = ExtensionRegistry::new();
+        let registry = projection(ExtensionRegistry::new());
         let result =
             build_hook_dispatcher_builder_factory(HooksActivationConfig::disabled(), &registry)
                 .expect("disabled build never errors");
@@ -623,7 +970,7 @@ prompt_doc_ref = "prompts/{id}/run.md"
         // first-party set + no extension hooks must still compose a valid
         // dispatcher — a zero-binding dispatcher, not a panic/error. This pins
         // the empty-catalog-is-valid contract.
-        let registry = ExtensionRegistry::new();
+        let registry = projection(ExtensionRegistry::new());
         let factory =
             build_hook_dispatcher_builder_factory(HooksActivationConfig::enabled(), &registry)
                 .expect("enabled build with empty registry + empty catalog succeeds")
@@ -643,10 +990,11 @@ prompt_doc_ref = "prompts/{id}/run.md"
         // first-party hook (not a production-shipped no-op). We drive the same
         // composition path via the `*_with` seam and confirm the test hook is
         // bound at AfterCapability.
-        let registry = ExtensionRegistry::new();
+        let registry = projection(ExtensionRegistry::new());
         let factory = build_hook_dispatcher_builder_factory_with(
             HooksActivationConfig::enabled(),
             &registry,
+            None,
             install_test_first_party_hook,
         )
         .expect("enabled build with a test first-party hook succeeds")
@@ -660,15 +1008,9 @@ prompt_doc_ref = "prompts/{id}/run.md"
         );
     }
 
-    /// Per-run-fresh DISPATCHER boundary: each `rebuild` mints a distinct
-    /// `HookDispatcher` (distinct `Arc`), so dispatcher-local state
-    /// (slot-poisoning, registry edits) cannot leak across runs. This proves
-    /// only dispatcher freshness — NOT predicate counter scoping, which is the
-    /// separate (tenant-scoped, shared-across-runs) boundary pinned by
-    /// `predicate_counter_state_is_tenant_scoped_across_rebuilds`.
     #[test]
-    fn rebuild_mints_independent_dispatchers_per_call() {
-        let registry = ExtensionRegistry::new();
+    fn factory_mints_independent_dispatchers_per_call() {
+        let registry = projection(ExtensionRegistry::new());
         let factory =
             build_hook_dispatcher_builder_factory(HooksActivationConfig::enabled(), &registry)
                 .expect("enabled build succeeds")
@@ -677,149 +1019,90 @@ prompt_doc_ref = "prompts/{id}/run.md"
         let b = factory().build_arc();
         assert!(
             !Arc::ptr_eq(&a, &b),
-            "each factory call must mint a fresh dispatcher (per-run dispatcher isolation)"
+            "each factory call must mint a fresh dispatcher (per-run isolation)"
         );
     }
 
-    /// Predicate counter state is TENANT-scoped and deliberately SHARED across
-    /// runs (the other half of the isolation boundary documented in the module
-    /// "Predicate counter scoping" note). This drives the real composition
-    /// path: an extension declares an `InvocationCount { max = 1 }` rate cap;
-    /// we build the per-run factory once, then mint TWO dispatchers from it
-    /// (two runs). A `before_capability` dispatch through the FIRST dispatcher
-    /// records one invocation; a dispatch through the SECOND, freshly-rebuilt
-    /// dispatcher must then be DENIED because it sees the count the first run
-    /// recorded. If the evaluator/backend were per-run instead of tenant-scoped,
-    /// the second dispatcher would start from zero and allow — the assertion
-    /// below would fail. This is the regression guard for "two host builds from
-    /// the same runtime share the predicate counter".
-    #[tokio::test]
-    async fn predicate_counter_state_is_tenant_scoped_across_rebuilds() {
-        use ironclaw_hooks::points::{BeforeCapabilityHookContext, SanitizedArguments};
-        use ironclaw_host_api::{ExtensionId as HostExtensionId, TenantId};
+    // ─── Helpers for the projection / quarantine test matrix ─────────────────
 
-        // `max = 1`: the first matching invocation is allowed (count 0 -> 1);
-        // any later invocation in the window is denied (count already at cap).
-        let hooks_block = r#"
+    use ironclaw_hooks::identity::{ExtensionId as HookExtensionId, HookLocalId};
+
+    /// Derive the registrar-minted hook id for an installed predicate hook.
+    fn installed_hook_id(ext: &str, version: &str, local: &str) -> HookId {
+        HookId::derive(
+            &HookExtensionId::new(ext).expect("valid extension id"),
+            version,
+            &HookLocalId::new(local).expect("valid hook local id"),
+            HookVersion::ONE,
+        )
+    }
+
+    /// `[[hooks]]` block for a valid `own_capabilities` deny predicate (needs no
+    /// grant, no WASM runtime).
+    fn own_deny_hook(local: &str, target: &str) -> String {
+        format!(
+            r#"
 [[hooks]]
-id = "cap-run"
+id = "{local}"
 kind = "before_capability"
 scope = "own_capabilities"
-body = { mode = "predicate", spec = { type = "rate_or_value_cap", when = { type = "name_equals", name = "ratecap-ext.run" }, bound = { type = "invocation_count", max = 1, window = "24h" }, on_exceeded = { decision = "deny", reason = "rate cap reached" } } }
-"#;
-        let registry =
-            registry_with_manifest("ratecap-ext", &manifest_toml("ratecap-ext", hooks_block));
-
-        // Build the per-run factory ONCE — the evaluator/backend is captured
-        // here and shared across every rebuild (tenant-scoped by construction).
-        let factory =
-            build_hook_dispatcher_builder_factory(HooksActivationConfig::enabled(), &registry)
-                .expect("enabled build with a rate-cap extension hook succeeds")
-                .expect("flag ON yields a factory");
-
-        let tenant = TenantId::new("tenant-a").expect("valid tenant id");
-        let provider = HostExtensionId::new("ratecap-ext").expect("valid provider id");
-        let make_ctx = || {
-            BeforeCapabilityHookContext::new(
-                tenant.clone(),
-                "ratecap-ext.run".to_string(),
-                [0u8; 32],
-                SanitizedArguments::unresolved(),
-                Some(provider.clone()),
-            )
-        };
-
-        // Run 1: fresh dispatcher; first invocation is under the cap -> allowed.
-        let run_one = factory().build_arc();
-        let first = run_one.dispatch_before_capability(&make_ctx()).await;
-        assert!(
-            first.decision.permits(),
-            "first invocation under an InvocationCount(max=1) cap must be allowed, \
-             got {:?}",
-            first.decision.view()
-        );
-
-        // Run 2: a SEPARATE rebuild (distinct dispatcher Arc) that nonetheless
-        // shares the tenant-scoped predicate counter. The count recorded by run
-        // 1 is now at the cap, so this invocation must be DENIED.
-        let run_two = factory().build_arc();
-        assert!(
-            !Arc::ptr_eq(&run_one, &run_two),
-            "the two runs must be distinct dispatchers (per-run freshness holds)"
-        );
-        let second = run_two.dispatch_before_capability(&make_ctx()).await;
-        assert!(
-            !second.decision.permits(),
-            "a fresh rebuild must observe the invocation count recorded by the \
-             previous run (tenant-scoped predicate counter shared across runs); \
-             it was allowed instead, which means the counter reset per run: {:?}",
-            second.decision.view()
-        );
+body = {{ mode = "predicate", spec = {{ type = "deny_capability", reason = "blocked by manifest hook", when = {{ type = "name_equals", name = "{target}" }} }} }}
+"#
+        )
     }
 
-    // ─── Direct composition-loader coverage ──────────────────────────────────
-    //
-    // The tests above exercise the activation seam with an empty registry
-    // (first-party-only). The tests below drive the extension-hook loader
-    // (`project_extension_install_sets` + `install_extension_sets`) through
-    // `build_hook_dispatcher_builder_factory` with a real `ExtensionRegistry`
-    // carrying `[[hooks]]` declarations, so the full `ExtensionManifestV2`
-    // `[[hooks]]` DTO → `HookManifestEntry` → registrar path is covered — not a
-    // loader look-alike. The load-bearing case is
-    // `malformed_extension_hook_manifest_fails_closed_not_panics`: an
-    // attacker-controlled installed manifest must degrade to a `RebornBuildError`,
-    // never a panic.
+    /// Build a [`HookProjectionRegistry`] directly from `(id, source, hooks)`
+    /// triples (no discovery), driving the real install-time projection path.
+    fn projection_with(packages: &[(&str, ManifestSource, String)]) -> HookProjectionRegistry {
+        let mut registry = ExtensionRegistry::new();
+        for (id, source, hooks_block) in packages {
+            let manifest = ExtensionManifest::parse(
+                &manifest_toml(id, hooks_block),
+                *source,
+                &HostPortCatalog::empty(),
+            )
+            .expect("manifest parses");
+            let package = ExtensionPackage::from_manifest(
+                manifest,
+                VirtualPath::new(format!("/system/extensions/{id}")).expect("valid root path"),
+            )
+            .expect("package builds from manifest");
+            registry.insert(package).expect("package inserts");
+        }
+        projection(registry)
+    }
 
-    /// A registry package declaring a VALID `own_capabilities` predicate hook
-    /// installs at the `Installed` trust tier, and the resulting dispatcher
-    /// carries a binding for that extension's hook id at the
-    /// `BeforeCapability` point alongside a (test-only) first-party hook —
-    /// proving the extension install does not displace the first-party set.
-    /// Driven through the `*_with` seam so the first-party hook is test-only,
-    /// not a production-shipped no-op.
+    // ─── Atomic quarantine + trust-discrimination coverage ───────────────────
+
+    /// A valid `own_capabilities` predicate hook from an untrusted
+    /// (`InstalledLocal`) extension installs through the real
+    /// `HookRegistrar::install` path at the `Installed` tier, alongside the
+    /// test-only first-party hook (extension install does not displace
+    /// first-party).
     #[test]
     fn valid_extension_hook_manifest_installs_at_installed_tier() {
-        use ironclaw_hooks::identity::{ExtensionId as HookExtensionId, HookLocalId};
-
-        // `own_capabilities` scope requires no user grant, so the loader's
-        // registrar (empty verified-grants set) installs it cleanly. A
-        // declarative predicate body needs no WASM runtime.
-        let hooks_block = r#"
-[[hooks]]
-id = "deny-run"
-kind = "before_capability"
-scope = "own_capabilities"
-body = { mode = "predicate", spec = { type = "deny_capability", reason = "blocked by manifest hook", when = { type = "name_equals", name = "valid-ext.run" } } }
-"#;
-        let registry =
-            registry_with_manifest("valid-ext", &manifest_toml("valid-ext", hooks_block));
+        let registry = projection(registry_with_manifest(
+            "valid-ext",
+            &manifest_toml("valid-ext", &own_deny_hook("deny-run", "valid-ext.run")),
+        ));
 
         let factory = build_hook_dispatcher_builder_factory_with(
             HooksActivationConfig::enabled(),
             &registry,
+            None,
             install_test_first_party_hook,
         )
         .expect("enabled build with a valid extension hook succeeds")
         .expect("flag ON yields a factory");
         let dispatcher = factory().build_arc();
 
-        // The extension hook id is derived deterministically from the
-        // extension id + version + local id, exactly as the registrar mints
-        // it. Assert the dispatcher carries that binding at BeforeCapability.
-        let expected = HookId::derive(
-            &HookExtensionId::new("valid-ext").expect("valid extension id"),
-            "0.1.0",
-            &HookLocalId::new("deny-run").expect("valid hook local id"),
-            HookVersion::ONE,
-        );
+        let expected = installed_hook_id("valid-ext", "0.1.0", "deny-run");
         let bindings = dispatcher.active_bindings_snapshot(HookPointSpec::BeforeCapability);
         assert!(
             bindings.iter().any(|binding| binding.hook_id == expected),
             "installed extension hook must be bound at BeforeCapability; saw {bindings:?}"
         );
 
-        // The test-only first-party hook still rides along at AfterCapability —
-        // the extension install does not displace the first-party set.
         let test_id = HookId::for_builtin(TEST_NOOP_OBSERVER_CANONICAL_PATH, HookVersion::ONE);
         let after = dispatcher.active_bindings_snapshot(HookPointSpec::AfterCapability);
         assert!(
@@ -828,51 +1111,121 @@ body = { mode = "predicate", spec = { type = "deny_capability", reason = "blocke
         );
     }
 
-    /// A malformed typed hook payload (the body declares an unknown `mode`)
-    /// must fail the build CLOSED with a `RebornBuildError::InvalidConfig`,
-    /// never a panic. This is the load-bearing degradation contract: external
-    /// manifests are untrusted input and a bad one cannot crash composition.
+    /// A malformed hook payload from an UNTRUSTED (`InstalledLocal`) extension
+    /// must be QUARANTINED — the build SUCCEEDS, that extension's hook is
+    /// absent, and (critically) no panic. This is the third-party degradation
+    /// contract: an attacker-controlled installed manifest cannot crash
+    /// composition nor fail the whole build.
     #[test]
-    fn malformed_extension_hook_manifest_fails_closed_not_panics() {
-        // `mode = "nonsense"` is not a recognized `HookManifestBody` variant,
-        // so the loader's `toml::from_str::<HookManifestEntry>` projection
-        // rejects it. The whole build must fail with InvalidConfig.
+    fn malformed_installed_extension_hook_is_quarantined_not_fatal() {
         let hooks_block = r#"
 [[hooks]]
 id = "broken-hook"
 kind = "before_capability"
 body = { mode = "nonsense" }
 "#;
-        let registry =
-            registry_with_manifest("broken-ext", &manifest_toml("broken-ext", hooks_block));
+        let registry = projection(registry_with_manifest(
+            "broken-ext",
+            &manifest_toml("broken-ext", hooks_block),
+        ));
 
-        let result =
-            build_hook_dispatcher_builder_factory(HooksActivationConfig::enabled(), &registry);
-        match result {
+        let factory =
+            build_hook_dispatcher_builder_factory(HooksActivationConfig::enabled(), &registry)
+                .expect("malformed INSTALLED manifest must NOT fail the build (quarantine)")
+                .expect("flag ON yields a factory");
+        let dispatcher = factory().build_arc();
+        assert!(
+            dispatcher
+                .active_bindings_snapshot(HookPointSpec::BeforeCapability)
+                .is_empty(),
+            "quarantined extension must contribute no bindings"
+        );
+    }
+
+    /// The SAME malformed payload from a TRUSTED (`HostBundled`) package must
+    /// fail the whole build closed with `InvalidConfig` — builtin/host-bundled
+    /// hooks are fail-closed-whole-build, never quarantined.
+    #[test]
+    fn malformed_host_bundled_extension_hook_fails_closed() {
+        let hooks_block = r#"
+[[hooks]]
+id = "broken-hook"
+kind = "before_capability"
+body = { mode = "nonsense" }
+"#;
+        // HostBundled ids are reserved to the `ironclaw.` prefix.
+        let registry = projection(registry_with_manifest_source(
+            "ironclaw.broken",
+            &manifest_toml("ironclaw.broken", hooks_block),
+            ManifestSource::HostBundled,
+        ));
+
+        match build_hook_dispatcher_builder_factory(HooksActivationConfig::enabled(), &registry) {
             Err(RebornBuildError::InvalidConfig { reason }) => {
                 assert!(
-                    reason.contains("broken-ext") && reason.contains("broken-hook"),
-                    "fail-closed error must name the offending extension + hook, got: {reason}"
+                    reason.contains("ironclaw.broken") && reason.contains("broken-hook"),
+                    "fail-closed error must name the offending host-bundled extension + hook, got: {reason}"
                 );
             }
-            Ok(_) => panic!("malformed manifest must fail closed, but the build succeeded"),
-            Err(other) => panic!(
-                "malformed manifest must fail with InvalidConfig, got a different error: {other}"
-            ),
+            Ok(_) => panic!("malformed host-bundled manifest must fail the whole build"),
+            Err(other) => panic!("expected InvalidConfig, got: {other}"),
         }
     }
 
-    /// A hook declaring `scope = same_tenant` reaches beyond the declaring
-    /// extension's own capabilities and therefore requires an explicit user
-    /// grant. The composition loader's registrar carries no verified grants,
-    /// so an installed-tier extension hook claiming that wider scope is
-    /// rejected (trust attenuation) — fail-closed, not a panic.
+    /// Atomic quarantine: an extension with two VALID hooks and one INVALID
+    /// hook must install NONE of its three hooks (whole-set atomicity), while a
+    /// sibling valid extension's hook IS installed.
     #[test]
-    fn extension_hook_claiming_ungranted_wider_scope_is_rejected() {
-        // `same_tenant` scope requires `requires_grant`; the manifest sets it,
-        // but the loader's registrar has no matching verified grant, so the
-        // install is denied. (Omitting `requires_grant` would instead fail the
-        // entry's own `validate()`; either way the build must fail closed.)
+    fn extension_with_one_invalid_hook_quarantines_the_whole_set_sibling_survives() {
+        let bad_set = format!(
+            "{}{}{}",
+            own_deny_hook("ok-1", "mixed.run"),
+            own_deny_hook("ok-2", "mixed.run"),
+            // invalid third hook
+            r#"
+[[hooks]]
+id = "bad-3"
+kind = "before_capability"
+body = { mode = "nonsense" }
+"#
+        );
+        let registry = projection_with(&[
+            ("mixed", ManifestSource::InstalledLocal, bad_set),
+            (
+                "good",
+                ManifestSource::InstalledLocal,
+                own_deny_hook("good-1", "good.run"),
+            ),
+        ]);
+
+        let factory =
+            build_hook_dispatcher_builder_factory(HooksActivationConfig::enabled(), &registry)
+                .expect("partial-invalid set must quarantine, not fail the build")
+                .expect("flag ON yields a factory");
+        let dispatcher = factory().build_arc();
+        let bindings = dispatcher.active_bindings_snapshot(HookPointSpec::BeforeCapability);
+
+        // None of `mixed`'s hooks installed.
+        for local in ["ok-1", "ok-2", "bad-3"] {
+            let id = installed_hook_id("mixed", "0.1.0", local);
+            assert!(
+                !bindings.iter().any(|b| b.hook_id == id),
+                "atomic quarantine must drop ALL of the offending extension's hooks ({local} leaked)"
+            );
+        }
+        // Sibling `good` survives.
+        let good_id = installed_hook_id("good", "0.1.0", "good-1");
+        assert!(
+            bindings.iter().any(|b| b.hook_id == good_id),
+            "a sibling valid extension's hooks must still install"
+        );
+    }
+
+    /// An untrusted extension claiming `scope = same_tenant` (a wider scope
+    /// than its own capabilities) with no host-verified grant is QUARANTINED by
+    /// the registrar's trust-attenuation check — build succeeds, hook absent.
+    #[test]
+    fn installed_extension_claiming_ungranted_wider_scope_is_quarantined() {
         let hooks_block = r#"
 [[hooks]]
 id = "cross-tenant-deny"
@@ -881,24 +1234,173 @@ scope = "same_tenant"
 requires_grant = "cross-tenant-policy"
 body = { mode = "predicate", spec = { type = "deny_capability", reason = "wider-scope deny", when = { type = "name_equals", name = "other-ext.run" } } }
 "#;
-        let registry =
-            registry_with_manifest("reachy-ext", &manifest_toml("reachy-ext", hooks_block));
+        let registry = projection(registry_with_manifest(
+            "reachy-ext",
+            &manifest_toml("reachy-ext", hooks_block),
+        ));
 
-        let result =
-            build_hook_dispatcher_builder_factory(HooksActivationConfig::enabled(), &registry);
-        match result {
-            Err(RebornBuildError::InvalidConfig { reason }) => {
-                assert!(
-                    reason.contains("reachy-ext"),
-                    "trust-attenuation rejection must name the extension, got: {reason}"
-                );
-            }
-            Ok(_) => {
-                panic!("ungranted wider-scope hook must be rejected, but the build succeeded")
-            }
-            Err(other) => panic!(
-                "ungranted wider-scope hook must be rejected with InvalidConfig, got a different error: {other}"
+        let factory =
+            build_hook_dispatcher_builder_factory(HooksActivationConfig::enabled(), &registry)
+                .expect("ungranted wider-scope INSTALLED hook must quarantine, not fail the build")
+                .expect("flag ON yields a factory");
+        let dispatcher = factory().build_arc();
+        assert!(
+            dispatcher
+                .active_bindings_snapshot(HookPointSpec::BeforeCapability)
+                .is_empty(),
+            "ungranted wider-scope hook must be quarantined (no binding)"
+        );
+    }
+
+    /// Third-party WASM stays OUT: the projection registrar has no
+    /// `wasm_runtime`, so a WASM-bodied installed hook fails install → under
+    /// quarantine the extension is dropped and the build continues (Step 6
+    /// negative test). A sibling predicate-only extension still installs.
+    #[test]
+    fn wasm_bodied_third_party_hook_is_quarantined_build_continues() {
+        let wasm_block = r#"
+[[hooks]]
+id = "wasm-hook"
+kind = "before_capability"
+scope = "own_capabilities"
+body = { mode = "wasm", export = "evaluate" }
+"#;
+        let registry = projection_with(&[
+            (
+                "wasm-ext",
+                ManifestSource::InstalledLocal,
+                wasm_block.to_string(),
             ),
+            (
+                "pred-ext",
+                ManifestSource::InstalledLocal,
+                own_deny_hook("pred-1", "pred-ext.run"),
+            ),
+        ]);
+
+        let factory =
+            build_hook_dispatcher_builder_factory(HooksActivationConfig::enabled(), &registry)
+                .expect("WASM-bodied third-party hook must quarantine, not fail the build")
+                .expect("flag ON yields a factory");
+        let dispatcher = factory().build_arc();
+        let bindings = dispatcher.active_bindings_snapshot(HookPointSpec::BeforeCapability);
+        assert!(
+            !bindings
+                .iter()
+                .any(|b| b.hook_id == installed_hook_id("wasm-ext", "0.1.0", "wasm-hook")),
+            "WASM-bodied third-party hook must be quarantined (no runtime in loader registrar)"
+        );
+        assert!(
+            bindings
+                .iter()
+                .any(|b| b.hook_id == installed_hook_id("pred-ext", "0.1.0", "pred-1")),
+            "sibling predicate extension must still install after a WASM quarantine"
+        );
+    }
+
+    /// Containment: a package whose root escapes the tenant root via `..` is
+    /// rejected by `enforce_root_containment` (FS-hardening v1).
+    #[test]
+    fn root_containment_rejects_traversal_and_non_child() {
+        let tenant_root = VirtualPath::new("/system/extensions/alpha").expect("root");
+        // Strict child OK.
+        assert!(
+            enforce_root_containment(
+                &tenant_root,
+                &VirtualPath::new("/system/extensions/alpha/ext-1").expect("child")
+            )
+            .is_ok()
+        );
+        // Sibling tenant is not a child.
+        assert!(
+            enforce_root_containment(
+                &tenant_root,
+                &VirtualPath::new("/system/extensions/beta/ext-1").expect("sibling")
+            )
+            .is_err(),
+            "another tenant's tree must not be a child of this tenant root"
+        );
+        // The tenant root itself is not a strict child.
+        assert!(enforce_root_containment(&tenant_root, &tenant_root).is_err());
+    }
+
+    /// `tenant_extension_root` derives the fixed `/system/extensions/<tenant>`
+    /// shape from identity, and distinct tenants yield distinct (disjoint)
+    /// roots — the tenant-isolation contract (no caller-supplied root).
+    #[test]
+    fn tenant_root_is_derived_from_identity_and_disjoint() {
+        let a = tenant_extension_root(&ironclaw_host_api::TenantId::new("alpha").expect("a"))
+            .expect("root a");
+        let b = tenant_extension_root(&ironclaw_host_api::TenantId::new("beta").expect("b"))
+            .expect("root b");
+        assert_eq!(a.as_str(), "/system/extensions/alpha");
+        assert_eq!(b.as_str(), "/system/extensions/beta");
+        assert_ne!(a.as_str(), b.as_str());
+    }
+
+    /// DoS cap: more than `MAX_INSTALLED_EXTENSIONS_CONSIDERED` hook-bearing
+    /// untrusted extensions ⇒ the surplus is quarantined (skipped), and the
+    /// build still succeeds. We use a small synthetic set keyed off the const
+    /// boundary so the test stays fast yet pins the ceiling.
+    #[test]
+    fn surplus_extensions_beyond_consider_cap_are_quarantined() {
+        let mut packages: Vec<(String, ManifestSource, String)> = Vec::new();
+        for i in 0..(MAX_INSTALLED_EXTENSIONS_CONSIDERED + 2) {
+            let id = format!("ext-{i:03}");
+            let hooks = own_deny_hook("h", &format!("{id}.run"));
+            packages.push((id, ManifestSource::InstalledLocal, hooks));
         }
+        let refs: Vec<(&str, ManifestSource, String)> = packages
+            .iter()
+            .map(|(id, src, hooks)| (id.as_str(), *src, hooks.clone()))
+            .collect();
+        let registry = projection_with(&refs);
+
+        let factory =
+            build_hook_dispatcher_builder_factory(HooksActivationConfig::enabled(), &registry)
+                .expect("surplus extensions must quarantine, not fail the build")
+                .expect("flag ON yields a factory");
+        let dispatcher = factory().build_arc();
+        let installed = dispatcher
+            .active_bindings_snapshot(HookPointSpec::BeforeCapability)
+            .len();
+        assert!(
+            installed <= MAX_INSTALLED_EXTENSIONS_CONSIDERED,
+            "no more than the consider-cap of extensions may install (saw {installed})"
+        );
+        assert!(
+            installed >= 1,
+            "the first extensions under the cap must still install"
+        );
+    }
+
+    /// Flag OFF (master ON + third-party OFF) keeps the projection registry
+    /// builtin-only: a registry carrying only an untrusted package still yields
+    /// a builtin-only set when assembled through `build_hook_projection_registry`
+    /// with the sub-flag off — behavior identical to #3938.
+    #[tokio::test]
+    async fn third_party_subflag_off_yields_builtin_only_projection() {
+        use ironclaw_filesystem::InMemoryBackend;
+
+        let fs = InMemoryBackend::new();
+        let tenant = ironclaw_host_api::TenantId::new("alpha").expect("tenant");
+        let builtin = ExtensionRegistry::new();
+        // Master ON, third-party OFF.
+        let config = HooksActivationConfig::enabled();
+        let projection_registry = build_hook_projection_registry(
+            builtin,
+            Some(ThirdPartyDiscoveryInput {
+                filesystem: &fs,
+                tenant_id: &tenant,
+            }),
+            config,
+        )
+        .await
+        .expect("projection registry builds");
+        assert_eq!(
+            projection_registry.packages().count(),
+            0,
+            "sub-flag OFF must not merge any third-party packages (builtin-only)"
+        );
     }
 }
