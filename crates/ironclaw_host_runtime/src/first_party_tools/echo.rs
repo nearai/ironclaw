@@ -2,7 +2,7 @@ use ironclaw_extensions::{CapabilityManifest, ExtensionError};
 use ironclaw_host_api::{EffectKind, PermissionMode};
 use serde_json::Value;
 
-use ironclaw_host_runtime::FirstPartyCapabilityError;
+use crate::FirstPartyCapabilityError;
 
 use super::{first_party_capability_manifest, input_error, resource_profile};
 

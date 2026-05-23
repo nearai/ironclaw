@@ -6,7 +6,7 @@ use ironclaw_host_api::RuntimeDispatchErrorKind;
 use serde_json::{Value, json};
 use std::{cmp::Reverse, time::UNIX_EPOCH};
 
-use ironclaw_host_runtime::{FirstPartyCapabilityError, FirstPartyCapabilityRequest};
+use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest};
 
 use super::{
     config::{DEFAULT_MAX_RESULTS, GLOB_MATCH_OPTIONS, MAX_VISITED_ENTRIES},

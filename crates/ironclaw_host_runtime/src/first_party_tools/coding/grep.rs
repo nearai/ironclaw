@@ -10,7 +10,7 @@ use ironclaw_host_api::{RuntimeDispatchErrorKind, ScopedPath, VirtualPath};
 use regex::RegexBuilder;
 use serde_json::{Value, json};
 
-use ironclaw_host_runtime::{FirstPartyCapabilityError, FirstPartyCapabilityRequest};
+use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest};
 
 use super::{
     config::{DEFAULT_HEAD_LIMIT, MAX_OUTPUT_SIZE, MAX_READ_SIZE, MAX_VISITED_ENTRIES},

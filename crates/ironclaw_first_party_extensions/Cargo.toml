@@ -10,39 +10,15 @@ homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
 publish = false
 
-[features]
-default = []
-libsql = ["ironclaw_filesystem/libsql"]
-
 [dependencies]
 async-trait = "0.1"
-base64 = "0.22.1"
-blake3 = "1"
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
-chrono-tz = "0.10"
-dirs = "6"
 futures = "0.3"
-glob = "0.3"
-ironclaw_extensions = { path = "../ironclaw_extensions" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
-ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
 ironclaw_loop_support = { path = "../ironclaw_loop_support" }
-ironclaw_safety = { path = "../ironclaw_safety" }
 ironclaw_skills = { path = "../ironclaw_skills" }
 ironclaw_turns = { path = "../ironclaw_turns" }
-regex = "1"
-serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["process", "time"] }
-tracing = "0.1"
 
 [dev-dependencies]
-ironclaw_authorization = { path = "../ironclaw_authorization" }
-ironclaw_network = { path = "../ironclaw_network" }
-ironclaw_processes = { path = "../ironclaw_processes" }
-ironclaw_resources = { path = "../ironclaw_resources" }
-ironclaw_secrets = { path = "../ironclaw_secrets" }
-ironclaw_trust = { path = "../ironclaw_trust" }
-tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt"] }

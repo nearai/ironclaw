@@ -48,6 +48,7 @@ use thiserror::Error;
 mod capability_catalog;
 mod extension_contracts;
 mod first_party;
+mod first_party_tools;
 mod invocation_services;
 mod obligations;
 mod planner;
@@ -69,6 +70,13 @@ pub use first_party::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
+pub use first_party_tools::{
+    APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, BuiltinFirstPartyTools,
+    ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID,
+    JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
+    TIME_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
+    builtin_first_party_package,
+};
 pub use invocation_services::{
     InvocationServices, InvocationServicesError, InvocationServicesResolutionRequest,
     InvocationServicesResolver, LocalInvocationServicesResolver,
@@ -80,8 +88,8 @@ pub use obligations::{
 use obligations::{NetworkObligationPolicyStore, RuntimeSecretInjectionStore};
 pub use planner::{ExecutionPlan, PlannerError, plan_capability};
 pub use process_port::{
-    COMMAND_MAX_OUTPUT_SIZE, CommandExecutionOutput, CommandExecutionRequest, LocalHostProcessPort,
-    RuntimeProcessError, RuntimeProcessPort, SandboxCommandTransport, TenantSandboxProcessPort,
+    CommandExecutionOutput, CommandExecutionRequest, LocalHostProcessPort, RuntimeProcessError,
+    RuntimeProcessPort, SandboxCommandTransport, TenantSandboxProcessPort,
 };
 pub use production::DefaultHostRuntime;
 pub use services::{

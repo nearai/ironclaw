@@ -33,7 +33,7 @@ use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    CapabilityDispatchRequest, CapabilityDispatcher, CapabilityId, DispatchError, EffectKind,
+    CapabilityDispatchRequest, CapabilityDispatcher, CapabilityId, DispatchError,
     ResourceReservationId, ResourceScope, ResourceUsage, RuntimeDispatchErrorKind,
     RuntimeHttpEgress, RuntimeKind,
     runtime_policy::{
@@ -1839,9 +1839,7 @@ where
         };
         self.registry.capabilities().any(|descriptor| {
             descriptor.runtime == RuntimeKind::FirstParty
-                && descriptor.effects.iter().any(|effect| {
-                    matches!(effect, EffectKind::SpawnProcess | EffectKind::ExecuteCode)
-                })
+                && descriptor.id.as_str() == crate::SHELL_CAPABILITY_ID
                 && first_party_runtime.contains_handler(&descriptor.id)
         })
     }

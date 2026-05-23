@@ -2,7 +2,7 @@ use ironclaw_filesystem::{FileType, FilesystemOperation};
 use ironclaw_host_api::RuntimeDispatchErrorKind;
 use serde_json::{Value, json};
 
-use ironclaw_host_runtime::{FirstPartyCapabilityError, FirstPartyCapabilityRequest};
+use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest};
 
 use super::{
     config::MAX_PATCH_SIZE,

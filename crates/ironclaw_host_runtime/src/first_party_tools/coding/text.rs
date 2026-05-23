@@ -1,4 +1,4 @@
-use ironclaw_host_runtime::FirstPartyCapabilityError;
+use crate::FirstPartyCapabilityError;
 
 use super::{
     guest_error,

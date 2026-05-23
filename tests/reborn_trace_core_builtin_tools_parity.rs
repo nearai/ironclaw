@@ -3,11 +3,11 @@
 mod reborn_support;
 mod support;
 
-use ironclaw_first_party_extensions::{
+use ironclaw_host_api::CapabilityId;
+use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, HTTP_CAPABILITY_ID, JSON_CAPABILITY_ID, READ_FILE_CAPABILITY_ID,
     TIME_CAPABILITY_ID,
 };
-use ironclaw_host_api::CapabilityId;
 use ironclaw_loop_support::{HostManagedModelMessageRole, HostManagedModelResponse};
 use ironclaw_turns::{TurnStatus, run_profile::LoopHostMilestoneKind};
 use reborn_support::{

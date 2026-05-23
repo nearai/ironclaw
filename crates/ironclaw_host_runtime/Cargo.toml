@@ -11,9 +11,14 @@ libsql = ["dep:libsql", "ironclaw_filesystem/libsql", "ironclaw_resources/libsql
 
 [dependencies]
 async-trait = "0.1"
+base64 = "0.22.1"
+blake3 = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+chrono-tz = "0.10"
 deadpool-postgres = { version = "0.14", optional = true }
 futures-util = "0.3"
+glob = "0.3"
+dirs = "6"
 ironclaw_approvals = { path = "../ironclaw_approvals" }
 ironclaw_authorization = { path = "../ironclaw_authorization" }
 ironclaw_capabilities = { path = "../ironclaw_capabilities" }
@@ -39,6 +44,7 @@ ironclaw_wasm = { path = "../ironclaw_wasm" }
 libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
 jsonschema = { version = "0.45", default-features = false }
 libc = "0.2"
+regex = "1"
 rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 secrecy = "0.10"
 serde_json = "1"

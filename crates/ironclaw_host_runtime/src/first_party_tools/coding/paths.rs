@@ -3,7 +3,7 @@ use ironclaw_host_api::{RuntimeDispatchErrorKind, ScopedPath, VirtualPath};
 use ironclaw_safety::sensitive_paths::is_sensitive_path_str;
 use serde_json::Value;
 
-use ironclaw_host_runtime::{FirstPartyCapabilityError, FirstPartyCapabilityRequest};
+use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest};
 
 use super::{
     config::{DEFAULT_EXCLUDED_DIRS, DEFAULT_SCOPED_ROOT, WORKSPACE_FILES},
