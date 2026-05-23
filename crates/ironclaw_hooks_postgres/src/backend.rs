@@ -30,9 +30,11 @@
 //!    cap enforcement and break replay refusal (the evicted id would leave
 //!    the dedup set while still logically in-window), so we fail closed.
 //! 4. **Inserts** the new row `ON CONFLICT (key_hash, id) DO NOTHING`.
-//! 5. **Evicts** the scope's least-recently-active key when the scope's
-//!    distinct-key count exceeds [`MAX_KEYS_PER_TENANT`] (the durable
-//!    analogue of the in-memory per-tenant LRU quota). Each victim's rows
+//! 5. **Evicts** the scope's oldest-front key — the key whose oldest
+//!    retained sample (`MIN(ts)`) is oldest — when the scope's distinct-key
+//!    count exceeds [`MAX_KEYS_PER_TENANT`] (the durable analogue of the
+//!    in-memory per-tenant LRU quota, which ranks buckets by their oldest
+//!    entry). Each victim's rows
 //!    are deleted only after acquiring that victim key's per-key advisory
 //!    lock with the NON-blocking `pg_try_advisory_xact_lock`, so eviction
 //!    obeys the same per-bucket serialization as a recorder and can never
@@ -342,9 +344,10 @@ impl PostgresPredicateStateBackend {
 
     /// Enforce [`MAX_KEYS_PER_TENANT`] distinct keys per scope+kind.
     /// Returns the number of keys evicted (0 or more). Eviction drops the
-    /// least-recently-active key — the key whose newest row is oldest —
-    /// matching the in-memory backend's oldest-front victim selection,
-    /// and never touches the key we just inserted.
+    /// key whose OLDEST retained sample is oldest (`MIN(ts)` per key) —
+    /// the "oldest-front" victim selection, matching the in-memory backend
+    /// (which ranks buckets by their front/oldest entry) and the libSQL
+    /// backend. It never touches the key we just inserted.
     ///
     /// # Lock discipline for victim eviction (deadlock + race fix)
     ///
@@ -408,12 +411,22 @@ impl PostgresPredicateStateBackend {
         }
         let to_evict = distinct as usize - MAX_KEYS_PER_TENANT;
 
-        // Victim candidates: rank keys in this scope by their most-recent
-        // activity (MAX(ts)); the staleest keys are evicted first. Exclude
-        // the key we just inserted so a flood can never evict itself and
-        // mask the new entry. We over-fetch beyond `to_evict` so that if some
-        // candidates are in-flight under their own per-key lock (try-lock
-        // fails, see below) we can fall through to the next-staleest key and
+        // Victim candidates: rank keys in this scope by their OLDEST retained
+        // sample (MIN(ts)) and evict the key whose oldest sample is oldest —
+        // "oldest-front" selection, matching the in-memory and libSQL
+        // backends. The in-memory backend ranks buckets by their front
+        // (oldest) entry's timestamp (`entries.front()` + `min_by_key`), so
+        // the durable analogue is MIN(ts) per key, NOT MAX(ts). Using MAX(ts)
+        // here would diverge: a key with one ancient sample and one fresh
+        // sample would be ranked by the fresh sample and spared, while the
+        // in-memory backend ranks it by the ancient sample and evicts it. The
+        // single-sample-per-key parity matrix masks this (MIN == MAX), but
+        // multi-sample keys would evict different keys across backends.
+        //
+        // Exclude the key we just inserted so a flood can never evict itself
+        // and mask the new entry. We over-fetch beyond `to_evict` so that if
+        // some candidates are in-flight under their own per-key lock (try-lock
+        // fails, see below) we can fall through to the next-oldest key and
         // still meet the quota. Bound the over-fetch so a pathological scope
         // can't pull an unbounded candidate set into memory.
         const CANDIDATE_OVERFETCH: i64 = 64;
@@ -421,12 +434,12 @@ impl PostgresPredicateStateBackend {
         let candidate_rows = tx
             .query(
                 "SELECT key_hash FROM (
-                     SELECT key_hash, MAX(ts) AS last_ts
+                     SELECT key_hash, MIN(ts) AS oldest_ts
                        FROM hook_predicate_counters
                       WHERE scope_hash = $1 AND kind = $2
                         AND key_hash <> $3
                       GROUP BY key_hash
-                      ORDER BY last_ts ASC
+                      ORDER BY oldest_ts ASC
                       LIMIT $4
                  ) victims",
                 &[&scope_ref, &kind, &current_key, &candidate_limit],
