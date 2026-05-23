@@ -4405,6 +4405,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_hooks_postgres"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "blake3",
+ "chrono",
+ "deadpool-postgres",
+ "ironclaw_hooks",
+ "ironclaw_host_api",
+ "rust_decimal",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-postgres",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "ironclaw_host_api"
 version = "0.1.0"
 dependencies = [
