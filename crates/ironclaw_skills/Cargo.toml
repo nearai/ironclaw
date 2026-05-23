@@ -18,7 +18,10 @@ registry = ["dep:tempfile"]
 catalog = ["dep:reqwest", "dep:urlencoding", "dep:futures"]
 
 [dependencies]
+async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
+ironclaw_filesystem = { path = "../ironclaw_filesystem" }
+ironclaw_host_api = { path = "../ironclaw_host_api" }
 regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

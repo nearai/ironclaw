@@ -2,48 +2,53 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
-use ironclaw_first_party_extensions::{
+use ironclaw_host_api::{
+    CapabilityId, EffectKind, HostApiError, PermissionMode, ResourceUsage, RuntimeDispatchErrorKind,
+};
+use ironclaw_skills::{
     SkillInstallRequest, SkillManagementContext, SkillManagementError, SkillManagementErrorKind,
     SkillRemoveRequest, SkillSummary, install_skill, list_skills, remove_skill,
 };
-use ironclaw_host_api::{
-    CapabilityId, CapabilityProfileSchemaRef, EffectKind, HostApiError, PermissionMode,
-    ResourceCeiling, ResourceEstimate, ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind,
-};
-use ironclaw_host_runtime::{
+use serde_json::{Value, json};
+
+use crate::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
-use serde_json::{Value, json};
 
-pub(crate) const SKILL_LIST_CAPABILITY_ID: &str = "builtin.skill_list";
-pub(crate) const SKILL_INSTALL_CAPABILITY_ID: &str = "builtin.skill_install";
-pub(crate) const SKILL_REMOVE_CAPABILITY_ID: &str = "builtin.skill_remove";
+use super::{first_party_capability_manifest, resource_profile};
 
-pub(crate) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
+pub const SKILL_LIST_CAPABILITY_ID: &str = "builtin.skill_list";
+pub const SKILL_INSTALL_CAPABILITY_ID: &str = "builtin.skill_install";
+pub const SKILL_REMOVE_CAPABILITY_ID: &str = "builtin.skill_remove";
+
+pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
     Ok(vec![
-        manifest(
+        first_party_capability_manifest(
             SKILL_LIST_CAPABILITY_ID,
             "List Reborn filesystem skills visible to the current local-dev agent",
             vec![EffectKind::ReadFilesystem],
             PermissionMode::Allow,
+            resource_profile(),
         )?,
-        manifest(
+        first_party_capability_manifest(
             SKILL_INSTALL_CAPABILITY_ID,
             "Install a SKILL.md document into the current user's Reborn skill root",
             vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
             PermissionMode::Ask,
+            resource_profile(),
         )?,
-        manifest(
+        first_party_capability_manifest(
             SKILL_REMOVE_CAPABILITY_ID,
             "Remove a user-installed Reborn filesystem skill",
             vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
             PermissionMode::Ask,
+            resource_profile(),
         )?,
     ])
 }
 
-pub(crate) fn insert_handlers(
+pub(super) fn insert_handlers(
     registry: &mut FirstPartyCapabilityRegistry,
 ) -> Result<(), HostApiError> {
     let handler = Arc::new(SkillManagementToolHandler);
@@ -57,48 +62,6 @@ pub(crate) fn insert_handlers(
     );
     registry.insert_handler(CapabilityId::new(SKILL_REMOVE_CAPABILITY_ID)?, handler);
     Ok(())
-}
-
-fn manifest(
-    id: &str,
-    description: &str,
-    effects: Vec<EffectKind>,
-    default_permission: PermissionMode,
-) -> Result<CapabilityManifest, ExtensionError> {
-    let schema_name = id.strip_prefix("builtin.").unwrap_or(id).replace('.', "-");
-    Ok(CapabilityManifest {
-        id: CapabilityId::new(id)?,
-        implements: Vec::new(),
-        description: description.to_string(),
-        effects,
-        default_permission,
-        visibility: ironclaw_extensions::CapabilityVisibility::Model,
-        input_schema_ref: CapabilityProfileSchemaRef::new(format!(
-            "schemas/builtin/{schema_name}.input.v1.json"
-        ))?,
-        output_schema_ref: CapabilityProfileSchemaRef::new(format!(
-            "schemas/builtin/{schema_name}.output.v1.json"
-        ))?,
-        prompt_doc_ref: Some(CapabilityProfileSchemaRef::new(format!(
-            "prompts/builtin/{schema_name}.md"
-        ))?),
-        required_host_ports: Vec::new(),
-        resource_profile: Some(ResourceProfile {
-            default_estimate: ResourceEstimate {
-                wall_clock_ms: Some(100),
-                output_bytes: Some(16 * 1024),
-                ..ResourceEstimate::default()
-            },
-            hard_ceiling: Some(ResourceCeiling {
-                max_usd: None,
-                max_input_tokens: None,
-                max_output_tokens: None,
-                max_wall_clock_ms: Some(5_000),
-                max_output_bytes: Some(1_048_576),
-                sandbox: None,
-            }),
-        }),
-    })
 }
 
 struct SkillManagementToolHandler;

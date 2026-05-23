@@ -12,7 +12,8 @@ use ironclaw_host_api::{
     NetworkPolicy, NetworkTargetPattern, Principal, RuntimeKind, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
-    CapabilitySurfacePolicy, HostRuntime, SurfaceKind,
+    CapabilitySurfacePolicy, HostRuntime, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
+    SKILL_REMOVE_CAPABILITY_ID, SurfaceKind,
     VisibleCapabilityRequest as HostVisibleCapabilityRequest,
 };
 use ironclaw_loop_support::{
@@ -532,10 +533,10 @@ enum LocalDevCapabilityKind {
 fn local_dev_capability_kind(capability_id: &str) -> LocalDevCapabilityKind {
     if capability_id == "builtin.shell" {
         LocalDevCapabilityKind::AmbientShell
-    } else if matches!(
-        capability_id,
-        "builtin.skill_list" | "builtin.skill_install" | "builtin.skill_remove"
-    ) {
+    } else if capability_id == SKILL_LIST_CAPABILITY_ID
+        || capability_id == SKILL_INSTALL_CAPABILITY_ID
+        || capability_id == SKILL_REMOVE_CAPABILITY_ID
+    {
         LocalDevCapabilityKind::SkillManagement
     } else {
         LocalDevCapabilityKind::Workspace

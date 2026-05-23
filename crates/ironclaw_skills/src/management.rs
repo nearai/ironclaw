@@ -1,14 +1,12 @@
 use std::sync::Arc;
 
+use crate::{MAX_PROMPT_FILE_SIZE, normalize_line_endings, parse_skill_md, validate_skill_name};
 use async_trait::async_trait;
 use ironclaw_filesystem::{
     BackendCapabilities, DirEntry, FileStat, FileType, FilesystemError, FilesystemOperation,
     RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{HostApiError, MountView, ResourceScope, ScopedPath, VirtualPath};
-use ironclaw_skills::{
-    MAX_PROMPT_FILE_SIZE, normalize_line_endings, parse_skill_md, validate_skill_name,
-};
 
 const USER_SKILLS_ROOT: &str = "/skills";
 const SYSTEM_SKILLS_ROOT: &str = "/system/skills";

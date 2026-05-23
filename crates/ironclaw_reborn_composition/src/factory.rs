@@ -4,7 +4,7 @@ use std::{
 };
 
 use ironclaw_authorization::GrantAuthorizer;
-use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry};
+use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
@@ -28,7 +28,6 @@ use ironclaw_turns::{
 };
 
 use crate::input::RebornStorageInput;
-use crate::skill_management_tools;
 use crate::{
     RebornBuildError, RebornBuildInput, RebornCompositionProfile, RebornFacadeReadiness,
     RebornProductAuthServices, RebornReadiness, RebornReadinessState,
@@ -275,48 +274,21 @@ fn builtin_extension_registry() -> Result<ExtensionRegistry, RebornBuildError> {
     // capabilities expose the same built-in package contract in both profiles.
     let mut registry = ExtensionRegistry::new();
     registry
-        .insert(composition_first_party_package().map_err(|error| {
-            RebornBuildError::InvalidConfig {
+        .insert(
+            builtin_first_party_package().map_err(|error| RebornBuildError::InvalidConfig {
                 reason: format!("built-in first-party package is invalid: {error}"),
-            }
-        })?)
+            })?,
+        )
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("built-in first-party registry is invalid: {error}"),
         })?;
     Ok(registry)
 }
 
-fn composition_first_party_package() -> Result<ExtensionPackage, RebornBuildError> {
-    let package =
-        builtin_first_party_package().map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("built-in first-party package is invalid: {error}"),
-        })?;
-    let mut manifest = package.manifest.clone();
-    manifest
-        .capabilities
-        .extend(skill_management_tools::manifests().map_err(|error| {
-            RebornBuildError::InvalidConfig {
-                reason: format!("skill management capabilities are invalid: {error}"),
-            }
-        })?);
-    ExtensionPackage::from_manifest(manifest, package.root).map_err(|error| {
-        RebornBuildError::InvalidConfig {
-            reason: format!("composed first-party package is invalid: {error}"),
-        }
-    })
-}
-
 fn builtin_first_party_registry() -> Result<FirstPartyCapabilityRegistry, RebornBuildError> {
-    let mut registry =
-        builtin_first_party_handlers().map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("built-in first-party handlers are invalid: {error}"),
-        })?;
-    skill_management_tools::insert_handlers(&mut registry).map_err(|error| {
-        RebornBuildError::InvalidConfig {
-            reason: format!("skill management handlers are invalid: {error}"),
-        }
-    })?;
-    Ok(registry)
+    builtin_first_party_handlers().map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("built-in first-party handlers are invalid: {error}"),
+    })
 }
 
 fn local_dev_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuildError> {
@@ -666,6 +638,7 @@ mod tests {
     };
     use ironclaw_host_runtime::{
         RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind,
+        SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
     };
     use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 
@@ -700,8 +673,8 @@ mod tests {
 
         let install_output = invoke_json(
             runtime.as_ref(),
-            skill_management_tools::SKILL_INSTALL_CAPABILITY_ID,
-            skill_context(skill_management_tools::SKILL_INSTALL_CAPABILITY_ID),
+            SKILL_INSTALL_CAPABILITY_ID,
+            skill_context(SKILL_INSTALL_CAPABILITY_ID),
             serde_json::json!({
                 "content": skill_md("runtime-sentinel", "runtime skill", "RUNTIME_SENTINEL")
             }),
@@ -718,8 +691,8 @@ mod tests {
 
         let list_output = invoke_json(
             runtime.as_ref(),
-            skill_management_tools::SKILL_LIST_CAPABILITY_ID,
-            skill_context(skill_management_tools::SKILL_LIST_CAPABILITY_ID),
+            SKILL_LIST_CAPABILITY_ID,
+            skill_context(SKILL_LIST_CAPABILITY_ID),
             serde_json::json!({}),
         )
         .await
@@ -734,8 +707,8 @@ mod tests {
 
         let remove_output = invoke_json(
             runtime.as_ref(),
-            skill_management_tools::SKILL_REMOVE_CAPABILITY_ID,
-            skill_context(skill_management_tools::SKILL_REMOVE_CAPABILITY_ID),
+            SKILL_REMOVE_CAPABILITY_ID,
+            skill_context(SKILL_REMOVE_CAPABILITY_ID),
             serde_json::json!({"name": "runtime-sentinel"}),
         )
         .await
@@ -777,22 +750,22 @@ mod tests {
     }
 
     #[test]
-    fn composed_first_party_package_declares_skill_management_tools() {
-        let package = composition_first_party_package().expect("composed package builds");
+    fn builtin_first_party_package_declares_skill_management_tools() {
+        let package = builtin_first_party_package().expect("built-in package builds");
         let ids = package
             .capabilities
             .iter()
             .map(|capability| capability.id.as_str())
             .collect::<Vec<_>>();
-        assert!(ids.contains(&skill_management_tools::SKILL_LIST_CAPABILITY_ID));
-        assert!(ids.contains(&skill_management_tools::SKILL_INSTALL_CAPABILITY_ID));
-        assert!(ids.contains(&skill_management_tools::SKILL_REMOVE_CAPABILITY_ID));
+        assert!(ids.contains(&SKILL_LIST_CAPABILITY_ID));
+        assert!(ids.contains(&SKILL_INSTALL_CAPABILITY_ID));
+        assert!(ids.contains(&SKILL_REMOVE_CAPABILITY_ID));
 
-        let registry = builtin_first_party_registry().expect("composed handlers build");
+        let registry = builtin_first_party_registry().expect("built-in handlers build");
         for id in [
-            skill_management_tools::SKILL_LIST_CAPABILITY_ID,
-            skill_management_tools::SKILL_INSTALL_CAPABILITY_ID,
-            skill_management_tools::SKILL_REMOVE_CAPABILITY_ID,
+            SKILL_LIST_CAPABILITY_ID,
+            SKILL_INSTALL_CAPABILITY_ID,
+            SKILL_REMOVE_CAPABILITY_ID,
         ] {
             assert!(registry.contains_handler(&ironclaw_host_api::CapabilityId::new(id).unwrap()));
         }

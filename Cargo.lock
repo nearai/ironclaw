@@ -4455,6 +4455,7 @@ dependencies = [
  "ironclaw_safety",
  "ironclaw_scripts",
  "ironclaw_secrets",
+ "ironclaw_skills",
  "ironclaw_trust",
  "ironclaw_turns",
  "ironclaw_wasm",
@@ -5036,8 +5037,11 @@ dependencies = [
 name = "ironclaw_skills"
 version = "0.3.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "futures",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
  "regex",
  "reqwest",
  "serde",
