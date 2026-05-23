@@ -1011,6 +1011,7 @@ fn production_wiring_validation_rejects_unverified_runtime_http_egress() {
         HostHttpEgressService::new_with_request_policy_for_tests(
             RecordingNetworkHttpEgress::new(),
             InMemorySecretStore::new(),
+            Arc::new(NoExposureGuard::new()),
         ),
     ));
 

@@ -1064,9 +1064,16 @@ where
                 None,
             ));
         };
+        let mut runtime_http_egress = crate::HostHttpEgressService::new(
+            network,
+            SharedSecretStore(secret_store),
+            Arc::clone(&self.no_exposure_guard),
+        );
+        if let Some(audit_sink) = &self.audit_sink {
+            runtime_http_egress = runtime_http_egress.with_audit_sink_dyn(Arc::clone(audit_sink));
+        }
         let runtime_http_egress = Arc::new(
-            crate::HostHttpEgressService::new(network, SharedSecretStore(secret_store))
-                .with_no_exposure_guard(Arc::clone(&self.no_exposure_guard))
+            runtime_http_egress
                 .with_network_policy_store(Arc::clone(&self.network_policy_store))
                 .with_secret_injection_store(Arc::clone(&self.secret_injection_store)),
         );
@@ -2502,10 +2509,11 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use ironclaw_authorization::GrantAuthorizer;
+    use ironclaw_events::InMemoryAuditSink;
     use ironclaw_extensions::ExtensionRegistry;
     use ironclaw_filesystem::LocalFilesystem;
     use ironclaw_host_api::{
-        CapabilityId, InvocationId, NetworkMethod, NetworkPolicy, NetworkScheme,
+        AuditStage, CapabilityId, InvocationId, NetworkMethod, NetworkPolicy, NetworkScheme,
         NetworkTargetPattern, ResourceScope, RuntimeCredentialInjection, RuntimeCredentialSource,
         RuntimeCredentialTarget, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeKind,
         SecretHandle, TenantId, UserId,
@@ -2603,7 +2611,9 @@ mod tests {
     fn host_http_egress_helper_uses_configured_no_exposure_guard() {
         let network = RecordingNetwork::ok();
         let recorded_requests = Arc::clone(&network.requests);
+        let audit = Arc::new(InMemoryAuditSink::new());
         let services = test_services()
+            .with_audit_sink(Arc::clone(&audit))
             .with_secret_store(Arc::new(InMemorySecretStore::new()))
             .with_no_exposure_guard(Arc::new(sentinel_guard()))
             .try_with_host_http_egress(network)
@@ -2618,7 +2628,7 @@ mod tests {
         let error = egress
             .execute(RuntimeHttpEgressRequest {
                 url: "https://api.example.test/v1/SENTINEL-12345".to_string(),
-                ..request_without_credentials(scope, capability_id)
+                ..request_without_credentials(scope, capability_id.clone())
             })
             .expect_err("configured no-exposure guard should block sentinel URL");
 
@@ -2631,6 +2641,23 @@ mod tests {
             recorded_requests.lock().unwrap().is_empty(),
             "request must be blocked before network dispatch"
         );
+        let records = audit.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].stage, AuditStage::Denied);
+        assert_eq!(records[0].action.kind, "runtime_http_egress");
+        assert_eq!(
+            records[0].action.target.as_deref(),
+            Some(capability_id.as_str())
+        );
+        assert_eq!(
+            records[0]
+                .result
+                .as_ref()
+                .and_then(|result| result.status.as_deref()),
+            Some("no_exposure_guard_blocked")
+        );
+        let serialized = serde_json::to_string(&records[0]).unwrap();
+        assert!(!serialized.contains("SENTINEL-12345"));
     }
 
     fn test_services() -> HostRuntimeServices<

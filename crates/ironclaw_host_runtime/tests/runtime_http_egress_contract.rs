@@ -9,7 +9,7 @@ use ironclaw_host_api::{
     RuntimeCredentialTarget, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
     RuntimeKind, SecretHandle, TenantId, TrustClass, UserId,
 };
-use ironclaw_host_runtime::{BuiltinObligationServices, HostHttpEgressService};
+use ironclaw_host_runtime::{BuiltinObligationServices, HostHttpEgressService, NoExposureGuard};
 use ironclaw_mcp::{
     McpClient, McpClientRequest, McpHostHttpClient, McpHostHttpEgressPlan, McpHostHttpRequest,
     McpRuntimeHttpAdapter, StaticMcpHostHttpEgressPlanner,
@@ -655,7 +655,7 @@ fn host_http_egress_rejects_header_injection_prefix_control_chars() {
         SecretMaterial::from("sk-test-secret"),
     ))
     .unwrap();
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(network, secrets);
+    let service = host_http_egress_with_request_policy_for_tests(network, secrets);
 
     let error = service
         .execute(RuntimeHttpEgressRequest {
@@ -706,7 +706,7 @@ fn host_http_egress_injects_leased_credentials_and_redacts_errors() {
         SecretMaterial::from("sk-test-secret"),
     ))
     .unwrap();
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(network, secrets);
+    let service = host_http_egress_with_request_policy_for_tests(network, secrets);
 
     let error = service
         .execute(RuntimeHttpEgressRequest {
@@ -763,10 +763,8 @@ fn host_http_egress_requires_available_required_credentials_before_network() {
         },
     });
     let network_recorder = network.requests.clone();
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(
-        network,
-        InMemorySecretStore::new(),
-    );
+    let service =
+        host_http_egress_with_request_policy_for_tests(network, InMemorySecretStore::new());
 
     let error = service
         .execute(RuntimeHttpEgressRequest {
@@ -812,10 +810,8 @@ fn host_http_egress_blocks_redactable_request_body_before_network() {
         },
     });
     let network_recorder = network.requests.clone();
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(
-        network,
-        InMemorySecretStore::new(),
-    );
+    let service =
+        host_http_egress_with_request_policy_for_tests(network, InMemorySecretStore::new());
 
     let error = service
         .execute(RuntimeHttpEgressRequest {
@@ -854,10 +850,8 @@ fn host_http_egress_blocks_secret_like_header_names_before_network() {
         },
     });
     let network_recorder = network.requests.clone();
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(
-        network,
-        InMemorySecretStore::new(),
-    );
+    let service =
+        host_http_egress_with_request_policy_for_tests(network, InMemorySecretStore::new());
 
     let error = service
         .execute(RuntimeHttpEgressRequest {
@@ -903,7 +897,7 @@ fn host_http_egress_injects_and_redacts_url_encoded_query_credentials() {
         SecretMaterial::from("secret with/slash+plus?"),
     ))
     .unwrap();
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(network, secrets);
+    let service = host_http_egress_with_request_policy_for_tests(network, secrets);
 
     let error = service
         .execute(RuntimeHttpEgressRequest {
@@ -953,10 +947,8 @@ fn host_http_egress_forwards_timeout_to_network() {
         },
     });
     let network_recorder = network.requests.clone();
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(
-        network,
-        InMemorySecretStore::new(),
-    );
+    let service =
+        host_http_egress_with_request_policy_for_tests(network, InMemorySecretStore::new());
 
     service
         .execute(RuntimeHttpEgressRequest {
@@ -992,10 +984,8 @@ fn host_http_egress_preserves_request_and_response_byte_accounting() {
         },
     });
     let network_recorder = network.requests.clone();
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(
-        network,
-        InMemorySecretStore::new(),
-    );
+    let service =
+        host_http_egress_with_request_policy_for_tests(network, InMemorySecretStore::new());
 
     let response = service
         .execute(RuntimeHttpEgressRequest {
@@ -1034,7 +1024,11 @@ fn host_http_egress_without_policy_store_fails_closed_before_transport() {
         },
     });
     let network_recorder = network.requests.clone();
-    let service = HostHttpEgressService::new(network, InMemorySecretStore::new());
+    let service = HostHttpEgressService::new(
+        network,
+        InMemorySecretStore::new(),
+        Arc::new(NoExposureGuard::new()),
+    );
 
     let error = service
         .execute(RuntimeHttpEgressRequest {
@@ -1505,7 +1499,7 @@ fn host_http_egress_redacts_injected_credentials_from_runtime_visible_response()
         SecretMaterial::from("sk-test-secret"),
     ))
     .unwrap();
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(network, secrets);
+    let service = host_http_egress_with_request_policy_for_tests(network, secrets);
 
     let response = service
         .execute(RuntimeHttpEgressRequest {
@@ -1563,7 +1557,7 @@ fn host_http_egress_redacts_lowercase_percent_encoded_secret_echoes() {
         SecretMaterial::from("secret with/slash+plus?"),
     ))
     .unwrap();
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(network, secrets);
+    let service = host_http_egress_with_request_policy_for_tests(network, secrets);
 
     let response = service
         .execute(RuntimeHttpEgressRequest {
@@ -1627,10 +1621,8 @@ fn host_http_egress_strips_all_sensitive_response_headers() {
             resolved_ip: None,
         },
     });
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(
-        network,
-        InMemorySecretStore::new(),
-    );
+    let service =
+        host_http_egress_with_request_policy_for_tests(network, InMemorySecretStore::new());
 
     let response = service
         .execute(RuntimeHttpEgressRequest {
@@ -1667,10 +1659,8 @@ fn host_http_egress_blocks_credential_shaped_response_body() {
             resolved_ip: None,
         },
     });
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(
-        network,
-        InMemorySecretStore::new(),
-    );
+    let service =
+        host_http_egress_with_request_policy_for_tests(network, InMemorySecretStore::new());
 
     let error = service
         .execute(RuntimeHttpEgressRequest {
@@ -1710,10 +1700,8 @@ fn host_http_egress_blocks_credential_shaped_runtime_request_before_network() {
         },
     });
     let network_recorder = network.requests.clone();
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(
-        network,
-        InMemorySecretStore::new(),
-    );
+    let service =
+        host_http_egress_with_request_policy_for_tests(network, InMemorySecretStore::new());
 
     let error = service
         .execute(RuntimeHttpEgressRequest {
@@ -1752,10 +1740,8 @@ fn host_http_egress_blocks_runtime_supplied_sensitive_headers_before_network() {
         },
     });
     let network_recorder = network.requests.clone();
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(
-        network,
-        InMemorySecretStore::new(),
-    );
+    let service =
+        host_http_egress_with_request_policy_for_tests(network, InMemorySecretStore::new());
 
     let error = service
         .execute(RuntimeHttpEgressRequest {
@@ -1797,10 +1783,8 @@ fn host_http_egress_blocks_runtime_supplied_credential_query_before_network() {
         },
     });
     let network_recorder = network.requests.clone();
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(
-        network,
-        InMemorySecretStore::new(),
-    );
+    let service =
+        host_http_egress_with_request_policy_for_tests(network, InMemorySecretStore::new());
 
     let error = service
         .execute(RuntimeHttpEgressRequest {
@@ -1839,10 +1823,8 @@ fn host_http_egress_blocks_percent_encoded_credential_values_before_network() {
         },
     });
     let network_recorder = network.requests.clone();
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(
-        network,
-        InMemorySecretStore::new(),
-    );
+    let service =
+        host_http_egress_with_request_policy_for_tests(network, InMemorySecretStore::new());
 
     let error = service
         .execute(RuntimeHttpEgressRequest {
@@ -1881,10 +1863,8 @@ fn host_http_egress_blocks_runtime_supplied_auth_like_headers_before_network() {
         },
     });
     let network_recorder = network.requests.clone();
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(
-        network,
-        InMemorySecretStore::new(),
-    );
+    let service =
+        host_http_egress_with_request_policy_for_tests(network, InMemorySecretStore::new());
 
     let error = service
         .execute(RuntimeHttpEgressRequest {
@@ -1936,7 +1916,7 @@ fn host_http_egress_runs_async_secret_store_futures_with_tokio_context() {
             SecretMaterial::from("sk-test-secret"),
         ))
         .unwrap();
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(network, secrets);
+    let service = host_http_egress_with_request_policy_for_tests(network, secrets);
 
     let response = service
         .execute(RuntimeHttpEgressRequest {
@@ -1984,10 +1964,8 @@ fn host_http_egress_maps_network_errors_to_stable_runtime_reasons() {
         request_bytes: 12,
         response_bytes: 0,
     });
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(
-        network,
-        InMemorySecretStore::new(),
-    );
+    let service =
+        host_http_egress_with_request_policy_for_tests(network, InMemorySecretStore::new());
 
     let error = service
         .execute(RuntimeHttpEgressRequest {
@@ -2230,6 +2208,17 @@ fn test_obligation_services() -> BuiltinObligationServices {
         Arc::new(InMemoryAuditSink::new()),
         Arc::new(InMemorySecretStore::new()),
         Arc::new(InMemoryResourceGovernor::new()),
+    )
+}
+
+fn host_http_egress_with_request_policy_for_tests<N, S>(
+    network: N,
+    secrets: S,
+) -> HostHttpEgressService<N, S> {
+    HostHttpEgressService::new_with_request_policy_for_tests(
+        network,
+        secrets,
+        Arc::new(NoExposureGuard::new()),
     )
 }
 

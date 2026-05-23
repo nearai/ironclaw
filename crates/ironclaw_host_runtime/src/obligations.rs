@@ -367,6 +367,7 @@ pub struct BuiltinObligationServices {
     network_policies: Arc<NetworkObligationPolicyStore>,
     secret_store: Arc<dyn SecretStore>,
     secret_injections: Arc<RuntimeSecretInjectionStore>,
+    no_exposure_guard: Arc<NoExposureGuard>,
     resource_governor: Arc<dyn ResourceGovernor>,
 }
 
@@ -381,6 +382,7 @@ impl BuiltinObligationServices {
             Arc::new(NetworkObligationPolicyStore::new()),
             secret_store,
             Arc::new(RuntimeSecretInjectionStore::new()),
+            Arc::new(NoExposureGuard::new()),
             resource_governor,
         )
     }
@@ -390,6 +392,7 @@ impl BuiltinObligationServices {
         network_policies: Arc<NetworkObligationPolicyStore>,
         secret_store: Arc<dyn SecretStore>,
         secret_injections: Arc<RuntimeSecretInjectionStore>,
+        no_exposure_guard: Arc<NoExposureGuard>,
         resource_governor: Arc<dyn ResourceGovernor>,
     ) -> Self {
         Self {
@@ -397,6 +400,7 @@ impl BuiltinObligationServices {
             network_policies,
             secret_store,
             secret_injections,
+            no_exposure_guard,
             resource_governor,
         }
     }
@@ -413,6 +417,11 @@ impl BuiltinObligationServices {
         self.resource_governor.clone()
     }
 
+    pub fn with_no_exposure_guard(mut self, guard: Arc<NoExposureGuard>) -> Self {
+        self.no_exposure_guard = guard;
+        self
+    }
+
     /// Builds host HTTP egress over this service graph's private handoff stores.
     /// Callers can supply concrete network transport without receiving mutable
     /// access to staged policy or secret material.
@@ -420,9 +429,14 @@ impl BuiltinObligationServices {
     where
         N: NetworkHttpEgress + 'static,
     {
-        crate::HostHttpEgressService::new(network, SharedSecretStore(self.secret_store.clone()))
-            .with_network_policy_store(self.network_policies.clone())
-            .with_secret_injection_store(self.secret_injections.clone())
+        crate::HostHttpEgressService::new(
+            network,
+            SharedSecretStore(self.secret_store.clone()),
+            self.no_exposure_guard.clone(),
+        )
+        .with_audit_sink_dyn(self.audit_sink.clone())
+        .with_network_policy_store(self.network_policies.clone())
+        .with_secret_injection_store(self.secret_injections.clone())
     }
 
     pub fn process_obligation_lifecycle_store<S>(
@@ -458,6 +472,7 @@ impl BuiltinObligationServices {
             .with_network_policy_store(self.network_policies.clone())
             .with_secret_store_dyn(self.secret_store.clone())
             .with_secret_injection_store(self.secret_injections.clone())
+            .with_no_exposure_guard(self.no_exposure_guard.clone())
             .with_resource_governor_dyn(self.resource_governor.clone())
     }
 }
@@ -1973,6 +1988,7 @@ mod tests {
             network_policies.clone(),
             secret_store.clone(),
             secret_injections.clone(),
+            Arc::new(NoExposureGuard::new()),
             governor.clone(),
         );
         let handler = services.obligation_handler();

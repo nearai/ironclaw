@@ -201,6 +201,7 @@ fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
     let obligations =
         std::fs::read_to_string(root.join("crates/ironclaw_host_runtime/src/obligations.rs"))
             .expect("host runtime obligations.rs must be readable");
+    let host_runtime_src = root.join("crates/ironclaw_host_runtime/src");
     let host_runtime_contract =
         std::fs::read_to_string(root.join("docs/reborn/contracts/host-runtime.md"))
             .expect("host runtime contract must be readable");
@@ -308,12 +309,15 @@ fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
         "try_with_host_http_egress",
         "low-level host-runtime/test harness escape hatches",
         "upper Reborn crates must not use them",
+        "customer-supplied redaction patterns",
     ] {
         assert!(
             host_runtime_contract.contains(required_phrase),
             "host-runtime contract should document `{required_phrase}` so raw handoff store seams are not mistaken for upper Reborn APIs"
         );
     }
+
+    assert_no_direct_leak_detector_usage_outside_guard(&host_runtime_src);
 
     let forbidden_script_lane_surface = [
         "RuntimeAdapter",
@@ -1935,6 +1939,47 @@ fn collect_forbidden_runtime_network_uses(
                         rule.reason
                     ));
                 }
+            }
+        }
+    }
+}
+
+fn assert_no_direct_leak_detector_usage_outside_guard(host_runtime_src: &std::path::Path) {
+    let mut violations = Vec::new();
+    collect_direct_leak_detector_uses(host_runtime_src, host_runtime_src, &mut violations);
+    assert!(
+        violations.is_empty(),
+        "ironclaw_host_runtime code must route leak detection through no_exposure_guard.rs, not direct LeakDetector usage:\n{}",
+        violations.join("\n")
+    );
+}
+
+fn collect_direct_leak_detector_uses(
+    dir: &std::path::Path,
+    root: &std::path::Path,
+    violations: &mut Vec<String>,
+) {
+    let entries = std::fs::read_dir(dir)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", dir.display()));
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|error| panic!("failed to read dir entry: {error}"));
+        let path = entry.path();
+        if path.is_dir() {
+            collect_direct_leak_detector_uses(&path, root, violations);
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+        if path.file_name().and_then(|name| name.to_str()) == Some("no_exposure_guard.rs") {
+            continue;
+        }
+        let contents = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        for (line_number, line) in contents.lines().enumerate() {
+            if line.contains("LeakDetector") {
+                let relative = path.strip_prefix(root).unwrap_or(&path);
+                violations.push(format!("{}:{}", relative.display(), line_number + 1));
             }
         }
     }

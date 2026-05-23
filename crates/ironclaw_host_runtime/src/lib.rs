@@ -26,9 +26,12 @@
 
 use crate::obligations::{NetworkObligationPolicyStore, RuntimeSecretInjectionStore};
 use async_trait::async_trait;
+use ironclaw_events::AuditSink;
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityId, CorrelationId, ExecutionContext, ExtensionId, NetworkPolicy,
-    ProcessId, ResourceEstimate, ResourceScope, ResourceUsage, RuntimeKind, SecretHandle,
+    ActionResultSummary, ActionSummary, ApprovalRequestId, AuditEnvelope, AuditEventId, AuditStage,
+    CapabilityId, CorrelationId, DecisionSummary, DenyReason, EffectKind, ExecutionContext,
+    ExtensionId, NetworkPolicy, ProcessId, ResourceEstimate, ResourceScope, ResourceUsage,
+    RuntimeKind, SecretHandle,
 };
 use ironclaw_host_api::{
     RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
@@ -730,11 +733,12 @@ enum NetworkPolicySource {
     RequestPolicyFallback,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HostHttpEgressService<N, S> {
     network: N,
     secrets: S,
     no_exposure_guard: Arc<NoExposureGuard>,
+    audit_sink: Option<Arc<dyn AuditSink>>,
     secret_injections: Option<Arc<RuntimeSecretInjectionStore>>,
     network_policy_store: Option<Arc<NetworkObligationPolicyStore>>,
     network_policy_source: NetworkPolicySource,
@@ -747,11 +751,12 @@ impl<N, S> HostHttpEgressService<N, S> {
     /// before executing network requests.
     /// Without that store, egress fails before transport rather than trusting a
     /// caller-supplied policy.
-    pub fn new(network: N, secrets: S) -> Self {
+    pub fn new(network: N, secrets: S, no_exposure_guard: Arc<NoExposureGuard>) -> Self {
         Self {
             network,
             secrets,
-            no_exposure_guard: Arc::new(NoExposureGuard::new()),
+            no_exposure_guard,
+            audit_sink: None,
             secret_injections: None,
             network_policy_store: None,
             network_policy_source: NetworkPolicySource::StagedObligation,
@@ -764,19 +769,33 @@ impl<N, S> HostHttpEgressService<N, S> {
     /// runtime egress must consume staged `ApplyNetworkPolicy` handoffs from
     /// the staged network-policy store instead of trusting runtime/caller
     /// request policy fields.
-    pub fn new_with_request_policy_for_tests(network: N, secrets: S) -> Self {
+    pub fn new_with_request_policy_for_tests(
+        network: N,
+        secrets: S,
+        no_exposure_guard: Arc<NoExposureGuard>,
+    ) -> Self {
         Self {
             network,
             secrets,
-            no_exposure_guard: Arc::new(NoExposureGuard::new()),
+            no_exposure_guard,
+            audit_sink: None,
             secret_injections: None,
             network_policy_store: None,
             network_policy_source: NetworkPolicySource::RequestPolicyFallback,
         }
     }
 
-    pub fn with_no_exposure_guard(mut self, guard: Arc<NoExposureGuard>) -> Self {
-        self.no_exposure_guard = guard;
+    pub fn with_audit_sink<T>(mut self, sink: Arc<T>) -> Self
+    where
+        T: AuditSink + 'static,
+    {
+        let sink: Arc<dyn AuditSink> = sink;
+        self.audit_sink = Some(sink);
+        self
+    }
+
+    pub fn with_audit_sink_dyn(mut self, sink: Arc<dyn AuditSink>) -> Self {
+        self.audit_sink = Some(sink);
         self
     }
 
@@ -850,6 +869,19 @@ impl<N, S> HostHttpEgressService<N, S> {
             store.discard_for_capability(&request.scope, &request.capability_id);
         }
     }
+
+    fn record_no_exposure_block(&self, request: &RuntimeHttpEgressRequest) {
+        tracing::debug!(
+            boundary = %ExposureBoundary::PublicApi,
+            capability_id = %request.capability_id,
+            runtime = ?request.runtime,
+            "no exposure guard blocked runtime HTTP egress"
+        );
+
+        if let Some(sink) = &self.audit_sink {
+            emit_audit_best_effort(Arc::clone(sink), no_exposure_blocked_audit_record(request));
+        }
+    }
 }
 
 impl<N, S> RuntimeHttpEgress for HostHttpEgressService<N, S>
@@ -864,6 +896,9 @@ where
         let network_policy = self.network_policy_for_request(&mut request)?;
         if let Err(error) = validate_runtime_request(&request, self.no_exposure_guard()) {
             self.discard_staged_policy_for_request(&request);
+            if is_no_exposure_block_error(&error) {
+                self.record_no_exposure_block(&request);
+            }
             return Err(error);
         }
 
@@ -1301,6 +1336,69 @@ fn runtime_request_leak_error() -> RuntimeHttpEgressError {
         reason: "credential_leak_blocked".to_string(),
         request_bytes: 0,
         response_bytes: 0,
+    }
+}
+
+fn is_no_exposure_block_error(error: &RuntimeHttpEgressError) -> bool {
+    matches!(
+        error,
+        RuntimeHttpEgressError::Request { reason, .. } if reason == "credential_leak_blocked"
+    )
+}
+
+fn no_exposure_blocked_audit_record(request: &RuntimeHttpEgressRequest) -> AuditEnvelope {
+    AuditEnvelope {
+        event_id: AuditEventId::new(),
+        correlation_id: CorrelationId::new(),
+        stage: AuditStage::Denied,
+        timestamp: chrono::Utc::now(),
+        tenant_id: request.scope.tenant_id.clone(),
+        user_id: request.scope.user_id.clone(),
+        agent_id: request.scope.agent_id.clone(),
+        project_id: request.scope.project_id.clone(),
+        mission_id: request.scope.mission_id.clone(),
+        thread_id: request.scope.thread_id.clone(),
+        invocation_id: request.scope.invocation_id,
+        process_id: None,
+        approval_request_id: None,
+        extension_id: None,
+        action: ActionSummary {
+            kind: "runtime_http_egress".to_string(),
+            target: Some(request.capability_id.as_str().to_string()),
+            effects: vec![EffectKind::Network],
+        },
+        decision: DecisionSummary {
+            kind: "deny".to_string(),
+            reason: Some(DenyReason::PolicyDenied),
+            actor: None,
+        },
+        result: Some(ActionResultSummary {
+            success: false,
+            status: Some("no_exposure_guard_blocked".to_string()),
+            output_bytes: None,
+        }),
+    }
+}
+
+fn emit_audit_best_effort(sink: Arc<dyn AuditSink>, record: AuditEnvelope) {
+    let joined = std::thread::scope(|scope| {
+        scope
+            .spawn(move || {
+                let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                else {
+                    tracing::debug!("no exposure guard audit sink runtime unavailable");
+                    return;
+                };
+                if let Err(error) = runtime.block_on(sink.emit_audit(record)) {
+                    tracing::debug!(error = %error, "no exposure guard audit sink failed");
+                }
+            })
+            .join()
+    });
+    if joined.is_err() {
+        tracing::debug!("no exposure guard audit sink worker panicked");
     }
 }
 
