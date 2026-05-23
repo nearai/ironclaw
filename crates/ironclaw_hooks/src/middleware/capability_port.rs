@@ -42,6 +42,25 @@ use crate::middleware::resolver::{
 };
 use crate::points::{BeforeCapabilityHookContext, SanitizedArguments};
 
+/// Maximum byte length of a capability input that the middleware will
+/// hand to predicate evaluation. When [`CapabilityInputResolver::size_hint`]
+/// reports a value larger than this, the middleware fails closed (treats
+/// the input as unresolved) without calling
+/// [`CapabilityInputResolver::resolve`]. A post-materialization check
+/// against the serialized JSON length acts as a defense-in-depth backstop
+/// when the size hint is unavailable.
+///
+/// This cap is deliberately conservative — its purpose is to prevent
+/// accidental fatality (a multi-gigabyte file blob fed to a predicate
+/// that scans for a numeric field) rather than to express a tight
+/// production limit. Production deployments that need to evaluate
+/// predicates against larger inputs should raise the cap once the
+/// streaming-extraction story exists; today the predicate evaluator only
+/// reads small numeric fields and 1 MiB is well above any realistic
+/// `NumericSum` payload while being orders of magnitude below the cost
+/// that would matter to a host.
+pub const MAX_PREDICATE_INPUT_BYTES: u64 = 1024 * 1024;
+
 /// Wraps an inner `LoopCapabilityPort`, fires `before_capability` hooks ahead
 /// of each invocation, and translates the dispatcher's composed decision into
 /// the `CapabilityOutcome` vocabulary the loop driver already speaks.
@@ -118,9 +137,19 @@ impl HookedLoopCapabilityPort {
         invocation: &CapabilityInvocation,
         provider: Option<ironclaw_host_api::ExtensionId>,
     ) -> BeforeCapabilityHookContext {
-        let arguments = match self.resolver.resolve(invocation).await {
-            Some(value) => SanitizedArguments::from_json(value),
-            None => SanitizedArguments::unresolved(),
+        // Lazy input resolution probe (PR #3573 follow-up): when no
+        // active hook would actually read the capability arguments, we
+        // skip both the size hint and the materializing `resolve` call.
+        // Eager resolution was a HIGH-priority cost finding because file/
+        // blob-shaped inputs can be expensive — or fatal — to materialize
+        // even when no predicate needs them.
+        let arguments = if self
+            .dispatcher
+            .before_capability_needs_input(provider.as_ref())
+        {
+            self.resolve_arguments(invocation).await
+        } else {
+            SanitizedArguments::unresolved()
         };
         BeforeCapabilityHookContext::new(
             self.tenant_id.clone(),
@@ -129,6 +158,57 @@ impl HookedLoopCapabilityPort {
             arguments,
             provider,
         )
+    }
+
+    /// Resolve capability arguments with a streaming size pre-check.
+    ///
+    /// Order of operations:
+    ///
+    /// 1. Ask the resolver for a [`CapabilityInputResolver::size_hint`].
+    ///    If the hint is `Some(n) > MAX_PREDICATE_INPUT_BYTES`, return
+    ///    `Unresolved` immediately — predicates that need input fail
+    ///    closed via the evaluator's existing unresolved-path policy.
+    /// 2. Call [`CapabilityInputResolver::resolve`]. If it returns
+    ///    `None`, return `Unresolved`.
+    /// 3. Re-check the serialized JSON length against
+    ///    `MAX_PREDICATE_INPUT_BYTES`. This is a defense-in-depth
+    ///    backstop for resolvers whose `size_hint` returns `None`
+    ///    (default-impl, or sources that don't know the size up
+    ///    front).
+    async fn resolve_arguments(&self, invocation: &CapabilityInvocation) -> SanitizedArguments {
+        if let Some(size) = self.resolver.size_hint(invocation).await
+            && size > MAX_PREDICATE_INPUT_BYTES
+        {
+            tracing::debug!(
+                capability = %invocation.capability_id,
+                size_bytes = size,
+                cap_bytes = MAX_PREDICATE_INPUT_BYTES,
+                "capability input exceeds MAX_PREDICATE_INPUT_BYTES; failing closed before resolve"
+            );
+            return SanitizedArguments::unresolved();
+        }
+        let Some(value) = self.resolver.resolve(invocation).await else {
+            return SanitizedArguments::unresolved();
+        };
+        // Defense-in-depth: even when the resolver's `size_hint`
+        // returned `None`, refuse to expose payloads larger than the cap
+        // to predicate evaluation. `serde_json::to_vec` is the cheapest
+        // stable way to measure the materialized byte cost.
+        match serde_json::to_vec(&value) {
+            Ok(bytes) if (bytes.len() as u64) > MAX_PREDICATE_INPUT_BYTES => {
+                tracing::debug!(
+                    capability = %invocation.capability_id,
+                    size_bytes = bytes.len(),
+                    cap_bytes = MAX_PREDICATE_INPUT_BYTES,
+                    "materialized capability input exceeds MAX_PREDICATE_INPUT_BYTES; failing closed"
+                );
+                SanitizedArguments::unresolved()
+            }
+            // Serialization failure means the resolver produced a value
+            // we can't measure or surface safely; fail closed.
+            Err(_) => SanitizedArguments::unresolved(),
+            Ok(_) => SanitizedArguments::from_json(value),
+        }
     }
 
     async fn run_dispatch(
@@ -908,5 +988,307 @@ mod tests {
 
         let queried = resolver.queried.lock().expect("queries").clone();
         assert_eq!(queried, vec!["cap.x".to_string()]);
+    }
+
+    // ── Lazy capability-input resolution (PR #3573 HIGH follow-up) ──────────
+    //
+    // The middleware must not pay the cost of resolving capability inputs
+    // when no active hook would read them. For inputs that are file blobs
+    // or other expensive sources, eager resolution can be wasteful or
+    // fatal. These tests pin the lazy-probe contract end-to-end via
+    // `invoke_capability`, not just through the helper, so that future
+    // changes to the dispatch path can't reintroduce eager resolution
+    // without also breaking a test.
+
+    use crate::evaluator::PredicateEvaluator;
+    use crate::installed_hook::PredicateBackedBeforeCapabilityHook;
+    use crate::predicate::{
+        CapabilityPredicate, HookPredicateSpec, OnExceededAction, ValueOrRateBound,
+    };
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering as AtomicOrdering};
+
+    /// Resolver that records how many times `resolve` and `size_hint` were
+    /// called and returns a configurable value/size. Used to prove the
+    /// middleware skips work when no predicate needs input.
+    struct ProbingResolver {
+        resolve_calls: AtomicU32,
+        size_hint_calls: AtomicU32,
+        size: Option<u64>,
+        value: serde_json::Value,
+    }
+
+    impl ProbingResolver {
+        fn new(value: serde_json::Value) -> Self {
+            Self {
+                resolve_calls: AtomicU32::new(0),
+                size_hint_calls: AtomicU32::new(0),
+                size: None,
+                value,
+            }
+        }
+
+        fn with_size(mut self, size: u64) -> Self {
+            self.size = Some(size);
+            self
+        }
+
+        fn resolve_calls(&self) -> u32 {
+            self.resolve_calls.load(AtomicOrdering::SeqCst)
+        }
+
+        fn size_hint_calls(&self) -> u32 {
+            self.size_hint_calls.load(AtomicOrdering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl CapabilityInputResolver for ProbingResolver {
+        async fn resolve(&self, _invocation: &CapabilityInvocation) -> Option<serde_json::Value> {
+            self.resolve_calls.fetch_add(1, AtomicOrdering::SeqCst);
+            Some(self.value.clone())
+        }
+
+        async fn size_hint(&self, _invocation: &CapabilityInvocation) -> Option<u64> {
+            self.size_hint_calls.fetch_add(1, AtomicOrdering::SeqCst);
+            self.size
+        }
+    }
+
+    fn install_predicate_hook(
+        dispatcher: &mut HookDispatcher,
+        local: &str,
+        spec: HookPredicateSpec,
+        evaluator: Arc<PredicateEvaluator>,
+    ) -> HookId {
+        let hook_id = HookId::derive(
+            &ExtensionId("ext".to_string()),
+            "1.0",
+            &HookLocalId(local.to_string()),
+            HookVersion::ONE,
+        );
+        let hook = PredicateBackedBeforeCapabilityHook::new(hook_id, spec, evaluator);
+        dispatcher
+            .install_installed_before_capability(
+                hook_id,
+                HookPhase::Policy,
+                ironclaw_host_api::ExtensionId::new("ext-test").expect("valid"),
+                HookBindingScope::Global,
+                Box::new(hook),
+            )
+            .expect("install ok");
+        hook_id
+    }
+
+    /// Pin lazy-resolution: when every active predicate-backed hook gates
+    /// only on invocation count (no input access), the dispatcher must
+    /// not consult the resolver at all. Instrument the resolver and
+    /// drive an `invoke_capability` through the middleware to assert
+    /// zero reads.
+    #[tokio::test]
+    async fn dispatch_skips_input_resolution_when_no_predicate_needs_input() {
+        let inner = Arc::new(AlwaysCompletedPort::new());
+        let mut dispatcher = HookDispatcher::new(HookRegistry::new());
+        let evaluator = Arc::new(PredicateEvaluator::new());
+        // InvocationCount: pure rate counter, never reads input.
+        let spec = HookPredicateSpec::RateOrValueCap {
+            when: CapabilityPredicate::Always,
+            bound: ValueOrRateBound::InvocationCount {
+                max: 100,
+                window: "1h".to_string(),
+            },
+            on_exceeded: OnExceededAction::Deny {
+                reason: "rate".to_string(),
+            },
+        };
+        install_predicate_hook(&mut dispatcher, "rate-only", spec, evaluator);
+
+        let resolver = Arc::new(ProbingResolver::new(serde_json::json!({"amount": 1})));
+        let wrapped = HookedLoopCapabilityPort::new(inner, Arc::new(dispatcher), tenant())
+            .with_resolver(Arc::clone(&resolver) as Arc<_>);
+
+        let _ = wrapped
+            .invoke_capability(invocation("cap.x"))
+            .await
+            .expect("ok");
+
+        assert_eq!(
+            resolver.resolve_calls(),
+            0,
+            "no active predicate needs the capability input — resolver must not be consulted"
+        );
+        assert_eq!(
+            resolver.size_hint_calls(),
+            0,
+            "size_hint must also be skipped when no hook needs input"
+        );
+    }
+
+    /// Pin the inverse: when a `NumericSum` predicate is active, the
+    /// resolver IS consulted (so the predicate can read the field). This
+    /// is the regression complement to the skip test — together they
+    /// pin the lazy-probe behavior in both directions.
+    #[tokio::test]
+    async fn dispatch_reads_input_when_numericsum_predicate_active() {
+        let inner = Arc::new(AlwaysCompletedPort::new());
+        let mut dispatcher = HookDispatcher::new(HookRegistry::new());
+        let evaluator = Arc::new(PredicateEvaluator::new());
+        let spec = HookPredicateSpec::RateOrValueCap {
+            when: CapabilityPredicate::Always,
+            bound: ValueOrRateBound::NumericSum {
+                max: "1000".to_string(),
+                field: "amount".to_string(),
+                window: "1h".to_string(),
+            },
+            on_exceeded: OnExceededAction::Deny {
+                reason: "value".to_string(),
+            },
+        };
+        install_predicate_hook(&mut dispatcher, "value-cap", spec, evaluator);
+
+        let resolver = Arc::new(ProbingResolver::new(serde_json::json!({"amount": 1})));
+        let wrapped = HookedLoopCapabilityPort::new(inner, Arc::new(dispatcher), tenant())
+            .with_resolver(Arc::clone(&resolver) as Arc<_>);
+
+        let _ = wrapped
+            .invoke_capability(invocation("cap.x"))
+            .await
+            .expect("ok");
+
+        assert_eq!(
+            resolver.resolve_calls(),
+            1,
+            "NumericSum predicate needs input; resolver must be consulted exactly once"
+        );
+    }
+
+    /// Pin the streaming size guard: when `size_hint` reports a value
+    /// above `MAX_PREDICATE_INPUT_BYTES`, the middleware must fail
+    /// closed without calling `resolve`. The predicate evaluator then
+    /// treats the input as unresolved and the dispatch denies per the
+    /// `on_exceeded` action — the inner port is never invoked.
+    #[tokio::test]
+    async fn dispatch_fails_closed_when_input_exceeds_max_bytes() {
+        let inner = Arc::new(AlwaysCompletedPort::new());
+        let mut dispatcher = HookDispatcher::new(HookRegistry::new());
+        let evaluator = Arc::new(PredicateEvaluator::new());
+        let spec = HookPredicateSpec::RateOrValueCap {
+            when: CapabilityPredicate::Always,
+            bound: ValueOrRateBound::NumericSum {
+                max: "1000".to_string(),
+                field: "amount".to_string(),
+                window: "1h".to_string(),
+            },
+            on_exceeded: OnExceededAction::Deny {
+                reason: "value".to_string(),
+            },
+        };
+        install_predicate_hook(&mut dispatcher, "value-cap-oversized", spec, evaluator);
+
+        // Size hint reports a value above the cap — resolve must be skipped.
+        let resolver = Arc::new(
+            ProbingResolver::new(serde_json::json!({"amount": 1}))
+                .with_size(MAX_PREDICATE_INPUT_BYTES + 1),
+        );
+        let wrapped = HookedLoopCapabilityPort::new(inner.clone(), Arc::new(dispatcher), tenant())
+            .with_resolver(Arc::clone(&resolver) as Arc<_>);
+
+        let outcome = wrapped
+            .invoke_capability(invocation("cap.x"))
+            .await
+            .expect("ok");
+
+        assert!(
+            matches!(outcome, CapabilityOutcome::Denied(_)),
+            "oversized input must fail closed to a Denied outcome (got {outcome:?})"
+        );
+        assert_eq!(
+            resolver.size_hint_calls(),
+            1,
+            "size_hint must be consulted exactly once"
+        );
+        assert_eq!(
+            resolver.resolve_calls(),
+            0,
+            "resolve must be skipped when size_hint exceeds the cap"
+        );
+        assert!(
+            inner.calls().is_empty(),
+            "inner port must not be invoked when the hook denies"
+        );
+    }
+
+    /// Pin the streaming order-of-operations: `size_hint` is consulted
+    /// **before** `resolve` for input-reading predicates. Without this
+    /// ordering, the middleware would materialize the value first and
+    /// only then notice it was too large — defeating the purpose of the
+    /// streaming pre-check.
+    #[tokio::test]
+    async fn dispatch_streams_size_check_before_full_materialization() {
+        // Resolver that records the order of its calls. If `resolve` is
+        // ever observed before `size_hint`, the test fails.
+        struct OrderingResolver {
+            sequence: AtomicU64,
+            size_hint_seq: AtomicU64,
+            resolve_seq: AtomicU64,
+            size: u64,
+        }
+        #[async_trait]
+        impl CapabilityInputResolver for OrderingResolver {
+            async fn resolve(
+                &self,
+                _invocation: &CapabilityInvocation,
+            ) -> Option<serde_json::Value> {
+                let s = self.sequence.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+                self.resolve_seq.store(s, AtomicOrdering::SeqCst);
+                Some(serde_json::json!({"amount": 1}))
+            }
+            async fn size_hint(&self, _invocation: &CapabilityInvocation) -> Option<u64> {
+                let s = self.sequence.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+                self.size_hint_seq.store(s, AtomicOrdering::SeqCst);
+                Some(self.size)
+            }
+        }
+
+        // Use a size just below the cap so resolve still runs after the
+        // pre-check — we want to assert *ordering*, not skip.
+        let resolver = Arc::new(OrderingResolver {
+            sequence: AtomicU64::new(0),
+            size_hint_seq: AtomicU64::new(0),
+            resolve_seq: AtomicU64::new(0),
+            size: MAX_PREDICATE_INPUT_BYTES - 1,
+        });
+
+        let inner = Arc::new(AlwaysCompletedPort::new());
+        let mut dispatcher = HookDispatcher::new(HookRegistry::new());
+        let evaluator = Arc::new(PredicateEvaluator::new());
+        let spec = HookPredicateSpec::RateOrValueCap {
+            when: CapabilityPredicate::Always,
+            bound: ValueOrRateBound::NumericSum {
+                max: "1000".to_string(),
+                field: "amount".to_string(),
+                window: "1h".to_string(),
+            },
+            on_exceeded: OnExceededAction::Deny {
+                reason: "value".to_string(),
+            },
+        };
+        install_predicate_hook(&mut dispatcher, "ordering", spec, evaluator);
+
+        let wrapped = HookedLoopCapabilityPort::new(inner, Arc::new(dispatcher), tenant())
+            .with_resolver(Arc::clone(&resolver) as Arc<_>);
+
+        let _ = wrapped
+            .invoke_capability(invocation("cap.x"))
+            .await
+            .expect("ok");
+
+        let size_hint_seq = resolver.size_hint_seq.load(AtomicOrdering::SeqCst);
+        let resolve_seq = resolver.resolve_seq.load(AtomicOrdering::SeqCst);
+        assert!(size_hint_seq > 0, "size_hint must have been called");
+        assert!(resolve_seq > 0, "resolve must have been called");
+        assert!(
+            size_hint_seq < resolve_seq,
+            "size_hint (seq {size_hint_seq}) must be consulted before resolve (seq {resolve_seq}) so oversized inputs never get materialized"
+        );
     }
 }

@@ -316,6 +316,17 @@ impl ObserverSink for RecordingObserverSink {
 #[async_trait]
 pub trait PrivilegedBeforeCapabilityHook: Send + Sync {
     async fn evaluate(&self, ctx: &BeforeCapabilityHookContext, sink: &mut dyn PrivilegedGateSink);
+
+    /// True when this hook reads
+    /// [`crate::points::SanitizedArguments`] on `ctx`. The middleware
+    /// uses this hint to skip eager input resolution when no active hook
+    /// would consult the input. The default is `true` (conservative): a
+    /// privileged hook with arbitrary Rust may inspect arguments without
+    /// the dispatcher being able to see it, so we only treat a hook as
+    /// input-free when it explicitly opts in by overriding this.
+    fn needs_input(&self) -> bool {
+        true
+    }
 }
 
 /// A `before_capability` hook supplied by an Installed source. The sink
@@ -323,6 +334,15 @@ pub trait PrivilegedBeforeCapabilityHook: Send + Sync {
 #[async_trait]
 pub trait RestrictedBeforeCapabilityHook: Send + Sync {
     async fn evaluate(&self, ctx: &BeforeCapabilityHookContext, sink: &mut dyn RestrictedGateSink);
+
+    /// True when this hook reads
+    /// [`crate::points::SanitizedArguments`] on `ctx`. See
+    /// [`PrivilegedBeforeCapabilityHook::needs_input`] for the contract;
+    /// declarative `Installed`-tier predicate-backed hooks override this
+    /// to delegate to their [`crate::predicate::HookPredicateSpec`].
+    fn needs_input(&self) -> bool {
+        true
+    }
 }
 
 /// A `before_prompt` mutator supplied by a Builtin or Trusted source.
