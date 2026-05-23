@@ -242,14 +242,14 @@ impl InMemorySecurityAuditSink {
     pub fn snapshot(&self) -> Vec<SecurityAuditEvent> {
         self.events
             .lock()
-            .expect("InMemorySecurityAuditSink mutex poisoned")
+            .expect("InMemorySecurityAuditSink mutex poisoned") // safety: test-only sink; poisoning means a test thread already panicked
             .clone()
     }
 
     pub fn len(&self) -> usize {
         self.events
             .lock()
-            .expect("InMemorySecurityAuditSink mutex poisoned")
+            .expect("InMemorySecurityAuditSink mutex poisoned") // safety: test-only sink; poisoning means a test thread already panicked
             .len()
     }
 
@@ -262,7 +262,7 @@ impl SecurityAuditSink for InMemorySecurityAuditSink {
     fn record(&self, event: SecurityAuditEvent) {
         self.events
             .lock()
-            .expect("InMemorySecurityAuditSink mutex poisoned")
+            .expect("InMemorySecurityAuditSink mutex poisoned") // safety: test-only sink; poisoning means a test thread already panicked
             .push(event);
     }
 }

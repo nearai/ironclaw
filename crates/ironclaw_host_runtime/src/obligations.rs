@@ -1736,7 +1736,7 @@ fn dispatch_output_bytes(output: &serde_json::Value) -> Result<u64, CapabilityOb
 /// Security-audit reason code emitted when [`redact_output`] rejects output
 /// because the leak detector matched. Stable grep target for SRE pattern
 /// matching across durable security-audit logs.
-pub(crate) const LEAK_REDACT_FAILED_CODE: &str = "leak_redact_failed";
+pub const LEAK_REDACT_FAILED_CODE: &str = "leak_redact_failed";
 
 fn redact_output(
     output: serde_json::Value,
