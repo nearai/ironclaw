@@ -22,6 +22,7 @@ use uuid::Uuid;
 
 use crate::context::{ActionRecord, JobContext};
 use crate::db::Database;
+use crate::tools::rate_limiter::RateLimitResult;
 use crate::tools::registry::ToolRegistry;
 use crate::tools::tool::{ToolError, ToolOutput};
 use crate::tools::{prepare_tool_params, redact_params};
@@ -124,6 +125,19 @@ impl ToolDispatcher {
             self.registry.get_resolved(tool_name).await.ok_or_else(|| {
                 ToolError::ExecutionFailed(format!("tool not found: {tool_name}"))
             })?;
+
+        // Per-tool rate limit, using the same registry limiter as the agent
+        // loop so a tool's declared rate_limit_config is honored on the
+        // gateway/CLI dispatch door too, not just agent-initiated calls.
+        if let Some(config) = tool.rate_limit_config()
+            && let RateLimitResult::Limited { retry_after, .. } = self
+                .registry
+                .rate_limiter()
+                .check_and_record(user_id, &resolved_name, &config)
+                .await
+        {
+            return Err(ToolError::RateLimited(Some(retry_after)));
+        }
 
         // 1. Normalize parameters (coerce types, fill defaults).
         let normalized_params = prepare_tool_params(tool.as_ref(), &params);
@@ -283,7 +297,7 @@ mod integration_tests {
     use crate::context::JobContext;
     use crate::db::Database;
     use crate::db::libsql::LibSqlBackend;
-    use crate::tools::tool::{Tool, ToolError, ToolOutput};
+    use crate::tools::tool::{Tool, ToolError, ToolOutput, ToolRateLimitConfig};
     use async_trait::async_trait;
     use ironclaw_safety::SafetyLayer;
     use std::time::Duration;
@@ -358,6 +372,36 @@ mod integration_tests {
         ) -> Result<ToolOutput, ToolError> {
             tokio::time::sleep(Duration::from_secs(60)).await;
             unreachable!("slow_stub should have been killed by its per-tool timeout")
+        }
+    }
+
+    /// Declares a 1-per-minute rate limit so the dispatcher's enforcement of
+    /// `rate_limit_config` can be exercised.
+    struct RateLimitedTool;
+
+    #[async_trait]
+    impl Tool for RateLimitedTool {
+        fn name(&self) -> &str {
+            "rate_limited_stub"
+        }
+        fn description(&self) -> &str {
+            "Test stub that declares a 1-per-minute rate limit."
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object" })
+        }
+        fn rate_limit_config(&self) -> Option<ToolRateLimitConfig> {
+            Some(ToolRateLimitConfig::new(1, 60))
+        }
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::success(
+                serde_json::json!({ "ok": true }),
+                Duration::from_millis(1),
+            ))
         }
     }
 
@@ -444,6 +488,38 @@ mod integration_tests {
     }
 
     // ── Tests ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn dispatch_enforces_per_tool_rate_limit() {
+        let (dispatcher, _backend, _db, registry, _dir) = test_dispatcher().await;
+        registry.register(Arc::new(RateLimitedTool)).await;
+
+        let first = dispatcher
+            .dispatch(
+                "rate_limited_stub",
+                serde_json::json!({}),
+                "tester",
+                DispatchSource::Channel("gateway".into()),
+            )
+            .await;
+        assert!(
+            first.is_ok(),
+            "first call within the limit must succeed: {first:?}"
+        );
+
+        let second = dispatcher
+            .dispatch(
+                "rate_limited_stub",
+                serde_json::json!({}),
+                "tester",
+                DispatchSource::Channel("gateway".into()),
+            )
+            .await;
+        assert!(
+            matches!(second, Err(ToolError::RateLimited(_))),
+            "second call must be rejected by the dispatcher rate limit: {second:?}"
+        );
+    }
 
     #[tokio::test]
     async fn dispatch_persists_action_record_with_redacted_sensitive_params() {

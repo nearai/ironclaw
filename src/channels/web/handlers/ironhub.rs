@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -23,10 +23,53 @@ const IRONHUB_SIGNING_KEY_NAME: &str = "ironhub_signing_key";
 const VERIFY_INTENT_WINDOW_SECS: u64 = 300;
 const SHARED_KEY_PREFIX: &str = "ihub_sk_";
 const SHARED_KEY_MIN_LEN: usize = 32;
+const SHARED_KEY_MIN_DISTINCT: usize = 12;
 const NONCE_CACHE_MAX_ENTRIES: usize = 16_384;
 
-static NONCE_CACHE: LazyLock<Mutex<HashMap<String, Instant>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+struct NonceCache {
+    seen: HashMap<String, Instant>,
+    order: VecDeque<String>,
+}
+
+impl NonceCache {
+    fn new() -> Self {
+        Self {
+            seen: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    fn front_is_expired(&self, now: Instant, ttl: Duration) -> bool {
+        match self.order.front() {
+            Some(front) => match self.seen.get(front) {
+                Some(seen_at) => now.duration_since(*seen_at) > ttl,
+                None => true,
+            },
+            None => false,
+        }
+    }
+
+    fn record_or_seen(&mut self, key: String, now: Instant, ttl: Duration) -> bool {
+        while self.front_is_expired(now, ttl) {
+            if let Some(evicted) = self.order.pop_front() {
+                self.seen.remove(&evicted);
+            }
+        }
+        if self.seen.contains_key(&key) {
+            return true;
+        }
+        if self.seen.len() >= NONCE_CACHE_MAX_ENTRIES
+            && let Some(evicted) = self.order.pop_front()
+        {
+            self.seen.remove(&evicted);
+        }
+        self.seen.insert(key.clone(), now);
+        self.order.push_back(key);
+        false
+    }
+}
+
+static NONCE_CACHE: LazyLock<Mutex<NonceCache>> = LazyLock::new(|| Mutex::new(NonceCache::new()));
 
 fn nonce_seen_or_record(uid: &str, nonce: &str) -> bool {
     let key = format!("{uid}:{nonce}");
@@ -36,21 +79,7 @@ fn nonce_seen_or_record(uid: &str, nonce: &str) -> bool {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),
     };
-    guard.retain(|_, t| now.duration_since(*t) <= ttl);
-    if guard.contains_key(&key) {
-        return true;
-    }
-    if guard.len() >= NONCE_CACHE_MAX_ENTRIES {
-        let cutoff = guard.len() / 4;
-        let mut sorted: Vec<(String, Instant)> =
-            guard.iter().map(|(k, v)| (k.clone(), *v)).collect();
-        sorted.sort_by_key(|(_, t)| *t);
-        for (k, _) in sorted.into_iter().take(cutoff) {
-            guard.remove(&k);
-        }
-    }
-    guard.insert(key, now);
-    false
+    guard.record_or_seen(key, now, ttl)
 }
 
 fn validate_shared_key(value: &str) -> Result<(), String> {
@@ -62,6 +91,13 @@ fn validate_shared_key(value: &str) -> Result<(), String> {
     if value.len() < SHARED_KEY_MIN_LEN {
         return Err(format!(
             "shared key must be at least {SHARED_KEY_MIN_LEN} characters"
+        ));
+    }
+    let body = &value[SHARED_KEY_PREFIX.len()..];
+    let distinct = body.chars().collect::<HashSet<_>>().len();
+    if distinct < SHARED_KEY_MIN_DISTINCT {
+        return Err(format!(
+            "shared key is too low-entropy; the part after {SHARED_KEY_PREFIX} must contain at least {SHARED_KEY_MIN_DISTINCT} distinct characters"
         ));
     }
     Ok(())
@@ -116,16 +152,38 @@ pub async fn ironhub_install_handler(
     Json(req): Json<IronhubInstallRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     catalog_rate_limit(&state, &user.user_id)?;
+
+    let store = secrets_store_or_503(&state)?;
+    let signed = SignedInstall {
+        slug: &req.slug,
+        version: &req.version,
+        uid: &req.uid,
+        aid: &req.aid,
+        ts: req.ts,
+        nonce: &req.nonce,
+        sig: &req.sig,
+    };
+    match verify_signed_install(store.as_ref(), &user.user_id, &signed).await {
+        Ok(()) => {}
+        Err(SignedInstallError::Rejected(reason)) => return Err((StatusCode::FORBIDDEN, reason)),
+        Err(SignedInstallError::NoSigningKey) => {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "no signing key configured on this agent".to_string(),
+            ));
+        }
+        Err(SignedInstallError::Internal(e)) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e)),
+    }
+
+    // verify-intent is a repeatable preview, so the one-shot nonce is only burned
+    // here, at the install that actually mutates state.
+    if nonce_seen_or_record(&user.user_id, &req.nonce) {
+        return Err((StatusCode::CONFLICT, "nonce already used".to_string()));
+    }
+
     let dispatcher = dispatcher_or_503(&state)?;
     let mut params = serde_json::Map::new();
-    params.insert("name".into(), serde_json::Value::String(req.name));
-    if let Some(kind) = req.kind {
-        params.insert("kind".into(), serde_json::Value::String(kind));
-    }
-    if let Some(tag) = req.release_tag {
-        params.insert("release_tag".into(), serde_json::Value::String(tag));
-    }
-    params.insert("force".into(), serde_json::Value::Bool(req.force));
+    params.insert("name".into(), serde_json::Value::String(req.slug));
     params.insert(
         "acknowledge_unverified".into(),
         serde_json::Value::Bool(req.acknowledge_unverified),
@@ -263,9 +321,68 @@ fn register_payload(uid: &str, aid: &str, ts: u64, nonce: &str) -> String {
     format!("register:{uid}:{aid}:{ts}:{nonce}")
 }
 
+struct SignedInstall<'a> {
+    slug: &'a str,
+    version: &'a str,
+    uid: &'a str,
+    aid: &'a str,
+    ts: u64,
+    nonce: &'a str,
+    sig: &'a str,
+}
+
+enum SignedInstallError {
+    Rejected(String),
+    NoSigningKey,
+    Internal(String),
+}
+
+async fn verify_signed_install(
+    store: &(dyn SecretsStore + Send + Sync),
+    user_id: &str,
+    signed: &SignedInstall<'_>,
+) -> Result<(), SignedInstallError> {
+    if let Err(e) = crate::cli::hub_install::validate_hub_name(signed.slug) {
+        return Err(SignedInstallError::Rejected(format!("invalid slug: {e}")));
+    }
+
+    let drift = now_unix().abs_diff(signed.ts);
+    if drift > VERIFY_INTENT_WINDOW_SECS {
+        return Err(SignedInstallError::Rejected(format!(
+            "timestamp drift {drift}s exceeds window {VERIFY_INTENT_WINDOW_SECS}s"
+        )));
+    }
+
+    let decrypted = match store.get_decrypted(user_id, IRONHUB_SIGNING_KEY_NAME).await {
+        Ok(s) => s,
+        Err(SecretError::NotFound(_)) => return Err(SignedInstallError::NoSigningKey),
+        Err(e) => return Err(SignedInstallError::Internal(e.to_string())),
+    };
+
+    let payload = install_payload(
+        signed.slug,
+        signed.version,
+        signed.uid,
+        signed.aid,
+        signed.ts,
+        signed.nonce,
+    );
+    let expected = hmac_hex(decrypted.expose(), &payload).map_err(SignedInstallError::Internal)?;
+
+    use subtle::ConstantTimeEq;
+    let sig_valid: bool = expected.as_bytes().ct_eq(signed.sig.as_bytes()).into();
+    if sig_valid {
+        Ok(())
+    } else {
+        Err(SignedInstallError::Rejected(
+            "signature mismatch".to_string(),
+        ))
+    }
+}
+
 pub async fn ironhub_signing_key_set_handler(
     State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
+    AdminUser(user): AdminUser,
     Json(req): Json<IronhubSigningKeySetRequest>,
 ) -> Result<Json<IronhubSigningKeyMetadata>, (StatusCode, String)> {
     let shared_key = req.shared_key.trim();
@@ -274,60 +391,28 @@ pub async fn ironhub_signing_key_set_handler(
     }
 
     let store = secrets_store_or_503(&state)?;
-
-    let previous = if store
-        .exists(&user.user_id, IRONHUB_SIGNING_KEY_NAME)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    {
-        let old = store
-            .get_decrypted(&user.user_id, IRONHUB_SIGNING_KEY_NAME)
-            .await
-            .map(|d| d.expose().to_string())
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        store
-            .delete(&user.user_id, IRONHUB_SIGNING_KEY_NAME)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        Some(old)
-    } else {
-        None
-    };
-
-    let secret = match store
+    let secret = store
         .create(
             &user.user_id,
             CreateSecretParams::new(IRONHUB_SIGNING_KEY_NAME, shared_key),
         )
         .await
-    {
-        Ok(s) => s,
-        Err(e) => {
-            if let Some(old) = previous
-                && let Err(restore_err) = store
-                    .create(
-                        &user.user_id,
-                        CreateSecretParams::new(IRONHUB_SIGNING_KEY_NAME, &old),
-                    )
-                    .await
-            {
-                tracing::warn!(
-                    "failed to restore previous IronHub signing key after set error: {restore_err}"
-                );
-            }
-            return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
-        }
-    };
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let stored = store
+        .get_decrypted(&user.user_id, IRONHUB_SIGNING_KEY_NAME)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(IronhubSigningKeyMetadata {
-        fingerprint: fingerprint(shared_key),
+        fingerprint: fingerprint(stored.expose()),
         created_at: secret.created_at.to_rfc3339(),
     }))
 }
 
 pub async fn ironhub_signing_key_get_handler(
     State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
+    AdminUser(user): AdminUser,
 ) -> Result<Json<IronhubSigningKeyMetadata>, (StatusCode, String)> {
     let store = secrets_store_or_503(&state)?;
     let meta = match store.get(&user.user_id, IRONHUB_SIGNING_KEY_NAME).await {
@@ -349,7 +434,7 @@ pub async fn ironhub_signing_key_get_handler(
 
 pub async fn ironhub_signing_key_delete_handler(
     State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
+    AdminUser(user): AdminUser,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let store = secrets_store_or_503(&state)?;
     let removed = store
@@ -368,73 +453,32 @@ pub async fn ironhub_verify_intent_handler(
     AuthenticatedUser(user): AuthenticatedUser,
     Json(req): Json<IronhubVerifyIntentRequest>,
 ) -> Result<Json<IronhubVerifyIntentResponse>, (StatusCode, String)> {
-    if let Err(e) = crate::cli::hub_install::validate_hub_name(&req.slug) {
-        return Ok(Json(IronhubVerifyIntentResponse {
-            valid: false,
-            reason: Some(format!("invalid slug: {e}")),
-        }));
-    }
-
-    let now = now_unix();
-    let drift = now.abs_diff(req.ts);
-    if drift > VERIFY_INTENT_WINDOW_SECS {
-        return Ok(Json(IronhubVerifyIntentResponse {
-            valid: false,
-            reason: Some(format!(
-                "timestamp drift {drift}s exceeds window {VERIFY_INTENT_WINDOW_SECS}s"
-            )),
-        }));
-    }
-
+    catalog_rate_limit(&state, &user.user_id)?;
     let store = secrets_store_or_503(&state)?;
-    let decrypted = match store
-        .get_decrypted(&user.user_id, IRONHUB_SIGNING_KEY_NAME)
-        .await
-    {
-        Ok(s) => s,
-        Err(SecretError::NotFound(_)) => {
-            return Ok(Json(IronhubVerifyIntentResponse {
-                valid: false,
-                reason: Some("no signing key configured on this agent".to_string()),
-            }));
-        }
-        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    let signed = SignedInstall {
+        slug: &req.slug,
+        version: &req.version,
+        uid: &req.uid,
+        aid: &req.aid,
+        ts: req.ts,
+        nonce: &req.nonce,
+        sig: &req.sig,
     };
-
-    let payload = install_payload(
-        &req.slug,
-        &req.version,
-        &req.uid,
-        &req.aid,
-        req.ts,
-        &req.nonce,
-    );
-    let expected = match hmac_hex(decrypted.expose(), &payload) {
-        Ok(v) => v,
-        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e)),
-    };
-
-    use subtle::ConstantTimeEq;
-    let supplied = req.sig.as_bytes();
-    let sig_valid: bool = expected.as_bytes().ct_eq(supplied).into();
-    if !sig_valid {
-        return Ok(Json(IronhubVerifyIntentResponse {
+    match verify_signed_install(store.as_ref(), &user.user_id, &signed).await {
+        Ok(()) => Ok(Json(IronhubVerifyIntentResponse {
+            valid: true,
+            reason: None,
+        })),
+        Err(SignedInstallError::Rejected(reason)) => Ok(Json(IronhubVerifyIntentResponse {
             valid: false,
-            reason: Some("signature mismatch".to_string()),
-        }));
-    }
-
-    if nonce_seen_or_record(&user.user_id, &req.nonce) {
-        return Ok(Json(IronhubVerifyIntentResponse {
+            reason: Some(reason),
+        })),
+        Err(SignedInstallError::NoSigningKey) => Ok(Json(IronhubVerifyIntentResponse {
             valid: false,
-            reason: Some("nonce already used".to_string()),
-        }));
+            reason: Some("no signing key configured on this agent".to_string()),
+        })),
+        Err(SignedInstallError::Internal(e)) => Err((StatusCode::INTERNAL_SERVER_ERROR, e)),
     }
-
-    Ok(Json(IronhubVerifyIntentResponse {
-        valid: true,
-        reason: None,
-    }))
 }
 
 pub async fn ironhub_register_handler(
@@ -442,6 +486,7 @@ pub async fn ironhub_register_handler(
     AuthenticatedUser(user): AuthenticatedUser,
     Json(req): Json<IronhubRegisterRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    catalog_rate_limit(&state, &user.user_id)?;
     let now = now_unix();
     let drift = now.abs_diff(req.ts);
     if drift > VERIFY_INTENT_WINDOW_SECS {
@@ -662,8 +707,18 @@ mod tests {
         let dispatcher = Arc::new(ToolDispatcher::new(registry, safety, db));
         std::mem::forget(dir);
 
+        let secrets = crate::channels::web::test_helpers::test_secrets_store();
+        secrets
+            .create(
+                "test-admin",
+                CreateSecretParams::new(IRONHUB_SIGNING_KEY_NAME, TEST_SHARED_KEY),
+            )
+            .await
+            .expect("seed signing key");
+
         let state = crate::channels::web::test_helpers::TestGatewayBuilder::new()
             .with_tool_dispatcher(dispatcher)
+            .with_secrets_store(secrets)
             .build();
         (state, calls)
     }
@@ -699,6 +754,58 @@ mod tests {
             .header("content-type", "application/json")
             .body(body)
             .expect("request")
+    }
+
+    fn install_signed_body(slug: &str, nonce: &str, ts: u64) -> serde_json::Value {
+        let payload = install_payload(slug, "1.0.0", "u1", "a1", ts, nonce);
+        let sig = hmac_hex(TEST_SHARED_KEY, &payload).expect("sign");
+        serde_json::json!({
+            "slug": slug,
+            "version": "1.0.0",
+            "uid": "u1",
+            "aid": "a1",
+            "ts": ts,
+            "nonce": nonce,
+            "sig": sig,
+        })
+    }
+
+    #[test]
+    fn nonce_cache_records_then_detects_replay() {
+        let mut cache = NonceCache::new();
+        let now = Instant::now();
+        let ttl = Duration::from_secs(VERIFY_INTENT_WINDOW_SECS);
+        assert!(!cache.record_or_seen("u:n1".into(), now, ttl));
+        assert!(cache.record_or_seen("u:n1".into(), now, ttl));
+        assert!(!cache.record_or_seen("u:n2".into(), now, ttl));
+    }
+
+    #[test]
+    fn nonce_cache_evicts_expired_before_recording() {
+        let mut cache = NonceCache::new();
+        let ttl = Duration::from_secs(VERIFY_INTENT_WINDOW_SECS);
+        let base = Instant::now();
+        let later = base + ttl + Duration::from_secs(10);
+        assert!(!cache.record_or_seen("u:old".into(), base, ttl));
+        assert!(!cache.record_or_seen("u:fresh".into(), later, ttl));
+        assert!(
+            !cache.record_or_seen("u:old".into(), later, ttl),
+            "an expired nonce must be evicted, so re-recording it is new, not a replay"
+        );
+    }
+
+    #[test]
+    fn nonce_cache_stays_bounded_and_evicts_oldest() {
+        let mut cache = NonceCache::new();
+        let now = Instant::now();
+        let ttl = Duration::from_secs(VERIFY_INTENT_WINDOW_SECS);
+        for i in 0..NONCE_CACHE_MAX_ENTRIES {
+            assert!(!cache.record_or_seen(format!("u:{i}"), now, ttl));
+        }
+        assert_eq!(cache.seen.len(), NONCE_CACHE_MAX_ENTRIES);
+        assert!(!cache.record_or_seen("u:overflow".into(), now, ttl));
+        assert_eq!(cache.seen.len(), NONCE_CACHE_MAX_ENTRIES);
+        assert!(!cache.seen.contains_key("u:0"));
     }
 
     #[tokio::test]
@@ -742,10 +849,12 @@ mod tests {
         let app = Router::new()
             .route("/api/ironhub/install", post(ironhub_install_handler))
             .with_state(state);
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let body = install_signed_body("clickup", &nonce, now_unix());
         let req = req_with_identity(
             "POST",
             "/api/ironhub/install",
-            Body::from(serde_json::json!({"name": "clickup"}).to_string()),
+            Body::from(body.to_string()),
             "admin",
         );
         let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
@@ -823,18 +932,29 @@ mod tests {
         let dispatcher = Arc::new(ToolDispatcher::new(registry, safety, db));
         std::mem::forget(dir);
 
+        let secrets = crate::channels::web::test_helpers::test_secrets_store();
+        secrets
+            .create(
+                "test-admin",
+                CreateSecretParams::new(IRONHUB_SIGNING_KEY_NAME, TEST_SHARED_KEY),
+            )
+            .await
+            .expect("seed signing key");
+
         let state = crate::channels::web::test_helpers::TestGatewayBuilder::new()
             .with_tool_dispatcher(dispatcher)
+            .with_secrets_store(secrets)
             .build();
         let app = Router::new()
             .route("/api/ironhub/install", post(ironhub_install_handler))
             .with_state(state);
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let mut body = install_signed_body("clickup", &nonce, now_unix());
+        body["acknowledge_unverified"] = serde_json::json!(true);
         let req = req_with_identity(
             "POST",
             "/api/ironhub/install",
-            Body::from(
-                serde_json::json!({"name": "clickup", "acknowledge_unverified": true}).to_string(),
-            ),
+            Body::from(body.to_string()),
             "admin",
         );
         let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
@@ -848,6 +968,11 @@ mod tests {
                 .and_then(|v| v.as_bool()),
             Some(true),
             "gateway handler must forward acknowledge_unverified to the ironhub_install tool"
+        );
+        assert_eq!(
+            params.get("name").and_then(|v| v.as_str()),
+            Some("clickup"),
+            "gateway handler must forward the signed slug as the install name"
         );
     }
 
@@ -934,10 +1059,12 @@ mod tests {
         let app = Router::new()
             .route("/api/ironhub/install", post(ironhub_install_handler))
             .with_state(state);
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let body = install_signed_body("microsoft_365", &nonce, now_unix());
         let req = req_with_identity(
             "POST",
             "/api/ironhub/install",
-            Body::from(serde_json::json!({"name": "microsoft_365"}).to_string()),
+            Body::from(body.to_string()),
             "admin",
         );
         let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
@@ -957,20 +1084,22 @@ mod tests {
         let app = Router::new()
             .route("/api/ironhub/install", post(ironhub_install_handler))
             .with_state(state);
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let body = install_signed_body("../etc/passwd", &nonce, now_unix());
         let req = req_with_identity(
             "POST",
             "/api/ironhub/install",
-            Body::from(serde_json::json!({"name": "../etc/passwd"}).to_string()),
+            Body::from(body.to_string()),
             "admin",
         );
         let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
             .await
             .expect("response");
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
         assert_eq!(
             calls.load(Ordering::SeqCst),
             0,
-            "tool execute must NOT run when schema rejects"
+            "tool execute must NOT run when the signed slug is rejected"
         );
     }
 
@@ -1054,10 +1183,13 @@ mod tests {
         let app = Router::new()
             .route("/api/ironhub/install", post(ironhub_install_handler))
             .with_state(state);
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let mut body = install_signed_body("clickup", &nonce, now_unix());
+        body["evil"] = serde_json::json!("exfil");
         let req = req_with_identity(
             "POST",
             "/api/ironhub/install",
-            Body::from(serde_json::json!({"name": "clickup", "evil": "exfil"}).to_string()),
+            Body::from(body.to_string()),
             "admin",
         );
         let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
@@ -1073,6 +1205,75 @@ mod tests {
             calls.load(Ordering::SeqCst),
             0,
             "tool execute must NOT run when extra field rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn ironhub_install_rejects_bad_signature() {
+        let (state, calls) = build_state_with_stubs().await;
+        let app = Router::new()
+            .route("/api/ironhub/install", post(ironhub_install_handler))
+            .with_state(state);
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let body = serde_json::json!({
+            "slug": "clickup",
+            "version": "1.0.0",
+            "uid": "u1",
+            "aid": "a1",
+            "ts": now_unix(),
+            "nonce": nonce,
+            "sig": "deadbeef".repeat(8),
+        });
+        let req = req_with_identity(
+            "POST",
+            "/api/ironhub/install",
+            Body::from(body.to_string()),
+            "admin",
+        );
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "install must reject an unsigned/forged request before dispatching"
+        );
+    }
+
+    #[tokio::test]
+    async fn ironhub_install_rejects_replayed_nonce() {
+        let (state, calls) = build_state_with_stubs().await;
+        let app = Router::new()
+            .route("/api/ironhub/install", post(ironhub_install_handler))
+            .with_state(state);
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let body = install_signed_body("clickup", &nonce, now_unix());
+        let first = req_with_identity(
+            "POST",
+            "/api/ironhub/install",
+            Body::from(body.to_string()),
+            "admin",
+        );
+        let r1 = ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), first)
+            .await
+            .expect("first");
+        assert_eq!(r1.status(), StatusCode::OK);
+
+        let replay = req_with_identity(
+            "POST",
+            "/api/ironhub/install",
+            Body::from(body.to_string()),
+            "admin",
+        );
+        let r2 = ServiceExt::<axum::http::Request<Body>>::oneshot(app, replay)
+            .await
+            .expect("replay");
+        assert_eq!(r2.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "a replayed signed install must not dispatch the tool twice"
         );
     }
 
@@ -1108,10 +1309,14 @@ mod tests {
     }
 
     #[test]
-    fn validate_shared_key_enforces_prefix_and_length() {
-        assert!(validate_shared_key("ihub_sk_aaaaaaaaaaaaaaaaaaaaaaaa").is_ok());
+    fn validate_shared_key_enforces_prefix_length_and_entropy() {
+        assert!(validate_shared_key(TEST_SHARED_KEY).is_ok());
         assert!(validate_shared_key("ihub_sk_short").is_err());
         assert!(validate_shared_key("not_prefixed_keykey_keykey_keykey").is_err());
+        assert!(
+            validate_shared_key("ihub_sk_aaaaaaaaaaaaaaaaaaaaaaaa").is_err(),
+            "a 32-char key whose body is one repeated character must be rejected as low-entropy"
+        );
     }
 
     #[test]
@@ -1124,7 +1329,90 @@ mod tests {
         assert_ne!(f1, fingerprint("ihub_sk_bbbbbbbbbbbbbbbbbbbbbbbb"));
     }
 
-    const TEST_SHARED_KEY: &str = "ihub_sk_test_kkkkkkkkkkkkkkkkkkkk";
+    const TEST_SHARED_KEY: &str = "ihub_sk_x7K2p9mQ4vR8tL3nB6wZ1yD5cF0jH";
+
+    #[tokio::test]
+    async fn verify_intent_is_rate_limited_per_user() {
+        let secrets = crate::channels::web::test_helpers::test_secrets_store();
+        let state = crate::channels::web::test_helpers::TestGatewayBuilder::new()
+            .user_id("test-user")
+            .with_secrets_store(secrets)
+            .with_ironhub_catalog_rate_limit(1, 60)
+            .build();
+        let app = Router::new()
+            .route(
+                "/api/ironhub/verify-intent",
+                post(ironhub_verify_intent_handler),
+            )
+            .with_state(state);
+        let body = serde_json::json!({
+            "slug": "clickup",
+            "version": "1.0.0",
+            "uid": "u1",
+            "aid": "a1",
+            "ts": now_unix(),
+            "nonce": "rl-verify-1",
+            "sig": "deadbeef"
+        })
+        .to_string();
+        let first = req_with_identity(
+            "POST",
+            "/api/ironhub/verify-intent",
+            Body::from(body.clone()),
+            "regular",
+        );
+        let r1 = ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), first)
+            .await
+            .expect("first");
+        assert_eq!(r1.status(), StatusCode::OK);
+        let second = req_with_identity(
+            "POST",
+            "/api/ironhub/verify-intent",
+            Body::from(body),
+            "regular",
+        );
+        let r2 = ServiceExt::<axum::http::Request<Body>>::oneshot(app, second)
+            .await
+            .expect("second");
+        assert_eq!(r2.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn register_is_rate_limited_per_user() {
+        let secrets = crate::channels::web::test_helpers::test_secrets_store();
+        let state = crate::channels::web::test_helpers::TestGatewayBuilder::new()
+            .user_id("test-user")
+            .with_secrets_store(secrets)
+            .with_ironhub_catalog_rate_limit(1, 60)
+            .build();
+        let app = Router::new()
+            .route("/api/ironhub/register", post(ironhub_register_handler))
+            .with_state(state);
+        let body = serde_json::json!({
+            "uid": "u1",
+            "aid": "a1",
+            "ts": now_unix(),
+            "nonce": "rl-register-1",
+            "sig": "deadbeef"
+        })
+        .to_string();
+        let first = req_with_identity(
+            "POST",
+            "/api/ironhub/register",
+            Body::from(body.clone()),
+            "regular",
+        );
+        let r1 = ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), first)
+            .await
+            .expect("first");
+        assert_eq!(r1.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let second =
+            req_with_identity("POST", "/api/ironhub/register", Body::from(body), "regular");
+        let r2 = ServiceExt::<axum::http::Request<Body>>::oneshot(app, second)
+            .await
+            .expect("second");
+        assert_eq!(r2.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
 
     async fn verify_app() -> (Router, String, String, u64) {
         use crate::secrets::CreateSecretParams;
@@ -1205,6 +1493,103 @@ mod tests {
         serde_json::from_slice(&bytes).expect("json")
     }
 
+    #[test]
+    fn tool_error_to_http_maps_all_variants() {
+        use std::time::Duration;
+        assert_eq!(
+            tool_error_to_http(ToolError::InvalidParameters("x".into())).0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            tool_error_to_http(ToolError::NotAuthorized("x".into())).0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            tool_error_to_http(ToolError::RateLimited(None)).0,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            tool_error_to_http(ToolError::RateLimited(Some(Duration::from_secs(5)))).0,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            tool_error_to_http(ToolError::Timeout(Duration::from_secs(3))).0,
+            StatusCode::GATEWAY_TIMEOUT
+        );
+        assert_eq!(
+            tool_error_to_http(ToolError::ExternalService("x".into())).0,
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            tool_error_to_http(ToolError::ExecutionFailed("x".into())).0,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            tool_error_to_http(ToolError::Sandbox("x".into())).0,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_intent_returns_invalid_when_no_signing_key() {
+        let secrets = crate::channels::web::test_helpers::test_secrets_store();
+        let state = crate::channels::web::test_helpers::TestGatewayBuilder::new()
+            .user_id("test-user")
+            .with_secrets_store(secrets)
+            .build();
+        let app = Router::new()
+            .route(
+                "/api/ironhub/verify-intent",
+                post(ironhub_verify_intent_handler),
+            )
+            .with_state(state);
+        let req = verify_req(verify_body(
+            "clickup",
+            now_unix(),
+            "nokey-nonce",
+            "deadbeef",
+        ));
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["valid"], false);
+        assert!(
+            json["reason"]
+                .as_str()
+                .unwrap_or("")
+                .contains("no signing key"),
+            "{json:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_rejects_replayed_nonce() {
+        let (app, _sig, _nonce, ts) = verify_app().await;
+        let nonce = "register-replay-nonce";
+        let payload = register_payload("u1", "a1", ts, nonce);
+        let sig = hmac_hex(TEST_SHARED_KEY, &payload).expect("sign");
+        let body = serde_json::json!({
+            "uid": "u1",
+            "aid": "a1",
+            "ts": ts,
+            "nonce": nonce,
+            "sig": sig,
+        });
+        let first = ServiceExt::<axum::http::Request<Body>>::oneshot(
+            app.clone(),
+            register_req(body.clone()),
+        )
+        .await
+        .expect("first");
+        assert_eq!(first.status(), StatusCode::OK);
+        let second = ServiceExt::<axum::http::Request<Body>>::oneshot(app, register_req(body))
+            .await
+            .expect("second");
+        assert_eq!(second.status(), StatusCode::CONFLICT);
+    }
+
     #[tokio::test]
     async fn verify_intent_accepts_valid_signature() {
         let (app, sig, nonce, ts) = verify_app().await;
@@ -1260,22 +1645,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn verify_intent_rejects_replayed_nonce() {
+    async fn verify_intent_is_repeatable_preview() {
         let (app, sig, nonce, ts) = verify_app().await;
         let first = verify_req(verify_body("clickup", ts, &nonce, &sig));
         let resp1 = ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), first)
             .await
             .expect("first response");
-        let json1 = body_json(resp1).await;
-        assert_eq!(json1["valid"], true);
+        assert_eq!(resp1.status(), StatusCode::OK);
+        assert_eq!(body_json(resp1).await["valid"], true);
 
-        let replay = verify_req(verify_body("clickup", ts, &nonce, &sig));
-        let resp2 = ServiceExt::<axum::http::Request<Body>>::oneshot(app, replay)
+        let again = verify_req(verify_body("clickup", ts, &nonce, &sig));
+        let resp2 = ServiceExt::<axum::http::Request<Body>>::oneshot(app, again)
             .await
-            .expect("replay response");
-        let json2 = body_json(resp2).await;
-        assert_eq!(json2["valid"], false);
-        assert!(json2["reason"].as_str().unwrap().contains("nonce"));
+            .expect("second response");
+        assert_eq!(resp2.status(), StatusCode::OK);
+        assert_eq!(
+            body_json(resp2).await["valid"],
+            true,
+            "verify-intent is a preview and must not consume the one-shot nonce"
+        );
     }
 
     #[tokio::test]
@@ -1312,6 +1700,10 @@ mod tests {
     }
 
     fn signing_key_req(method: &str, body: Body) -> axum::http::Request<Body> {
+        signing_key_req_as(method, body, "admin")
+    }
+
+    fn signing_key_req_as(method: &str, body: Body, role: &str) -> axum::http::Request<Body> {
         let mut req = axum::http::Request::builder()
             .method(method)
             .uri("/api/ironhub/signing-key")
@@ -1320,7 +1712,7 @@ mod tests {
             .expect("request");
         req.extensions_mut().insert(UserIdentity {
             user_id: "test-user".into(),
-            role: "regular".into(),
+            role: role.into(),
             workspace_read_scopes: Vec::new(),
         });
         req
@@ -1442,6 +1834,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn signing_key_set_rejects_non_admin() {
+        let app = signing_key_app().await;
+        let body = serde_json::json!({"shared_key": TEST_SHARED_KEY}).to_string();
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(
+            app,
+            signing_key_req_as("POST", Body::from(body), "regular"),
+        )
+        .await
+        .expect("response");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn signing_key_set_replaces_existing_and_updates_fingerprint() {
+        let app = signing_key_app().await;
+        let first = serde_json::json!({"shared_key": TEST_SHARED_KEY}).to_string();
+        let first_resp = ServiceExt::<axum::http::Request<Body>>::oneshot(
+            app.clone(),
+            signing_key_req("POST", Body::from(first)),
+        )
+        .await
+        .expect("first set");
+        assert_eq!(first_resp.status(), StatusCode::OK);
+        let first_fp = body_json(first_resp).await["fingerprint"]
+            .as_str()
+            .expect("fingerprint")
+            .to_string();
+
+        let rotated = format!("{TEST_SHARED_KEY}_rotated");
+        let second = serde_json::json!({"shared_key": rotated}).to_string();
+        let second_resp = ServiceExt::<axum::http::Request<Body>>::oneshot(
+            app,
+            signing_key_req("POST", Body::from(second)),
+        )
+        .await
+        .expect("second set");
+        assert_eq!(second_resp.status(), StatusCode::OK);
+        let second_fp = body_json(second_resp).await["fingerprint"]
+            .as_str()
+            .expect("fingerprint")
+            .to_string();
+
+        assert_ne!(
+            first_fp, second_fp,
+            "replacing the signing key must change the returned fingerprint"
+        );
+    }
+
+    #[tokio::test]
     async fn register_accepts_valid_signature() {
         let (app, _intent_sig, _intent_nonce, ts) = verify_app().await;
         let nonce = uuid::Uuid::new_v4().to_string();
@@ -1495,5 +1936,28 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(resp.status(), StatusCode::REQUEST_TIMEOUT);
+    }
+
+    #[tokio::test]
+    async fn register_rejects_when_no_signing_key_configured() {
+        let secrets = crate::channels::web::test_helpers::test_secrets_store();
+        let state = crate::channels::web::test_helpers::TestGatewayBuilder::new()
+            .user_id("test-user")
+            .with_secrets_store(secrets)
+            .build();
+        let app = Router::new()
+            .route("/api/ironhub/register", post(ironhub_register_handler))
+            .with_state(state);
+        let body = serde_json::json!({
+            "uid": "u1",
+            "aid": "a1",
+            "ts": now_unix(),
+            "nonce": uuid::Uuid::new_v4().to_string(),
+            "sig": "deadbeef".repeat(8),
+        });
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, register_req(body))
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

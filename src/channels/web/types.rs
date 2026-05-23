@@ -1245,13 +1245,13 @@ pub struct EngineActionResponse {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IronhubInstallRequest {
-    pub name: String,
-    #[serde(default)]
-    pub kind: Option<String>,
-    #[serde(default)]
-    pub release_tag: Option<String>,
-    #[serde(default)]
-    pub force: bool,
+    pub slug: String,
+    pub version: String,
+    pub uid: String,
+    pub aid: String,
+    pub ts: u64,
+    pub nonce: String,
+    pub sig: String,
     #[serde(default)]
     pub acknowledge_unverified: bool,
 }

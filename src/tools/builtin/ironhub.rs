@@ -8,6 +8,7 @@ use crate::context::JobContext;
 use crate::extensions::{EnsureReadyIntent, ExtensionKind, ExtensionManager};
 use crate::registry::{
     HubInstallOutcome, HubInstaller, HubManifest, HubSkillEntry, HubToolEntry, Provenance,
+    RegistryError,
 };
 use crate::tools::builtin::extension_tools::output_from_ensure_ready;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
@@ -220,6 +221,21 @@ fn annotate_reload_verification(json: &mut serde_json::Value, name: &str, loaded
     }
 }
 
+fn install_error_to_tool_error(name: &str, err: RegistryError) -> ToolError {
+    match err {
+        RegistryError::AlreadyInstalled { .. } => ToolError::InvalidParameters(format!(
+            "'{name}' is already installed; pass force=true to reinstall"
+        )),
+        RegistryError::ChecksumMismatch { .. } => {
+            ToolError::ExternalService(format!("'{name}' failed artifact integrity verification"))
+        }
+        other => {
+            tracing::debug!("IronHub install failed for '{name}': {other}");
+            ToolError::ExecutionFailed(format!("install of '{name}' failed"))
+        }
+    }
+}
+
 fn tool_entry_json(entry: &HubToolEntry) -> serde_json::Value {
     serde_json::json!({
         "kind": "tool",
@@ -294,7 +310,7 @@ impl IronhubInstallTool {
                 let outcome = installer
                     .install_tool_from_manifest(&manifest, &parsed.name, parsed.force)
                     .await
-                    .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+                    .map_err(|e| install_error_to_tool_error(&parsed.name, e))?;
                 let ready = self
                     .deps
                     .extension_manager
@@ -315,24 +331,33 @@ impl IronhubInstallTool {
                 let outcome = installer
                     .install_skill_from_manifest(&manifest, &parsed.name, parsed.force)
                     .await
-                    .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+                    .map_err(|e| install_error_to_tool_error(&parsed.name, e))?;
                 let mut json = install_outcome_to_json(kind, &outcome);
                 if let Some(reg) = &self.deps.skill_registry {
                     let reg = Arc::clone(reg);
-                    let handle = tokio::runtime::Handle::current();
-                    let loaded = tokio::task::spawn_blocking(move || {
-                        let mut guard = reg.write().unwrap_or_else(|poison| {
-                            tracing::error!(
-                                "skill registry RwLock was poisoned (a previous writer panicked); recovering"
-                            );
-                            poison.into_inner()
-                        });
-                        handle.block_on(guard.reload())
-                    })
+                    let loaded = tokio::task::spawn_blocking(
+                        move || -> Result<Vec<String>, ToolError> {
+                            let mut guard = reg.write().unwrap_or_else(|poison| {
+                                tracing::error!(
+                                    "skill registry RwLock was poisoned (a previous writer panicked); recovering"
+                                );
+                                poison.into_inner()
+                            });
+                            let rt = tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build()
+                                .map_err(|e| {
+                                    ToolError::ExecutionFailed(format!(
+                                        "skill registry reload runtime: {e}"
+                                    ))
+                                })?;
+                            Ok(rt.block_on(guard.reload()))
+                        },
+                    )
                     .await
                     .map_err(|e| {
                         ToolError::ExecutionFailed(format!("skill registry reload join: {e}"))
-                    })?;
+                    })??;
                     annotate_reload_verification(&mut json, &outcome.name, &loaded);
                 }
                 Ok(ToolOutput::success(json, start.elapsed()))
@@ -473,6 +498,10 @@ impl Tool for IronhubSearchTool {
          Returns matching tools and skills."
     }
 
+    fn requires_sanitization(&self) -> bool {
+        true // IronHub catalog entries are external data
+    }
+
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -508,7 +537,7 @@ impl Tool for IronhubSearchTool {
 
         let installer = build_installer(release_tag.as_deref(), None)?;
         let manifest = installer
-            .fetch_manifest()
+            .fetch_manifest_cached()
             .await
             .map_err(|_| catalog_unavailable())?;
 
@@ -561,6 +590,10 @@ impl Tool for IronhubListTool {
         "List everything available in the IronHub catalog grouped by tools and skills."
     }
 
+    fn requires_sanitization(&self) -> bool {
+        true // IronHub catalog entries are external data
+    }
+
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -589,7 +622,7 @@ impl Tool for IronhubListTool {
 
         let installer = build_installer(release_tag.as_deref(), None)?;
         let manifest = installer
-            .fetch_manifest()
+            .fetch_manifest_cached()
             .await
             .map_err(|_| catalog_unavailable())?;
 
@@ -634,6 +667,10 @@ impl Tool for IronhubInfoTool {
          description, artifact URLs, and SHA-256 checksums."
     }
 
+    fn requires_sanitization(&self) -> bool {
+        true // IronHub catalog entries are external data
+    }
+
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -672,7 +709,7 @@ impl Tool for IronhubInfoTool {
 
         let installer = build_installer(release_tag.as_deref(), None)?;
         let manifest = installer
-            .fetch_manifest()
+            .fetch_manifest_cached()
             .await
             .map_err(|_| catalog_unavailable())?;
 
@@ -896,6 +933,22 @@ mod tests {
         let tool = IronhubSearchTool::new();
         let schema = tool.parameters_schema();
         assert_eq!(schema["required"], serde_json::json!(["query"]));
+    }
+
+    #[test]
+    fn catalog_tools_sanitize_external_output() {
+        assert!(
+            IronhubSearchTool::new().requires_sanitization(),
+            "search surfaces external catalog text and must be sanitized"
+        );
+        assert!(
+            IronhubListTool::new().requires_sanitization(),
+            "list surfaces external catalog text and must be sanitized"
+        );
+        assert!(
+            IronhubInfoTool::new().requires_sanitization(),
+            "info surfaces external catalog text and must be sanitized"
+        );
     }
 
     #[test]
@@ -1246,6 +1299,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn install_from_manifest_passes_gate_for_new_when_acknowledged() {
+        let (tool, _tools_dir, _channels_dir) = install_tool_with_ext_mgr();
+        let manifest = manifest_with_provenance("indie-tool", Provenance::New, None, None);
+        let parsed = InstallParams {
+            name: "indie-tool".into(),
+            kind_hint: None,
+            release_tag: None,
+            force: false,
+            acknowledge_unverified: true,
+        };
+        let ctx = JobContext::with_user("test", "install gate ack test", "");
+        let err = tool
+            .install_from_manifest(std::time::Instant::now(), manifest, parsed, &ctx)
+            .await
+            .expect_err("fake artifact URLs make the install fail downstream of the gate");
+        assert!(
+            !matches!(&err, ToolError::InvalidParameters(m) if m.contains("UNVERIFIED")),
+            "acknowledge_unverified=true must clear the gate; got the gate rejection instead: {err:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn install_params_from_json_propagates_acknowledge_unverified() {
         let parsed = InstallParams::from_json(&serde_json::json!({
             "name": "indie-tool",
@@ -1272,6 +1347,31 @@ mod tests {
         assert!(!msg.contains("http"));
         assert!(!msg.contains("hub.ironclaw.com"));
         assert!(!msg.contains('/'));
+    }
+
+    #[test]
+    fn install_error_to_tool_error_never_leaks_paths_or_detail() {
+        let already = RegistryError::AlreadyInstalled {
+            name: "clickup".into(),
+            path: std::path::PathBuf::from("/home/someone/.ironclaw/tools/clickup.wasm"),
+        };
+        let msg = install_error_to_tool_error("clickup", already).to_string();
+        assert!(!msg.contains('/'), "must not leak a path: {msg}");
+        assert!(
+            msg.contains("force=true"),
+            "AlreadyInstalled must stay actionable: {msg}"
+        );
+
+        let download = RegistryError::DownloadFailed {
+            url: "https://hub.ironclaw.com/api/catalog/artifact/secret-token".into(),
+            reason: "connection refused at /var/run/internal.sock".into(),
+        };
+        let msg = install_error_to_tool_error("clickup", download).to_string();
+        assert!(
+            !msg.contains("secret-token"),
+            "must not leak the upstream url: {msg}"
+        );
+        assert!(!msg.contains('/'), "must not leak a path or url: {msg}");
     }
 
     #[test]

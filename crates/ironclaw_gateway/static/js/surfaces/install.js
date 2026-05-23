@@ -20,7 +20,8 @@ function renderIronhubInstallError(message) {
   );
 }
 
-function renderIronhubConfirm(tool, info) {
+function renderIronhubConfirm(signed, info) {
+  var tool = signed && signed.slug ? signed.slug : '';
   var kind = info && info.kind ? info.kind : 'tool';
   var version = info && info.version ? info.version : '';
   var description = info && info.description ? info.description : '';
@@ -84,7 +85,7 @@ function renderIronhubConfirm(tool, info) {
   var btn = document.getElementById('ironhub-install-confirm-btn');
   if (btn) {
     btn.addEventListener('click', function() {
-      ironhubInstallConfirm(tool, isCommunityUnverified);
+      ironhubInstallConfirm(signed, isCommunityUnverified);
     });
   }
 }
@@ -97,13 +98,21 @@ function ironhubAckChanged() {
   }
 }
 
-function ironhubInstallConfirm(tool, requireAck) {
+function ironhubInstallConfirm(signed, requireAck) {
   var btn = document.getElementById('ironhub-install-confirm-btn');
   if (btn) {
     btn.disabled = true;
     btn.textContent = I18n.t('ironhub.install.installing');
   }
-  var body = { name: tool };
+  var body = {
+    slug: signed.slug,
+    version: signed.version,
+    uid: signed.uid,
+    aid: signed.aid,
+    ts: parseInt(signed.ts, 10),
+    nonce: signed.nonce,
+    sig: signed.sig,
+  };
   if (requireAck) {
     body.acknowledge_unverified = true;
   }
@@ -111,7 +120,7 @@ function ironhubInstallConfirm(tool, requireAck) {
     method: 'POST',
     body: body,
   }).then(function(res) {
-    var name = res && res.name ? res.name : tool;
+    var name = res && res.name ? res.name : signed.slug;
     showToast(I18n.t('ironhub.install.success', { name: name }), 'success');
     renderIronhubInstallState(
       '<h2>' + escapeHtml(I18n.t('ironhub.install.doneTitle')) + '</h2>' +
@@ -148,17 +157,19 @@ function startIronhubInstall(params) {
     return;
   }
 
+  var signed = {
+    slug: slug,
+    version: version,
+    uid: uid,
+    aid: aid,
+    ts: parseInt(ts, 10),
+    nonce: nonce,
+    sig: sig,
+  };
+
   apiFetch('/api/ironhub/verify-intent', {
     method: 'POST',
-    body: {
-      slug: slug,
-      version: version,
-      uid: uid,
-      aid: aid,
-      ts: parseInt(ts, 10),
-      nonce: nonce,
-      sig: sig,
-    },
+    body: signed,
   }).then(function(res) {
     if (!res || !res.valid) {
       var reason = res && res.reason ? res.reason : I18n.t('ironhub.install.unverified');
@@ -167,10 +178,10 @@ function startIronhubInstall(params) {
     }
     return apiFetch('/api/ironhub/info?name=' + encodeURIComponent(slug))
       .then(function(info) {
-        renderIronhubConfirm(slug, info);
+        renderIronhubConfirm(signed, info);
       })
       .catch(function() {
-        renderIronhubConfirm(slug, null);
+        renderIronhubConfirm(signed, null);
       });
   }).catch(function(err) {
     var msg = err && err.message ? err.message : I18n.t('ironhub.install.unverified');

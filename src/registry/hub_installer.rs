@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
+use std::time::{Duration, Instant};
 
 use tokio::fs;
 use tokio::sync::Mutex as AsyncMutex;
@@ -19,16 +20,87 @@ const MAX_WASM_BYTES: usize = 16 * 1024 * 1024;
 static INSTALL_LOCKS: LazyLock<std::sync::Mutex<HashMap<String, Arc<AsyncMutex<()>>>>> =
     LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
-fn acquire_install_lock(key: &str) -> Arc<AsyncMutex<()>> {
+struct InstallLock {
+    key: String,
+    mutex: Arc<AsyncMutex<()>>,
+}
+
+impl InstallLock {
+    async fn lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.mutex.lock().await
+    }
+}
+
+impl Drop for InstallLock {
+    fn drop(&mut self) {
+        let mut guard = INSTALL_LOCKS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(existing) = guard.get(&self.key)
+            && Arc::ptr_eq(existing, &self.mutex)
+            && Arc::strong_count(&self.mutex) <= 2
+        {
+            guard.remove(&self.key);
+        }
+    }
+}
+
+fn acquire_install_lock(key: &str) -> InstallLock {
     let mut guard = INSTALL_LOCKS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(lock) = guard.get(key) {
-        return Arc::clone(lock);
+    let mutex = if let Some(existing) = guard.get(key) {
+        Arc::clone(existing)
+    } else {
+        let fresh = Arc::new(AsyncMutex::new(()));
+        guard.insert(key.to_string(), Arc::clone(&fresh));
+        fresh
+    };
+    InstallLock {
+        key: key.to_string(),
+        mutex,
     }
-    let lock = Arc::new(AsyncMutex::new(()));
-    guard.insert(key.to_string(), Arc::clone(&lock));
-    lock
+}
+
+const MANIFEST_CACHE_TTL: Duration = Duration::from_secs(60);
+const MANIFEST_CACHE_MAX_ENTRIES: usize = 64;
+
+struct CachedManifest {
+    manifest: Arc<HubManifest>,
+    fetched_at: Instant,
+}
+
+static MANIFEST_CACHE: LazyLock<std::sync::Mutex<HashMap<String, CachedManifest>>> =
+    LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+fn manifest_cache_get(url: &str, now: Instant) -> Option<Arc<HubManifest>> {
+    let guard = MANIFEST_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let entry = guard.get(url)?;
+    (now.duration_since(entry.fetched_at) <= MANIFEST_CACHE_TTL)
+        .then(|| Arc::clone(&entry.manifest))
+}
+
+fn manifest_cache_put(url: &str, manifest: Arc<HubManifest>, now: Instant) {
+    let mut guard = MANIFEST_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if guard.len() >= MANIFEST_CACHE_MAX_ENTRIES && !guard.contains_key(url) {
+        guard.retain(|_, e| now.duration_since(e.fetched_at) <= MANIFEST_CACHE_TTL);
+        if guard.len() >= MANIFEST_CACHE_MAX_ENTRIES
+            && let Some(victim) = guard.keys().next().cloned()
+        {
+            guard.remove(&victim);
+        }
+    }
+    guard.insert(
+        url.to_string(),
+        CachedManifest {
+            manifest,
+            fetched_at: now,
+        },
+    );
 }
 
 async fn write_atomic(target: &Path, bytes: &[u8]) -> Result<(), RegistryError> {
@@ -135,6 +207,16 @@ impl HubInstaller {
         &self.skills_dir
     }
 
+    pub async fn fetch_manifest_cached(&self) -> Result<HubManifest, RegistryError> {
+        let now = Instant::now();
+        if let Some(hit) = manifest_cache_get(&self.manifest_url, now) {
+            return Ok((*hit).clone());
+        }
+        let manifest = Arc::new(self.fetch_manifest().await?);
+        manifest_cache_put(&self.manifest_url, Arc::clone(&manifest), now);
+        Ok((*manifest).clone())
+    }
+
     pub async fn fetch_manifest(&self) -> Result<HubManifest, RegistryError> {
         validate_artifact_url("hub-manifest", "manifest_url", &self.manifest_url)?;
 
@@ -182,6 +264,14 @@ impl HubInstaller {
             .await
     }
 
+    fn tool_wasm_path(&self, name: &str) -> PathBuf {
+        self.tools_dir.join(format!("{name}.wasm"))
+    }
+
+    fn skill_md_path(&self, name: &str) -> PathBuf {
+        self.skills_dir.join(name).join("SKILL.md")
+    }
+
     pub async fn install_tool_entry(
         &self,
         entry: &HubToolEntry,
@@ -189,6 +279,16 @@ impl HubInstaller {
         force: bool,
     ) -> Result<HubInstallOutcome, RegistryError> {
         validate_tool_entry(entry)?;
+
+        if !force {
+            let target = self.tool_wasm_path(&entry.name);
+            if target.exists() {
+                return Err(RegistryError::AlreadyInstalled {
+                    name: entry.name.clone(),
+                    path: target,
+                });
+            }
+        }
 
         let wasm_bytes = download_artifact(&entry.wasm.url, MAX_WASM_BYTES as u64).await?;
         let caps_bytes =
@@ -205,6 +305,16 @@ impl HubInstaller {
         force: bool,
     ) -> Result<HubInstallOutcome, RegistryError> {
         validate_skill_entry(entry)?;
+
+        if !force {
+            let target = self.skill_md_path(&entry.name);
+            if target.exists() {
+                return Err(RegistryError::AlreadyInstalled {
+                    name: entry.name.clone(),
+                    path: target,
+                });
+            }
+        }
 
         let md_bytes = download_artifact(&entry.skill_md.url, MAX_METADATA_BYTES as u64).await?;
 
@@ -254,7 +364,7 @@ impl HubInstaller {
             .await
             .map_err(RegistryError::Io)?;
 
-        let target_wasm = self.tools_dir.join(format!("{}.wasm", entry.name));
+        let target_wasm = self.tool_wasm_path(&entry.name);
         let target_caps = self
             .tools_dir
             .join(format!("{}.capabilities.json", entry.name));
@@ -312,7 +422,7 @@ impl HubInstaller {
             .await
             .map_err(RegistryError::Io)?;
 
-        let target_md = skill_dir.join("SKILL.md");
+        let target_md = self.skill_md_path(&entry.name);
 
         let lock = acquire_install_lock(&format!("skill:{}", entry.name));
         let _guard = lock.lock().await;
@@ -540,6 +650,61 @@ mod tests {
         assert!(
             stray.is_empty(),
             "no temp files must remain on disk after install"
+        );
+    }
+
+    #[test]
+    fn manifest_cache_hits_within_ttl_and_expires_after() {
+        let url = "https://hub.ironclaw.com/manifest-cache-test.json";
+        let manifest = Arc::new(build_manifest(vec![], vec![]));
+        let base = Instant::now();
+        manifest_cache_put(url, Arc::clone(&manifest), base);
+        assert!(
+            manifest_cache_get(url, base).is_some(),
+            "a fresh entry must be a cache hit"
+        );
+        let later = base + MANIFEST_CACHE_TTL + Duration::from_secs(1);
+        assert!(
+            manifest_cache_get(url, later).is_none(),
+            "an entry past its TTL must miss"
+        );
+    }
+
+    #[tokio::test]
+    async fn install_lock_entry_reclaimed_after_install() {
+        let tmp = TempDir::new().expect("tempdir");
+        let installer = installer_in(&tmp);
+        let wasm = b"fake-wasm-bytes";
+        let caps = br#"{"name":"reclaim-probe"}"#;
+        let entry = build_tool_entry("reclaim-probe", wasm, caps);
+        installer
+            .install_tool_from_bytes(&entry, "test-release", wasm, caps, false)
+            .await
+            .expect("install succeeds");
+        let retained = INSTALL_LOCKS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains_key("tool:reclaim-probe");
+        assert!(
+            !retained,
+            "install lock entry must be reclaimed after the install completes"
+        );
+    }
+
+    #[tokio::test]
+    async fn install_tool_entry_skips_download_when_already_installed() {
+        let tmp = TempDir::new().expect("tempdir");
+        let installer = installer_in(&tmp);
+        std::fs::create_dir_all(tmp.path().join("tools")).expect("tools dir");
+        std::fs::write(tmp.path().join("tools/clickup.wasm"), b"already here").expect("seed");
+
+        let entry = build_tool_entry("clickup", b"fake-wasm-bytes", br#"{"name":"clickup"}"#);
+        let result = installer
+            .install_tool_entry(&entry, "test-release", false)
+            .await;
+        assert!(
+            matches!(result, Err(RegistryError::AlreadyInstalled { .. })),
+            "force=false re-install must short-circuit before downloading, got {result:?}"
         );
     }
 
