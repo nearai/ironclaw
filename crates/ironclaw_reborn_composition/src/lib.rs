@@ -186,8 +186,8 @@ use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{
-    MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, SecretHandle, VirtualPath,
-    runtime_policy::EffectiveRuntimePolicy,
+    MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, SYSTEM_RESERVED_ID,
+    SecretHandle, VirtualPath, runtime_policy::EffectiveRuntimePolicy,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_runtime::{CapabilitySurfaceVersion, HostRuntimeServices};
@@ -265,18 +265,34 @@ const PER_USER_ALIASES: &[&str] = &[
 ///
 /// The system sentinel scope (see
 /// [`ironclaw_host_api::ResourceScope::system`]) routes records under
-/// `/tenants/__SYSTEM__/users/__SYSTEM__/<alias>`. Production code uses
+/// `/tenants/__system__/users/__system__/<alias>`. Production code uses
 /// it for process-global records whose paths already encode per-tenant
 /// identity (event-log stream keys, conversation singleton state).
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub fn invocation_mount_view(
     scope: &ResourceScope,
 ) -> Result<MountView, ironclaw_host_api::HostApiError> {
-    let tenant_user_prefix = format!(
-        "/tenants/{}/users/{}",
-        scope.tenant_id.as_str(),
-        scope.user_id.as_str()
-    );
+    invocation_mount_view_for_segments(
+        resource_scope_path_segment(scope.tenant_id.as_str()),
+        resource_scope_path_segment(scope.user_id.as_str()),
+    )
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn resource_scope_path_segment(value: &str) -> &str {
+    if value == SYSTEM_RESERVED_ID {
+        "__system__"
+    } else {
+        value
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn invocation_mount_view_for_segments(
+    tenant_id: &str,
+    user_id: &str,
+) -> Result<MountView, ironclaw_host_api::HostApiError> {
+    let tenant_user_prefix = format!("/tenants/{tenant_id}/users/{user_id}");
     let mut grants = Vec::with_capacity(PER_USER_ALIASES.len() + 2);
     for alias in PER_USER_ALIASES {
         let target = format!("{tenant_user_prefix}{alias}");
@@ -288,7 +304,7 @@ pub fn invocation_mount_view(
     }
     grants.push(MountGrant::new(
         MountAlias::new("/tenant-shared")?,
-        VirtualPath::new(format!("/tenants/{}/shared", scope.tenant_id.as_str()))?,
+        VirtualPath::new(format!("/tenants/{tenant_id}/shared"))?,
         MountPermissions::read_write(),
     ));
     for system_subroot in ["/system/settings", "/system/extensions", "/system/skills"] {
@@ -675,6 +691,18 @@ mod mount_view_tests {
         assert_eq!(
             resolved.as_str(),
             &format!("/tenants/{}/shared/foo", scope.tenant_id.as_str())
+        );
+    }
+
+    #[test]
+    fn invocation_mount_view_sanitizes_system_scope_segments() {
+        let view = invocation_mount_view(&ResourceScope::system()).unwrap();
+        let resolved = view
+            .resolve(&ScopedPath::new("/turns/state.json").unwrap())
+            .unwrap();
+        assert_eq!(
+            resolved.as_str(),
+            "/tenants/__system__/users/__system__/turns/state.json"
         );
     }
 

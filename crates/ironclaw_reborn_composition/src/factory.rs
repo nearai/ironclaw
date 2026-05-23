@@ -23,8 +23,6 @@ use ironclaw_host_api::{
     EffectKind, HostPath, MountAlias, MountGrant, MountPermissions, MountView, PackageId,
     VirtualPath,
 };
-#[cfg(feature = "libsql")]
-use ironclaw_host_api::{ResourceScope, SYSTEM_RESERVED_ID};
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostRuntimeServices,
     builtin_first_party_handlers, builtin_first_party_package,
@@ -77,6 +75,27 @@ type LocalDevResourceGovernor =
 #[cfg(not(feature = "libsql"))]
 type LocalDevResourceGovernor = InMemoryResourceGovernor;
 
+#[cfg(feature = "libsql")]
+type LocalDevRunStateStore = FilesystemRunStateStore<LocalDevRootFilesystem>;
+#[cfg(not(feature = "libsql"))]
+type LocalDevRunStateStore = InMemoryRunStateStore;
+
+#[cfg(feature = "libsql")]
+type LocalDevApprovalRequestStore = FilesystemApprovalRequestStore<LocalDevRootFilesystem>;
+#[cfg(not(feature = "libsql"))]
+type LocalDevApprovalRequestStore = InMemoryApprovalRequestStore;
+
+#[cfg(feature = "libsql")]
+type LocalDevProcessServices = ProcessServices<
+    ironclaw_processes::FilesystemProcessStore<LocalDevRootFilesystem>,
+    ironclaw_processes::FilesystemProcessResultStore<LocalDevRootFilesystem>,
+>;
+#[cfg(not(feature = "libsql"))]
+type LocalDevProcessServices = ProcessServices<
+    ironclaw_processes::InMemoryProcessStore,
+    ironclaw_processes::InMemoryProcessResultStore,
+>;
+
 pub struct RebornServices {
     pub host_runtime: Option<Arc<dyn ironclaw_host_runtime::HostRuntime>>,
     pub turn_coordinator: Option<Arc<dyn ironclaw_turns::TurnCoordinator>>,
@@ -91,6 +110,17 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     pub(crate) event_log: Arc<dyn DurableEventLog>,
+}
+
+struct RebornLocalDevStoreGraph {
+    run_state: Arc<LocalDevRunStateStore>,
+    approval_requests: Arc<LocalDevApprovalRequestStore>,
+    turn_state: Arc<LocalDevTurnStateStore>,
+    local_runtime: Arc<RebornLocalRuntimeServices>,
+    resource_governor: Arc<LocalDevResourceGovernor>,
+    process_services: LocalDevProcessServices,
+    #[cfg(feature = "libsql")]
+    capability_leases: Arc<FilesystemCapabilityLeaseStore<LocalDevRootFilesystem>>,
 }
 
 impl std::fmt::Debug for RebornServices {
@@ -174,86 +204,14 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         Arc::clone(&filesystem),
         local_dev_skill_mount_view()?,
     ));
-
-    #[cfg(feature = "libsql")]
-    let scoped_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
-    let event_log = local_dev_event_log(Arc::clone(&filesystem))?;
-
-    #[cfg(feature = "libsql")]
-    let run_state = Arc::new(FilesystemRunStateStore::new(Arc::clone(&scoped_filesystem)));
-    #[cfg(not(feature = "libsql"))]
-    let run_state = Arc::new(InMemoryRunStateStore::new());
-
-    #[cfg(feature = "libsql")]
-    let approval_requests = Arc::new(FilesystemApprovalRequestStore::new(Arc::clone(
-        &scoped_filesystem,
-    )));
-    #[cfg(not(feature = "libsql"))]
-    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
-
-    #[cfg(feature = "libsql")]
-    let turn_state = Arc::new(FilesystemTurnStateStore::new(Arc::clone(
-        &scoped_filesystem,
-    )));
-    #[cfg(not(feature = "libsql"))]
-    let turn_state = Arc::new(InMemoryTurnStateStore::default());
-
-    #[cfg(feature = "libsql")]
-    let checkpoint_state_store: Arc<dyn CheckpointStateStore> = Arc::new(
-        FilesystemCheckpointStateStore::new(Arc::clone(&scoped_filesystem)),
-    );
-    #[cfg(not(feature = "libsql"))]
-    let checkpoint_state_store: Arc<dyn CheckpointStateStore> =
-        Arc::new(InMemoryCheckpointStateStore::default());
-
-    #[cfg(feature = "libsql")]
-    let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_state.clone();
-    #[cfg(not(feature = "libsql"))]
-    let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> =
-        Arc::new(InMemoryLoopCheckpointStore::default());
-
-    #[cfg(feature = "libsql")]
-    let thread_service: Arc<dyn SessionThreadService> = Arc::new(
-        FilesystemSessionThreadService::new(Arc::clone(&scoped_filesystem)),
-    );
-    #[cfg(not(feature = "libsql"))]
-    let thread_service: Arc<dyn SessionThreadService> =
-        Arc::new(InMemorySessionThreadService::default());
-
-    let local_runtime = Arc::new(RebornLocalRuntimeServices {
-        turn_state: Arc::clone(&turn_state),
-        checkpoint_state_store: Arc::clone(&checkpoint_state_store),
-        loop_checkpoint_store: Arc::clone(&loop_checkpoint_store),
-        thread_service: Arc::clone(&thread_service),
-        skill_filesystem,
-        event_log: Arc::clone(&event_log),
-    });
-
-    #[cfg(feature = "libsql")]
-    let resource_governor: Arc<LocalDevResourceGovernor> =
-        Arc::new(PersistentResourceGovernor::new(
-            FilesystemResourceGovernorStore::new(Arc::clone(&scoped_filesystem)),
-        ));
-    #[cfg(not(feature = "libsql"))]
-    let resource_governor: Arc<LocalDevResourceGovernor> =
-        Arc::new(InMemoryResourceGovernor::new());
-
-    #[cfg(feature = "libsql")]
-    let process_services = ProcessServices::filesystem(Arc::clone(&scoped_filesystem));
-    #[cfg(not(feature = "libsql"))]
-    let process_services = ProcessServices::in_memory();
-
-    #[cfg(feature = "libsql")]
-    let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
-        &scoped_filesystem,
-    )));
+    let store_graph = build_local_dev_store_graph(Arc::clone(&filesystem), skill_filesystem)?;
 
     let mut services = HostRuntimeServices::new(
         Arc::new(builtin_extension_registry()?),
         filesystem,
-        resource_governor,
+        Arc::clone(&store_graph.resource_governor),
         Arc::new(GrantAuthorizer::new()),
-        process_services,
+        store_graph.process_services.clone(),
         CapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
     .with_first_party_capabilities(Arc::new(builtin_first_party_registry()?))
@@ -262,12 +220,12 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     .try_with_host_http_egress(ironclaw_network::PolicyNetworkHttpEgress::new(
         ironclaw_network::ReqwestNetworkTransport::default(),
     ))?
-    .with_run_state(Arc::clone(&run_state))
-    .with_approval_requests(Arc::clone(&approval_requests))
-    .with_turn_state_and_transition_port(Arc::clone(&turn_state));
+    .with_run_state(Arc::clone(&store_graph.run_state))
+    .with_approval_requests(Arc::clone(&store_graph.approval_requests))
+    .with_turn_state_and_transition_port(Arc::clone(&store_graph.turn_state));
     #[cfg(feature = "libsql")]
     {
-        services = services.with_capability_leases(capability_leases);
+        services = services.with_capability_leases(Arc::clone(&store_graph.capability_leases));
     }
     if let Some(runtime_policy) = input.runtime_policy {
         services = services.with_runtime_policy(runtime_policy);
@@ -277,14 +235,99 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
 
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
         Arc::new(services.host_runtime_for_local_testing());
-    let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
-        Arc::new(DefaultTurnCoordinator::new(turn_state));
+    let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> = Arc::new(
+        DefaultTurnCoordinator::new(Arc::clone(&store_graph.turn_state)),
+    );
 
     Ok(RebornServices {
         host_runtime: Some(host_runtime),
         turn_coordinator: Some(turn_coordinator),
         readiness: readiness_for(input.profile, true, true),
-        local_runtime: Some(local_runtime),
+        local_runtime: Some(store_graph.local_runtime),
+    })
+}
+
+#[cfg(feature = "libsql")]
+fn build_local_dev_store_graph(
+    filesystem: Arc<LocalDevRootFilesystem>,
+    skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
+) -> Result<RebornLocalDevStoreGraph, RebornBuildError> {
+    let scoped_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
+    let event_log = local_dev_event_log(filesystem)?;
+    let run_state = Arc::new(FilesystemRunStateStore::new(Arc::clone(&scoped_filesystem)));
+    let approval_requests = Arc::new(FilesystemApprovalRequestStore::new(Arc::clone(
+        &scoped_filesystem,
+    )));
+    let turn_state = Arc::new(FilesystemTurnStateStore::new(Arc::clone(
+        &scoped_filesystem,
+    )));
+    let checkpoint_state_store: Arc<dyn CheckpointStateStore> = Arc::new(
+        FilesystemCheckpointStateStore::new(Arc::clone(&scoped_filesystem)),
+    );
+    let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_state.clone();
+    let thread_service: Arc<dyn SessionThreadService> = Arc::new(
+        FilesystemSessionThreadService::new(Arc::clone(&scoped_filesystem)),
+    );
+    let local_runtime = Arc::new(RebornLocalRuntimeServices {
+        turn_state: Arc::clone(&turn_state),
+        checkpoint_state_store,
+        loop_checkpoint_store,
+        thread_service,
+        skill_filesystem,
+        event_log,
+    });
+    let resource_governor: Arc<LocalDevResourceGovernor> =
+        Arc::new(PersistentResourceGovernor::new(
+            FilesystemResourceGovernorStore::new(Arc::clone(&scoped_filesystem)),
+        ));
+    let process_services = ProcessServices::filesystem(Arc::clone(&scoped_filesystem));
+    let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(scoped_filesystem));
+
+    Ok(RebornLocalDevStoreGraph {
+        run_state,
+        approval_requests,
+        turn_state,
+        local_runtime,
+        resource_governor,
+        process_services,
+        capability_leases,
+    })
+}
+
+#[cfg(not(feature = "libsql"))]
+fn build_local_dev_store_graph(
+    filesystem: Arc<LocalDevRootFilesystem>,
+    skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
+) -> Result<RebornLocalDevStoreGraph, RebornBuildError> {
+    let event_log = local_dev_event_log(filesystem)?;
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let turn_state = Arc::new(InMemoryTurnStateStore::default());
+    let checkpoint_state_store: Arc<dyn CheckpointStateStore> =
+        Arc::new(InMemoryCheckpointStateStore::default());
+    let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> =
+        Arc::new(InMemoryLoopCheckpointStore::default());
+    let thread_service: Arc<dyn SessionThreadService> =
+        Arc::new(InMemorySessionThreadService::default());
+    let local_runtime = Arc::new(RebornLocalRuntimeServices {
+        turn_state: Arc::clone(&turn_state),
+        checkpoint_state_store,
+        loop_checkpoint_store,
+        thread_service,
+        skill_filesystem,
+        event_log,
+    });
+    let resource_governor: Arc<LocalDevResourceGovernor> =
+        Arc::new(InMemoryResourceGovernor::new());
+    let process_services = ProcessServices::in_memory();
+
+    Ok(RebornLocalDevStoreGraph {
+        run_state,
+        approval_requests,
+        turn_state,
+        local_runtime,
+        resource_governor,
+        process_services,
     })
 }
 
@@ -409,58 +452,7 @@ fn local_dev_bytes_capabilities() -> BackendCapabilities {
 fn local_dev_scoped_filesystem(
     filesystem: Arc<LocalDevRootFilesystem>,
 ) -> Arc<ScopedFilesystem<LocalDevRootFilesystem>> {
-    Arc::new(ScopedFilesystem::new(
-        filesystem,
-        local_dev_invocation_mount_view,
-    ))
-}
-
-#[cfg(feature = "libsql")]
-const LOCAL_DEV_DURABLE_ALIASES: &[&str] = &[
-    "/processes",
-    "/secrets",
-    "/authorization",
-    "/outbound",
-    "/run-state",
-    "/approvals",
-    "/threads",
-    "/conversations",
-    "/turns",
-    "/checkpoint-state",
-    "/resources",
-    "/engine",
-    "/skills",
-];
-
-#[cfg(feature = "libsql")]
-fn local_dev_invocation_mount_view(
-    scope: &ResourceScope,
-) -> Result<MountView, ironclaw_host_api::HostApiError> {
-    let tenant_id = if scope.tenant_id.as_str() == SYSTEM_RESERVED_ID {
-        "__system__"
-    } else {
-        scope.tenant_id.as_str()
-    };
-    let user_id = if scope.user_id.as_str() == SYSTEM_RESERVED_ID {
-        "__system__"
-    } else {
-        scope.user_id.as_str()
-    };
-    let tenant_user_prefix = format!("/tenants/{tenant_id}/users/{user_id}");
-    let mut grants = Vec::with_capacity(LOCAL_DEV_DURABLE_ALIASES.len() + 1);
-    for alias in LOCAL_DEV_DURABLE_ALIASES {
-        grants.push(MountGrant::new(
-            MountAlias::new(*alias)?,
-            VirtualPath::new(format!("{tenant_user_prefix}{alias}"))?,
-            MountPermissions::read_write_list_delete(),
-        ));
-    }
-    grants.push(MountGrant::new(
-        MountAlias::new("/tenant-shared")?,
-        VirtualPath::new(format!("/tenants/{tenant_id}/shared"))?,
-        MountPermissions::read_write(),
-    ));
-    MountView::new(grants)
+    crate::wrap_scoped(filesystem)
 }
 
 #[cfg(feature = "libsql")]
