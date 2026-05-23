@@ -412,6 +412,7 @@ struct SeenRuntimeEvent {
     kind: RuntimeEventKind,
     provider: Option<ironclaw_host_api::ExtensionId>,
     hook_id: Option<String>,
+    is_replay: bool,
 }
 
 /// Recorder used by event-triggered hook integration tests. Pairs the
@@ -470,6 +471,7 @@ impl EventTriggeredHook for RecordingEventTriggeredHook {
             kind: ctx.event.kind,
             provider: ctx.event.provider.clone(),
             hook_id: ctx.event.hook_id.clone(),
+            is_replay: ctx.is_replay,
         });
         sink.note(NoteCategory::HookFired, "event hook fired");
     }
@@ -1259,6 +1261,85 @@ async fn event_triggered_subscription_replays_from_resume_cursor() {
             RuntimeEventCursor::new(3),
             RuntimeEventCursor::new(4),
         ]
+    );
+}
+
+/// PR #3640 followup (Bug 2, replay signal): events caught up from the resume
+/// cursor to the stream head at subscription time must be dispatched through
+/// the replay path (`is_replay = true`) so reconnect/restart side effects can
+/// dedupe. Events that arrive after the backlog is drained (head reached) must
+/// be live (`is_replay = false`). Previously every event went through the live
+/// path, so the public `EventTriggeredHookContext::is_replay` contract was dead
+/// surface and replayed side effects fired with no dedupe signal.
+#[tokio::test]
+async fn event_subscription_marks_is_replay_true_for_replayed_events() {
+    let fixture = Fixture::new().await;
+    let scope = runtime_scope(&fixture);
+    let stream = EventStreamKey::from_scope(&scope);
+    let log = Arc::new(InMemoryDurableEventLog::new());
+    let hook_id = HookId::for_builtin("tests::hooks_integration::replay_flag", HookVersion::ONE);
+
+    // Backlog of two events appended BEFORE the subscription starts. These are
+    // the gap between the resume cursor (origin) and head-at-startup, so they
+    // must replay.
+    for _ in 0..2 {
+        log.append(RuntimeEvent::hook_failed(
+            scope.clone(),
+            runtime_capability("hooks.replay"),
+            hook_id.to_hex(),
+            "timeout",
+            "fail_isolated",
+            None,
+        ))
+        .await
+        .expect("append backlog event");
+    }
+
+    let seen = SeenLog::new();
+    let inner = Arc::new(RecordingCapabilityPort::new());
+    let _host = fixture
+        .factory()
+        .with_hook_dispatcher(event_triggered_dispatcher(
+            RuntimeEventKind::HookFailed,
+            Arc::clone(&seen),
+        ))
+        .with_event_subscription(event_log_subscription(
+            &fixture,
+            Arc::clone(&log),
+            stream,
+            RuntimeEventCursor::origin(),
+        ))
+        .build_text_only_host_with_capabilities(fixture.request(), inner)
+        .await
+        .expect("host builds with event subscription");
+
+    // Both backlog events must arrive marked as replay.
+    let replayed = wait_for_seen_events(&seen, 2).await;
+    assert_eq!(replayed.len(), 2, "both backlog events must be observed");
+    assert!(
+        replayed.iter().all(|event| event.is_replay),
+        "backlog events caught up to head must be marked is_replay = true: {replayed:?}"
+    );
+
+    // Append a fresh event AFTER the backlog has drained (the subscription has
+    // by now reached an empty poll and switched to live). It must be live.
+    log.append(RuntimeEvent::hook_failed(
+        scope.clone(),
+        runtime_capability("hooks.replay"),
+        hook_id.to_hex(),
+        "timeout",
+        "fail_isolated",
+        None,
+    ))
+    .await
+    .expect("append live event");
+
+    let all = wait_for_seen_events(&seen, 3).await;
+    assert_eq!(all.len(), 3, "live event must also be observed");
+    assert!(
+        !all[2].is_replay,
+        "event arriving after head must be live (is_replay = false): {:?}",
+        all[2]
     );
 }
 

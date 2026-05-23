@@ -646,6 +646,16 @@ impl EventTriggeredHookSubscription {
         // first iteration where the resulting interval reaches the cap,
         // which keeps the streak counter bounded.
         let mut empty_streak: u32 = 0;
+        // PR #3640 followup (Bug 2, replay signal): events read while catching
+        // up from `start_cursor` to the stream head at subscription time are
+        // *replay* — on a reconnect/restart they may have already fired their
+        // side effects, so hooks receive `is_replay = true` to dedupe. The
+        // first empty poll means we have drained the backlog and reached head;
+        // every event after that boundary is *live* (`is_replay = false`).
+        // This needs no durable cursor state: `start_cursor` is the caller's
+        // committed resume point, and the catch-up window is exactly the gap
+        // between it and head-at-startup.
+        let mut replaying = true;
         loop {
             match self
                 .log
@@ -660,6 +670,9 @@ impl EventTriggeredHookSubscription {
                 Ok(replay) => {
                     if replay.entries.is_empty() {
                         cursor = replay.next_cursor;
+                        // First empty poll == backlog drained == head reached.
+                        // Everything after this boundary is live (Bug 2).
+                        replaying = false;
                         let sleep_for = adaptive_poll_interval(
                             self.poll_interval,
                             self.max_poll_interval,
@@ -671,13 +684,23 @@ impl EventTriggeredHookSubscription {
                     }
                     empty_streak = 0;
                     for entry in replay.entries {
-                        dispatcher
-                            .dispatch_event_triggered_at(
-                                tenant_id.clone(),
-                                entry.cursor,
-                                &entry.record,
-                            )
-                            .await;
+                        if replaying {
+                            dispatcher
+                                .dispatch_event_triggered_replay_at(
+                                    tenant_id.clone(),
+                                    entry.cursor,
+                                    &entry.record,
+                                )
+                                .await;
+                        } else {
+                            dispatcher
+                                .dispatch_event_triggered_at(
+                                    tenant_id.clone(),
+                                    entry.cursor,
+                                    &entry.record,
+                                )
+                                .await;
+                        }
                     }
                     cursor = replay.next_cursor;
                 }
