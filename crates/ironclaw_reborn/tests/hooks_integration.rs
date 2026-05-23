@@ -29,7 +29,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Duration as StdDuration, Instant};
 
 use tokio::sync::Notify;
 
@@ -496,9 +496,13 @@ fn event_triggered_dispatcher_with_scope(
     delay: Option<Duration>,
 ) -> Arc<HookDispatcher> {
     let hook_id = HookId::derive(
-        &ExtensionId(owning_extension.to_string()),
+        &ExtensionId::new(owning_extension.to_string()).expect("extension id literal is valid"),
         "0.0.1",
-        &HookLocalId(format!("event-{event_kind:?}")),
+        &HookLocalId::new(format!(
+            "event-{}",
+            format!("{event_kind:?}").to_lowercase()
+        ))
+        .expect("hook local id literal is valid"),
         HookVersion::ONE,
     );
     HookDispatcherBuilder::new(HookRegistry::new())
@@ -1321,15 +1325,17 @@ async fn event_triggered_own_capabilities_scope_resolves_hook_failed_owner_from_
     let ext_a = ironclaw_host_api::ExtensionId::new("ext-a").expect("valid ext");
     let ext_b = ironclaw_host_api::ExtensionId::new("ext-b").expect("valid ext");
     let ext_a_source_hook_id = HookId::derive(
-        &ExtensionId(ext_a.as_str().to_string()),
+        &ExtensionId::new(ext_a.as_str().to_string()).expect("extension id literal is valid"),
         "0.0.1",
-        &HookLocalId("hook-failed-source-a".to_string()),
+        &HookLocalId::new("hook-failed-source-a".to_string())
+            .expect("hook local id literal is valid"),
         HookVersion::ONE,
     );
     let ext_b_source_hook_id = HookId::derive(
-        &ExtensionId(ext_b.as_str().to_string()),
+        &ExtensionId::new(ext_b.as_str().to_string()).expect("extension id literal is valid"),
         "0.0.1",
-        &HookLocalId("hook-failed-source-b".to_string()),
+        &HookLocalId::new("hook-failed-source-b".to_string())
+            .expect("hook local id literal is valid"),
         HookVersion::ONE,
     );
     let ext_a_source_hook_hex = ext_a_source_hook_id.to_hex();
@@ -1369,9 +1375,10 @@ async fn event_triggered_own_capabilities_scope_resolves_hook_failed_owner_from_
     let seen = SeenLog::new();
     let inert_seen = SeenLog::new();
     let subscription_hook_id = HookId::derive(
-        &ExtensionId(ext_a.as_str().to_string()),
+        &ExtensionId::new(ext_a.as_str().to_string()).expect("extension id literal is valid"),
         "0.0.1",
-        &HookLocalId("hook-failed-own-capabilities-subscription".to_string()),
+        &HookLocalId::new("hook-failed-own-capabilities-subscription".to_string())
+            .expect("hook local id literal is valid"),
         HookVersion::ONE,
     );
     let dispatcher = HookDispatcherBuilder::new(HookRegistry::new())
@@ -1521,7 +1528,7 @@ async fn event_triggered_subscription_with_foreign_tenant_stream_fails_host_buil
     let fixture = Fixture::new().await;
     let log = Arc::new(InMemoryDurableEventLog::new());
     let foreign_tenant = ironclaw_host_api::TenantId::new("tenant-foreign").expect("valid tenant");
-    let our_user = fixture.user_id.clone();
+    let our_user = fixture.actor_id.clone();
     let our_agent = fixture
         .context
         .scope
@@ -1605,9 +1612,13 @@ async fn event_triggered_self_lifecycle_event_does_not_redispatch() {
     // The subscription's own hook id (matches what
     // `event_triggered_dispatcher_with_scope` derives).
     let subscriber_hook_id = HookId::derive(
-        &ExtensionId(ext.as_str().to_string()),
+        &ExtensionId::new(ext.as_str().to_string()).expect("extension id literal is valid"),
         "0.0.1",
-        &HookLocalId(format!("event-{:?}", RuntimeEventKind::HookFailed)),
+        &HookLocalId::new(format!(
+            "event-{}",
+            format!("{:?}", RuntimeEventKind::HookFailed).to_lowercase()
+        ))
+        .expect("hook local id literal is valid"),
         HookVersion::ONE,
     );
 
@@ -1628,9 +1639,9 @@ async fn event_triggered_self_lifecycle_event_does_not_redispatch() {
     // SHOULD fire the subscription (control case, proves the filter is
     // narrow).
     let other_hook_id = HookId::derive(
-        &ExtensionId(ext.as_str().to_string()),
+        &ExtensionId::new(ext.as_str().to_string()).expect("extension id literal is valid"),
         "0.0.1",
-        &HookLocalId("some-other-hook".to_string()),
+        &HookLocalId::new("some-other-hook".to_string()).expect("hook local id literal is valid"),
         HookVersion::ONE,
     );
     log.append(RuntimeEvent::hook_failed(

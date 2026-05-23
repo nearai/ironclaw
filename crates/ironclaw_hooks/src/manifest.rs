@@ -707,7 +707,7 @@ gas = 999
     #[test]
     fn event_triggered_kind_round_trips_through_toml() {
         let entry = HookManifestEntry {
-            id: HookLocalId("hook-failure-alert".to_string()),
+            id: HookLocalId::new("hook-failure-alert").expect("hook local id is valid"),
             kind: HookManifestKind::EventTriggered,
             scope: HookManifestScope::OwnCapabilities,
             phase: HookPhase::Telemetry,

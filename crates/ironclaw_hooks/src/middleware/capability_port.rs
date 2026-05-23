@@ -1249,6 +1249,7 @@ mod tests {
                 point: HookPointSpec::AfterCapability,
                 owning_extension: None,
                 scope: HookBindingScope::Global,
+                event_kind_filter: None,
                 poisoned: false,
             })
             .expect("ok");
@@ -1744,6 +1745,7 @@ mod tests {
                 point: HookPointSpec::BeforeCapability,
                 owning_extension: None,
                 scope: HookBindingScope::Global,
+                event_kind_filter: None,
                 poisoned: false,
             })
             .expect("insert no_input");
@@ -1757,6 +1759,7 @@ mod tests {
                 point: HookPointSpec::BeforeCapability,
                 owning_extension: None,
                 scope: HookBindingScope::Global,
+                event_kind_filter: None,
                 poisoned: false,
             })
             .expect("insert needs_input");
@@ -1865,6 +1868,7 @@ mod tests {
             point: HookPointSpec::BeforeCapability,
             owning_extension: None,
             scope: HookBindingScope::Global,
+            event_kind_filter: None,
             poisoned: false,
         };
 
@@ -1878,6 +1882,7 @@ mod tests {
             point: HookPointSpec::AfterCapability,
             owning_extension: None,
             scope: HookBindingScope::Global,
+            event_kind_filter: None,
             poisoned: false,
         };
 
