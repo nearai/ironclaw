@@ -8,7 +8,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_threads::ThreadScope;
 use ironclaw_turns::{
-    LoopFailureKind, TurnRunId,
+    TurnRunId,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, LoopHostMilestone, LoopHostMilestoneKind,
         LoopHostMilestoneSink,
@@ -35,6 +35,24 @@ pub struct DurableLoopHostMilestoneScope {
 }
 
 impl DurableLoopHostMilestoneScope {
+    pub fn new(
+        tenant_id: TenantId,
+        user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        mission_id: Option<MissionId>,
+    ) -> Self {
+        Self {
+            tenant_id,
+            user_id,
+            agent_id,
+            project_id,
+            mission_id,
+            thread_id: None,
+            run_id: None,
+        }
+    }
+
     pub fn from_thread_scope(thread_scope: &ThreadScope) -> Result<Self, AgentLoopHostError> {
         let Some(user_id) = thread_scope.owner_user_id.clone() else {
             return Err(AgentLoopHostError::new(
@@ -195,7 +213,7 @@ impl DurableLoopHostMilestoneSink {
             LoopHostMilestoneKind::Failed { reason_kind, .. } => RuntimeEvent::loop_failed(
                 scope,
                 capability_id(LOOP_RUN_CAPABILITY_ID)?,
-                loop_failure_kind(reason_kind),
+                reason_kind.as_str(),
             ),
             // PromptBundleBuilt and CheckpointCreated are suppressed here intentionally.
             // Checkpoint durability is owned by LoopCheckpointPort::write_checkpoint; the
@@ -215,26 +233,6 @@ impl DurableLoopHostMilestoneSink {
             | LoopHostMilestoneKind::DriverNote { .. } => return Ok(None),
         };
         Ok(Some(event))
-    }
-}
-
-fn loop_failure_kind(reason_kind: &LoopFailureKind) -> &'static str {
-    match reason_kind {
-        LoopFailureKind::ModelError => "model_error",
-        LoopFailureKind::ContextBuildFailed => "context_build_failed",
-        LoopFailureKind::CapabilityProtocolError => "capability_protocol_error",
-        LoopFailureKind::IterationLimit => "iteration_limit",
-        LoopFailureKind::InvalidModelOutput => "invalid_model_output",
-        LoopFailureKind::CheckpointRejected => "checkpoint_rejected",
-        LoopFailureKind::CheckpointUnavailable => "checkpoint_unavailable",
-        LoopFailureKind::TranscriptWriteFailed => "transcript_write_failed",
-        LoopFailureKind::DriverBug => "driver_bug",
-        LoopFailureKind::InterruptedUnexpectedly => "interrupted_unexpectedly",
-        LoopFailureKind::NoProgressDetected => "no_progress_detected",
-        LoopFailureKind::PolicyDenied => "policy_denied",
-        // LoopFailureKind is `#[non_exhaustive]`; fail closed if a new variant
-        // lands in `ironclaw_turns` ahead of this matcher being updated.
-        _ => "driver_bug",
     }
 }
 

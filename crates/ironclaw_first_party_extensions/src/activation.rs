@@ -7,15 +7,15 @@ use async_trait::async_trait;
 use futures::{StreamExt, TryStreamExt, stream};
 use ironclaw_loop_support::{
     HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
-    SkillBundleDescriptor, SkillBundleSource, SkillBundleSourceError, SkillSourceKind,
-    sort_skill_bundle_descriptors,
+    SkillBundleDescriptor, SkillBundleId, SkillBundleSource, SkillBundleSourceError,
+    SkillSourceKind, sort_skill_bundle_descriptors,
 };
 use ironclaw_skills::{
     LoadedSkill, SkillSource, extract_skill_mentions, parse_skill_md, prefilter_skills,
     skill_token_cost,
 };
 use ironclaw_turns::run_profile::{LoopRunContext, SkillVisibility};
-use ironclaw_turns::{AcceptedMessageRef, TurnScope};
+use ironclaw_turns::{AcceptedMessageRef, TurnRunId, TurnScope};
 use thiserror::Error;
 
 /// Maximum number of first-party skills selected for one turn by default.
@@ -25,24 +25,27 @@ pub const DEFAULT_MAX_ACTIVE_SKILLS: usize = 4;
 pub const DEFAULT_MAX_SKILL_CONTEXT_TOKENS: usize = 4000;
 
 const MAX_CONCURRENT_SKILL_ACTIVATION_LOADS: usize = 16;
+const MAX_ACTIVATION_CACHE_ENTRIES: usize = 1024;
 
 /// Typed request produced by first-party skill activation selection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillActivationRequest {
     pub name: String,
     pub source: Option<SkillSourceKind>,
+    pub bundle_id: Option<SkillBundleId>,
     pub mode: SkillActivationMode,
 }
 
 impl SkillActivationRequest {
     fn resolved(
         name: impl Into<String>,
-        source: SkillSourceKind,
+        bundle_id: SkillBundleId,
         mode: SkillActivationMode,
     ) -> Self {
         Self {
             name: name.into(),
-            source: Some(source),
+            source: Some(bundle_id.source_kind()),
+            bundle_id: Some(bundle_id),
             mode,
         }
     }
@@ -77,6 +80,42 @@ pub struct SkillActivationSelection {
     pub activations: Vec<SkillActivationRequest>,
     pub rewritten_message: String,
     pub feedback: Vec<String>,
+}
+
+/// Fully resolved activation output for one user message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillActivationPlan {
+    pub selection: SkillActivationSelection,
+    activated_bundles: Vec<SkillBundleId>,
+}
+
+impl SkillActivationPlan {
+    pub fn empty(selection: SkillActivationSelection) -> Self {
+        Self {
+            selection,
+            activated_bundles: Vec::new(),
+        }
+    }
+
+    pub(crate) fn new(
+        selection: SkillActivationSelection,
+        activated_bundles: Vec<SkillBundleId>,
+    ) -> Self {
+        Self {
+            selection,
+            activated_bundles,
+        }
+    }
+
+    pub fn activated_bundles(&self) -> &[SkillBundleId] {
+        &self.activated_bundles
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CapturedSkillActivationPlan {
+    pub plan: SkillActivationPlan,
+    pub run_context: LoopRunContext,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -129,8 +168,9 @@ where
 {
     bundle_source: Arc<S>,
     config: SkillActivationSelectorConfig,
-    messages_by_run: Mutex<HashMap<SkillActivationMessageKey, String>>,
+    messages_by_run: Mutex<HashMap<SkillActivationMessageKey, SkillActivationMessage>>,
     activation_cache: Mutex<HashMap<ActivationCandidateCacheKey, CachedActivationCandidate>>,
+    plans_by_run: Mutex<HashMap<(TurnScope, TurnRunId), CapturedSkillActivationPlan>>,
 }
 
 impl<S> SelectableSkillContextSource<S>
@@ -143,6 +183,7 @@ where
             config,
             messages_by_run: Mutex::new(HashMap::new()),
             activation_cache: Mutex::new(HashMap::new()),
+            plans_by_run: Mutex::new(HashMap::new()),
         }
     }
 
@@ -152,14 +193,60 @@ where
         accepted_message_ref: AcceptedMessageRef,
         message: impl Into<String>,
     ) -> Result<(), SkillActivationSelectionError> {
+        self.record_message(scope, accepted_message_ref, message, false)
+    }
+
+    pub(crate) fn record_user_message_for_execution(
+        &self,
+        scope: TurnScope,
+        accepted_message_ref: AcceptedMessageRef,
+        message: impl Into<String>,
+    ) -> Result<(), SkillActivationSelectionError> {
+        self.record_message(scope, accepted_message_ref, message, true)
+    }
+
+    fn record_message(
+        &self,
+        scope: TurnScope,
+        accepted_message_ref: AcceptedMessageRef,
+        message: impl Into<String>,
+        capture_plan: bool,
+    ) -> Result<(), SkillActivationSelectionError> {
         self.messages_by_run
             .lock()
             .map_err(|_| SkillActivationSelectionError::Internal)?
             .insert(
                 SkillActivationMessageKey::new(scope, accepted_message_ref),
-                message.into(),
+                SkillActivationMessage {
+                    text: message.into(),
+                    capture_plan,
+                },
             );
         Ok(())
+    }
+
+    pub(crate) fn bundle_source(&self) -> Arc<S> {
+        Arc::clone(&self.bundle_source)
+    }
+
+    pub(crate) fn take_activation_plan_for_run(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+    ) -> Result<Option<CapturedSkillActivationPlan>, SkillActivationSelectionError> {
+        Ok(self
+            .plans_by_run
+            .lock()
+            .map_err(|_| SkillActivationSelectionError::Internal)?
+            .remove(&(scope.clone(), run_id)))
+    }
+
+    pub async fn select_activation_plan(
+        &self,
+        run_context: &LoopRunContext,
+        message: &str,
+    ) -> Result<SkillActivationPlan, SkillActivationSelectionError> {
+        self.resolve_activation_plan(run_context, message).await
     }
 
     pub fn clear_accepted_message(
@@ -181,7 +268,7 @@ where
         &self,
         scope: &TurnScope,
         accepted_message_ref: &AcceptedMessageRef,
-    ) -> Result<Option<String>, SkillActivationSelectionError> {
+    ) -> Result<Option<SkillActivationMessage>, SkillActivationSelectionError> {
         Ok(self
             .messages_by_run
             .lock()
@@ -196,9 +283,61 @@ where
         &self,
         run_context: &LoopRunContext,
         message: &str,
+        capture_plan: bool,
     ) -> Result<Vec<HostSkillContextCandidate>, SkillActivationSelectionError> {
-        if message.trim().is_empty() {
+        let (plan, candidates) = self
+            .resolve_activation_plan_with_candidates(run_context, message)
+            .await?;
+        if capture_plan {
+            self.plans_by_run
+                .lock()
+                .map_err(|_| SkillActivationSelectionError::Internal)?
+                .insert(
+                    (run_context.scope.clone(), run_context.run_id),
+                    CapturedSkillActivationPlan {
+                        plan: plan.clone(),
+                        run_context: run_context.clone(),
+                    },
+                );
+        }
+        if plan.selection.activations.is_empty() {
             return Ok(Vec::new());
+        }
+
+        let mut selected = Vec::new();
+        for candidate in candidates {
+            if plan.activated_bundles.contains(candidate.descriptor.id()) {
+                selected.push(candidate.into_context_candidate());
+            }
+        }
+        Ok(selected)
+    }
+
+    async fn resolve_activation_plan(
+        &self,
+        run_context: &LoopRunContext,
+        message: &str,
+    ) -> Result<SkillActivationPlan, SkillActivationSelectionError> {
+        self.resolve_activation_plan_with_candidates(run_context, message)
+            .await
+            .map(|(plan, _)| plan)
+    }
+
+    async fn resolve_activation_plan_with_candidates(
+        &self,
+        run_context: &LoopRunContext,
+        message: &str,
+    ) -> Result<(SkillActivationPlan, Vec<ActivationCandidate>), SkillActivationSelectionError>
+    {
+        if message.trim().is_empty() {
+            return Ok((
+                SkillActivationPlan::empty(SkillActivationSelection {
+                    activations: Vec::new(),
+                    rewritten_message: message.to_string(),
+                    feedback: Vec::new(),
+                }),
+                Vec::new(),
+            ));
         }
 
         let mut descriptors = self
@@ -213,31 +352,8 @@ where
             .load_activation_candidates(run_context, &descriptors)
             .await?;
         let selection = select_skill_activations(message, &candidates, &self.config)?;
-        if selection.activations.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let selected_ids: HashSet<(SkillSourceKind, String)> = selection
-            .activations
-            .iter()
-            .filter_map(|activation| {
-                activation
-                    .source
-                    .map(|source| (source, activation.name.clone()))
-            })
-            .collect();
-
-        let mut selected = Vec::new();
-        for candidate in candidates {
-            let key = (
-                candidate.descriptor.id().source_kind(),
-                candidate.loaded.manifest.name.clone(),
-            );
-            if selected_ids.contains(&key) {
-                selected.push(candidate.into_context_candidate());
-            }
-        }
-        Ok(selected)
+        let plan = activation_plan_for_candidates(selection);
+        Ok((plan, candidates))
     }
 
     async fn load_activation_candidates(
@@ -245,13 +361,13 @@ where
         run_context: &LoopRunContext,
         descriptors: &[SkillBundleDescriptor],
     ) -> Result<Vec<ActivationCandidate>, SkillActivationSelectionError> {
-        let visible_descriptors = descriptors
-            .iter()
-            .filter(|descriptor| descriptor.visibility() == Some(&SkillVisibility::Visible))
-            .cloned()
-            .collect::<Vec<_>>();
-        stream::iter(visible_descriptors)
-            .map(|descriptor| async move {
+        stream::iter(0..descriptors.len())
+            .map(|index| async move {
+                let descriptor = &descriptors[index];
+                if descriptor.visibility() != Some(&SkillVisibility::Visible) {
+                    return Ok(None);
+                }
+                let descriptor = descriptor.clone();
                 let skill_md = self
                     .bundle_source
                     .read_skill_bundle_file(
@@ -262,8 +378,10 @@ where
                     .await
                     .map_err(skill_bundle_source_error_to_selection_error)?;
                 self.activation_candidate_from_skill_md(&descriptor, skill_md)
+                    .map(Some)
             })
             .buffered(MAX_CONCURRENT_SKILL_ACTIVATION_LOADS)
+            .try_filter_map(|candidate| async move { Ok(candidate) })
             .try_collect()
             .await
     }
@@ -274,6 +392,8 @@ where
         skill_md: Vec<u8>,
     ) -> Result<ActivationCandidate, SkillActivationSelectionError> {
         let cache_key = ActivationCandidateCacheKey::new(descriptor, &skill_md);
+        let skill_md =
+            String::from_utf8(skill_md).map_err(|_| SkillActivationSelectionError::ParseFailed)?;
         if let Some(cached) = self
             .activation_cache
             .lock()
@@ -284,23 +404,31 @@ where
             return Ok(ActivationCandidate {
                 descriptor: descriptor.clone(),
                 loaded: cached.loaded,
-                skill_md: cached.skill_md,
+                skill_md,
             });
         }
 
-        let skill_md =
-            String::from_utf8(skill_md).map_err(|_| SkillActivationSelectionError::ParseFailed)?;
         let loaded = loaded_skill_from_candidate(descriptor, &skill_md)?;
-        self.activation_cache
+        let mut cache = self
+            .activation_cache
             .lock()
-            .map_err(|_| SkillActivationSelectionError::Internal)?
-            .insert(
-                cache_key,
-                CachedActivationCandidate {
-                    loaded: loaded.clone(),
-                    skill_md: skill_md.clone(),
-                },
-            );
+            .map_err(|_| SkillActivationSelectionError::Internal)?;
+        if let Some(cached) = cache.get(&cache_key).cloned() {
+            return Ok(ActivationCandidate {
+                descriptor: descriptor.clone(),
+                loaded: cached.loaded,
+                skill_md,
+            });
+        }
+        if cache.len() >= MAX_ACTIVATION_CACHE_ENTRIES {
+            cache.clear();
+        }
+        cache.insert(
+            cache_key,
+            CachedActivationCandidate {
+                loaded: loaded.clone(),
+            },
+        );
         Ok(ActivationCandidate {
             descriptor: descriptor.clone(),
             loaded,
@@ -324,6 +452,12 @@ impl SkillActivationMessageKey {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SkillActivationMessage {
+    text: String,
+    capture_plan: bool,
+}
+
 #[async_trait]
 impl<S> HostSkillContextSource for SelectableSkillContextSource<S>
 where
@@ -342,7 +476,7 @@ where
         else {
             return Ok(Vec::new());
         };
-        self.selected_candidates(run_context, &message)
+        self.selected_candidates(run_context, &message.text, message.capture_plan)
             .await
             .map_err(SkillActivationSelectionError::into_context_error)
     }
@@ -357,7 +491,6 @@ struct ActivationCandidate {
 #[derive(Debug, Clone)]
 struct CachedActivationCandidate {
     loaded: LoadedSkill,
-    skill_md: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -396,6 +529,16 @@ impl ActivationCandidate {
         )
         .with_ordering_key(descriptor_context_ordering_key(&self.descriptor))
     }
+}
+
+fn activation_plan_for_candidates(selection: SkillActivationSelection) -> SkillActivationPlan {
+    let activated_bundles = selection
+        .activations
+        .iter()
+        .filter_map(|activation| activation.bundle_id.clone())
+        .collect();
+
+    SkillActivationPlan::new(selection, activated_bundles)
 }
 
 fn loaded_skill_from_candidate(
@@ -457,7 +600,7 @@ fn select_skill_activations(
             reserve_skill_budget(skill, &mut remaining_slots, &mut remaining_tokens)?;
             activations.push(SkillActivationRequest::resolved(
                 candidate.loaded.manifest.name.clone(),
-                candidate.descriptor.id().source_kind(),
+                candidate.descriptor.id().clone(),
                 SkillActivationMode::ExplicitMention,
             ));
             feedback.push(format!(
@@ -485,7 +628,7 @@ fn select_skill_activations(
         if selected_keys.insert(key) {
             activations.push(SkillActivationRequest::resolved(
                 candidate.loaded.manifest.name.clone(),
-                candidate.descriptor.id().source_kind(),
+                candidate.descriptor.id().clone(),
                 SkillActivationMode::ActivationCriteria,
             ));
         }
@@ -866,6 +1009,10 @@ mod tests {
     }
 
     async fn run_context() -> LoopRunContext {
+        run_context_for("thread-a", "msg:run-a").await
+    }
+
+    async fn run_context_for(thread_id: &str, accepted_message: &str) -> LoopRunContext {
         let resolved = InMemoryRunProfileResolver::default()
             .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
             .await
@@ -875,13 +1022,13 @@ mod tests {
                 TenantId::new("tenant-a").unwrap(),
                 Some(AgentId::new("agent-a").unwrap()),
                 Some(ProjectId::new("project-a").unwrap()),
-                ironclaw_host_api::ThreadId::new("thread-a").unwrap(),
+                ironclaw_host_api::ThreadId::new(thread_id).unwrap(),
             ),
             TurnId::new(),
             TurnRunId::new(),
             resolved,
         )
-        .with_accepted_message_ref(AcceptedMessageRef::new("msg:run-a").unwrap())
+        .with_accepted_message_ref(AcceptedMessageRef::new(accepted_message).unwrap())
         .with_actor(TurnActor::new(
             ironclaw_host_api::UserId::new("user-a").unwrap(),
         ))
@@ -1037,6 +1184,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn clear_accepted_message_removes_only_requested_message() {
+        let source = Arc::new(StaticSkillBundleSource::new(vec![(
+            SkillSourceKind::User,
+            "code-review",
+            &skill_md(
+                "code-review",
+                "Review code",
+                &["review"],
+                "CODE_REVIEW_SENTINEL",
+            ),
+        )]));
+        let selectable =
+            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let first_context = run_context().await;
+        let second_context = run_context_for("thread-a", "msg:run-b").await;
+
+        selectable
+            .record_user_message(
+                first_context.scope.clone(),
+                accepted_message_ref(&first_context),
+                "please review this PR",
+            )
+            .expect("record first message");
+        selectable
+            .record_user_message(
+                second_context.scope.clone(),
+                accepted_message_ref(&second_context),
+                "please review this PR",
+            )
+            .expect("record second message");
+
+        selectable
+            .clear_accepted_message(&first_context.scope, &accepted_message_ref(&first_context))
+            .expect("clear first message");
+
+        let first_selected = selectable
+            .load_skill_context_candidates(&first_context)
+            .await
+            .expect("first selection succeeds");
+        assert!(
+            first_selected.is_empty(),
+            "cleared message should not activate skills"
+        );
+
+        let second_selected = selectable
+            .load_skill_context_candidates(&second_context)
+            .await
+            .expect("second selection succeeds");
+        assert_eq!(
+            second_selected.len(),
+            1,
+            "clearing one accepted message must not remove another message"
+        );
+    }
+
+    #[tokio::test]
     async fn selector_force_activates_dollar_skill_mention() {
         let source = Arc::new(StaticSkillBundleSource::new(vec![(
             SkillSourceKind::User,
@@ -1119,7 +1322,7 @@ mod tests {
             .expect("record message");
 
         let error = selectable
-            .selected_candidates(&context, "/code-review this PR")
+            .selected_candidates(&context, "/code-review this PR", false)
             .await
             .expect_err("ambiguous activation should fail");
 
@@ -1236,7 +1439,7 @@ mod tests {
             )
             .expect("record message");
         let error = selectable
-            .selected_candidates(&context, "/alpha-helper /beta-helper")
+            .selected_candidates(&context, "/alpha-helper /beta-helper", false)
             .await
             .expect_err("explicit activation should honor active skill limit");
         assert_eq!(error, SkillActivationSelectionError::ContextBudgetExceeded);
@@ -1361,6 +1564,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn activation_cache_is_bounded_under_skill_churn() {
+        let source = Arc::new(StaticSkillBundleSource::new(Vec::new()));
+        let selectable =
+            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+
+        for index in 0..=MAX_ACTIVATION_CACHE_ENTRIES {
+            let name = format!("skill-{index}");
+            let descriptor = SkillBundleDescriptor::new(
+                SkillBundleId::new(SkillSourceKind::User, &name).unwrap(),
+                Some(SkillTrust::Trusted),
+                Some(SkillVisibility::Visible),
+            );
+            selectable
+                .activation_candidate_from_skill_md(
+                    &descriptor,
+                    skill_md(&name, "Review code", &["review"], "CODE_REVIEW_SENTINEL")
+                        .into_bytes(),
+                )
+                .expect("skill parses");
+        }
+
+        let cache_len = selectable.activation_cache.lock().unwrap().len();
+        assert!(
+            cache_len <= MAX_ACTIVATION_CACHE_ENTRIES,
+            "activation cache must stay bounded"
+        );
+    }
+
     #[tokio::test]
     async fn selector_reports_source_unavailable_on_bundle_list_error() {
         let source = Arc::new(ErroringListSkillBundleSource::new(
@@ -1371,7 +1603,7 @@ mod tests {
         let context = run_context().await;
 
         let error = selectable
-            .selected_candidates(&context, "review")
+            .selected_candidates(&context, "review", false)
             .await
             .expect_err("list error should fail closed");
         assert_eq!(error, SkillActivationSelectionError::SourceUnavailable);
@@ -1387,7 +1619,7 @@ mod tests {
         let context = run_context().await;
 
         let error = selectable
-            .selected_candidates(&context, "review")
+            .selected_candidates(&context, "review", false)
             .await
             .expect_err("internal error should fail closed");
         assert_eq!(error, SkillActivationSelectionError::Internal);
@@ -1411,7 +1643,7 @@ mod tests {
         let context = run_context().await;
 
         let error = selectable
-            .selected_candidates(&context, "bad helper")
+            .selected_candidates(&context, "bad helper", false)
             .await
             .expect_err("invalid skill md should fail closed");
         assert_eq!(error, SkillActivationSelectionError::ParseFailed);
@@ -1432,7 +1664,7 @@ mod tests {
         let context = run_context().await;
 
         let error = selectable
-            .selected_candidates(&context, "review")
+            .selected_candidates(&context, "review", false)
             .await
             .expect_err("missing trust should fail closed");
         assert_eq!(error, SkillActivationSelectionError::TrustDataMissing);
@@ -1453,10 +1685,130 @@ mod tests {
         let context = run_context().await;
 
         let error = selectable
-            .selected_candidates(&context, "review")
+            .selected_candidates(&context, "review", false)
             .await
             .expect_err("missing visibility should fail closed");
         assert_eq!(error, SkillActivationSelectionError::VisibilityDataMissing);
+    }
+
+    #[tokio::test]
+    async fn execution_message_capture_stores_and_consumes_plan_once() {
+        let source = Arc::new(StaticSkillBundleSource::new(vec![(
+            SkillSourceKind::User,
+            "code-review",
+            &skill_md(
+                "code-review",
+                "Review code",
+                &["review"],
+                "CODE_REVIEW_SENTINEL",
+            ),
+        )]));
+        let selectable =
+            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let context = run_context().await;
+
+        selectable
+            .record_user_message_for_execution(
+                context.scope.clone(),
+                accepted_message_ref(&context),
+                "please review this",
+            )
+            .expect("record message");
+        let selected = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("selection succeeds");
+        assert_eq!(selected.len(), 1);
+        let plan = selectable
+            .take_activation_plan_for_run(&context.scope, context.run_id)
+            .expect("take captured plan")
+            .expect("plan should be captured");
+        assert_eq!(plan.plan.selection.activations.len(), 1);
+        assert!(
+            selectable
+                .take_activation_plan_for_run(&context.scope, context.run_id)
+                .expect("take is repeatable")
+                .is_none(),
+            "captured plans are single-consumer"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_accepted_message_removes_pending_execution_capture() {
+        let source = Arc::new(StaticSkillBundleSource::new(vec![(
+            SkillSourceKind::User,
+            "code-review",
+            &skill_md(
+                "code-review",
+                "Review code",
+                &["review"],
+                "CODE_REVIEW_SENTINEL",
+            ),
+        )]));
+        let selectable =
+            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let captured_a = run_context_for("thread-a", "msg:a-captured").await;
+        let pending_a = run_context_for("thread-a", "msg:a-pending").await;
+        let captured_b = run_context_for("thread-b", "msg:b-captured").await;
+
+        selectable
+            .record_user_message_for_execution(
+                captured_a.scope.clone(),
+                accepted_message_ref(&captured_a),
+                "please review this",
+            )
+            .expect("record captured scope a message");
+        selectable
+            .load_skill_context_candidates(&captured_a)
+            .await
+            .expect("scope a selection succeeds");
+
+        selectable
+            .record_user_message_for_execution(
+                pending_a.scope.clone(),
+                accepted_message_ref(&pending_a),
+                "please review this",
+            )
+            .expect("record pending scope a message");
+
+        selectable
+            .record_user_message_for_execution(
+                captured_b.scope.clone(),
+                accepted_message_ref(&captured_b),
+                "please review this",
+            )
+            .expect("record captured scope b message");
+        selectable
+            .load_skill_context_candidates(&captured_b)
+            .await
+            .expect("scope b selection succeeds");
+
+        selectable
+            .clear_accepted_message(&pending_a.scope, &accepted_message_ref(&pending_a))
+            .expect("clear pending scope a message");
+
+        assert!(
+            selectable
+                .take_activation_plan_for_run(&captured_a.scope, captured_a.run_id)
+                .expect("take cleared scope a plan")
+                .is_some(),
+            "clearing a pending message must not remove an already captured plan"
+        );
+        assert!(
+            selectable
+                .load_skill_context_candidates(&pending_a)
+                .await
+                .expect("pending scope a selection after clear succeeds")
+                .is_empty(),
+            "clearing the accepted message removes its pending execution capture"
+        );
+        assert!(
+            selectable
+                .take_activation_plan_for_run(&captured_b.scope, captured_b.run_id)
+                .expect("take scope b plan")
+                .is_some(),
+            "clearing one accepted message must not remove another scope's plan"
+        );
     }
 
     #[test]

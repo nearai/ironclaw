@@ -6,9 +6,10 @@ use std::sync::Arc;
 use anyhow::{Context, anyhow};
 use clap::Args;
 use ironclaw_reborn_composition::{
-    RebornReadiness, RebornWebuiBundle, WebuiServeConfig, build_reborn_runtime,
-    build_webui_services, webui_v2_app,
+    RebornReadiness, RebornRuntimeIdentity, RebornWebuiBundle, WebuiServeConfig,
+    build_reborn_runtime, build_webui_services, webui_v2_app,
 };
+use ironclaw_reborn_config::IdentitySection;
 use ironclaw_reborn_webui_ingress::{
     EnvBearerAuthenticator, RebornWebuiServeOptions, serve_webui_v2,
 };
@@ -46,6 +47,8 @@ pub(crate) struct ServeCommand {
 
 impl ServeCommand {
     pub(crate) fn execute(self, context: RebornCliContext) -> anyhow::Result<()> {
+        crate::runtime::init_tracing();
+
         // Build the runtime config from the operator's TOML.
         let runtime_input = crate::runtime::build_runtime_input(
             context.boot_config(),
@@ -108,11 +111,10 @@ impl ServeCommand {
         // still 400. Mirror the same fallback rule the `run` command
         // uses: identity.default_agent or composition's default.
         let identity_section = config_file.as_ref().and_then(|file| file.identity.as_ref());
-        let default_agent_raw = identity_section
-            .and_then(|identity| identity.default_agent.as_deref())
-            .unwrap_or("reborn-cli");
+        let default_agent_raw =
+            resolve_webui_default_agent(identity_section, &runtime_input.identity);
         let default_agent_id =
-            ironclaw_reborn_composition::host_api::AgentId::new(default_agent_raw).map_err(
+            ironclaw_reborn_composition::host_api::AgentId::new(&default_agent_raw).map_err(
                 |err| anyhow!("[identity].default_agent `{default_agent_raw}` is invalid: {err}"),
             )?;
         let default_project_id = identity_section
@@ -234,45 +236,10 @@ impl ServeCommand {
             .build()
             .context("failed to build tokio runtime for `serve`")?;
 
-        // No production `ProjectionStream` port is wired into the
-        // Reborn runtime in this slice. Without one,
-        // `RebornServices::stream_events` returns `Unavailable` for
-        // every poll, so `/events` (SSE) and `/ws` would advertise
-        // streaming routes that only emit 503 Unavailable.
-        //
-        // Per #3580 review feedback, fail serve startup by default so
-        // the binary cannot advertise streaming routes that cannot
-        // deliver projections. The
-        // `IRONCLAW_REBORN_ALLOW_NO_PROJECTION_STREAM` env opt-in is
-        // reserved for tests and for installations that genuinely
-        // only care about the non-streaming v2 routes (create-thread,
-        // send-message, get-timeline, cancel-run, resolve-gate,
-        // setup-extension, list-threads); it surfaces a startup
-        // warning so the trade-off is visible in logs.
-        let allow_no_stream = env::var("IRONCLAW_REBORN_ALLOW_NO_PROJECTION_STREAM")
-            .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes"));
-        if !allow_no_stream {
-            anyhow::bail!(
-                "Reborn `serve` cannot start: no `ProjectionStream` is wired into the WebUI \
-                 bundle, so /events (SSE) and /ws would advertise streaming routes that only \
-                 emit 503 Unavailable. The v2 streaming surface requires a real projection \
-                 stream port — wire one through `build_webui_services(&runtime, Some(stream))` \
-                 once the host installation exposes it, then re-run `ironclaw-reborn serve`. \
-                 To start anyway for non-streaming routes only, set \
-                 IRONCLAW_REBORN_ALLOW_NO_PROJECTION_STREAM=1."
-            );
-        }
-
         rt.block_on(async move {
             let runtime = build_reborn_runtime(runtime_input)
                 .await
                 .context("failed to assemble Reborn runtime for `serve`")?;
-            tracing::warn!(
-                target = "ironclaw::reborn::cli::serve",
-                "IRONCLAW_REBORN_ALLOW_NO_PROJECTION_STREAM is set; /events and /ws will \
-                 return 503 Unavailable until a real ProjectionStream is wired into \
-                 build_webui_services",
-            );
             let bundle: RebornWebuiBundle = build_webui_services(&runtime, None)?;
 
             print_serve_banner(
@@ -333,6 +300,15 @@ impl ServeCommand {
     }
 }
 
+fn resolve_webui_default_agent(
+    identity_section: Option<&IdentitySection>,
+    runtime_identity: &RebornRuntimeIdentity,
+) -> String {
+    identity_section
+        .and_then(|identity| identity.default_agent.clone())
+        .unwrap_or_else(|| runtime_identity.agent_id.clone())
+}
+
 fn print_serve_banner(
     listen_addr: SocketAddr,
     env_token_var: &str,
@@ -356,4 +332,33 @@ fn print_serve_banner(
     }
     eprintln!("  readiness : {readiness:?}");
     eprintln!();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn webui_default_agent_falls_back_to_runtime_identity() {
+        let runtime_identity = RebornRuntimeIdentity::reborn_cli();
+
+        assert_eq!(
+            resolve_webui_default_agent(None, &runtime_identity),
+            "reborn-cli-agent"
+        );
+    }
+
+    #[test]
+    fn webui_default_agent_uses_config_override() {
+        let runtime_identity = RebornRuntimeIdentity::reborn_cli();
+        let identity = IdentitySection {
+            default_agent: Some("configured-agent".to_string()),
+            ..IdentitySection::default()
+        };
+
+        assert_eq!(
+            resolve_webui_default_agent(Some(&identity), &runtime_identity),
+            "configured-agent"
+        );
+    }
 }

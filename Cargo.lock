@@ -4155,6 +4155,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_auth"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "ironclaw_host_api",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "ironclaw_authorization"
 version = "0.1.0"
 dependencies = [
@@ -4744,7 +4760,11 @@ dependencies = [
  "deadpool-postgres",
  "http 1.4.0",
  "http-body-util",
+ "ironclaw_auth",
  "ironclaw_authorization",
+ "ironclaw_event_projections",
+ "ironclaw_event_streams",
+ "ironclaw_events",
  "ironclaw_extensions",
  "ironclaw_filesystem",
  "ironclaw_first_party_extensions",
@@ -4753,6 +4773,7 @@ dependencies = [
  "ironclaw_llm",
  "ironclaw_loop_support",
  "ironclaw_network",
+ "ironclaw_outbound",
  "ironclaw_processes",
  "ironclaw_product_adapters",
  "ironclaw_product_workflow",

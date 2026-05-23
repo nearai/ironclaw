@@ -35,9 +35,9 @@ impl std::fmt::Debug for RebornWebuiBundle {
 /// Compose the WebUI-facing product facade from an already-built Reborn runtime.
 ///
 /// This function does not create a second turn coordinator, thread service,
-/// host runtime, route server, or event stream. It reuses the runtime's existing
-/// task-level composition and accepts an optional projection stream owned by the
-/// caller's event-stream composition layer.
+/// host runtime or route server. It reuses the runtime's existing task-level
+/// composition and attaches the runtime-owned projection stream unless the
+/// caller supplies a custom stream.
 pub fn build_webui_services(
     runtime: &RebornRuntime,
     event_stream: Option<Arc<dyn ProjectionStream>>,
@@ -78,9 +78,7 @@ pub fn build_webui_services(
             },
         );
     }
-    if let Some(event_stream) = event_stream {
-        api = api.with_event_stream(event_stream);
-    }
+    api = api.with_event_stream(event_stream.unwrap_or_else(|| runtime.webui_event_stream()));
 
     Ok(RebornWebuiBundle {
         api: Arc::new(api),

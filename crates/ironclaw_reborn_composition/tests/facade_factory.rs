@@ -46,6 +46,7 @@ use ironclaw_turns::{
     TurnScope,
     runner::{ClaimedTurnRun, TurnRunTransitionPort},
 };
+use secrecy::SecretString;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 fn test_master_key() -> SecretMaterial {
@@ -327,6 +328,91 @@ async fn local_dev_builds_facades_without_production_claim() {
     assert_eq!(services.readiness.state, RebornReadinessState::DevOnly);
     assert!(services.readiness.facades.host_runtime);
     assert!(services.readiness.facades.turn_coordinator);
+    assert!(services.readiness.facades.product_auth);
+    assert!(services.product_auth.is_some());
+}
+
+#[tokio::test]
+async fn local_dev_product_auth_entrypoint_redacts_manual_token_submit() {
+    let dir = tempfile::tempdir().unwrap();
+    let services = build_reborn_services(RebornBuildInput::local_dev(
+        "test-owner",
+        dir.path().to_path_buf(),
+    ))
+    .await
+    .unwrap();
+    let product_auth = services
+        .product_auth
+        .as_ref()
+        .expect("local-dev composes product auth");
+    let scope = auth_scope("alice");
+    let provider = ironclaw_auth::AuthProviderId::new("github").unwrap();
+    let label = ironclaw_auth::CredentialAccountLabel::new("work github").unwrap();
+
+    let challenge = product_auth
+        .interaction_service()
+        .request_secret_input(ironclaw_auth::ManualTokenSetupRequest {
+            scope: scope.clone(),
+            provider: provider.clone(),
+            label: label.clone(),
+            continuation: ironclaw_auth::AuthContinuationRef::SetupOnly,
+            expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+        })
+        .await
+        .unwrap();
+    let ironclaw_auth::AuthChallenge::ManualTokenRequired {
+        interaction_id,
+        provider: challenge_provider,
+        label: challenge_label,
+        ..
+    } = challenge
+    else {
+        panic!("expected manual-token challenge");
+    };
+    assert_eq!(challenge_provider, provider);
+    assert_eq!(challenge_label, label);
+
+    let submit = ironclaw_auth::SecretSubmitRequest {
+        interaction_id,
+        secret: SecretString::from("super-secret-token".to_string()),
+    };
+    let debug = format!("{submit:?}");
+    assert!(!debug.contains("super-secret-token"));
+
+    let result = product_auth
+        .interaction_service()
+        .submit_manual_token(&scope, submit)
+        .await
+        .unwrap();
+    assert_eq!(
+        result.status,
+        ironclaw_auth::CredentialAccountStatus::Configured
+    );
+
+    let accounts = product_auth
+        .credential_account_service()
+        .list_accounts(ironclaw_auth::CredentialAccountListRequest::new(
+            scope.clone(),
+            provider,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(accounts.accounts.len(), 1);
+    let serialized = serde_json::to_string(&accounts).unwrap();
+    assert!(!serialized.contains("super-secret-token"));
+    assert!(!serialized.contains("manual-access-"));
+}
+
+fn auth_scope(user: &str) -> ironclaw_auth::AuthProductScope {
+    ironclaw_auth::AuthProductScope::new(
+        ironclaw_host_api::ResourceScope::local_default(
+            ironclaw_host_api::UserId::new(user).unwrap(),
+            ironclaw_host_api::InvocationId::new(),
+        )
+        .unwrap(),
+        ironclaw_auth::AuthSurface::Web,
+    )
+    .with_session_id(ironclaw_auth::AuthSessionId::new(format!("session-{user}")).unwrap())
 }
 
 #[cfg(feature = "libsql")]

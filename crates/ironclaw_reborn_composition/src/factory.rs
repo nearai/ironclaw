@@ -30,12 +30,13 @@ use ironclaw_turns::{
 use crate::input::RebornStorageInput;
 use crate::{
     RebornBuildError, RebornBuildInput, RebornCompositionProfile, RebornFacadeReadiness,
-    RebornReadiness, RebornReadinessState,
+    RebornProductAuthServices, RebornReadiness, RebornReadinessState,
 };
 
 pub struct RebornServices {
     pub host_runtime: Option<Arc<dyn ironclaw_host_runtime::HostRuntime>>,
     pub turn_coordinator: Option<Arc<dyn ironclaw_turns::TurnCoordinator>>,
+    pub product_auth: Option<Arc<RebornProductAuthServices>>,
     pub readiness: RebornReadiness,
     pub(crate) local_runtime: Option<Arc<RebornLocalRuntimeServices>>,
 }
@@ -83,6 +84,7 @@ impl std::fmt::Debug for RebornServices {
             .debug_struct("RebornServices")
             .field("host_runtime", &self.host_runtime.is_some())
             .field("turn_coordinator", &self.turn_coordinator.is_some())
+            .field("product_auth", &self.product_auth.is_some())
             .field("readiness", &self.readiness)
             .field("local_runtime", &self.local_runtime.is_some())
             .finish()
@@ -94,6 +96,7 @@ impl RebornServices {
         Self {
             host_runtime: None,
             turn_coordinator: None,
+            product_auth: None,
             readiness: RebornReadiness::disabled(),
             local_runtime: None,
         }
@@ -134,10 +137,17 @@ fn production_config(
 }
 
 async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, RebornBuildError> {
+    let RebornBuildInput {
+        profile,
+        storage,
+        runtime_policy,
+        product_auth_services,
+        ..
+    } = input;
     let RebornStorageInput::LocalDev {
         root,
         workspace_root,
-    } = input.storage
+    } = storage
     else {
         return Err(RebornBuildError::InvalidConfig {
             reason: "local-dev profile requires local-dev storage input".to_string(),
@@ -226,7 +236,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     .with_run_state(Arc::clone(&run_state))
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_turn_state(Arc::clone(&turn_state));
-    if let Some(runtime_policy) = input.runtime_policy {
+    if let Some(runtime_policy) = runtime_policy {
         services = services.with_runtime_policy(runtime_policy);
     }
     // TODO(process-port): local-dev intentionally uses the default
@@ -236,11 +246,19 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         Arc::new(services.host_runtime_for_local_testing());
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
         Arc::new(DefaultTurnCoordinator::new(turn_state));
+    let product_auth = Some(
+        product_auth_services
+            .unwrap_or_else(|| Arc::new(RebornProductAuthServices::local_dev_in_memory())),
+    );
+    let product_auth_ready = product_auth.is_some();
 
     Ok(RebornServices {
         host_runtime: Some(host_runtime),
         turn_coordinator: Some(turn_coordinator),
-        readiness: readiness_for(input.profile, true, true),
+        // Local-dev always composes a safe in-memory product-auth boundary when
+        // the caller does not inject one; readiness tracks the assembled facade.
+        product_auth,
+        readiness: readiness_for(profile, true, true, product_auth_ready),
         local_runtime: Some(local_runtime),
     })
 }
@@ -360,6 +378,7 @@ async fn build_production_shaped(
         required_runtime_backends,
         require_runtime_http_egress,
         require_wasm_credentials,
+        product_auth_services,
     } = input;
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     let wiring_config = production_config(
@@ -375,6 +394,7 @@ async fn build_production_shaped(
         required_runtime_backends,
         require_runtime_http_egress,
         require_wasm_credentials,
+        product_auth_services,
     );
 
     match storage {
@@ -401,16 +421,13 @@ async fn build_production_shaped(
             // TODO(process-port): if production enables FirstParty runtime,
             // HostRuntimeServices must be given a production process port;
             // otherwise the LocalHostProcessPort default is rejected.
-            build_libsql_production(
+            let context = RebornProductionBuildContext {
                 profile,
                 wiring_config,
                 production_wiring,
-                db,
-                path_or_url,
-                auth_token,
-                secret_master_key,
-            )
-            .await
+                product_auth_services,
+            };
+            build_libsql_production(context, db, path_or_url, auth_token, secret_master_key).await
         }
         #[cfg(feature = "postgres")]
         RebornStorageInput::Postgres {
@@ -426,15 +443,13 @@ async fn build_production_shaped(
             // TODO(process-port): if production enables FirstParty runtime,
             // HostRuntimeServices must be given a production process port;
             // otherwise the LocalHostProcessPort default is rejected.
-            build_postgres_production(
+            let context = RebornProductionBuildContext {
                 profile,
                 wiring_config,
                 production_wiring,
-                pool,
-                url,
-                secret_master_key,
-            )
-            .await
+                product_auth_services,
+            };
+            build_postgres_production(context, pool, url, secret_master_key).await
         }
     }
 }
@@ -444,6 +459,14 @@ struct RebornProductionWiring {
     trust_policy: Arc<HostTrustPolicy>,
     runtime_policy: EffectiveRuntimePolicy,
     turn_run_wake_notifier: Arc<ironclaw_host_runtime::SchedulerTurnRunWakeNotifier>,
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+struct RebornProductionBuildContext {
+    profile: RebornCompositionProfile,
+    wiring_config: ironclaw_host_runtime::ProductionWiringConfig,
+    production_wiring: RebornProductionWiring,
+    product_auth_services: Option<Arc<RebornProductAuthServices>>,
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -479,9 +502,7 @@ fn planned_run_profile_resolver() -> Result<Arc<InMemoryRunProfileResolver>, Reb
 
 #[cfg(feature = "libsql")]
 async fn build_libsql_production(
-    profile: RebornCompositionProfile,
-    wiring_config: ironclaw_host_runtime::ProductionWiringConfig,
-    production_wiring: RebornProductionWiring,
+    context: RebornProductionBuildContext,
     db: Arc<libsql::Database>,
     path_or_url: String,
     auth_token: Option<ironclaw_secrets::SecretMaterial>,
@@ -490,6 +511,13 @@ async fn build_libsql_production(
     use ironclaw_authorization::FilesystemCapabilityLeaseStore;
     use ironclaw_filesystem::LibSqlRootFilesystem;
     use ironclaw_secrets::FilesystemSecretStore;
+
+    let RebornProductionBuildContext {
+        profile,
+        wiring_config,
+        production_wiring,
+        product_auth_services,
+    } = context;
 
     let filesystem = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&db)));
     filesystem.run_migrations().await?;
@@ -540,20 +568,20 @@ async fn build_libsql_production(
         Arc::new(services.turn_coordinator_for_production()?);
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
         Arc::new(services.host_runtime_for_production(&wiring_config)?);
+    let product_auth_ready = product_auth_services.is_some();
 
     Ok(RebornServices {
         host_runtime: Some(host_runtime),
         turn_coordinator: Some(turn_coordinator),
-        readiness: readiness_for(profile, true, true),
+        readiness: readiness_for(profile, true, true, product_auth_ready),
+        product_auth: product_auth_services,
         local_runtime: None,
     })
 }
 
 #[cfg(feature = "postgres")]
 async fn build_postgres_production(
-    profile: RebornCompositionProfile,
-    wiring_config: ironclaw_host_runtime::ProductionWiringConfig,
-    production_wiring: RebornProductionWiring,
+    context: RebornProductionBuildContext,
     pool: deadpool_postgres::Pool,
     url: ironclaw_secrets::SecretMaterial,
     secret_master_key: ironclaw_secrets::SecretMaterial,
@@ -561,6 +589,13 @@ async fn build_postgres_production(
     use ironclaw_authorization::FilesystemCapabilityLeaseStore;
     use ironclaw_filesystem::PostgresRootFilesystem;
     use ironclaw_secrets::FilesystemSecretStore;
+
+    let RebornProductionBuildContext {
+        profile,
+        wiring_config,
+        production_wiring,
+        product_auth_services,
+    } = context;
 
     let filesystem = Arc::new(PostgresRootFilesystem::new(pool.clone()));
     filesystem.run_migrations().await?;
@@ -608,11 +643,13 @@ async fn build_postgres_production(
         Arc::new(services.turn_coordinator_for_production()?);
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
         Arc::new(services.host_runtime_for_production(&wiring_config)?);
+    let product_auth_ready = product_auth_services.is_some();
 
     Ok(RebornServices {
         host_runtime: Some(host_runtime),
         turn_coordinator: Some(turn_coordinator),
-        readiness: readiness_for(profile, true, true),
+        readiness: readiness_for(profile, true, true, product_auth_ready),
+        product_auth: product_auth_services,
         local_runtime: None,
     })
 }
@@ -621,6 +658,7 @@ fn readiness_for(
     profile: RebornCompositionProfile,
     host_runtime: bool,
     turn_coordinator: bool,
+    product_auth: bool,
 ) -> RebornReadiness {
     let state = match profile {
         RebornCompositionProfile::Disabled => RebornReadinessState::Disabled,
@@ -634,6 +672,7 @@ fn readiness_for(
         facades: RebornFacadeReadiness {
             host_runtime,
             turn_coordinator,
+            product_auth,
         },
     }
 }
@@ -654,6 +693,7 @@ mod tests {
 
         assert!(services.host_runtime.is_some());
         assert!(services.turn_coordinator.is_some());
+        assert!(services.product_auth.is_some());
         assert!(services.local_runtime.is_some());
         assert_eq!(services.readiness.state, RebornReadinessState::DevOnly);
     }
@@ -664,7 +704,22 @@ mod tests {
 
         assert!(services.host_runtime.is_none());
         assert!(services.turn_coordinator.is_none());
+        assert!(services.product_auth.is_none());
         assert!(services.local_runtime.is_none());
         assert_eq!(services.readiness.state, RebornReadinessState::Disabled);
+    }
+
+    #[test]
+    fn production_readiness_reflects_product_auth_presence() {
+        let without_auth = readiness_for(RebornCompositionProfile::Production, true, true, false);
+        assert_eq!(
+            without_auth.state,
+            RebornReadinessState::ProductionValidated
+        );
+        assert!(!without_auth.facades.product_auth);
+
+        let with_auth = readiness_for(RebornCompositionProfile::Production, true, true, true);
+        assert_eq!(with_auth.state, RebornReadinessState::ProductionValidated);
+        assert!(with_auth.facades.product_auth);
     }
 }

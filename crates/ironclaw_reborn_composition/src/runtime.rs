@@ -31,18 +31,25 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use ironclaw_events::{DurableEventLog, InMemoryDurableEventLog, RuntimeEvent};
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_first_party_extensions::{
     FirstPartySkillsExtension, FirstPartySkillsExtensionHandles, LoadedFirstPartyExtensions,
-    SelectableSkillContextSource, SkillActivationSelectorConfig,
+    SelectableSkillContextSource, SkillActivationSelectorConfig, SkillExecutionAdapter,
 };
-use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{
+    AgentId, CapabilityId, InvocationId, ResourceScope, TenantId, ThreadId, UserId,
+};
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
     FilesystemSkillBundleSource, HostIdentityContextBuildError, HostIdentityContextCandidate,
     HostIdentityContextSource, HostSkillContextSource,
 };
+use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_reborn::loop_exit_applier::ThreadCheckpointLoopExitEvidencePort;
+use ironclaw_reborn::milestone_events::{
+    DurableLoopHostMilestoneScope, DurableLoopHostMilestoneSink,
+};
 use ironclaw_reborn::runtime::{
     DefaultPlannedRuntimeBuildError, DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts,
     build_default_planned_runtime,
@@ -57,13 +64,22 @@ use ironclaw_turns::{
     ReplyTargetBindingRef, RunProfileResolutionRequest, SanitizedCancelReason, SourceBindingRef,
     SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId,
     TurnScope, TurnStatus,
-    run_profile::{InMemoryLoopHostMilestoneSink, LoopRunContext, PromptMode},
+    run_profile::{LoopHostMilestoneSink, LoopRunContext, PromptMode},
 };
 
+use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
 use crate::{RebornBuildError, RebornCompositionProfile, RebornServices, build_reborn_services};
 
 mod local_dev;
+mod skills;
+
+pub use skills::{
+    RebornSkillActivation, RebornSkillActivationMode, RebornSkillAsset, RebornSkillBundle,
+    RebornSkillExecutionPlan, RebornSkillExecutionResult, RebornSkillSourceKind,
+};
+
+use skills::skill_asset_error;
 
 #[cfg(feature = "root-llm-provider")]
 use crate::runtime_input::{ResolvedRebornLlm, ResolvedRebornLlmSource};
@@ -119,6 +135,10 @@ pub enum RebornRuntimeError {
     LlmProvider(String),
     #[error("turn-runner worker is no longer running")]
     WorkerStopped,
+    #[error("skill execution unavailable for assembled runtime")]
+    SkillExecutionUnavailable,
+    #[error("skill execution failed: {0}")]
+    SkillExecution(String),
 }
 
 impl From<TurnError> for RebornRuntimeError {
@@ -151,14 +171,19 @@ pub struct RebornRuntime {
     actor_user_id: UserId,
     source_binding_ref: SourceBindingRef,
     reply_target_binding_ref: ReplyTargetBindingRef,
+    projection_services: RebornProjectionServices,
+    webui_event_log: Arc<dyn DurableEventLog>,
     default_run_profile_id: String,
     wake_sender: TurnRunnerWakeSender,
     send_locks: Mutex<HashMap<ConversationId, Arc<Mutex<()>>>>,
     skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
+    skill_execution_adapter: Option<Arc<LocalDevSkillExecutionAdapter>>,
 }
 
 pub(crate) type LocalDevSelectableSkillContextSource =
     SelectableSkillContextSource<FilesystemSkillBundleSource<LocalFilesystem>>;
+type LocalDevSkillExecutionAdapter =
+    SkillExecutionAdapter<FilesystemSkillBundleSource<LocalFilesystem>>;
 
 impl RebornRuntime {
     /// Snapshot of the substrate facades produced by `build_reborn_services`.
@@ -178,6 +203,10 @@ impl RebornRuntime {
 
     pub(crate) fn webui_turn_coordinator(&self) -> Arc<dyn TurnCoordinator> {
         self.turn_coordinator.clone()
+    }
+
+    pub(crate) fn webui_event_stream(&self) -> Arc<dyn ProjectionStream> {
+        self.projection_services.webui_event_stream()
     }
 
     pub(crate) fn webui_skill_activation_source(
@@ -329,6 +358,17 @@ impl RebornRuntime {
         text: &str,
         cancellation: CancellationToken,
     ) -> Result<AssistantReply, RebornRuntimeError> {
+        self.send_user_message_internal(conversation, text, cancellation, false)
+            .await
+    }
+
+    async fn send_user_message_internal(
+        &self,
+        conversation: &ConversationId,
+        text: &str,
+        cancellation: CancellationToken,
+        capture_skill_execution_plan: bool,
+    ) -> Result<AssistantReply, RebornRuntimeError> {
         let send_lock = self.send_lock_for(conversation).await;
         let _send_guard = send_lock.lock().await;
         if self.worker_handle.is_finished() {
@@ -365,7 +405,19 @@ impl RebornRuntime {
         ))
         .map_err(|reason| RebornRuntimeError::InvalidArgument { reason })?;
 
-        if let Some(skill_activation_source) = &self.skill_activation_source {
+        if capture_skill_execution_plan {
+            let adapter = self
+                .skill_execution_adapter
+                .as_ref()
+                .ok_or(RebornRuntimeError::SkillExecutionUnavailable)?;
+            adapter
+                .record_user_message_for_execution(
+                    scope.clone(),
+                    accepted_message_ref.clone(),
+                    text,
+                )
+                .map_err(|error| RebornRuntimeError::TurnSubmission(error.to_string()))?;
+        } else if let Some(skill_activation_source) = &self.skill_activation_source {
             skill_activation_source
                 .record_user_message(scope.clone(), accepted_message_ref.clone(), text)
                 .map_err(|error| RebornRuntimeError::TurnSubmission(error.to_string()))?;
@@ -442,6 +494,55 @@ impl RebornRuntime {
         reply
     }
 
+    /// Submit a skill-aware message through the normal Reborn loop and return
+    /// the structured activation plan produced during prompt construction.
+    pub async fn execute_skill_message(
+        &self,
+        conversation: &ConversationId,
+        text: &str,
+    ) -> Result<RebornSkillExecutionResult, RebornRuntimeError> {
+        let adapter = self
+            .skill_execution_adapter
+            .as_ref()
+            .ok_or(RebornRuntimeError::SkillExecutionUnavailable)?;
+        let scope = self.turn_scope_for(&conversation.0);
+        let reply = self
+            .send_user_message_internal(conversation, text, CancellationToken::new(), true)
+            .await?;
+        let plan = self.skill_execution_plan_for_run(adapter, &scope, reply.run_id)?;
+        Ok(RebornSkillExecutionResult { plan, reply })
+    }
+
+    /// Read a bundle-relative asset from a skill activated by
+    /// [`Self::execute_skill_message`].
+    pub async fn read_skill_execution_asset(
+        &self,
+        conversation: &ConversationId,
+        plan: &RebornSkillExecutionPlan,
+        activation: &RebornSkillActivation,
+        path: impl AsRef<str>,
+    ) -> Result<RebornSkillAsset, RebornRuntimeError> {
+        if plan.run_context().thread_id != conversation.0 {
+            return Err(RebornRuntimeError::SkillExecution(
+                "skill execution plan does not belong to this conversation".to_string(),
+            ));
+        }
+        let adapter = self
+            .skill_execution_adapter
+            .as_ref()
+            .ok_or(RebornRuntimeError::SkillExecutionUnavailable)?;
+        adapter
+            .read_file_for_activation(
+                plan.run_context(),
+                plan.first_party_plan(),
+                &activation.to_first_party_request(),
+                path,
+            )
+            .await
+            .map(RebornSkillAsset::from)
+            .map_err(skill_asset_error)
+    }
+
     /// Stop the turn-runner worker. Awaits the worker task to finish before
     /// returning.
     pub async fn shutdown(self) -> Result<(), RebornRuntimeError> {
@@ -463,6 +564,21 @@ impl RebornRuntime {
             self.thread_scope.project_id.clone(),
             thread_id.clone(),
         )
+    }
+
+    fn skill_execution_plan_for_run(
+        &self,
+        adapter: &SkillExecutionAdapter<FilesystemSkillBundleSource<LocalFilesystem>>,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+    ) -> Result<RebornSkillExecutionPlan, RebornRuntimeError> {
+        adapter
+            .take_execution_plan_for_run(scope, run_id)
+            .map_err(|error| RebornRuntimeError::SkillExecution(error.to_string()))?
+            .map(RebornSkillExecutionPlan::from_first_party)
+            .ok_or_else(|| {
+                RebornRuntimeError::SkillExecution("skill activation plan unavailable".to_string())
+            })
     }
 
     async fn send_lock_for(&self, conversation: &ConversationId) -> Arc<Mutex<()>> {
@@ -561,8 +677,42 @@ impl RebornRuntime {
                 .map_err(|reason| RebornRuntimeError::InvalidArgument { reason })?,
             })
             .await?;
+        if matches!(
+            response.status,
+            TurnStatus::CancelRequested | TurnStatus::Cancelled
+        ) {
+            self.append_webui_loop_cancelled(scope, run_id).await?;
+        }
         self.wake_sender.wake();
         Ok(response)
+    }
+
+    async fn append_webui_loop_cancelled(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+    ) -> Result<(), RebornRuntimeError> {
+        let capability_id = CapabilityId::new(LOOP_RUN_CAPABILITY_ID).map_err(|reason| {
+            RebornRuntimeError::InvalidArgument {
+                reason: format!("loop-run capability id: {reason}"),
+            }
+        })?;
+        self.webui_event_log
+            .append(RuntimeEvent::loop_cancelled(
+                ResourceScope {
+                    tenant_id: scope.tenant_id.clone(),
+                    user_id: self.actor_user_id.clone(),
+                    agent_id: scope.agent_id.clone(),
+                    project_id: scope.project_id.clone(),
+                    mission_id: None,
+                    thread_id: Some(scope.thread_id.clone()),
+                    invocation_id: InvocationId::from_uuid(run_id.as_uuid()),
+                },
+                capability_id,
+            ))
+            .await
+            .map(|_| ())
+            .map_err(|error| RebornRuntimeError::TurnCoordinator(error.to_string()))
     }
 
     async fn read_latest_assistant_text(
@@ -656,19 +806,21 @@ pub async fn build_reborn_runtime(
     let loop_checkpoint_store = Arc::clone(&local_runtime.loop_checkpoint_store);
     let thread_service = Arc::clone(&local_runtime.thread_service);
     let validated_identity = validate_runtime_identity(identity)?;
-    let (skill_context_source, skill_activation_source) = match configured_skill_context_source {
-        Some(source) => (Some(source), None),
-        None => {
-            let local_dev_skills = local_dev_filesystem_skill_context_source(
-                local_runtime,
-                &validated_identity.tenant_id,
-            )?;
-            (
-                Some(local_dev_skills.source),
-                Some(local_dev_skills.activation_source),
-            )
-        }
-    };
+    let (skill_context_source, skill_activation_source, skill_execution_adapter) =
+        match configured_skill_context_source {
+            Some(source) => (Some(source), None, None),
+            None => {
+                let local_dev_skills = local_dev_filesystem_skill_context_source(
+                    local_runtime,
+                    &validated_identity.tenant_id,
+                )?;
+                (
+                    Some(local_dev_skills.source),
+                    Some(local_dev_skills.activation_source),
+                    Some(local_dev_skills.execution_adapter),
+                )
+            }
+        };
 
     let tenant_id = validated_identity.tenant_id.clone();
     let agent_id = validated_identity.agent_id.clone();
@@ -680,10 +832,9 @@ pub async fn build_reborn_runtime(
         tenant_id,
         agent_id,
         project_id: None,
-        // Keep this scope aligned with `ThreadCheckpointLoopExitEvidencePort`,
-        // which reconstructs thread scope from `TurnScope` for completion
-        // evidence and currently has no owner-user dimension there.
-        owner_user_id: None,
+        // Keep local-dev runtime threads aligned with WebUI's owner-scoped
+        // facade so both entrypoints drive the same runner/evidence path.
+        owner_user_id: Some(actor_user_id.clone()),
         mission_id: None,
     };
 
@@ -771,7 +922,24 @@ pub async fn build_reborn_runtime(
         Arc::clone(&loop_checkpoint_store) as Arc<dyn ironclaw_turns::LoopCheckpointStore>,
         thread_scope.clone(),
     ));
-    let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    // Local-dev WebUI projections are process-local today; production fanout
+    // will swap this for a retained durable log owned by the host runtime.
+    let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let projection_services = build_reborn_projection_services(
+        Arc::clone(&event_log),
+        validated_identity.reply_target_binding_ref.clone(),
+    );
+    let milestone_thread_scope = ThreadScope {
+        owner_user_id: Some(actor_user_id.clone()),
+        ..thread_scope.clone()
+    };
+    let milestone_scope = DurableLoopHostMilestoneScope::from_thread_scope(&milestone_thread_scope)
+        .map_err(|error| RebornRuntimeError::InvalidArgument {
+            reason: error.to_string(),
+        })?;
+    let milestone_sink: Arc<dyn LoopHostMilestoneSink> = Arc::new(
+        DurableLoopHostMilestoneSink::new(Arc::clone(&event_log), milestone_scope),
+    );
     let local_dev_capabilities = local_dev::capability_wiring(
         &services,
         actor_user_id.clone(),
@@ -812,16 +980,14 @@ pub async fn build_reborn_runtime(
         model_budget_accountant,
         safety_context: None,
     })?;
-    let default_run_profile_id = composition
+    let default_resolved_run_profile = composition
         .run_profile_resolver
         .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
         .await
         .map_err(|error| RebornRuntimeError::InvalidArgument {
             reason: format!("could not resolve default run profile: {error}"),
-        })?
-        .profile_id
-        .as_str()
-        .to_string();
+        })?;
+    let default_run_profile_id = default_resolved_run_profile.profile_id.as_str().to_string();
     let planned_turn_coordinator: Arc<dyn TurnCoordinator> = composition.coordinator.clone();
     services.turn_coordinator = Some(Arc::clone(&planned_turn_coordinator));
 
@@ -845,16 +1011,22 @@ pub async fn build_reborn_runtime(
         actor_user_id,
         source_binding_ref: validated_identity.source_binding_ref,
         reply_target_binding_ref: validated_identity.reply_target_binding_ref,
+        projection_services,
+        webui_event_log: event_log,
         default_run_profile_id,
         wake_sender,
         send_locks: Mutex::new(HashMap::new()),
         skill_activation_source,
+        skill_execution_adapter,
     })
 }
+
+const LOOP_RUN_CAPABILITY_ID: &str = "loop.run";
 
 struct LocalDevSkillContextSource {
     source: Arc<dyn HostSkillContextSource>,
     activation_source: Arc<LocalDevSelectableSkillContextSource>,
+    execution_adapter: Arc<LocalDevSkillExecutionAdapter>,
 }
 
 fn local_dev_filesystem_skill_context_source(
@@ -881,9 +1053,16 @@ fn local_dev_filesystem_skill_context_source(
                 .to_string(),
         })?;
     let source: Arc<dyn HostSkillContextSource> = activation_source.clone();
+    let execution_adapter = loaded_extensions.skill_execution_adapter().ok_or_else(|| {
+        RebornRuntimeError::InvalidArgument {
+            reason: "first-party skills extension did not expose a skill execution adapter"
+                .to_string(),
+        }
+    })?;
     Ok(LocalDevSkillContextSource {
         source,
         activation_source,
+        execution_adapter,
     })
 }
 
@@ -1098,9 +1277,10 @@ mod tests {
         HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
         HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
     };
+    use ironclaw_product_adapters::{ProductOutboundPayload, ProductProjectionItem};
     use ironclaw_product_workflow::{
-        RebornSubmitTurnResponse, WebUiAuthenticatedCaller, WebUiCreateThreadRequest,
-        WebUiSendMessageRequest,
+        RebornStreamEventsRequest, RebornSubmitTurnResponse, WebUiAuthenticatedCaller,
+        WebUiCreateThreadRequest, WebUiSendMessageRequest,
     };
     use ironclaw_skills::SkillTrust;
     use ironclaw_threads::{
@@ -1120,7 +1300,7 @@ mod tests {
     use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
     use crate::webui::build_webui_services;
 
-    use super::build_reborn_runtime;
+    use super::{RebornSkillSourceKind, build_reborn_runtime};
 
     fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
         EffectiveRuntimePolicy {
@@ -1865,6 +2045,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_skill_message_returns_plan_and_reads_active_bundle_assets() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let storage_root = root.path().join("local-dev");
+        std::fs::create_dir_all(storage_root.join("skills/asset-helper/references"))
+            .expect("asset skill references dir");
+        std::fs::write(
+            storage_root.join("skills/asset-helper/SKILL.md"),
+            skill_md(
+                "asset-helper",
+                "asset helper description",
+                "ASSET_HELPER_PROMPT_SENTINEL",
+            ),
+        )
+        .expect("write asset helper skill");
+        std::fs::write(
+            storage_root.join("skills/asset-helper/references/policy.md"),
+            "asset helper policy",
+        )
+        .expect("write asset helper policy");
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let gateway = Arc::new(RecordingGateway {
+            reply: "asset helper ok".to_string(),
+            requests: Arc::clone(&requests),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-skill-exec-owner", storage_root)
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-skill-exec-tenant".to_string(),
+            agent_id: "runtime-skill-exec-agent".to_string(),
+            source_binding_id: "runtime-skill-exec-source".to_string(),
+            reply_target_binding_id: "runtime-skill-exec-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            runtime.execute_skill_message(&conversation, "$asset-helper use policy"),
+        )
+        .await
+        .expect("skill execution should finish")
+        .expect("skill execution should succeed");
+
+        assert_eq!(result.reply.status, TurnStatus::Completed);
+        assert_eq!(result.reply.text.as_deref(), Some("asset helper ok"));
+        assert_eq!(result.plan.activations().len(), 1);
+        assert_eq!(result.plan.activations()[0].name, "asset-helper");
+        assert_eq!(
+            result.plan.activations()[0].source,
+            Some(RebornSkillSourceKind::User)
+        );
+        assert_eq!(result.plan.active_bundles().len(), 1);
+        assert_eq!(result.plan.active_bundles()[0].skill_name, "asset-helper");
+        assert_eq!(
+            result.plan.run_context().run_id,
+            result.reply.run_id,
+            "post-activation asset reads must reuse the real activation run context"
+        );
+        let asset = runtime
+            .read_skill_execution_asset(
+                &conversation,
+                &result.plan,
+                &result.plan.activations()[0],
+                "references/policy.md",
+            )
+            .await
+            .expect("active bundle asset read succeeds");
+
+        assert_eq!(asset.skill_name, "asset-helper");
+        assert_eq!(asset.path, "references/policy.md");
+        assert_eq!(asset.into_utf8().unwrap(), "asset helper policy");
+
+        let other_conversation = runtime
+            .new_conversation()
+            .await
+            .expect("other conversation");
+        let error = runtime
+            .read_skill_execution_asset(
+                &other_conversation,
+                &result.plan,
+                &result.plan.activations()[0],
+                "references/policy.md",
+            )
+            .await
+            .expect_err("plan should be bound to its activation conversation");
+        assert!(
+            error
+                .to_string()
+                .contains("skill execution plan does not belong to this conversation"),
+            "unexpected error: {error}"
+        );
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
     async fn local_dev_runtime_fails_closed_for_ambiguous_explicit_skill_before_model_call() {
         let root = tempfile::tempdir().expect("tempdir");
         let storage_root = root.path().join("local-dev");
@@ -2089,6 +2372,10 @@ mod tests {
     #[tokio::test]
     async fn local_dev_runtime_webui_bundle_reuses_thread_and_turn_facades() {
         let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "webui projection ok".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
         let input = RebornRuntimeInput::from_services(
             RebornBuildInput::local_dev("runtime-webui-owner", root.path().join("local-dev"))
                 .with_runtime_policy(local_dev_runtime_policy()),
@@ -2102,17 +2389,90 @@ mod tests {
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(10),
             max_total: Duration::from_secs(3),
-        });
+        })
+        .with_model_gateway_override(gateway);
 
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let runtime_turn_coordinator = runtime.webui_turn_coordinator();
         let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+        let caller = WebUiAuthenticatedCaller::new(
+            TenantId::new("runtime-webui-tenant").unwrap(),
+            UserId::new("runtime-webui-owner").unwrap(),
+            Some(AgentId::new("runtime-webui-agent").unwrap()),
+            None,
+        );
+        let created = bundle
+            .api
+            .create_thread(
+                caller.clone(),
+                WebUiCreateThreadRequest {
+                    client_action_id: Some("create-webui-stream-thread".to_string()),
+                    requested_thread_id: None,
+                },
+            )
+            .await
+            .expect("create webui thread");
+        let submitted = bundle
+            .api
+            .submit_turn(
+                caller.clone(),
+                WebUiSendMessageRequest {
+                    client_action_id: Some("send-webui-stream-message".to_string()),
+                    thread_id: Some(created.thread.thread_id.to_string()),
+                    content: Some("hello webui stream".to_string()),
+                },
+            )
+            .await
+            .expect("submit webui turn");
+        let RebornSubmitTurnResponse::Submitted { run_id, .. } = submitted else {
+            panic!("webui submit should start a run");
+        };
+        let stream = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let stream = bundle
+                    .api
+                    .stream_events(
+                        caller.clone(),
+                        RebornStreamEventsRequest {
+                            thread_id: created.thread.thread_id.to_string(),
+                            after_cursor: None,
+                        },
+                    )
+                    .await
+                    .expect("webui event stream");
+                if stream.events.iter().any(|event| {
+                    matches!(
+                        event.payload(),
+                        ProductOutboundPayload::ProjectionSnapshot { state }
+                            | ProductOutboundPayload::ProjectionUpdate { state }
+                            if state.items.iter().any(|item| matches!(
+                                item,
+                                ProductProjectionItem::RunStatus { run_id: seen, status }
+                                    if *seen == run_id && status == "completed"
+                            ))
+                    )
+                }) {
+                    break stream;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("completed webui projection should appear");
 
         let _api = bundle.api.clone();
         assert!(Arc::ptr_eq(
             &runtime_turn_coordinator,
             &runtime.webui_turn_coordinator()
         ));
+        assert!(
+            stream.events.iter().all(|event| matches!(
+                event.payload(),
+                ProductOutboundPayload::ProjectionSnapshot { .. }
+                    | ProductOutboundPayload::ProjectionUpdate { .. }
+            )),
+            "webui bundle should expose only projection stream events"
+        );
         assert_eq!(bundle.readiness, runtime.services().readiness);
         assert_eq!(bundle.readiness.state, RebornReadinessState::DevOnly);
 

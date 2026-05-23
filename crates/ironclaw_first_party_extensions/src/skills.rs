@@ -8,7 +8,7 @@ use ironclaw_loop_support::{
 };
 
 use crate::{
-    SelectableSkillContextSource, SkillActivationSelectorConfig,
+    SelectableSkillContextSource, SkillActivationSelectorConfig, SkillExecutionAdapter,
     error::FirstPartySkillsExtensionError,
 };
 
@@ -104,6 +104,9 @@ where
 {
     bundle_source: Arc<FilesystemSkillBundleSource<F>>,
     context_source: Arc<SkillBundleContextSource<FilesystemSkillBundleSource<F>>>,
+    default_selectable_context_source:
+        Arc<SelectableSkillContextSource<FilesystemSkillBundleSource<F>>>,
+    execution_adapter: Arc<SkillExecutionAdapter<FilesystemSkillBundleSource<F>>>,
 }
 
 impl<F> std::fmt::Debug for FirstPartySkillsExtension<F>
@@ -134,9 +137,18 @@ where
                 })?,
         );
         let context_source = Arc::new(SkillBundleContextSource::new(Arc::clone(&bundle_source)));
+        let default_selectable_context_source = Arc::new(SelectableSkillContextSource::new(
+            Arc::clone(&bundle_source),
+            SkillActivationSelectorConfig::default(),
+        ));
+        let execution_adapter = Arc::new(SkillExecutionAdapter::new(Arc::clone(
+            &default_selectable_context_source,
+        )));
         Ok(Self {
             bundle_source,
             context_source,
+            default_selectable_context_source,
+            execution_adapter,
         })
     }
 
@@ -156,10 +168,19 @@ where
         &self,
         config: SkillActivationSelectorConfig,
     ) -> Arc<SelectableSkillContextSource<FilesystemSkillBundleSource<F>>> {
+        if config == SkillActivationSelectorConfig::default() {
+            return Arc::clone(&self.default_selectable_context_source);
+        }
         Arc::new(SelectableSkillContextSource::new(
             Arc::clone(&self.bundle_source),
             config,
         ))
+    }
+
+    pub fn skill_execution_adapter(
+        &self,
+    ) -> Arc<SkillExecutionAdapter<FilesystemSkillBundleSource<F>>> {
+        Arc::clone(&self.execution_adapter)
     }
 }
 
