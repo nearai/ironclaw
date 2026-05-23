@@ -131,7 +131,7 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_host
 }
 
 #[tokio::test]
-async fn github_v2_package_discovers_and_publishes_read_only_hot_catalog() {
+async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
     let (_storage, fs) = mounted_github_package_fs();
     let registry = discover_extensions_with_default_host_api_contracts(
         &fs,
@@ -152,13 +152,24 @@ async fn github_v2_package_discovers_and_publishes_read_only_hot_catalog() {
             .iter()
             .map(|capability| capability.id.as_str())
             .collect::<Vec<_>>(),
-        vec!["github.search_issues", "github.get_issue"]
+        vec![
+            "github.search_issues",
+            "github.get_issue",
+            "github.comment_issue"
+        ]
     );
     for capability in &package.manifest.capabilities {
-        assert_eq!(
-            capability.effects,
+        let expected_effects = if capability.id.as_str() == "github.comment_issue" {
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::Network,
+                EffectKind::UseSecret,
+                EffectKind::ExternalWrite,
+            ]
+        } else {
             vec![EffectKind::Network, EffectKind::UseSecret]
-        );
+        };
+        assert_eq!(capability.effects, expected_effects);
         assert_eq!(capability.default_permission, PermissionMode::Ask);
         assert_eq!(
             capability
@@ -173,7 +184,7 @@ async fn github_v2_package_discovers_and_publishes_read_only_hot_catalog() {
     let hot_catalog = publish_hot_capability_catalog(&fs, &registry)
         .await
         .unwrap();
-    assert_eq!(hot_catalog.capabilities.len(), 2);
+    assert_eq!(hot_catalog.capabilities.len(), 3);
 
     let search = hot_catalog
         .get(&CapabilityId::new("github.search_issues").unwrap())
@@ -211,6 +222,32 @@ async fn github_v2_package_discovers_and_publishes_read_only_hot_catalog() {
             .as_deref()
             .is_some_and(|doc| doc.contains("github.get_issue") && doc.contains("read-only"))
     );
+
+    let comment_issue = hot_catalog
+        .get(&CapabilityId::new("github.comment_issue").unwrap())
+        .unwrap();
+    assert_eq!(
+        comment_issue.descriptor.parameters_schema["required"],
+        json!(["owner", "repo", "issue_number", "body"])
+    );
+    assert_eq!(
+        comment_issue.descriptor.effects,
+        vec![
+            EffectKind::DispatchCapability,
+            EffectKind::Network,
+            EffectKind::UseSecret,
+            EffectKind::ExternalWrite,
+        ]
+    );
+    assert_eq!(
+        comment_issue.output_schema["required"],
+        json!(["id", "html_url", "body"])
+    );
+    assert!(comment_issue.prompt_doc.as_deref().is_some_and(|doc| {
+        doc.contains("github.comment_issue")
+            && doc.contains("external write")
+            && doc.contains("github_token")
+    }));
 }
 
 #[tokio::test]
@@ -384,8 +421,11 @@ fn mounted_github_package_fs() -> (tempfile::TempDir, LocalFilesystem) {
         "schemas/github/search_issues.output.v1.json",
         "schemas/github/get_issue.input.v1.json",
         "schemas/github/get_issue.output.v1.json",
+        "schemas/github/comment_issue.input.v1.json",
+        "schemas/github/comment_issue.output.v1.json",
         "prompts/github/search_issues.md",
         "prompts/github/get_issue.md",
+        "prompts/github/comment_issue.md",
     ] {
         copy_package_file(&source_root, &package_root, relative);
     }

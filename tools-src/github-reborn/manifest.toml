@@ -2,7 +2,7 @@ schema_version = "reborn.extension_manifest.v2"
 id = "github"
 name = "GitHub"
 version = "0.2.5"
-description = "Read-only GitHub issue lookup capabilities."
+description = "GitHub issue lookup and issue comment capabilities."
 trust = "third_party"
 
 [runtime]
@@ -35,4 +35,15 @@ visibility = "model"
 input_schema_ref = "schemas/github/get_issue.input.v1.json"
 output_schema_ref = "schemas/github/get_issue.output.v1.json"
 prompt_doc_ref = "prompts/github/get_issue.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
+id = "github.comment_issue"
+description = "Add a comment to a GitHub issue or pull request."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/comment_issue.input.v1.json"
+output_schema_ref = "schemas/github/comment_issue.output.v1.json"
+prompt_doc_ref = "prompts/github/comment_issue.md"
 required_host_ports = ["host.runtime.http_egress"]
