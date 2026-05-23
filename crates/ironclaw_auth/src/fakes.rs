@@ -12,7 +12,7 @@ use crate::{
     CredentialAccountListRequest, CredentialAccountMutation, CredentialAccountProjection,
     CredentialAccountSelectionRequest, CredentialAccountService, CredentialAccountStatus,
     CredentialOwnership, CredentialSetupService, ManualTokenSetupRequest, NewAuthFlow,
-    NewCredentialAccount, OAuthCallbackClaimRequest, OAuthCallbackInput,
+    NewCredentialAccount, OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
     OAuthProviderCallbackRequest, OAuthProviderExchange, ProviderCallbackOutcome,
     SecretCleanupAction, SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
     SecretSubmitRequest, SecretSubmitResult, cleanup::SecretCleanupAction::Deactivate,
@@ -117,13 +117,21 @@ impl AuthFlowManager for InMemoryAuthProductServices {
         if !scope_matches(scope, &record.scope) {
             return Err(AuthProductError::CrossScopeDenied);
         }
-        if record.opaque_state_hash.as_ref() != Some(&request.opaque_state_hash) {
+        if !record
+            .opaque_state_hash
+            .as_ref()
+            .is_some_and(|expected| expected.constant_time_eq(&request.opaque_state_hash))
+        {
             return Err(AuthProductError::CrossScopeDenied);
         }
         if record.provider != request.provider {
             return Err(AuthProductError::TokenExchangeFailed);
         }
-        if record.pkce_verifier_hash.as_ref() != Some(&request.pkce_verifier_hash) {
+        if !record
+            .pkce_verifier_hash
+            .as_ref()
+            .is_some_and(|expected| expected.constant_time_eq(&request.pkce_verifier_hash))
+        {
             return Err(AuthProductError::CrossScopeDenied);
         }
         if crate::is_terminal_status(record.status) {
@@ -171,8 +179,10 @@ impl AuthFlowManager for InMemoryAuthProductServices {
                 if exchange.provider != record.provider {
                     return Err(AuthProductError::TokenExchangeFailed);
                 }
-                if callback.expected_pkce_verifier_hash.as_ref()
-                    != Some(&exchange.pkce_verifier_hash)
+                if !callback
+                    .expected_pkce_verifier_hash
+                    .as_ref()
+                    .is_some_and(|expected| expected.constant_time_eq(&exchange.pkce_verifier_hash))
                 {
                     return Err(AuthProductError::CrossScopeDenied);
                 }
@@ -201,6 +211,24 @@ impl AuthFlowManager for InMemoryAuthProductServices {
             emitted_at: now,
         });
         Ok(completed)
+    }
+
+    async fn fail_oauth_callback(
+        &self,
+        scope: &crate::AuthProductScope,
+        input: OAuthCallbackFailureInput,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        let now = Utc::now();
+        let mut state = self.lock_state();
+        let record = state
+            .flows
+            .get_mut(&input.flow_id)
+            .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
+        let _callback = prepare_callback_flow(record, scope, &input.opaque_state_hash, now)?;
+        record.status = AuthFlowStatus::Failed;
+        record.error = Some(input.error);
+        record.updated_at = now;
+        Ok(record.clone())
     }
 
     async fn cancel_flow(
@@ -550,7 +578,11 @@ fn prepare_callback_flow(
         record.updated_at = now;
         return Err(AuthProductError::UnknownOrExpiredFlow);
     }
-    if record.opaque_state_hash.as_ref() != Some(opaque_state_hash) {
+    if !record
+        .opaque_state_hash
+        .as_ref()
+        .is_some_and(|expected| expected.constant_time_eq(opaque_state_hash))
+    {
         return Err(AuthProductError::CrossScopeDenied);
     }
     Ok(PreparedCallbackFlow {

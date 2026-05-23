@@ -6,10 +6,11 @@ use ironclaw_auth::{
     AuthContinuationEvent, AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowManager,
     AuthFlowStatus, AuthInteractionService, AuthProductError, AuthProductScope, AuthProviderClient,
     CredentialAccountId, CredentialAccountService, CredentialSetupService,
-    InMemoryAuthProductServices, OAuthCallbackClaimRequest, OAuthCallbackInput,
-    OAuthProviderCallbackRequest, OpaqueStateHash, ProviderCallbackOutcome, SecretCleanupService,
+    InMemoryAuthProductServices, OAuthCallbackClaimRequest, OAuthCallbackFailureInput,
+    OAuthCallbackInput, OAuthProviderCallbackRequest, OpaqueStateHash, ProviderCallbackOutcome,
+    SecretCleanupService,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[async_trait]
 pub trait RebornAuthContinuationDispatcher: Send + Sync {
@@ -59,7 +60,7 @@ pub enum RebornOAuthCallbackOutcome {
 }
 
 /// Stable sanitized callback response safe for Web/CLI/API surfaces.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornOAuthCallbackResponse {
     pub flow_id: AuthFlowId,
     pub status: AuthFlowStatus,
@@ -69,7 +70,7 @@ pub struct RebornOAuthCallbackResponse {
 }
 
 /// Stable sanitized callback failure safe for route rendering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornOAuthCallbackError {
     pub code: AuthErrorCode,
     pub retryable: bool,
@@ -240,11 +241,36 @@ impl RebornProductAuthServices {
                 if claimed.status == AuthFlowStatus::Completed {
                     claimed
                 } else {
-                    let exchange = self
+                    let exchange = match self
                         .provider_client
                         .exchange_callback(provider_request)
                         .await
-                        .map_err(RebornOAuthCallbackError::from)?;
+                    {
+                        Ok(exchange) => exchange,
+                        Err(error) => {
+                            let error_code = error.code();
+                            if let Err(fail_error) = self
+                                .flow_manager
+                                .fail_oauth_callback(
+                                    &request.scope,
+                                    OAuthCallbackFailureInput {
+                                        flow_id: request.flow_id,
+                                        opaque_state_hash: request.opaque_state_hash,
+                                        error: error_code,
+                                    },
+                                )
+                                .await
+                            {
+                                tracing::debug!(
+                                    flow_id = %request.flow_id,
+                                    exchange_error_code = ?error_code,
+                                    fail_error_code = ?fail_error.code(),
+                                    "reborn auth callback provider exchange failed and flow failure update failed"
+                                );
+                            }
+                            return Err(error.into());
+                        }
+                    };
                     self.flow_manager
                         .complete_oauth_callback(
                             &request.scope,
@@ -319,9 +345,9 @@ mod tests {
         CredentialAccount, CredentialAccountId, CredentialAccountListPage,
         CredentialAccountListRequest, CredentialAccountMutation, CredentialAccountProjection,
         CredentialAccountSelectionRequest, CredentialAccountStatus, NewAuthFlow,
-        NewCredentialAccount, OAuthCallbackClaimRequest, OAuthCallbackInput,
-        OAuthProviderCallbackRequest, OAuthProviderExchange, SecretCleanupReport,
-        SecretCleanupRequest, SecretSubmitRequest, SecretSubmitResult,
+        NewCredentialAccount, OAuthCallbackClaimRequest, OAuthCallbackFailureInput,
+        OAuthCallbackInput, OAuthProviderCallbackRequest, OAuthProviderExchange,
+        SecretCleanupReport, SecretCleanupRequest, SecretSubmitRequest, SecretSubmitResult,
     };
 
     struct SharedAuthTestDouble;
@@ -426,6 +452,14 @@ mod tests {
             &self,
             _scope: &AuthProductScope,
             _input: OAuthCallbackInput,
+        ) -> Result<AuthFlowRecord, AuthProductError> {
+            unreachable!("constructor tests do not call auth-flow methods")
+        }
+
+        async fn fail_oauth_callback(
+            &self,
+            _scope: &AuthProductScope,
+            _input: OAuthCallbackFailureInput,
         ) -> Result<AuthFlowRecord, AuthProductError> {
             unreachable!("constructor tests do not call auth-flow methods")
         }

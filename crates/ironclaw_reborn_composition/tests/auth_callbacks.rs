@@ -16,7 +16,7 @@ use ironclaw_auth::{
 use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
 use ironclaw_reborn_composition::{
     RebornAuthContinuationDispatcher, RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
-    RebornProductAuthServices,
+    RebornOAuthCallbackResponse, RebornProductAuthServices,
 };
 use secrecy::SecretString;
 
@@ -231,6 +231,8 @@ async fn oauth_callback_handler_completes_flow_and_dispatches_typed_continuation
     );
 
     let serialized = serde_json::to_string(&response).unwrap();
+    let parsed: RebornOAuthCallbackResponse = serde_json::from_str(&serialized).unwrap();
+    assert_eq!(parsed, response);
     assert!(!serialized.contains("raw-auth-code"));
     assert!(!serialized.contains("raw-pkce-verifier"));
     assert!(!serialized.contains("oauth-access-"));
@@ -281,6 +283,29 @@ async fn oauth_callback_handler_rejects_wrong_state_without_provider_exchange_or
         .handle_oauth_callback(request)
         .await
         .expect_err("wrong state is rejected before provider exchange");
+
+    assert_eq!(error.code, AuthErrorCode::CrossScopeDenied);
+    assert_eq!(provider_client.calls(), 0);
+    assert!(dispatcher.events().is_empty());
+}
+
+#[tokio::test]
+async fn oauth_callback_handler_rejects_wrong_pkce_without_provider_exchange_or_dispatch() {
+    let dispatcher = Arc::new(RecordingContinuationDispatcher::default());
+    let provider_client = Arc::new(CountingProviderClient::default());
+    let services = auth_services(dispatcher.clone()).with_provider_client(provider_client.clone());
+    let owner = scope("alice");
+    let flow_id = create_flow(&services, owner.clone()).await;
+    let mut request = authorized_request(owner, flow_id);
+    let RebornOAuthCallbackOutcome::Authorized { provider_request } = &mut request.outcome else {
+        panic!("authorized request expected");
+    };
+    provider_request.pkce_verifier_hash = pkce_hash("wrong-pkce");
+
+    let error = services
+        .handle_oauth_callback(request)
+        .await
+        .expect_err("wrong pkce is rejected before provider exchange");
 
     assert_eq!(error.code, AuthErrorCode::CrossScopeDenied);
     assert_eq!(provider_client.calls(), 0);
@@ -353,7 +378,7 @@ async fn oauth_callback_handler_routes_exchange_failures_through_provider_bounda
     let flow_id = create_flow(&services, owner.clone()).await;
 
     let error = services
-        .handle_oauth_callback(authorized_request(owner, flow_id))
+        .handle_oauth_callback(authorized_request(owner.clone(), flow_id))
         .await
         .expect_err("provider exchange failure surfaces sanitized error");
 
@@ -361,6 +386,24 @@ async fn oauth_callback_handler_routes_exchange_failures_through_provider_bounda
     assert!(!error.retryable);
     assert!(dispatcher.events().is_empty());
     let serialized = serde_json::to_string(&error).unwrap();
+    let parsed: ironclaw_reborn_composition::RebornOAuthCallbackError =
+        serde_json::from_str(&serialized).unwrap();
+    assert_eq!(parsed, error);
     assert!(!serialized.contains("raw-auth-code"));
     assert!(!serialized.contains("raw-pkce-verifier"));
+
+    let flow = services
+        .flow_manager()
+        .get_flow(&owner, flow_id)
+        .await
+        .expect("flow lookup")
+        .expect("flow record");
+    assert_eq!(flow.status, ironclaw_auth::AuthFlowStatus::Failed);
+    assert_eq!(flow.error, Some(AuthErrorCode::TokenExchangeFailed));
+
+    let retry = services
+        .handle_oauth_callback(authorized_request(owner, flow_id))
+        .await
+        .expect_err("failed flow rejects retry");
+    assert_eq!(retry.code, AuthErrorCode::FlowAlreadyTerminal);
 }
