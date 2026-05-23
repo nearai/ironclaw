@@ -192,13 +192,19 @@ impl HookedLoopCapabilityPort {
         };
         // Defense-in-depth: even when the resolver's `size_hint`
         // returned `None`, refuse to expose payloads larger than the cap
-        // to predicate evaluation. `serde_json::to_vec` is the cheapest
-        // stable way to measure the materialized byte cost.
-        match serde_json::to_vec(&value) {
-            Ok(bytes) if (bytes.len() as u64) > MAX_PREDICATE_INPUT_BYTES => {
+        // to predicate evaluation. We measure the serialized byte cost
+        // by streaming into a counting writer rather than calling
+        // `serde_json::to_vec` and discarding the buffer — avoids one
+        // `Vec<u8>` allocation per resolved invocation on the happy
+        // path (henrypark133 review L1 on PR #3913). `SanitizedArguments::from_json`
+        // sanitizes the in-memory `serde_json::Value` directly; it does
+        // not re-serialize, so handing it the unmodified `value` is the
+        // cheapest path.
+        match serialized_len(&value) {
+            Ok(bytes) if bytes > MAX_PREDICATE_INPUT_BYTES => {
                 tracing::debug!(
                     capability = %invocation.capability_id,
-                    size_bytes = bytes.len(),
+                    size_bytes = bytes,
                     cap_bytes = MAX_PREDICATE_INPUT_BYTES,
                     "materialized capability input exceeds MAX_PREDICATE_INPUT_BYTES; failing closed"
                 );
@@ -522,6 +528,28 @@ fn fail_closed_gate_ref_unavailable(sanitized_reason: &str) -> CapabilityOutcome
             .expect("hook_gate_ref_unavailable is a valid loop-safe identifier"), // safety: literal ASCII identifier, validated by LoopGateRef constructor contract
         safe_summary: sanitized_reason.to_string(),
     })
+}
+
+/// Counts the JSON-serialized byte length of `value` without allocating
+/// an intermediate `Vec<u8>`. `serde_json::to_writer` writes into a
+/// trivial `std::io::Write` impl that only increments a counter, so the
+/// happy-path measurement skips one buffer allocation and one
+/// `Vec<u8>::drop` per resolved invocation (henrypark133 review L1 on
+/// PR #3913).
+fn serialized_len(value: &serde_json::Value) -> Result<u64, serde_json::Error> {
+    struct CountingWriter(u64);
+    impl std::io::Write for CountingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(buf.len() as u64);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = CountingWriter(0);
+    serde_json::to_writer(&mut writer, value)?;
+    Ok(writer.0)
 }
 
 /// Stable digest of capability arguments for hook context. The middleware
