@@ -3,10 +3,14 @@
 //!
 //! These tests drive the REAL production composition functions
 //! ([`build_hook_projection_registry`] + [`build_hook_dispatcher_builder_factory`])
-//! against a fake [`RootFilesystem`] that serves a `/system/extensions/<tenant>`
+//! against a fake [`RootFilesystem`] that serves a `/system/extensions`
 //! manifest tree — the same code path `build_reborn_runtime` invokes, not a
 //! loader look-alike. They assert the containment, tenant-isolation, quarantine,
 //! DoS-cap, and capability-absence properties of the model.
+//!
+//! Tenant isolation (Option 1): the per-tenant [`RootFilesystem`] is the scope
+//! boundary, not a tenant path segment. The discovery root is the fixed
+//! `/system/extensions`; two tenants are modeled as two distinct filesystems.
 
 use std::collections::BTreeMap;
 
@@ -49,9 +53,8 @@ impl FakeExtensionFs {
             .push((name.to_string(), file_type));
     }
 
-    /// Register an extension `id` under tenant root `<root>` with the given
-    /// manifest TOML. `root_override` lets a test point the discovered package
-    /// root somewhere else (to exercise the containment escape path).
+    /// Register an extension `id` under directory `<root>` with the given
+    /// manifest TOML, materializing the dir child and the manifest file.
     fn add_extension(&mut self, root: &str, id: &str, manifest_toml: &str) {
         self.add_dir_child(root, id, FileType::Directory);
         let manifest_path = format!("{root}/{id}/manifest.toml");
