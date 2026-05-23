@@ -80,10 +80,19 @@ impl PredicateEvaluator {
 
     /// Construct an evaluator over an explicit backend. Crate-internal:
     /// used by tests that need to pre-seed backend state (e.g. saturate a
-    /// per-key window to drive the fail-closed overflow path) and by
-    /// future host wiring that swaps in a durable backend.
+    /// per-key window to drive the fail-closed overflow path).
     #[cfg(test)]
     pub(crate) fn with_backend(backend: Arc<dyn PredicateStateBackend>) -> Self {
+        Self { backend }
+    }
+
+    /// Construct an evaluator over an explicit [`PredicateStateBackend`].
+    ///
+    /// This is the production seam for swapping the default in-memory backend
+    /// for a durable one (Postgres / libSQL, #3933 + follow-ups) without
+    /// changing the evaluator's predicate semantics. The composition layer
+    /// passes the per-tenant backend here when activating the hook framework.
+    pub fn with_state_backend(backend: Arc<dyn PredicateStateBackend>) -> Self {
         Self { backend }
     }
 

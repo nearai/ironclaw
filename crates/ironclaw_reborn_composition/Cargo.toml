@@ -64,6 +64,7 @@ ironclaw_event_streams = { path = "../ironclaw_event_streams" }
 ironclaw_events = { path = "../ironclaw_events" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
+ironclaw_hooks = { path = "../ironclaw_hooks" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
 ironclaw_llm = { path = "../ironclaw_llm", optional = true, default-features = false }
@@ -99,6 +100,7 @@ serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
+toml = "0.8"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 

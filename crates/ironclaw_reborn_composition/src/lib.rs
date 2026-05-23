@@ -21,6 +21,7 @@
 mod auth;
 mod error;
 mod factory;
+mod hooks;
 mod input;
 #[cfg(feature = "root-llm-provider")]
 mod llm_catalog;
@@ -50,6 +51,10 @@ pub use auth::{
 };
 pub use error::RebornBuildError;
 pub use factory::{RebornServices, build_reborn_services};
+pub use hooks::{
+    HOOKS_ENABLED_ENV, HookDispatcherBuilderFactory, HooksActivationConfig, NoOpObserverHook,
+    build_hook_dispatcher_builder_factory,
+};
 pub use input::RebornBuildInput;
 #[cfg(feature = "root-llm-provider")]
 pub use llm_catalog::{
