@@ -1281,40 +1281,66 @@ impl HookDispatcher {
             // owner. Fail-closed: do not trust the payload provider.
             return None;
         };
-        let resolved = match self.registry.lock() {
-            Ok(registry) => registry.owning_extension_for_hook_hex(hook_id).cloned(),
-            Err(poisoned) => {
-                // Keep the same fail-closed posture as other registry reads:
-                // if the registry cannot be trusted, providerless
-                // OwnCapabilities hooks remain inert.
-                let _ = poisoned;
+        // PR #3931 (Hole 2): the lifecycle owner is the registry-resolved owner
+        // of `hook_id`, and ONLY that. The `event.provider` payload is
+        // forgeable — it is a plain serialized field a synthesized event can
+        // set to any extension id; there is NO unforgeable host-stamped owner
+        // source distinct from the payload today. So for lifecycle events we
+        // must NOT fall back to the carried provider. Two distinct
+        // failure modes both fail-closed to `None` (hook inert), and must NOT
+        // be collapsed into a carried-provider fallback:
+        //
+        //   1. Poisoned registry — the registry cannot be trusted at all.
+        //   2. Unknown hook_id — no local binding owns this hook. Trusting the
+        //      claim here would let a synthesized event (unknown hook_id +
+        //      provider=ext-a) activate ext-a's OwnCapabilities hooks.
+        //
+        // The only path that yields a provider is a registry hit. If the
+        // payload disagrees with the resolved owner, that is a spoof: log and
+        // use the resolved owner, never the claim.
+        match self.registry.lock() {
+            Err(_poisoned) => {
+                // Fail-closed: an untrusted registry resolves to no owner, so
+                // providerless OwnCapabilities hooks remain inert. We must not
+                // substitute the spoofable carried provider here.
                 None
             }
-        };
-        match (resolved, event.provider.clone()) {
-            // The registry knows this hook_id — it is the authoritative owner.
-            // If the payload disagrees, that is a provider spoof: log it and
-            // use the resolved owner, never the claim.
-            (Some(resolved_owner), Some(claimed)) if resolved_owner != claimed => {
-                tracing::warn!(
-                    hook_id = hook_id,
-                    claimed_provider = claimed.as_str(),
-                    resolved_provider = resolved_owner.as_str(),
-                    "hook-lifecycle event provider claim disagrees with registry-resolved \
-                     owner; using resolved owner (possible provider spoof)"
-                );
-                Some(resolved_owner)
-            }
-            (Some(resolved_owner), _) => Some(resolved_owner),
-            // The registry has no binding for this hook_id (the subject hook is
-            // owned by another host/extension and not registered here). We
-            // cannot prove a spoof, so fall back to the host-stamped provider
-            // carried on the event — the legitimate "carried provider" path
-            // for hook-meta events about foreign hooks. A claim here cannot
-            // redirect to a locally-registered extension's OwnCapabilities
-            // hooks under a hook_id that extension owns, because such a
-            // hook_id would have resolved above.
-            (None, claimed) => claimed,
+            Ok(registry) => match registry.owning_extension_for_hook_hex(hook_id).cloned() {
+                Some(resolved_owner) => {
+                    if let Some(claimed) = event.provider.as_ref()
+                        && &resolved_owner != claimed
+                    {
+                        tracing::warn!(
+                            hook_id = hook_id,
+                            claimed_provider = claimed.as_str(),
+                            resolved_provider = resolved_owner.as_str(),
+                            "hook-lifecycle event provider claim disagrees with \
+                             registry-resolved owner; using resolved owner (possible \
+                             provider spoof)"
+                        );
+                    }
+                    Some(resolved_owner)
+                }
+                None => {
+                    // Unknown hook_id: no local binding owns it. The carried
+                    // provider is forgeable and cannot be authenticated, so it
+                    // is NOT used — a synthesized lifecycle event must never be
+                    // able to target another extension's OwnCapabilities hooks.
+                    // (If a future design adds an unforgeable host-stamped owner
+                    // field distinct from the payload, a legitimate
+                    // foreign-host lifecycle path could be honored here; until
+                    // then, fail closed.)
+                    if event.provider.is_some() {
+                        tracing::debug!(
+                            hook_id = hook_id,
+                            "hook-lifecycle event names an unknown hook_id while carrying a \
+                             provider claim; ignoring the unauthenticated claim and resolving \
+                             to no owner (fail-closed)"
+                        );
+                    }
+                    None
+                }
+            },
         }
     }
 
@@ -4098,6 +4124,121 @@ mod tests {
         assert!(
             resolved.is_none(),
             "poisoned registry must fall back to None for scope resolution"
+        );
+    }
+
+    /// PR #3931 (Hole 2, unknown-hook spoof): a hook-lifecycle event whose
+    /// `hook_id` does NOT resolve in the registry must NOT let the carried
+    /// `provider` payload fire that extension's `OwnCapabilities` hooks. The
+    /// provider field is forgeable (it is part of the event payload, not an
+    /// unforgeable host stamp), so a synthesized lifecycle event naming an
+    /// unknown hook_id + provider=target could otherwise activate the target's
+    /// OwnCapabilities watchers. Fail-closed: provider resolves to `None`
+    /// (hook inert).
+    #[tokio::test]
+    async fn unknown_lifecycle_hook_id_with_carried_provider_stays_inert() {
+        let target = ironclaw_host_api::ExtensionId::new("target").expect("valid extension id");
+
+        // Watcher owned by `target`, OwnCapabilities-scoped, listening for
+        // HookFailed. It must only observe events whose true owner is `target`.
+        let watcher_id = ext_hook_id("hole2-unknown-watcher");
+        let watcher = HookBinding {
+            hook_id: watcher_id,
+            hook_version: HookVersion::ONE,
+            trust_class: HookTrustClass::Installed,
+            phase: HookPhase::Telemetry,
+            priority: HookPriority::DEFAULT,
+            point: HookPointSpec::EventTriggered,
+            event_kind_filter: Some(RuntimeEventKind::HookFailed),
+            owning_extension: Some(target.clone()),
+            scope: HookBindingScope::OwnCapabilities,
+            poisoned: false,
+        };
+
+        let mut registry = HookRegistry::new();
+        registry.insert(watcher).expect("watcher");
+        let mut dispatcher = HookDispatcher::new(registry);
+        dispatcher.install_event_triggered_impl(
+            watcher_id,
+            EventTriggeredHookImpl::Any(Box::new(NotingEventHook)),
+        );
+
+        // Synthesize a HookFailed naming a hook_id that is NOT in the registry,
+        // but claiming provider=target. The unknown hook_id used to fall
+        // through to the carried provider; it must now resolve to None.
+        let unknown_subject = ext_hook_id("hole2-unknown-subject");
+        let mut event = RuntimeEvent::hook_failed(
+            event_resource_scope(),
+            event_capability(),
+            unknown_subject.to_hex(),
+            "panic",
+            "fail_isolated",
+            None,
+        );
+        event.provider = Some(target.clone());
+
+        let resolved = dispatcher.scope_provider_for_runtime_event(&event);
+        assert!(
+            resolved.is_none(),
+            "unknown lifecycle hook_id must resolve to None, not the forgeable \
+             carried provider: {resolved:?}"
+        );
+
+        let outcome = dispatcher
+            .dispatch_event_triggered_at(tenant(), EventCursor::new(1), &event)
+            .await;
+        assert_eq!(
+            outcome.facts.len(),
+            0,
+            "target's OwnCapabilities watcher must NOT fire for a synthesized \
+             HookFailed naming an unknown hook_id + provider=target: {:?}",
+            outcome.facts
+        );
+    }
+
+    /// PR #3931 (Hole 2, poison + carried provider): a poisoned registry must
+    /// not be collapsed into the carried-provider fallback. The earlier
+    /// poison test used `provider: None`, so it passed even while a non-None
+    /// claim would have leaked through `(None, claimed) => claimed`. Here the
+    /// event carries `provider=target`; a poisoned registry must still resolve
+    /// to `None` (fail-closed), never the spoofable claim.
+    #[tokio::test]
+    async fn poisoned_registry_with_carried_provider_resolves_none() {
+        let target = ironclaw_host_api::ExtensionId::new("target").expect("valid extension id");
+        let id = ext_hook_id("hole2-poison-watcher");
+        let mut registry = HookRegistry::new();
+        registry
+            .insert(event_triggered_binding(id, RuntimeEventKind::HookFailed))
+            .expect("insert");
+        let dispatcher = Arc::new(HookDispatcher::new(registry));
+
+        let poisoner = Arc::clone(&dispatcher);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.registry.lock().expect("first lock ok");
+            panic!("intentional poison");
+        })
+        .join();
+        assert!(
+            dispatcher.registry.is_poisoned(),
+            "mutex must be poisoned for this test to exercise the fallback"
+        );
+
+        let subject_id = ext_hook_id("hole2-poison-subject");
+        let mut event = RuntimeEvent::hook_failed(
+            event_resource_scope(),
+            event_capability(),
+            subject_id.to_hex(),
+            "panic",
+            "fail_isolated",
+            None,
+        );
+        event.provider = Some(target.clone());
+
+        let resolved = dispatcher.scope_provider_for_runtime_event(&event);
+        assert!(
+            resolved.is_none(),
+            "poisoned registry must resolve to None even when the event carries \
+             a provider claim, never trust the spoofable payload: {resolved:?}"
         );
     }
 

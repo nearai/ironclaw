@@ -521,6 +521,74 @@ fn event_triggered_dispatcher_with_scope(
         .build_arc()
 }
 
+/// No-op `before_capability` hook used only to register a *subject* binding in
+/// the dispatcher's registry. PR #3931 (Hole 2): hook-lifecycle ownership is
+/// resolved from the registry by `hook_id`, never from the forgeable carried
+/// `provider`. A legitimate Phase 5 alerting flow therefore needs the subject
+/// hook present in the registry so its owner resolves; this hook lets tests
+/// register such subjects without affecting capability dispatch.
+struct NoopSubjectHook;
+
+#[async_trait]
+impl RestrictedBeforeCapabilityHook for NoopSubjectHook {
+    async fn evaluate(
+        &self,
+        _ctx: &BeforeCapabilityHookContext,
+        _sink: &mut dyn RestrictedGateSink,
+    ) {
+        // No opinion: registering this binding only makes its owner resolvable
+        // via `owning_extension_for_hook_hex`.
+    }
+}
+
+/// Like [`event_triggered_dispatcher_with_scope`], but also registers the
+/// supplied `subjects` (`(hook_id, owning_extension)`) as installed
+/// `before_capability` bindings so the registry can resolve their owners for
+/// hook-lifecycle event scope filtering (PR #3931, Hole 2). The subjects never
+/// fire for the lifecycle event kind under test; they exist purely as registry
+/// owner anchors.
+fn event_triggered_dispatcher_with_subjects(
+    event_kind: RuntimeEventKind,
+    seen: Arc<SeenLog>,
+    scope: HookBindingScope,
+    owning_extension: &str,
+    subjects: &[(HookId, ironclaw_host_api::ExtensionId)],
+) -> Arc<HookDispatcher> {
+    let watcher_id = HookId::derive(
+        &ExtensionId::new(owning_extension.to_string()).expect("extension id literal is valid"),
+        "0.0.1",
+        &HookLocalId::new(format!(
+            "event-{}",
+            format!("{event_kind:?}").to_lowercase()
+        ))
+        .expect("hook local id literal is valid"),
+        HookVersion::ONE,
+    );
+    let mut builder = HookDispatcherBuilder::new(HookRegistry::new())
+        .with_timeout(Duration::from_millis(500))
+        .install_installed_event_triggered(
+            watcher_id,
+            HookPhase::Telemetry,
+            event_kind,
+            ironclaw_host_api::ExtensionId::new(owning_extension).expect("valid ext id"),
+            scope,
+            Box::new(RecordingEventTriggeredHook { seen, delay: None }),
+        )
+        .expect("event-triggered hook installs");
+    for (subject_id, subject_owner) in subjects {
+        builder = builder
+            .install_installed_before_capability(
+                *subject_id,
+                HookPhase::Policy,
+                subject_owner.clone(),
+                HookBindingScope::OwnCapabilities,
+                Box::new(NoopSubjectHook),
+            )
+            .expect("subject before_capability hook installs");
+    }
+    builder.build_arc()
+}
+
 fn pause_approval_dispatcher() -> Arc<HookDispatcher> {
     let hook_id = HookId::derive(
         &ExtensionId::new("integration-tests").expect("valid ExtensionId in test"),
@@ -1733,57 +1801,69 @@ async fn event_triggered_own_capabilities_scope_resolves_hook_failed_owner_from_
     );
 }
 
-/// henrypark133 HIGH regression: hook milestone events now carry the
-/// originating hook's owning extension directly in `provider`. An
-/// `OwnCapabilities`-scoped event-triggered subscription must match those
-/// events through the primary `event.provider` path — no fallback hook_id
-/// lookup needed. This is the load-bearing default case for Phase 5
-/// (hook-failure / decision-emitted alerting).
+/// Phase 5 (hook-failure / decision-emitted alerting): an `OwnCapabilities`-
+/// scoped event-triggered subscription must fire for lifecycle events owned by
+/// its own extension and stay inert for foreign-owned ones.
+///
+/// PR #3931 (Hole 2) hardened this: ownership is resolved from the registry by
+/// the event's `hook_id`, NOT from the forgeable carried `provider` payload. So
+/// the legitimate flow requires the subject hooks registered in the dispatcher
+/// (which they are in production — the subject hook ran in this same host). The
+/// carried `provider` is still present on the wire but is no longer the
+/// authority; the registry-resolved owner is. A spoofed `provider` on an
+/// unregistered hook_id can no longer mint authority (covered by the dispatch
+/// unit tests `unknown_lifecycle_hook_id_with_carried_provider_stays_inert` and
+/// `hook_failed_with_spoofed_provider_does_not_fire_target_extension_hooks`).
 #[tokio::test]
-async fn event_triggered_own_capabilities_matches_hook_failed_with_carried_provider() {
+async fn event_triggered_own_capabilities_matches_hook_failed_for_registry_owned_hook() {
     let fixture = Fixture::new().await;
     let scope = runtime_scope(&fixture);
     let stream = EventStreamKey::from_scope(&scope);
     let log = Arc::new(InMemoryDurableEventLog::new());
     let ext_a = ironclaw_host_api::ExtensionId::new("ext-a").expect("valid ext");
     let ext_b = ironclaw_host_api::ExtensionId::new("ext-b").expect("valid ext");
-    let foreign_hook_hex = HookId::for_builtin("tests::foreign_failed", HookVersion::ONE).to_hex();
-    let own_hook_hex = HookId::for_builtin("tests::own_failed", HookVersion::ONE).to_hex();
+    // Subject hooks are registered in the dispatcher so their owners resolve
+    // from the registry (the production reality: the failed hook ran here).
+    let foreign_subject = HookId::for_builtin("tests::foreign_failed", HookVersion::ONE);
+    let own_subject = HookId::for_builtin("tests::own_failed", HookVersion::ONE);
 
-    // Two HookFailed events with provider explicitly carried (the new path).
-    // Foreign-provider event must be filtered out; own-provider event must
-    // fire the subscription.
+    // Two HookFailed events. The ext-B-owned one must be filtered out; the
+    // ext-A-owned one must fire the subscription. Ownership comes from the
+    // registry binding for each subject hook_id, not from the payload provider.
     log.append(RuntimeEvent::hook_failed(
         scope.clone(),
         runtime_capability("hooks.ext_b.failed"),
-        foreign_hook_hex,
+        foreign_subject.to_hex(),
         "panic",
         "fail_isolated",
-        Some(ext_b),
+        Some(ext_b.clone()),
     ))
     .await
-    .expect("append foreign-provider hook failure event");
+    .expect("append foreign-owned hook failure event");
     log.append(RuntimeEvent::hook_failed(
         scope,
         runtime_capability("hooks.ext_a.failed"),
-        own_hook_hex,
+        own_subject.to_hex(),
         "panic",
         "fail_isolated",
         Some(ext_a.clone()),
     ))
     .await
-    .expect("append own-provider hook failure event");
+    .expect("append own-owned hook failure event");
 
     let seen = SeenLog::new();
     let inner = Arc::new(RecordingCapabilityPort::new());
     let _host = fixture
         .factory()
-        .with_hook_dispatcher(event_triggered_dispatcher_with_scope(
+        .with_hook_dispatcher(event_triggered_dispatcher_with_subjects(
             RuntimeEventKind::HookFailed,
             Arc::clone(&seen),
             HookBindingScope::OwnCapabilities,
             ext_a.as_str(),
-            None,
+            &[
+                (own_subject, ext_a.clone()),
+                (foreign_subject, ext_b.clone()),
+            ],
         ))
         .with_event_subscription(event_log_subscription(
             &fixture,
@@ -1796,9 +1876,17 @@ async fn event_triggered_own_capabilities_matches_hook_failed_with_carried_provi
         .expect("host builds with HookFailed OwnCapabilities subscription");
 
     let events = wait_for_seen_events(&seen, 1).await;
-    assert_eq!(events.len(), 1, "exactly one own-provider event must fire");
+    assert_eq!(
+        events.len(),
+        1,
+        "exactly one event (the ext-A registry-owned one) must fire"
+    );
     assert_eq!(events[0].kind, RuntimeEventKind::HookFailed);
-    assert_eq!(events[0].provider.as_ref(), Some(&ext_a));
+    assert_eq!(
+        events[0].hook_id.as_deref(),
+        Some(own_subject.to_hex().as_str()),
+        "the firing event must be the ext-A-owned subject"
+    );
 }
 
 /// NOTE(#3640): subscription stream/read-scope must be
@@ -1919,9 +2007,11 @@ async fn event_triggered_self_lifecycle_event_does_not_redispatch() {
     ))
     .await
     .expect("append self-targeted hook failure event");
-    // Event #2: a HookFailed about a DIFFERENT hook, same provider — this
-    // SHOULD fire the subscription (control case, proves the filter is
-    // narrow).
+    // Event #2: a HookFailed about a DIFFERENT hook owned by the same
+    // extension — this SHOULD fire the subscription (control case, proves the
+    // filter is narrow). PR #3931 (Hole 2): this subject hook is registered in
+    // the dispatcher below so its owner resolves from the registry, not from
+    // the carried provider.
     let other_hook_id = HookId::derive(
         &ExtensionId::new(ext.as_str().to_string()).expect("extension id literal is valid"),
         "0.0.1",
@@ -1943,12 +2033,15 @@ async fn event_triggered_self_lifecycle_event_does_not_redispatch() {
     let inner = Arc::new(RecordingCapabilityPort::new());
     let _host = fixture
         .factory()
-        .with_hook_dispatcher(event_triggered_dispatcher_with_scope(
+        .with_hook_dispatcher(event_triggered_dispatcher_with_subjects(
             RuntimeEventKind::HookFailed,
             Arc::clone(&seen),
             HookBindingScope::OwnCapabilities,
             ext.as_str(),
-            None,
+            // Register the control-case subject so its owner resolves from the
+            // registry. The subscriber's own hook id is already registered by
+            // the event-triggered watcher install.
+            &[(other_hook_id, ext.clone())],
         ))
         .with_event_subscription(event_log_subscription(
             &fixture,
