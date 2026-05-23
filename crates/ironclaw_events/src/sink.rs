@@ -77,9 +77,24 @@ pub trait DurableEventLog: Send + Sync {
     /// filtering.
     ///
     /// `after` is a known-valid resume cursor for the caller (typically the
-    /// subscription's `start_cursor`); the probe walks forward from it so it
-    /// never trips the earliest-retained `ReplayGap` guard. The returned head
-    /// is `>= after`.
+    /// subscription's `start_cursor`); implementations must treat it as the
+    /// floor of the probe so the call never trips the earliest-retained
+    /// `ReplayGap` guard for a still-valid resume position. The returned head
+    /// is `>= after`. A cursor strictly beyond the current head is a foreign /
+    /// future cursor and must be rejected with [`EventError::ReplayGap`] —
+    /// mirroring the `read_after_cursor` contract.
+    ///
+    /// # Atomicity contract (REQUIRED — no default impl)
+    ///
+    /// The head must be read **atomically at the instant of the call** from a
+    /// single authoritative tail observation (a tail counter, the stream's
+    /// `next_cursor`, or the backend's last-assigned sequence number). It must
+    /// NOT be derived by draining the stream page-by-page until an empty read:
+    /// a record appended concurrently *during* such a drain would fold into the
+    /// observed head and be mis-classified as replay. Each backend knows how to
+    /// read its own tail cheaply, so this is a required operation rather than a
+    /// default-implemented unbounded scan hidden behind a method whose docs
+    /// promise atomicity.
     ///
     /// # Why this exists (PR #3931, Hole 1)
     ///
@@ -94,39 +109,11 @@ pub trait DurableEventLog: Send + Sync {
     /// Snapshotting the head **once, atomically, at subscription start** fixes
     /// the boundary: `cursor <= startup_head` is replay, everything else is
     /// live.
-    ///
-    /// The default implementation drains the stream unfiltered
-    /// (`ReadScope::any()` — the consumer already holds whole-stream authority
-    /// for its `(tenant, user, agent)` partition) from `after` to the tail and
-    /// returns the maximum cursor observed. Because it is unfiltered, the
-    /// `next_cursor` it observes is the true stream head and is never pulled
-    /// short by scope-filtered records. Backends that can read the head in O(1)
-    /// (e.g. an in-memory tail counter) should override this.
     async fn head_cursor(
         &self,
         stream: &EventStreamKey,
         after: EventCursor,
-    ) -> Result<EventCursor, EventError> {
-        // Unfiltered drain: every record matches, so `next_cursor` advances to
-        // the true head rather than stalling on filtered-out records. Loop in
-        // case the backend caps the batch below the backlog size.
-        const HEAD_PROBE_BATCH: usize = 1024;
-        let mut head = after;
-        loop {
-            let replay = self
-                .read_after_cursor(stream, &ReadScope::any(), Some(head), HEAD_PROBE_BATCH)
-                .await?;
-            if replay.entries.is_empty() {
-                // Caught up: `next_cursor` echoes the requested cursor, and we
-                // have walked to the tail.
-                return Ok(head);
-            }
-            // `next_cursor` is monotonically non-decreasing and, under an
-            // unfiltered read, equals the last record returned. Advance and
-            // continue until a poll comes back empty (tail reached).
-            head = replay.next_cursor.max(head);
-        }
-    }
+    ) -> Result<EventCursor, EventError>;
 }
 
 /// Durable control-plane audit log with explicit-error append and scoped

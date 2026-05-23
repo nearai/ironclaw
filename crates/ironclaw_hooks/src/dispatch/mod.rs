@@ -40,6 +40,9 @@ use crate::wasm::{
     WasmBeforeCapabilityHook, WasmBeforePromptHook, WasmHookFailure, WasmObserverHook,
 };
 
+mod lifecycle_owner;
+use lifecycle_owner::{LifecycleOwnerLookup, resolve_event_owner};
+
 /// Default per-hook wall-clock budget. Tunable per dispatcher.
 pub const DEFAULT_HOOK_TIMEOUT: Duration = Duration::from_millis(50);
 
@@ -1255,93 +1258,18 @@ impl HookDispatcher {
         &self,
         event: &RuntimeEvent,
     ) -> Option<ironclaw_host_api::ExtensionId> {
-        // PR #3640 followup (Bug 3): hook-lifecycle provider spoofing.
-        // For hook-lifecycle event kinds the authoritative owner is the
-        // extension that registered the hook named by `event.hook_id` — NOT
-        // the `event.provider` payload, which is attacker-controllable when a
-        // hook synthesizes a lifecycle event for *another* hook. Resolve the
-        // owner from the registry first; if it disagrees with the payload
-        // claim, log a security note and use the resolved owner (never the
-        // claim). Only fall back to the untrusted payload provider for
-        // non-lifecycle event kinds, where there is no hook_id to anchor on.
-        let is_lifecycle = matches!(
-            event.kind,
-            RuntimeEventKind::HookDispatched
-                | RuntimeEventKind::HookDecisionEmitted
-                | RuntimeEventKind::HookFailed
-        );
-        if !is_lifecycle {
-            // Non-lifecycle events carry no hook-id anchor; the provider claim
-            // is the only available signal and is not spoofable in the same
-            // way (it names the capability provider, established by the host).
-            return event.provider.clone();
-        }
-        let Some(hook_id) = event.hook_id.as_deref() else {
-            // A hook-lifecycle event with no hook_id cannot be anchored to an
-            // owner. Fail-closed: do not trust the payload provider.
-            return None;
-        };
-        // PR #3931 (Hole 2): the lifecycle owner is the registry-resolved owner
-        // of `hook_id`, and ONLY that. The `event.provider` payload is
-        // forgeable — it is a plain serialized field a synthesized event can
-        // set to any extension id; there is NO unforgeable host-stamped owner
-        // source distinct from the payload today. So for lifecycle events we
-        // must NOT fall back to the carried provider. Two distinct
-        // failure modes both fail-closed to `None` (hook inert), and must NOT
-        // be collapsed into a carried-provider fallback:
-        //
-        //   1. Poisoned registry — the registry cannot be trusted at all.
-        //   2. Unknown hook_id — no local binding owns this hook. Trusting the
-        //      claim here would let a synthesized event (unknown hook_id +
-        //      provider=ext-a) activate ext-a's OwnCapabilities hooks.
-        //
-        // The only path that yields a provider is a registry hit. If the
-        // payload disagrees with the resolved owner, that is a spoof: log and
-        // use the resolved owner, never the claim.
-        match self.registry.lock() {
-            Err(_poisoned) => {
-                // Fail-closed: an untrusted registry resolves to no owner, so
-                // providerless OwnCapabilities hooks remain inert. We must not
-                // substitute the spoofable carried provider here.
-                None
-            }
+        // The lifecycle provider-ownership security policy lives in
+        // `lifecycle_owner` (PR #3931 P2 extraction). Here we only translate
+        // the registry-lock probe into a `LifecycleOwnerLookup` value; the
+        // resolver applies the fail-closed policy. The probe closure is only
+        // invoked for lifecycle events that carry a `hook_id` anchor.
+        resolve_event_owner(event, |hook_id| match self.registry.lock() {
+            Err(_poisoned) => LifecycleOwnerLookup::Poisoned,
             Ok(registry) => match registry.owning_extension_for_hook_hex(hook_id).cloned() {
-                Some(resolved_owner) => {
-                    if let Some(claimed) = event.provider.as_ref()
-                        && &resolved_owner != claimed
-                    {
-                        tracing::warn!(
-                            hook_id = hook_id,
-                            claimed_provider = claimed.as_str(),
-                            resolved_provider = resolved_owner.as_str(),
-                            "hook-lifecycle event provider claim disagrees with \
-                             registry-resolved owner; using resolved owner (possible \
-                             provider spoof)"
-                        );
-                    }
-                    Some(resolved_owner)
-                }
-                None => {
-                    // Unknown hook_id: no local binding owns it. The carried
-                    // provider is forgeable and cannot be authenticated, so it
-                    // is NOT used — a synthesized lifecycle event must never be
-                    // able to target another extension's OwnCapabilities hooks.
-                    // (If a future design adds an unforgeable host-stamped owner
-                    // field distinct from the payload, a legitimate
-                    // foreign-host lifecycle path could be honored here; until
-                    // then, fail closed.)
-                    if event.provider.is_some() {
-                        tracing::debug!(
-                            hook_id = hook_id,
-                            "hook-lifecycle event names an unknown hook_id while carrying a \
-                             provider claim; ignoring the unauthenticated claim and resolving \
-                             to no owner (fail-closed)"
-                        );
-                    }
-                    None
-                }
+                Some(owner) => LifecycleOwnerLookup::Owner(owner),
+                None => LifecycleOwnerLookup::Unknown,
             },
-        }
+        })
     }
 
     #[cfg(test)]

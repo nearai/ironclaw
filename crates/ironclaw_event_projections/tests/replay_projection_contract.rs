@@ -1399,6 +1399,16 @@ impl DurableEventLog for FailingDurableEventLog {
             reason: "DATABASE_PROJECTION_SENTINEL /tmp/backend-private-path sk_live".to_string(),
         })
     }
+
+    async fn head_cursor(
+        &self,
+        _stream: &EventStreamKey,
+        _after: EventCursor,
+    ) -> Result<EventCursor, EventError> {
+        Err(EventError::DurableLog {
+            reason: "DATABASE_PROJECTION_SENTINEL /tmp/backend-private-path sk_live".to_string(),
+        })
+    }
 }
 
 fn scope_for_thread(thread_id: ThreadId) -> ResourceScope {
@@ -1738,6 +1748,26 @@ impl DurableEventLog for StaticDurableEventLog {
             entries: visible,
             next_cursor,
         })
+    }
+
+    async fn head_cursor(
+        &self,
+        _stream: &EventStreamKey,
+        after: EventCursor,
+    ) -> Result<EventCursor, EventError> {
+        let head = self
+            .entries
+            .iter()
+            .map(|entry| entry.cursor)
+            .max()
+            .unwrap_or_else(EventCursor::origin);
+        if after.as_u64() > head.as_u64() {
+            return Err(EventError::ReplayGap {
+                requested: after,
+                earliest: head,
+            });
+        }
+        Ok(head)
     }
 }
 

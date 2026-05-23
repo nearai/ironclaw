@@ -1115,23 +1115,17 @@ fn runtime_capability(capability_id: &str) -> CapabilityId {
 }
 
 fn event_log_subscription(
-    fixture: &Fixture,
     log: Arc<InMemoryDurableEventLog>,
     stream: EventStreamKey,
     after: RuntimeEventCursor,
 ) -> EventTriggeredHookSubscription {
     let log: Arc<dyn DurableEventLog> = log;
-    // PR #3640 followup (Bug 1): ReadScope::any() is now rejected at host
-    // build to prevent cross-thread/project leakage. Supply a filter
-    // tightened to the fixture's thread/project so it survives the
-    // derive-and-validate step and matches the fixture-scoped events.
-    let read_scope = ReadScope {
-        project_id: fixture.context.scope.project_id.clone(),
-        mission_id: None,
-        thread_id: Some(fixture.context.thread_id.clone()),
-        process_id: None,
-    };
-    EventTriggeredHookSubscription::new(log, stream, read_scope, after)
+    // PR #3931 followup: ReadScope::any() is accepted again — the host build
+    // path derives the effective filter from the authoritative run/thread
+    // scope (see `EventTriggeredHookSubscription::effective_read_scope`), so a
+    // permissive caller filter cannot widen the read or leak across
+    // threads/projects. No fixture-side tightening is needed.
+    EventTriggeredHookSubscription::new(log, stream, ReadScope::any(), after)
         .with_poll_interval(Duration::from_millis(5))
         .with_batch_limit(16)
 }
@@ -1245,7 +1239,6 @@ async fn event_triggered_hook_matches_runtime_event_kind_subscription() {
             Arc::clone(&seen),
         ))
         .with_event_subscription(event_log_subscription(
-            &fixture,
             Arc::clone(&log),
             stream,
             RuntimeEventCursor::origin(),
@@ -1299,7 +1292,6 @@ async fn event_triggered_subscription_replays_from_resume_cursor() {
                 Arc::clone(&first_seen),
             ))
             .with_event_subscription(event_log_subscription(
-                &fixture,
                 Arc::clone(&log),
                 stream.clone(),
                 prefix.cursor,
@@ -1327,7 +1319,6 @@ async fn event_triggered_subscription_replays_from_resume_cursor() {
             Arc::clone(&second_seen),
         ))
         .with_event_subscription(event_log_subscription(
-            &fixture,
             Arc::clone(&log),
             stream,
             prefix.cursor,
@@ -1386,7 +1377,6 @@ async fn event_subscription_marks_is_replay_true_for_replayed_events() {
             Arc::clone(&seen),
         ))
         .with_event_subscription(event_log_subscription(
-            &fixture,
             Arc::clone(&log),
             stream,
             RuntimeEventCursor::origin(),
@@ -1467,7 +1457,6 @@ async fn event_subscription_live_event_before_first_empty_poll_is_live() {
             Some(Duration::from_millis(80)),
         ))
         .with_event_subscription(event_log_subscription(
-            &fixture,
             Arc::clone(&log),
             stream,
             RuntimeEventCursor::origin(),
@@ -1649,7 +1638,6 @@ async fn event_triggered_hook_respects_own_capabilities_scope_filter() {
             None,
         ))
         .with_event_subscription(event_log_subscription(
-            &fixture,
             Arc::clone(&log),
             stream,
             RuntimeEventCursor::origin(),
@@ -1773,7 +1761,6 @@ async fn event_triggered_own_capabilities_scope_resolves_hook_failed_owner_from_
         .factory()
         .with_hook_dispatcher(dispatcher)
         .with_event_subscription(event_log_subscription(
-            &fixture,
             Arc::clone(&log),
             stream,
             RuntimeEventCursor::origin(),
@@ -1866,7 +1853,6 @@ async fn event_triggered_own_capabilities_matches_hook_failed_for_registry_owned
             ],
         ))
         .with_event_subscription(event_log_subscription(
-            &fixture,
             Arc::clone(&log),
             stream,
             RuntimeEventCursor::origin(),
@@ -1914,7 +1900,6 @@ async fn event_triggered_subscription_with_foreign_tenant_stream_fails_host_buil
         .factory()
         .with_hook_dispatcher(dispatcher)
         .with_event_subscription(event_log_subscription(
-            &fixture,
             Arc::clone(&log),
             foreign_stream,
             RuntimeEventCursor::origin(),
@@ -1951,7 +1936,6 @@ async fn event_triggered_subscription_with_foreign_user_stream_fails_host_build(
         .factory()
         .with_hook_dispatcher(dispatcher)
         .with_event_subscription(event_log_subscription(
-            &fixture,
             Arc::clone(&log),
             foreign_stream,
             RuntimeEventCursor::origin(),
@@ -2044,7 +2028,6 @@ async fn event_triggered_self_lifecycle_event_does_not_redispatch() {
             &[(other_hook_id, ext.clone())],
         ))
         .with_event_subscription(event_log_subscription(
-            &fixture,
             Arc::clone(&log),
             stream,
             RuntimeEventCursor::origin(),
@@ -2101,7 +2084,6 @@ async fn event_triggered_replay_gap_emits_subscription_terminated_milestone() {
         .factory()
         .with_hook_dispatcher(dispatcher)
         .with_event_subscription(event_log_subscription(
-            &fixture,
             Arc::clone(&log),
             stream,
             RuntimeEventCursor::origin(),
@@ -2190,7 +2172,6 @@ async fn event_triggered_slow_hook_does_not_block_event_emit_caller() {
             Some(Duration::from_millis(100)),
         ))
         .with_event_subscription(event_log_subscription(
-            &fixture,
             Arc::clone(&log),
             stream,
             RuntimeEventCursor::origin(),

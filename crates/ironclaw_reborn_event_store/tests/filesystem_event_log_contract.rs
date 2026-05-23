@@ -126,6 +126,55 @@ async fn filesystem_event_log_append_assigns_monotonic_cursors() {
 }
 
 #[tokio::test]
+async fn filesystem_event_log_head_cursor_reports_latest_and_rejects_future() {
+    let fs = build_scoped_fs();
+    let log = FilesystemDurableEventLog::new(Arc::clone(&fs));
+    let scope = scope_for("alice", "project-a");
+    let stream = EventStreamKey::from_scope(&scope);
+
+    // Empty stream: head is origin.
+    assert_eq!(
+        log.head_cursor(&stream, EventCursor::origin())
+            .await
+            .expect("head of empty stream"),
+        EventCursor::origin()
+    );
+
+    for _ in 0..3 {
+        log.append(RuntimeEvent::dispatch_requested(
+            scope.clone(),
+            capability_id(),
+        ))
+        .await
+        .expect("append");
+    }
+
+    // Head is the latest appended cursor, read atomically from the tail.
+    assert_eq!(
+        log.head_cursor(&stream, EventCursor::origin())
+            .await
+            .expect("head after 3 appends"),
+        EventCursor::new(3)
+    );
+    // Probing from a valid mid-stream cursor still returns the true head.
+    assert_eq!(
+        log.head_cursor(&stream, EventCursor::new(2))
+            .await
+            .expect("head from mid-stream cursor"),
+        EventCursor::new(3)
+    );
+    // A cursor beyond head is a foreign/future cursor → ReplayGap.
+    let err = log
+        .head_cursor(&stream, EventCursor::new(99))
+        .await
+        .expect_err("future cursor must be rejected");
+    assert!(
+        matches!(err, EventError::ReplayGap { .. }),
+        "expected ReplayGap, got {err:?}"
+    );
+}
+
+#[tokio::test]
 async fn filesystem_event_log_replay_returns_records_in_order() {
     let fs = build_scoped_fs();
     let log = FilesystemDurableEventLog::new(Arc::clone(&fs));

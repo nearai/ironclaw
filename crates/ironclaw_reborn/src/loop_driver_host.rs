@@ -523,15 +523,25 @@ impl EventTriggeredHookSubscription {
     /// cross-tenant trust-boundary break (NOTE(#3640)).
     ///
     /// PR #3640 followup (Bug 1, cross-thread/project leakage): the supplied
-    /// `read_scope` is **not trusted as-is**. A permissive `ReadScope::any()`
-    /// is rejected (fail-closed) and the effective filter is *derived* from the
-    /// run/thread scope so the subscription can never observe events from other
-    /// threads/projects/missions that share the same `(tenant, user, agent)`
-    /// stream. The derived filter always pins `thread_id` to the run's thread
+    /// `read_scope` is **not trusted as-is**. The effective filter is always
+    /// *derived* from the authoritative run/thread scope, so the subscription
+    /// can never observe events from other threads/projects/missions that share
+    /// the same `(tenant, user, agent)` stream — regardless of what the caller
+    /// passed. The derived filter always pins `thread_id` to the run's thread
     /// and pins `project_id`/`mission_id` whenever the run/thread scope carries
-    /// them. Any explicit `Some(want)` the caller supplied must additionally
-    /// equal the corresponding run/thread value, so a caller cannot *widen* the
-    /// scope below what the run authorizes.
+    /// them; only `process_id` (a strict narrowing within the thread) is
+    /// carried from the caller. Any explicit `Some(want)` the caller supplied
+    /// for `project_id`/`mission_id`/`thread_id` must additionally equal the
+    /// corresponding run/thread value, so a caller cannot *widen* the scope
+    /// below what the run authorizes.
+    ///
+    /// PR #3931 followup: a permissive `ReadScope::any()` is no longer
+    /// special-cased / rejected. Because the read uses the derived scope above
+    /// (installed via [`Self::with_read_scope`] before the background task
+    /// spawns — never the caller's raw filter), `any()` cannot widen the read:
+    /// its `None` fields are simply overwritten by the authoritative
+    /// derivation. The rejection was redundant ceremony, not a load-bearing
+    /// security check.
     fn effective_read_scope(
         &self,
         run_scope: &ironclaw_turns::TurnScope,
@@ -565,17 +575,6 @@ impl EventTriggeredHookSubscription {
                 self.stream.user_id.as_str(),
                 owner.as_str(),
             ));
-        }
-        // Fail-closed: a fully-permissive ReadScope::any() would let the
-        // subscription observe every project/mission/thread in the shared
-        // (tenant, user, agent) stream. Reject it outright — the effective
-        // filter is derived below, not trusted from the caller.
-        if self.read_scope == ReadScope::any() {
-            return Err(
-                "event subscription read_scope must be tightened; ReadScope::any() is rejected \
-                 to prevent cross-thread/project event leakage"
-                    .to_string(),
-            );
         }
         // Any explicit Some(want) the caller supplied must equal the
         // corresponding run/thread scope value — a caller may tighten but
@@ -1340,8 +1339,8 @@ where
                 // would silently dispatch B's hook events into A's
                 // dispatcher with A's context tenant. Bug 1 followup: the
                 // effective read scope is *derived* from the run/thread scope
-                // (and ReadScope::any() is rejected) so the subscription can
-                // never observe other threads/projects in the shared stream.
+                // so the subscription can never observe other threads/projects
+                // in the shared stream — the caller's filter is not trusted.
                 let effective_read_scope = subscription
                     .effective_read_scope(&run_context.scope, &self.thread_scope)
                     .map_err(|reason| RebornLoopDriverHostError::ScopeMismatch { reason })?;
@@ -3007,19 +3006,29 @@ mod event_subscription_scope_tests {
         EventTriggeredHookSubscription::new(log, stream, read_scope, EventCursor::origin())
     }
 
+    /// PR #3931 followup: `ReadScope::any()` is no longer rejected. A
+    /// permissive caller filter is accepted, but the *derived* scope (the only
+    /// scope ever used for the read) still pins the authoritative
+    /// thread/project from the run/thread scope — so `any()` cannot widen the
+    /// read or reopen the cross-thread/project leak.
     #[test]
-    fn event_subscription_rejects_read_scope_any() {
+    fn event_subscription_any_scope_is_constrained_by_derived_scope() {
         let (tenant, agent, user, project, thread) = ids();
         let sub = subscription(stream_key(&tenant, &user, &agent), ReadScope::any());
-        let err = sub
+        let effective = sub
             .effective_read_scope(
                 &run_scope(&tenant, &agent, &project, &thread),
                 &thread_scope(&tenant, &agent, &user, &project),
             )
-            .expect_err("ReadScope::any() must be rejected fail-closed");
-        assert!(
-            err.contains("ReadScope::any()"),
-            "rejection must name the permissive scope: {err}"
+            .expect("ReadScope::any() is accepted; the derived scope constrains the read");
+        // The permissive `any()` does NOT pass through — the derivation pins
+        // the authoritative thread/project regardless of the caller's filter.
+        assert_eq!(effective.thread_id, Some(thread));
+        assert_eq!(effective.project_id, Some(project));
+        assert_ne!(
+            effective,
+            ReadScope::any(),
+            "derived scope must not remain permissive"
         );
     }
 

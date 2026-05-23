@@ -856,6 +856,16 @@ impl DurableEventLog for JsonlDurableEventLog {
             )
             .await
     }
+
+    async fn head_cursor(
+        &self,
+        stream: &EventStreamKey,
+        after: EventCursor,
+    ) -> Result<EventCursor, EventError> {
+        self.store
+            .head_cursor(StreamKind::Runtime, stream, after)
+            .await
+    }
 }
 
 /// JSONL-backed durable audit log.
@@ -1010,6 +1020,40 @@ impl JsonlStore {
         })
         .await
         .map_err(|_| durable_error("jsonl event store failed to read stream"))?
+    }
+
+    /// Atomic head snapshot: read the last assigned cursor directly from the
+    /// stream file's tail. `read_last_jsonl_cursor` seeks to EOF and parses
+    /// only the final line, so this is O(1) in stream length — never an
+    /// unbounded forward scan. We take the in-process stream lock (and the
+    /// shared OS lock inside the reader is unnecessary here because we only
+    /// read the already-committed last line) so a concurrent in-process append
+    /// cannot interleave a partial tail line. The observed last cursor is the
+    /// true head at the instant of the call.
+    ///
+    /// `after` is the caller's known-valid resume cursor. A head strictly below
+    /// `after` means the caller asked for a foreign / future cursor, so we
+    /// surface [`EventError::ReplayGap`] — mirroring `read_after`.
+    async fn head_cursor(
+        &self,
+        kind: StreamKind,
+        stream: &EventStreamKey,
+        after: EventCursor,
+    ) -> Result<EventCursor, EventError> {
+        let lock = self.stream_lock(kind, stream).await;
+        let _guard = lock.lock().await;
+        let path = self.stream_path(kind, stream);
+        let head = tokio::task::spawn_blocking(move || read_last_jsonl_cursor(&path))
+            .await
+            .map_err(|_| durable_error("jsonl event store failed to read stream head"))??
+            .unwrap_or(0);
+        if after.as_u64() > head {
+            return Err(EventError::ReplayGap {
+                requested: after,
+                earliest: EventCursor::new(head),
+            });
+        }
+        Ok(EventCursor::new(head))
     }
 
     async fn stream_lock(&self, kind: StreamKind, stream: &EventStreamKey) -> Arc<Mutex<()>> {

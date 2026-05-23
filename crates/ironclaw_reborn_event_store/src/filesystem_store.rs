@@ -191,6 +191,47 @@ where
             next_cursor,
         })
     }
+
+    async fn head_cursor(
+        &self,
+        stream: &EventStreamKey,
+        after: EventCursor,
+    ) -> Result<EventCursor, EventError> {
+        let path = stream_path(StreamKind::Runtime, stream)?;
+        // Atomic head read: a single `tail` observation from just before the
+        // caller's resume cursor. `tail(after - 1)` returns every record with
+        // seq >= after in one consistent snapshot; the maximum seq it observes
+        // is the true head at the instant of the call. This is NOT a
+        // page-by-page drain loop — a concurrent append either lands inside
+        // this snapshot (and becomes the head) or after it (correctly
+        // classified live), so the boundary is race-free. The scan is bounded
+        // by the gap from `after` to head, not the whole stream length,
+        // matching the bounded-probe pattern already used on the
+        // `read_after_cursor` cold path.
+        let records = self
+            .fs
+            .tail(
+                &ResourceScope::system(),
+                &path,
+                SeqNo::from_backend(after.as_u64().saturating_sub(1)),
+            )
+            .await
+            .map_err(map_filesystem_tail_error)?;
+        let head = records
+            .iter()
+            .map(|record| record.seq.get())
+            .max()
+            .unwrap_or_else(|| after.as_u64().saturating_sub(1));
+        if after.as_u64() > head {
+            // No record at or after `after`: the caller asked for a foreign /
+            // future cursor. Mirror `read_after_cursor`'s gap shape.
+            return Err(EventError::ReplayGap {
+                requested: after,
+                earliest: EventCursor::origin(),
+            });
+        }
+        Ok(EventCursor::new(head))
+    }
 }
 
 /// Filesystem-backed durable audit log.
