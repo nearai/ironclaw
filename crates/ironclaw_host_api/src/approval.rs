@@ -175,3 +175,85 @@ pub enum FileActionKind {
     Write,
     Delete,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{InvocationId, ResourceEstimate, TenantId, UserId};
+    use serde_json::json;
+
+    fn scope() -> ResourceScope {
+        ResourceScope {
+            tenant_id: TenantId::new("tenant").unwrap(),
+            user_id: UserId::new("user").unwrap(),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        }
+    }
+
+    #[test]
+    fn invocation_fingerprint_canonicalizes_nested_object_key_order() {
+        let scope = scope();
+        let capability = CapabilityId::new("echo.say").unwrap();
+        let left = json!({
+            "z": 1,
+            "nested": {
+                "b": [3, {"y": true, "x": false}],
+                "a": "first"
+            }
+        });
+        let right = json!({
+            "nested": {
+                "a": "first",
+                "b": [3, {"x": false, "y": true}]
+            },
+            "z": 1
+        });
+
+        let first = InvocationFingerprint::for_dispatch(
+            &scope,
+            &capability,
+            &ResourceEstimate::default(),
+            &left,
+        )
+        .unwrap();
+        let second = InvocationFingerprint::for_dispatch(
+            &scope,
+            &capability,
+            &ResourceEstimate::default(),
+            &right,
+        )
+        .unwrap();
+
+        assert_eq!(first, second);
+        assert!(first.as_str().starts_with("sha256:"));
+        assert_eq!(first.as_str().len(), "sha256:".len() + 64);
+    }
+
+    #[test]
+    fn invocation_fingerprint_separates_dispatch_and_spawn_actions() {
+        let scope = scope();
+        let capability = CapabilityId::new("echo.say").unwrap();
+        let input = json!({"message": "same payload"});
+
+        let dispatch = InvocationFingerprint::for_dispatch(
+            &scope,
+            &capability,
+            &ResourceEstimate::default(),
+            &input,
+        )
+        .unwrap();
+        let spawn = InvocationFingerprint::for_spawn(
+            &scope,
+            &capability,
+            &ResourceEstimate::default(),
+            &input,
+        )
+        .unwrap();
+
+        assert_ne!(dispatch, spawn);
+    }
+}
