@@ -1,9 +1,9 @@
 [package]
-name = "ironclaw_first_party_extensions"
+name = "ironclaw_first_party_extension_ports"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.92"
-description = "First-party userland extension implementations for IronClaw"
+description = "Loop-facing ports for first-party IronClaw extensions"
 authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/nearai/ironclaw"
@@ -11,13 +11,15 @@ repository = "https://github.com/nearai/ironclaw"
 publish = false
 
 [dependencies]
-blake3 = "1"
-glob = "0.3"
+async-trait = "0.1"
+futures = "0.3"
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
-ironclaw_safety = { path = "../ironclaw_safety" }
-regex = "1"
-serde_json = "1"
+ironclaw_loop_support = { path = "../ironclaw_loop_support" }
+ironclaw_skills = { path = "../ironclaw_skills" }
+ironclaw_turns = { path = "../ironclaw_turns" }
 thiserror = "2"
-tokio = { version = "1", features = ["sync"] }
 tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

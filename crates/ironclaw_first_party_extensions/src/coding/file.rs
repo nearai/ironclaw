@@ -1,13 +1,13 @@
 //! Reborn first-party port of the v1 file coding tools.
 //!
 //! The v1 `Tool`/`JobContext`/local-filesystem boundary is replaced here with
-//! `FirstPartyCapabilityRequest`, scoped mounts, and `RootFilesystem`.
+//! `CodingCapabilityRequest`, scoped mounts, and `RootFilesystem`.
 
 use ironclaw_filesystem::{FileType, FilesystemOperation};
 use ironclaw_host_api::RuntimeDispatchErrorKind;
 use serde_json::{Value, json};
 
-use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest};
+use super::{CodingCapabilityError, CodingCapabilityRequest};
 
 use super::{
     config::{
@@ -27,32 +27,30 @@ use super::{
 };
 
 pub(super) async fn read_file(
-    request: &FirstPartyCapabilityRequest,
+    request: &CodingCapabilityRequest,
     read_state: &SharedCodingReadState,
-) -> Result<Value, FirstPartyCapabilityError> {
+) -> Result<Value, CodingCapabilityError> {
     let resolved = resolve_required_path(request, "path", FilesystemOperation::ReadFile)?;
     let offset = optional_usize(&request.input, "offset")?.unwrap_or(0);
     let limit = optional_usize(&request.input, "limit")?;
     let has_explicit_range = offset > 0 || limit.is_some();
     let stat = request
-        .services
         .filesystem
         .stat(&resolved.virtual_path)
         .await
         .map_err(filesystem_error)?;
     if stat.sensitive {
-        return Err(FirstPartyCapabilityError::new(
+        return Err(CodingCapabilityError::new(
             RuntimeDispatchErrorKind::FilesystemDenied,
         ));
     }
     if stat.file_type != FileType::File || stat.len > MAX_READ_SIZE {
-        return Err(FirstPartyCapabilityError::new(
+        return Err(CodingCapabilityError::new(
             RuntimeDispatchErrorKind::Resource,
         ));
     }
 
     let bytes = request
-        .services
         .filesystem
         .read_file(&resolved.virtual_path)
         .await
@@ -94,10 +92,10 @@ pub(super) async fn read_file(
 }
 
 pub(super) async fn write_file(
-    request: &FirstPartyCapabilityRequest,
+    request: &CodingCapabilityRequest,
     read_state: &SharedCodingReadState,
     edit_locks: &SharedCodingEditLocks,
-) -> Result<Value, FirstPartyCapabilityError> {
+) -> Result<Value, CodingCapabilityError> {
     let path_str = required_str(&request.input, "path")?;
     if is_workspace_path(path_str) {
         return Err(input_error());
@@ -114,13 +112,12 @@ pub(super) async fn write_file(
     if let Some(stat) = stat_optional(request, &resolved.virtual_path).await?
         && stat.sensitive
     {
-        return Err(FirstPartyCapabilityError::new(
+        return Err(CodingCapabilityError::new(
             RuntimeDispatchErrorKind::FilesystemDenied,
         ));
     }
     create_parent_dir(request, &resolved.virtual_path).await?;
     request
-        .services
         .filesystem
         .write_file(&resolved.virtual_path, content.as_bytes())
         .await
@@ -141,8 +138,8 @@ pub(super) async fn write_file(
 }
 
 pub(super) async fn list_dir(
-    request: &FirstPartyCapabilityRequest,
-) -> Result<Value, FirstPartyCapabilityError> {
+    request: &CodingCapabilityRequest,
+) -> Result<Value, CodingCapabilityError> {
     let resolved = resolve_optional_path(request, FilesystemOperation::ListDir)?;
     let recursive = request
         .input
@@ -164,17 +161,16 @@ pub(super) async fn list_dir(
 }
 
 async fn collect_list_entries(
-    request: &FirstPartyCapabilityRequest,
+    request: &CodingCapabilityRequest,
     root: &ResolvedPath,
     recursive: bool,
     max_depth: usize,
-) -> Result<Vec<ListEntry>, FirstPartyCapabilityError> {
+) -> Result<Vec<ListEntry>, CodingCapabilityError> {
     let mut output = Vec::new();
     let mut stack = vec![(root.virtual_path.clone(), 0usize)];
     let mut visited = 0usize;
     while let Some((dir, depth)) = stack.pop() {
         let entries = request
-            .services
             .filesystem
             .list_dir(&dir)
             .await
@@ -182,7 +178,7 @@ async fn collect_list_entries(
         for entry in entries {
             visited += 1;
             if visited > MAX_VISITED_ENTRIES {
-                return Err(FirstPartyCapabilityError::new(
+                return Err(CodingCapabilityError::new(
                     RuntimeDispatchErrorKind::Resource,
                 ));
             }
@@ -196,7 +192,7 @@ async fn collect_list_entries(
                 format!("{relative}/")
             } else {
                 // silent-ok: list_dir is best-effort for entries that disappear or fail stat.
-                let Ok(stat) = request.services.filesystem.stat(&entry.path).await else {
+                let Ok(stat) = request.filesystem.stat(&entry.path).await else {
                     tracing::debug!(
                         path = entry.path.as_str(),
                         "skipping list_dir entry after stat failed"
@@ -249,17 +245,17 @@ fn format_size(bytes: u64) -> String {
 }
 
 pub(super) async fn apply_patch(
-    request: &FirstPartyCapabilityRequest,
+    request: &CodingCapabilityRequest,
     read_state: &SharedCodingReadState,
     edit_locks: &SharedCodingEditLocks,
-) -> Result<Value, FirstPartyCapabilityError> {
+) -> Result<Value, CodingCapabilityError> {
     let path_str = required_str(&request.input, "path")?;
     if is_workspace_path(path_str) {
         return Err(input_error());
     }
     let resolved = resolve_required_path(request, "path", FilesystemOperation::ReadFile)?;
     if !operation_allowed(&resolved.grant.permissions, FilesystemOperation::WriteFile) {
-        return Err(FirstPartyCapabilityError::new(
+        return Err(CodingCapabilityError::new(
             RuntimeDispatchErrorKind::FilesystemDenied,
         ));
     }
@@ -278,23 +274,21 @@ pub(super) async fn apply_patch(
         .lock_edit(&scope, resolved.virtual_path.as_str())
         .await;
     let stat = request
-        .services
         .filesystem
         .stat(&resolved.virtual_path)
         .await
         .map_err(filesystem_error)?;
     if stat.sensitive {
-        return Err(FirstPartyCapabilityError::new(
+        return Err(CodingCapabilityError::new(
             RuntimeDispatchErrorKind::FilesystemDenied,
         ));
     }
     if stat.file_type != FileType::File || stat.len > MAX_PATCH_SIZE {
-        return Err(FirstPartyCapabilityError::new(
+        return Err(CodingCapabilityError::new(
             RuntimeDispatchErrorKind::Resource,
         ));
     }
     let bytes = request
-        .services
         .filesystem
         .read_file(&resolved.virtual_path)
         .await
@@ -319,7 +313,6 @@ pub(super) async fn apply_patch(
         replace_content(&content, old_string, new_string, replace_all, match_count)?;
     let output = encode_text(&new_content, encoding, line_ending);
     request
-        .services
         .filesystem
         .write_file(&resolved.virtual_path, &output)
         .await

@@ -3,7 +3,7 @@ use ironclaw_host_api::{RuntimeDispatchErrorKind, ScopedPath, VirtualPath};
 use ironclaw_safety::sensitive_paths::is_sensitive_path_str;
 use serde_json::Value;
 
-use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest};
+use super::{CodingCapabilityError, CodingCapabilityRequest};
 
 use super::{
     config::{DEFAULT_EXCLUDED_DIRS, DEFAULT_SCOPED_ROOT, WORKSPACE_FILES},
@@ -13,17 +13,17 @@ use super::{
 };
 
 pub(super) fn resolve_required_path(
-    request: &FirstPartyCapabilityRequest,
+    request: &CodingCapabilityRequest,
     field: &str,
     operation: FilesystemOperation,
-) -> Result<ResolvedPath, FirstPartyCapabilityError> {
+) -> Result<ResolvedPath, CodingCapabilityError> {
     resolve_path(request, required_str(&request.input, field)?, operation)
 }
 
 pub(super) fn resolve_optional_path(
-    request: &FirstPartyCapabilityRequest,
+    request: &CodingCapabilityRequest,
     operation: FilesystemOperation,
-) -> Result<ResolvedPath, FirstPartyCapabilityError> {
+) -> Result<ResolvedPath, CodingCapabilityError> {
     let path = request
         .input
         .get("path")
@@ -33,29 +33,30 @@ pub(super) fn resolve_optional_path(
 }
 
 fn resolve_path(
-    request: &FirstPartyCapabilityRequest,
+    request: &CodingCapabilityRequest,
     path: &str,
     operation: FilesystemOperation,
-) -> Result<ResolvedPath, FirstPartyCapabilityError> {
+) -> Result<ResolvedPath, CodingCapabilityError> {
     let scoped_path = ScopedPath::new(scoped_path_input(path)).map_err(|_| input_error())?;
     if is_sensitive_scoped_path(scoped_path.as_str()) {
-        return Err(FirstPartyCapabilityError::new(
+        return Err(CodingCapabilityError::new(
             RuntimeDispatchErrorKind::FilesystemDenied,
         ));
     }
-    let mounts = request.mounts.as_ref().ok_or_else(|| {
-        FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::FilesystemDenied)
-    })?;
+    let mounts = request
+        .mounts
+        .as_ref()
+        .ok_or_else(|| CodingCapabilityError::new(RuntimeDispatchErrorKind::FilesystemDenied))?;
     let (virtual_path, grant) = mounts
         .resolve_with_grant(&scoped_path)
-        .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::FilesystemDenied))?;
+        .map_err(|_| CodingCapabilityError::new(RuntimeDispatchErrorKind::FilesystemDenied))?;
     if is_sensitive_resolved_path(&virtual_path) {
-        return Err(FirstPartyCapabilityError::new(
+        return Err(CodingCapabilityError::new(
             RuntimeDispatchErrorKind::FilesystemDenied,
         ));
     }
     if !operation_allowed(&grant.permissions, operation) {
-        return Err(FirstPartyCapabilityError::new(
+        return Err(CodingCapabilityError::new(
             RuntimeDispatchErrorKind::FilesystemDenied,
         ));
     }
@@ -103,10 +104,10 @@ pub(super) fn operation_allowed(
 }
 
 pub(super) async fn stat_optional(
-    request: &FirstPartyCapabilityRequest,
+    request: &CodingCapabilityRequest,
     path: &VirtualPath,
-) -> Result<Option<FileStat>, FirstPartyCapabilityError> {
-    match request.services.filesystem.stat(path).await {
+) -> Result<Option<FileStat>, CodingCapabilityError> {
+    match request.filesystem.stat(path).await {
         Ok(stat) => Ok(Some(stat)),
         Err(FilesystemError::NotFound { .. }) => Ok(None),
         Err(error) => Err(filesystem_error(error)),
@@ -114,21 +115,20 @@ pub(super) async fn stat_optional(
 }
 
 pub(super) async fn create_parent_dir(
-    request: &FirstPartyCapabilityRequest,
+    request: &CodingCapabilityRequest,
     path: &VirtualPath,
-) -> Result<(), FirstPartyCapabilityError> {
+) -> Result<(), CodingCapabilityError> {
     let Some(parent) = virtual_parent(path)? else {
         return Ok(());
     };
     request
-        .services
         .filesystem
         .create_dir_all(&parent)
         .await
         .map_err(filesystem_error)
 }
 
-fn virtual_parent(path: &VirtualPath) -> Result<Option<VirtualPath>, FirstPartyCapabilityError> {
+fn virtual_parent(path: &VirtualPath) -> Result<Option<VirtualPath>, CodingCapabilityError> {
     let raw = path.as_str().trim_end_matches('/');
     let Some((parent, _leaf)) = raw.rsplit_once('/') else {
         return Ok(None);
@@ -138,13 +138,13 @@ fn virtual_parent(path: &VirtualPath) -> Result<Option<VirtualPath>, FirstPartyC
     }
     VirtualPath::new(parent)
         .map(Some)
-        .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::FilesystemDenied))
+        .map_err(|_| CodingCapabilityError::new(RuntimeDispatchErrorKind::FilesystemDenied))
 }
 
 pub(super) fn virtual_to_relative(
     root: &VirtualPath,
     path: &VirtualPath,
-) -> Result<String, FirstPartyCapabilityError> {
+) -> Result<String, CodingCapabilityError> {
     let target = root.as_str().trim_end_matches('/');
     let raw = path.as_str();
     if raw == target {
@@ -152,10 +152,10 @@ pub(super) fn virtual_to_relative(
     }
     raw.strip_prefix(&format!("{target}/"))
         .map(ToString::to_string)
-        .ok_or_else(|| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::FilesystemDenied))
+        .ok_or_else(|| CodingCapabilityError::new(RuntimeDispatchErrorKind::FilesystemDenied))
 }
 
-pub(super) fn validate_relative_pattern(pattern: &str) -> Result<(), FirstPartyCapabilityError> {
+pub(super) fn validate_relative_pattern(pattern: &str) -> Result<(), CodingCapabilityError> {
     if pattern.starts_with('/') || pattern.split('/').any(|segment| segment == "..") {
         return Err(input_error());
     }
@@ -211,7 +211,7 @@ fn is_sensitive_resolved_path(path: &VirtualPath) -> bool {
     is_sensitive_path_str(path.as_str())
 }
 
-pub(super) fn filesystem_error(error: FilesystemError) -> FirstPartyCapabilityError {
+pub(super) fn filesystem_error(error: FilesystemError) -> CodingCapabilityError {
     match error {
         FilesystemError::Contract(_) => input_error(),
         FilesystemError::PermissionDenied { .. }
@@ -219,7 +219,7 @@ pub(super) fn filesystem_error(error: FilesystemError) -> FirstPartyCapabilityEr
         | FilesystemError::PathOutsideMount { .. }
         | FilesystemError::SymlinkEscape { .. }
         | FilesystemError::MountConflict { .. } => {
-            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::FilesystemDenied)
+            CodingCapabilityError::new(RuntimeDispatchErrorKind::FilesystemDenied)
         }
         FilesystemError::NotFound { .. } => guest_error(),
         FilesystemError::Backend { .. } => guest_error(),
@@ -230,10 +230,10 @@ pub(super) fn filesystem_error(error: FilesystemError) -> FirstPartyCapabilityEr
         FilesystemError::VersionMismatch { .. }
         | FilesystemError::Unsupported { .. }
         | FilesystemError::IndexConflict { .. } => {
-            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::FilesystemDenied)
+            CodingCapabilityError::new(RuntimeDispatchErrorKind::FilesystemDenied)
         }
         // FilesystemError is #[non_exhaustive]; any future variant maps to a
         // denial here until coding-tool semantics for it are designed.
-        _ => FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::FilesystemDenied),
+        _ => CodingCapabilityError::new(RuntimeDispatchErrorKind::FilesystemDenied),
     }
 }

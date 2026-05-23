@@ -1,13 +1,13 @@
 use serde_json::Value;
 
-use crate::FirstPartyCapabilityError;
+use super::CodingCapabilityError;
 
 use super::input_error;
 
 pub(super) fn required_str<'a>(
     input: &'a Value,
     field: &str,
-) -> Result<&'a str, FirstPartyCapabilityError> {
+) -> Result<&'a str, CodingCapabilityError> {
     input
         .get(field)
         .and_then(Value::as_str)
@@ -17,7 +17,7 @@ pub(super) fn required_str<'a>(
 pub(super) fn optional_usize(
     input: &Value,
     field: &str,
-) -> Result<Option<usize>, FirstPartyCapabilityError> {
+) -> Result<Option<usize>, CodingCapabilityError> {
     input
         .get(field)
         .map(|value| {
@@ -32,7 +32,7 @@ pub(super) fn optional_usize(
 pub(super) fn optional_usize_allow_zero(
     input: &Value,
     field: &str,
-) -> Result<Option<usize>, FirstPartyCapabilityError> {
+) -> Result<Option<usize>, CodingCapabilityError> {
     input
         .get(field)
         .map(|value| {

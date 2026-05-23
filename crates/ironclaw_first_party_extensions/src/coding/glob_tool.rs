@@ -1,10 +1,12 @@
+//! Reborn first-party port of the v1 glob coding tool.
+
 use glob::Pattern;
 use ironclaw_filesystem::{DirEntry, FileType, FilesystemOperation};
 use ironclaw_host_api::RuntimeDispatchErrorKind;
 use serde_json::{Value, json};
 use std::{cmp::Reverse, time::UNIX_EPOCH};
 
-use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest};
+use super::{CodingCapabilityError, CodingCapabilityRequest};
 
 use super::{
     config::{DEFAULT_MAX_RESULTS, GLOB_MATCH_OPTIONS, MAX_VISITED_ENTRIES},
@@ -18,8 +20,8 @@ use super::{
 };
 
 pub(super) async fn glob(
-    request: &FirstPartyCapabilityRequest,
-) -> Result<Value, FirstPartyCapabilityError> {
+    request: &CodingCapabilityRequest,
+) -> Result<Value, CodingCapabilityError> {
     let start = std::time::Instant::now();
     let pattern = required_str(&request.input, "pattern")?;
     validate_relative_pattern(pattern)?;
@@ -42,7 +44,6 @@ pub(super) async fn glob(
     let mut files_with_mtime = Vec::with_capacity(files.len());
     for (relative, path) in files {
         let stat = request
-            .services
             .filesystem
             .stat(&path)
             .await
@@ -70,15 +71,14 @@ pub(super) async fn glob(
 }
 
 async fn walk_entries(
-    request: &FirstPartyCapabilityRequest,
+    request: &CodingCapabilityRequest,
     root: &ResolvedPath,
-    mut visit: impl FnMut(&DirEntry, &str) -> Result<bool, FirstPartyCapabilityError>,
-) -> Result<(), FirstPartyCapabilityError> {
+    mut visit: impl FnMut(&DirEntry, &str) -> Result<bool, CodingCapabilityError>,
+) -> Result<(), CodingCapabilityError> {
     let mut stack = vec![root.virtual_path.clone()];
     let mut visited = 0usize;
     while let Some(dir) = stack.pop() {
         let entries = request
-            .services
             .filesystem
             .list_dir(&dir)
             .await
@@ -86,7 +86,7 @@ async fn walk_entries(
         for entry in entries {
             visited += 1;
             if visited > MAX_VISITED_ENTRIES {
-                return Err(FirstPartyCapabilityError::new(
+                return Err(CodingCapabilityError::new(
                     RuntimeDispatchErrorKind::Resource,
                 ));
             }

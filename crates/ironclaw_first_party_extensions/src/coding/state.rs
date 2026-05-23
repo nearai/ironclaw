@@ -7,7 +7,7 @@ use std::{
 
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
 
-use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest};
+use super::{CodingCapabilityError, CodingCapabilityRequest};
 
 use super::guest_error;
 
@@ -94,7 +94,7 @@ impl CodingReadState {
         scope: &CodingReadScopeKey,
         path: &str,
         current_content_hash: &str,
-    ) -> Result<(), FirstPartyCapabilityError> {
+    ) -> Result<(), CodingCapabilityError> {
         let key = (scope.clone(), path.to_string());
         let Some(entry) = self.entries.get(&key) else {
             return Err(guest_error());
@@ -125,7 +125,7 @@ pub(super) fn content_hash(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex().to_string()
 }
 
-pub(super) fn read_scope_key(request: &FirstPartyCapabilityRequest) -> CodingReadScopeKey {
+pub(super) fn read_scope_key(request: &CodingCapabilityRequest) -> CodingReadScopeKey {
     CodingReadScopeKey {
         tenant_id: request.scope.tenant_id.as_str().to_string(),
         user_id: request.scope.user_id.as_str().to_string(),

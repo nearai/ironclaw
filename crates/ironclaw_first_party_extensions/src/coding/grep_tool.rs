@@ -1,3 +1,5 @@
+//! Reborn first-party port of the v1 grep coding tool.
+
 use std::{
     cmp::Reverse,
     collections::BTreeSet,
@@ -10,10 +12,13 @@ use ironclaw_host_api::{RuntimeDispatchErrorKind, ScopedPath, VirtualPath};
 use regex::RegexBuilder;
 use serde_json::{Value, json};
 
-use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest};
+use super::{CodingCapabilityError, CodingCapabilityRequest};
 
 use super::{
-    config::{DEFAULT_HEAD_LIMIT, MAX_OUTPUT_SIZE, MAX_READ_SIZE, MAX_VISITED_ENTRIES},
+    config::{
+        DEFAULT_HEAD_LIMIT, GREP_MAX_TOTAL_BYTES, MAX_OUTPUT_SIZE, MAX_READ_SIZE,
+        MAX_VISITED_ENTRIES,
+    },
     input_error,
     inputs::{optional_usize, optional_usize_allow_zero, required_str},
     paths::{
@@ -26,34 +31,33 @@ use super::{
 };
 
 pub(super) async fn grep(
-    request: &FirstPartyCapabilityRequest,
-) -> Result<Value, FirstPartyCapabilityError> {
+    request: &CodingCapabilityRequest,
+) -> Result<Value, CodingCapabilityError> {
     let resolved = resolve_optional_path(request, FilesystemOperation::Stat)?;
     if !operation_allowed(&resolved.grant.permissions, FilesystemOperation::ReadFile) {
-        return Err(FirstPartyCapabilityError::new(
+        return Err(CodingCapabilityError::new(
             RuntimeDispatchErrorKind::FilesystemDenied,
         ));
     }
     let root_stat = request
-        .services
         .filesystem
         .stat(&resolved.virtual_path)
         .await
         .map_err(filesystem_error)?;
     if root_stat.sensitive {
-        return Err(FirstPartyCapabilityError::new(
+        return Err(CodingCapabilityError::new(
             RuntimeDispatchErrorKind::FilesystemDenied,
         ));
     }
     if root_stat.file_type == FileType::Directory
         && !operation_allowed(&resolved.grant.permissions, FilesystemOperation::ListDir)
     {
-        return Err(FirstPartyCapabilityError::new(
+        return Err(CodingCapabilityError::new(
             RuntimeDispatchErrorKind::FilesystemDenied,
         ));
     }
     if !matches!(root_stat.file_type, FileType::File | FileType::Directory) {
-        return Err(FirstPartyCapabilityError::new(
+        return Err(CodingCapabilityError::new(
             RuntimeDispatchErrorKind::Resource,
         ));
     }
@@ -106,7 +110,7 @@ pub(super) async fn grep(
     let offset = optional_usize(&request.input, "offset")?.unwrap_or(0);
     let mut search_results = Vec::new();
 
-    walk_files(
+    let walk_result = walk_files(
         request,
         &resolved,
         root_stat,
@@ -130,16 +134,20 @@ pub(super) async fn grep(
             let Ok((content, _encoding, _line_ending)) = decode_text(bytes) else {
                 return Ok(true);
             };
-            if regex.is_match(&content) {
-                let (line_matches, count) =
-                    line_matches(&content, &regex, before_context, after_context, multiline);
-                search_results.push(GrepFileResult {
-                    relative: relative.to_string(),
-                    modified,
-                    count,
-                    lines: line_matches,
-                });
+            if !regex.is_match(&content) {
+                return Ok(true);
             }
+            let (line_matches, count) = match output_mode {
+                "files_with_matches" => (Vec::new(), 0),
+                "count" => (Vec::new(), count_matches_only(&content, &regex, multiline)),
+                _ => line_matches(&content, &regex, before_context, after_context, multiline),
+            };
+            search_results.push(GrepFileResult {
+                relative: relative.to_string(),
+                modified,
+                count,
+                lines: line_matches,
+            });
             Ok(true)
         },
     )
@@ -160,17 +168,30 @@ pub(super) async fn grep(
         offset,
         head_limit,
         before_context > 0 || after_context > 0,
+        walk_result,
     ))
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct WalkFilesResult {
+    scan_limit: Option<ScanLimit>,
+    bytes_scanned: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ScanLimit {
+    AggregateBytes,
+    FileBytes { file_bytes: u64 },
+}
+
 async fn walk_files(
-    request: &FirstPartyCapabilityRequest,
+    request: &CodingCapabilityRequest,
     root: &ResolvedPath,
     root_stat: FileStat,
     mut include: impl FnMut(&str) -> bool,
-    mut visit: impl FnMut(&str, &[u8], Option<SystemTime>) -> Result<bool, FirstPartyCapabilityError>,
-) -> Result<(), FirstPartyCapabilityError> {
-    let mut total_bytes = 0u64;
+    mut visit: impl FnMut(&str, &[u8], Option<SystemTime>) -> Result<bool, CodingCapabilityError>,
+) -> Result<WalkFilesResult, CodingCapabilityError> {
+    let mut walk_result = WalkFilesResult::default();
     if root_stat.file_type == FileType::File {
         let relative = root_file_relative(&root.scoped_path);
         if include(&relative)
@@ -179,21 +200,23 @@ async fn walk_files(
                 &root.virtual_path,
                 &relative,
                 root_stat,
-                &mut total_bytes,
+                &mut walk_result,
                 &mut visit,
+                false,
             )
             .await?
         {
-            return Ok(());
+            walk_result
+                .scan_limit
+                .get_or_insert(ScanLimit::AggregateBytes);
         }
-        return Ok(());
+        return Ok(walk_result);
     }
 
     let mut stack = vec![root.virtual_path.clone()];
     let mut visited = 0usize;
     while let Some(dir) = stack.pop() {
         let entries = request
-            .services
             .filesystem
             .list_dir(&dir)
             .await
@@ -201,7 +224,7 @@ async fn walk_files(
         for entry in entries {
             visited += 1;
             if visited > MAX_VISITED_ENTRIES {
-                return Err(FirstPartyCapabilityError::new(
+                return Err(CodingCapabilityError::new(
                     RuntimeDispatchErrorKind::Resource,
                 ));
             }
@@ -220,12 +243,14 @@ async fn walk_files(
                     if !include(&relative) {
                         continue;
                     }
-                    let stat = request
-                        .services
-                        .filesystem
-                        .stat(&entry.path)
-                        .await
-                        .map_err(filesystem_error)?;
+                    // silent-ok: grep directory search skips entries that disappear or fail stat.
+                    let Ok(stat) = request.filesystem.stat(&entry.path).await else {
+                        tracing::debug!(
+                            path = entry.path.as_str(),
+                            "skipping grep file after stat failed"
+                        );
+                        continue;
+                    };
                     if stat.sensitive {
                         continue;
                     }
@@ -234,46 +259,71 @@ async fn walk_files(
                         &entry.path,
                         &relative,
                         stat,
-                        &mut total_bytes,
+                        &mut walk_result,
                         &mut visit,
+                        true,
                     )
                     .await?
                     {
-                        return Ok(());
+                        walk_result
+                            .scan_limit
+                            .get_or_insert(ScanLimit::AggregateBytes);
+                        return Ok(walk_result);
                     }
                 }
                 FileType::Symlink | FileType::Other => {}
             }
         }
     }
-    Ok(())
+    Ok(walk_result)
 }
 
 async fn visit_file(
-    request: &FirstPartyCapabilityRequest,
+    request: &CodingCapabilityRequest,
     path: &VirtualPath,
     relative: &str,
     stat: FileStat,
-    total_bytes: &mut u64,
-    visit: &mut impl FnMut(&str, &[u8], Option<SystemTime>) -> Result<bool, FirstPartyCapabilityError>,
-) -> Result<bool, FirstPartyCapabilityError> {
+    walk_result: &mut WalkFilesResult,
+    visit: &mut impl FnMut(&str, &[u8], Option<SystemTime>) -> Result<bool, CodingCapabilityError>,
+    skip_read_errors: bool,
+) -> Result<bool, CodingCapabilityError> {
     if stat.len > MAX_READ_SIZE {
-        return Err(FirstPartyCapabilityError::new(
-            RuntimeDispatchErrorKind::Resource,
-        ));
+        tracing::debug!(
+            path = path.as_str(),
+            len = stat.len,
+            max_read_size = MAX_READ_SIZE,
+            "skipping oversized grep file"
+        );
+        if !skip_read_errors {
+            walk_result.scan_limit = Some(ScanLimit::FileBytes {
+                file_bytes: stat.len,
+            });
+            return Ok(false);
+        }
+        return Ok(true);
     }
-    *total_bytes = total_bytes.saturating_add(stat.len);
-    if *total_bytes > 16 * 1024 * 1024 {
-        return Err(FirstPartyCapabilityError::new(
-            RuntimeDispatchErrorKind::Resource,
-        ));
+    let next_total = walk_result.bytes_scanned.saturating_add(stat.len);
+    if next_total > GREP_MAX_TOTAL_BYTES {
+        tracing::debug!(
+            path = path.as_str(),
+            total_bytes = walk_result.bytes_scanned,
+            next_file_bytes = stat.len,
+            max_total_bytes = GREP_MAX_TOTAL_BYTES,
+            "stopping grep after aggregate scan budget"
+        );
+        walk_result.scan_limit = Some(ScanLimit::AggregateBytes);
+        return Ok(false);
     }
-    let bytes = request
-        .services
-        .filesystem
-        .read_file(path)
-        .await
-        .map_err(filesystem_error)?;
+    walk_result.bytes_scanned = next_total;
+    let bytes = match request.filesystem.read_file(path).await {
+        Ok(bytes) => bytes,
+        Err(_error) if skip_read_errors => {
+            // silent-ok: grep directory search skips files that disappear or fail read.
+            tracing::debug!(path = path.as_str(), "skipping grep file after read failed");
+            return Ok(true);
+        }
+        Err(error) => return Err(filesystem_error(error)),
+    };
     visit(relative, &bytes, stat.modified)
 }
 
@@ -292,6 +342,7 @@ fn build_grep_output(
     offset: usize,
     head_limit: Option<usize>,
     had_context: bool,
+    walk_result: WalkFilesResult,
 ) -> Value {
     let effective_limit = match head_limit {
         Some(0) => usize::MAX,
@@ -307,11 +358,14 @@ fn build_grep_output(
                 .take(effective_limit)
                 .map(|result| result.relative)
                 .collect::<Vec<_>>();
-            json!({
+            let mut output = json!({
                 "files": files,
                 "count": files.len(),
-                "truncated": total > offset.saturating_add(effective_limit)
-            })
+                "truncated": walk_result.scan_limit.is_some()
+                    || total > offset.saturating_add(effective_limit)
+            });
+            add_scan_limit_metadata(&mut output, walk_result);
+            output
         }
         "count" => {
             let total_count = results.len();
@@ -321,14 +375,17 @@ fn build_grep_output(
                 .take(effective_limit)
                 .collect::<Vec<_>>();
             let total = page.iter().map(|result| result.count).sum::<usize>();
-            json!({
+            let mut output = json!({
                 "counts": page.into_iter().map(|result| json!({
                     "file": result.relative,
                     "count": result.count
                 })).collect::<Vec<_>>(),
                 "total": total,
-                "truncated": total_count > offset.saturating_add(effective_limit)
-            })
+                "truncated": walk_result.scan_limit.is_some()
+                    || total_count > offset.saturating_add(effective_limit)
+            });
+            add_scan_limit_metadata(&mut output, walk_result);
+            output
         }
         _ => {
             let mut lines = Vec::new();
@@ -353,14 +410,41 @@ fn build_grep_output(
                 .cloned()
                 .collect::<Vec<_>>();
             let mut content = page.join("\n");
-            let mut truncated =
-                raw_len > MAX_OUTPUT_SIZE || lines.len() > offset.saturating_add(effective_limit);
+            let mut truncated = walk_result.scan_limit.is_some()
+                || raw_len > MAX_OUTPUT_SIZE
+                || lines.len() > offset.saturating_add(effective_limit);
             if content.len() > MAX_OUTPUT_SIZE {
                 content.truncate(previous_char_boundary(&content, MAX_OUTPUT_SIZE));
                 truncated = true;
             }
-            json!({ "content": content, "truncated": truncated })
+            let mut output = json!({ "content": content, "truncated": truncated });
+            add_scan_limit_metadata(&mut output, walk_result);
+            output
         }
+    }
+}
+
+fn add_scan_limit_metadata(output: &mut Value, walk_result: WalkFilesResult) {
+    match walk_result.scan_limit {
+        Some(ScanLimit::AggregateBytes) => {
+            output["limit_reason"] = json!("aggregate_scan_bytes");
+            output["bytes_scanned"] = json!(walk_result.bytes_scanned);
+            output["max_scan_bytes"] = json!(GREP_MAX_TOTAL_BYTES);
+        }
+        Some(ScanLimit::FileBytes { file_bytes }) => {
+            output["limit_reason"] = json!("file_size_bytes");
+            output["file_bytes"] = json!(file_bytes);
+            output["max_file_bytes"] = json!(MAX_READ_SIZE);
+        }
+        None => {}
+    }
+}
+
+fn count_matches_only(content: &str, regex: &regex::Regex, multiline: bool) -> usize {
+    if multiline {
+        regex.find_iter(content).count()
+    } else {
+        content.lines().filter(|line| regex.is_match(line)).count()
     }
 }
 

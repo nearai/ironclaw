@@ -1,11 +1,11 @@
-use crate::FirstPartyCapabilityError;
+use super::CodingCapabilityError;
 
 use super::{
     guest_error,
     types::{FileEncoding, FuzzyMatch, LineEnding, MatchMethod},
 };
 
-pub(super) fn reject_binary_probe(bytes: &[u8]) -> Result<(), FirstPartyCapabilityError> {
+pub(super) fn reject_binary_probe(bytes: &[u8]) -> Result<(), CodingCapabilityError> {
     if detect_encoding(bytes) == FileEncoding::Utf16Le {
         return Ok(());
     }
@@ -18,7 +18,7 @@ pub(super) fn reject_binary_probe(bytes: &[u8]) -> Result<(), FirstPartyCapabili
 
 pub(super) fn decode_text(
     bytes: &[u8],
-) -> Result<(String, FileEncoding, LineEnding), FirstPartyCapabilityError> {
+) -> Result<(String, FileEncoding, LineEnding), CodingCapabilityError> {
     let encoding = detect_encoding(bytes);
     let raw = match encoding {
         FileEncoding::Utf8 => String::from_utf8(bytes.to_vec()).map_err(|_| guest_error())?,
@@ -92,7 +92,7 @@ pub(super) fn replace_content(
     new_string: &str,
     replace_all: bool,
     match_count: usize,
-) -> Result<(String, usize), FirstPartyCapabilityError> {
+) -> Result<(String, usize), CodingCapabilityError> {
     if replace_all {
         let mut matches = Vec::new();
         let mut search_offset = 0usize;

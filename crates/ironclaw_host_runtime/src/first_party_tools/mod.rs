@@ -5,7 +5,6 @@
 //! through `CapabilityHost`, trust policy, grants, resource accounting, and
 //! runtime dispatch before any handler runs.
 
-mod coding;
 mod echo;
 mod http;
 mod json;
@@ -20,6 +19,9 @@ use ironclaw_extensions::{
     CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionManifest, ExtensionPackage,
     ExtensionRuntime, MANIFEST_SCHEMA_VERSION, ManifestSource,
 };
+use ironclaw_first_party_extensions::coding::{
+    CodingCapabilityError, CodingCapabilityRequest, CodingCapabilityState,
+};
 use ironclaw_host_api::{
     CapabilityId, CapabilityProfileSchemaRef, EffectKind, ExtensionId, HostApiError,
     PermissionMode, RequestedTrustClass, ResourceCeiling, ResourceEstimate, ResourceProfile,
@@ -31,12 +33,12 @@ use crate::{
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
 
-pub use coding::{
+pub use echo::ECHO_CAPABILITY_ID;
+pub use http::HTTP_CAPABILITY_ID;
+pub use ironclaw_first_party_extensions::coding::{
     APPLY_PATCH_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID,
     READ_FILE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
 };
-pub use echo::ECHO_CAPABILITY_ID;
-pub use http::HTTP_CAPABILITY_ID;
 pub use json::JSON_CAPABILITY_ID;
 pub use shell::SHELL_CAPABILITY_ID;
 pub use skill_management::{
@@ -81,13 +83,60 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                     http::manifest()?,
                     shell::manifest()?,
                 ];
-                capabilities.extend(coding::manifests()?);
                 capabilities.extend(skill_management::manifests()?);
+                capabilities.extend(coding_manifests()?);
                 capabilities
             },
         },
         VirtualPath::new("/system/extensions/builtin")?,
     )
+}
+
+fn coding_manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
+    Ok(vec![
+        first_party_capability_manifest(
+            READ_FILE_CAPABILITY_ID,
+            "Read a file through scoped mounts with v1 read_file output shape",
+            vec![EffectKind::ReadFilesystem],
+            PermissionMode::Allow,
+            resource_profile(),
+        )?,
+        first_party_capability_manifest(
+            WRITE_FILE_CAPABILITY_ID,
+            "Write content through scoped mounts with v1 write_file output shape",
+            vec![EffectKind::WriteFilesystem],
+            PermissionMode::Allow,
+            resource_profile(),
+        )?,
+        first_party_capability_manifest(
+            LIST_DIR_CAPABILITY_ID,
+            "List directory contents through scoped mounts with v1 list_dir output shape",
+            vec![EffectKind::ReadFilesystem],
+            PermissionMode::Allow,
+            resource_profile(),
+        )?,
+        first_party_capability_manifest(
+            GLOB_CAPABILITY_ID,
+            "Find files under a scoped directory with v1 glob output shape",
+            vec![EffectKind::ReadFilesystem],
+            PermissionMode::Allow,
+            resource_profile(),
+        )?,
+        first_party_capability_manifest(
+            GREP_CAPABILITY_ID,
+            "Search scoped file contents with v1 grep output modes",
+            vec![EffectKind::ReadFilesystem],
+            PermissionMode::Allow,
+            resource_profile(),
+        )?,
+        first_party_capability_manifest(
+            APPLY_PATCH_CAPABILITY_ID,
+            "Apply exact/fuzzy search-replace edits through scoped mounts",
+            vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
+            PermissionMode::Allow,
+            resource_profile(),
+        )?,
+    ])
 }
 
 /// Create handlers for all built-in first-party capabilities.
@@ -143,8 +192,7 @@ fn first_party_capability_manifest(
 
 #[derive(Debug, Default)]
 pub struct BuiltinFirstPartyTools {
-    coding_read_state: coding::SharedCodingReadState,
-    coding_edit_locks: coding::SharedCodingEditLocks,
+    coding_state: CodingCapabilityState,
 }
 
 #[async_trait]
@@ -193,7 +241,17 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
             | GLOB_CAPABILITY_ID
             | GREP_CAPABILITY_ID
             | APPLY_PATCH_CAPABILITY_ID => {
-                coding::dispatch(&request, &self.coding_read_state, &self.coding_edit_locks).await?
+                let request = CodingCapabilityRequest::new(
+                    request.capability_id.clone(),
+                    request.scope.clone(),
+                    request.mounts.clone(),
+                    Arc::clone(&request.services.filesystem),
+                    request.input.clone(),
+                );
+                self.coding_state
+                    .dispatch(&request)
+                    .await
+                    .map_err(coding_error)?
             }
             _ => {
                 return Err(FirstPartyCapabilityError::new(
@@ -277,4 +335,8 @@ fn input_error() -> FirstPartyCapabilityError {
 
 fn guest_error() -> FirstPartyCapabilityError {
     FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Guest)
+}
+
+fn coding_error(error: CodingCapabilityError) -> FirstPartyCapabilityError {
+    FirstPartyCapabilityError::new(error.kind())
 }
