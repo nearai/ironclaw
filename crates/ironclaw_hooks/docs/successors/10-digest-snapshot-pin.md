@@ -41,7 +41,15 @@ fn invocation_arguments_digest_is_stable_for_known_inputs() {
         // captured one-time; if you find yourself updating this, ask
         // whether the digest change is intentional, and document it
         // in the digest stability contract.
-        "INSERT_CAPTURED_HEX_HERE"
+        //
+        // NOTE: this is illustrative pseudocode — the shipped fixture
+        // uses `(cap.snapshot.fixture, input:cap.snapshot.fixture)` and
+        // pins
+        // "4d0ab78e009b32615c2766bd1c26921bd59ef81b5741a75387707f82f0344315".
+        // See `tests::invocation_arguments_digest_is_stable_for_known_inputs`
+        // and the caller-driven
+        // `tests::invoke_capability_arguments_digest_is_stable_at_middleware_boundary`.
+        "4d0ab78e009b32615c2766bd1c26921bd59ef81b5741a75387707f82f0344315"
     );
 }
 ```
