@@ -1,13 +1,8 @@
-use std::collections::HashSet;
-use std::sync::Arc;
-
-use ironclaw_filesystem::{FilesystemError, LocalFilesystem, ScopedFilesystem};
 use ironclaw_first_party_extensions::{
-    SetupMarkerSource, SkillActivationMode as FirstPartySkillActivationMode, SkillActivationPlan,
-    SkillActivationRequest as FirstPartySkillActivationRequest, SkillActivationSelectionError,
+    SkillActivationMode as FirstPartySkillActivationMode, SkillActivationPlan,
+    SkillActivationRequest as FirstPartySkillActivationRequest,
     SkillBundleAsset as FirstPartySkillBundleAsset, SkillBundleAssetReadError, SkillExecutionPlan,
 };
-use ironclaw_host_api::ScopedPath;
 use ironclaw_loop_support::{SkillBundleId, SkillBundleSource, SkillSourceKind};
 use ironclaw_turns::run_profile::LoopRunContext;
 
@@ -206,72 +201,4 @@ impl From<FirstPartySkillBundleAsset> for RebornSkillAsset {
 
 pub(super) fn skill_asset_error(error: SkillBundleAssetReadError) -> RebornRuntimeError {
     RebornRuntimeError::SkillExecution(error.to_string())
-}
-
-#[derive(Debug)]
-pub(super) struct LocalDevWorkspaceSetupMarkerSource {
-    filesystem: Arc<ScopedFilesystem<LocalFilesystem>>,
-}
-
-impl LocalDevWorkspaceSetupMarkerSource {
-    pub(super) fn new(filesystem: Arc<ScopedFilesystem<LocalFilesystem>>) -> Self {
-        Self { filesystem }
-    }
-}
-
-#[async_trait::async_trait]
-impl SetupMarkerSource for LocalDevWorkspaceSetupMarkerSource {
-    async fn satisfied_setup_markers(
-        &self,
-        run_context: &LoopRunContext,
-        markers: &HashSet<String>,
-    ) -> Result<HashSet<String>, SkillActivationSelectionError> {
-        let scope = run_context.scope.to_resource_scope();
-        let mut satisfied = HashSet::new();
-        for marker in markers {
-            let Some(path) = workspace_setup_marker_path(marker) else {
-                continue;
-            };
-            match self.filesystem.stat(&scope, &path).await {
-                Ok(_) => {
-                    satisfied.insert(marker.clone());
-                }
-                Err(FilesystemError::NotFound { .. }) => {}
-                Err(_) => return Err(SkillActivationSelectionError::SourceUnavailable),
-            }
-        }
-        Ok(satisfied)
-    }
-}
-
-fn workspace_setup_marker_path(marker: &str) -> Option<ScopedPath> {
-    let marker = marker.trim_start_matches('/');
-    if marker.is_empty() {
-        tracing::debug!("ignoring empty skill setup marker");
-        return None;
-    }
-    match ScopedPath::new(format!("/workspace/{marker}")) {
-        Ok(path) => Some(path),
-        Err(reason) => {
-            tracing::debug!(%marker, %reason, "ignoring invalid skill setup marker");
-            None
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn workspace_setup_marker_path_ignores_invalid_markers() {
-        assert!(workspace_setup_marker_path("").is_none());
-        assert!(workspace_setup_marker_path("../escape").is_none());
-        assert_eq!(
-            workspace_setup_marker_path("/markers/setup.done")
-                .expect("valid setup marker path")
-                .as_str(),
-            "/workspace/markers/setup.done"
-        );
-    }
 }

@@ -79,7 +79,7 @@ pub use skills::{
     RebornSkillExecutionPlan, RebornSkillExecutionResult, RebornSkillSourceKind,
 };
 
-use skills::{LocalDevWorkspaceSetupMarkerSource, skill_asset_error};
+use skills::skill_asset_error;
 
 #[cfg(feature = "root-llm-provider")]
 use crate::runtime_input::{ResolvedRebornLlm, ResolvedRebornLlmSource};
@@ -906,22 +906,14 @@ fn local_dev_filesystem_skill_context_source(
     .map_err(|reason| RebornRuntimeError::InvalidArgument {
         reason: format!("first-party skills extension source: {reason}"),
     })?;
-    let setup_marker_source = Arc::new(LocalDevWorkspaceSetupMarkerSource::new(Arc::clone(
-        &local_runtime.workspace_filesystem,
-    )));
-    let activation_source = Arc::new(
-        SelectableSkillContextSource::new(
-            extension.bundle_source(),
-            SkillActivationSelectorConfig::default(),
-        )
-        .with_setup_marker_source(setup_marker_source),
+    let selectable_skills = extension.selectable_skill_runtime_with_setup_markers(
+        SkillActivationSelectorConfig::default(),
+        Arc::clone(&local_runtime.workspace_filesystem),
     );
-    let source: Arc<dyn HostSkillContextSource> = activation_source.clone();
-    let execution_adapter = Arc::new(SkillExecutionAdapter::new(Arc::clone(&activation_source)));
     Ok(LocalDevSkillContextSource {
-        source,
-        activation_source,
-        execution_adapter,
+        source: selectable_skills.host_skill_context_source(),
+        activation_source: selectable_skills.activation_source(),
+        execution_adapter: selectable_skills.execution_adapter(),
     })
 }
 

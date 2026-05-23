@@ -9,7 +9,7 @@ use ironclaw_loop_support::{
 
 use crate::{
     SelectableSkillContextSource, SkillActivationSelectorConfig, SkillExecutionAdapter,
-    error::FirstPartySkillsExtensionError,
+    error::FirstPartySkillsExtensionError, setup_markers::FilesystemSetupMarkerSource,
 };
 
 const SYSTEM_SKILLS_ROOT: &str = "/system/skills";
@@ -104,9 +104,69 @@ where
 {
     bundle_source: Arc<FilesystemSkillBundleSource<F>>,
     context_source: Arc<SkillBundleContextSource<FilesystemSkillBundleSource<F>>>,
-    default_selectable_context_source:
-        Arc<SelectableSkillContextSource<FilesystemSkillBundleSource<F>>>,
+    default_selectable_runtime: FirstPartySelectableSkillsRuntime<F>,
+}
+
+pub struct FirstPartySelectableSkillsRuntime<F>
+where
+    F: RootFilesystem + 'static,
+{
+    activation_source: Arc<SelectableSkillContextSource<FilesystemSkillBundleSource<F>>>,
     execution_adapter: Arc<SkillExecutionAdapter<FilesystemSkillBundleSource<F>>>,
+}
+
+impl<F> Clone for FirstPartySelectableSkillsRuntime<F>
+where
+    F: RootFilesystem + 'static,
+{
+    fn clone(&self) -> Self {
+        Self {
+            activation_source: Arc::clone(&self.activation_source),
+            execution_adapter: Arc::clone(&self.execution_adapter),
+        }
+    }
+}
+
+impl<F> std::fmt::Debug for FirstPartySelectableSkillsRuntime<F>
+where
+    F: RootFilesystem + 'static,
+{
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FirstPartySelectableSkillsRuntime")
+            .field("activation_source", &self.activation_source)
+            .field("execution_adapter", &self.execution_adapter)
+            .finish()
+    }
+}
+
+impl<F> FirstPartySelectableSkillsRuntime<F>
+where
+    F: RootFilesystem + 'static,
+{
+    fn new(
+        activation_source: Arc<SelectableSkillContextSource<FilesystemSkillBundleSource<F>>>,
+        execution_adapter: Arc<SkillExecutionAdapter<FilesystemSkillBundleSource<F>>>,
+    ) -> Self {
+        Self {
+            activation_source,
+            execution_adapter,
+        }
+    }
+
+    pub fn host_skill_context_source(&self) -> Arc<dyn HostSkillContextSource> {
+        self.activation_source.clone()
+    }
+
+    pub fn activation_source(
+        &self,
+    ) -> Arc<SelectableSkillContextSource<FilesystemSkillBundleSource<F>>> {
+        Arc::clone(&self.activation_source)
+    }
+
+    pub fn execution_adapter(&self) -> Arc<SkillExecutionAdapter<FilesystemSkillBundleSource<F>>> {
+        Arc::clone(&self.execution_adapter)
+    }
 }
 
 impl<F> std::fmt::Debug for FirstPartySkillsExtension<F>
@@ -144,11 +204,14 @@ where
         let execution_adapter = Arc::new(SkillExecutionAdapter::new(Arc::clone(
             &default_selectable_context_source,
         )));
+        let default_selectable_runtime = FirstPartySelectableSkillsRuntime::new(
+            default_selectable_context_source,
+            execution_adapter,
+        );
         Ok(Self {
             bundle_source,
             context_source,
-            default_selectable_context_source,
-            execution_adapter,
+            default_selectable_runtime,
         })
     }
 
@@ -169,7 +232,7 @@ where
         config: SkillActivationSelectorConfig,
     ) -> Arc<SelectableSkillContextSource<FilesystemSkillBundleSource<F>>> {
         if config == SkillActivationSelectorConfig::default() {
-            return Arc::clone(&self.default_selectable_context_source);
+            return self.default_selectable_runtime.activation_source();
         }
         Arc::new(SelectableSkillContextSource::new(
             Arc::clone(&self.bundle_source),
@@ -177,10 +240,41 @@ where
         ))
     }
 
+    pub fn selectable_skill_runtime(
+        &self,
+        config: SkillActivationSelectorConfig,
+    ) -> FirstPartySelectableSkillsRuntime<F> {
+        if config == SkillActivationSelectorConfig::default() {
+            return self.default_selectable_runtime.clone();
+        }
+        let activation_source = self.selectable_skill_context_source(config);
+        let execution_adapter =
+            Arc::new(SkillExecutionAdapter::new(Arc::clone(&activation_source)));
+        FirstPartySelectableSkillsRuntime::new(activation_source, execution_adapter)
+    }
+
+    pub fn selectable_skill_runtime_with_setup_markers<W>(
+        &self,
+        config: SkillActivationSelectorConfig,
+        workspace_filesystem: Arc<ScopedFilesystem<W>>,
+    ) -> FirstPartySelectableSkillsRuntime<F>
+    where
+        W: RootFilesystem + 'static,
+    {
+        let setup_marker_source = Arc::new(FilesystemSetupMarkerSource::new(workspace_filesystem));
+        let activation_source = Arc::new(
+            SelectableSkillContextSource::new(Arc::clone(&self.bundle_source), config)
+                .with_setup_marker_source(setup_marker_source),
+        );
+        let execution_adapter =
+            Arc::new(SkillExecutionAdapter::new(Arc::clone(&activation_source)));
+        FirstPartySelectableSkillsRuntime::new(activation_source, execution_adapter)
+    }
+
     pub fn skill_execution_adapter(
         &self,
     ) -> Arc<SkillExecutionAdapter<FilesystemSkillBundleSource<F>>> {
-        Arc::clone(&self.execution_adapter)
+        self.default_selectable_runtime.execution_adapter()
     }
 }
 

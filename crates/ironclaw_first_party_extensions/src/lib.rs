@@ -9,6 +9,7 @@ mod activation;
 mod assets;
 mod error;
 mod execution;
+mod setup_markers;
 mod skills;
 
 pub use activation::{
@@ -24,4 +25,6 @@ pub use ironclaw_skills::{
     SkillManagementContext, SkillManagementError, SkillManagementErrorKind, SkillRemoveRequest,
     SkillRemoveResult, SkillSummary, install_skill, list_skills, remove_skill,
 };
-pub use skills::{FirstPartySkillsExtension, FirstPartySkillsExtensionHandles};
+pub use skills::{
+    FirstPartySelectableSkillsRuntime, FirstPartySkillsExtension, FirstPartySkillsExtensionHandles,
+};
