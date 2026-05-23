@@ -17,37 +17,40 @@ mod types;
 use std::sync::Arc;
 
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::{CapabilityId, MountView, ResourceScope, RuntimeDispatchErrorKind};
+use ironclaw_host_api::{MountView, ResourceScope, RuntimeDispatchErrorKind};
 use serde_json::Value;
 
 use state::{SharedCodingEditLocks, SharedCodingReadState};
 
-pub const READ_FILE_CAPABILITY_ID: &str = "builtin.read_file";
-pub const WRITE_FILE_CAPABILITY_ID: &str = "builtin.write_file";
-pub const LIST_DIR_CAPABILITY_ID: &str = "builtin.list_dir";
-pub const GLOB_CAPABILITY_ID: &str = "builtin.glob";
-pub const GREP_CAPABILITY_ID: &str = "builtin.grep";
-pub const APPLY_PATCH_CAPABILITY_ID: &str = "builtin.apply_patch";
-
-#[derive(Clone)]
-pub struct CodingCapabilityRequest {
-    pub(crate) capability_id: CapabilityId,
-    pub(crate) scope: ResourceScope,
-    pub(crate) mounts: Option<MountView>,
-    pub(crate) filesystem: Arc<dyn RootFilesystem>,
-    pub(crate) input: Value,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodingCapabilityKind {
+    ReadFile,
+    WriteFile,
+    ListDir,
+    Glob,
+    Grep,
+    ApplyPatch,
 }
 
-impl CodingCapabilityRequest {
+#[derive(Clone)]
+pub struct CodingCapabilityRequest<'a> {
+    pub(crate) kind: CodingCapabilityKind,
+    pub(crate) scope: &'a ResourceScope,
+    pub(crate) mounts: Option<&'a MountView>,
+    pub(crate) filesystem: Arc<dyn RootFilesystem>,
+    pub(crate) input: &'a Value,
+}
+
+impl<'a> CodingCapabilityRequest<'a> {
     pub fn new(
-        capability_id: CapabilityId,
-        scope: ResourceScope,
-        mounts: Option<MountView>,
+        kind: CodingCapabilityKind,
+        scope: &'a ResourceScope,
+        mounts: Option<&'a MountView>,
         filesystem: Arc<dyn RootFilesystem>,
-        input: Value,
+        input: &'a Value,
     ) -> Self {
         Self {
-            capability_id,
+            kind,
             scope,
             mounts,
             filesystem,
@@ -81,27 +84,26 @@ pub struct CodingCapabilityState {
 impl CodingCapabilityState {
     pub async fn dispatch(
         &self,
-        request: &CodingCapabilityRequest,
+        request: &CodingCapabilityRequest<'_>,
     ) -> Result<Value, CodingCapabilityError> {
         dispatch(request, &self.read_state, &self.edit_locks).await
     }
 }
 
 async fn dispatch(
-    request: &CodingCapabilityRequest,
+    request: &CodingCapabilityRequest<'_>,
     read_state: &SharedCodingReadState,
     edit_locks: &SharedCodingEditLocks,
 ) -> Result<Value, CodingCapabilityError> {
-    match request.capability_id.as_str() {
-        READ_FILE_CAPABILITY_ID => file::read_file(request, read_state).await,
-        WRITE_FILE_CAPABILITY_ID => file::write_file(request, read_state, edit_locks).await,
-        LIST_DIR_CAPABILITY_ID => file::list_dir(request).await,
-        GLOB_CAPABILITY_ID => glob_tool::glob(request).await,
-        GREP_CAPABILITY_ID => grep_tool::grep(request).await,
-        APPLY_PATCH_CAPABILITY_ID => file::apply_patch(request, read_state, edit_locks).await,
-        _ => Err(CodingCapabilityError::new(
-            RuntimeDispatchErrorKind::UndeclaredCapability,
-        )),
+    match request.kind {
+        CodingCapabilityKind::ReadFile => file::read_file(request, read_state).await,
+        CodingCapabilityKind::WriteFile => file::write_file(request, read_state, edit_locks).await,
+        CodingCapabilityKind::ListDir => file::list_dir(request).await,
+        CodingCapabilityKind::Glob => glob_tool::glob(request).await,
+        CodingCapabilityKind::Grep => grep_tool::grep(request).await,
+        CodingCapabilityKind::ApplyPatch => {
+            file::apply_patch(request, read_state, edit_locks).await
+        }
     }
 }
 

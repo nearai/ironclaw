@@ -125,7 +125,7 @@ pub(super) fn content_hash(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex().to_string()
 }
 
-pub(super) fn read_scope_key(request: &CodingCapabilityRequest) -> CodingReadScopeKey {
+pub(super) fn read_scope_key(request: &CodingCapabilityRequest<'_>) -> CodingReadScopeKey {
     CodingReadScopeKey {
         tenant_id: request.scope.tenant_id.as_str().to_string(),
         user_id: request.scope.user_id.as_str().to_string(),

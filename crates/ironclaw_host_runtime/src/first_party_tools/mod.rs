@@ -20,7 +20,7 @@ use ironclaw_extensions::{
     ExtensionRuntime, MANIFEST_SCHEMA_VERSION, ManifestSource,
 };
 use ironclaw_first_party_extensions::coding::{
-    CodingCapabilityError, CodingCapabilityRequest, CodingCapabilityState,
+    CodingCapabilityError, CodingCapabilityKind, CodingCapabilityRequest, CodingCapabilityState,
 };
 use ironclaw_host_api::{
     CapabilityId, CapabilityProfileSchemaRef, EffectKind, ExtensionId, HostApiError,
@@ -35,10 +35,6 @@ use crate::{
 
 pub use echo::ECHO_CAPABILITY_ID;
 pub use http::HTTP_CAPABILITY_ID;
-pub use ironclaw_first_party_extensions::coding::{
-    APPLY_PATCH_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID,
-    READ_FILE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
-};
 pub use json::JSON_CAPABILITY_ID;
 pub use shell::SHELL_CAPABILITY_ID;
 pub use skill_management::{
@@ -47,6 +43,12 @@ pub use skill_management::{
 pub use time::TIME_CAPABILITY_ID;
 
 pub const BUILTIN_FIRST_PARTY_PROVIDER: &str = "builtin";
+pub const READ_FILE_CAPABILITY_ID: &str = "builtin.read_file";
+pub const WRITE_FILE_CAPABILITY_ID: &str = "builtin.write_file";
+pub const LIST_DIR_CAPABILITY_ID: &str = "builtin.list_dir";
+pub const GLOB_CAPABILITY_ID: &str = "builtin.glob";
+pub const GREP_CAPABILITY_ID: &str = "builtin.grep";
+pub const APPLY_PATCH_CAPABILITY_ID: &str = "builtin.apply_patch";
 
 const MAX_FIRST_PARTY_INPUT_BYTES: usize = 1_048_576;
 const MAX_WRITE_FILE_INPUT_BYTES: usize = 6 * 1024 * 1024;
@@ -241,12 +243,13 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
             | GLOB_CAPABILITY_ID
             | GREP_CAPABILITY_ID
             | APPLY_PATCH_CAPABILITY_ID => {
+                let kind = coding_capability_kind(request.capability_id.as_str())?;
                 let request = CodingCapabilityRequest::new(
-                    request.capability_id.clone(),
-                    request.scope.clone(),
-                    request.mounts.clone(),
+                    kind,
+                    &request.scope,
+                    request.mounts.as_ref(),
                     Arc::clone(&request.services.filesystem),
-                    request.input.clone(),
+                    &request.input,
                 );
                 self.coding_state
                     .dispatch(&request)
@@ -339,4 +342,20 @@ fn guest_error() -> FirstPartyCapabilityError {
 
 fn coding_error(error: CodingCapabilityError) -> FirstPartyCapabilityError {
     FirstPartyCapabilityError::new(error.kind())
+}
+
+fn coding_capability_kind(
+    capability_id: &str,
+) -> Result<CodingCapabilityKind, FirstPartyCapabilityError> {
+    match capability_id {
+        READ_FILE_CAPABILITY_ID => Ok(CodingCapabilityKind::ReadFile),
+        WRITE_FILE_CAPABILITY_ID => Ok(CodingCapabilityKind::WriteFile),
+        LIST_DIR_CAPABILITY_ID => Ok(CodingCapabilityKind::ListDir),
+        GLOB_CAPABILITY_ID => Ok(CodingCapabilityKind::Glob),
+        GREP_CAPABILITY_ID => Ok(CodingCapabilityKind::Grep),
+        APPLY_PATCH_CAPABILITY_ID => Ok(CodingCapabilityKind::ApplyPatch),
+        _ => Err(FirstPartyCapabilityError::new(
+            RuntimeDispatchErrorKind::UndeclaredCapability,
+        )),
+    }
 }

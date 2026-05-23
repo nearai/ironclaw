@@ -13,15 +13,15 @@ use super::{
 };
 
 pub(super) fn resolve_required_path(
-    request: &CodingCapabilityRequest,
+    request: &CodingCapabilityRequest<'_>,
     field: &str,
     operation: FilesystemOperation,
 ) -> Result<ResolvedPath, CodingCapabilityError> {
-    resolve_path(request, required_str(&request.input, field)?, operation)
+    resolve_path(request, required_str(request.input, field)?, operation)
 }
 
 pub(super) fn resolve_optional_path(
-    request: &CodingCapabilityRequest,
+    request: &CodingCapabilityRequest<'_>,
     operation: FilesystemOperation,
 ) -> Result<ResolvedPath, CodingCapabilityError> {
     let path = request
@@ -33,7 +33,7 @@ pub(super) fn resolve_optional_path(
 }
 
 fn resolve_path(
-    request: &CodingCapabilityRequest,
+    request: &CodingCapabilityRequest<'_>,
     path: &str,
     operation: FilesystemOperation,
 ) -> Result<ResolvedPath, CodingCapabilityError> {
@@ -45,7 +45,6 @@ fn resolve_path(
     }
     let mounts = request
         .mounts
-        .as_ref()
         .ok_or_else(|| CodingCapabilityError::new(RuntimeDispatchErrorKind::FilesystemDenied))?;
     let (virtual_path, grant) = mounts
         .resolve_with_grant(&scoped_path)
@@ -104,7 +103,7 @@ pub(super) fn operation_allowed(
 }
 
 pub(super) async fn stat_optional(
-    request: &CodingCapabilityRequest,
+    request: &CodingCapabilityRequest<'_>,
     path: &VirtualPath,
 ) -> Result<Option<FileStat>, CodingCapabilityError> {
     match request.filesystem.stat(path).await {
@@ -115,7 +114,7 @@ pub(super) async fn stat_optional(
 }
 
 pub(super) async fn create_parent_dir(
-    request: &CodingCapabilityRequest,
+    request: &CodingCapabilityRequest<'_>,
     path: &VirtualPath,
 ) -> Result<(), CodingCapabilityError> {
     let Some(parent) = virtual_parent(path)? else {

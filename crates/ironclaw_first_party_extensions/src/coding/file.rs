@@ -27,12 +27,12 @@ use super::{
 };
 
 pub(super) async fn read_file(
-    request: &CodingCapabilityRequest,
+    request: &CodingCapabilityRequest<'_>,
     read_state: &SharedCodingReadState,
 ) -> Result<Value, CodingCapabilityError> {
     let resolved = resolve_required_path(request, "path", FilesystemOperation::ReadFile)?;
-    let offset = optional_usize(&request.input, "offset")?.unwrap_or(0);
-    let limit = optional_usize(&request.input, "limit")?;
+    let offset = optional_usize(request.input, "offset")?.unwrap_or(0);
+    let limit = optional_usize(request.input, "limit")?;
     let has_explicit_range = offset > 0 || limit.is_some();
     let stat = request
         .filesystem
@@ -92,16 +92,16 @@ pub(super) async fn read_file(
 }
 
 pub(super) async fn write_file(
-    request: &CodingCapabilityRequest,
+    request: &CodingCapabilityRequest<'_>,
     read_state: &SharedCodingReadState,
     edit_locks: &SharedCodingEditLocks,
 ) -> Result<Value, CodingCapabilityError> {
-    let path_str = required_str(&request.input, "path")?;
+    let path_str = required_str(request.input, "path")?;
     if is_workspace_path(path_str) {
         return Err(input_error());
     }
     let resolved = resolve_required_path(request, "path", FilesystemOperation::WriteFile)?;
-    let content = required_str(&request.input, "content")?;
+    let content = required_str(request.input, "content")?;
     if content.len() > MAX_WRITE_SIZE {
         return Err(input_error());
     }
@@ -138,7 +138,7 @@ pub(super) async fn write_file(
 }
 
 pub(super) async fn list_dir(
-    request: &CodingCapabilityRequest,
+    request: &CodingCapabilityRequest<'_>,
 ) -> Result<Value, CodingCapabilityError> {
     let resolved = resolve_optional_path(request, FilesystemOperation::ListDir)?;
     let recursive = request
@@ -146,7 +146,7 @@ pub(super) async fn list_dir(
         .get("recursive")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let max_depth = optional_usize(&request.input, "max_depth")?.unwrap_or(3);
+    let max_depth = optional_usize(request.input, "max_depth")?.unwrap_or(3);
     let mut entries = collect_list_entries(request, &resolved, recursive, max_depth).await?;
     sort_list_entries(&mut entries);
     let truncated = entries.len() > MAX_DIR_ENTRIES;
@@ -161,7 +161,7 @@ pub(super) async fn list_dir(
 }
 
 async fn collect_list_entries(
-    request: &CodingCapabilityRequest,
+    request: &CodingCapabilityRequest<'_>,
     root: &ResolvedPath,
     recursive: bool,
     max_depth: usize,
@@ -245,11 +245,11 @@ fn format_size(bytes: u64) -> String {
 }
 
 pub(super) async fn apply_patch(
-    request: &CodingCapabilityRequest,
+    request: &CodingCapabilityRequest<'_>,
     read_state: &SharedCodingReadState,
     edit_locks: &SharedCodingEditLocks,
 ) -> Result<Value, CodingCapabilityError> {
-    let path_str = required_str(&request.input, "path")?;
+    let path_str = required_str(request.input, "path")?;
     if is_workspace_path(path_str) {
         return Err(input_error());
     }
@@ -259,8 +259,8 @@ pub(super) async fn apply_patch(
             RuntimeDispatchErrorKind::FilesystemDenied,
         ));
     }
-    let old_string = required_str(&request.input, "old_string")?;
-    let new_string = required_str(&request.input, "new_string")?;
+    let old_string = required_str(request.input, "old_string")?;
+    let new_string = required_str(request.input, "new_string")?;
     if old_string == new_string {
         return Err(input_error());
     }

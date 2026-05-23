@@ -20,13 +20,13 @@ use super::{
 };
 
 pub(super) async fn glob(
-    request: &CodingCapabilityRequest,
+    request: &CodingCapabilityRequest<'_>,
 ) -> Result<Value, CodingCapabilityError> {
     let start = std::time::Instant::now();
-    let pattern = required_str(&request.input, "pattern")?;
+    let pattern = required_str(request.input, "pattern")?;
     validate_relative_pattern(pattern)?;
     let resolved = resolve_optional_path(request, FilesystemOperation::ListDir)?;
-    let max_results = optional_usize(&request.input, "max_results")?.unwrap_or(DEFAULT_MAX_RESULTS);
+    let max_results = optional_usize(request.input, "max_results")?.unwrap_or(DEFAULT_MAX_RESULTS);
     let pattern = Pattern::new(pattern).map_err(|_| input_error())?;
     let mut files = Vec::new();
     walk_entries(request, &resolved, |entry, relative| {
@@ -71,7 +71,7 @@ pub(super) async fn glob(
 }
 
 async fn walk_entries(
-    request: &CodingCapabilityRequest,
+    request: &CodingCapabilityRequest<'_>,
     root: &ResolvedPath,
     mut visit: impl FnMut(&DirEntry, &str) -> Result<bool, CodingCapabilityError>,
 ) -> Result<(), CodingCapabilityError> {

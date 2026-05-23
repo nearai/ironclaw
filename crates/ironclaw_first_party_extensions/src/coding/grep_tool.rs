@@ -31,7 +31,7 @@ use super::{
 };
 
 pub(super) async fn grep(
-    request: &CodingCapabilityRequest,
+    request: &CodingCapabilityRequest<'_>,
 ) -> Result<Value, CodingCapabilityError> {
     let resolved = resolve_optional_path(request, FilesystemOperation::Stat)?;
     if !operation_allowed(&resolved.grant.permissions, FilesystemOperation::ReadFile) {
@@ -61,7 +61,7 @@ pub(super) async fn grep(
             RuntimeDispatchErrorKind::Resource,
         ));
     }
-    let pattern = required_str(&request.input, "pattern")?;
+    let pattern = required_str(request.input, "pattern")?;
     let output_mode = request
         .input
         .get("output_mode")
@@ -95,19 +95,19 @@ pub(super) async fn grep(
         .dot_matches_new_line(multiline)
         .build()
         .map_err(|_| input_error())?;
-    let context = optional_usize(&request.input, "context")?;
+    let context = optional_usize(request.input, "context")?;
     let before_context = if let Some(context) = context {
         context
     } else {
-        optional_usize(&request.input, "before_context")?.unwrap_or(0)
+        optional_usize(request.input, "before_context")?.unwrap_or(0)
     };
     let after_context = if let Some(context) = context {
         context
     } else {
-        optional_usize(&request.input, "after_context")?.unwrap_or(0)
+        optional_usize(request.input, "after_context")?.unwrap_or(0)
     };
-    let head_limit = optional_usize_allow_zero(&request.input, "head_limit")?;
-    let offset = optional_usize(&request.input, "offset")?.unwrap_or(0);
+    let head_limit = optional_usize_allow_zero(request.input, "head_limit")?;
+    let offset = optional_usize(request.input, "offset")?.unwrap_or(0);
     let mut search_results = Vec::new();
 
     let walk_result = walk_files(
@@ -185,7 +185,7 @@ enum ScanLimit {
 }
 
 async fn walk_files(
-    request: &CodingCapabilityRequest,
+    request: &CodingCapabilityRequest<'_>,
     root: &ResolvedPath,
     root_stat: FileStat,
     mut include: impl FnMut(&str) -> bool,
@@ -279,7 +279,7 @@ async fn walk_files(
 }
 
 async fn visit_file(
-    request: &CodingCapabilityRequest,
+    request: &CodingCapabilityRequest<'_>,
     path: &VirtualPath,
     relative: &str,
     stat: FileStat,
