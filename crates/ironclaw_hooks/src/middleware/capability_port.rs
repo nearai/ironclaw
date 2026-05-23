@@ -427,18 +427,13 @@ impl LoopCapabilityPort for HookedLoopCapabilityPort {
                         // to surface; drop it.
                         None
                     } else {
-                        match inner_outcomes.pop() {
-                            Some(inner) => Some((inner, provider)),
-                            None => {
-                                // Inner port stopped early (its own
-                                // suspension) and consumed fewer
-                                // outcomes than we queued. Drop
-                                // remaining Pending slots and continue
-                                // — observers on any trailing Resolved
-                                // slots must still fire.
-                                None
-                            }
-                        }
+                        // `pop()` returns `None` when the inner port
+                        // stopped early (its own suspension) and
+                        // consumed fewer outcomes than we queued. Drop
+                        // pending slots without an outcome and continue
+                        // — observers on any trailing Resolved slots
+                        // must still fire.
+                        inner_outcomes.pop().map(|inner| (inner, provider))
                     }
                 }
             };
@@ -1679,6 +1674,131 @@ mod tests {
         );
     }
 
+    /// henrypark133 L2 on PR #3913: when several BeforeCapability hooks
+    /// share a scope+provider, `before_capability_needs_input` must
+    /// return `true` as soon as ANY active binding's hook reports
+    /// `needs_input() = true`. The short-circuit doesn't depend on which
+    /// hook the trait's default lives on, so a mixed pair (one false,
+    /// one true) must still cause `resolve_arguments` to be called by
+    /// the middleware. Drive the whole path via `invoke_capability` and
+    /// an instrumented resolver to confirm the call actually happens.
+    #[tokio::test]
+    async fn before_capability_needs_input_returns_true_when_any_active_binding_needs_input() {
+        struct NoInputHook;
+        #[async_trait]
+        impl RestrictedBeforeCapabilityHook for NoInputHook {
+            async fn evaluate(
+                &self,
+                _ctx: &BeforeCapabilityHookContext,
+                sink: &mut dyn RestrictedGateSink,
+            ) {
+                sink.pass();
+            }
+            fn needs_input(&self) -> bool {
+                false
+            }
+        }
+
+        struct NeedsInputHook;
+        #[async_trait]
+        impl RestrictedBeforeCapabilityHook for NeedsInputHook {
+            async fn evaluate(
+                &self,
+                _ctx: &BeforeCapabilityHookContext,
+                sink: &mut dyn RestrictedGateSink,
+            ) {
+                sink.pass();
+            }
+            fn needs_input(&self) -> bool {
+                true
+            }
+        }
+
+        // Two BeforeCapability bindings on the same scope. One opts
+        // out of input access; the other opts in. The dispatcher's
+        // input-needed probe must short-circuit to true on the second
+        // binding regardless of registration order.
+        let no_input_id = HookId::derive(
+            &ExtensionId::new("ext").expect("valid"),
+            "1.0",
+            &HookLocalId::new("no-input").expect("valid"),
+            HookVersion::ONE,
+        );
+        let needs_input_id = HookId::derive(
+            &ExtensionId::new("ext").expect("valid"),
+            "1.0",
+            &HookLocalId::new("needs-input").expect("valid"),
+            HookVersion::ONE,
+        );
+        let mut registry = HookRegistry::new();
+        registry
+            .insert(HookBinding {
+                hook_id: no_input_id,
+                hook_version: HookVersion::ONE,
+                trust_class: HookTrustClass::Installed,
+                phase: HookPhase::Policy,
+                priority: HookPriority::DEFAULT,
+                point: HookPointSpec::BeforeCapability,
+                owning_extension: None,
+                scope: HookBindingScope::Global,
+                poisoned: false,
+            })
+            .expect("insert no_input");
+        registry
+            .insert(HookBinding {
+                hook_id: needs_input_id,
+                hook_version: HookVersion::ONE,
+                trust_class: HookTrustClass::Installed,
+                phase: HookPhase::Policy,
+                priority: HookPriority::DEFAULT,
+                point: HookPointSpec::BeforeCapability,
+                owning_extension: None,
+                scope: HookBindingScope::Global,
+                poisoned: false,
+            })
+            .expect("insert needs_input");
+        let mut dispatcher = HookDispatcher::new(registry);
+        dispatcher.install_before_capability(
+            no_input_id,
+            BeforeCapabilityHookImpl::Restricted(Box::new(NoInputHook)),
+        );
+        dispatcher.install_before_capability(
+            needs_input_id,
+            BeforeCapabilityHookImpl::Restricted(Box::new(NeedsInputHook)),
+        );
+
+        // First half: probe directly via the dispatcher's
+        // `before_capability_needs_input` API.
+        let dispatcher = Arc::new(dispatcher);
+        assert!(
+            dispatcher.before_capability_needs_input(None),
+            "with a mixed pair (one needs_input=false, one needs_input=true) the \
+             dispatcher must return true so the middleware materializes input",
+        );
+
+        // Second half: drive `invoke_capability` end-to-end with an
+        // instrumented resolver. The middleware must consult `resolve`
+        // because at least one active binding needs input — confirming
+        // the short-circuit is wired all the way through the call site,
+        // not just the helper.
+        let resolver = Arc::new(ProbingResolver::new(serde_json::json!({"amount": 1})));
+        let inner = Arc::new(AlwaysCompletedPort::new());
+        let wrapped = HookedLoopCapabilityPort::new(inner, dispatcher, tenant())
+            .with_resolver(Arc::clone(&resolver) as Arc<_>);
+
+        let _ = wrapped
+            .invoke_capability(invocation("cap.x"))
+            .await
+            .expect("ok");
+
+        assert_eq!(
+            resolver.resolve_calls(),
+            1,
+            "resolver must be called exactly once when at least one active \
+             binding's hook reports needs_input()=true",
+        );
+    }
+
     /// henrypark133 M1 on PR #3911: in the merged-batch path, when an
     /// allowed (Pending) entry precedes a hook-resolved suspension entry
     /// and `stop_on_first_suspension` is true, the merge loop must still
@@ -1802,7 +1922,10 @@ mod tests {
             "alpha was hook-allowed and inner produced a Completed outcome",
         );
         assert!(
-            matches!(outcome.outcomes[1], CapabilityOutcome::ApprovalRequired { .. }),
+            matches!(
+                outcome.outcomes[1],
+                CapabilityOutcome::ApprovalRequired { .. }
+            ),
             "beta was hook-resolved to ApprovalRequired",
         );
         assert!(
