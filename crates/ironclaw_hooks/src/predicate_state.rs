@@ -252,6 +252,26 @@ pub(crate) enum PredicateBackendError {
     #[error("predicate state backend is unavailable: {0}")]
     #[allow(dead_code)] // populated by future durable backends; in-memory is infallible
     Unavailable(String),
+
+    /// The per-key sliding window hit its sample cap
+    /// ([`MAX_SAMPLES_PER_KEY`]) and a new in-window sample could not be
+    /// recorded without dropping an existing one. Returned **fail-closed**
+    /// (codex review on PR #3635): silently evicting the oldest sample to
+    /// make room weakened cap enforcement (a count could never exceed the
+    /// cap) and broke replay refusal (the evicted sample's id left the
+    /// dedup set while still logically in-window). The evaluator treats
+    /// this as a restrictive DENY/PauseApproval rather than a silent Allow.
+    ///
+    /// For `InvocationCount` predicates this is unreachable in practice:
+    /// manifest validation rejects any `max` above the cap, so a
+    /// well-formed cap denies (count > max) before the window can overflow.
+    /// For `NumericSum` predicates there is no per-sample count threshold
+    /// to bound the window, so this is the backpressure signal.
+    #[error(
+        "predicate sliding window for `{key}` exceeded the per-key sample cap \
+         of {cap}; failing closed"
+    )]
+    WindowOverflow { key: String, cap: usize },
 }
 
 /// Backend for the predicate evaluator's sliding-window state.
@@ -519,11 +539,21 @@ impl PredicateStateBackend for InMemoryPredicateStateBackend {
             }
         }
         let bucket = history.entry(key.clone()).or_default();
-        let cutoff = now.checked_sub(window).unwrap_or(now);
-        // Trim entries outside the window via the bucket helper so the
-        // `dedup_ids` set stays in sync.
+        // Trim entries outside the window by AGE, not by an absolute
+        // cutoff. `now.checked_sub(window)` underflows the monotonic clock
+        // when `window` exceeds the representable past (e.g. a 24h window
+        // shortly after boot), and the old `unwrap_or(now)` then collapsed
+        // the cutoff to `now`, trimming every valid prior entry — a long
+        // window behaved like a zero-width one (codex review on PR #3635,
+        // Bug 2). Comparing each entry's age against `window` is correct
+        // regardless of how far back `now - window` would be; future
+        // timestamps (`ts > now`, possible only via a test clock) yield
+        // `None` age and are treated as fresh, never trimmed.
         while let Some((front_ts, _)) = bucket.entries.front() {
-            if *front_ts < cutoff {
+            let trim = now
+                .checked_duration_since(*front_ts)
+                .is_some_and(|age| age > window);
+            if trim {
                 bucket.pop_front();
             } else {
                 break;
@@ -534,13 +564,26 @@ impl PredicateStateBackend for InMemoryPredicateStateBackend {
         // outer mutex while scanning thousands of entries on the hot
         // path).
         if !bucket.dedup_ids.contains(event_id) {
-            // Per-key sample cap: drop the oldest sample(s) to make room.
-            // Bounds per-key memory under attacker-triggered hot capabilities
-            // (threat-model finding D5). Ported from the pre-extraction
-            // inline enforcement in `evaluator.rs` (PR #3573 round 3) which
-            // the predicate-state extraction missed.
-            while bucket.entries.len() >= MAX_SAMPLES_PER_KEY {
-                bucket.pop_front();
+            // Per-key sample cap: FAIL CLOSED on overflow (codex review on
+            // PR #3635, Bug 1). The previous implementation dropped the
+            // oldest sample to make room, which silently weakened cap
+            // enforcement (the count could never exceed the cap, so an
+            // `InvocationCount { max >= cap }` never fired) and broke replay
+            // refusal (the evicted id left `dedup_ids` while still in-window).
+            // We now reject instead. Manifest validation rejects count
+            // thresholds above the cap, so a well-formed `InvocationCount`
+            // denies (count > max) before this can trip; reaching here means
+            // genuine backpressure that must not silently pass.
+            if bucket.entries.len() >= MAX_SAMPLES_PER_KEY {
+                // Drop the bucket if the trim above emptied it, so an
+                // overflow-on-a-stale-key doesn't leave a zombie bucket.
+                if bucket.entries.is_empty() {
+                    history.remove(key);
+                }
+                return Err(PredicateBackendError::WindowOverflow {
+                    key: format!("{}/{}", key.tenant_id.as_str(), key.capability),
+                    cap: MAX_SAMPLES_PER_KEY,
+                });
             }
             bucket.push_back(now, event_id.clone());
         }
@@ -579,22 +622,40 @@ impl PredicateStateBackend for InMemoryPredicateStateBackend {
             }
         }
         let bucket = history.entry(key.clone()).or_default();
-        let cutoff = now.checked_sub(window).unwrap_or(now);
+        // Trim by AGE, not an absolute cutoff — see `record_invocation`
+        // for the underflow rationale (codex review on PR #3635, Bug 2).
         while let Some((ts, _, _)) = bucket.entries.front() {
-            if *ts < cutoff {
+            let trim = now
+                .checked_duration_since(*ts)
+                .is_some_and(|age| age > window);
+            if trim {
                 bucket.pop_front();
             } else {
                 break;
             }
         }
         if !bucket.dedup_ids.contains(event_id) {
-            // Per-key sample cap: drop oldest sample(s). `pop_front`
-            // decrements `running_sum` so the incremental invariant
-            // (`running_sum == sum(entries values)`) is preserved across
-            // eviction (threat-model finding D5). Ported from the
-            // pre-extraction inline enforcement in `evaluator.rs`.
-            while bucket.entries.len() >= MAX_SAMPLES_PER_KEY {
-                bucket.pop_front();
+            // Per-key sample cap: FAIL CLOSED on overflow (codex review on
+            // PR #3635, Bug 1). Unlike `InvocationCount`, `NumericSum` has
+            // no per-sample count threshold to bound the window at
+            // validation time, so the per-key cap is the only sample bound.
+            // The old implementation dropped oldest samples to make room,
+            // which silently UNDERCOUNTED the sum (in-window values were
+            // discarded) — a fail-OPEN weakening of the value cap. We now
+            // reject so the evaluator can deny.
+            if bucket.entries.len() >= MAX_SAMPLES_PER_KEY {
+                if bucket.entries.is_empty() {
+                    history.remove(key);
+                }
+                return Err(PredicateBackendError::WindowOverflow {
+                    key: format!(
+                        "{}/{}#{}",
+                        key.tenant_id.as_str(),
+                        key.capability,
+                        key.field
+                    ),
+                    cap: MAX_SAMPLES_PER_KEY,
+                });
             }
             bucket.push_back(now, value, event_id.clone());
         }
@@ -1471,15 +1532,21 @@ mod tests {
     /// Threat-model finding **D5** regression: an attacker that triggers a
     /// hot capability with a very large declared window can otherwise force
     /// the backend to retain every invocation in the window, exhausting
-    /// memory. The per-key sample cap drops oldest samples first, so the
-    /// bucket never grows past [`MAX_SAMPLES_PER_KEY`].
+    /// memory.
     ///
-    /// Round 3 of PR #3573 introduced this defense inline in
-    /// `evaluator.rs`; the predicate-state extraction in PR #3635 moved the
-    /// bookkeeping into [`PredicateStateBackend`] but initially missed
-    /// porting the cap — this test pins it in the backend.
+    /// FAIL-CLOSED CHANGE (PR #3635 followup, codex review): the previous
+    /// implementation silently dropped the oldest sample to make room when
+    /// the per-key cap was hit. That silently weakened cap enforcement (a
+    /// count never exceeded [`MAX_SAMPLES_PER_KEY`], so an
+    /// `InvocationCount { max }` with `max >= MAX_SAMPLES_PER_KEY` could
+    /// never fire) AND broke replay refusal (the evicted sample's id was
+    /// removed from `dedup_ids`). The backend now returns
+    /// [`PredicateBackendError::WindowOverflow`] instead, which the
+    /// evaluator treats as a fail-closed DENY. Validation rejects count
+    /// thresholds above the cap at install time so a well-formed
+    /// `InvocationCount` cap never reaches overflow.
     #[test]
-    fn record_invocation_caps_samples_per_key_under_attacker_pressure() {
+    fn record_invocation_returns_window_overflow_at_cap_not_silent_drop() {
         let backend = InMemoryPredicateStateBackend::new();
         let key = InvocationKey {
             hook_id: hook_id(),
@@ -1490,48 +1557,45 @@ mod tests {
         // Window large enough that no entry trims for time; the cap is the
         // only thing keeping the bucket bounded.
         let window = Duration::from_secs(3600);
-        let overflow = MAX_SAMPLES_PER_KEY + 64;
-        for i in 0..overflow {
-            let _ = backend
+        // Fill exactly to the cap — these must all succeed.
+        for i in 0..MAX_SAMPLES_PER_KEY {
+            let count = backend
                 .record_invocation(
                     &key,
                     &ev(&format!("evt-{i}")),
                     t0 + Duration::from_millis(i as u64),
                     window,
                 )
-                .expect("ok");
+                .expect("inserts up to the cap succeed");
+            assert_eq!(count as usize, i + 1);
         }
+        // The next distinct in-window event would push past the cap. It must
+        // fail closed (WindowOverflow), NOT silently evict the oldest sample.
+        let result = backend.record_invocation(
+            &key,
+            &ev("evt-overflow"),
+            t0 + Duration::from_secs(1),
+            window,
+        );
+        assert!(
+            matches!(result, Err(PredicateBackendError::WindowOverflow { .. })),
+            "hitting the per-key cap must fail closed, got {result:?}"
+        );
+        // The bucket must remain pinned at the cap — no silent eviction.
         let history = backend.invocation_history.lock().expect("lock");
         let bucket = history.get(&key).expect("bucket retained");
-        assert!(
-            bucket.entries.len() <= MAX_SAMPLES_PER_KEY,
-            "bucket must not grow past per-key cap; got {}",
-            bucket.entries.len()
-        );
-        // The cap drop-oldest path; with a fresh insert each iteration the
-        // bucket should sit exactly at the cap.
-        assert_eq!(
-            bucket.entries.len(),
-            MAX_SAMPLES_PER_KEY,
-            "drop-oldest must keep the bucket pinned at the cap under sustained pressure"
-        );
-        // dedup_ids must stay in sync with entries — pop_front decrements
-        // both via the bucket helper.
-        assert_eq!(
-            bucket.dedup_ids.len(),
-            bucket.entries.len(),
-            "dedup_ids must mirror entries after cap-driven eviction"
-        );
+        assert_eq!(bucket.entries.len(), MAX_SAMPLES_PER_KEY);
+        assert_eq!(bucket.dedup_ids.len(), MAX_SAMPLES_PER_KEY);
     }
 
-    /// Threat-model finding **D5** regression for the NumericSum path. In
-    /// addition to bounding bucket size, the `running_sum` invariant
-    /// (`running_sum == sum(entries values)`) must survive cap-driven
-    /// eviction — `pop_front` is responsible for decrementing the sum on
-    /// each drop, so the reported sum tracks only the retained
-    /// most-recent `MAX_SAMPLES_PER_KEY` values.
+    /// Companion to the invocation overflow test for the NumericSum path.
+    /// `NumericSum` has no per-sample count bound at validation time (its
+    /// threshold is a value sum, not a count), so the per-key cap is the
+    /// only sample bound. Hitting it must fail closed with
+    /// [`PredicateBackendError::WindowOverflow`] rather than silently
+    /// undercounting the sum by evicting in-window samples.
     #[test]
-    fn record_value_evicts_oldest_keeping_running_sum_consistent() {
+    fn numeric_sum_window_overflow_returns_deny_not_silent_allow() {
         let backend = InMemoryPredicateStateBackend::new();
         let key = ValueKey {
             hook_id: hook_id(),
@@ -1541,12 +1605,8 @@ mod tests {
         };
         let t0 = Instant::now();
         let window = Duration::from_secs(3600);
-        let overflow = MAX_SAMPLES_PER_KEY + 32;
-        // Use a constant value so the expected post-cap sum is easy to
-        // compute: it must equal MAX_SAMPLES_PER_KEY * value once the cap
-        // is saturated.
         let value = Decimal::from(3);
-        for i in 0..overflow {
+        for i in 0..MAX_SAMPLES_PER_KEY {
             let _ = backend
                 .record_value(
                     &key,
@@ -1555,33 +1615,99 @@ mod tests {
                     value,
                     window,
                 )
-                .expect("ok");
+                .expect("inserts up to the cap succeed");
         }
+        let result = backend.record_value(
+            &key,
+            &ev("v-overflow"),
+            t0 + Duration::from_secs(1),
+            value,
+            window,
+        );
+        assert!(
+            matches!(result, Err(PredicateBackendError::WindowOverflow { .. })),
+            "NumericSum at the per-key cap must fail closed (overflow), got {result:?}"
+        );
+        // No silent eviction: the running_sum still reflects exactly the
+        // cap-many samples, not an undercount.
         let history = backend.value_history.lock().expect("lock");
         let bucket = history.get(&key).expect("bucket retained");
-        assert!(
-            bucket.entries.len() <= MAX_SAMPLES_PER_KEY,
-            "bucket must not grow past per-key cap; got {}",
-            bucket.entries.len()
-        );
         assert_eq!(bucket.entries.len(), MAX_SAMPLES_PER_KEY);
-        // Running-sum invariant: must match the actual deque content
-        // exactly. If `pop_front` failed to decrement on eviction, the
-        // sum would still reflect the dropped values.
-        let deque_sum: Decimal = bucket.entries.iter().map(|(_, v, _)| *v).sum();
-        assert_eq!(
-            bucket.running_sum, deque_sum,
-            "running_sum must stay in sync with deque content after cap-driven eviction"
-        );
         assert_eq!(
             bucket.running_sum,
             Decimal::from(MAX_SAMPLES_PER_KEY as u64) * value,
-            "with constant value inserts, post-cap sum = cap * value"
         );
+    }
+
+    /// codex review (PR #3635 followup): replay refusal must survive cap
+    /// pressure. Even when the bucket is saturated at the per-key cap, an
+    /// id already recorded within the window must still dedup to a no-op
+    /// (and report the unchanged count) rather than being treated as a
+    /// fresh event. The dedup-id lifecycle is the logical window, not a
+    /// fixed ring that the cap can silently shrink.
+    #[test]
+    fn dedup_id_survives_cap_eviction_within_window() {
+        let backend = InMemoryPredicateStateBackend::new();
+        let key = InvocationKey {
+            hook_id: hook_id(),
+            tenant_id: tenant(),
+            capability: "cap.replay".to_string(),
+        };
+        let t0 = Instant::now();
+        let window = Duration::from_secs(3600);
+        // Saturate the bucket to the cap.
+        for i in 0..MAX_SAMPLES_PER_KEY {
+            backend
+                .record_invocation(
+                    &key,
+                    &ev(&format!("evt-{i}")),
+                    t0 + Duration::from_millis(i as u64),
+                    window,
+                )
+                .expect("ok");
+        }
+        // Replaying the FIRST (oldest) in-window id must be a no-op: it is
+        // still inside the window, so its presence in dedup_ids must be
+        // honored even at the cap boundary. A fresh count is returned, NOT
+        // an overflow, because no new sample is added.
+        let count = backend
+            .record_invocation(&key, &ev("evt-0"), t0 + Duration::from_secs(2), window)
+            .expect("replay of in-window id must dedup, not overflow");
         assert_eq!(
-            bucket.dedup_ids.len(),
-            bucket.entries.len(),
-            "dedup_ids must mirror entries after cap-driven eviction"
+            count as usize, MAX_SAMPLES_PER_KEY,
+            "replay of an in-window id at the cap must be a no-op against the count"
+        );
+    }
+
+    /// codex review (PR #3635 followup) — Bug 2: a window longer than the
+    /// monotonic clock's representable past previously collapsed the cutoff
+    /// to `now` (via `now.checked_sub(window).unwrap_or(now)`), trimming
+    /// every prior in-window entry — a 24h window after recent boot behaved
+    /// like a zero-width window. Trimming by age (`now - ts > window`)
+    /// instead of an absolute cutoff fixes this: prior entries inside the
+    /// window are retained even when `now - window` underflows.
+    #[test]
+    fn record_invocation_with_long_window_does_not_zero_cutoff() {
+        let backend = InMemoryPredicateStateBackend::new();
+        let key = InvocationKey {
+            hook_id: hook_id(),
+            tenant_id: tenant(),
+            capability: "cap.longwindow".to_string(),
+        };
+        // `now` is a fresh Instant; `now - 24h` underflows the monotonic
+        // clock shortly after process/boot start. Two events a few ms apart
+        // are both well within a 24h window and must both be counted.
+        let now = Instant::now();
+        let window = Duration::from_secs(24 * 3600);
+        backend
+            .record_invocation(&key, &ev("first"), now, window)
+            .expect("ok");
+        let count = backend
+            .record_invocation(&key, &ev("second"), now + Duration::from_millis(5), window)
+            .expect("ok");
+        assert_eq!(
+            count, 2,
+            "a long window must retain prior in-window entries even when now - window underflows"
         );
     }
 

@@ -77,6 +77,15 @@ impl PredicateEvaluator {
         }
     }
 
+    /// Construct an evaluator over an explicit backend. Crate-internal:
+    /// used by tests that need to pre-seed backend state (e.g. saturate a
+    /// per-key window to drive the fail-closed overflow path) and by
+    /// future host wiring that swaps in a durable backend.
+    #[cfg(test)]
+    pub(crate) fn with_backend(backend: Arc<dyn PredicateStateBackend>) -> Self {
+        Self { backend }
+    }
+
     /// Total LRU evictions observed by the underlying backend. Operators
     /// should alert when this advances. Threat-model finding D5.
     pub fn evictions_observed(&self) -> u64 {
@@ -950,5 +959,68 @@ mod tests {
             evaluator.evaluate(hook_id(), &spec, &ctx("cap.x")),
             EvaluatorDecision::Deny { .. }
         ));
+    }
+
+    /// codex review (PR #3635 followup) — fail-closed overflow surfaces as
+    /// DENY through the evaluator caller, not a silent Allow. We saturate a
+    /// NumericSum window to the per-key cap via the backend, then drive one
+    /// more invocation through `evaluate_at`. The backend returns
+    /// `WindowOverflow`, which the evaluator must translate into the
+    /// restrictive `on_exceeded` action (DENY), never `Allow`.
+    #[test]
+    fn numeric_sum_backend_overflow_surfaces_as_deny_through_evaluator() {
+        use crate::predicate_state::{
+            InMemoryPredicateStateBackend, MAX_SAMPLES_PER_KEY, PredicateEventId, ValueKey,
+        };
+        use rust_decimal::Decimal;
+        use std::time::{Duration, Instant};
+
+        let backend = Arc::new(InMemoryPredicateStateBackend::new());
+        let hid = hook_id();
+        let t0 = Instant::now();
+        let window = Duration::from_secs(3600);
+        let field = "amount";
+        let capability = "cap.spend";
+        let key = ValueKey {
+            hook_id: hid,
+            tenant_id: tenant(),
+            capability: capability.to_string(),
+            field: field.to_string(),
+        };
+        // Saturate the per-key window to the cap directly on the backend.
+        for i in 0..MAX_SAMPLES_PER_KEY {
+            backend
+                .record_value(
+                    &key,
+                    &PredicateEventId::new_unchecked(format!("seed-{i}")),
+                    t0 + Duration::from_millis(i as u64),
+                    Decimal::from(1),
+                    window,
+                )
+                .expect("seed insert ok");
+        }
+
+        let evaluator = PredicateEvaluator::with_backend(backend);
+        let spec = HookPredicateSpec::RateOrValueCap {
+            when: CapabilityPredicate::NameEquals {
+                name: capability.to_string(),
+            },
+            bound: ValueOrRateBound::NumericSum {
+                // A huge max that the running sum would never reach — proving
+                // the DENY comes from the overflow, not a real cap breach.
+                max: "1000000000".to_string(),
+                field: field.to_string(),
+                window: "1h".to_string(),
+            },
+            on_exceeded: OnExceededAction::Deny {
+                reason: "spend cap".to_string(),
+            },
+        };
+        let ctx = ctx_with_args(capability, serde_json::json!({ "amount": 1 }));
+        let decision = evaluator.evaluate_at(hook_id(), &spec, &ctx, t0 + Duration::from_secs(1));
+        assert!(
+            matches!(decision, EvaluatorDecision::Deny { .. }),
+            "backend WindowOverflow must fail closed as DENY, got {decision:?}"
+        );
     }
 }

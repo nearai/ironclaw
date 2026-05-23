@@ -270,6 +270,29 @@ impl HookManifestEntry {
                     bound,
                     on_exceeded,
                 } => {
+                    // Bug 1 (codex review on PR #3635): an `InvocationCount`
+                    // cap whose `max` exceeds the backend's per-key sample
+                    // cap is silently unenforceable — the sliding window can
+                    // never retain more than `MAX_SAMPLES_PER_KEY` samples,
+                    // so `count` can never exceed such a `max` and the cap
+                    // never fires. Reject at install time (fail-closed) so
+                    // the operator sees the impossibility instead of a dead
+                    // rate limit. `NumericSum` is intentionally NOT bounded
+                    // here: its threshold is a value sum, not a count, and
+                    // the backend fails closed via `WindowOverflow` when its
+                    // window saturates.
+                    if let ValueOrRateBound::InvocationCount { max, .. } = bound
+                        && (*max as usize) > crate::predicate_state::MAX_SAMPLES_PER_KEY
+                    {
+                        return Err(HookManifestValidationError(format!(
+                            "hook `{}` InvocationCount max {} exceeds the predicate \
+                             backend capacity (per-key sample cap {}); the cap would be \
+                             silently unenforceable",
+                            self.id.as_str(),
+                            max,
+                            crate::predicate_state::MAX_SAMPLES_PER_KEY
+                        )));
+                    }
                     let window = match bound {
                         ValueOrRateBound::InvocationCount { window, .. } => Some(window.as_str()),
                         ValueOrRateBound::NumericSum { window, .. } => Some(window.as_str()),
@@ -522,6 +545,77 @@ mod tests {
             },
         };
         assert!(entry.validate().is_err());
+    }
+
+    /// codex review (PR #3635 followup) — Bug 1: an `InvocationCount` cap
+    /// whose `max` exceeds the in-memory backend's per-key sample cap
+    /// ([`crate::predicate_state::MAX_SAMPLES_PER_KEY`]) is silently
+    /// unenforceable at runtime (the backend can never retain more than the
+    /// cap, so `count` can never exceed such a `max`). Reject it at install
+    /// time, fail-closed, so an operator learns the cap is impossible to
+    /// enforce instead of getting a silently dead rate limit.
+    #[test]
+    fn invocation_count_max_above_per_key_cap_is_rejected_at_install() {
+        use crate::predicate_state::MAX_SAMPLES_PER_KEY;
+        let entry = HookManifestEntry {
+            id: HookLocalId::new("over-cap").expect("valid HookLocalId in test"),
+            kind: HookManifestKind::BeforeCapability,
+            scope: HookManifestScope::OwnCapabilities,
+            phase: HookPhase::Policy,
+            priority: HookPriority::DEFAULT,
+            description: None,
+            requires_grant: None,
+            body: HookManifestBody::Predicate {
+                spec: HookPredicateSpec::RateOrValueCap {
+                    when: CapabilityPredicate::Always,
+                    bound: ValueOrRateBound::InvocationCount {
+                        max: (MAX_SAMPLES_PER_KEY as u32) + 1,
+                        window: "24h".to_string(),
+                    },
+                    on_exceeded: OnExceededAction::Deny {
+                        reason: "x".to_string(),
+                    },
+                },
+            },
+        };
+        let err = entry
+            .validate()
+            .expect_err("count max above the per-key cap must be rejected");
+        assert!(
+            err.0.contains("backend capacity") || err.0.contains("per-key"),
+            "unexpected msg: {}",
+            err.0
+        );
+    }
+
+    /// Boundary companion: a `max` exactly at the cap is enforceable (the
+    /// (cap+1)th distinct in-window event fails closed at the backend), so
+    /// it must validate.
+    #[test]
+    fn invocation_count_max_at_per_key_cap_validates() {
+        use crate::predicate_state::MAX_SAMPLES_PER_KEY;
+        let entry = HookManifestEntry {
+            id: HookLocalId::new("at-cap").expect("valid HookLocalId in test"),
+            kind: HookManifestKind::BeforeCapability,
+            scope: HookManifestScope::OwnCapabilities,
+            phase: HookPhase::Policy,
+            priority: HookPriority::DEFAULT,
+            description: None,
+            requires_grant: None,
+            body: HookManifestBody::Predicate {
+                spec: HookPredicateSpec::RateOrValueCap {
+                    when: CapabilityPredicate::Always,
+                    bound: ValueOrRateBound::InvocationCount {
+                        max: MAX_SAMPLES_PER_KEY as u32,
+                        window: "24h".to_string(),
+                    },
+                    on_exceeded: OnExceededAction::Deny {
+                        reason: "x".to_string(),
+                    },
+                },
+            },
+        };
+        entry.validate().expect("max at the cap is enforceable");
     }
 
     #[test]
