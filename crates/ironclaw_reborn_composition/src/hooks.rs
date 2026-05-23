@@ -190,6 +190,25 @@ fn install_first_party_hooks(
 /// On any projection or install failure the whole build fails loudly
 /// (fail-closed). A malformed manifest hook must never silently drop into a
 /// half-installed registry.
+///
+/// # Activation scope (what is live in production today)
+///
+/// This loader fully supports installed-tier hooks declared by *any*
+/// extension package in `registry`. However, the production composition root
+/// ([`crate::runtime::build_reborn_runtime`]) currently invokes
+/// [`build_hook_dispatcher_builder_factory`] with the *builtin* extension
+/// registry only (`builtin_extension_registry()`). Consequently, with the flag
+/// ON the live runtime activates exactly two hook sources:
+///
+/// 1. the first-party builtin set ([`install_first_party_hooks`]), and
+/// 2. `[[hooks]]` declared by builtin / host-bundled packages.
+///
+/// Hooks declared by third-party *installed* extensions are **not** yet
+/// surfaced into the runtime path — not because this loader can't install them
+/// (it can), but because no installed-extension registry is threaded into the
+/// call site yet. "Extension-declared hooks" in this module therefore means
+/// "builtin-package-declared hooks" in production until that registry is
+/// wired. Live third-party activation is a deliberate follow-up.
 fn install_extension_hooks(
     registry: &ExtensionRegistry,
     registrar: &HookRegistrar,
@@ -344,6 +363,59 @@ pub fn build_hook_dispatcher_builder_factory(
 mod tests {
     use super::*;
 
+    use ironclaw_extensions::v2::ManifestSource;
+    use ironclaw_extensions::{ExtensionManifest, ExtensionPackage};
+    use ironclaw_host_api::{HostPortCatalog, VirtualPath};
+
+    /// Build a single-capability `reborn.extension_manifest.v2` manifest TOML
+    /// for `id`, optionally carrying a `[[hooks]]` block. The capability id is
+    /// provider-prefixed (`<id>.run`) as `ExtensionPackage::from_manifest`
+    /// requires.
+    fn manifest_toml(id: &str, hooks_block: &str) -> String {
+        format!(
+            r#"schema_version = "reborn.extension_manifest.v2"
+id = "{id}"
+name = "{id}"
+version = "0.1.0"
+description = "{id} extension"
+trust = "untrusted"
+
+[runtime]
+kind = "wasm"
+module = "wasm/{id}.wasm"
+
+[[capabilities]]
+id = "{id}.run"
+description = "Run {id}"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/{id}/run.input.v1.json"
+output_schema_ref = "schemas/{id}/run.output.v1.json"
+prompt_doc_ref = "prompts/{id}/run.md"
+{hooks_block}"#
+        )
+    }
+
+    /// Parse `toml` into a validated package rooted at the conventional
+    /// extensions path and insert it into a fresh registry.
+    fn registry_with_manifest(id: &str, toml: &str) -> ExtensionRegistry {
+        let manifest = ExtensionManifest::parse(
+            toml,
+            ManifestSource::InstalledLocal,
+            &HostPortCatalog::empty(),
+        )
+        .expect("manifest parses");
+        let package = ExtensionPackage::from_manifest(
+            manifest,
+            VirtualPath::new(format!("/system/extensions/{id}")).expect("valid root path"),
+        )
+        .expect("package builds from manifest");
+        let mut registry = ExtensionRegistry::new();
+        registry.insert(package).expect("package inserts");
+        registry
+    }
+
     #[test]
     fn config_defaults_to_disabled() {
         assert!(!HooksActivationConfig::default().is_enabled());
@@ -403,5 +475,143 @@ mod tests {
             !Arc::ptr_eq(&a, &b),
             "each factory call must mint a fresh dispatcher (per-run isolation)"
         );
+    }
+
+    // ─── Direct composition-loader coverage ──────────────────────────────────
+    //
+    // The tests above exercise the activation seam with an empty registry
+    // (first-party-only). The tests below drive `install_extension_hooks`
+    // through `build_hook_dispatcher_builder_factory` with a real
+    // `ExtensionRegistry` carrying `[[hooks]]` declarations, so the full
+    // `ExtensionManifestV2` `[[hooks]]` DTO → `HookManifestEntry` → registrar
+    // path is covered — not a loader look-alike. The load-bearing case is
+    // `malformed_extension_hook_manifest_fails_closed_not_panics`: an
+    // attacker-controlled installed manifest must degrade to a `RebornBuildError`,
+    // never a panic.
+
+    /// A registry package declaring a VALID `own_capabilities` predicate hook
+    /// installs at the `Installed` trust tier, and the resulting dispatcher
+    /// carries a binding for that extension's hook id at the
+    /// `BeforeCapability` point alongside the first-party no-op observer.
+    #[test]
+    fn valid_extension_hook_manifest_installs_at_installed_tier() {
+        use ironclaw_hooks::identity::{ExtensionId as HookExtensionId, HookLocalId};
+
+        // `own_capabilities` scope requires no user grant, so the loader's
+        // registrar (empty verified-grants set) installs it cleanly. A
+        // declarative predicate body needs no WASM runtime.
+        let hooks_block = r#"
+[[hooks]]
+id = "deny-run"
+kind = "before_capability"
+scope = "own_capabilities"
+body = { mode = "predicate", spec = { type = "deny_capability", reason = "blocked by manifest hook", when = { type = "name_equals", name = "valid-ext.run" } } }
+"#;
+        let registry =
+            registry_with_manifest("valid-ext", &manifest_toml("valid-ext", hooks_block));
+
+        let factory =
+            build_hook_dispatcher_builder_factory(HooksActivationConfig::enabled(), &registry)
+                .expect("enabled build with a valid extension hook succeeds")
+                .expect("flag ON yields a factory");
+        let dispatcher = factory().build_arc();
+
+        // The extension hook id is derived deterministically from the
+        // extension id + version + local id, exactly as the registrar mints
+        // it. Assert the dispatcher carries that binding at BeforeCapability.
+        let expected = HookId::derive(
+            &HookExtensionId::new("valid-ext").expect("valid extension id"),
+            "0.1.0",
+            &HookLocalId::new("deny-run").expect("valid hook local id"),
+            HookVersion::ONE,
+        );
+        let bindings = dispatcher.active_bindings_snapshot(HookPointSpec::BeforeCapability);
+        assert!(
+            bindings.iter().any(|binding| binding.hook_id == expected),
+            "installed extension hook must be bound at BeforeCapability; saw {bindings:?}"
+        );
+
+        // The first-party no-op observer still rides along at AfterCapability —
+        // the extension install does not displace the builtin set.
+        let builtin_id = HookId::for_builtin(NOOP_OBSERVER_CANONICAL_PATH, HookVersion::ONE);
+        let after = dispatcher.active_bindings_snapshot(HookPointSpec::AfterCapability);
+        assert!(
+            after.iter().any(|binding| binding.hook_id == builtin_id),
+            "first-party no-op observer must remain installed alongside extension hooks"
+        );
+    }
+
+    /// A malformed typed hook payload (the body declares an unknown `mode`)
+    /// must fail the build CLOSED with a `RebornBuildError::InvalidConfig`,
+    /// never a panic. This is the load-bearing degradation contract: external
+    /// manifests are untrusted input and a bad one cannot crash composition.
+    #[test]
+    fn malformed_extension_hook_manifest_fails_closed_not_panics() {
+        // `mode = "nonsense"` is not a recognized `HookManifestBody` variant,
+        // so the loader's `toml::from_str::<HookManifestEntry>` projection
+        // rejects it. The whole build must fail with InvalidConfig.
+        let hooks_block = r#"
+[[hooks]]
+id = "broken-hook"
+kind = "before_capability"
+body = { mode = "nonsense" }
+"#;
+        let registry =
+            registry_with_manifest("broken-ext", &manifest_toml("broken-ext", hooks_block));
+
+        let result =
+            build_hook_dispatcher_builder_factory(HooksActivationConfig::enabled(), &registry);
+        match result {
+            Err(RebornBuildError::InvalidConfig { reason }) => {
+                assert!(
+                    reason.contains("broken-ext") && reason.contains("broken-hook"),
+                    "fail-closed error must name the offending extension + hook, got: {reason}"
+                );
+            }
+            Ok(_) => panic!("malformed manifest must fail closed, but the build succeeded"),
+            Err(other) => panic!(
+                "malformed manifest must fail with InvalidConfig, got a different error: {other}"
+            ),
+        }
+    }
+
+    /// A hook declaring `scope = same_tenant` reaches beyond the declaring
+    /// extension's own capabilities and therefore requires an explicit user
+    /// grant. The composition loader's registrar carries no verified grants,
+    /// so an installed-tier extension hook claiming that wider scope is
+    /// rejected (trust attenuation) — fail-closed, not a panic.
+    #[test]
+    fn extension_hook_claiming_ungranted_wider_scope_is_rejected() {
+        // `same_tenant` scope requires `requires_grant`; the manifest sets it,
+        // but the loader's registrar has no matching verified grant, so the
+        // install is denied. (Omitting `requires_grant` would instead fail the
+        // entry's own `validate()`; either way the build must fail closed.)
+        let hooks_block = r#"
+[[hooks]]
+id = "cross-tenant-deny"
+kind = "before_capability"
+scope = "same_tenant"
+requires_grant = "cross-tenant-policy"
+body = { mode = "predicate", spec = { type = "deny_capability", reason = "wider-scope deny", when = { type = "name_equals", name = "other-ext.run" } } }
+"#;
+        let registry =
+            registry_with_manifest("reachy-ext", &manifest_toml("reachy-ext", hooks_block));
+
+        let result =
+            build_hook_dispatcher_builder_factory(HooksActivationConfig::enabled(), &registry);
+        match result {
+            Err(RebornBuildError::InvalidConfig { reason }) => {
+                assert!(
+                    reason.contains("reachy-ext"),
+                    "trust-attenuation rejection must name the extension, got: {reason}"
+                );
+            }
+            Ok(_) => {
+                panic!("ungranted wider-scope hook must be rejected, but the build succeeded")
+            }
+            Err(other) => panic!(
+                "ungranted wider-scope hook must be rejected with InvalidConfig, got a different error: {other}"
+            ),
+        }
     }
 }

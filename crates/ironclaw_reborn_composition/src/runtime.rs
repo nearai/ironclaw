@@ -822,6 +822,16 @@ pub async fn build_reborn_runtime(
     // build here rather than silently composing a broken dispatcher.
     let hooks_config = HooksActivationConfig::from_env();
     let hook_dispatcher_builder_factory = {
+        // Activation scope today: this passes the *builtin* extension registry
+        // only. So when the flag is ON, the live runtime activates exactly two
+        // hook sources — the first-party builtin set and any `[[hooks]]`
+        // declared by builtin/host-bundled packages. Hooks declared by
+        // third-party *installed* extensions are NOT yet surfaced into this
+        // path (no installed-extension registry is threaded here). The loader
+        // (`install_extension_hooks`) fully supports installed-tier extension
+        // hooks; this call site simply doesn't feed it a third-party registry
+        // yet. Wiring the per-tenant installed-extension registry here is the
+        // follow-up that turns on live third-party activation.
         let registry = builtin_extension_registry()?;
         build_hook_dispatcher_builder_factory(hooks_config, &registry).map_err(|error| {
             RebornRuntimeError::InvalidArgument {
