@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use crate::{
     CapabilitySurfaceVersion, HostRuntimeError, VisibleCapabilityRequest, VisibleCapabilitySurface,
-    first_party_tools::resolve_builtin_input_schema_ref, plan_capability,
+    plan_capability,
 };
 
 const ALL_RUNTIME_KINDS: &[RuntimeKind] = &[
@@ -179,11 +179,8 @@ impl<'a> CapabilityCatalog<'a> {
                 Decision::RequireApproval { .. } | Decision::Deny { .. } => continue,
             };
 
-            let mut descriptor = descriptor.clone();
-            resolve_builtin_input_schema_ref(&mut descriptor);
-
             capabilities.push(VisibleCapability {
-                descriptor,
+                descriptor: descriptor.clone(),
                 access,
                 estimated_resources: estimate,
             });

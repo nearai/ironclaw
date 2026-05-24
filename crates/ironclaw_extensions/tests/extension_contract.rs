@@ -81,6 +81,56 @@ fn package_trust_policy_input_rejects_mutated_public_descriptors() {
 }
 
 #[test]
+fn registry_rejects_installed_package_with_mutated_parameters_schema() {
+    let mut package = package_from_manifest(parse_manifest(WASM_MANIFEST), "echo");
+    package.capabilities[0].parameters_schema = serde_json::json!({"type": "object"});
+
+    let err = ExtensionRegistry::new().insert(package).unwrap_err();
+
+    assert!(matches!(
+        err,
+        ExtensionError::InvalidManifest { reason } if reason.contains("capability descriptors")
+    ));
+}
+
+#[test]
+fn registry_allows_host_bundled_package_with_resolved_parameters_schema() {
+    let manifest = ExtensionManifest::parse(
+        WASM_MANIFEST,
+        ManifestSource::HostBundled,
+        &HostPortCatalog::empty(),
+    )
+    .unwrap();
+    let mut package = package_from_manifest(manifest, "echo");
+    package.capabilities[0].parameters_schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "message": { "type": "string" }
+        },
+        "required": ["message"],
+        "additionalProperties": false
+    });
+
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(package).unwrap();
+
+    let descriptor = registry
+        .get_capability(&CapabilityId::new("echo.say").unwrap())
+        .unwrap();
+    assert_eq!(
+        descriptor.parameters_schema,
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "message": { "type": "string" }
+            },
+            "required": ["message"],
+            "additionalProperties": false
+        })
+    );
+}
+
+#[test]
 fn script_and_mcp_runtime_metadata_stays_declarative() {
     let script = parse_manifest(SCRIPT_MANIFEST);
     assert_eq!(script.runtime_kind(), RuntimeKind::Script);
