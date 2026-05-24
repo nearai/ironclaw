@@ -11,7 +11,8 @@ use ironclaw_loop_support::{
 };
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, CapabilityCallCandidate, CapabilityInputRef, CapabilitySurfaceVersion,
-    LoopCapabilityPort, ProviderToolCall, ProviderToolCallReplay, VisibleCapabilityRequest,
+    LoopCapabilityPort, ProviderToolCall, ProviderToolCallReplay, ProviderToolDefinition,
+    VisibleCapabilityRequest,
 };
 use thiserror::Error;
 
@@ -263,13 +264,7 @@ async fn assert_provider_tools(
     capabilities: Arc<dyn LoopCapabilityPort>,
     capability_ids: &[CapabilityId],
 ) -> Result<(), HostManagedModelError> {
-    capabilities
-        .visible_capabilities(VisibleCapabilityRequest)
-        .await
-        .map_err(capability_host_error)?;
-    let definitions = capabilities
-        .tool_definitions()
-        .map_err(capability_host_error)?;
+    let definitions = provider_tool_definitions(&capabilities).await?;
     for capability_id in capability_ids {
         if !definitions
             .iter()
@@ -287,18 +282,24 @@ async fn assert_provider_tools(
     Ok(())
 }
 
+async fn provider_tool_definitions(
+    capabilities: &Arc<dyn LoopCapabilityPort>,
+) -> Result<Vec<ProviderToolDefinition>, HostManagedModelError> {
+    capabilities
+        .visible_capabilities(VisibleCapabilityRequest)
+        .await
+        .map_err(capability_host_error)?;
+    capabilities
+        .tool_definitions()
+        .map_err(capability_host_error)
+}
+
 async fn provider_tool_calls_response(
     request: &HostManagedModelRequest,
     capabilities: Arc<dyn LoopCapabilityPort>,
     calls: Vec<RebornScriptedProviderToolCall>,
 ) -> Result<HostManagedModelResponse, HostManagedModelError> {
-    capabilities
-        .visible_capabilities(VisibleCapabilityRequest)
-        .await
-        .map_err(capability_host_error)?;
-    let definitions = capabilities
-        .tool_definitions()
-        .map_err(capability_host_error)?;
+    let definitions = provider_tool_definitions(&capabilities).await?;
     let mut candidates = Vec::with_capacity(calls.len());
     for call in calls {
         let definition = definitions

@@ -89,6 +89,11 @@ build_first_party_extension() {
         FAILED+=("$name")
         return 1
     fi
+    if [ ! -f "$artifact" ]; then
+        echo "  FAIL $name (expected artifact $artifact not found)"
+        FAILED+=("$name")
+        return 1
+    fi
 
     mkdir -p "$(dirname "$extension_root/$module_path")"
     cp "$artifact" "$extension_root/$module_path"

@@ -1,5 +1,3 @@
-#[path = "support/github_wasm_runtime_contract.rs"]
-mod github_wasm_runtime_contract;
 mod support;
 
 use support::legacy_capability_fixture_to_v2;
@@ -5369,7 +5367,6 @@ impl WasmRuntimeCredentialProvider for SecretStoreLeaseCredentials {
 #[derive(Debug, Clone, Default)]
 struct RecordingRuntimeHttpEgress {
     requests: Arc<std::sync::Mutex<Vec<RuntimeHttpEgressRequest>>>,
-    response_body: Vec<u8>,
 }
 
 impl RecordingRuntimeHttpEgress {
@@ -5384,14 +5381,12 @@ impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
         self.requests.lock().unwrap().push(request.clone());
-        let response_body = self.response_body.clone();
-        let response_bytes = response_body.len() as u64;
         Ok(RuntimeHttpEgressResponse {
             status: 200,
             headers: Vec::new(),
-            body: response_body,
+            body: Vec::new(),
             request_bytes: request.body.len() as u64,
-            response_bytes,
+            response_bytes: 0,
             redaction_applied: false,
         })
     }
