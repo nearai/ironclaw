@@ -834,9 +834,11 @@ fn registry_with_manifest(manifest: &str) -> ExtensionRegistry {
 
 fn parse_manifest(manifest: &str) -> ExtensionManifest {
     let manifest = legacy_capability_fixture_to_v2(manifest);
+    // HostBundled — legacy top-level capability fixtures are HostBundled-only
+    // per the readiness gate; test intent is end-to-end host-runtime gating.
     ExtensionManifest::parse(
         &manifest,
-        ManifestSource::InstalledLocal,
+        ManifestSource::HostBundled,
         &HostPortCatalog::empty(),
     )
     .unwrap()

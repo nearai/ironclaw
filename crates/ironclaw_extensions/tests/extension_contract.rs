@@ -748,12 +748,11 @@ async fn lifecycle_service_does_not_install_when_required_event_sink_fails() {
 }
 
 fn parse_manifest(raw: &str) -> ExtensionManifest {
-    ExtensionManifest::parse(
-        raw,
-        ManifestSource::InstalledLocal,
-        &HostPortCatalog::empty(),
-    )
-    .unwrap()
+    // HostBundled — the legacy WASM_MANIFEST fixtures use top-level
+    // `[[capabilities]]`, which the readiness gate restricts to host-bundled
+    // sources. Tests that exercise downstream lifecycle/registry behavior
+    // do not depend on the manifest being treated as InstalledLocal.
+    ExtensionManifest::parse(raw, ManifestSource::HostBundled, &HostPortCatalog::empty()).unwrap()
 }
 
 fn package_from_manifest(manifest: ExtensionManifest, id: &str) -> ExtensionPackage {

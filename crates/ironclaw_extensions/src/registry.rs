@@ -5,7 +5,7 @@ use ironclaw_host_api::{CapabilityDescriptor, CapabilityId, ExtensionId};
 use crate::{ExtensionError, ExtensionPackage};
 
 /// Registry of validated extension packages and declared capabilities.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ExtensionRegistry {
     packages: HashMap<ExtensionId, ExtensionPackage>,
     capabilities: HashMap<CapabilityId, CapabilityDescriptor>,

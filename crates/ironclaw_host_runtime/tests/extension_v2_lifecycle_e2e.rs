@@ -25,7 +25,7 @@ use tempfile::tempdir;
 
 #[tokio::test]
 async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_host_api_capability() {
-    let (_storage, fs) = mounted_extension_fs("script", SCRIPT_MANIFEST);
+    let (_storage, fs) = mounted_extension_fs("script", "script", SCRIPT_MANIFEST);
     let discovered = discover_extensions_with_default_host_api_contracts(
         &fs,
         &VirtualPath::new("/system/extensions").unwrap(),
@@ -40,6 +40,7 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_host
     let mut lifecycle = ExtensionLifecycleService::new(ExtensionRegistry::new());
     lifecycle.install(package).await.unwrap();
     let extension_id = ExtensionId::new("script").unwrap();
+    let capability_id = CapabilityId::new("script.echo").unwrap();
     assert!(lifecycle.is_enabled(&extension_id));
     lifecycle.disable(&extension_id).await.unwrap();
     assert!(!lifecycle.is_enabled(&extension_id));
@@ -49,9 +50,7 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_host
     let hot_catalog = publish_hot_capability_catalog(&fs, lifecycle.registry())
         .await
         .unwrap();
-    let hot_record = hot_catalog
-        .get(&CapabilityId::new("script.echo").unwrap())
-        .unwrap();
+    let hot_record = hot_catalog.get(&capability_id).unwrap();
     assert_eq!(
         hot_record.descriptor.parameters_schema,
         json!({"type":"object","properties":{"message":{"type":"string"}},"required":["message"]})
@@ -86,9 +85,16 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_host
         RuntimeKind::Script,
         json!({"message":"script ok"}),
     ));
-    let dispatcher =
-        RuntimeDispatcher::from_arcs(Arc::new(discovered), Arc::new(fs), Arc::clone(&governor))
-            .with_runtime_adapter_arc(RuntimeKind::Script, Arc::clone(&adapter));
+    // Dispatcher is built from the lifecycle-installed registry, not the
+    // pre-install discovery snapshot, so this proves the registry the
+    // lifecycle service actually owns is dispatch-ready.
+    let fs_arc = Arc::new(fs);
+    let dispatcher = RuntimeDispatcher::from_arcs(
+        Arc::new(lifecycle.registry().clone()),
+        Arc::clone(&fs_arc),
+        Arc::clone(&governor),
+    )
+    .with_runtime_adapter_arc(RuntimeKind::Script, Arc::clone(&adapter));
     let dispatch_port: &dyn CapabilityDispatcher = &dispatcher;
     let reservation = governor.reserve(scope.clone(), estimate.clone()).unwrap();
     let reservation_id = reservation.id;
@@ -96,7 +102,7 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_host
 
     let result = dispatch_port
         .dispatch_json(ironclaw_host_api::CapabilityDispatchRequest {
-            capability_id: CapabilityId::new("script.echo").unwrap(),
+            capability_id: capability_id.clone(),
             scope: scope.clone(),
             estimate: estimate.clone(),
             mounts: None,
@@ -115,23 +121,29 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_host
     let requests = adapter.requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].provider, extension_id);
-    assert_eq!(
-        requests[0].capability_id,
-        CapabilityId::new("script.echo").unwrap()
-    );
+    assert_eq!(requests[0].capability_id, capability_id);
     assert_eq!(requests[0].runtime, RuntimeKind::Script);
     assert_eq!(requests[0].scope, scope);
     assert_eq!(requests[0].estimate, estimate);
     assert_eq!(requests[0].mounts, None);
     assert_eq!(requests[0].resource_reservation_id, Some(reservation_id));
     assert_eq!(requests[0].input, json!({"message":"hello"}));
+
+    // Close the readiness chain: remove the package and confirm a fresh
+    // catalog publication no longer projects its capability.
+    lifecycle.remove(&extension_id).await.unwrap();
+    assert!(!lifecycle.is_enabled(&extension_id));
+    let after_remove = publish_hot_capability_catalog(fs_arc.as_ref(), lifecycle.registry())
+        .await
+        .unwrap();
+    assert!(after_remove.get(&capability_id).is_none());
 }
 
 #[tokio::test]
 async fn extension_v2_lifecycle_fails_closed_before_install_for_unknown_required_host_port() {
     let manifest =
         SCRIPT_MANIFEST.replace("host.runtime.http_egress", "host.runtime.not_supported");
-    let (_storage, fs) = mounted_extension_fs("script", &manifest);
+    let (_storage, fs) = mounted_extension_fs("script", "script", &manifest);
 
     let err = discover_extensions_with_default_host_api_contracts(
         &fs,
@@ -150,6 +162,200 @@ async fn extension_v2_lifecycle_fails_closed_before_install_for_unknown_required
     );
     let lifecycle = ExtensionLifecycleService::new(ExtensionRegistry::new());
     assert!(!lifecycle.is_enabled(&ExtensionId::new("script").unwrap()));
+}
+
+#[tokio::test]
+async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_wasm_capability() {
+    let (_storage, fs) = mounted_extension_fs("wasm-echo", "wasm", WASM_MANIFEST);
+    let discovered = discover_extensions_with_default_host_api_contracts(
+        &fs,
+        &VirtualPath::new("/system/extensions").unwrap(),
+    )
+    .await
+    .unwrap();
+    let package = discovered
+        .get_extension(&ExtensionId::new("wasm-echo").unwrap())
+        .unwrap()
+        .clone();
+
+    let extension_id = ExtensionId::new("wasm-echo").unwrap();
+    let capability_id = CapabilityId::new("wasm-echo.echo").unwrap();
+    let mut lifecycle = ExtensionLifecycleService::new(ExtensionRegistry::new());
+    lifecycle.install(package).await.unwrap();
+
+    let hot_catalog = publish_hot_capability_catalog(&fs, lifecycle.registry())
+        .await
+        .unwrap();
+    let hot_record = hot_catalog.get(&capability_id).unwrap();
+    assert_eq!(hot_record.descriptor.runtime, RuntimeKind::Wasm);
+    assert_eq!(
+        hot_record.descriptor.parameters_schema,
+        json!({"type":"object","properties":{"message":{"type":"string"}},"required":["message"]})
+    );
+    assert_eq!(hot_record.output_schema, json!({"type":"object"}));
+    assert_eq!(
+        hot_record.prompt_doc.as_deref(),
+        Some("Echo user-provided text through the wasm runtime.")
+    );
+
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let scope = sample_scope();
+    let estimate = ResourceEstimate {
+        concurrency_slots: Some(1),
+        output_bytes: Some(10_000),
+        ..ResourceEstimate::default()
+    };
+    governor
+        .set_limit(
+            ResourceAccount::tenant(scope.tenant_id.clone()),
+            ResourceLimits {
+                max_concurrency_slots: Some(1),
+                max_output_bytes: Some(10_000),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
+    let adapter = Arc::new(RecordingAdapter::new(
+        RuntimeKind::Wasm,
+        json!({"message":"wasm ok"}),
+    ));
+    let fs_arc = Arc::new(fs);
+    let dispatcher = RuntimeDispatcher::from_arcs(
+        Arc::new(lifecycle.registry().clone()),
+        Arc::clone(&fs_arc),
+        Arc::clone(&governor),
+    )
+    .with_runtime_adapter_arc(RuntimeKind::Wasm, Arc::clone(&adapter));
+    let dispatch_port: &dyn CapabilityDispatcher = &dispatcher;
+    let reservation = governor.reserve(scope.clone(), estimate.clone()).unwrap();
+    let reservation_id = reservation.id;
+
+    let result = dispatch_port
+        .dispatch_json(ironclaw_host_api::CapabilityDispatchRequest {
+            capability_id: capability_id.clone(),
+            scope: scope.clone(),
+            estimate: estimate.clone(),
+            mounts: None,
+            resource_reservation: Some(reservation),
+            input: json!({"message":"hello"}),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.output, json!({"message":"wasm ok"}));
+    assert_eq!(result.receipt.id, reservation_id);
+    assert_eq!(result.receipt.status, ReservationStatus::Reconciled);
+
+    let requests = adapter.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].provider, extension_id);
+    assert_eq!(requests[0].capability_id, capability_id);
+    assert_eq!(requests[0].runtime, RuntimeKind::Wasm);
+
+    lifecycle.remove(&extension_id).await.unwrap();
+    assert!(!lifecycle.is_enabled(&extension_id));
+    let after_remove = publish_hot_capability_catalog(fs_arc.as_ref(), lifecycle.registry())
+        .await
+        .unwrap();
+    assert!(after_remove.get(&capability_id).is_none());
+}
+
+#[tokio::test]
+async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_mcp_capability() {
+    let (_storage, fs) = mounted_extension_fs("mcp-echo", "mcp", MCP_MANIFEST);
+    let discovered = discover_extensions_with_default_host_api_contracts(
+        &fs,
+        &VirtualPath::new("/system/extensions").unwrap(),
+    )
+    .await
+    .unwrap();
+    let package = discovered
+        .get_extension(&ExtensionId::new("mcp-echo").unwrap())
+        .unwrap()
+        .clone();
+
+    let extension_id = ExtensionId::new("mcp-echo").unwrap();
+    let capability_id = CapabilityId::new("mcp-echo.echo").unwrap();
+    let mut lifecycle = ExtensionLifecycleService::new(ExtensionRegistry::new());
+    lifecycle.install(package).await.unwrap();
+
+    let hot_catalog = publish_hot_capability_catalog(&fs, lifecycle.registry())
+        .await
+        .unwrap();
+    let hot_record = hot_catalog.get(&capability_id).unwrap();
+    assert_eq!(hot_record.descriptor.runtime, RuntimeKind::Mcp);
+    assert_eq!(
+        hot_record.descriptor.parameters_schema,
+        json!({"type":"object","properties":{"message":{"type":"string"}},"required":["message"]})
+    );
+    assert_eq!(hot_record.output_schema, json!({"type":"object"}));
+    assert_eq!(
+        hot_record.prompt_doc.as_deref(),
+        Some("Echo user-provided text through the mcp runtime.")
+    );
+
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let scope = sample_scope();
+    let estimate = ResourceEstimate {
+        concurrency_slots: Some(1),
+        process_count: Some(1),
+        output_bytes: Some(10_000),
+        ..ResourceEstimate::default()
+    };
+    governor
+        .set_limit(
+            ResourceAccount::tenant(scope.tenant_id.clone()),
+            ResourceLimits {
+                max_concurrency_slots: Some(1),
+                max_process_count: Some(1),
+                max_output_bytes: Some(10_000),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
+    let adapter = Arc::new(RecordingAdapter::new(
+        RuntimeKind::Mcp,
+        json!({"message":"mcp ok"}),
+    ));
+    let fs_arc = Arc::new(fs);
+    let dispatcher = RuntimeDispatcher::from_arcs(
+        Arc::new(lifecycle.registry().clone()),
+        Arc::clone(&fs_arc),
+        Arc::clone(&governor),
+    )
+    .with_runtime_adapter_arc(RuntimeKind::Mcp, Arc::clone(&adapter));
+    let dispatch_port: &dyn CapabilityDispatcher = &dispatcher;
+    let reservation = governor.reserve(scope.clone(), estimate.clone()).unwrap();
+    let reservation_id = reservation.id;
+
+    let result = dispatch_port
+        .dispatch_json(ironclaw_host_api::CapabilityDispatchRequest {
+            capability_id: capability_id.clone(),
+            scope: scope.clone(),
+            estimate: estimate.clone(),
+            mounts: None,
+            resource_reservation: Some(reservation),
+            input: json!({"message":"hello"}),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.output, json!({"message":"mcp ok"}));
+    assert_eq!(result.receipt.id, reservation_id);
+    assert_eq!(result.receipt.status, ReservationStatus::Reconciled);
+
+    let requests = adapter.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].provider, extension_id);
+    assert_eq!(requests[0].capability_id, capability_id);
+    assert_eq!(requests[0].runtime, RuntimeKind::Mcp);
+
+    lifecycle.remove(&extension_id).await.unwrap();
+    assert!(!lifecycle.is_enabled(&extension_id));
+    let after_remove = publish_hot_capability_catalog(fs_arc.as_ref(), lifecycle.registry())
+        .await
+        .unwrap();
+    assert!(after_remove.get(&capability_id).is_none());
 }
 
 #[derive(Clone)]
@@ -254,25 +460,29 @@ fn dispatch_error_for_runtime(
     }
 }
 
-fn mounted_extension_fs(id: &str, manifest: &str) -> (tempfile::TempDir, LocalFilesystem) {
+fn mounted_extension_fs(
+    id: &str,
+    lane: &str,
+    manifest: &str,
+) -> (tempfile::TempDir, LocalFilesystem) {
     let storage = tempdir().unwrap();
     let extension_root = storage.path().join(id);
-    std::fs::create_dir_all(extension_root.join("schemas/script")).unwrap();
-    std::fs::create_dir_all(extension_root.join("prompts/script")).unwrap();
+    std::fs::create_dir_all(extension_root.join(format!("schemas/{lane}"))).unwrap();
+    std::fs::create_dir_all(extension_root.join(format!("prompts/{lane}"))).unwrap();
     std::fs::write(extension_root.join("manifest.toml"), manifest).unwrap();
     std::fs::write(
-        extension_root.join("schemas/script/echo.input.v1.json"),
+        extension_root.join(format!("schemas/{lane}/echo.input.v1.json")),
         r#"{"type":"object","properties":{"message":{"type":"string"}},"required":["message"]}"#,
     )
     .unwrap();
     std::fs::write(
-        extension_root.join("schemas/script/echo.output.v1.json"),
+        extension_root.join(format!("schemas/{lane}/echo.output.v1.json")),
         r#"{"type":"object"}"#,
     )
     .unwrap();
     std::fs::write(
-        extension_root.join("prompts/script/echo.md"),
-        "Echo user-provided text through the script runtime.",
+        extension_root.join(format!("prompts/{lane}/echo.md")),
+        format!("Echo user-provided text through the {lane} runtime."),
     )
     .unwrap();
 
@@ -326,5 +536,65 @@ visibility = "model"
 input_schema_ref = "schemas/script/echo.input.v1.json"
 output_schema_ref = "schemas/script/echo.output.v1.json"
 prompt_doc_ref = "prompts/script/echo.md"
+required_host_ports = ["host.runtime.http_egress"]
+"#;
+
+const WASM_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
+id = "wasm-echo"
+name = "WASM Echo"
+version = "0.1.0"
+description = "WASM lifecycle extension"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/echo.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "wasm-echo.echo"
+description = "Echo through WASM"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/wasm/echo.input.v1.json"
+output_schema_ref = "schemas/wasm/echo.output.v1.json"
+prompt_doc_ref = "prompts/wasm/echo.md"
+required_host_ports = ["host.runtime.http_egress"]
+"#;
+
+const MCP_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
+id = "mcp-echo"
+name = "MCP Echo"
+version = "0.1.0"
+description = "MCP lifecycle extension"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "stdio"
+command = "mcp-echo-server"
+args = ["--stdio"]
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "mcp-echo.echo"
+description = "Echo through MCP"
+effects = ["network", "dispatch_capability"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/mcp/echo.input.v1.json"
+output_schema_ref = "schemas/mcp/echo.output.v1.json"
+prompt_doc_ref = "prompts/mcp/echo.md"
 required_host_ports = ["host.runtime.http_egress"]
 "#;

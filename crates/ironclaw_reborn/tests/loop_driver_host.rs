@@ -5705,7 +5705,7 @@ fn e2e_registry_with_manifest(manifest: &str) -> ExtensionRegistry {
     let mut registry = ExtensionRegistry::new();
     let manifest = ExtensionManifest::parse(
         manifest,
-        ManifestSource::InstalledLocal,
+        ManifestSource::HostBundled,
         &HostPortCatalog::empty(),
     )
     .unwrap();

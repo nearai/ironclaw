@@ -538,9 +538,13 @@ fn package_from_manifest(manifest: &str) -> ExtensionPackage {
 
 fn parse_manifest(manifest: &str) -> ExtensionManifest {
     let manifest = legacy_capability_fixture_to_v2(manifest);
+    // HostBundled — these dispatcher tests use legacy top-level capability
+    // fixtures, which the readiness gate restricts to host-bundled sources.
+    // Test intent is downstream dispatch routing, not source-vs-shape
+    // validation.
     ExtensionManifest::parse(
         &manifest,
-        ManifestSource::InstalledLocal,
+        ManifestSource::HostBundled,
         &HostPortCatalog::empty(),
     )
     .unwrap()

@@ -318,7 +318,7 @@ fn hot_capability_manifest_rejects_traversal_schema_ref_at_parse_boundary() {
 
     let err = ExtensionManifest::parse(
         &manifest,
-        ManifestSource::InstalledLocal,
+        ManifestSource::HostBundled,
         &HostPortCatalog::empty(),
     )
     .unwrap_err();
@@ -1345,7 +1345,7 @@ fn hot_catalog_fixture_with_prompt_bytes(
 ) -> (tempfile::TempDir, LocalFilesystem, ExtensionRegistry) {
     let manifest = ExtensionManifest::parse(
         HOT_CAPABILITY_MANIFEST,
-        ManifestSource::InstalledLocal,
+        ManifestSource::HostBundled,
         &HostPortCatalog::empty(),
     )
     .unwrap();
@@ -1397,7 +1397,7 @@ fn hot_catalog_fixture_with_manifest(
 fn manifest_without_prompt_doc_ref() -> ExtensionManifest {
     let mut manifest = ExtensionManifest::parse(
         HOT_CAPABILITY_MANIFEST,
-        ManifestSource::InstalledLocal,
+        ManifestSource::HostBundled,
         &HostPortCatalog::empty(),
     )
     .unwrap();
@@ -1408,7 +1408,7 @@ fn manifest_without_prompt_doc_ref() -> ExtensionManifest {
 fn manifest_with_visibility(visibility: CapabilityVisibility) -> ExtensionManifest {
     let mut manifest = ExtensionManifest::parse(
         HOT_CAPABILITY_MANIFEST,
-        ManifestSource::InstalledLocal,
+        ManifestSource::HostBundled,
         &HostPortCatalog::empty(),
     )
     .unwrap();
@@ -1487,7 +1487,7 @@ fn parse_manifest(manifest: &str) -> ExtensionManifest {
     let manifest = legacy_capability_fixture_to_v2(manifest);
     ExtensionManifest::parse(
         &manifest,
-        ManifestSource::InstalledLocal,
+        ManifestSource::HostBundled,
         &HostPortCatalog::empty(),
     )
     .unwrap()

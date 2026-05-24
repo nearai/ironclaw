@@ -599,13 +599,8 @@ impl ExtensionManifestV2 {
                     reason: format!("unknown top-level field {key:?}"),
                 });
             }
-            if !source.allows_first_party() && !manifest.capabilities.is_empty() {
-                return Err(
-                    ManifestV2Error::LegacyTopLevelCapabilitiesForInstalledSource {
-                        manifest_source: source,
-                    },
-                );
-            }
+            // Legacy top-level capability rejection for non-HostBundled sources
+            // is centralized in `from_raw`; nothing further to enforce here.
         } else {
             manifest.project_and_extend_capabilities(
                 &document.sections,
@@ -702,6 +697,20 @@ impl ExtensionManifestV2 {
                 manifest_source: source,
                 kind: runtime.kind(),
             });
+        }
+        // Legacy top-level `[[capabilities]]` is only allowed for host-bundled
+        // packages. Centralizing here means every parse entry point — bare
+        // `parse`, `parse_with_host_api_contracts`, and
+        // `parse_with_optional_host_api_contracts` — enforces the readiness
+        // gate. Ordered after the reserved-id / trust / runtime source checks
+        // so the more-specific privilege rejection wins when both apply. See
+        // `docs/reborn/contracts/tool-package-readiness.md` §3.
+        if raw.host_api.is_empty() && !source.allows_first_party() && !raw.capabilities.is_empty() {
+            return Err(
+                ManifestV2Error::LegacyTopLevelCapabilitiesForInstalledSource {
+                    manifest_source: source,
+                },
+            );
         }
 
         let host_apis = validate_host_api_refs(raw.host_api, sections)?;

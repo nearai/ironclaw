@@ -1470,7 +1470,7 @@ fn parse_manifest(manifest: &str) -> ExtensionManifest {
     let manifest = legacy_capability_fixture_to_v2(manifest);
     ExtensionManifest::parse(
         &manifest,
-        ManifestSource::InstalledLocal,
+        ManifestSource::HostBundled,
         &HostPortCatalog::empty(),
     )
     .unwrap()
