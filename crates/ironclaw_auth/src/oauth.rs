@@ -1,3 +1,11 @@
+//! OAuth protocol helpers shared by Reborn product auth providers.
+//!
+//! This module intentionally owns only protocol-level pieces: Google OAuth
+//! constants, PKCE challenge construction, authorization URL assembly, and
+//! redacted provider token projections. Durable flow state, callback routing,
+//! provider exchange, and credential storage remain owned by the product auth
+//! services in this crate.
+
 use std::fmt;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -10,15 +18,23 @@ use crate::{
     OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret, ProviderScope,
 };
 
+/// Reborn auth provider id for Google OAuth accounts.
 pub const GOOGLE_PROVIDER_ID: &str = "google";
+/// Google OAuth 2.0 authorization endpoint.
 pub const GOOGLE_AUTHORIZATION_ENDPOINT: &str = "https://accounts.google.com/o/oauth2/v2/auth";
+/// Google OAuth 2.0 token endpoint.
 pub const GOOGLE_TOKEN_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
 
+/// Read-only access to Google Calendar calendars and events.
 pub const GOOGLE_CALENDAR_READONLY_SCOPE: &str =
     "https://www.googleapis.com/auth/calendar.readonly";
+/// Read/write access to Google Calendar events.
 pub const GOOGLE_CALENDAR_EVENTS_SCOPE: &str = "https://www.googleapis.com/auth/calendar.events";
+/// Read-only access to Gmail messages and metadata.
 pub const GOOGLE_GMAIL_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/gmail.readonly";
+/// Permission to send Gmail messages.
 pub const GOOGLE_GMAIL_SEND_SCOPE: &str = "https://www.googleapis.com/auth/gmail.send";
+/// Permission to modify Gmail messages and drafts.
 pub const GOOGLE_GMAIL_MODIFY_SCOPE: &str = "https://www.googleapis.com/auth/gmail.modify";
 
 /// URL-safe S256 PKCE code challenge.
@@ -39,7 +55,7 @@ impl fmt::Display for PkceCodeChallenge {
 
 /// Provider authorization URL input. This is protocol-only: callers still own
 /// durable auth-flow records, callback routing, and provider exchange.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OAuthAuthorizeUrlRequest<'a> {
     pub authorization_endpoint: &'a str,
     pub client_id: &'a str,
@@ -48,6 +64,21 @@ pub struct OAuthAuthorizeUrlRequest<'a> {
     pub code_challenge: &'a PkceCodeChallenge,
     pub scopes: &'a [ProviderScope],
     pub extra_params: &'a [(&'a str, &'a str)],
+}
+
+impl fmt::Debug for OAuthAuthorizeUrlRequest<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OAuthAuthorizeUrlRequest")
+            .field("authorization_endpoint", &self.authorization_endpoint)
+            .field("client_id", &"[REDACTED]")
+            .field("redirect_uri", &self.redirect_uri)
+            .field("state", &"[REDACTED]")
+            .field("code_challenge", &"[REDACTED]")
+            .field("scopes", &self.scopes)
+            .field("extra_params", &self.extra_params)
+            .finish()
+    }
 }
 
 /// Redacted token-response projection after provider exchange. It can be used
@@ -184,6 +215,7 @@ pub fn build_google_authorization_url(
         ("include_granted_scopes", "true"),
     ];
     if let Some(hosted_domain) = allowed_hosted_domain {
+        validate_authorize_fragment("google hosted domain", hosted_domain)?;
         extra_params.push(("hd", hosted_domain));
     }
     build_authorization_url(OAuthAuthorizeUrlRequest {
@@ -206,6 +238,8 @@ pub fn scope_text(scopes: &[ProviderScope]) -> String {
 }
 
 fn sha256_hex(value: &str) -> String {
+    // Digest newtypes expose constant-time comparison for callback/state checks;
+    // this helper only constructs the canonical 64-character lowercase hex text.
     let digest = Sha256::digest(value.as_bytes());
     let mut output = String::with_capacity(64);
     for byte in digest {

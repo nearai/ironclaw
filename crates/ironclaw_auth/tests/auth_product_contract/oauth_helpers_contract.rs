@@ -1,11 +1,41 @@
 use super::common::*;
 use ironclaw_auth::{
     GOOGLE_AUTHORIZATION_ENDPOINT, GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE,
-    OAuthAuthorizationCode, OAuthAuthorizeUrlRequest, OAuthTokenResponse, PkceVerifierSecret,
-    build_authorization_url, build_google_authorization_url, opaque_state_hash,
+    OAuthAuthorizationCode, OAuthAuthorizeUrlRequest, OAuthTokenResponse, PkceCodeChallenge,
+    PkceVerifierSecret, build_authorization_url, build_google_authorization_url, opaque_state_hash,
     pkce_s256_challenge, pkce_verifier_hash, scope_text,
 };
 use secrecy::ExposeSecret;
+
+fn verifier_challenge() -> PkceCodeChallenge {
+    let verifier = PkceVerifierSecret::new(secret("raw-pkce-verifier")).unwrap();
+    pkce_s256_challenge(&verifier)
+}
+
+fn valid_scopes() -> Vec<ironclaw_auth::ProviderScope> {
+    provider_scopes(&[GOOGLE_CALENDAR_READONLY_SCOPE])
+}
+
+fn valid_authorization_request<'a>(
+    challenge: &'a PkceCodeChallenge,
+    scopes: &'a [ironclaw_auth::ProviderScope],
+    extra_params: &'a [(&'a str, &'a str)],
+) -> OAuthAuthorizeUrlRequest<'a> {
+    OAuthAuthorizeUrlRequest {
+        authorization_endpoint: GOOGLE_AUTHORIZATION_ENDPOINT,
+        client_id: "client-id.apps.googleusercontent.com",
+        redirect_uri: "http://127.0.0.1:5555/oauth/callback/google",
+        state: "opaque-state",
+        code_challenge: challenge,
+        scopes,
+        extra_params,
+    }
+}
+
+fn assert_invalid_request<T>(result: Result<T, ironclaw_auth::AuthProductError>) {
+    let error = result.err().expect("request should be invalid");
+    assert_eq!(error.code(), AuthErrorCode::InvalidRequest);
+}
 
 #[test]
 fn oauth_hash_helpers_emit_valid_stable_digests_without_raw_material() {
@@ -138,4 +168,109 @@ fn token_response_rejects_empty_token_material() {
     let error = OAuthTokenResponse::new(secret(""), None, None, None).unwrap_err();
 
     assert_eq!(error.code(), AuthErrorCode::InvalidRequest);
+}
+
+#[test]
+fn token_response_rejects_empty_refresh_token() {
+    assert_invalid_request(OAuthTokenResponse::new(
+        secret("access-token"),
+        Some(secret("")),
+        None,
+        None,
+    ));
+}
+
+#[test]
+fn token_response_rejects_invalid_scope() {
+    assert_invalid_request(OAuthTokenResponse::new(
+        secret("access-token"),
+        None,
+        Some("valid-scope \0invalid"),
+        None,
+    ));
+}
+
+#[test]
+fn authorization_url_request_debug_redacts_sensitive_fields() {
+    let challenge = verifier_challenge();
+    let scopes = valid_scopes();
+    let request = valid_authorization_request(&challenge, &scopes, &[]);
+
+    let debug = format!("{request:?}");
+
+    assert!(!debug.contains("client-id.apps.googleusercontent.com"));
+    assert!(!debug.contains("opaque-state"));
+    assert!(!debug.contains(challenge.as_str()));
+    assert!(debug.contains("[REDACTED]"));
+}
+
+#[test]
+fn authorization_url_builder_rejects_missing_core_fields() {
+    let challenge = verifier_challenge();
+    let scopes = valid_scopes();
+
+    assert_invalid_request(build_authorization_url(OAuthAuthorizeUrlRequest {
+        client_id: "",
+        ..valid_authorization_request(&challenge, &scopes, &[])
+    }));
+    assert_invalid_request(build_authorization_url(OAuthAuthorizeUrlRequest {
+        redirect_uri: "",
+        ..valid_authorization_request(&challenge, &scopes, &[])
+    }));
+    assert_invalid_request(build_authorization_url(OAuthAuthorizeUrlRequest {
+        state: "",
+        ..valid_authorization_request(&challenge, &scopes, &[])
+    }));
+}
+
+#[test]
+fn authorization_url_builder_rejects_bad_endpoint_urls() {
+    let challenge = verifier_challenge();
+    let scopes = valid_scopes();
+
+    assert_invalid_request(build_authorization_url(OAuthAuthorizeUrlRequest {
+        authorization_endpoint: "not a url",
+        ..valid_authorization_request(&challenge, &scopes, &[])
+    }));
+    assert_invalid_request(build_authorization_url(OAuthAuthorizeUrlRequest {
+        authorization_endpoint: "http://accounts.google.com/o/oauth2/v2/auth",
+        ..valid_authorization_request(&challenge, &scopes, &[])
+    }));
+}
+
+#[test]
+fn authorization_url_builder_rejects_bad_extra_params() {
+    let challenge = verifier_challenge();
+    let scopes = valid_scopes();
+
+    assert_invalid_request(build_authorization_url(valid_authorization_request(
+        &challenge,
+        &scopes,
+        &[("", "value")],
+    )));
+    assert_invalid_request(build_authorization_url(valid_authorization_request(
+        &challenge,
+        &scopes,
+        &[("login_hint", "")],
+    )));
+    assert_invalid_request(build_authorization_url(valid_authorization_request(
+        &challenge,
+        &scopes,
+        &[("login_hint", "bad\u{0000}value")],
+    )));
+}
+
+#[test]
+fn google_authorization_url_rejects_invalid_hosted_domain() {
+    let challenge = verifier_challenge();
+    let scopes = valid_scopes();
+
+    assert_invalid_request(build_google_authorization_url(
+        "client-id.apps.googleusercontent.com",
+        "http://127.0.0.1:5555/oauth/callback/google",
+        "opaque-state",
+        &challenge,
+        &scopes,
+        Some("near.ai\nexample.com"),
+    ));
 }
