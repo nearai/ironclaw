@@ -1,0 +1,274 @@
+// WebChat v2 ingress client.
+//
+// Every function in this module targets a `/api/webchat/v2/*` route
+// defined by issue #3815. The module deliberately contains no
+// `/api/chat`, `/api/engine`, `/auth/`, or `/api/profile` paths — the
+// hard non-goal of issue #3886 is enforced here as the single
+// network seam for the SPA. Add no v1 helpers.
+//
+// Request/response shapes mirror the Rust DTOs in
+// `ironclaw_product_workflow::webui_inbound` and
+// `ironclaw_product_workflow::reborn_services::types`. The error
+// envelope mirrors `RebornServicesError`.
+
+const TOKEN_KEY = "ironclaw_token";
+const V2_BASE = "/api/webchat/v2";
+
+export class ApiError extends Error {
+  constructor(message, { status, statusText, body, headers, payload } = {}) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.statusText = statusText;
+    this.body = body;
+    this.headers = headers;
+    // Parsed RebornServicesError when the server returned JSON in
+    // the documented shape. Undefined for non-JSON 5xx / proxy errors.
+    this.payload = payload;
+  }
+}
+
+export function readStoredToken() {
+  return sessionStorage.getItem(TOKEN_KEY) || "";
+}
+
+export function storeToken(token) {
+  if (token) {
+    sessionStorage.setItem(TOKEN_KEY, token);
+  } else {
+    sessionStorage.removeItem(TOKEN_KEY);
+  }
+}
+
+// Generate a client action id (idempotency key) for mutating requests.
+// Must be a non-empty token with no control characters; `crypto.randomUUID`
+// satisfies the validator in `webui_inbound::parse_client_action_id`.
+export function clientActionId() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  const bytes = new Uint8Array(16);
+  (crypto?.getRandomValues || ((b) => b))(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function parseErrorBody(response) {
+  const text = await response.text().catch(() => "");
+  if (!text) return { text: "", payload: undefined };
+  const contentType = response.headers.get("content-type") || "";
+  if (!contentType.includes("application/json")) {
+    return { text, payload: undefined };
+  }
+  try {
+    return { text, payload: JSON.parse(text) };
+  } catch (_) {
+    return { text, payload: undefined };
+  }
+}
+
+export async function apiFetch(path, options = {}) {
+  const token = readStoredToken();
+  const headers = new Headers(options.headers || {});
+  headers.set("Accept", "application/json");
+  if (options.body && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+
+  const response = await fetch(path, {
+    credentials: "same-origin",
+    ...options,
+    headers,
+  });
+
+  if (!response.ok) {
+    const { text, payload } = await parseErrorBody(response);
+    throw new ApiError(text || response.statusText, {
+      status: response.status,
+      statusText: response.statusText,
+      body: text,
+      headers: response.headers,
+      payload,
+    });
+  }
+
+  const contentType = response.headers.get("content-type") || "";
+  return contentType.includes("application/json")
+    ? response.json()
+    : response.text();
+}
+
+// --- Threads ---
+
+export function createThread({ clientActionId: clientId, requestedThreadId } = {}) {
+  const body = { client_action_id: clientId || clientActionId() };
+  if (requestedThreadId) body.requested_thread_id = requestedThreadId;
+  return apiFetch(`${V2_BASE}/threads`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function listThreads({ limit, cursor } = {}) {
+  const url = new URL(`${V2_BASE}/threads`, window.location.origin);
+  if (limit != null) url.searchParams.set("limit", String(limit));
+  if (cursor) url.searchParams.set("cursor", cursor);
+  return apiFetch(url.pathname + url.search);
+}
+
+// --- Messages ---
+
+export function sendMessage({ threadId, content, clientActionId: clientId }) {
+  const body = {
+    client_action_id: clientId || clientActionId(),
+    content,
+  };
+  return apiFetch(
+    `${V2_BASE}/threads/${encodeURIComponent(threadId)}/messages`,
+    {
+      method: "POST",
+      body: JSON.stringify(body),
+    },
+  );
+}
+
+// --- Timeline ---
+
+export function fetchTimeline({ threadId, limit, cursor } = {}) {
+  const url = new URL(
+    `${V2_BASE}/threads/${encodeURIComponent(threadId)}/timeline`,
+    window.location.origin,
+  );
+  if (limit != null) url.searchParams.set("limit", String(limit));
+  if (cursor) url.searchParams.set("cursor", cursor);
+  return apiFetch(url.pathname + url.search);
+}
+
+// --- Streaming (SSE) ---
+
+// `EventSource` cannot set request headers, so the token rides as a
+// query param. The composition middleware accepts `?token=` for this
+// route specifically (in-scope "SSE query-token exception" from #3886).
+export function openEventStream({ threadId, afterCursor } = {}) {
+  const url = new URL(
+    `${V2_BASE}/threads/${encodeURIComponent(threadId)}/events`,
+    window.location.origin,
+  );
+  const token = readStoredToken();
+  if (token) url.searchParams.set("token", token);
+  if (afterCursor) url.searchParams.set("after_cursor", afterCursor);
+  return new EventSource(url.toString());
+}
+
+// --- Streaming (WebSocket) ---
+
+// Same-origin enforcement happens at the composition layer. The
+// browser sends Origin automatically; the bearer travels via the
+// `?token=` URL parameter (the WS handshake API in browsers has no
+// way to set a custom request header).
+export function openEventSocket({ threadId } = {}) {
+  const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const url = new URL(
+    `${V2_BASE}/threads/${encodeURIComponent(threadId)}/ws`,
+    window.location.origin,
+  );
+  url.protocol = scheme;
+  const token = readStoredToken();
+  if (token) url.searchParams.set("token", token);
+  return new WebSocket(url.toString());
+}
+
+// --- Run cancellation ---
+
+export function cancelRun({
+  threadId,
+  runId,
+  reason,
+  clientActionId: clientId,
+} = {}) {
+  const body = { client_action_id: clientId || clientActionId() };
+  if (reason) body.reason = reason;
+  return apiFetch(
+    `${V2_BASE}/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/cancel`,
+    {
+      method: "POST",
+      body: JSON.stringify(body),
+    },
+  );
+}
+
+// --- Gate resolution ---
+
+// `resolution` is one of "approved" | "denied" | "credential_provided" | "cancelled".
+// `always` is only meaningful when `resolution === "approved"`.
+// `credentialRef` is only meaningful when `resolution === "credential_provided"`.
+export function resolveGate({
+  threadId,
+  runId,
+  gateRef,
+  resolution,
+  always,
+  credentialRef,
+  clientActionId: clientId,
+} = {}) {
+  const body = {
+    client_action_id: clientId || clientActionId(),
+    resolution,
+  };
+  if (always != null) body.always = always;
+  if (credentialRef) body.credential_ref = credentialRef;
+  return apiFetch(
+    `${V2_BASE}/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/gates/${encodeURIComponent(gateRef)}/resolve`,
+    {
+      method: "POST",
+      body: JSON.stringify(body),
+    },
+  );
+}
+
+// --- Extension setup ---
+
+export function setupExtension(extensionName, { action, payload } = {}) {
+  const body = {};
+  if (action) body.action = action;
+  if (payload !== undefined) body.payload = payload;
+  return apiFetch(
+    `${V2_BASE}/extensions/${encodeURIComponent(extensionName)}/setup`,
+    {
+      method: "POST",
+      body: JSON.stringify(body),
+    },
+  );
+}
+
+// --- TODO stubs for v1-shaped helpers brought-back code still imports ---
+//
+// Issue #3886 Hard Non-Goal: the browser must not call `/auth/*`,
+// `/api/gateway/*`, or any other v1 endpoint without a v2 counterpart.
+// The functions below preserve the fork's import surface so the
+// admin/settings/extensions/login pages render, but they return
+// empty/null data without sending any HTTP request. When a v2
+// equivalent lands, replace the stub body with the real wire call.
+
+export function gatewayStatus() {
+  // TODO: requires v2 gateway-status endpoint. Returning a zeroed
+  // shape so any consumer reading `data.engine_v2_enabled`,
+  // `data.llm_backend`, etc. resolves cleanly to falsey values.
+  return Promise.resolve({
+    engine_v2_enabled: false,
+    restart_enabled: false,
+    total_connections: null,
+    llm_backend: null,
+    llm_model: null,
+    todo: true,
+  });
+}
+
+export function fetchAuthProviders() {
+  // TODO: requires v2 auth-providers endpoint. v2 only supports
+  // OIDC bearer tokens supplied externally; no OAuth providers
+  // are advertised through the v2 ingress.
+  return Promise.resolve({ providers: [], todo: true });
+}

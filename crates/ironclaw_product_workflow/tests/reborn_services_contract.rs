@@ -2886,8 +2886,15 @@ fn facade_source_avoids_forbidden_runtime_dependencies() {
 // callers.
 #[tokio::test]
 async fn list_threads_unimplemented_backend_returns_service_unavailable() {
+    // `ScopeMismatchThreadStub` is reused here because it
+    // intentionally does NOT override the trait's default
+    // `list_threads_for_scope` impl, so the facade sees the
+    // unimplemented-enumeration error path. The in-memory backend
+    // grew a real enumeration impl (local-dev needed working
+    // sidebar listing), so it can no longer stand in for a backend
+    // without enumeration support.
     let services = RebornServices::new(
-        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(ScopeMismatchThreadStub),
         Arc::new(FakeTurnCoordinator::default()),
     );
 

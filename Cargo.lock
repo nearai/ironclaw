@@ -4839,6 +4839,7 @@ dependencies = [
  "ironclaw_trust",
  "ironclaw_turns",
  "ironclaw_webui_v2",
+ "ironclaw_webui_v2_static",
  "libsql",
  "lru 0.16.4",
  "secrecy",
@@ -5242,6 +5243,19 @@ dependencies = [
  "tokio-tungstenite 0.29.0",
  "tower 0.5.3",
  "tracing",
+]
+
+[[package]]
+name = "ironclaw_webui_v2_static"
+version = "0.1.0"
+dependencies = [
+ "axum 0.8.9",
+ "http 1.4.0",
+ "http-body-util",
+ "ironclaw_webui_v2_static",
+ "rand 0.8.6",
+ "tokio",
+ "tower 0.5.3",
 ]
 
 [[package]]

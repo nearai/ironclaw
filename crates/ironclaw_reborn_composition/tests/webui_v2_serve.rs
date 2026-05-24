@@ -1006,3 +1006,297 @@ async fn rate_limit_is_independent_per_caller() {
         "bob's per-caller budget must be independent of alice's",
     );
 }
+
+// ─── static SPA mount (`ironclaw_webui_v2_static`) ────────────────────
+//
+// The composition mounts the embedded SPA bundle under `/v2`. These
+// tests drive that mount through the same composed router production
+// uses, so a regression that drops the `.nest("/v2", ...)` call (or
+// that accidentally routes the SPA through the bearer-auth middleware)
+// fails here. Per `.claude/rules/testing.md` ("Test Through the
+// Caller") — the standalone router test in `ironclaw_webui_v2_static`
+// does not exercise the composition seam, so this layer needs its
+// own coverage.
+
+#[tokio::test]
+async fn static_root_serves_index_with_substituted_csp_nonce() {
+    let (app, _) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .map(|v| v.to_str().unwrap().to_string()),
+        Some("text/html; charset=utf-8".to_string()),
+    );
+    let body = read_body_string(response).await;
+    assert!(
+        body.contains("v2-root"),
+        "SPA shell must contain the React mount point",
+    );
+    assert!(
+        !body.contains("__IRONCLAW_CSP_NONCE__"),
+        "every CSP-nonce placeholder must be substituted",
+    );
+}
+
+#[tokio::test]
+async fn static_root_does_not_require_bearer_auth() {
+    let (app, _) = build_app();
+    // No Authorization header at all — anonymous fetch of the SPA shell
+    // must succeed. The bearer-auth middleware is only attached to the
+    // v2 JSON routes via `route_layer`, so the static `.nest("/v2", …)`
+    // mount escapes it by design.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn static_js_asset_returns_javascript_content_type() {
+    let (app, _) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/js/main.js")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let ct = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .map(|v| v.to_str().unwrap().to_string())
+        .unwrap_or_default();
+    assert!(ct.starts_with("text/javascript"), "got content-type `{ct}`");
+}
+
+#[tokio::test]
+async fn static_css_asset_returns_text_css_content_type() {
+    let (app, _) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/styles/app.css")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let ct = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .map(|v| v.to_str().unwrap().to_string())
+        .unwrap_or_default();
+    assert!(ct.starts_with("text/css"), "got content-type `{ct}`");
+}
+
+#[tokio::test]
+async fn static_unknown_extension_path_returns_404() {
+    let (app, _) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/missing-asset.bin")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn static_client_side_route_falls_back_to_spa_shell() {
+    // Any `/v2/<no-dot-segment>` path that does not match an asset
+    // returns the SPA shell so react-router can render the right
+    // view. Without this, a hard refresh on `/v2/chat/<id>` would
+    // 404 instead of resuming the chat view.
+    let (app, _) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/chat/some-thread-id")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_body_string(response).await;
+    assert!(body.contains("v2-root"));
+}
+
+#[tokio::test]
+async fn static_root_emits_a_fresh_nonce_per_request() {
+    fn nonce_attribute(body: &str) -> String {
+        let marker = "nonce=\"";
+        let start = body.find(marker).expect("nonce attribute present");
+        let after = &body[start + marker.len()..];
+        let end = after.find('"').expect("nonce attribute closed");
+        after[..end].to_string()
+    }
+
+    let (app, _) = build_app();
+    let body_a = read_body_string(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/v2/")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot"),
+    )
+    .await;
+    let body_b = read_body_string(
+        app.oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot"),
+    )
+    .await;
+
+    let nonce_a = nonce_attribute(&body_a);
+    let nonce_b = nonce_attribute(&body_b);
+    assert_ne!(
+        nonce_a, nonce_b,
+        "CSP nonce must be regenerated for every request",
+    );
+}
+
+// ─── JS client contract: URL + body shapes ────────────────────────────
+//
+// These tests lock the URL + body shapes the SPA's `lib/api.js`
+// builds against the composed router. A regression in the JS client
+// (e.g. dropping `client_action_id`, forgetting to encode `gate_ref`
+// in the path) will show up as a 4xx here rather than as a runtime
+// browser failure.
+
+#[tokio::test]
+async fn js_client_send_message_path_shape_reaches_facade() {
+    // api.js → `sendMessage({threadId, content, clientActionId})`
+    // builds `POST /api/webchat/v2/threads/{thread_id}/messages` with
+    // body `{client_action_id, content}` (no thread_id in body —
+    // it lives in the path).
+    let (app, _) = build_app();
+    let body = json!({
+        "client_action_id": "act-from-js",
+        "content": "hello from the SPA",
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/threads/thread.fake/messages")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn js_client_cancel_run_path_shape_reaches_facade() {
+    // api.js → `cancelRun({threadId, runId, reason, clientActionId})`
+    // builds `POST /api/webchat/v2/threads/{thread_id}/runs/{run_id}/cancel`
+    // with body `{client_action_id, reason}`.
+    let (app, _) = build_app();
+    let run_id = uuid::Uuid::new_v4();
+    let body = json!({
+        "client_action_id": "act-from-js",
+        "reason": "user_requested",
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!(
+                    "/api/webchat/v2/threads/thread.fake/runs/{run_id}/cancel",
+                ))
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn js_client_resolve_gate_path_shape_dispatches_to_facade() {
+    // api.js → `resolveGate({threadId, runId, gateRef, resolution, always, clientActionId})`
+    // builds `POST /api/webchat/v2/threads/{thread_id}/runs/{run_id}/gates/{gate_ref}/resolve`
+    // with body `{client_action_id, resolution, always}`.
+    //
+    // The stub's `resolve_gate` returns 500 by design; we only care
+    // that the path-params parsing succeeded and the facade was
+    // reached. A routing-level regression (missing path segment,
+    // wrong encoding) would surface as 404, not 500.
+    let (app, _) = build_app();
+    let run_id = uuid::Uuid::new_v4();
+    let gate_ref = "gate-abc";
+    let body = json!({
+        "client_action_id": "act-from-js",
+        "resolution": "approved",
+        "always": false,
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!(
+                    "/api/webchat/v2/threads/thread.fake/runs/{run_id}/gates/{gate_ref}/resolve",
+                ))
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    // 500 = facade reached and returned (stub returns Internal); 404
+    // would mean the path did not route. Anything else means contract
+    // drift.
+    assert_eq!(
+        response.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "resolve_gate path must reach the stubbed facade (which returns 500)",
+    );
+}

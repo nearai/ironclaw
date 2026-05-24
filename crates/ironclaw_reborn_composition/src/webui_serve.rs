@@ -356,6 +356,32 @@ pub fn webui_v2_app(
             ws_origin_state,
             enforce_websocket_origin,
         ))
+        // SPA static assets served from the embedded
+        // `ironclaw_webui_v2_static` bundle. Routed AFTER the
+        // route_layer stack above so the SPA does not require bearer
+        // auth or burn rate-limit slots — anonymous fetches of
+        // HTML/JS/CSS/images are expected. Outer security headers,
+        // CORS, panic boundary, and the global body-limit
+        // (`.layer(...)` calls below) still apply, defense in depth.
+        //
+        // Three explicit routes (no `.nest`) so axum 0.8 dispatches
+        // the handler uniformly for `/v2`, `/v2/`, and every
+        // sub-path. The static crate exposes two handlers — `serve_root`
+        // for the prefix root + trailing-slash, `serve_wildcard` for
+        // sub-paths — so the path passed to the asset lookup is
+        // already mount-prefix-stripped via axum's `Path` extractor.
+        .route(
+            "/v2",
+            axum::routing::get(ironclaw_webui_v2_static::serve_root),
+        )
+        .route(
+            "/v2/",
+            axum::routing::get(ironclaw_webui_v2_static::serve_root),
+        )
+        .route(
+            "/v2/{*path}",
+            axum::routing::get(ironclaw_webui_v2_static::serve_wildcard),
+        )
         // Outer global cap: applies to unmatched paths (e.g. 404 fallback)
         // as defense in depth. v2 routes are tighter via the per-route
         // body-limit middleware above.

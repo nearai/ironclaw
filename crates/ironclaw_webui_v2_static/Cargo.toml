@@ -1,0 +1,34 @@
+[package]
+name = "ironclaw_webui_v2_static"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Static asset bundle for the Reborn WebChat v2 SPA. Off by default — enable with the `webui-v2-beta` feature. Host composition mounts the resulting Router alongside the JSON ingress."
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[features]
+default = []
+# Compile in the static asset Router. Matches the gate on the JSON
+# route surface in `ironclaw_webui_v2` so host composition flips a
+# single feature to enable the full v2 WebUI.
+webui-v2-beta = ["dep:axum", "dep:tokio"]
+
+[dependencies]
+# Tiny RNG for per-request CSP nonces. `rand_core` keeps the dep
+# surface minimal (no `rand` macros, no SmallRng grab-bag).
+rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
+
+# Optional — only when `webui-v2-beta` is enabled.
+axum = { version = "0.8", optional = true }
+tokio = { version = "1", features = ["sync"], optional = true }
+
+[dev-dependencies]
+ironclaw_webui_v2_static = { path = ".", features = ["webui-v2-beta"] }
+http = "1"
+http-body-util = "0.1"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+tower = { version = "0.5", features = ["util"] }
