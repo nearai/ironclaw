@@ -14,9 +14,10 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::{
-    CapabilityId, EffectKind, ExtensionId, HostPath, MountView, PermissionMode, ReservationStatus,
-    ResourceEstimate, ResourceReservationId, ResourceScope, ResourceUsage, RuntimeKind, TenantId,
-    UserId, VirtualPath,
+    CapabilityId, EffectKind, ExtensionId, HostPath, MountView, NetworkScheme,
+    NetworkTargetPattern, PermissionMode, ReservationStatus, ResourceEstimate,
+    ResourceReservationId, ResourceScope, ResourceUsage, RuntimeCredentialTarget, RuntimeKind,
+    SecretHandle, TenantId, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     default_host_api_contract_registry, default_host_port_catalog,
@@ -192,6 +193,28 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
                 .collect::<Vec<_>>(),
             vec!["host.runtime.http_egress"]
         );
+        assert_eq!(capability.runtime_credentials.len(), 1);
+        let credential = &capability.runtime_credentials[0];
+        assert_eq!(
+            credential.handle,
+            SecretHandle::new("github_token").unwrap()
+        );
+        assert_eq!(
+            credential.audience,
+            NetworkTargetPattern {
+                scheme: Some(NetworkScheme::Https),
+                host_pattern: "api.github.com".to_string(),
+                port: None,
+            }
+        );
+        assert_eq!(
+            credential.target,
+            RuntimeCredentialTarget::Header {
+                name: "authorization".to_string(),
+                prefix: Some("Bearer ".to_string()),
+            }
+        );
+        assert!(credential.required);
     }
 
     let hot_catalog = publish_hot_capability_catalog(&fs, &registry)

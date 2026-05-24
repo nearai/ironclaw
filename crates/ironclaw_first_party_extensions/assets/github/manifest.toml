@@ -19,6 +19,9 @@ section = "capability_provider.tools"
 id = "github.search_issues"
 description = "Search GitHub issues and pull requests with the GitHub search query syntax."
 effects = ["network", "use_secret"]
+runtime_credentials = [
+  { handle = "github_token", audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/github/search_issues.input.v1.json"
@@ -30,6 +33,9 @@ required_host_ports = ["host.runtime.http_egress"]
 id = "github.get_issue"
 description = "Fetch one GitHub issue or pull request by repository and issue number."
 effects = ["network", "use_secret"]
+runtime_credentials = [
+  { handle = "github_token", audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/github/get_issue.input.v1.json"
@@ -41,6 +47,9 @@ required_host_ports = ["host.runtime.http_egress"]
 id = "github.comment_issue"
 description = "Add a comment to a GitHub issue or pull request."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "github_token", audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/github/comment_issue.input.v1.json"

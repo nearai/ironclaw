@@ -2,4 +2,4 @@ Use `github.comment_issue` to add a Markdown comment to an existing GitHub issue
 
 Pass `owner`, `repo`, `issue_number`, and `body` exactly. If the user provides a GitHub issue or pull request URL, extract the owner, repository, and number before calling this capability.
 
-This capability performs an external write through the GitHub API using the host HTTP egress port. It requires approval before dispatch and requires a configured `github_token` secret, but Extension Manifest v2 does not yet define a canonical credential declaration field, so the token requirement is documented here rather than declared in the manifest.
+This capability performs an external write through the GitHub API using the host HTTP egress port. It requires approval before dispatch and requires a configured `github_token` runtime credential declared by the manifest.

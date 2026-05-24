@@ -482,11 +482,7 @@ where
                 });
             }
         };
-        let cache_key = format!(
-            "{}:{}",
-            request.capability_id.as_str(),
-            module_path.as_str()
-        );
+        let cache_key = module_path.as_str().to_string();
         let prepared = self.prepared_guard()?.get(&cache_key).cloned();
         if let Some(prepared) = prepared {
             let host = self.host_for_scope(&request.scope, request.capability_id);
@@ -502,7 +498,7 @@ where
             })?;
         let prepared = Arc::new(
             self.runtime
-                .prepare(request.capability_id.as_str(), &wasm_bytes)
+                .prepare(request.package.id.as_str(), &wasm_bytes)
                 .map_err(|error| DispatchError::Wasm {
                     kind: wasm_error_kind(&error),
                 })?,
@@ -559,7 +555,12 @@ where
             });
         }
     };
-    let execution = match runtime.execute(prepared, host, WitToolRequest::new(input_json)) {
+    let context_json = wasm_invocation_context(request.capability_id);
+    let execution = match runtime.execute(
+        prepared,
+        host,
+        WitToolRequest::new(input_json).with_context(context_json),
+    ) {
         Ok(execution) => execution,
         Err(error) => {
             if let Some(usage) = preserved_wasm_error_usage(&error) {
@@ -623,6 +624,13 @@ where
         usage: execution.usage,
         receipt,
     })
+}
+
+fn wasm_invocation_context(capability_id: &CapabilityId) -> String {
+    serde_json::json!({
+        "capability_id": capability_id.as_str(),
+    })
+    .to_string()
 }
 
 fn account_or_release_failed_first_party_execution<G>(
