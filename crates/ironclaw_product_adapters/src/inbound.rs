@@ -189,9 +189,19 @@ pub fn parse_product_slash_command(
         .char_indices()
         .find_map(|(idx, c)| c.is_whitespace().then_some(idx))
         .unwrap_or(without_slash.len());
-    let command = without_slash[..command_end].to_ascii_lowercase();
-    let arguments = without_slash[command_end..].trim_start().to_string();
+    let command_slice = &without_slash[..command_end];
+    let arguments_slice = without_slash[command_end..].trim_start();
+    validate_command_name(command_slice)
+        .map_err(|error| ProductSlashCommandParseError::InvalidPayload(error.to_string()))?;
+    validate_payload_string(
+        "command arguments",
+        arguments_slice,
+        COMMAND_ARGUMENTS_MAX_BYTES,
+    )
+    .map_err(|error| ProductSlashCommandParseError::InvalidPayload(error.to_string()))?;
 
+    let command = command_slice.to_ascii_lowercase();
+    let arguments = arguments_slice.to_string();
     InboundCommandPayload::new(command, arguments, trigger)
         .map(Some)
         .map_err(|error| ProductSlashCommandParseError::InvalidPayload(error.to_string()))

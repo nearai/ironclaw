@@ -128,6 +128,8 @@ impl ProductWorkflow for DefaultProductWorkflow {
             IdempotencyDecision::New(mut action) => {
                 let result = dispatch_payload(
                     &envelope,
+                    action.action_id,
+                    action.fingerprint.clone(),
                     &*self.inbound_turn_service,
                     &*self.before_inbound_policy,
                     &*self.command_admission_service,
@@ -281,6 +283,8 @@ fn projection_thread_id_from_binding(
 
 async fn dispatch_payload(
     envelope: &ProductInboundEnvelope,
+    action_id: crate::ProductActionId,
+    action_fingerprint: ActionFingerprintKey,
     inbound_turn_service: &dyn InboundTurnService,
     before_inbound_policy: &dyn BeforeInboundPolicy,
     command_admission_service: &dyn ProductCommandAdmissionService,
@@ -310,7 +314,8 @@ async fn dispatch_payload(
             }
         }
         ProductInboundPayload::Command(cmd) => {
-            let context = ProductCommandContext::from_envelope(envelope)?;
+            let context =
+                ProductCommandContext::from_envelope(envelope, action_id, action_fingerprint)?;
             let command = ProductCommand::from_payload(cmd);
             match command_admission_service.admit(&context, &command).await? {
                 ProductCommandAdmission::Allowed => {}
@@ -321,7 +326,7 @@ async fn dispatch_payload(
                 }
             }
             let ack = command_service.execute(context, command).await?;
-            let dispatch_kind = dispatch_kind_from_ack(&ack, envelope.payload())?;
+            let dispatch_kind = dispatch_kind_from_command_ack(&ack, envelope.payload())?;
             Ok(DispatchedAction { ack, dispatch_kind })
         }
         ProductInboundPayload::ApprovalResolution(_) => {
@@ -364,6 +369,23 @@ fn dispatch_kind_from_ack(
         ProductInboundAck::DeferredBusy { active_run_id, .. } => {
             Ok(ActionDispatchKind::UserMessageTurn {
                 run_id: *active_run_id,
+            })
+        }
+        ProductInboundAck::Rejected(rejection) => Ok(ActionDispatchKind::Rejected {
+            kind: rejection.kind.clone(),
+        }),
+        _ => ActionDispatchKind::try_from_payload(payload),
+    }
+}
+
+fn dispatch_kind_from_command_ack(
+    ack: &ProductInboundAck,
+    payload: &ProductInboundPayload,
+) -> Result<ActionDispatchKind, ProductWorkflowError> {
+    match ack {
+        ProductInboundAck::Accepted { .. } | ProductInboundAck::DeferredBusy { .. } => {
+            Err(ProductWorkflowError::UnsupportedActionKind {
+                kind: "turn_ack_from_product_command".into(),
             })
         }
         ProductInboundAck::Rejected(rejection) => Ok(ActionDispatchKind::Rejected {
