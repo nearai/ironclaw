@@ -18,20 +18,35 @@ mod pipeline;
 mod prompt;
 mod turn_stop;
 
-use assistant_reply::*;
-use budget::*;
-use capabilities::*;
-use capability_helpers::*;
-use checkpoint::*;
-use exit_helpers::*;
-use gates::*;
-use input::*;
-use loop_exit::*;
-use mapping::*;
-use model::*;
-use pipeline::*;
-use prompt::*;
-use turn_stop::*;
+use assistant_reply::{AssistantReplyInput, AssistantReplyStage};
+use budget::{BudgetInput, BudgetStage, BudgetStep};
+use capabilities::{CapabilityInput, CapabilityStage};
+use capability_helpers::{
+    CapabilitySurfaceIndex, append_capability_error_ref, append_capability_result_ref,
+    append_capability_safe_summary_ref, apply_capability_filter,
+    capability_invocation_from_candidate, capability_is_visible, capability_summary,
+    gate_tool_result_summary, push_call_signature_once, push_completed_result,
+};
+use checkpoint::{CheckpointInput, CheckpointStage};
+use exit_helpers::{
+    cancelled_exit, cancelled_exit_with_reason, cancelled_reason_from_signal, completed_exit,
+    exit_id, failed_exit,
+};
+use gates::{GateInput, GateStage};
+#[cfg(test)]
+use input::consume_drainable_inputs;
+use input::{DrainInput, InputStage, InputStep, UserFacingInputDrainMode};
+use loop_exit::{ExitInput, ExitStage};
+use mapping::{
+    batch_policy_kind, blocked_kind, capability_batch_counts, capability_error_class,
+    capability_failure_kind, capability_host_error, checkpoint_kind_to_host,
+    honor_retry_alteration, loop_gate_kind, model_error_class, model_preference_to_host,
+    sanitized_strategy_summary,
+};
+use model::{ModelInput, ModelStage, ModelStep};
+use pipeline::{DefaultExecutorPipeline, ExecutorStage, StageContext};
+use prompt::{PromptInput, PromptStage, PromptStep};
+use turn_stop::{StopInput, StopStage, StopStep};
 
 use async_trait::async_trait;
 use ironclaw_turns::{
