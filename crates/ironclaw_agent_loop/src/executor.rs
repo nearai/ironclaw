@@ -52,8 +52,10 @@ use turn_stop::{StopInput, StopStage, StopStep};
 
 use async_trait::async_trait;
 use ironclaw_turns::{
-    LoopCancelledReasonKind, LoopExit,
-    run_profile::{AgentLoopDriverHost, LoopInputAckToken},
+    LoopCancelledReasonKind, LoopDiagnosticRef, LoopExit,
+    run_profile::{
+        AgentLoopDriverHost, AgentLoopHostErrorKind, LoopInputAckToken, LoopSafeSummary,
+    },
 };
 
 use crate::{
@@ -88,6 +90,13 @@ pub trait AgentLoopExecutor: Send + Sync {
 pub enum AgentLoopExecutorError {
     #[error("host port returned an unrecoverable error: {stage:?}")]
     HostUnavailable { stage: HostStage },
+    #[error("host port returned an unrecoverable error: {stage:?} ({kind:?}: {safe_summary})")]
+    HostUnavailableWithDiagnostics {
+        stage: HostStage,
+        kind: AgentLoopHostErrorKind,
+        safe_summary: LoopSafeSummary,
+        diagnostic_ref: Option<LoopDiagnosticRef>,
+    },
     #[error("planner returned a contract violation: {detail}")]
     PlannerContract { detail: &'static str },
     #[error("checkpoint write failed at {stage:?}")]

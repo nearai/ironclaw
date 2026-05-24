@@ -1,12 +1,12 @@
 use ironclaw_turns::{
-    LoopCancelledReasonKind, LoopCompletionKind, LoopExit, LoopFailureKind, LoopGateRef,
-    LoopResultRef,
+    LoopCancelledReasonKind, LoopCompletionKind, LoopDiagnosticRef, LoopExit, LoopFailureKind,
+    LoopGateRef, LoopResultRef,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, CapabilityFailureKind,
         CapabilityInputRef, CapabilityOutcome, CapabilityResultMessage, LoopCancelReasonKind,
         LoopCheckpointKind, LoopInput, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
-        LoopInterruptKind, LoopProcessRef, LoopRunInfoPort, ParentLoopOutput, ProcessHandleSummary,
-        ProviderToolCallReplay, VisibleCapabilityRequest,
+        LoopInterruptKind, LoopProcessRef, LoopRunInfoPort, LoopSafeSummary, ParentLoopOutput,
+        ProcessHandleSummary, ProviderToolCallReplay, VisibleCapabilityRequest,
     },
 };
 
@@ -990,6 +990,35 @@ async fn model_retry_success_clears_recovery_state() {
     assert!(matches!(exit, LoopExit::Completed(_)));
     assert_eq!(host.model_requests().len(), 2);
     assert_eq!(final_staged_state(&host).recovery_state, Default::default());
+}
+
+#[tokio::test]
+async fn model_unrecoverable_host_error_preserves_sanitized_diagnostics() {
+    let diagnostic_ref = LoopDiagnosticRef::new("diag:model-credentials").expect("valid");
+    let host = MockHost::new(Vec::new()).with_model_errors(vec![
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::CredentialUnavailable,
+            "model credentials are unavailable",
+        )
+        .with_diagnostic_ref(diagnostic_ref),
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let error = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect_err("credential errors should stop before a loop exit");
+
+    assert_eq!(
+        error,
+        AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+            stage: HostStage::Model,
+            kind: AgentLoopHostErrorKind::CredentialUnavailable,
+            safe_summary: LoopSafeSummary::new("model credentials are unavailable").expect("safe"),
+            diagnostic_ref: Some(LoopDiagnosticRef::new("diag:model-credentials").expect("valid")),
+        }
+    );
 }
 
 #[tokio::test]

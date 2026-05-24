@@ -3,7 +3,7 @@ use ironclaw_turns::{
     LoopExit, LoopFailureKind,
     run_profile::{
         AgentLoopHostErrorKind, LoopDriverNoteKind, LoopModelCapabilityView, LoopModelRequest,
-        LoopProgressEvent,
+        LoopProgressEvent, LoopSafeSummary,
     },
 };
 
@@ -76,8 +76,12 @@ impl ExecutorStage<ModelInput> for ModelStage {
                         return Err(AgentLoopExecutorError::Cancelled);
                     }
                     let Some(class) = model_error_class(&error) else {
-                        return Err(AgentLoopExecutorError::HostUnavailable {
+                        return Err(AgentLoopExecutorError::HostUnavailableWithDiagnostics {
                             stage: HostStage::Model,
+                            kind: error.kind,
+                            safe_summary: LoopSafeSummary::new(error.safe_summary)
+                                .unwrap_or_else(|_| LoopSafeSummary::model_gateway_failed()),
+                            diagnostic_ref: error.diagnostic_ref,
                         });
                     };
                     if !recorded_failure {
