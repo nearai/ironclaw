@@ -117,6 +117,52 @@ async fn webui_event_stream_drains_capability_activity_from_projection() {
 }
 
 #[tokio::test]
+async fn webui_event_stream_preserves_sanitized_capability_activity_error_kind() {
+    let tenant_id = TenantId::new("webui-activity-redacted-tenant").unwrap();
+    let user_id = UserId::new("webui-activity-redacted-user").unwrap();
+    let agent_id = AgentId::new("webui-activity-redacted-agent").unwrap();
+    let thread_id = ThreadId::new("webui-activity-redacted-thread").unwrap();
+    let invocation_id = InvocationId::new();
+    let event_log = Arc::new(InMemoryDurableEventLog::new());
+    event_log
+        .append(RuntimeEvent::dispatch_failed(
+            resource_scope(&tenant_id, &user_id, &agent_id, &thread_id, invocation_id),
+            CapabilityId::new("script.echo").unwrap(),
+            Some(ExtensionId::new("script").unwrap()),
+            Some(RuntimeKind::Script),
+            "raw failure /tmp/private-host-path SECRET_SENTINEL_sk_live",
+        ))
+        .await
+        .unwrap();
+
+    let event_log: Arc<dyn DurableEventLog> = event_log;
+    let actor = TurnActor::new(user_id);
+    let services = build_reborn_projection_services(
+        event_log,
+        ReplyTargetBindingRef::new("webui-activity-redacted-reply").unwrap(),
+    );
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor,
+            scope: TurnScope::new(tenant_id, Some(agent_id), None, thread_id),
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(events.iter().any(|event| {
+        matches!(
+            event.payload(),
+            ProductOutboundPayload::CapabilityActivity(activity)
+                if activity.invocation_id == invocation_id
+                    && activity.status == CapabilityActivityStatusView::Failed
+                    && activity.error_kind.as_deref() == Some("Unclassified")
+        )
+    }));
+}
+
+#[tokio::test]
 async fn webui_event_stream_resumes_inside_multi_payload_runtime_projection_item() {
     let tenant_id = TenantId::new("webui-activity-resume-tenant").unwrap();
     let user_id = UserId::new("webui-activity-resume-user").unwrap();

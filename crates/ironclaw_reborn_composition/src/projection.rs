@@ -16,11 +16,12 @@ use ironclaw_event_streams::{
 use ironclaw_events::{DurableEventLog, EventStreamKey, ReadScope};
 use ironclaw_outbound::InMemoryOutboundStateStore;
 use ironclaw_product_adapters::{
-    AdapterInstallationId, CapabilityActivityStatusView, CapabilityActivityView, ExternalActorRef,
-    ExternalConversationRef, ProductAdapterError, ProductAdapterId, ProductOutboundEnvelope,
-    ProductOutboundPayload, ProductOutboundTarget, ProductProjectionItem, ProductProjectionState,
-    ProductWorkflowRejectionKind, ProjectionCursor as ProductProjectionCursor, ProjectionStream,
-    ProjectionSubscriptionRequest, RedactedString,
+    AdapterInstallationId, CapabilityActivityStatusView, CapabilityActivityView,
+    CapabilityActivityViewInput, ExternalActorRef, ExternalConversationRef, ProductAdapterError,
+    ProductAdapterId, ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
+    ProductProjectionItem, ProductProjectionState, ProductWorkflowRejectionKind,
+    ProjectionCursor as ProductProjectionCursor, ProjectionStream, ProjectionSubscriptionRequest,
+    RedactedString,
 };
 use ironclaw_turns::{
     ReplyTargetBindingRef, TurnActor, TurnCoordinator, TurnEventProjectionCursor,
@@ -358,7 +359,7 @@ fn snapshot_payloads(
     payloads.extend(capability_activity_payloads(
         snapshot.capability_activities,
         activity_limit,
-    ));
+    )?);
     Ok((!payloads.is_empty()).then_some((cursor, payloads)))
 }
 
@@ -375,7 +376,7 @@ fn replay_payloads(
     payloads.extend(capability_activity_payloads(
         replay.capability_activities.clone(),
         activity_limit,
-    ));
+    )?);
     Ok((!payloads.is_empty()).then_some((cursor, payloads)))
 }
 
@@ -425,12 +426,12 @@ fn run_status_projection_state(
 fn capability_activity_payloads(
     activities: Vec<CapabilityActivityProjection>,
     limit: usize,
-) -> Vec<ProductOutboundPayload> {
+) -> Result<Vec<ProductOutboundPayload>, ProductAdapterError> {
     activities
         .into_iter()
         .take(limit)
         .map(|activity| {
-            ProductOutboundPayload::CapabilityActivity(CapabilityActivityView {
+            CapabilityActivityView::new(CapabilityActivityViewInput {
                 invocation_id: activity.invocation_id,
                 thread_id: activity.thread_id,
                 capability_id: activity.capability_id,
@@ -442,8 +443,9 @@ fn capability_activity_payloads(
                 error_kind: activity.error_kind,
                 updated_at: activity.updated_at,
             })
+            .map(ProductOutboundPayload::CapabilityActivity)
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()
 }
 
 fn capability_activity_status_wire(
