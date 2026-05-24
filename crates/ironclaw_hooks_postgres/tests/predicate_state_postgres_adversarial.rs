@@ -19,8 +19,8 @@ use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;
 use ironclaw_hooks::identity::{ExtensionId, HookId, HookLocalId, HookVersion};
 use ironclaw_hooks::predicate_state::{
-    InvocationKey, MAX_KEYS_PER_TENANT, MAX_SAMPLES_PER_KEY, PredicateEventId,
-    PredicateStateBackend, ValueKey,
+    InvocationKey, MAX_KEYS_PER_TENANT, MAX_SAMPLES_PER_KEY, PredicateBackendError,
+    PredicateEventId, PredicateStateBackend, ValueKey,
 };
 use ironclaw_hooks_postgres::PostgresPredicateStateBackend;
 use ironclaw_host_api::TenantId;
@@ -245,8 +245,6 @@ async fn cross_host_value_replay_sums_once() {
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn per_key_sample_cap_fails_closed_under_flood() {
-    use ironclaw_hooks::predicate_state::PredicateBackendError;
-
     let (url, _guard) = guarded!();
     let hs = hosts(&url, 1).await;
     let backend = &hs[0];
@@ -405,12 +403,14 @@ async fn scope_lru_eviction_serializes_against_victim_writes_no_deadlock() {
         let k = inv_key(tenant, &format!("fresh.{i}"));
         let ts = base() + chrono::Duration::seconds(10_000 + i as i64);
         handles.push(tokio::spawn(async move {
-            // A fresh key may itself be evicted by a later pass; both Ok and
-            // a benign overflow are acceptable — what must NOT happen is a
-            // hang or an Unavailable (deadlock/serialization) error.
-            let _ = backend
+            // RETURN the backend result so the join below can assert it. A
+            // discarded result would let a deadlock-detected/serialization
+            // DB error pass silently as long as the task returned before the
+            // timeout (serrrfirat regression on #3933). The result is checked
+            // against the allowed-outcome set after the join.
+            backend
                 .record_invocation(&k, &ev(&format!("fresh-e{i}")), ts, window)
-                .await;
+                .await
         }));
     }
     for i in 0..HOT_HITS {
@@ -420,22 +420,52 @@ async fn scope_lru_eviction_serializes_against_victim_writes_no_deadlock() {
         // ids so each is a real insert (subject to the per-key sample cap).
         let ts = base() + chrono::Duration::seconds(20_000 + i as i64);
         handles.push(tokio::spawn(async move {
-            let _ = backend
+            backend
                 .record_invocation(&hot, &ev(&format!("hot-e{i}")), ts, window)
-                .await;
+                .await
         }));
     }
 
     // Hard timeout is the deadlock detector: pre-fix this join would hang
     // (or surface a Postgres deadlock-detected error) instead of completing.
+    // Collect every task's backend result so we can assert the allowed
+    // outcomes EXPLICITLY rather than discarding them.
     let join_all = async {
+        let mut results = Vec::with_capacity(handles.len());
         for handle in handles {
-            handle.await.expect("task did not panic");
+            results.push(handle.await.expect("task did not panic"));
         }
+        results
     };
-    tokio::time::timeout(Duration::from_secs(60), join_all)
+    let results = tokio::time::timeout(Duration::from_secs(60), join_all)
         .await
         .expect("all record tasks completed without deadlock/hang");
+
+    // Assert the production failure mode this test documents actually fails
+    // the test: each record must be either `Ok` (recorded / replayed) or a
+    // benign quota/window outcome. A `Unavailable(..)` whose message looks
+    // like a Postgres deadlock-detected or serialization-failure error means
+    // the eviction lock discipline regressed — that must surface as a test
+    // failure, not a silent pass.
+    for (i, r) in results.iter().enumerate() {
+        match r {
+            Ok(_) => {}
+            Err(PredicateBackendError::WindowOverflow { .. }) => {
+                // A fresh/hot key can legitimately hit the per-key sample cap.
+            }
+            Err(PredicateBackendError::Unavailable(msg)) => {
+                let lower = msg.to_lowercase();
+                assert!(
+                    !(lower.contains("deadlock") || lower.contains("serialize")),
+                    "task {i} surfaced a deadlock/serialization DB error \
+                     (eviction lock discipline regressed): {msg}"
+                );
+                // A non-deadlock `Unavailable` here is the explicit fail-closed
+                // quota outcome (every stale victim momentarily locked) — that
+                // is an allowed outcome of the new quota-enforcement contract.
+            }
+        }
+    }
 
     // Consistency: whatever survived for the hot key, the backend's reported
     // aggregate must equal its actual surviving IN-WINDOW row count — no torn
@@ -485,6 +515,91 @@ async fn scope_lru_eviction_serializes_against_victim_writes_no_deadlock() {
         distinct as usize <= MAX_KEYS_PER_TENANT,
         "per-scope LRU bound must hold after the concurrent race; had {distinct}"
     );
+}
+
+/// Stateful proof that the per-scope quota is ACTUALLY enforced, not merely
+/// best-effort. Drives a single uncontended host sequentially well past
+/// [`MAX_KEYS_PER_TENANT`] distinct keys, then asserts the scope holds at
+/// EXACTLY the cap — no overshoot. This is the regression guard for the
+/// "silently best-effort `Ok(evicted)`" BLOCKER (serrrfirat on #3933): the
+/// old code could commit an over-quota scope if victims happened to be
+/// locked; with a single sequential writer no victim is ever locked, so the
+/// quota-enforcement loop must drive the scope exactly to the cap on every
+/// newly-material insert. A regression that under-evicts would leave
+/// `distinct > MAX_KEYS_PER_TENANT` and fail here. Run against a real
+/// Postgres via `IRONCLAW_HOOKS_POSTGRES_URL` / `DATABASE_URL`; skipped
+/// (passing) otherwise.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn scope_quota_is_enforced_exactly_not_best_effort() {
+    let (url, _guard) = guarded!();
+    let hs = hosts(&url, 1).await;
+    let backend = &hs[0];
+    let window = Duration::from_secs(86_400);
+    let tenant = "quota-exact-tenant";
+
+    // Insert OVERSHOOT keys beyond the cap. Each key gets one in-window
+    // sample with a strictly increasing timestamp so the oldest-front LRU
+    // victim selection is deterministic (key N is staler than key N+1).
+    const OVERSHOOT: usize = 200;
+    let total = MAX_KEYS_PER_TENANT + OVERSHOOT;
+    for i in 0..total {
+        let k = inv_key(tenant, &format!("k.{i}"));
+        let ts = base() + chrono::Duration::seconds(i as i64);
+        backend
+            .record_invocation(&k, &ev(&format!("e{i}")), ts, window)
+            .await
+            .expect("record under uncontended single writer must succeed");
+    }
+
+    // The scope must hold at EXACTLY the cap — eviction kept pace with every
+    // over-cap insert. Verify via a direct distinct-key count.
+    let pool = build_pool(&url).expect("pool");
+    let client = pool.get().await.expect("client");
+    let scope = ironclaw_hooks_postgres::test_support::scope_hash_bytes(tenant);
+    let distinct: i64 = client
+        .query_one(
+            "SELECT COUNT(DISTINCT key_hash)::BIGINT FROM hooks_predicate_invocations \
+             WHERE scope_hash = $1",
+            &[&&scope[..]],
+        )
+        .await
+        .expect("distinct count")
+        .get(0);
+    assert_eq!(
+        distinct as usize, MAX_KEYS_PER_TENANT,
+        "uncontended sequential flood must leave the scope at EXACTLY the cap \
+         (quota enforced, not best-effort); had {distinct}"
+    );
+
+    // And the surviving keys must be the MOST-RECENT ones: the oldest-front
+    // victims (k.0 .. k.OVERSHOOT-1) were evicted, so k.0 must be gone and
+    // the newest key (k.{total-1}) must survive.
+    let oldest = inv_key(tenant, "k.0");
+    let oldest_hash = ironclaw_hooks_postgres::test_support::invocation_key_hash_bytes(&oldest);
+    let oldest_rows: i64 = client
+        .query_one(
+            "SELECT COUNT(*)::BIGINT FROM hooks_predicate_invocations WHERE key_hash = $1",
+            &[&&oldest_hash[..]],
+        )
+        .await
+        .expect("count oldest")
+        .get(0);
+    assert_eq!(
+        oldest_rows, 0,
+        "the oldest-front key must have been evicted under the quota"
+    );
+    let newest = inv_key(tenant, &format!("k.{}", total - 1));
+    let newest_hash = ironclaw_hooks_postgres::test_support::invocation_key_hash_bytes(&newest);
+    let newest_rows: i64 = client
+        .query_one(
+            "SELECT COUNT(*)::BIGINT FROM hooks_predicate_invocations WHERE key_hash = $1",
+            &[&&newest_hash[..]],
+        )
+        .await
+        .expect("count newest")
+        .get(0);
+    assert_eq!(newest_rows, 1, "the most-recent key must survive eviction");
 }
 
 /// Deterministic reproduction of the eviction deadlock cycle at the raw-SQL
