@@ -35,7 +35,7 @@ mod model_gateway;
 mod port_adapters;
 
 pub use config::{RebornLoopDriverHostError, RebornLoopDriverHostRequest, TextOnlyLoopHostConfig};
-use model_gateway::{ThreadResolvingLoopModelGateway, ThreadResolvingLoopModelGatewayConfig};
+use model_gateway::ThreadResolvingLoopModelGateway;
 use port_adapters::{
     HostManagedLoopCheckpointPort, HostManagedLoopProgressPort, NoExtraLoopInputPort,
 };
@@ -50,10 +50,9 @@ const LEGACY_TEXT_ONLY_CHECKPOINT_SCHEMA_ID: &str = "interactive_checkpoint_v1";
 const LEGACY_TEXT_ONLY_CHECKPOINT_SCHEMA_VERSION: u64 = 1;
 
 use ironclaw_turns::{
-    CheckpointStateStore, GetCheckpointStateRequest, GetLoopCheckpointRequest,
-    LoopCheckpointStateRef, LoopCheckpointStore, PutCheckpointStateRequest,
-    PutLoopCheckpointRequest, RunProfileId, TurnCheckpointId, TurnError, TurnRunWake,
-    TurnRunWakeNotifier, TurnRunWakeNotifyError, TurnStateStore, TurnStatus,
+    CheckpointStateStore, LoopCheckpointStateRef, LoopCheckpointStore, RunProfileId,
+    TurnCheckpointId, TurnError, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError,
+    TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, BeginAssistantDraft,
         CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityInvocation, CapabilityOutcome,
@@ -63,11 +62,11 @@ use ironclaw_turns::{
         InstructionSafetyContext, LoadCheckpointPayloadRequest, LoadedCheckpointPayload,
         LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointPort,
         LoopCheckpointRequest, LoopContextBundle, LoopContextPort, LoopContextRequest,
-        LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch,
-        LoopInputCursor, LoopInputPort, LoopModelBudgetAccountant, LoopModelPolicyGuard,
-        LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort,
-        LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRequest, LoopPromptPort,
-        LoopRunContext, LoopRunInfoPort, LoopTranscriptPort, NoOpBudgetAccountant, NoOpPolicyGuard,
+        LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputPort,
+        LoopModelBudgetAccountant, LoopModelPolicyGuard, LoopModelPort, LoopModelRequest,
+        LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
+        LoopPromptBundleAuthority, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
+        LoopRunInfoPort, LoopTranscriptPort, NoOpBudgetAccountant, NoOpPolicyGuard,
         ProviderToolCall, ProviderToolDefinition, RunScopedHookMilestoneSink,
         StageCheckpointPayloadRequest, UpdateAssistantDraft, VisibleCapabilityRequest,
         VisibleCapabilitySurface,
@@ -1311,21 +1310,17 @@ where
             )),
             None => Arc::new(NoExtraLoopInputPort::new(run_context.clone())),
         };
-        let model_gateway = Arc::new(ThreadResolvingLoopModelGateway::new(
-            ThreadResolvingLoopModelGatewayConfig {
-                thread_service: Arc::clone(&self.thread_service),
-                thread_scope: self.thread_scope.clone(),
-                host_gateway: Arc::clone(&self.model_gateway),
-                max_messages,
-                skill_context_source: self.skill_context_source.clone(),
-                identity_context_source: self.identity_context_source.clone(),
-                instruction_materialization_store: Some(Arc::clone(
-                    &instruction_materialization_store,
-                )),
-                capabilities: Some(Arc::clone(&capabilities)),
-                prompt_authority,
-            },
-        ));
+        let model_gateway = Arc::new(ThreadResolvingLoopModelGateway {
+            thread_service: Arc::clone(&self.thread_service),
+            thread_scope: self.thread_scope.clone(),
+            host_gateway: Arc::clone(&self.model_gateway),
+            max_messages,
+            skill_context_source: self.skill_context_source.clone(),
+            identity_context_source: self.identity_context_source.clone(),
+            instruction_materialization_store: Some(Arc::clone(&instruction_materialization_store)),
+            capabilities: Some(Arc::clone(&capabilities)),
+            prompt_authority,
+        });
         let mut model: Arc<dyn LoopModelPort> = Arc::new(HostManagedLoopModelPort::with_guards(
             run_context.clone(),
             model_gateway,
@@ -2098,7 +2093,8 @@ mod tests {
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
     use ironclaw_turns::{
         InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore, InMemoryRunProfileResolver,
-        RunProfileResolver, TurnCheckpointId, TurnId, TurnRunId, TurnScope,
+        PutLoopCheckpointRequest, RunProfileResolver, TurnCheckpointId, TurnId, TurnRunId,
+        TurnScope,
         run_profile::{
             AgentLoopHostErrorKind, CheckpointSchemaId, InMemoryLoopHostMilestoneSink,
             LoadCheckpointPayloadRequest, LoopCheckpointKind, LoopCheckpointRequest,
