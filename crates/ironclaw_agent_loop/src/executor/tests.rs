@@ -1346,3 +1346,51 @@ async fn denied_provider_call_appends_failure_tool_result_for_replay() {
         vec![result_ref, appended[1].result_ref.clone()]
     );
 }
+
+#[tokio::test]
+async fn invalid_provider_tool_input_appends_failure_tool_result_for_replay() {
+    let host = MockHost::new(vec![provider_calls_response(), reply_response()])
+        .with_batch_outcomes(vec![ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Failed(
+                ironclaw_turns::run_profile::CapabilityFailure {
+                    error_kind: CapabilityFailureKind::InvalidInput,
+                    safe_summary: "invalid input".to_string(),
+                },
+            )],
+            stopped_on_suspension: false,
+        }]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    let appended = host.appended_result_refs();
+    assert_eq!(appended.len(), 1);
+    assert_eq!(appended[0].safe_summary, "invalid input");
+    assert!(
+        appended[0]
+            .result_ref
+            .as_str()
+            .starts_with("result:provider-error-turn_1-call_1")
+    );
+    let provider_call = appended[0]
+        .provider_call
+        .as_ref()
+        .expect("provider replay metadata");
+    assert_eq!(provider_call.provider_turn_id, "turn_1");
+    assert_eq!(provider_call.provider_call_id, "call_1");
+    assert_eq!(provider_call.provider_tool_name, "demo__echo");
+    match exit {
+        LoopExit::Completed(completed) => {
+            assert_eq!(completed.result_refs, vec![appended[0].result_ref.clone()]);
+        }
+        other => panic!("expected completed, got {other:?}"),
+    }
+    assert_eq!(
+        final_staged_state(&host).result_refs,
+        vec![appended[0].result_ref.clone()]
+    );
+}

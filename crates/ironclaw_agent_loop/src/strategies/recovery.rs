@@ -170,9 +170,9 @@ pub(crate) enum RetryScope {
 /// exponential backoff.
 ///
 /// This strategy:
-/// - Skips `PolicyDenied` so the model can try another authorized tool without
-///   consuming retry budget.
-/// - Aborts immediately on `Permanent`, `InputInvalid`, and `ContentFiltered`.
+/// - Skips `PolicyDenied` and `InputInvalid` so the model can observe the tool
+///   error and try another call without consuming retry budget.
+/// - Aborts immediately on `Permanent` and `ContentFiltered`.
 /// - Retries capability/model transient, unavailable, and internal errors up
 ///   to [`Self::max_attempts_per_class`] times with `Backoff`.
 /// - Retries `ContextOverflow` at iteration scope with `ShrinkContext`.
@@ -199,15 +199,15 @@ impl RecoveryStrategy for DefaultRecoveryStrategy {
     ) -> RecoveryOutcome {
         let kind = capability_error_to_failure_kind(err.class);
         match err.class {
-            CapabilityErrorClass::PolicyDenied => RecoveryOutcome::SkipResult {
-                recovery: state.recovery_state.cleared_attempts(),
-            },
-            CapabilityErrorClass::Permanent | CapabilityErrorClass::InputInvalid => {
-                RecoveryOutcome::Abort {
+            CapabilityErrorClass::PolicyDenied | CapabilityErrorClass::InputInvalid => {
+                RecoveryOutcome::SkipResult {
                     recovery: state.recovery_state.cleared_attempts(),
-                    failure_kind: kind,
                 }
             }
+            CapabilityErrorClass::Permanent => RecoveryOutcome::Abort {
+                recovery: state.recovery_state.cleared_attempts(),
+                failure_kind: kind,
+            },
             CapabilityErrorClass::Transient
             | CapabilityErrorClass::Unavailable
             | CapabilityErrorClass::Internal => {
@@ -828,7 +828,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn capability_input_invalid_aborts_immediately() {
+        async fn capability_input_invalid_skips_result() {
             let strategy = DefaultRecoveryStrategy::default();
             let state = state_with_no_attempts();
 
@@ -836,7 +836,12 @@ mod tests {
                 .on_capability_error(&state, &cap_err(CapabilityErrorClass::InputInvalid))
                 .await;
 
-            assert!(matches!(outcome, RecoveryOutcome::Abort { .. }));
+            match outcome {
+                RecoveryOutcome::SkipResult { recovery } => {
+                    assert_eq!(recovery, RecoveryStrategyState::default());
+                }
+                other => panic!("expected SkipResult, got {other:?}"),
+            }
         }
 
         #[tokio::test]
