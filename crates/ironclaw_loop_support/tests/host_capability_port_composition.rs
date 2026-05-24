@@ -84,7 +84,11 @@ async fn host_capability_port_composition_factory_builds_loop_capability_port() 
         .unwrap();
 
     assert_eq!(surface.version.as_str(), "factory-empty:v1");
-    assert!(surface.descriptors.is_empty());
+    assert_eq!(surface.descriptors.len(), 1);
+    assert_eq!(
+        surface.descriptors[0].capability_id.as_str(),
+        "ironclaw.loop.capability_info"
+    );
 }
 
 #[tokio::test]

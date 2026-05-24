@@ -2,7 +2,8 @@ use std::collections::HashMap;
 
 use ironclaw_host_api::{CapabilityId, EffectKind, ExtensionId, ResourceEstimate, RuntimeKind};
 use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, ProviderToolCall, ProviderToolDefinition,
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityDescriptorView, ConcurrencyHint,
+    ProviderToolCall, ProviderToolDefinition,
 };
 
 use crate::capability_info::{self, CapabilityInfoEntry};
@@ -108,6 +109,20 @@ impl SurfaceSnapshot {
         };
         Ok((capability_id, capability))
     }
+
+    pub(super) fn synthetic_descriptor_views(
+        &self,
+    ) -> Result<Vec<CapabilityDescriptorView>, AgentLoopHostError> {
+        self.capabilities
+            .iter()
+            .filter_map(|(capability_id, capability)| match capability {
+                SurfaceCapabilitySnapshot::Runtime(_) => None,
+                SurfaceCapabilitySnapshot::Synthetic(capability) => {
+                    Some(capability.descriptor_view(capability_id))
+                }
+            })
+            .collect()
+    }
 }
 
 impl RuntimeSurfaceCapabilitySnapshot {
@@ -199,6 +214,27 @@ impl RuntimeSurfaceCapabilitySnapshot {
 }
 
 impl SyntheticSurfaceCapabilitySnapshot {
+    fn descriptor_view(
+        &self,
+        capability_id: &CapabilityId,
+    ) -> Result<CapabilityDescriptorView, AgentLoopHostError> {
+        match self.kind {
+            SyntheticCapabilityKind::CapabilityInfo => {
+                debug_assert!(capability_info::is_capability_id(capability_id));
+                let definition = capability_info::tool_definition()?;
+                Ok(CapabilityDescriptorView {
+                    capability_id: capability_id.clone(),
+                    provider: None,
+                    runtime: RuntimeKind::System,
+                    safe_name: self.provider_tool_name.clone(),
+                    safe_description: definition.description,
+                    concurrency_hint: ConcurrencyHint::SafeForParallel,
+                    parameters_schema: definition.parameters,
+                })
+            }
+        }
+    }
+
     fn tool_definition(
         &self,
         capability_id: &CapabilityId,

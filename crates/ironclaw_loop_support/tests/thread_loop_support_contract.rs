@@ -934,6 +934,52 @@ async fn model_port_limits_provider_tool_definitions_to_model_visible_capability
 }
 
 #[tokio::test]
+async fn model_port_preserves_capability_info_for_filtered_capability_view() {
+    let fixture = ThreadFixture::new().await;
+    let messages = user_model_messages(&fixture);
+    issue_prompt_grant(&fixture.run_context, &messages);
+
+    let capability_info_id = CapabilityId::new("ironclaw.loop.capability_info").unwrap();
+    let allowed_id = CapabilityId::new("demo.allowed").unwrap();
+    let hidden_id = CapabilityId::new("demo.hidden").unwrap();
+    let gateway = Arc::new(RecordingGateway::reply("model says hi"));
+    let model_port = ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway.clone(),
+        16,
+    )
+    .with_capability_port(Arc::new(StaticToolDefinitionPort::new(vec![
+        provider_tool_definition(capability_info_id.clone(), "capability_info"),
+        provider_tool_definition(allowed_id.clone(), "demo__allowed"),
+        provider_tool_definition(hidden_id, "demo__hidden"),
+    ])));
+
+    model_port
+        .stream_model(LoopModelRequest {
+            messages,
+            surface_version: None,
+            model_preference: None,
+            capability_view: Some(LoopModelCapabilityView {
+                visible_capability_ids: vec![capability_info_id, allowed_id],
+            }),
+        })
+        .await
+        .unwrap();
+
+    let tool_definition_calls = gateway.tool_definition_calls();
+    assert_eq!(tool_definition_calls.len(), 1);
+    assert_eq!(
+        tool_definition_calls[0]
+            .iter()
+            .map(|definition| definition.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["capability_info", "demo__allowed"]
+    );
+}
+
+#[tokio::test]
 async fn thread_context_port_filters_skill_visibility_and_installed_prompt_content() {
     let fixture = ThreadFixture::new().await;
     let source = Arc::new(StaticSkillContextSource::new(vec![

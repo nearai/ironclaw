@@ -370,6 +370,7 @@ mod tests {
         batch_outcome: Mutex<Option<CapabilityBatchOutcome>>,
         tool_definitions: Mutex<Vec<ProviderToolDefinition>>,
         provider_call_capability_ids: Mutex<HashMap<String, ProviderToolCallCapabilityIds>>,
+        validated_provider_calls: Mutex<Vec<ProviderToolCall>>,
         provider_calls: Mutex<Vec<ProviderToolCall>>,
         visible_calls: Mutex<usize>,
         invocations: Mutex<Vec<CapabilityInvocation>>,
@@ -412,6 +413,17 @@ mod tests {
             Ok(ProviderToolCallCapabilityIds::single(
                 definition.capability_id,
             ))
+        }
+
+        fn validate_provider_tool_call(
+            &self,
+            request: &ProviderToolCall,
+        ) -> Result<(), AgentLoopHostError> {
+            self.validated_provider_calls
+                .lock()
+                .expect("validated provider call lock")
+                .push(request.clone());
+            Ok(())
         }
 
         async fn register_provider_tool_call(
@@ -714,10 +726,9 @@ mod tests {
             );
         let filter = CapabilitySurfaceProfileFilter::new(
             inner.clone(),
-            Arc::new(CapabilityAllowSet::allowlist([
-                capability_id(capability_info::CAPABILITY_ID),
-                capability_id("demo.allowed"),
-            ])),
+            Arc::new(CapabilityAllowSet::allowlist([capability_id(
+                "demo.allowed",
+            )])),
         );
 
         let error = filter
@@ -731,6 +742,46 @@ mod tests {
                 .provider_calls
                 .lock()
                 .expect("provider calls lock")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn capability_info_target_denied_before_profile_filter_inner_validation() {
+        let inner = Arc::new(SpyPort::default());
+        *inner
+            .tool_definitions
+            .lock()
+            .expect("tool definitions lock") = vec![
+            provider_definition(capability_info::CAPABILITY_ID, capability_info::TOOL_NAME),
+            provider_definition("demo.allowed", "demo__allowed"),
+            provider_definition("demo.denied", "demo__denied"),
+        ];
+        inner
+            .provider_call_capability_ids
+            .lock()
+            .expect("provider call capability ids lock")
+            .insert(
+                capability_info::TOOL_NAME.to_string(),
+                provider_call_capability_ids(&[capability_info::CAPABILITY_ID, "demo.denied"]),
+            );
+        let filter = CapabilitySurfaceProfileFilter::new(
+            inner.clone(),
+            Arc::new(CapabilityAllowSet::allowlist([capability_id(
+                "demo.allowed",
+            )])),
+        );
+
+        let error = filter
+            .validate_provider_tool_call(&capability_info_call("demo__denied"))
+            .expect_err("denied capability_info target should fail before inner validation");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert!(
+            inner
+                .validated_provider_calls
+                .lock()
+                .expect("validated provider calls lock")
                 .is_empty()
         );
     }
@@ -754,13 +805,8 @@ mod tests {
                 capability_info::TOOL_NAME.to_string(),
                 provider_call_capability_ids(&[capability_info::CAPABILITY_ID, "demo.denied"]),
             );
-        let filter = CapabilitySurfaceVisibleFilter::new(
-            inner.clone(),
-            [
-                capability_id(capability_info::CAPABILITY_ID),
-                capability_id("demo.allowed"),
-            ],
-        );
+        let filter =
+            CapabilitySurfaceVisibleFilter::new(inner.clone(), [capability_id("demo.allowed")]);
 
         let error = filter
             .register_provider_tool_call(capability_info_call("demo.denied"))
@@ -773,6 +819,42 @@ mod tests {
                 .provider_calls
                 .lock()
                 .expect("provider calls lock")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn capability_info_target_denied_before_visible_filter_inner_validation() {
+        let inner = Arc::new(SpyPort::default());
+        *inner
+            .tool_definitions
+            .lock()
+            .expect("tool definitions lock") = vec![
+            provider_definition(capability_info::CAPABILITY_ID, capability_info::TOOL_NAME),
+            provider_definition("demo.allowed", "demo__allowed"),
+            provider_definition("demo.denied", "demo__denied"),
+        ];
+        inner
+            .provider_call_capability_ids
+            .lock()
+            .expect("provider call capability ids lock")
+            .insert(
+                capability_info::TOOL_NAME.to_string(),
+                provider_call_capability_ids(&[capability_info::CAPABILITY_ID, "demo.denied"]),
+            );
+        let filter =
+            CapabilitySurfaceVisibleFilter::new(inner.clone(), [capability_id("demo.allowed")]);
+
+        let error = filter
+            .validate_provider_tool_call(&capability_info_call("demo.denied"))
+            .expect_err("denied capability_info target should fail before inner validation");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert!(
+            inner
+                .validated_provider_calls
+                .lock()
+                .expect("validated provider calls lock")
                 .is_empty()
         );
     }

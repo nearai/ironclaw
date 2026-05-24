@@ -34,6 +34,9 @@ use self::surface_snapshot::{
     SyntheticSurfaceCapabilitySnapshot,
 };
 
+// arch-exempt: large_file, tracked in #3988; this PR keeps new synthetic surface
+// snapshot logic in `capability_port/surface_snapshot.rs` while preserving the
+// existing adapter boundary.
 const PROVIDER_TOOL_NAME_MAX_BYTES: usize = 64;
 const PROVIDER_TOOL_NAME_DIGEST_BYTES: usize = 32;
 
@@ -760,7 +763,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             .map_err(host_runtime_error)?;
         let version = loop_surface_version(runtime_surface.version.as_str())?;
         let mut snapshot = SurfaceSnapshot::with_synthetic_capabilities()?;
-        let descriptors = runtime_surface
+        let mut descriptors = runtime_surface
             .capabilities
             .into_iter()
             .map(|capability| {
@@ -801,6 +804,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                 })
             })
             .collect::<Result<Vec<_>, AgentLoopHostError>>()?;
+        descriptors.extend(snapshot.synthetic_descriptor_views()?);
 
         let mut snapshots = lock_mut(&self.snapshots, "capability surface snapshot store")?;
         snapshots.clear();
@@ -1862,7 +1866,7 @@ mod tests {
         TurnId, TurnRunId, TurnScope,
     };
 
-    use crate::capability_info;
+    use crate::{capability_info, capability_surface_filter::CapabilitySurfaceVisibleFilter};
 
     #[test]
     fn concurrency_hint_treats_empty_effects_as_exclusive() {
@@ -2255,19 +2259,40 @@ mod tests {
             provider_id,
         )]));
         let result_writer = Arc::new(RecordingResultWriter::default());
-        let port = HostRuntimeLoopCapabilityPortFactory::new(
-            runtime.clone(),
-            visible_request(context),
-            dummy_input_resolver(),
-            result_writer.clone(),
-            dummy_milestone_sink(),
-        )
-        .port_for_run_context(run_context);
+        let port = Arc::new(
+            HostRuntimeLoopCapabilityPortFactory::new(
+                runtime.clone(),
+                visible_request(context),
+                dummy_input_resolver(),
+                result_writer.clone(),
+                dummy_milestone_sink(),
+            )
+            .port_for_run_context(run_context),
+        );
 
         let surface = port
             .visible_capabilities(VisibleCapabilityRequest {})
             .await
             .expect("visible capabilities load");
+        assert!(surface.descriptors.iter().any(|descriptor| {
+            descriptor.capability_id.as_str() == capability_info::CAPABILITY_ID
+        }));
+        let visible_filter = CapabilitySurfaceVisibleFilter::new(
+            port.clone(),
+            surface
+                .descriptors
+                .iter()
+                .map(|descriptor| descriptor.capability_id.clone()),
+        );
+        let filtered_tool_definitions = visible_filter
+            .tool_definitions()
+            .expect("filtered tool definitions");
+        assert!(
+            filtered_tool_definitions
+                .iter()
+                .any(|definition| definition.name == capability_info::TOOL_NAME),
+            "capability_info must survive the ordinary model-visible capability filter"
+        );
         let tool_definitions = port.tool_definitions().expect("tool definitions");
         assert!(
             tool_definitions
@@ -2334,6 +2359,62 @@ mod tests {
         assert!(
             runtime.take_requests().is_empty(),
             "capability_info must be served by the loop port without dispatching to the host runtime"
+        );
+    }
+
+    #[tokio::test]
+    async fn capability_info_accepts_visible_provider_tool_name() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let context = execution_context("thread-capability-info-provider-name");
+        let run_context = loop_run_context(&context).await;
+        let result_writer = Arc::new(RecordingResultWriter::default());
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+                capability_id.clone(),
+                provider_id,
+            )])),
+            visible_request(context),
+            dummy_input_resolver(),
+            result_writer.clone(),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+        let provider_tool_name = port
+            .tool_definitions()
+            .expect("tool definitions")
+            .into_iter()
+            .find(|definition| definition.capability_id == capability_id)
+            .expect("runtime capability is advertised")
+            .name;
+
+        let mut call = provider_tool_call();
+        call.name = capability_info::TOOL_NAME.to_string();
+        call.arguments = serde_json::json!({
+            "name": provider_tool_name,
+            "detail": "summary"
+        });
+        let candidate = port
+            .register_provider_tool_call(call)
+            .await
+            .expect("capability_info call should register by provider tool name");
+        port.invoke_capability(CapabilityInvocation {
+            surface_version: surface.version,
+            capability_id: candidate.capability_id,
+            input_ref: candidate.input_ref,
+        })
+        .await
+        .expect("capability_info invocation succeeds");
+
+        let records = result_writer.records();
+        assert_eq!(records[0].1["capability_id"], capability_id.as_str());
+        assert_eq!(
+            records[0].1["summary"]["notes"],
+            serde_json::json!(["runtime: first_party", "effects: dispatch_capability"])
         );
     }
 
