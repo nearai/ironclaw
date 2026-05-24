@@ -1,4 +1,17 @@
-use super::*;
+use ironclaw_turns::{
+    LoopExit,
+    run_profile::{AgentLoopDriverHost, LoopProgressEvent, ParentLoopOutput},
+};
+
+use crate::{family::LoopFamily, state::LoopExecutionState, strategies::TurnEndKind};
+
+use super::{
+    AgentLoopExecutorError, AssistantReplyInput, BudgetInput, BudgetStep, CancelCheck,
+    CapabilityInput, CheckpointInput, CheckpointKind, CheckpointStage, DefaultExecutorPipeline,
+    DrainInput, ExecutorStage, ExitInput, InputStep, ModelInput, ModelStep, PendingInputAck,
+    PromptInput, PromptStep, StageContext, StopInput, StopStep, TurnCompletedStep,
+    UserFacingInputDrainMode, completed_exit,
+};
 
 impl DefaultExecutorPipeline {
     pub(super) async fn execute(
@@ -12,7 +25,7 @@ impl DefaultExecutorPipeline {
         let mut pending_input_ack = PendingInputAck::default();
 
         loop {
-            state = match self.checkpoint.cancel_if_requested(ctx, state).await? {
+            state = match CheckpointStage.cancel_if_requested(ctx, state).await? {
                 CancelCheck::Continue(state) => *state,
                 CancelCheck::Exit(exit) => return Ok(exit),
             };
@@ -38,7 +51,7 @@ impl DefaultExecutorPipeline {
                 BudgetStep::Exit(exit) => return Ok(exit),
             }
 
-            self.checkpoint
+            CheckpointStage
                 .emit_progress(
                     ctx,
                     LoopProgressEvent::IterationStarted {
@@ -87,8 +100,7 @@ impl DefaultExecutorPipeline {
             state = prompt.state;
             pending_input_ack = prompt.pending_input_ack;
 
-            state = self
-                .checkpoint
+            state = CheckpointStage
                 .process(
                     ctx,
                     CheckpointInput {
@@ -206,8 +218,7 @@ impl DefaultExecutorPipeline {
                         InputStep::Exit(exit) => return Ok(exit),
                     }
 
-                    let checked = self
-                        .checkpoint
+                    let checked = CheckpointStage
                         .process(
                             ctx,
                             CheckpointInput {

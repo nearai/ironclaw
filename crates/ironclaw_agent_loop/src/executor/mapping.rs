@@ -1,4 +1,20 @@
-use super::*;
+use ironclaw_turns::{
+    LoopBlockedKind, LoopFailureKind,
+    run_profile::{
+        AgentLoopHostError, AgentLoopHostErrorKind, BatchPolicyKind, CapabilityFailureKind,
+        CapabilityOutcome, LoopCheckpointKind, LoopGateKind,
+    },
+};
+
+use crate::{
+    state::CheckpointKind,
+    strategies::{
+        BatchPolicy, CapabilityErrorClass, GateKind, ModelErrorClass, ModelPreference,
+        RetryAlteration, SanitizedStrategySummary,
+    },
+};
+
+use super::{AgentLoopExecutorError, HostStage};
 
 pub(super) fn checkpoint_kind_to_host(kind: CheckpointKind) -> LoopCheckpointKind {
     match kind {

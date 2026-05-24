@@ -1,9 +1,21 @@
 use std::collections::{HashMap, HashSet};
 
 use ironclaw_host_api::CapabilityId;
-use ironclaw_turns::run_profile::{CapabilityDescriptorView, CapabilitySurfaceVersion};
+use ironclaw_turns::{
+    LoopResultRef,
+    run_profile::{
+        AgentLoopDriverHost, AppendCapabilityResultRef, CapabilityCallCandidate,
+        CapabilityDescriptorView, CapabilityInvocation, CapabilityResultMessage,
+        CapabilitySurfaceVersion, ProviderToolCallReference, VisibleCapabilitySurface,
+    },
+};
 
-use super::*;
+use crate::{
+    state::{CapabilityCallSignature, LoopExecutionState},
+    strategies::{CapabilityCallSummary, CapabilityErrorSummary, CapabilityFilter, GateKind},
+};
+
+use super::{AgentLoopExecutorError, capability_host_error};
 
 pub(super) fn capability_invocation_from_candidate(
     call: CapabilityCallCandidate,

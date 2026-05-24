@@ -1,4 +1,24 @@
-use super::*;
+use async_trait::async_trait;
+use ironclaw_turns::run_profile::{
+    LoopCheckpointRequest, LoopProgressEvent, StageCheckpointPayloadRequest,
+};
+
+use crate::state::{CheckpointKind, LoopExecutionState};
+
+#[cfg(test)]
+use crate::executor::CanonicalAgentLoopExecutor;
+
+#[cfg(test)]
+use ironclaw_turns::run_profile::AgentLoopDriverHost;
+
+use super::{
+    AgentLoopExecutorError, CancelCheck, CheckpointWrite, ExecutorStage, PendingInputAck,
+    StageContext, cancelled_exit_with_reason, cancelled_reason_from_signal,
+    checkpoint_kind_to_host,
+};
+
+#[cfg(test)]
+use super::{DrainedInputs, InputStage};
 
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct CheckpointStage;

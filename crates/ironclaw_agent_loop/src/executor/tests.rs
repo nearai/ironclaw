@@ -1,34 +1,26 @@
-use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
-
-use async_trait::async_trait;
-use ironclaw_host_api::{CapabilityId, RuntimeKind, TenantId, ThreadId};
 use ironclaw_turns::{
-    AgentLoopDriverDescriptor, LoopGateRef, LoopMessageRef, LoopResultRef, RunProfileId,
-    RunProfileVersion, TurnCheckpointId, TurnId, TurnRunId, TurnScope,
+    LoopCancelledReasonKind, LoopCompletionKind, LoopExit, LoopFailureKind, LoopGateRef,
+    LoopResultRef,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, CancellationPolicy,
-        CapabilityDescriptorView, CapabilityInputRef, CapabilitySurfaceProfileId,
-        CapabilitySurfaceVersion, CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass,
-        ContextProfileId, LoopCancelReasonKind, LoopCancellationPort, LoopCancellationSignal,
-        LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextBundle, LoopContextRequest,
-        LoopDriverId, LoopInputAck, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
-        LoopInputCursorToken, LoopInterruptKind, LoopModelMessage, LoopModelResponse,
-        LoopProcessRef, LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest,
-        LoopRunContext, LoopRunInfoPort, ModelProfileId, ModelStreamChunk, ProcessHandleSummary,
-        ProviderToolCallReplay, RedactedRunProfileProvenance, ResolvedRunProfile,
-        ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
-        RuntimeProfileConstraints, SchedulingClass, StageCheckpointPayloadRequest, SteeringPolicy,
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, CapabilityFailureKind,
+        CapabilityInputRef, CapabilityOutcome, CapabilityResultMessage, LoopCancelReasonKind,
+        LoopCheckpointKind, LoopInput, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
+        LoopInterruptKind, LoopProcessRef, LoopRunInfoPort, ParentLoopOutput, ProcessHandleSummary,
+        ProviderToolCallReplay, VisibleCapabilityRequest,
     },
 };
 
-use crate::default_planner::DefaultPlanner;
-use crate::family::{ComponentDigest, ComponentIdentity, LoopFamily, LoopFamilyId};
-use crate::strategies::{
-    CapabilityStrategy, InputDrainStrategy, RecoveryOutcome, RecoveryStrategy, RetryScope,
-};
+use crate::state::{CheckpointKind, LoopExecutionState};
+use crate::strategies::{CapabilityFilter, StopKind, TurnSummary};
 
-use super::*;
+use super::{
+    AgentLoopExecutor, AgentLoopExecutorError, AssistantReplyInput, AssistantReplyStage,
+    BudgetInput, BudgetStage, BudgetStep, CanonicalAgentLoopExecutor, CapabilityInput,
+    CapabilityStage, DrainInput, ExecutorStage, ExitInput, ExitStage, HostStage, InputStage,
+    InputStep, PendingInputAck, PromptInput, PromptStage, StageContext, StopInput, StopStage,
+    StopStep, TurnCompletedStep, UserFacingInputDrainMode, consume_drainable_inputs,
+    sanitize_result_ref_suffix, synthetic_provider_error_result_ref,
+};
 
 #[allow(dead_code)]
 fn _check(_: &dyn AgentLoopExecutor) {}
@@ -432,6 +424,39 @@ async fn capability_stage_returns_after_batch_summary() {
     }
 }
 
+#[test]
+fn sanitize_result_ref_suffix_handles_empty_special_chars_and_truncation() {
+    assert_eq!(sanitize_result_ref_suffix(""), "unknown");
+    assert_eq!(
+        sanitize_result_ref_suffix("turn/with spaces:and?symbols"),
+        "turn-with-spaces-and-symbols"
+    );
+
+    let oversized = "a".repeat(300);
+    let sanitized = sanitize_result_ref_suffix(&oversized);
+    assert_eq!(sanitized.len(), 300);
+
+    let result_ref = synthetic_provider_error_result_ref(&CapabilityCallCandidate {
+        surface_version: surface_version(),
+        capability_id: capability_id(),
+        input_ref: CapabilityInputRef::new("input:demo").expect("valid"),
+        provider_replay: Some(ProviderToolCallReplay {
+            provider_id: "test-provider".to_string(),
+            provider_model_id: "test-model".to_string(),
+            provider_turn_id: oversized,
+            provider_call_id: "call/with space".to_string(),
+            provider_tool_name: "demo__echo".to_string(),
+            arguments: serde_json::json!({}),
+            response_reasoning: None,
+            reasoning: None,
+            signature: None,
+        }),
+    })
+    .expect("synthetic provider error ref");
+    assert!(result_ref.as_str().starts_with("result:provider-error-"));
+    assert_eq!("result:".len() + 240, result_ref.as_str().len());
+}
+
 #[tokio::test]
 async fn exit_stage_no_progress_detected_exits_with_failed_loop_exit() {
     let host = MockHost::new(Vec::new());
@@ -490,6 +515,39 @@ async fn exit_stage_aborted_exits_with_requested_failure_kind() {
         }
         other => panic!("expected failed exit, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn stopped_on_suspension_completed_outcome_still_appends_result() {
+    let result_ref = LoopResultRef::new("result:stopped-completed").expect("valid");
+    let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
+                result_ref: result_ref.clone(),
+                safe_summary: "stopped batch completed".to_string(),
+                terminate_hint: true,
+            })],
+            stopped_on_suspension: true,
+        },
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    match exit {
+        LoopExit::Completed(completed) => {
+            assert_eq!(completed.completion_kind, LoopCompletionKind::ResultOnly);
+            assert_eq!(completed.result_refs, vec![result_ref.clone()]);
+        }
+        other => panic!("expected completed, got {other:?}"),
+    }
+    let appended = host.appended_result_refs();
+    assert_eq!(appended.len(), 1);
+    assert_eq!(appended[0].result_ref, result_ref);
 }
 
 #[tokio::test]
@@ -770,6 +828,11 @@ async fn strategy_filtered_capability_denial_does_not_invoke_host_and_records_po
     assert!(matches!(exit, LoopExit::Completed(_)));
     assert!(host.batch_invocations().is_empty());
     assert!(host.single_invocations().is_empty());
+    assert!(
+        !host
+            .progress_event_names()
+            .contains(&"capability_batch_started")
+    );
     assert!(
         host.model_requests()[0]
             .capability_view

@@ -27,6 +27,8 @@ use capability_helpers::{
     capability_invocation_from_candidate, capability_is_visible, capability_summary,
     gate_tool_result_summary, push_call_signature_once, push_completed_result,
 };
+#[cfg(test)]
+use capability_helpers::{sanitize_result_ref_suffix, synthetic_provider_error_result_ref};
 use checkpoint::{CheckpointInput, CheckpointStage};
 use exit_helpers::{
     cancelled_exit, cancelled_exit_with_reason, cancelled_reason_from_signal, completed_exit,
@@ -50,30 +52,14 @@ use turn_stop::{StopInput, StopStage, StopStep};
 
 use async_trait::async_trait;
 use ironclaw_turns::{
-    LoopBlocked, LoopBlockedKind, LoopCancelled, LoopCancelledReasonKind, LoopCompleted,
-    LoopCompletionKind, LoopExit, LoopExitId, LoopFailed, LoopFailureKind, LoopResultRef,
-    run_profile::{
-        AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef,
-        AssistantReply, BatchPolicyKind, CapabilityBatchInvocation, CapabilityCallCandidate,
-        CapabilityFailureKind, CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage,
-        FinalizeAssistantMessage, LoopCancelReasonKind, LoopCancellationSignal, LoopCheckpointKind,
-        LoopCheckpointRequest, LoopDriverNoteKind, LoopGateKind, LoopInput, LoopInputAckToken,
-        LoopInputBatch, LoopModelCapabilityView, LoopModelRequest, LoopProgressEvent,
-        ParentLoopOutput, ProviderToolCallReference, StageCheckpointPayloadRequest,
-        VisibleCapabilityRequest, VisibleCapabilitySurface,
-    },
+    LoopCancelledReasonKind, LoopExit,
+    run_profile::{AgentLoopDriverHost, LoopInputAckToken},
 };
 
 use crate::{
     family::LoopFamily,
-    planner::AgentLoopPlannerInternal,
-    state::{CapabilityCallSignature, CheckpointKind, LoopExecutionState},
-    strategies::{
-        BatchPolicy, CapabilityCallSummary, CapabilityErrorClass, CapabilityErrorSummary,
-        CapabilityFilter, GateKind, GateOutcome, ModelErrorClass, ModelErrorSummary,
-        ModelPreference, RecoveryOutcome, RetryAlteration, SanitizedStrategySummary, StopKind,
-        StopOutcome, TurnEndKind, TurnSummary,
-    },
+    state::{CheckpointKind, LoopExecutionState},
+    strategies::TurnSummary,
 };
 
 const MAX_CAPABILITY_RETRIES: usize = 8;

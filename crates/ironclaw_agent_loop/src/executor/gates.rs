@@ -1,7 +1,22 @@
-use super::*;
+use async_trait::async_trait;
+use ironclaw_turns::{
+    LoopBlocked, LoopExit,
+    run_profile::{CapabilityCallCandidate, LoopProgressEvent},
+};
+
+use crate::{
+    state::{CheckpointKind, LoopExecutionState},
+    strategies::{GateKind, GateOutcome},
+};
+
+use super::{
+    AgentLoopExecutorError, BatchStep, CancelCheck, CheckpointStage, ExecutorStage, StageContext,
+    append_capability_safe_summary_ref, blocked_kind, exit_id, failed_exit,
+    gate_tool_result_summary, loop_gate_kind,
+};
 
 #[derive(Debug, Default, Clone, Copy)]
-pub(super) struct GateStage;
+pub(crate) struct GateStage;
 
 pub(super) struct GateInput {
     pub(super) state: LoopExecutionState,

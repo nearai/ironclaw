@@ -830,6 +830,35 @@ mod tests {
     }
 
     #[test]
+    fn local_dev_workspace_root_overlapping_skill_root_is_rejected() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+
+        for skill_root in [
+            storage_root.join("skills"),
+            storage_root.join("tenant-shared/skills"),
+            storage_root.join("system/skills"),
+        ] {
+            for workspace_root in [
+                skill_root.clone(),
+                skill_root
+                    .parent()
+                    .expect("skill root parent")
+                    .to_path_buf(),
+                skill_root.join("nested-workspace"),
+            ] {
+                let error =
+                    validate_local_dev_workspace_skill_isolation(&storage_root, &workspace_root)
+                        .expect_err("workspace root overlapping skill root should be rejected");
+                assert!(
+                    matches!(error, RebornBuildError::InvalidConfig { .. }),
+                    "unexpected error: {error:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn builtin_first_party_package_declares_skill_management_tools() {
         let package = builtin_first_party_package().expect("built-in package builds");
         let ids = package

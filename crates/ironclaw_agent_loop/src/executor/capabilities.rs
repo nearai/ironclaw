@@ -1,6 +1,31 @@
 use std::collections::HashSet;
 
-use super::*;
+use async_trait::async_trait;
+use ironclaw_turns::{
+    LoopFailureKind,
+    run_profile::{
+        CapabilityBatchInvocation, CapabilityCallCandidate, CapabilityFailureKind,
+        CapabilityOutcome, LoopDriverNoteKind, LoopProgressEvent, VisibleCapabilitySurface,
+    },
+};
+
+use crate::{
+    state::{CheckpointKind, LoopExecutionState},
+    strategies::{
+        BatchPolicy, CapabilityErrorClass, CapabilityErrorSummary, GateKind, RecoveryOutcome,
+        SanitizedStrategySummary, TurnSummary,
+    },
+};
+
+use super::{
+    AgentLoopExecutorError, BatchStep, CancelCheck, CapabilitySurfaceIndex, CheckpointStage,
+    ExecutorStage, GateInput, GateStage, MAX_CAPABILITY_RETRIES, StageContext, TurnCompletedStep,
+    append_capability_error_ref, append_capability_result_ref, append_capability_safe_summary_ref,
+    batch_policy_kind, cancelled_exit, capability_batch_counts, capability_error_class,
+    capability_failure_kind, capability_host_error, capability_invocation_from_candidate,
+    capability_is_visible, capability_summary, failed_exit, honor_retry_alteration,
+    push_call_signature_once, push_completed_result, sanitized_strategy_summary,
+};
 
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct CapabilityStage;
@@ -140,28 +165,40 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             // possible gates/errors so partial parallel progress is durable in
             // any later suspension checkpoint. Keep this in sync with the
             // Completed arm in handle_capability_outcome.
-            for (call, outcome) in visible_calls.iter().zip(&outcomes) {
+            let mut pending_outcomes = Vec::new();
+            for (call, outcome) in visible_calls.into_iter().zip(outcomes) {
                 if let CapabilityOutcome::Completed(result) = outcome {
-                    push_call_signature_once(&mut state, &mut signatures, call)?;
-                    append_capability_result_ref(ctx.host, call, result).await?;
-                    push_completed_result(&mut state, result.clone());
+                    push_call_signature_once(&mut state, &mut signatures, &call)?;
+                    append_capability_result_ref(ctx.host, &call, &result).await?;
+                    push_completed_result(&mut state, result);
+                } else {
+                    pending_outcomes.push((call, outcome));
                 }
             }
-        }
-
-        for (call, outcome) in visible_calls.into_iter().zip(outcomes) {
-            if !batch.stopped_on_suspension && matches!(outcome, CapabilityOutcome::Completed(_)) {
-                continue;
-            }
-            push_call_signature_once(&mut state, &mut signatures, &call)?;
-            match self
-                .handle_capability_outcome(ctx, state, call, outcome)
-                .await?
-            {
-                BatchStep::Continue(next) => {
-                    state = *next;
+            for (call, outcome) in pending_outcomes {
+                push_call_signature_once(&mut state, &mut signatures, &call)?;
+                match self
+                    .handle_capability_outcome(ctx, state, call, outcome)
+                    .await?
+                {
+                    BatchStep::Continue(next) => {
+                        state = *next;
+                    }
+                    BatchStep::Exit(exit) => return Ok(TurnCompletedStep::Exit(exit)),
                 }
-                BatchStep::Exit(exit) => return Ok(TurnCompletedStep::Exit(exit)),
+            }
+        } else {
+            for (call, outcome) in visible_calls.into_iter().zip(outcomes) {
+                push_call_signature_once(&mut state, &mut signatures, &call)?;
+                match self
+                    .handle_capability_outcome(ctx, state, call, outcome)
+                    .await?
+                {
+                    BatchStep::Continue(next) => {
+                        state = *next;
+                    }
+                    BatchStep::Exit(exit) => return Ok(TurnCompletedStep::Exit(exit)),
+                }
             }
         }
 

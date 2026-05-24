@@ -1,4 +1,12 @@
-use super::*;
+use async_trait::async_trait;
+use ironclaw_turns::run_profile::AgentLoopDriverHost;
+
+use crate::planner::AgentLoopPlannerInternal;
+
+use super::{
+    AgentLoopExecutorError, AssistantReplyStage, BudgetStage, CapabilityStage, ExitStage,
+    InputStage, ModelStage, PromptStage, StopStage,
+};
 
 #[derive(Clone, Copy)]
 pub(crate) struct StageContext<'a> {
@@ -26,6 +34,5 @@ pub(crate) struct DefaultExecutorPipeline {
     pub(crate) assistant_reply: AssistantReplyStage,
     pub(crate) capabilities: CapabilityStage,
     pub(crate) stop: StopStage,
-    pub(crate) checkpoint: CheckpointStage,
     pub(crate) exit: ExitStage,
 }
