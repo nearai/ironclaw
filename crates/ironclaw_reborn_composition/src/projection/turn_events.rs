@@ -127,7 +127,12 @@ async fn blocked_prompt_payload(
     {
         Ok(state) => state,
         Err(TurnError::ScopeNotFound) => return Ok(None),
-        Err(_) => {
+        Err(error) => {
+            tracing::debug!(
+                %error,
+                run_id = %event.run_id,
+                "turn gate state lookup failed during WebUI projection"
+            );
             return Err(ProductAdapterError::WorkflowTransient {
                 reason: RedactedString::new("turn gate state lookup failed"),
             });
