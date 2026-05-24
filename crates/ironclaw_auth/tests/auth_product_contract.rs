@@ -8,5 +8,7 @@ mod credential_account_contract;
 mod manual_token_contract;
 #[path = "auth_product_contract/oauth_flow_contract.rs"]
 mod oauth_flow_contract;
+#[path = "auth_product_contract/oauth_helpers_contract.rs"]
+mod oauth_helpers_contract;
 #[path = "auth_product_contract/serde_redaction_contract.rs"]
 mod serde_redaction_contract;

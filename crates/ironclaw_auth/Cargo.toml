@@ -13,10 +13,12 @@ publish = false
 
 [dependencies]
 async-trait = "0.1"
+base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 secrecy = { version = "0.10", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
 subtle = "2"
 thiserror = "2"
 url = "2"

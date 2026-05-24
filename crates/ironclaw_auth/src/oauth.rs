@@ -1,0 +1,233 @@
+use std::fmt;
+
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use secrecy::{ExposeSecret, SecretString};
+use sha2::{Digest, Sha256};
+use url::Url;
+
+use crate::{
+    AuthProductError, AuthorizationCodeHash, OAuthAuthorizationCode, OAuthAuthorizationUrl,
+    OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret, ProviderScope,
+};
+
+pub const GOOGLE_PROVIDER_ID: &str = "google";
+pub const GOOGLE_AUTHORIZATION_ENDPOINT: &str = "https://accounts.google.com/o/oauth2/v2/auth";
+pub const GOOGLE_TOKEN_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
+
+pub const GOOGLE_CALENDAR_READONLY_SCOPE: &str =
+    "https://www.googleapis.com/auth/calendar.readonly";
+pub const GOOGLE_CALENDAR_EVENTS_SCOPE: &str = "https://www.googleapis.com/auth/calendar.events";
+pub const GOOGLE_GMAIL_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/gmail.readonly";
+pub const GOOGLE_GMAIL_SEND_SCOPE: &str = "https://www.googleapis.com/auth/gmail.send";
+pub const GOOGLE_GMAIL_MODIFY_SCOPE: &str = "https://www.googleapis.com/auth/gmail.modify";
+
+/// URL-safe S256 PKCE code challenge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PkceCodeChallenge(String);
+
+impl PkceCodeChallenge {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for PkceCodeChallenge {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// Provider authorization URL input. This is protocol-only: callers still own
+/// durable auth-flow records, callback routing, and provider exchange.
+#[derive(Debug, Clone)]
+pub struct OAuthAuthorizeUrlRequest<'a> {
+    pub authorization_endpoint: &'a str,
+    pub client_id: &'a str,
+    pub redirect_uri: &'a str,
+    pub state: &'a str,
+    pub code_challenge: &'a PkceCodeChallenge,
+    pub scopes: &'a [ProviderScope],
+    pub extra_params: &'a [(&'a str, &'a str)],
+}
+
+/// Redacted token-response projection after provider exchange. It can be used
+/// by provider clients before converting token material into secret handles.
+#[derive(Clone)]
+pub struct OAuthTokenResponse {
+    pub access_token: SecretString,
+    pub refresh_token: Option<SecretString>,
+    pub scopes: Vec<ProviderScope>,
+    pub expires_in_seconds: Option<u64>,
+}
+
+impl fmt::Debug for OAuthTokenResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OAuthTokenResponse")
+            .field("access_token", &"[REDACTED]")
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("scopes", &self.scopes)
+            .field("expires_in_seconds", &self.expires_in_seconds)
+            .finish()
+    }
+}
+
+impl OAuthTokenResponse {
+    pub fn new(
+        access_token: SecretString,
+        refresh_token: Option<SecretString>,
+        scope_text: Option<&str>,
+        expires_in_seconds: Option<u64>,
+    ) -> Result<Self, AuthProductError> {
+        if access_token.expose_secret().trim().is_empty() {
+            return Err(AuthProductError::invalid_request(
+                "oauth access token must not be empty",
+            ));
+        }
+        if refresh_token
+            .as_ref()
+            .is_some_and(|token| token.expose_secret().trim().is_empty())
+        {
+            return Err(AuthProductError::invalid_request(
+                "oauth refresh token must not be empty",
+            ));
+        }
+        let scopes = scope_text
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(ProviderScope::new)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            access_token,
+            refresh_token,
+            scopes,
+            expires_in_seconds,
+        })
+    }
+}
+
+pub fn opaque_state_hash(state: &str) -> Result<OpaqueStateHash, AuthProductError> {
+    OpaqueStateHash::new(sha256_hex(state))
+}
+
+pub fn pkce_verifier_hash(
+    verifier: &PkceVerifierSecret,
+) -> Result<PkceVerifierHash, AuthProductError> {
+    PkceVerifierHash::new(sha256_hex(verifier.expose_secret()))
+}
+
+pub fn authorization_code_hash(
+    code: &OAuthAuthorizationCode,
+) -> Result<AuthorizationCodeHash, AuthProductError> {
+    AuthorizationCodeHash::new(sha256_hex(code.expose_secret()))
+}
+
+pub fn pkce_s256_challenge(verifier: &PkceVerifierSecret) -> PkceCodeChallenge {
+    PkceCodeChallenge(URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.expose_secret().as_bytes())))
+}
+
+pub fn build_authorization_url(
+    request: OAuthAuthorizeUrlRequest<'_>,
+) -> Result<OAuthAuthorizationUrl, AuthProductError> {
+    validate_authorize_fragment("oauth client id", request.client_id)?;
+    validate_authorize_fragment("oauth redirect uri", request.redirect_uri)?;
+    validate_authorize_fragment("oauth state", request.state)?;
+
+    let mut url = Url::parse(request.authorization_endpoint).map_err(|_| {
+        AuthProductError::invalid_request("oauth authorization endpoint must be an absolute url")
+    })?;
+    if url.scheme() != "https" {
+        return Err(AuthProductError::invalid_request(
+            "oauth authorization endpoint must use https",
+        ));
+    }
+    if url.host_str().is_none() {
+        return Err(AuthProductError::invalid_request(
+            "oauth authorization endpoint host is required",
+        ));
+    }
+
+    {
+        let mut pairs = url.query_pairs_mut();
+        pairs
+            .append_pair("client_id", request.client_id)
+            .append_pair("redirect_uri", request.redirect_uri)
+            .append_pair("response_type", "code")
+            .append_pair("scope", &scope_text(request.scopes))
+            .append_pair("state", request.state)
+            .append_pair("code_challenge", request.code_challenge.as_str())
+            .append_pair("code_challenge_method", "S256");
+        for (name, value) in request.extra_params {
+            validate_authorize_fragment("oauth query parameter name", name)?;
+            validate_authorize_fragment("oauth query parameter value", value)?;
+            pairs.append_pair(name, value);
+        }
+    }
+
+    OAuthAuthorizationUrl::new(url.to_string())
+}
+
+pub fn build_google_authorization_url(
+    client_id: &str,
+    redirect_uri: &str,
+    state: &str,
+    code_challenge: &PkceCodeChallenge,
+    scopes: &[ProviderScope],
+    allowed_hosted_domain: Option<&str>,
+) -> Result<OAuthAuthorizationUrl, AuthProductError> {
+    let mut extra_params = vec![
+        ("access_type", "offline"),
+        ("prompt", "consent"),
+        ("include_granted_scopes", "true"),
+    ];
+    if let Some(hosted_domain) = allowed_hosted_domain {
+        extra_params.push(("hd", hosted_domain));
+    }
+    build_authorization_url(OAuthAuthorizeUrlRequest {
+        authorization_endpoint: GOOGLE_AUTHORIZATION_ENDPOINT,
+        client_id,
+        redirect_uri,
+        state,
+        code_challenge,
+        scopes,
+        extra_params: &extra_params,
+    })
+}
+
+pub fn scope_text(scopes: &[ProviderScope]) -> String {
+    scopes
+        .iter()
+        .map(ProviderScope::as_str)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn sha256_hex(value: &str) -> String {
+    let digest = Sha256::digest(value.as_bytes());
+    let mut output = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(output, "{byte:02x}");
+    }
+    output
+}
+
+fn validate_authorize_fragment(label: &'static str, value: &str) -> Result<(), AuthProductError> {
+    if value.trim().is_empty() {
+        return Err(AuthProductError::invalid_request(format!(
+            "{label} must not be empty"
+        )));
+    }
+    if value
+        .chars()
+        .any(|character| character == '\0' || character.is_control())
+    {
+        return Err(AuthProductError::invalid_request(format!(
+            "{label} must not contain NUL/control characters"
+        )));
+    }
+    Ok(())
+}
