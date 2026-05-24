@@ -5,24 +5,25 @@ use super::*;
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct CapabilityStage;
 
-pub(super) struct CapabilityBatchInput {
+pub(super) struct CapabilityInput {
     pub(super) state: LoopExecutionState,
     pub(super) surface: VisibleCapabilitySurface,
     pub(super) calls: Vec<CapabilityCallCandidate>,
 }
 
 #[async_trait]
-impl ExecutorStage<CapabilityBatchInput> for CapabilityStage {
+impl ExecutorStage<CapabilityInput> for CapabilityStage {
     type Output = TurnCompletedStep;
 
     async fn process(
         &self,
         ctx: StageContext<'_>,
-        input: CapabilityBatchInput,
+        input: CapabilityInput,
     ) -> Result<TurnCompletedStep, AgentLoopExecutorError> {
         let mut state = input.state;
         let result_refs_start = state.result_refs.len();
         let surface = &input.surface;
+        let surface_index = CapabilitySurfaceIndex::new(surface);
         let calls = input.calls;
         state.stop_state.last_batch_total = 0;
         state.stop_state.terminate_hints_in_last_batch = 0;
@@ -30,7 +31,7 @@ impl ExecutorStage<CapabilityBatchInput> for CapabilityStage {
         let mut visible_calls = Vec::new();
         let mut denied_calls = Vec::new();
         for call in calls {
-            if capability_is_visible(surface, &call) {
+            if capability_is_visible(&surface_index, &call) {
                 visible_calls.push(call);
                 continue;
             }
@@ -40,7 +41,7 @@ impl ExecutorStage<CapabilityBatchInput> for CapabilityStage {
 
         let summaries = visible_calls
             .iter()
-            .map(|call| capability_summary(surface, call))
+            .map(|call| capability_summary(&surface_index, call))
             .collect::<Vec<_>>();
         let policy = ctx.planner.batch().policy(&state, &summaries);
         let stop_on_first_suspension = matches!(policy, BatchPolicy::Sequential);
@@ -135,6 +136,10 @@ impl ExecutorStage<CapabilityBatchInput> for CapabilityStage {
 
         let outcomes = batch.outcomes;
         if !batch.stopped_on_suspension {
+            // Non-suspended batches record completed outcomes before handling
+            // possible gates/errors so partial parallel progress is durable in
+            // any later suspension checkpoint. Keep this in sync with the
+            // Completed arm in handle_capability_outcome.
             for (call, outcome) in visible_calls.iter().zip(&outcomes) {
                 if let CapabilityOutcome::Completed(result) = outcome {
                     push_call_signature_once(&mut state, &mut signatures, call)?;
@@ -351,79 +356,12 @@ impl CapabilityStage {
                                 diagnostic_ref: None,
                             };
                         }
-                        promoted => match promoted {
-                            CapabilityOutcome::Completed(result) => {
-                                append_capability_result_ref(ctx.host, &call, &result).await?;
-                                push_completed_result(&mut state, result);
-                                return Ok(BatchStep::Continue(Box::new(state)));
-                            }
-                            CapabilityOutcome::ApprovalRequired { gate_ref, .. } => {
-                                return GateStage
-                                    .process(
-                                        ctx,
-                                        GateInput {
-                                            state,
-                                            call,
-                                            kind: GateKind::Approval,
-                                            gate_ref,
-                                        },
-                                    )
-                                    .await;
-                            }
-                            CapabilityOutcome::AuthRequired { gate_ref, .. } => {
-                                return GateStage
-                                    .process(
-                                        ctx,
-                                        GateInput {
-                                            state,
-                                            call,
-                                            kind: GateKind::Auth,
-                                            gate_ref,
-                                        },
-                                    )
-                                    .await;
-                            }
-                            CapabilityOutcome::ResourceBlocked { gate_ref, .. } => {
-                                return GateStage
-                                    .process(
-                                        ctx,
-                                        GateInput {
-                                            state,
-                                            call,
-                                            kind: GateKind::Resource,
-                                            gate_ref,
-                                        },
-                                    )
-                                    .await;
-                            }
-                            CapabilityOutcome::SpawnedProcess(handle) => {
-                                return self
-                                    .fail_unsupported_process_wait(
-                                        ctx,
-                                        state,
-                                        &call,
-                                        &handle.process_ref,
-                                    )
-                                    .await;
-                            }
-                            CapabilityOutcome::Denied(denied) => {
-                                state
-                                    .recent_failure_kinds
-                                    .push(LoopFailureKind::PolicyDenied);
-                                summary = CapabilityErrorSummary {
-                                    class: CapabilityErrorClass::PolicyDenied,
-                                    safe_summary: sanitized_strategy_summary(denied.safe_summary)?,
-                                    diagnostic_ref: None,
-                                };
-                            }
-                            CapabilityOutcome::Failed(failure) => {
-                                summary = CapabilityErrorSummary {
-                                    class: capability_error_class(&failure.error_kind),
-                                    safe_summary: sanitized_strategy_summary(failure.safe_summary)?,
-                                    diagnostic_ref: None,
-                                };
-                            }
-                        },
+                        promoted => {
+                            return Box::pin(
+                                self.handle_capability_outcome(ctx, state, call, promoted),
+                            )
+                            .await;
+                        }
                     }
                 }
             }

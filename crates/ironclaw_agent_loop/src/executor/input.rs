@@ -9,7 +9,7 @@ pub(super) enum UserFacingInputDrainMode {
     FollowUp,
 }
 
-pub(super) struct InputInput {
+pub(super) struct DrainInput {
     pub(super) state: LoopExecutionState,
     pub(super) pending_input_ack: PendingInputAck,
     pub(super) mode: UserFacingInputDrainMode,
@@ -25,13 +25,13 @@ pub(super) enum InputStep {
 }
 
 #[async_trait]
-impl ExecutorStage<InputInput> for InputStage {
+impl ExecutorStage<DrainInput> for InputStage {
     type Output = InputStep;
 
     async fn process(
         &self,
         ctx: StageContext<'_>,
-        input: InputInput,
+        input: DrainInput,
     ) -> Result<InputStep, AgentLoopExecutorError> {
         let mut state = input.state;
         let mut pending_input_ack = input.pending_input_ack;

@@ -163,7 +163,7 @@ async fn input_stage_steering_drain_carries_pending_ack() {
     let step = InputStage
         .process(
             ctx,
-            InputInput {
+            DrainInput {
                 state,
                 pending_input_ack: PendingInputAck::default(),
                 mode: UserFacingInputDrainMode::Steering,
@@ -192,6 +192,96 @@ async fn input_stage_steering_drain_carries_pending_ack() {
         }
         InputStep::Exit(exit) => panic!("expected continue, got {exit:?}"),
     }
+}
+
+#[tokio::test]
+async fn input_stage_steering_input_is_drained_like_user_message() {
+    let host = MockHost::new(Vec::new());
+    let run_context = host.run_context().clone();
+    let host = host.with_input_batches(vec![LoopInputBatch {
+        inputs: vec![LoopInput::Steering {
+            message_ref: message_ref("msg:steering-drained"),
+        }],
+        input_acks: vec![input_ack(
+            &run_context,
+            "input-cursor:after-steering",
+            "input-ack:after-steering",
+        )],
+        next_cursor: input_cursor(&run_context, "input-cursor:after-steering"),
+    }]);
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let step = InputStage
+        .process(
+            ctx,
+            DrainInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+                mode: UserFacingInputDrainMode::Steering,
+            },
+        )
+        .await
+        .expect("input stage");
+
+    match step {
+        InputStep::Continue { state, drained, .. } => {
+            assert!(drained);
+            assert_eq!(
+                state.input_cursor,
+                input_cursor(&run_context, "input-cursor:after-steering")
+            );
+        }
+        InputStep::Exit(exit) => panic!("expected continue, got {exit:?}"),
+    }
+}
+
+#[test]
+fn consume_drainable_inputs_empty_batch_short_circuits() {
+    let host = MockHost::new(Vec::new());
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    let before_cursor = state.input_cursor.clone();
+    let batch = LoopInputBatch {
+        inputs: Vec::new(),
+        input_acks: Vec::new(),
+        next_cursor: before_cursor.clone(),
+    };
+
+    let (drained, ack_tokens, cancelled_reason_kind) =
+        consume_drainable_inputs(&batch, UserFacingInputDrainMode::Steering, &mut state)
+            .expect("consume inputs");
+
+    assert!(!drained);
+    assert!(ack_tokens.is_empty());
+    assert!(cancelled_reason_kind.is_none());
+    assert_eq!(state.input_cursor, before_cursor);
+}
+
+#[test]
+fn consume_drainable_inputs_returns_planner_contract_error_when_acks_missing() {
+    let host = MockHost::new(Vec::new());
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    let batch = LoopInputBatch {
+        inputs: vec![LoopInput::Steering {
+            message_ref: message_ref("msg:steering-missing-ack"),
+        }],
+        input_acks: Vec::new(),
+        next_cursor: state.input_cursor.clone(),
+    };
+
+    let error = consume_drainable_inputs(&batch, UserFacingInputDrainMode::Steering, &mut state)
+        .expect_err("missing ack metadata violates the host contract");
+
+    assert!(matches!(
+        error,
+        AgentLoopExecutorError::PlannerContract {
+            detail: "input batch omitted ack metadata for consumed inputs"
+        }
+    ));
 }
 
 #[tokio::test]
@@ -226,6 +316,70 @@ async fn assistant_reply_stage_returns_reply_summary() {
 }
 
 #[tokio::test]
+async fn prompt_stage_host_unavailable_on_visible_capabilities_propagates_error() {
+    let host = MockHost::new(Vec::new()).with_failing_visible_capabilities();
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let result = PromptStage
+        .process(
+            ctx,
+            PromptInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await;
+    let error = match result {
+        Ok(_) => panic!("visible capabilities failure should propagate"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        AgentLoopExecutorError::HostUnavailable {
+            stage: HostStage::Capability
+        }
+    ));
+}
+
+#[tokio::test]
+async fn prompt_stage_host_unavailable_on_build_prompt_bundle_propagates_error() {
+    let host = MockHost::new(Vec::new()).with_failing_prompt_bundle();
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let result = PromptStage
+        .process(
+            ctx,
+            PromptInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await;
+    let error = match result {
+        Ok(_) => panic!("prompt bundle failure should propagate"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        AgentLoopExecutorError::HostUnavailable {
+            stage: HostStage::Prompt
+        }
+    ));
+}
+
+#[tokio::test]
 async fn capability_stage_returns_after_batch_summary() {
     let result_ref = LoopResultRef::new("result:done").expect("valid");
     let host = MockHost::new(Vec::new()).with_batch_outcomes(vec![
@@ -252,7 +406,7 @@ async fn capability_stage_returns_after_batch_summary() {
     let step = CapabilityStage
         .process(
             ctx,
-            CapabilityBatchInput {
+            CapabilityInput {
                 state,
                 surface: ironclaw_turns::run_profile::LoopCapabilityPort::visible_capabilities(
                     &host,
@@ -275,6 +429,66 @@ async fn capability_stage_returns_after_batch_summary() {
             );
         }
         TurnCompletedStep::Exit(exit) => panic!("expected continue, got {exit:?}"),
+    }
+}
+
+#[tokio::test]
+async fn exit_stage_no_progress_detected_exits_with_failed_loop_exit() {
+    let host = MockHost::new(Vec::new());
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = ExitStage
+        .process(
+            ctx,
+            ExitInput {
+                state,
+                kind: StopKind::NoProgressDetected,
+            },
+        )
+        .await
+        .expect("exit stage");
+
+    match exit {
+        LoopExit::Failed(failed) => {
+            assert_eq!(failed.reason_kind, LoopFailureKind::NoProgressDetected);
+            assert!(failed.checkpoint_id.is_some());
+        }
+        other => panic!("expected failed exit, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn exit_stage_aborted_exits_with_requested_failure_kind() {
+    let host = MockHost::new(Vec::new());
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = ExitStage
+        .process(
+            ctx,
+            ExitInput {
+                state,
+                kind: StopKind::Aborted(LoopFailureKind::CapabilityProtocolError),
+            },
+        )
+        .await
+        .expect("exit stage");
+
+    match exit {
+        LoopExit::Failed(failed) => {
+            assert_eq!(failed.reason_kind, LoopFailureKind::CapabilityProtocolError);
+            assert!(failed.checkpoint_id.is_some());
+        }
+        other => panic!("expected failed exit, got {other:?}"),
     }
 }
 
@@ -504,6 +718,41 @@ async fn non_empty_capability_batch_rejects_empty_outcomes() {
     ) {
         panic!("expected planner contract error, got {error:?}");
     }
+}
+
+#[tokio::test]
+async fn capability_batch_rejects_outcome_count_exceeding_invocation_count() {
+    let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![
+                CapabilityOutcome::Completed(CapabilityResultMessage {
+                    result_ref: LoopResultRef::new("result:first").expect("valid"),
+                    safe_summary: "first".to_string(),
+                    terminate_hint: false,
+                }),
+                CapabilityOutcome::Completed(CapabilityResultMessage {
+                    result_ref: LoopResultRef::new("result:second").expect("valid"),
+                    safe_summary: "second".to_string(),
+                    terminate_hint: false,
+                }),
+            ],
+            stopped_on_suspension: true,
+        },
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let error = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect_err("too many outcomes violate the host contract");
+
+    assert!(matches!(
+        error,
+        AgentLoopExecutorError::PlannerContract {
+            detail: "capability batch outcome count does not match invocations"
+        }
+    ));
 }
 
 #[tokio::test]

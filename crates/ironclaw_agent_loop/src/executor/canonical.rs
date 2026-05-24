@@ -51,7 +51,7 @@ impl DefaultExecutorPipeline {
                 .input
                 .process(
                     ctx,
-                    InputInput {
+                    DrainInput {
                         state,
                         pending_input_ack: std::mem::take(&mut pending_input_ack),
                         mode: UserFacingInputDrainMode::Steering,
@@ -130,7 +130,7 @@ impl DefaultExecutorPipeline {
                     self.capabilities
                         .process(
                             ctx,
-                            CapabilityBatchInput {
+                            CapabilityInput {
                                 state,
                                 surface: prompt.surface,
                                 calls,
@@ -183,7 +183,7 @@ impl DefaultExecutorPipeline {
                         .input
                         .process(
                             ctx,
-                            InputInput {
+                            DrainInput {
                                 state,
                                 pending_input_ack: std::mem::take(&mut pending_input_ack),
                                 mode: UserFacingInputDrainMode::FollowUp,

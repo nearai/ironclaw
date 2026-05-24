@@ -27,6 +27,8 @@ pub(super) struct MockHost {
     cancel_after_model_response: Arc<Mutex<bool>>,
     cancel_after_batch_invocation: Arc<Mutex<bool>>,
     fail_checkpoint: Arc<Mutex<Option<LoopCheckpointKind>>>,
+    fail_visible_capabilities: bool,
+    fail_prompt_bundle: bool,
 }
 
 impl MockHost {
@@ -57,6 +59,8 @@ impl MockHost {
             cancel_after_model_response: Arc::new(Mutex::new(false)),
             cancel_after_batch_invocation: Arc::new(Mutex::new(false)),
             fail_checkpoint: Arc::new(Mutex::new(None)),
+            fail_visible_capabilities: false,
+            fail_prompt_bundle: false,
         }
     }
 
@@ -88,6 +92,16 @@ impl MockHost {
 
     pub(super) fn with_failing_progress_port(mut self) -> Self {
         self.fail_progress_port = true;
+        self
+    }
+
+    pub(super) fn with_failing_visible_capabilities(mut self) -> Self {
+        self.fail_visible_capabilities = true;
+        self
+    }
+
+    pub(super) fn with_failing_prompt_bundle(mut self) -> Self {
+        self.fail_prompt_bundle = true;
         self
     }
 
@@ -273,6 +287,12 @@ impl ironclaw_turns::run_profile::LoopPromptPort for MockHost {
         request: LoopPromptBundleRequest,
     ) -> Result<LoopPromptBundle, AgentLoopHostError> {
         self.prompt_requests.lock().expect("lock").push(request);
+        if self.fail_prompt_bundle {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "prompt bundle unavailable",
+            ));
+        }
         Ok(LoopPromptBundle {
             bundle_ref: LoopPromptBundleRef::for_run(&self.context, "bundle").expect("valid"),
             messages: vec![LoopModelMessage {
@@ -348,6 +368,12 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockHost {
         &self,
         _request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
+        if self.fail_visible_capabilities {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "visible capabilities unavailable",
+            ));
+        }
         Ok(VisibleCapabilitySurface {
             version: self.visible_surface_version.clone(),
             descriptors: vec![CapabilityDescriptorView {

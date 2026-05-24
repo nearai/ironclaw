@@ -1,7 +1,7 @@
 use super::*;
 
 #[derive(Debug, Default, Clone, Copy)]
-pub(crate) struct GateStage;
+pub(super) struct GateStage;
 
 pub(super) struct GateInput {
     pub(super) state: LoopExecutionState,

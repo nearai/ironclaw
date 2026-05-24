@@ -1,4 +1,7 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+
+use ironclaw_host_api::CapabilityId;
+use ironclaw_turns::run_profile::{CapabilityDescriptorView, CapabilitySurfaceVersion};
 
 use super::*;
 
@@ -12,14 +15,32 @@ pub(super) fn capability_invocation_from_candidate(
     }
 }
 
+pub(super) struct CapabilitySurfaceIndex<'a> {
+    version: &'a CapabilitySurfaceVersion,
+    descriptors: HashMap<&'a CapabilityId, &'a CapabilityDescriptorView>,
+}
+
+impl<'a> CapabilitySurfaceIndex<'a> {
+    pub(super) fn new(surface: &'a VisibleCapabilitySurface) -> Self {
+        let descriptors = surface
+            .descriptors
+            .iter()
+            .map(|descriptor| (&descriptor.capability_id, descriptor))
+            .collect();
+        Self {
+            version: &surface.version,
+            descriptors,
+        }
+    }
+}
+
 pub(super) fn capability_summary(
-    surface: &VisibleCapabilitySurface,
+    surface: &CapabilitySurfaceIndex<'_>,
     call: &CapabilityCallCandidate,
 ) -> CapabilityCallSummary {
     let concurrency_hint = surface
         .descriptors
-        .iter()
-        .find(|descriptor| descriptor.capability_id == call.capability_id)
+        .get(&call.capability_id)
         .map(|descriptor| descriptor.concurrency_hint)
         .unwrap_or(ironclaw_turns::run_profile::ConcurrencyHint::Exclusive);
     CapabilityCallSummary {
@@ -29,16 +50,13 @@ pub(super) fn capability_summary(
 }
 
 pub(super) fn capability_is_visible(
-    surface: &VisibleCapabilitySurface,
+    surface: &CapabilitySurfaceIndex<'_>,
     call: &CapabilityCallCandidate,
 ) -> bool {
-    if call.surface_version != surface.version {
+    if &call.surface_version != surface.version {
         return false;
     }
-    surface
-        .descriptors
-        .iter()
-        .any(|descriptor| descriptor.capability_id == call.capability_id)
+    surface.descriptors.contains_key(&call.capability_id)
 }
 
 pub(super) fn apply_capability_filter(

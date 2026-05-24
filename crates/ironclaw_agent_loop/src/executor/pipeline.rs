@@ -18,26 +18,14 @@ pub(crate) trait ExecutorStage<Input>: Send + Sync {
 }
 
 #[derive(Debug, Default, Clone, Copy)]
-pub(crate) struct ExecutorPipeline<B, I, P, M, A, C, S, K, E> {
-    pub(crate) budget: B,
-    pub(crate) input: I,
-    pub(crate) prompt: P,
-    pub(crate) model: M,
-    pub(crate) assistant_reply: A,
-    pub(crate) capabilities: C,
-    pub(crate) stop: S,
-    pub(crate) checkpoint: K,
-    pub(crate) exit: E,
+pub(crate) struct DefaultExecutorPipeline {
+    pub(crate) budget: BudgetStage,
+    pub(crate) input: InputStage,
+    pub(crate) prompt: PromptStage,
+    pub(crate) model: ModelStage,
+    pub(crate) assistant_reply: AssistantReplyStage,
+    pub(crate) capabilities: CapabilityStage,
+    pub(crate) stop: StopStage,
+    pub(crate) checkpoint: CheckpointStage,
+    pub(crate) exit: ExitStage,
 }
-
-pub(crate) type DefaultExecutorPipeline = ExecutorPipeline<
-    BudgetStage,
-    InputStage,
-    PromptStage,
-    ModelStage,
-    AssistantReplyStage,
-    CapabilityStage,
-    StopStage,
-    CheckpointStage,
-    ExitStage,
->;
