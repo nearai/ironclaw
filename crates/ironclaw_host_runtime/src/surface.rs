@@ -213,7 +213,10 @@ fn surface_descriptor(
         .and_then(Value::as_str)
         .map(str::to_string)
     else {
-        return Ok(descriptor);
+        return Err(HostRuntimeError::invalid_request(format!(
+            "built-in capability {} must publish from an input schema ref",
+            descriptor.id
+        )));
     };
     descriptor.parameters_schema =
         resolve_builtin_input_schema_ref(&reference).ok_or_else(|| {
