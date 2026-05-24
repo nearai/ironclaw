@@ -10,14 +10,15 @@ use ironclaw_threads::ThreadScope;
 use ironclaw_turns::{
     TurnRunId,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, LoopHostMilestone, LoopHostMilestoneKind,
-        LoopHostMilestoneSink,
+        AgentLoopHostError, AgentLoopHostErrorKind, HookDecisionSummary, LoopHostMilestone,
+        LoopHostMilestoneKind, LoopHostMilestoneSink,
     },
 };
 
 const MODEL_CAPABILITY_ID: &str = "loop.model";
 const ASSISTANT_REPLY_CAPABILITY_ID: &str = "loop.assistant_reply";
 const LOOP_RUN_CAPABILITY_ID: &str = "loop.run";
+const HOOK_CAPABILITY_ID: &str = "loop.hook";
 
 /// Scope authority bound into the sink at construction time.
 ///
@@ -215,6 +216,55 @@ impl DurableLoopHostMilestoneSink {
                 capability_id(LOOP_RUN_CAPABILITY_ID)?,
                 reason_kind.as_str(),
             ),
+            // Hook telemetry is projected into the durable event log so audit
+            // consumers can replay the same hook dispatched/decision/failed
+            // trail that SSE observers see live. Only closed-vocabulary labels
+            // and the blake3-hex hook identity cross into the event;
+            // sanitized reasons stay in the hook milestone stream and do not
+            // enter durable storage through this seam.
+            LoopHostMilestoneKind::HookDispatched {
+                hook_id,
+                point,
+                trust_class,
+                owning_extension,
+            } => RuntimeEvent::hook_dispatched(
+                scope,
+                capability_id(HOOK_CAPABILITY_ID)?,
+                hook_id.clone(),
+                point.clone(),
+                trust_class.clone(),
+                owning_extension.clone(),
+            ),
+            LoopHostMilestoneKind::HookDecisionEmitted {
+                hook_id,
+                decision,
+                owning_extension,
+                // `audit_reason` is intentionally NOT projected into the
+                // durable event log: durable events are model-visible audit
+                // surface; the free-form manifest reason is operator-visible
+                // SSE/audit content delivered via the in-memory milestone
+                // sink, not the cross-process event channel.
+                audit_reason: _,
+            } => RuntimeEvent::hook_decision_emitted(
+                scope,
+                capability_id(HOOK_CAPABILITY_ID)?,
+                hook_id.clone(),
+                hook_decision_label(decision),
+                owning_extension.clone(),
+            ),
+            LoopHostMilestoneKind::HookFailed {
+                hook_id,
+                category,
+                disposition,
+                owning_extension,
+            } => RuntimeEvent::hook_failed(
+                scope,
+                capability_id(HOOK_CAPABILITY_ID)?,
+                hook_id.clone(),
+                category.clone(),
+                disposition.clone(),
+                owning_extension.clone(),
+            ),
             // PromptBundleBuilt and CheckpointCreated are suppressed here intentionally.
             // Checkpoint durability is owned by LoopCheckpointPort::write_checkpoint; the
             // CheckpointCreated runtime-event milestone is emitted there with the authoritative
@@ -236,6 +286,15 @@ impl DurableLoopHostMilestoneSink {
     }
 }
 
+/// Render a [`HookDecisionSummary`] as the closed-vocabulary kind label
+/// expected by [`RuntimeEvent::hook_decision_emitted`]. Sanitized reasons live
+/// in the in-memory hook milestone stream only — durable runtime events carry
+/// the kind label alone so that audit replay never depends on free-form reason
+/// text.
+fn hook_decision_label(decision: &HookDecisionSummary) -> &'static str {
+    decision.kind_name()
+}
+
 fn capability_id(value: &'static str) -> Result<CapabilityId, AgentLoopHostError> {
     CapabilityId::new(value).map_err(|_| {
         AgentLoopHostError::new(
@@ -250,4 +309,140 @@ fn durable_event_error(_error: EventError) -> AgentLoopHostError {
         AgentLoopHostErrorKind::Unavailable,
         "loop milestone event log is unavailable",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_events::{InMemoryDurableEventLog, RuntimeEventKind};
+    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+    use ironclaw_threads::ThreadScope;
+    use ironclaw_turns::{
+        TurnId, TurnScope,
+        run_profile::{HookDecisionSummary, LoopDriverId, LoopHostMilestone},
+    };
+
+    const HOOK_HEX_ID: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn fixture_thread_scope() -> ThreadScope {
+        ThreadScope {
+            tenant_id: TenantId::new("tenant-hook-projection").unwrap(),
+            agent_id: AgentId::new("agent-hook-projection").unwrap(),
+            project_id: Some(ProjectId::new("project-hook-projection").unwrap()),
+            owner_user_id: Some(UserId::new("user-hook-projection").unwrap()),
+            mission_id: None,
+        }
+    }
+
+    fn fixture_milestone(kind: LoopHostMilestoneKind) -> (LoopHostMilestone, ThreadId, TurnRunId) {
+        let thread_id = ThreadId::new("thread-hook-projection").unwrap();
+        let run_id = TurnRunId::new();
+        let scope = TurnScope::new(
+            TenantId::new("tenant-hook-projection").unwrap(),
+            Some(AgentId::new("agent-hook-projection").unwrap()),
+            Some(ProjectId::new("project-hook-projection").unwrap()),
+            thread_id.clone(),
+        );
+        let milestone = LoopHostMilestone {
+            scope,
+            turn_id: TurnId::new(),
+            run_id,
+            loop_driver_id: LoopDriverId::new("hook-projection-driver").unwrap(),
+            kind,
+        };
+        (milestone, thread_id, run_id)
+    }
+
+    fn projector_for(thread_id: ThreadId, run_id: TurnRunId) -> DurableLoopHostMilestoneSink {
+        let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+        let milestone_scope = DurableLoopHostMilestoneScope::from_thread_scope_for_run(
+            &fixture_thread_scope(),
+            thread_id,
+            run_id,
+        )
+        .expect("durable milestone scope requires owner user — fixture supplies one");
+        DurableLoopHostMilestoneSink::new(event_log, milestone_scope)
+    }
+
+    #[test]
+    fn hook_dispatched_milestone_projects_to_runtime_event() {
+        let (milestone, thread_id, run_id) =
+            fixture_milestone(LoopHostMilestoneKind::HookDispatched {
+                hook_id: HOOK_HEX_ID.to_string(),
+                point: "before_capability".to_string(),
+                trust_class: "builtin".to_string(),
+                owning_extension: None,
+            });
+
+        let sink = projector_for(thread_id, run_id);
+        let event = sink
+            .runtime_event_for_milestone(&milestone)
+            .expect("projection succeeds")
+            .expect("hook dispatched milestone now projects to a runtime event");
+
+        assert_eq!(event.kind, RuntimeEventKind::HookDispatched);
+        assert_eq!(
+            event.capability_id,
+            CapabilityId::new(HOOK_CAPABILITY_ID).unwrap()
+        );
+        assert_eq!(event.hook_id.as_deref(), Some(HOOK_HEX_ID));
+        assert_eq!(event.hook_point.as_deref(), Some("before_capability"));
+        assert_eq!(event.hook_trust_class.as_deref(), Some("builtin"));
+        assert!(event.hook_decision.is_none());
+        assert!(event.hook_failure_category.is_none());
+    }
+
+    #[test]
+    fn hook_decision_emitted_milestone_projects_to_runtime_event() {
+        let (milestone, thread_id, run_id) =
+            fixture_milestone(LoopHostMilestoneKind::HookDecisionEmitted {
+                hook_id: HOOK_HEX_ID.to_string(),
+                // Reason text must NOT leak into the durable event — only the
+                // closed-vocabulary `kind_name()` should be projected.
+                decision: HookDecisionSummary::Deny {
+                    reason: "policy-denied raw text".to_string(),
+                },
+                audit_reason: None,
+                owning_extension: None,
+            });
+
+        let sink = projector_for(thread_id, run_id);
+        let event = sink
+            .runtime_event_for_milestone(&milestone)
+            .expect("projection succeeds")
+            .expect("hook decision milestone now projects to a runtime event");
+
+        assert_eq!(event.kind, RuntimeEventKind::HookDecisionEmitted);
+        assert_eq!(event.hook_decision.as_deref(), Some("deny"));
+        assert_eq!(event.hook_id.as_deref(), Some(HOOK_HEX_ID));
+        let wire = serde_json::to_string(&event).expect("serialize hook decision event");
+        assert!(
+            !wire.contains("policy-denied"),
+            "raw decision reason leaked into durable event payload: {wire}"
+        );
+    }
+
+    #[test]
+    fn hook_failed_milestone_projects_to_runtime_event() {
+        let (milestone, thread_id, run_id) = fixture_milestone(LoopHostMilestoneKind::HookFailed {
+            hook_id: HOOK_HEX_ID.to_string(),
+            category: "timeout".to_string(),
+            disposition: "fail_closed".to_string(),
+            owning_extension: None,
+        });
+
+        let sink = projector_for(thread_id, run_id);
+        let event = sink
+            .runtime_event_for_milestone(&milestone)
+            .expect("projection succeeds")
+            .expect("hook failed milestone now projects to a runtime event");
+
+        assert_eq!(event.kind, RuntimeEventKind::HookFailed);
+        assert_eq!(event.hook_failure_category.as_deref(), Some("timeout"));
+        assert_eq!(
+            event.hook_failure_disposition.as_deref(),
+            Some("fail_closed")
+        );
+        assert_eq!(event.hook_id.as_deref(), Some(HOOK_HEX_ID));
+    }
 }

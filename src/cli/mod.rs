@@ -36,7 +36,6 @@ mod service;
 mod skills;
 pub mod status;
 mod tool;
-mod traces;
 
 pub use acp::{AcpCommand, run_acp_command};
 pub use channels::{ChannelsCommand, run_channels_command};
@@ -59,7 +58,6 @@ pub use service::{ServiceCommand, run_service_command};
 pub use skills::{SkillsCommand, run_skills_command};
 pub use status::run_status_command;
 pub use tool::{ToolCommand, run_tool_command};
-pub use traces::{TracesCommand, run_traces_command};
 
 use std::sync::Arc;
 
@@ -309,14 +307,6 @@ pub enum Command {
            ironclaw models set-provider ollama --model llama3  # Switch to local Ollama"
     )]
     Models(ModelsCommand),
-
-    /// Manage opt-in trace contributions
-    #[command(
-        subcommand,
-        about = "Manage trace contributions",
-        long_about = "Create local redacted trace contribution previews, explicitly submit or revoke them, and operate private Trace Commons reviewer/admin APIs.\nExamples:\n  ironclaw traces preview --recorded-trace trace.json --output contribution.json\n  ironclaw traces submit --envelope contribution.json --endpoint https://example.internal/v1/traces\n  ironclaw traces ingest-health --endpoint https://example.internal"
-    )]
-    Traces(Box<TracesCommand>),
 
     /// Probe external dependencies and validate configuration
     #[command(

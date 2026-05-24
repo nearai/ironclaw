@@ -5,6 +5,7 @@ use serde_json::Value;
 const COMPOSITION_CRATE: &str = "ironclaw_reborn_composition";
 
 const SUBSTRATE_CRATES: &[&str] = &[
+    "ironclaw_auth",
     "ironclaw_host_api",
     "ironclaw_storage",
     "ironclaw_filesystem",

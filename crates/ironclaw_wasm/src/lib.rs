@@ -8,7 +8,6 @@ mod bindings;
 mod config;
 mod error;
 mod host;
-mod limiter;
 mod runtime;
 mod store;
 mod types;

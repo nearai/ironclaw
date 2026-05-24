@@ -4,30 +4,23 @@
 
 - Read `Cargo.toml` for actual dependencies and feature shape.
 - Use these neighboring contracts before changing behavior:
-  - `crates/ironclaw_extensions/AGENTS.md`
-  - `crates/ironclaw_loop_support/AGENTS.md`
-  - `docs/reborn/contracts/skills-extension.md`
+  - `crates/ironclaw_host_runtime/AGENTS.md`
+  - `crates/ironclaw_filesystem/AGENTS.md`
 
 ## What This Crate Owns
 
-- Concrete first-party userland extensions that ship with IronClaw.
-- Narrow in-process ports exposed back to Reborn composition.
-- Scoped handles granted to bundled extension implementations.
+- Concrete first-party userland extension implementations that ship with IronClaw.
+- Deterministic tool behavior behind narrow explicit request types.
+- Scoped handles granted by host runtime or composition.
 
 ## Do Not Move In Here
 
-- Generic extension manifests, install state, activation lifecycle, registry, or store contracts.
-- Runtime authority, raw host services, secrets, network clients, dispatcher handles, or lower substrate handles.
-- Product workflow or root application composition.
+- Host runtime composition, authorization, approvals, resource accounting, or capability registry wiring.
+- Loop-facing skill context ports, turn-run adapters, or Reborn composition wiring.
+- Raw secrets, network clients, dispatcher handles, or ambient host authority.
 
 ## Validation
 
 - Fast local check: `cargo test -p ironclaw_first_party_extensions`
+- Caller check after tool behavior changes: `cargo test -p ironclaw_host_runtime --test first_party_coding_tools`
 - Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture reborn_crate_dependency_boundaries_hold`
-- Composition check when exposed ports change: `cargo test -p ironclaw_reborn_composition local_dev_runtime`
-
-## Agent Notes
-
-- Keep concrete extension implementation separate from `ironclaw_extensions`, which owns generic extension platform contracts.
-- Preserve explicit scoped handles; do not introduce ambient runtime authority.
-- Add or update architecture boundary rules whenever dependencies change.

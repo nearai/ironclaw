@@ -778,12 +778,6 @@ mod tests {
         let sources = [
             include_str!("first_party_tools/shell.rs"),
             include_str!("first_party_tools/http.rs"),
-            include_str!("first_party_tools/coding/apply_patch.rs"),
-            include_str!("first_party_tools/coding/glob.rs"),
-            include_str!("first_party_tools/coding/grep.rs"),
-            include_str!("first_party_tools/coding/list_dir.rs"),
-            include_str!("first_party_tools/coding/read_file.rs"),
-            include_str!("first_party_tools/coding/write_file.rs"),
         ];
         for source in sources {
             assert!(!source.contains("ProcessBackendKind"));

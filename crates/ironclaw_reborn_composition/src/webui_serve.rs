@@ -58,14 +58,14 @@ use ironclaw_product_workflow::WebUiAuthenticatedCaller;
 /// Default per-request body limit (14 MiB) — sized to cover ~10 MiB of
 /// decoded attachments plus base64/JSON overhead. Mirrors the existing
 /// gateway-owned limit used by host-owned surfaces today.
-pub const DEFAULT_WEBUI_MAX_BODY_BYTES: usize = 14 * 1024 * 1024;
+pub(crate) const DEFAULT_WEBUI_MAX_BODY_BYTES: usize = 14 * 1024 * 1024;
 
 /// Default Content-Security-Policy applied to WebChat v2 responses.
 /// `default-src 'self'`, `object-src 'none'`, `frame-ancestors 'none'`
 /// — locked down because the v2 surface is API-only and never serves
 /// untrusted HTML. The CLI can override per-deployment if it ever
 /// fronts an HTML SPA on the same listener.
-pub const DEFAULT_WEBUI_CSP: &str =
+pub(crate) const DEFAULT_WEBUI_CSP: &str =
     "default-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'";
 
 /// Authentication contract the Reborn binary supplies. The composition

@@ -59,8 +59,10 @@ pub use memory_context::{
     EmptyMemoryPromptContextService, MemoryPromptContextRequest, MemoryPromptContextService,
 };
 pub use milestones::{
+    HookDecisionSummary, HookMilestoneSink, InMemoryHookMilestoneSink,
     InMemoryLoopHostMilestoneSink, LoopHostMilestone, LoopHostMilestoneEmitter,
     LoopHostMilestoneKind, LoopHostMilestoneSink, PromptSkillContextMetadata,
+    RunScopedHookMilestoneSink,
 };
 pub use model::{
     HostManagedLoopModelPort, LoopModelBudgetAccountant, LoopModelGateway, LoopModelGatewayError,

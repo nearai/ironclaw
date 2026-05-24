@@ -18,6 +18,7 @@
 
 pub mod app_loop_family;
 pub mod driver_registry;
+pub mod hook_gate_refs;
 pub mod loop_driver_host;
 pub mod loop_exit_applier;
 pub mod milestone_events;

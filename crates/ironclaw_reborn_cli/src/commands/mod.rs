@@ -13,6 +13,7 @@ pub(crate) mod run;
 #[cfg(feature = "webui-v2-beta")]
 pub(crate) mod serve;
 pub(crate) mod skills;
+pub(crate) mod traces;
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
@@ -44,6 +45,8 @@ pub(crate) enum Command {
     Serve(serve::ServeCommand),
     /// Inspect configured Reborn skills.
     Skills(skills::SkillsCommand),
+    /// Manage trace contributions to TraceCommons.
+    Traces(Box<traces::TracesCommand>),
 }
 
 impl Command {
@@ -72,6 +75,7 @@ impl Command {
                 command.execute(crate::context::RebornCliContext::resolve_from_env()?)
             }
             Self::Skills(command) => command.execute(),
+            Self::Traces(command) => command.execute(),
         }
     }
 }

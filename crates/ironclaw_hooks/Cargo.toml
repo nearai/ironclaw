@@ -1,0 +1,48 @@
+[package]
+name = "ironclaw_hooks"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Reborn loop hook framework: trust-tiered points/kinds/decisions, sealed witness types, dispatcher contract."
+
+[features]
+default = []
+# Exposes test-only constructors (e.g., `SanitizedArguments::for_tests`) that
+# bypass the resolver wiring. Production builds MUST NOT enable this; the
+# constructors it exposes would let untrusted code bypass the sanitizer-only-
+# on-trusted-path invariant. Intended exclusively as a `dev-dependency` feature
+# for hook authors writing predicate tests outside `ironclaw_reborn`.
+test-support = []
+# Exposes the `predicate_state::contract` trait-level test harness so
+# out-of-crate durable backends (durable-backend PRs 2/3 — Postgres,
+# libSQL) can run the same `PredicateStateBackend` contract suite against
+# their impl. Mirrors `ironclaw_memory`'s `contract-tests` feature.
+contract-tests = []
+
+[dependencies]
+async-trait = "0.1"
+blake3 = "1"
+chrono = { version = "0.4", features = ["serde"] }
+futures = "0.3"
+ironclaw_events = { path = "../ironclaw_events" }
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_prompt_envelope = { path = "../ironclaw_prompt_envelope" }
+ironclaw_turns = { path = "../ironclaw_turns" }
+ironclaw_wasm_limiter = { path = "../ironclaw_wasm_limiter" }
+lru = "0.16"
+rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["time", "rt", "sync"] }
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
+wasmtime = "44.0.2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+toml = "0.8"
+wat = "1"
+
+[lints]
+workspace = true

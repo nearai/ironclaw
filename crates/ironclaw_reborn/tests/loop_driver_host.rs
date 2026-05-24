@@ -1538,6 +1538,7 @@ async fn turn_runner_blocks_on_approval_then_coordinator_resume_completes_same_r
             actor: TurnActor::new(UserId::new("user-text-host").unwrap()),
             run_id,
             gate_resolution_ref: gate_ref.clone(),
+            precondition: ironclaw_turns::ResumeTurnPrecondition::AnyBlockedGate,
             source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
             idempotency_key: IdempotencyKey::new("resume-approval-once").unwrap(),

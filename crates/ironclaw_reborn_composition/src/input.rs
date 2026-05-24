@@ -5,7 +5,7 @@ use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
 use ironclaw_host_runtime::SchedulerTurnRunWakeNotifier;
 use ironclaw_trust::HostTrustPolicy;
 
-use crate::RebornCompositionProfile;
+use crate::{RebornCompositionProfile, RebornProductAuthServicePorts};
 
 pub struct RebornBuildInput {
     pub(crate) profile: RebornCompositionProfile,
@@ -17,6 +17,7 @@ pub struct RebornBuildInput {
     pub(crate) required_runtime_backends: Vec<ironclaw_host_api::RuntimeKind>,
     pub(crate) require_runtime_http_egress: bool,
     pub(crate) require_wasm_credentials: bool,
+    pub(crate) product_auth_ports: Option<RebornProductAuthServicePorts>,
 }
 
 pub(crate) enum RebornStorageInput {
@@ -162,6 +163,17 @@ impl RebornBuildInput {
         self
     }
 
+    /// Inject Reborn-native product-auth service ports.
+    ///
+    /// Production callers should provide durable implementations here. The
+    /// composition root attaches the turn-continuation dispatcher after it has
+    /// composed the profile's [`ironclaw_turns::TurnCoordinator`], so OAuth
+    /// continuations cannot accidentally bypass the active coordinator.
+    pub fn with_product_auth_ports(mut self, ports: RebornProductAuthServicePorts) -> Self {
+        self.product_auth_ports = Some(ports);
+        self
+    }
+
     fn new(
         profile: RebornCompositionProfile,
         owner_id: impl Into<String>,
@@ -177,6 +189,28 @@ impl RebornBuildInput {
             required_runtime_backends: Vec::new(),
             require_runtime_http_egress: false,
             require_wasm_credentials: false,
+            product_auth_ports: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use ironclaw_auth::InMemoryAuthProductServices;
+
+    use super::*;
+
+    #[test]
+    fn with_product_auth_ports_records_injected_ports() {
+        let product_auth = RebornProductAuthServicePorts::from_shared(Arc::new(
+            InMemoryAuthProductServices::new(),
+        ));
+
+        let input =
+            RebornBuildInput::disabled("test-owner").with_product_auth_ports(product_auth.clone());
+
+        assert!(input.product_auth_ports.is_some());
     }
 }

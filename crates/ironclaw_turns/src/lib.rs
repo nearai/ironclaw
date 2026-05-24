@@ -61,7 +61,8 @@ pub use loop_exit::{
 };
 pub use memory::{InMemoryTurnStateStore, InMemoryTurnStateStoreLimits};
 pub use request::{
-    CancelRunRequest, GetRunStateRequest, ResumeTurnRequest, SubmitTurnRequest, TurnTimestamp,
+    CancelRunRequest, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
+    SubmitTurnRequest, TurnTimestamp,
 };
 pub use response::{CancelRunResponse, ResumeTurnResponse, SubmitTurnResponse, ThreadBusy};
 pub use run_profile::{
