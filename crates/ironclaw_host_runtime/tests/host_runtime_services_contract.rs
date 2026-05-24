@@ -1,3 +1,5 @@
+#[path = "support/github_wasm_runtime_contract.rs"]
+mod github_wasm_runtime_contract;
 mod support;
 
 use support::legacy_capability_fixture_to_v2;
@@ -92,8 +94,7 @@ use ironclaw_turns::{NoopTurnRunWakeNotifier, TurnRunWake, TurnRunWakeNotifier};
 use ironclaw_wasm::{
     RecordingWasmHostHttp, WasmHostError, WasmHostHttp, WasmHttpRequest, WasmHttpResponse,
     WasmRuntimeCredentialProvider, WasmRuntimeCredentialRequest, WasmStagedRuntimeCredential,
-    WasmStagedRuntimeCredentials, WitToolExecution, WitToolHost, WitToolRequest, WitToolRuntime,
-    WitToolRuntimeConfig,
+    WasmStagedRuntimeCredentials, WitToolHost, WitToolRuntimeConfig,
 };
 use serde_json::json;
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
@@ -3607,255 +3608,6 @@ async fn host_runtime_services_routes_wasm_http_through_per_invocation_policy_ha
 }
 
 #[tokio::test]
-async fn host_runtime_services_routes_github_wasm_read_through_runtime_http_egress() {
-    let parsed_manifest = parse_manifest(GITHUB_WASM_READ_MANIFEST);
-    let component = tool_component(GITHUB_ISSUES_READ_TOOL_WAT);
-    let filesystem = Arc::new(
-        filesystem_with_wasm_component(
-            parsed_manifest.id.as_str(),
-            "wasm/github-issues-read.wasm",
-            &component,
-        )
-        .await,
-    );
-    let governor = Arc::new(governor_with_default_limit(sample_account()));
-    let secret_store = Arc::new(InMemorySecretStore::new());
-    let secret_handle = SecretHandle::new("github_token").unwrap();
-    let policy = github_issues_policy();
-    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
-        Arc::new(ObligatingAuthorizer::new(vec![
-            Obligation::ApplyNetworkPolicy {
-                policy: policy.clone(),
-            },
-            Obligation::InjectSecretOnce {
-                handle: secret_handle.clone(),
-            },
-        ]));
-    let network = RecordingNetworkHttpEgress::new();
-    let services = HostRuntimeServices::new(
-        Arc::new(registry_with_manifest(GITHUB_WASM_READ_MANIFEST)),
-        filesystem,
-        governor,
-        authorizer,
-        ProcessServices::in_memory(),
-        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
-    )
-    .with_secret_store(Arc::clone(&secret_store))
-    .with_wasm_runtime_credential_provider(Arc::new(WasmStagedRuntimeCredentials::new(vec![
-        WasmStagedRuntimeCredential::for_exact_url(
-            secret_handle.clone(),
-            RuntimeCredentialTarget::Header {
-                name: "authorization".to_string(),
-                prefix: Some("Bearer ".to_string()),
-            },
-            true,
-            "https://api.github.com/repos/nearai/ironclaw/issues?state=open&per_page=1".to_string(),
-        ),
-    ])));
-    let services = services
-        .try_with_host_http_egress(network.clone())
-        .unwrap()
-        .try_with_wasm_runtime(WitToolRuntimeConfig::for_testing(), WitToolHost::deny_all())
-        .unwrap();
-    let capability_id = CapabilityId::new("github.search_issues").unwrap();
-    let scope = sample_scope(InvocationId::new());
-    secret_store
-        .put(
-            scope.clone(),
-            secret_handle,
-            SecretMaterial::from("ghp_fake_fixture_token"),
-        )
-        .await
-        .unwrap();
-
-    let outcome = services
-        .host_runtime_for_local_testing()
-        .invoke_capability(wasm_runtime_request_for_scope(
-            capability_id.clone(),
-            scope.clone(),
-            json!({"state": "open", "per_page": 1}),
-        ))
-        .await
-        .unwrap();
-
-    assert_completed_outcome(outcome, &capability_id);
-    let requests = network.requests();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].method, NetworkMethod::Get);
-    assert_eq!(
-        requests[0].url,
-        "https://api.github.com/repos/nearai/ironclaw/issues?state=open&per_page=1"
-    );
-    assert_eq!(requests[0].body, Vec::<u8>::new());
-    assert_eq!(requests[0].policy, policy);
-    assert_eq!(
-        requests[0]
-            .headers
-            .iter()
-            .find(|(name, _)| name == "authorization"),
-        Some(&(
-            "authorization".to_string(),
-            "Bearer ghp_fake_fixture_token".to_string(),
-        ))
-    );
-}
-
-#[test]
-fn bundled_github_wasm_executes_search_get_and_comment_operations() {
-    let search_http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
-        status: 200,
-        headers_json: "{}".to_string(),
-        body: br#"{"total_count":0,"incomplete_results":false,"items":[]}"#.to_vec(),
-    }));
-    let search = execute_bundled_github_wasm(
-        "github.search_issues",
-        json!({"query": "repo:nearai/ironclaw is:issue", "limit": 1}),
-        Arc::clone(&search_http),
-    );
-    assert_eq!(search.error, None);
-    assert_eq!(
-        search.output_json.as_deref(),
-        Some(r#"{"total_count":0,"incomplete_results":false,"items":[]}"#)
-    );
-    assert_single_wasm_request(
-        &search_http,
-        "GET",
-        "https://api.github.com/search/issues?q=repo%3Anearai%2Fironclaw%20is%3Aissue&per_page=1",
-        None,
-    );
-
-    let get_issue_http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
-        status: 200,
-        headers_json: "{}".to_string(),
-        body: br#"{"number":2,"title":"Reborn GitHub issue","state":"open","html_url":"https://github.com/nearai/ironclaw/issues/2"}"#.to_vec(),
-    }));
-    let get_issue = execute_bundled_github_wasm(
-        "github.get_issue",
-        json!({"owner": "nearai", "repo": "ironclaw", "issue_number": 2}),
-        Arc::clone(&get_issue_http),
-    );
-    assert_eq!(get_issue.error, None);
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(get_issue.output_json.as_deref().unwrap())
-            .unwrap()["number"],
-        json!(2)
-    );
-    assert_single_wasm_request(
-        &get_issue_http,
-        "GET",
-        "https://api.github.com/repos/nearai/ironclaw/issues/2",
-        None,
-    );
-
-    let comment_http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
-        status: 201,
-        headers_json: "{}".to_string(),
-        body: br##"{"id":44,"html_url":"https://github.com/nearai/ironclaw/issues/2#issuecomment-44","body":"Reborn WASM comment"}"##.to_vec(),
-    }));
-    let comment = execute_bundled_github_wasm(
-        "github.comment_issue",
-        json!({
-            "owner": "nearai",
-            "repo": "ironclaw",
-            "issue_number": 2,
-            "body": "Reborn WASM comment",
-        }),
-        Arc::clone(&comment_http),
-    );
-    assert_eq!(comment.error, None);
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(comment.output_json.as_deref().unwrap()).unwrap()
-            ["body"],
-        json!("Reborn WASM comment")
-    );
-    assert_single_wasm_request(
-        &comment_http,
-        "POST",
-        "https://api.github.com/repos/nearai/ironclaw/issues/2/comments",
-        Some(br#"{"body":"Reborn WASM comment"}"#),
-    );
-}
-
-#[test]
-fn bundled_github_wasm_sanitizes_host_http_and_api_failures() {
-    let cases = [
-        (
-            RecordingWasmHostHttp::err(WasmHostError::Unavailable(
-                "missing auth token ghp_fake_fixture_token".to_string(),
-            )),
-            "AuthRequired",
-        ),
-        (
-            RecordingWasmHostHttp::err(WasmHostError::Failed(
-                "deadline exceeded while token ghp_fake_fixture_token was present".to_string(),
-            )),
-            "AuthRequired",
-        ),
-        (
-            RecordingWasmHostHttp::err(WasmHostError::Failed("redirect blocked".to_string())),
-            "github_api_redirect_denied",
-        ),
-        (
-            RecordingWasmHostHttp::err(WasmHostError::FailedAfterRequestSent(
-                "response body too large".to_string(),
-            )),
-            "github_api_body_limit",
-        ),
-        (
-            RecordingWasmHostHttp::err(WasmHostError::Denied(
-                "host not allowed: api.evil.test".to_string(),
-            )),
-            "github_api_egress_denied",
-        ),
-        (
-            RecordingWasmHostHttp::ok(WasmHttpResponse {
-                status: 403,
-                headers_json: "{}".to_string(),
-                body: br#"{"message":"bad credentials ghp_fake_fixture_token"}"#.to_vec(),
-            }),
-            "github_api_error_status_403",
-        ),
-        (
-            RecordingWasmHostHttp::ok(WasmHttpResponse {
-                status: 200,
-                headers_json: "{}".to_string(),
-                body: vec![0xff, 0xfe],
-            }),
-            "github_api_invalid_utf8",
-        ),
-    ];
-
-    for (http, expected_error) in cases {
-        let execution = execute_bundled_github_wasm(
-            "github.search_issues",
-            json!({"query": "repo:nearai/ironclaw is:issue", "limit": 1}),
-            Arc::new(http),
-        );
-        assert_eq!(execution.error.as_deref(), Some(expected_error));
-        assert!(
-            !format!("{execution:?}").contains("ghp_fake_fixture_token"),
-            "guest-visible failure must not leak credential material"
-        );
-    }
-}
-
-#[test]
-fn bundled_github_wasm_leaves_success_json_for_host_output_decode() {
-    let execution = execute_bundled_github_wasm(
-        "github.search_issues",
-        json!({"query": "repo:nearai/ironclaw is:issue", "limit": 1}),
-        Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
-            status: 200,
-            headers_json: "{}".to_string(),
-            body: b"not-json".to_vec(),
-        })),
-    );
-
-    assert_eq!(execution.output_json.as_deref(), Some("not-json"));
-    assert_eq!(execution.error, None);
-}
-
-#[tokio::test]
 async fn host_runtime_services_routes_cached_wasm_http_through_per_invocation_policy_handoff() {
     let parsed_manifest = parse_manifest(WASM_HTTP_SUCCESS_MANIFEST);
     let component = tool_component(HTTP_TOOL_WAT);
@@ -6762,54 +6514,6 @@ fn wasm_runtime_request_for_scope(
     )
 }
 
-fn execute_bundled_github_wasm(
-    capability_id: &str,
-    input: serde_json::Value,
-    http: Arc<RecordingWasmHostHttp>,
-) -> WitToolExecution {
-    let runtime = WitToolRuntime::new(WitToolRuntimeConfig::default()).unwrap();
-    let wasm_bytes = std::fs::read(github_first_party_wasm_path())
-        .expect("first-party GitHub WASM must be built before running this contract");
-    let prepared = runtime.prepare("github", &wasm_bytes).unwrap();
-    runtime
-        .execute(
-            &prepared,
-            WitToolHost::deny_all().with_http(http),
-            WitToolRequest::new(input.to_string()).with_context(
-                json!({
-                    "capability_id": capability_id,
-                })
-                .to_string(),
-            ),
-        )
-        .unwrap()
-}
-
-fn github_first_party_wasm_path() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join("crates/ironclaw_first_party_extensions/assets/github/wasm/github_tool.wasm")
-}
-
-fn assert_single_wasm_request(
-    http: &RecordingWasmHostHttp,
-    expected_method: &str,
-    expected_url: &str,
-    expected_body: Option<&[u8]>,
-) {
-    let requests = http.requests().unwrap();
-    assert_eq!(requests.len(), 1);
-    let request = &requests[0];
-    assert_eq!(request.method, expected_method);
-    assert_eq!(request.url, expected_url);
-    assert_eq!(request.timeout_ms, Some(10_000));
-    assert_eq!(request.body.as_deref(), expected_body);
-
-    let headers: serde_json::Value = serde_json::from_str(&request.headers_json).unwrap();
-    assert_eq!(headers["User-Agent"], "IronClaw-GitHub-Reborn-WASM");
-    assert_eq!(headers["X-GitHub-Api-Version"], "2026-03-10");
-}
-
 fn wasm_http_estimate() -> ResourceEstimate {
     ResourceEstimate {
         concurrency_slots: Some(1),
@@ -6828,18 +6532,6 @@ fn wasm_http_policy() -> NetworkPolicy {
         allowed_targets: vec![NetworkTargetPattern {
             scheme: Some(NetworkScheme::Https),
             host_pattern: "example.test".to_string(),
-            port: None,
-        }],
-        deny_private_ip_ranges: true,
-        max_egress_bytes: Some(10_000),
-    }
-}
-
-fn github_issues_policy() -> NetworkPolicy {
-    NetworkPolicy {
-        allowed_targets: vec![NetworkTargetPattern {
-            scheme: Some(NetworkScheme::Https),
-            host_pattern: "api.github.com".to_string(),
             port: None,
         }],
         deny_private_ip_ranges: true,
@@ -7011,25 +6703,6 @@ default_permission = "allow"
 parameters_schema = { type = "object" }
 "#;
 
-const GITHUB_WASM_READ_MANIFEST: &str = r#"
-id = "github"
-name = "GitHub v2"
-version = "0.1.0"
-description = "GitHub read-only integration"
-trust = "untrusted"
-
-[runtime]
-kind = "wasm"
-module = "wasm/github-issues-read.wasm"
-
-[[capabilities]]
-id = "github.search_issues"
-description = "Search GitHub issues"
-effects = ["dispatch_capability", "network", "use_secret"]
-default_permission = "allow"
-parameters_schema = { type = "object" }
-"#;
-
 const WASM_GUEST_ERROR_MANIFEST: &str = r#"
 id = "wasm-accounting"
 name = "WASM Accounting Guest Error"
@@ -7135,93 +6808,6 @@ const HTTP_TOOL_WAT: &str = r#"
     i32.const 1
     i32.const 256
     i32.const 5
-    i32.const 0
-    i32.const 0
-    i32.const 512
-    call $http_request
-
-    i32.const 48
-    i32.const 1
-    i32.store
-    i32.const 52
-    i32.const 3072
-    i32.store
-    i32.const 56
-    i32.const 1
-    i32.store
-    i32.const 60
-    i32.const 0
-    i32.store
-    i32.const 48)
-  (func $post (param i32))
-  (func $realloc (param $old i32) (param $old_align i32) (param $new_size i32) (param $new_align i32) (result i32)
-    (local $ret i32)
-    global.get $heap
-    local.set $ret
-    global.get $heap
-    local.get $new_size
-    i32.add
-    global.set $heap
-    local.get $ret)
-  (func $_initialize)
-  (export "near:agent/tool@0.3.0#execute" (func $execute))
-  (export "cabi_post_near:agent/tool@0.3.0#execute" (func $post))
-  (export "near:agent/tool@0.3.0#schema" (func $schema))
-  (export "cabi_post_near:agent/tool@0.3.0#schema" (func $post))
-  (export "near:agent/tool@0.3.0#description" (func $description))
-  (export "cabi_post_near:agent/tool@0.3.0#description" (func $post))
-  (export "cabi_realloc" (func $realloc))
-  (export "_initialize" (func $_initialize))
-)
-"#;
-
-const GITHUB_ISSUES_READ_TOOL_WAT: &str = r#"
-(module
-  (type (;0;) (func (param i32 i32 i32)))
-  (type (;1;) (func (result i64)))
-  (type (;2;) (func (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)))
-  (type (;3;) (func (param i32 i32 i32 i32 i32)))
-  (type (;4;) (func (param i32 i32) (result i32)))
-  (import "near:agent/host@0.3.0" "log" (func $log (type 0)))
-  (import "near:agent/host@0.3.0" "now-millis" (func $now (type 1)))
-  (import "near:agent/host@0.3.0" "workspace-read" (func $workspace_read (type 0)))
-  (import "near:agent/host@0.3.0" "http-request" (func $http_request (type 2)))
-  (import "near:agent/host@0.3.0" "tool-invoke" (func $tool_invoke (type 3)))
-  (import "near:agent/host@0.3.0" "secret-exists" (func $secret_exists (type 4)))
-  (memory (export "memory") 1)
-  (global $heap (mut i32) (i32.const 4096))
-  (data (i32.const 128) "GET")
-  (data (i32.const 160) "https://api.github.com/repos/nearai/ironclaw/issues?state=open&per_page=1")
-  (data (i32.const 256) "{}")
-  (data (i32.const 1024) "{\22type\22:\22object\22}")
-  (data (i32.const 2048) "GitHub issue search")
-  (data (i32.const 3072) "1")
-  (func $schema (result i32)
-    i32.const 16
-    i32.const 1024
-    i32.store
-    i32.const 20
-    i32.const 17
-    i32.store
-    i32.const 16)
-  (func $description (result i32)
-    i32.const 32
-    i32.const 2048
-    i32.store
-    i32.const 36
-    i32.const 19
-    i32.store
-    i32.const 32)
-  (func $execute (param i32 i32 i32 i32 i32) (result i32)
-    i32.const 128
-    i32.const 3
-    i32.const 160
-    i32.const 73
-    i32.const 256
-    i32.const 2
-    i32.const 0
-    i32.const 0
-    i32.const 0
     i32.const 0
     i32.const 0
     i32.const 512

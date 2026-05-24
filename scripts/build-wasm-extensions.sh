@@ -26,6 +26,7 @@ FAILED=()
 
 if [[ "${1:-}" == "--tools" ]]; then
     BUILD_CHANNELS=false
+    BUILD_FIRST_PARTY=false
 elif [[ "${1:-}" == "--channels" ]]; then
     BUILD_TOOLS=false
     BUILD_FIRST_PARTY=false
