@@ -91,7 +91,7 @@ pub(super) async fn grep(
         .unwrap_or(false);
     let regex = RegexBuilder::new(pattern)
         .case_insensitive(case_insensitive)
-        .multi_line(true)
+        .multi_line(multiline)
         .dot_matches_new_line(multiline)
         .build()
         .map_err(|_| input_error())?;
