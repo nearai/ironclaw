@@ -5040,6 +5040,8 @@ dependencies = [
  "ironclaw_host_api",
  "rand 0.8.6",
  "secrecy",
+ "secret-service",
+ "security-framework 3.7.0",
  "serde",
  "serde_json",
  "sha2 0.10.9",
