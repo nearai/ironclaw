@@ -226,6 +226,14 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
         json!(["owner", "repo", "issue_number"])
     );
     assert_eq!(
+        get_issue.descriptor.parameters_schema["properties"]["owner"]["pattern"],
+        json!("^[^\\s/?#]+$")
+    );
+    assert_eq!(
+        get_issue.descriptor.parameters_schema["properties"]["owner"]["not"]["pattern"],
+        json!("\\.\\.")
+    );
+    assert_eq!(
         get_issue.output_schema["required"],
         json!(["number", "title", "state", "html_url"])
     );

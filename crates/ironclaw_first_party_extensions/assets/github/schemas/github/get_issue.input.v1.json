@@ -8,13 +8,17 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 100,
-      "description": "Repository owner or organization."
+      "pattern": "^[^\\s/?#]+$",
+      "not": { "pattern": "\\.\\." },
+      "description": "Repository owner or organization. Must not contain whitespace, '/', '?', '#', or '..'."
     },
     "repo": {
       "type": "string",
       "minLength": 1,
       "maxLength": 100,
-      "description": "Repository name."
+      "pattern": "^[^\\s/?#]+$",
+      "not": { "pattern": "\\.\\." },
+      "description": "Repository name. Must not contain whitespace, '/', '?', '#', or '..'."
     },
     "issue_number": {
       "type": "integer",
