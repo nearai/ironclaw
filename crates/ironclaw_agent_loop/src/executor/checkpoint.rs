@@ -137,7 +137,7 @@ impl CheckpointStage {
             }
             // Strict profile (or non-checkpoint error variant): propagate the
             // error so the runner sees the same failure mode as
-            // `checkpoint_and_exit_if_cancelled`. Returning `Ok(LoopExit::failed)`
+            // `cancel_if_requested`. Returning `Ok(LoopExit::failed)`
             // would silently mask `HostUnavailable` and break the strict
             // require-final-checkpoint contract.
             Err(error) => Err(error),

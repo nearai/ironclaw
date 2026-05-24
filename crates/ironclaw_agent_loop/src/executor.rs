@@ -94,7 +94,7 @@ pub enum AgentLoopExecutorError {
     /// Constructed when a model or capability call returns a cancelled outcome
     /// (i.e. `AgentLoopHostErrorKind::Cancelled` or `CapabilityFailureKind::Cancelled`
     /// surfaces from an in-flight external call). Between-call boundary cancellation
-    /// — detected cooperatively by `checkpoint_and_exit_if_cancelled` — returns
+    /// — detected cooperatively by `CheckpointStage::cancel_if_requested` — returns
     /// `LoopExit::Cancelled` directly and never constructs this variant.
     /// WS16 will build further on this split when product adapters are wired.
     #[error("cancelled by host before any LoopExit could be produced")]
