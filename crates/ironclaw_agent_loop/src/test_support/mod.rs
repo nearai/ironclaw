@@ -896,6 +896,7 @@ fn scripted_capability_call(call: ScriptedCapabilityCall) -> CapabilityCallCandi
         capability_id: capability_id(&call.name),
         input_ref: CapabilityInputRef::new(call.input_ref)
             .unwrap_or_else(|error| panic!("test capability input ref should be valid: {error}")),
+        effective_capability_ids: vec![capability_id(&call.name)],
         provider_replay: None,
     }
 }

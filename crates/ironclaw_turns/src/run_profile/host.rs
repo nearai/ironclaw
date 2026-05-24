@@ -1089,6 +1089,8 @@ pub struct CapabilityCallCandidate {
     pub surface_version: CapabilitySurfaceVersion,
     pub capability_id: CapabilityId,
     pub input_ref: CapabilityInputRef,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effective_capability_ids: Vec<CapabilityId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_replay: Option<ProviderToolCallReplay>,
 }
@@ -1884,4 +1886,73 @@ fn unsupported_host_method(method: &'static str) -> AgentLoopHostError {
         AgentLoopHostErrorKind::Unavailable,
         format!("agent loop host method {method} is unavailable"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct DefinitionPort {
+        definitions: Vec<ProviderToolDefinition>,
+    }
+
+    #[async_trait]
+    impl LoopCapabilityPort for DefinitionPort {
+        fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
+            Ok(self.definitions.clone())
+        }
+
+        async fn visible_capabilities(
+            &self,
+            _request: VisibleCapabilityRequest,
+        ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
+            unreachable!("not used by this test")
+        }
+
+        async fn invoke_capability(
+            &self,
+            _request: CapabilityInvocation,
+        ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+            unreachable!("not used by this test")
+        }
+
+        async fn invoke_capability_batch(
+            &self,
+            _request: CapabilityBatchInvocation,
+        ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+            unreachable!("not used by this test")
+        }
+    }
+
+    fn provider_tool_call(name: &str) -> ProviderToolCall {
+        ProviderToolCall {
+            provider_id: "provider".to_string(),
+            provider_model_id: "model".to_string(),
+            turn_id: Some("turn".to_string()),
+            id: "call".to_string(),
+            name: name.to_string(),
+            arguments: serde_json::json!({}),
+            response_reasoning: None,
+            reasoning: None,
+            signature: None,
+        }
+    }
+
+    #[test]
+    fn provider_tool_call_capability_ids_rejects_unknown_tool_name() {
+        let port = DefinitionPort {
+            definitions: vec![ProviderToolDefinition {
+                capability_id: CapabilityId::new("demo.allowed").expect("valid capability id"),
+                name: "demo__allowed".to_string(),
+                description: "allowed".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            }],
+        };
+
+        let error = port
+            .provider_tool_call_capability_ids(&provider_tool_call("demo__missing"))
+            .expect_err("unknown provider tool must fail closed");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    }
 }

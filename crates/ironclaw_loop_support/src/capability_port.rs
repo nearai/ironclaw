@@ -737,6 +737,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             surface_version: prepared.surface_version,
             capability_id: prepared.capability_id,
             input_ref,
+            effective_capability_ids: prepared.effective_capability_ids,
             provider_replay: Some(ProviderToolCallReplay {
                 provider_id: tool_call.provider_id,
                 provider_model_id: tool_call.provider_model_id,
@@ -863,8 +864,10 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                 let result = self
                     .invoke_synthetic_capability(request, capability, snapshot)
                     .await;
-                self.record_loop_completed(&idempotency_key, result.clone())?;
-                guard.commit();
+                if result.is_ok() {
+                    self.record_loop_completed(&idempotency_key, result.clone())?;
+                    guard.commit();
+                }
                 return result;
             }
         };
@@ -1848,6 +1851,8 @@ fn host_runtime_error(error: HostRuntimeError) -> AgentLoopHostError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use async_trait::async_trait;
     use ironclaw_host_api::{
         AgentId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, GrantConstraints,
@@ -2363,6 +2368,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn capability_info_result_write_failure_is_retryable() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let context = execution_context("thread-capability-info-retry-result-write");
+        let run_context = loop_run_context(&context).await;
+        let result_writer = Arc::new(FailOnceResultWriter::default());
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+                capability_id.clone(),
+                provider_id,
+            )])),
+            visible_request(context),
+            dummy_input_resolver(),
+            result_writer.clone(),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+        let mut call = provider_tool_call();
+        call.name = capability_info::TOOL_NAME.to_string();
+        call.arguments = serde_json::json!({ "name": capability_id.as_str() });
+        let candidate = port
+            .register_provider_tool_call(call)
+            .await
+            .expect("capability_info call should register");
+        let invocation = CapabilityInvocation {
+            surface_version: surface.version,
+            capability_id: candidate.capability_id,
+            input_ref: candidate.input_ref,
+        };
+
+        let error = port
+            .invoke_capability(invocation.clone())
+            .await
+            .expect_err("first result write should fail");
+        assert_eq!(error.kind, AgentLoopHostErrorKind::TranscriptWriteFailed);
+        let retried_outcome = port
+            .invoke_capability(invocation)
+            .await
+            .expect("second invocation should retry the write");
+
+        assert!(matches!(retried_outcome, CapabilityOutcome::Completed(_)));
+        assert_eq!(result_writer.attempts(), 2);
+    }
+
+    #[tokio::test]
     async fn capability_info_accepts_visible_provider_tool_name() {
         let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
         let provider_id = ExtensionId::new("demo").expect("valid provider id");
@@ -2451,6 +2505,47 @@ mod tests {
                 .register_provider_tool_call(call)
                 .await
                 .expect_err("invalid capability_info arguments should fail");
+            assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        }
+    }
+
+    #[tokio::test]
+    async fn capability_info_rejects_invalid_name_inputs() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let context = execution_context("thread-capability-info-invalid-name");
+        let run_context = loop_run_context(&context).await;
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+            capability_id,
+            provider_id,
+        )]));
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            runtime,
+            visible_request(context),
+            dummy_input_resolver(),
+            dummy_result_writer(),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+        port.visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+
+        for arguments in [
+            serde_json::json!({}),
+            serde_json::json!({ "name": "" }),
+            serde_json::json!({ "name": "demo echo" }),
+            serde_json::json!({ "name": "demo.echo!" }),
+            serde_json::json!({ "name": "demo.écho" }),
+            serde_json::json!({ "name": "a".repeat(161) }),
+        ] {
+            let mut call = provider_tool_call();
+            call.name = capability_info::TOOL_NAME.to_string();
+            call.arguments = arguments;
+            let error = port
+                .register_provider_tool_call(call)
+                .await
+                .expect_err("invalid capability_info name should fail");
             assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
         }
     }
@@ -2558,7 +2653,7 @@ mod tests {
             if expected_summary {
                 assert_eq!(
                     output["summary"]["always_required"],
-                    serde_json::json!(["limit", "message", "mode"])
+                    serde_json::json!(["limit", "message"])
                 );
                 assert_eq!(
                     output["summary"]["notes"],
@@ -3219,6 +3314,40 @@ mod tests {
             _output: serde_json::Value,
         ) -> Result<LoopResultRef, AgentLoopHostError> {
             LoopResultRef::new("result:mount-test").map_err(|_| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Internal,
+                    "result ref could not be built",
+                )
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct FailOnceResultWriter {
+        attempts: AtomicUsize,
+    }
+
+    impl FailOnceResultWriter {
+        fn attempts(&self) -> usize {
+            self.attempts.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl LoopCapabilityResultWriter for FailOnceResultWriter {
+        async fn write_capability_result(
+            &self,
+            _run_context: &LoopRunContext,
+            _capability_id: &CapabilityId,
+            _output: serde_json::Value,
+        ) -> Result<LoopResultRef, AgentLoopHostError> {
+            if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::TranscriptWriteFailed,
+                    "transient result write failure",
+                ));
+            }
+            LoopResultRef::new("result:capability-info-retry").map_err(|_| {
                 AgentLoopHostError::new(
                     AgentLoopHostErrorKind::Internal,
                     "result ref could not be built",

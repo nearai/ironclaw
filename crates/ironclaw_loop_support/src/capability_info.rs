@@ -193,17 +193,18 @@ impl SchemaSummary {
     fn for_schema(schema: &serde_json::Value) -> Self {
         let mut parameter_names = BTreeSet::new();
         let mut required_names = BTreeSet::new();
-        let mut stack = vec![schema];
-        while let Some(current) = stack.pop() {
+        let mut stack = vec![(schema, true)];
+        while let Some((current, contributes_required)) = stack.pop() {
             if let Some(properties) = current
                 .get("properties")
                 .and_then(serde_json::Value::as_object)
             {
                 parameter_names.extend(properties.keys().cloned());
             }
-            if let Some(required) = current
-                .get("required")
-                .and_then(serde_json::Value::as_array)
+            if contributes_required
+                && let Some(required) = current
+                    .get("required")
+                    .and_then(serde_json::Value::as_array)
             {
                 required_names.extend(
                     required
@@ -211,9 +212,16 @@ impl SchemaSummary {
                         .filter_map(|value| value.as_str().map(str::to_string)),
                 );
             }
-            for key in ["allOf", "oneOf", "anyOf"] {
+            if let Some(variants) = current.get("allOf").and_then(serde_json::Value::as_array) {
+                stack.extend(
+                    variants
+                        .iter()
+                        .map(|variant| (variant, contributes_required)),
+                );
+            }
+            for key in ["oneOf", "anyOf"] {
                 if let Some(variants) = current.get(key).and_then(serde_json::Value::as_array) {
-                    stack.extend(variants);
+                    stack.extend(variants.iter().map(|variant| (variant, false)));
                 }
             }
         }
