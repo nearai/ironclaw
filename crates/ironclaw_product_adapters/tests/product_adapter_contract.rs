@@ -447,6 +447,8 @@ fn command_payload_bounds_are_public_contract() {
     assert!(
         InboundCommandPayload::new("h".repeat(257), "", ProductTriggerReason::BotCommand).is_err()
     );
+    assert!(InboundCommandPayload::new("bad name", "", ProductTriggerReason::BotCommand).is_err());
+    assert!(InboundCommandPayload::new("bad/name", "", ProductTriggerReason::BotCommand).is_err());
 }
 
 #[test]

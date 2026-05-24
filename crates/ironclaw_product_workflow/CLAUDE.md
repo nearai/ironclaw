@@ -21,6 +21,8 @@ handling, gate routing, mission routing, and redacted acknowledgements.
 | `IdempotencyLedger` | Durable action deduplication port |
 | `InMemoryIdempotencyLedger` | Local-dev/test ledger with in-flight lease recovery semantics |
 | `ProductInboundAction` | Durable ledger record for inbound actions |
+| `ProductCommandAdmissionService` | Source/auth-aware admission port that decides whether a typed product command may execute |
+| `ProductCommandService` | Reborn-native product command execution port for already-admitted typed commands |
 | `RebornServicesApi` / `RebornServices` | Native WebChat v2 facade — stable surface beta WebUI route handlers consume in place of reaching into turn coordination, thread stores, runtime lanes, dispatchers, or capability hosts. Enforces caller ownership of the thread before any turn mutation; rejects stale or attacker-supplied `gate_ref` on denied/cancelled gate resolutions; refuses persistent (`always: true`) approvals until an approval-policy port lands |
 
 ## Dependencies
@@ -42,6 +44,14 @@ Agent-loop note: product-facing turns enter through workflow services and
 canonical turn submission. Do not shortcut directly to `AgentLoopDriver`,
 `PlannedDriver`, host runtime services, or loop host factories from adapters or
 workflow callers.
+
+Product commands are not turns. Adapters may parse slash syntax at the edge, but
+`ProductInboundPayload::Command` must enter the workflow as normalized command
+payloads. The source/auth decision belongs to `ProductCommandAdmissionService`;
+the source-agnostic command model must not know which product surface produced
+the command. Admitted commands dispatch through `ProductCommandService`, not
+`InboundTurnService`, v1 `SubmissionParser`, v1 command routers, or agent-loop
+command handlers.
 
 WebUI-facing facade methods must bind browser thread ids through
 `SessionThreadService` using a `ThreadScope` derived from the authenticated
