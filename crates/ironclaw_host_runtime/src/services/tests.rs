@@ -1,14 +1,15 @@
 use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, EffectKind, HostPortCatalog, InvocationId, NetworkMethod,
-    NetworkPolicy, NetworkScheme, NetworkTargetPattern, PermissionMode, ResourceEstimate,
-    ResourceReceipt, ResourceScope, RuntimeCredentialInjection, RuntimeCredentialSource,
-    RuntimeCredentialTarget, RuntimeHttpEgressRequest, RuntimeKind, SecretHandle, TenantId,
-    TrustClass, UserId, VirtualPath,
+    CapabilityDescriptor, CapabilityId, DispatchError, EffectKind, HostPortCatalog, InvocationId,
+    NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern, PermissionMode,
+    ResourceEstimate, ResourceReceipt, ResourceScope, ResourceUsage, RuntimeCredentialInjection,
+    RuntimeCredentialSource, RuntimeCredentialTarget, RuntimeDispatchErrorKind, RuntimeHttpEgress,
+    RuntimeHttpEgressRequest, RuntimeKind, SecretHandle, TenantId, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -20,7 +21,13 @@ use ironclaw_resources::{
 use ironclaw_secrets::{InMemorySecretStore, SecretMaterial};
 use serde_json::{Value, json};
 
-use super::*;
+use super::{
+    CapabilitySurfaceVersion, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
+    FirstPartyCapabilityRegistry, FirstPartyRuntimeAdapter, HostRuntimeServices,
+    LocalHostProcessPort, LocalInvocationServicesResolver, NetworkMode, ProcessBackendKind,
+    ProcessResultStore, ProcessStore, RootFilesystem, RuntimeAdapter, RuntimeAdapterRequest,
+    RuntimeAdapterResult, RuntimeProfile, SecretMode, ServiceResolvedRuntimeAdapter,
+};
 
 #[test]
 fn host_http_egress_borrows_staged_policy_for_repeated_invocation_requests() {

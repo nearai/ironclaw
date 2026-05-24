@@ -1,31 +1,22 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use async_trait::async_trait;
 use ironclaw_host_api::{AgentId, TenantId, ThreadId};
 use ironclaw_threads::{
-    AppendAssistantDraftRequest, AppendToolResultReferenceRequest, EnsureThreadRequest,
-    InMemorySessionThreadService, MessageContent, MessageKind, MessageStatus, SessionThreadService,
-    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope, ToolResultSafeSummary,
+    AppendAssistantDraftRequest, EnsureThreadRequest, InMemorySessionThreadService, MessageContent,
+    MessageKind, MessageStatus, SessionThreadService, ThreadHistoryRequest, ThreadMessageId,
+    ThreadMessageRecord, ThreadScope, ToolResultSafeSummary,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
-    GetLoopCheckpointRequest, GetRunStateRequest, LoopBlocked, LoopBlockedKind, LoopCheckpointKind,
-    LoopCheckpointRecord, LoopCheckpointStateRef, LoopCheckpointStore, LoopCompleted,
-    LoopCompletionKind, LoopExit, LoopExitId, LoopFailed, LoopFailureKind, LoopGateRef,
-    LoopMessageRef, LoopResultRef, PutLoopCheckpointRequest, ReplyTargetBindingRef,
-    ResumeTurnRequest, ResumeTurnResponse, RunProfileVersion, SanitizedFailure, SourceBindingRef,
-    SubmitTurnRequest, SubmitTurnResponse, TurnCheckpointId, TurnError, TurnId, TurnLeaseToken,
-    TurnRunId, TurnRunState, TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
-    run_profile::{CheckpointSchemaId, LoopDriverId},
-    runner::{
-        ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
-        ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecordModelRouteSnapshotRequest, RecordRecoveryRequiredRequest,
-        RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, TurnRunTransitionPort,
-    },
+    LoopBlockedKind, LoopCheckpointKind, LoopCompleted, LoopCompletionKind, LoopExit, LoopFailed,
+    LoopFailureKind, LoopMessageRef, LoopResultRef, TurnCheckpointId, TurnError, TurnId, TurnRunId,
+    TurnScope, TurnStateStore, TurnStatus,
 };
 
-use super::*;
+use super::{
+    BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
+    InMemoryLoopExitEvidencePort, LoopExitApplier, LoopExitEvidencePort,
+    ThreadCheckpointLoopExitEvidencePort, verify_tool_result_ref,
+};
 
 mod support;
 

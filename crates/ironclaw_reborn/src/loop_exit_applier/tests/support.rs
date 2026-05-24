@@ -1,4 +1,32 @@
-use super::*;
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use ironclaw_host_api::{TenantId, ThreadId};
+use ironclaw_threads::{
+    AppendToolResultReferenceRequest, InMemorySessionThreadService, SessionThreadService,
+    ThreadMessageRecord, ThreadScope, ToolResultSafeSummary,
+};
+use ironclaw_turns::{
+    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
+    GetLoopCheckpointRequest, GetRunStateRequest, LoopBlocked, LoopBlockedKind,
+    LoopCheckpointRecord, LoopCheckpointStateRef, LoopCheckpointStore, LoopCompleted,
+    LoopCompletionKind, LoopExit, LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef,
+    PutLoopCheckpointRequest, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse,
+    RunProfileVersion, SanitizedFailure, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
+    TurnCheckpointId, TurnError, TurnId, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId,
+    TurnScope, TurnStateStore, TurnStatus,
+    run_profile::{CheckpointSchemaId, LoopDriverId},
+    runner::{
+        ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
+        ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
+        RecordModelRouteSnapshotRequest, RecordRecoveryRequiredRequest,
+        RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, TurnRunTransitionPort,
+    },
+};
+
+use crate::loop_exit_applier::{
+    InMemoryLoopExitEvidencePort, LoopExitApplier, ThreadCheckpointLoopExitEvidencePort,
+};
 
 pub(super) fn text_checkpoint_evidence(
     loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
