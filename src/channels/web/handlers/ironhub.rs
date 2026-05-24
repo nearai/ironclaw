@@ -493,10 +493,9 @@ pub async fn ironhub_verify_intent_handler(
 
 pub async fn ironhub_register_handler(
     State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
     Json(req): Json<IronhubRegisterRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    catalog_rate_limit(&state, &user.user_id)?;
+    catalog_rate_limit(&state, &state.owner_id)?;
     let now = now_unix();
     let drift = now.abs_diff(req.ts);
     if drift > VERIFY_INTENT_WINDOW_SECS {
@@ -508,7 +507,7 @@ pub async fn ironhub_register_handler(
 
     let store = secrets_store_or_503(&state)?;
     let decrypted = match store
-        .get_decrypted(&user.user_id, IRONHUB_SIGNING_KEY_NAME)
+        .get_decrypted(&state.owner_id, IRONHUB_SIGNING_KEY_NAME)
         .await
     {
         Ok(s) => s,
@@ -532,7 +531,7 @@ pub async fn ironhub_register_handler(
         return Err((StatusCode::UNAUTHORIZED, "signature mismatch".to_string()));
     }
 
-    if nonce_seen_or_record(&user.user_id, &req.nonce) {
+    if nonce_seen_or_record(&state.owner_id, &req.nonce) {
         return Err((StatusCode::CONFLICT, "nonce already used".to_string()));
     }
 
@@ -2005,5 +2004,34 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn register_succeeds_without_session_via_hmac() {
+        let (app, _intent_sig, _intent_nonce, ts) = verify_app().await;
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let payload = register_payload("u1", "a1", ts, &nonce);
+        let sig = hmac_hex(TEST_SHARED_KEY, &payload).expect("sign");
+        let body = serde_json::json!({
+            "uid": "u1",
+            "aid": "a1",
+            "ts": ts,
+            "nonce": nonce,
+            "sig": sig,
+        });
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/ironhub/register")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("request");
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "register must authenticate by HMAC alone with no session; IronHub calls it server-to-server"
+        );
     }
 }

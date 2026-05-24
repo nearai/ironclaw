@@ -69,6 +69,7 @@ subset that can later be replaced by a typed `Deps` alias.
 |--------|------|-------------|
 | GET | `/api/health` | Health check |
 | GET | `/oauth/callback` | OAuth callback for extension auth |
+| POST | `/api/ironhub/register` | IronHub deep-link handshake (HMAC-authenticated, no session) |
 
 ### Chat
 | Method | Path | Description |
@@ -212,7 +213,7 @@ Legacy cleanup note:
 | POST | `/api/ironhub/signing-key` | Set the shared install key (body: `{shared_key}`; validates `ihub_sk_` prefix, minimum 32 characters, and a distinct-character floor) |
 | GET | `/api/ironhub/signing-key` | Get fingerprint + created_at for the stored key (never returns the key) |
 | DELETE | `/api/ironhub/signing-key` | Remove the stored key |
-| POST | `/api/ironhub/register` | IronHub-side handshake confirming the agent owns the shared key (body: `{uid, aid, ts, nonce, sig}`; sig over `register:{uid}:{aid}:{ts}:{nonce}`; returns 200 on valid, 401 on bad sig, 408 on stale timestamp, 409 on replayed nonce) |
+| POST | `/api/ironhub/register` | IronHub-side handshake confirming the agent owns the shared key. **Public route, no session** (lives on the `public` router): IronHub calls it server-to-server, authenticated solely by the HMAC `sig` verified against the owner's stored key (`state.owner_id`). Body `{uid, aid, ts, nonce, sig}`; sig over `register:{uid}:{aid}:{ts}:{nonce}`; returns 200 on valid, 401 on bad sig, 408 on stale timestamp, 409 on replayed nonce |
 | POST | `/api/ironhub/verify-intent` | Browser deep-link install preview (body: `{slug, version, uid, aid, ts, nonce, sig, artifact_digest}`; sig over `install:{slug}:{version}:{uid}:{aid}:{ts}:{nonce}:{artifact_digest}`; returns `{valid, reason}`). Repeatable: it checks slug, freshness, and signature but does NOT consume the nonce; the nonce is burned only by `/api/ironhub/install`. |
 
 **Install protocol contract** (canonical shape that matches IronHub PR #43 and replaces the earlier `{tool}:{ts}` minimal verify shape):

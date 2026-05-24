@@ -136,6 +136,7 @@ pub async fn start_server(
             get(slack_relay_oauth_callback_handler),
         )
         .route("/relay/events", post(relay_events_handler))
+        .route("/api/ironhub/register", post(ironhub_register_handler))
         .route(
             "/api/webhooks/{path}",
             post(crate::channels::web::handlers::webhooks::webhook_trigger_handler),
@@ -327,7 +328,6 @@ pub async fn start_server(
             "/api/ironhub/verify-intent",
             post(ironhub_verify_intent_handler),
         )
-        .route("/api/ironhub/register", post(ironhub_register_handler))
         // Settings
         .route("/api/settings", get(settings_list_handler))
         .route("/api/settings/export", get(settings_export_handler))
