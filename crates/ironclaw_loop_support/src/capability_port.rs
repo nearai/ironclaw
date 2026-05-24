@@ -2452,6 +2452,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_capability_can_use_old_builtin_capability_info_id_without_synthetic_intercept()
+    {
+        let capability_id =
+            CapabilityId::new("builtin.capability_info").expect("valid capability id");
+        let provider_id = ExtensionId::new("builtin").expect("valid provider id");
+        let mut context = execution_context("thread-capability-info-id-collision");
+        let run_context = loop_run_context(&context).await;
+        let loop_driver_extension =
+            loop_driver_execution_extension_id(&run_context).expect("valid extension id");
+        context.grants.grants.push(dispatch_capability_grant(
+            &capability_id,
+            &loop_driver_extension,
+        ));
+
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+            capability_id.clone(),
+            provider_id.clone(),
+        )]));
+        let visible_request = visible_request(context).with_provider_trust(
+            std::collections::BTreeMap::from([(provider_id, dispatch_trust_decision())]),
+        );
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            runtime.clone(),
+            visible_request,
+            Arc::new(StaticInputResolver),
+            Arc::new(StaticResultWriter),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+        port.invoke_capability(CapabilityInvocation {
+            surface_version: surface.version,
+            capability_id: capability_id.clone(),
+            input_ref: CapabilityInputRef::new("input:old-builtin-capability-info")
+                .expect("valid input ref"),
+        })
+        .await
+        .expect("runtime capability invocation succeeds");
+
+        let requests = runtime.take_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].capability_id, capability_id);
+    }
+
+    #[tokio::test]
     async fn factory_with_execution_mounts_propagates_to_port() {
         let context = execution_context("thread-factory-mounts");
         let run_context = loop_run_context(&context).await;

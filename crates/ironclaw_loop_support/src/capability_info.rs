@@ -6,7 +6,7 @@ use ironclaw_turns::run_profile::{
 };
 
 pub(super) const TOOL_NAME: &str = "capability_info";
-pub(super) const CAPABILITY_ID: &str = "builtin.capability_info";
+pub(super) const CAPABILITY_ID: &str = "ironclaw.loop.capability_info";
 
 pub(super) struct CapabilityInfoEntry<'a> {
     pub(super) capability_id: &'a CapabilityId,
