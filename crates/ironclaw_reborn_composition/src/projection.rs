@@ -98,12 +98,12 @@ impl ProjectionStream for WebuiRunStatusProjectionStream {
         request: ProjectionSubscriptionRequest,
     ) -> Result<Vec<ProductOutboundEnvelope>, ProductAdapterError> {
         let projection_scope = runtime_projection_scope(&request.actor, &request.scope);
-        let mut cursor = request
+        let origin_cursor = request
             .after_cursor
             .map(|cursor| parse_webui_projection_cursor(cursor.as_str()))
             .transpose()?
             .unwrap_or_default();
-        validate_webui_projection_cursor_scope(&cursor, &request.scope)?;
+        validate_webui_projection_cursor_scope(&origin_cursor, &request.scope)?;
         let mut subscription = self
             .manager
             .subscribe(ProjectionSubscribeRequest {
@@ -113,40 +113,37 @@ impl ProjectionStream for WebuiRunStatusProjectionStream {
                 target: ProjectionTarget::Thread {
                     thread_id: request.scope.thread_id.clone(),
                 },
-                after_cursor: cursor.runtime.clone(),
+                after_cursor: origin_cursor.runtime.clone(),
                 limit: WEBUI_PROJECTION_PAGE_LIMIT,
                 capabilities: SubscriberCapabilities::default(),
             })
             .await
             .map_err(map_event_stream_error)?;
 
-        let mut payloads = Vec::new();
+        let mut batch = WebuiProjectionBatch::new(origin_cursor);
         if let Some(item) = subscription.next().await
             && let Some((runtime_cursor, payload)) = item_to_payload(item, &request.scope)?
         {
-            cursor.runtime = Some(runtime_cursor);
-            payloads.push((cursor.clone(), payload));
+            batch.push_runtime(runtime_cursor, payload);
         }
 
-        let turn_after = cursor.turn.clone();
+        let turn_after = batch.cursor().turn.clone();
         let turn_drain = self.turn_events.drain(&request.scope, turn_after).await?;
         for TurnEventPayload {
             cursor: turn_cursor,
             payload,
         } in turn_drain.payloads
         {
-            cursor.turn = Some(turn_cursor.clone());
-            payloads.push((cursor.clone(), payload));
+            batch.push_turn(turn_cursor, payload);
         }
         if let Some(next_cursor) = turn_drain.next_cursor
-            && cursor.turn.as_ref() != Some(&next_cursor)
+            && batch.cursor().turn.as_ref() != Some(&next_cursor)
         {
-            cursor.turn = Some(next_cursor);
-            payloads.push((cursor.clone(), ProductOutboundPayload::KeepAlive));
+            batch.push_turn(next_cursor, ProductOutboundPayload::KeepAlive);
         }
 
-        payloads
-            .into_iter()
+        batch
+            .into_payloads()
             .map(|(cursor, payload)| {
                 envelope_to_outbound(
                     product_cursor_from_webui_cursor(&cursor)?,
@@ -157,6 +154,44 @@ impl ProjectionStream for WebuiRunStatusProjectionStream {
                 )
             })
             .collect()
+    }
+}
+
+struct WebuiProjectionBatch {
+    cursor: WebuiProjectionCursor,
+    payloads: Vec<(WebuiProjectionCursor, ProductOutboundPayload)>,
+}
+
+impl WebuiProjectionBatch {
+    fn new(cursor: WebuiProjectionCursor) -> Self {
+        Self {
+            cursor,
+            payloads: Vec::new(),
+        }
+    }
+
+    fn cursor(&self) -> &WebuiProjectionCursor {
+        &self.cursor
+    }
+
+    fn push_runtime(&mut self, cursor: EventProjectionCursor, payload: ProductOutboundPayload) {
+        self.cursor.runtime = Some(cursor);
+        self.push(payload);
+    }
+
+    fn push_turn(&mut self, cursor: TurnEventProjectionCursor, payload: ProductOutboundPayload) {
+        self.cursor.turn = Some(cursor);
+        self.push(payload);
+    }
+
+    fn push(&mut self, payload: ProductOutboundPayload) {
+        self.payloads.push((self.cursor.clone(), payload));
+    }
+
+    fn into_payloads(
+        self,
+    ) -> impl Iterator<Item = (WebuiProjectionCursor, ProductOutboundPayload)> {
+        self.payloads.into_iter()
     }
 }
 

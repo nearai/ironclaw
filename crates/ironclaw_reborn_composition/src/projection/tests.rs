@@ -1,3 +1,4 @@
+use super::turn_events::WEBUI_TURN_EVENT_PAGE_LIMIT;
 use super::*;
 
 use async_trait::async_trait;
@@ -311,6 +312,124 @@ async fn webui_event_stream_emits_keepalive_when_only_turn_cursor_advances() {
             TurnEventCursor(1)
         ))
     );
+}
+
+#[tokio::test]
+async fn webui_event_stream_reads_past_filtered_turn_event_pages() {
+    let tenant_id = TenantId::new("webui-events-tenant").unwrap();
+    let user_id = UserId::new("webui-events-user").unwrap();
+    let agent_id = AgentId::new("webui-events-agent").unwrap();
+    let thread_id = ThreadId::new("webui-events-thread").unwrap();
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+    let run_id = TurnRunId::new();
+    let mut events = (1..=WEBUI_TURN_EVENT_PAGE_LIMIT as u64)
+        .map(|cursor| TurnLifecycleEvent {
+            cursor: TurnEventCursor(cursor),
+            scope: scope.clone(),
+            run_id,
+            status: TurnStatus::Running,
+            kind: TurnEventKind::RunnerHeartbeat,
+            sanitized_reason: None,
+        })
+        .collect::<Vec<_>>();
+    events.push(TurnLifecycleEvent {
+        cursor: TurnEventCursor(WEBUI_TURN_EVENT_PAGE_LIMIT as u64 + 1),
+        scope: scope.clone(),
+        run_id,
+        status: TurnStatus::BlockedAuth,
+        kind: TurnEventKind::Blocked,
+        sanitized_reason: Some("GitHub authentication required".to_string()),
+    });
+    let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let services = build_reborn_projection_services(
+        event_log,
+        ReplyTargetBindingRef::new("webui-events-reply").unwrap(),
+    )
+    .with_turn_events(
+        Arc::new(FakeTurnEventSource { events }),
+        Arc::new(FakeTurnCoordinator {
+            state: turn_run_state(
+                &scope,
+                &user_id,
+                run_id,
+                TurnEventCursor(WEBUI_TURN_EVENT_PAGE_LIMIT as u64 + 1),
+            ),
+        }),
+    );
+
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id),
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(events.len(), 1);
+    assert!(matches!(
+        events[0].payload(),
+        ProductOutboundPayload::AuthPrompt(prompt)
+            if prompt.turn_run_id == run_id
+                && prompt.body == "GitHub authentication required"
+    ));
+}
+
+#[tokio::test]
+async fn webui_event_stream_does_not_prompt_for_stale_blocked_event() {
+    let tenant_id = TenantId::new("webui-events-tenant").unwrap();
+    let user_id = UserId::new("webui-events-user").unwrap();
+    let agent_id = AgentId::new("webui-events-agent").unwrap();
+    let thread_id = ThreadId::new("webui-events-thread").unwrap();
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+    let run_id = TurnRunId::new();
+    let mut state = turn_run_state(&scope, &user_id, run_id, TurnEventCursor(1));
+    state.event_cursor = TurnEventCursor(2);
+    let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let services = build_reborn_projection_services(
+        event_log,
+        ReplyTargetBindingRef::new("webui-events-reply").unwrap(),
+    )
+    .with_turn_events(
+        Arc::new(FakeTurnEventSource {
+            events: vec![TurnLifecycleEvent {
+                cursor: TurnEventCursor(1),
+                scope: scope.clone(),
+                run_id,
+                status: TurnStatus::BlockedAuth,
+                kind: TurnEventKind::Blocked,
+                sanitized_reason: Some("stale auth gate".to_string()),
+            }],
+        }),
+        Arc::new(FakeTurnCoordinator { state }),
+    );
+
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id),
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(events.len(), 1);
+    assert!(matches!(
+        events[0].payload(),
+        ProductOutboundPayload::ProjectionUpdate { .. }
+    ));
 }
 
 #[tokio::test]
