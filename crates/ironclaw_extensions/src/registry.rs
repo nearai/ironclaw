@@ -4,6 +4,8 @@ use ironclaw_host_api::{CapabilityDescriptor, CapabilityId, ExtensionId};
 
 use crate::{ExtensionError, ExtensionPackage, ManifestSource};
 
+const BUILTIN_FIRST_PARTY_EXTENSION_ID: &str = "builtin";
+
 /// Registry of validated extension packages and declared capabilities.
 #[derive(Debug, Default)]
 pub struct ExtensionRegistry {
@@ -188,8 +190,8 @@ pub(crate) fn validate_package_consistency(
             ),
         });
     }
-    // Host-bundled packages may pre-resolve manifest schema refs into concrete
-    // descriptors; all other descriptor fields must still match the manifest.
+    // The built-in first-party package may pre-resolve manifest schema refs into
+    // concrete descriptors; all other descriptor fields must still match.
     if package.capabilities != expected.capabilities
         && !host_bundled_capabilities_match_except_parameters_schema(package, &expected)
     {
@@ -205,6 +207,7 @@ fn host_bundled_capabilities_match_except_parameters_schema(
     expected: &ExtensionPackage,
 ) -> bool {
     if package.manifest.source != ManifestSource::HostBundled
+        || package.id.as_str() != BUILTIN_FIRST_PARTY_EXTENSION_ID
         || package.capabilities.len() != expected.capabilities.len()
     {
         return false;

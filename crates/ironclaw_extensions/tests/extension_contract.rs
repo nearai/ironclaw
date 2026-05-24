@@ -94,7 +94,7 @@ fn registry_rejects_installed_package_with_mutated_parameters_schema() {
 }
 
 #[test]
-fn registry_allows_host_bundled_package_with_resolved_parameters_schema() {
+fn registry_rejects_host_bundled_non_builtin_package_with_mutated_parameters_schema() {
     let manifest = ExtensionManifest::parse(
         WASM_MANIFEST,
         ManifestSource::HostBundled,
@@ -111,11 +111,39 @@ fn registry_allows_host_bundled_package_with_resolved_parameters_schema() {
         "additionalProperties": false
     });
 
+    let err = ExtensionRegistry::new().insert(package).unwrap_err();
+
+    assert!(matches!(
+        err,
+        ExtensionError::InvalidManifest { reason } if reason.contains("capability descriptors")
+    ));
+}
+
+#[test]
+fn registry_allows_builtin_host_bundled_package_with_resolved_parameters_schema() {
+    let manifest = ExtensionManifest::parse(
+        &WASM_MANIFEST
+            .replace("id = \"echo\"", "id = \"builtin\"")
+            .replace("id = \"echo.say\"", "id = \"builtin.say\""),
+        ManifestSource::HostBundled,
+        &HostPortCatalog::empty(),
+    )
+    .unwrap();
+    let mut package = package_from_manifest(manifest, "builtin");
+    package.capabilities[0].parameters_schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "message": { "type": "string" }
+        },
+        "required": ["message"],
+        "additionalProperties": false
+    });
+
     let mut registry = ExtensionRegistry::new();
     registry.insert(package).unwrap();
 
     let descriptor = registry
-        .get_capability(&CapabilityId::new("echo.say").unwrap())
+        .get_capability(&CapabilityId::new("builtin.say").unwrap())
         .unwrap();
     assert_eq!(
         descriptor.parameters_schema,
@@ -128,6 +156,28 @@ fn registry_allows_host_bundled_package_with_resolved_parameters_schema() {
             "additionalProperties": false
         })
     );
+}
+
+#[test]
+fn registry_rejects_builtin_host_bundled_package_with_mutated_non_schema_descriptor_fields() {
+    let manifest = ExtensionManifest::parse(
+        &WASM_MANIFEST
+            .replace("id = \"echo\"", "id = \"builtin\"")
+            .replace("id = \"echo.say\"", "id = \"builtin.say\""),
+        ManifestSource::HostBundled,
+        &HostPortCatalog::empty(),
+    )
+    .unwrap();
+    let mut package = package_from_manifest(manifest, "builtin");
+    package.capabilities[0].parameters_schema = serde_json::json!({"type": "object"});
+    package.capabilities[0].default_permission = PermissionMode::Ask;
+
+    let err = ExtensionRegistry::new().insert(package).unwrap_err();
+
+    assert!(matches!(
+        err,
+        ExtensionError::InvalidManifest { reason } if reason.contains("capability descriptors")
+    ));
 }
 
 #[test]
