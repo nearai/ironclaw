@@ -256,6 +256,14 @@ fn map_normalized_char_to_original_byte(
     }
 }
 
+pub(super) fn previous_char_boundary(value: &str, mut end: usize) -> usize {
+    end = end.min(value.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,12 +275,4 @@ mod tests {
         assert_eq!(count, 0);
         assert_eq!(method, MatchMethod::Exact);
     }
-}
-
-pub(super) fn previous_char_boundary(value: &str, mut end: usize) -> usize {
-    end = end.min(value.len());
-    while end > 0 && !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    end
 }
