@@ -342,6 +342,7 @@ pub(crate) fn capability_call_from_trace_with_surface(
         })?;
     Ok(CapabilityCallCandidate {
         surface_version,
+        effective_capability_ids: vec![capability_id.clone()],
         capability_id,
         input_ref,
         provider_replay: Some(ProviderToolCallReplay {

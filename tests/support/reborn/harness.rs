@@ -1730,6 +1730,9 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
             surface_version: CapabilitySurfaceVersion::new(TEST_CAPABILITY_SURFACE_VERSION)
                 .expect("valid surface version"),
             capability_id: CapabilityId::new(TEST_CAPABILITY_ID).expect("valid capability id"),
+            effective_capability_ids: vec![
+                CapabilityId::new(TEST_CAPABILITY_ID).expect("valid capability id"),
+            ],
             input_ref: CapabilityInputRef::new(format!("input:{}", call.id))
                 .expect("valid input ref"),
             provider_replay: Some(ProviderToolCallReplay {
@@ -1973,6 +1976,9 @@ pub fn trace_tool_call_response() -> ironclaw_loop_support::HostManagedModelResp
             surface_version: CapabilitySurfaceVersion::new(TEST_CAPABILITY_SURFACE_VERSION)
                 .expect("valid surface version"),
             capability_id: CapabilityId::new(TEST_CAPABILITY_ID).expect("valid capability id"),
+            effective_capability_ids: vec![
+                CapabilityId::new(TEST_CAPABILITY_ID).expect("valid capability id"),
+            ],
             input_ref: CapabilityInputRef::new("input:trace-call-1").expect("valid input ref"),
             provider_replay: Some(ProviderToolCallReplay {
                 provider_id: "trace_replay".to_string(),
