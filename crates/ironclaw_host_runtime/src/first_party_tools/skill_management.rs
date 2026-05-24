@@ -99,5 +99,9 @@ impl FirstPartyCapabilityHandler for SkillManagementToolHandler {
 }
 
 fn skill_management_error(error: SkillManagementCapabilityError) -> FirstPartyCapabilityError {
+    tracing::debug!(
+        runtime_dispatch_error_kind = %error.kind(),
+        "skill management error mapped to first-party capability error"
+    );
     FirstPartyCapabilityError::new(error.kind())
 }

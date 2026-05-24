@@ -64,6 +64,11 @@ impl SkillManagementCapabilityError {
     }
 }
 
+#[tracing::instrument(
+    level = "debug",
+    skip(request),
+    fields(kind = ?request.kind, scope = ?request.scope)
+)]
 pub async fn dispatch(
     request: &SkillManagementCapabilityRequest<'_>,
 ) -> Result<Value, SkillManagementCapabilityError> {
@@ -74,17 +79,30 @@ pub async fn dispatch(
     }
 }
 
+#[tracing::instrument(level = "debug", skip(request))]
 async fn dispatch_list(
     request: &SkillManagementCapabilityRequest<'_>,
 ) -> Result<Value, SkillManagementCapabilityError> {
     let context = management_context(request)?;
     let skills = list_skills(&context).await.map_err(capability_error)?;
+    tracing::debug!(
+        skill_count = skills.len(),
+        "skill management list completed"
+    );
     Ok(json!({
         "skills": Value::from_iter(skills.iter().map(skill_summary_json)),
         "count": skills.len(),
     }))
 }
 
+#[tracing::instrument(
+    level = "debug",
+    skip(request),
+    fields(
+        has_content = request.input.get("content").is_some(),
+        has_requested_name = request.input.get("name").is_some(),
+    )
+)]
 async fn dispatch_install(
     request: &SkillManagementCapabilityRequest<'_>,
 ) -> Result<Value, SkillManagementCapabilityError> {
@@ -92,12 +110,20 @@ async fn dispatch_install(
         .input
         .get("content")
         .and_then(Value::as_str)
-        .ok_or_else(input_error)?;
+        .ok_or_else(|| {
+            tracing::debug!("skill management install missing string content input");
+            input_error()
+        })?;
     let name = request.input.get("name").and_then(Value::as_str);
     let context = management_context(request)?;
     let installed = install_skill(&context, SkillInstallRequest { name, content })
         .await
         .map_err(capability_error)?;
+    tracing::debug!(
+        skill_name = %installed.name,
+        scoped_path = %installed.scoped_path,
+        "skill management install completed"
+    );
 
     Ok(json!({
         "installed": true,
@@ -106,6 +132,11 @@ async fn dispatch_install(
     }))
 }
 
+#[tracing::instrument(
+    level = "debug",
+    skip(request),
+    fields(has_name = request.input.get("name").is_some())
+)]
 async fn dispatch_remove(
     request: &SkillManagementCapabilityRequest<'_>,
 ) -> Result<Value, SkillManagementCapabilityError> {
@@ -113,11 +144,18 @@ async fn dispatch_remove(
         .input
         .get("name")
         .and_then(Value::as_str)
-        .ok_or_else(input_error)?;
+        .ok_or_else(|| {
+            tracing::debug!("skill management remove missing string name input");
+            input_error()
+        })?;
     let context = management_context(request)?;
     let removed = remove_skill(&context, SkillRemoveRequest { name })
         .await
         .map_err(capability_error)?;
+    tracing::debug!(
+        skill_name = %removed.name,
+        "skill management remove completed"
+    );
 
     Ok(json!({
         "removed": true,
@@ -129,6 +167,7 @@ fn management_context(
     request: &SkillManagementCapabilityRequest<'_>,
 ) -> Result<SkillManagementContext, SkillManagementCapabilityError> {
     let Some(mounts) = request.mounts else {
+        tracing::debug!("skill management request missing filesystem mounts");
         return Err(SkillManagementCapabilityError::new(
             RuntimeDispatchErrorKind::FilesystemDenied,
         ));
@@ -157,6 +196,7 @@ fn input_error() -> SkillManagementCapabilityError {
 }
 
 fn capability_error(error: SkillManagementError) -> SkillManagementCapabilityError {
+    let skill_error_kind = error.kind();
     let kind = match error.kind() {
         SkillManagementErrorKind::InvalidInput => RuntimeDispatchErrorKind::InputEncode,
         SkillManagementErrorKind::FilesystemDenied => RuntimeDispatchErrorKind::FilesystemDenied,
@@ -165,5 +205,10 @@ fn capability_error(error: SkillManagementError) -> SkillManagementCapabilityErr
         | SkillManagementErrorKind::InvalidSkill => RuntimeDispatchErrorKind::Guest,
         SkillManagementErrorKind::Resource => RuntimeDispatchErrorKind::Resource,
     };
+    tracing::debug!(
+        skill_management_error_kind = ?skill_error_kind,
+        runtime_dispatch_error_kind = %kind,
+        "skill management error mapped to runtime dispatch error"
+    );
     SkillManagementCapabilityError::new(kind)
 }
