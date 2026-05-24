@@ -2,6 +2,8 @@
 //!
 //! The executor owns loop mechanics. Loop families own strategy composition.
 
+mod assistant_reply;
+mod budget;
 mod canonical;
 mod capabilities;
 mod capability_helpers;
@@ -14,17 +16,22 @@ mod mapping;
 mod model;
 mod pipeline;
 mod prompt;
+mod turn_stop;
 
+use assistant_reply::*;
+use budget::*;
 use capabilities::*;
 use capability_helpers::*;
 use checkpoint::*;
 use exit_helpers::*;
 use gates::*;
+use input::*;
 use loop_exit::*;
 use mapping::*;
 use model::*;
 use pipeline::*;
 use prompt::*;
+use turn_stop::*;
 
 use async_trait::async_trait;
 use ironclaw_turns::{
@@ -32,13 +39,13 @@ use ironclaw_turns::{
     LoopCompletionKind, LoopExit, LoopExitId, LoopFailed, LoopFailureKind, LoopResultRef,
     run_profile::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef,
-        BatchPolicyKind, CapabilityBatchInvocation, CapabilityCallCandidate, CapabilityFailureKind,
-        CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, FinalizeAssistantMessage,
-        LoopCancelReasonKind, LoopCancellationSignal, LoopCheckpointKind, LoopCheckpointRequest,
-        LoopDriverNoteKind, LoopGateKind, LoopInput, LoopInputAckToken, LoopInputBatch,
-        LoopModelCapabilityView, LoopModelRequest, LoopProgressEvent, ParentLoopOutput,
-        ProviderToolCallReference, StageCheckpointPayloadRequest, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        AssistantReply, BatchPolicyKind, CapabilityBatchInvocation, CapabilityCallCandidate,
+        CapabilityFailureKind, CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage,
+        FinalizeAssistantMessage, LoopCancelReasonKind, LoopCancellationSignal, LoopCheckpointKind,
+        LoopCheckpointRequest, LoopDriverNoteKind, LoopGateKind, LoopInput, LoopInputAckToken,
+        LoopInputBatch, LoopModelCapabilityView, LoopModelRequest, LoopProgressEvent,
+        ParentLoopOutput, ProviderToolCallReference, StageCheckpointPayloadRequest,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 
@@ -132,6 +139,15 @@ struct CheckpointWrite {
 #[derive(Debug)]
 enum BatchStep {
     Continue(Box<LoopExecutionState>),
+    Exit(LoopExit),
+}
+
+#[derive(Debug)]
+enum TurnCompletedStep {
+    Continue {
+        state: Box<LoopExecutionState>,
+        summary: TurnSummary,
+    },
     Exit(LoopExit),
 }
 

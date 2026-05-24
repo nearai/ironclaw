@@ -1,9 +1,143 @@
 use super::*;
 
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct InputStage;
+
 #[derive(Debug, Clone, Copy)]
 pub(super) enum UserFacingInputDrainMode {
     Steering,
     FollowUp,
+}
+
+pub(super) struct InputInput {
+    pub(super) state: LoopExecutionState,
+    pub(super) pending_input_ack: PendingInputAck,
+    pub(super) mode: UserFacingInputDrainMode,
+}
+
+pub(super) enum InputStep {
+    Continue {
+        state: Box<LoopExecutionState>,
+        pending_input_ack: PendingInputAck,
+        drained: bool,
+    },
+    Exit(LoopExit),
+}
+
+#[async_trait]
+impl ExecutorStage<InputInput> for InputStage {
+    type Output = InputStep;
+
+    async fn process(
+        &self,
+        ctx: StageContext<'_>,
+        input: InputInput,
+    ) -> Result<InputStep, AgentLoopExecutorError> {
+        let mut state = input.state;
+        let mut pending_input_ack = input.pending_input_ack;
+
+        let should_drain = match input.mode {
+            UserFacingInputDrainMode::Steering => {
+                pending_input_ack.is_empty() && ctx.planner.drain().drain_steering(&state).await
+            }
+            UserFacingInputDrainMode::FollowUp => ctx.planner.drain().drain_followup(&state).await,
+        };
+
+        if should_drain {
+            state = match CheckpointStage.cancel_if_requested(ctx, state).await? {
+                CancelCheck::Continue(state) => *state,
+                CancelCheck::Exit(exit) => return Ok(InputStep::Exit(exit)),
+            };
+            let drained = self.drain(ctx, state, input.mode).await?;
+            state = drained.state;
+            pending_input_ack.replace(drained.ack_tokens)?;
+            if let Some(reason_kind) = drained.cancelled_reason_kind {
+                let checked = CheckpointStage
+                    .write(ctx, state, CheckpointKind::Final)
+                    .await?;
+                pending_input_ack.ack(ctx.host).await?;
+                return Ok(InputStep::Exit(cancelled_exit_with_reason(
+                    ctx.host,
+                    checked.state,
+                    reason_kind,
+                    Some(checked.checkpoint_id),
+                )?));
+            }
+            state = match CheckpointStage
+                .cancel_if_requested_after_pending_input_ack(ctx, state, &mut pending_input_ack)
+                .await?
+            {
+                CancelCheck::Continue(state) => *state,
+                CancelCheck::Exit(exit) => return Ok(InputStep::Exit(exit)),
+            };
+            return Ok(InputStep::Continue {
+                state: Box::new(state),
+                pending_input_ack,
+                drained: drained.drained,
+            });
+        }
+
+        if matches!(input.mode, UserFacingInputDrainMode::Steering) {
+            state = match CheckpointStage
+                .cancel_if_requested_after_pending_input_ack(ctx, state, &mut pending_input_ack)
+                .await?
+            {
+                CancelCheck::Continue(state) => *state,
+                CancelCheck::Exit(exit) => return Ok(InputStep::Exit(exit)),
+            };
+        }
+
+        Ok(InputStep::Continue {
+            state: Box::new(state),
+            pending_input_ack,
+            drained: false,
+        })
+    }
+}
+
+impl InputStage {
+    #[cfg(test)]
+    pub(super) async fn drain_user_inputs(
+        &self,
+        ctx: StageContext<'_>,
+        state: LoopExecutionState,
+    ) -> Result<DrainedInputs, AgentLoopExecutorError> {
+        self.drain(ctx, state, UserFacingInputDrainMode::Steering)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(super) async fn drain_followup(
+        &self,
+        ctx: StageContext<'_>,
+        state: LoopExecutionState,
+    ) -> Result<DrainedInputs, AgentLoopExecutorError> {
+        self.drain(ctx, state, UserFacingInputDrainMode::FollowUp)
+            .await
+    }
+
+    async fn drain(
+        &self,
+        ctx: StageContext<'_>,
+        mut state: LoopExecutionState,
+        mode: UserFacingInputDrainMode,
+    ) -> Result<DrainedInputs, AgentLoopExecutorError> {
+        let batch = ctx
+            .host
+            .poll_inputs(state.input_cursor.clone(), MAX_INPUT_DRAIN)
+            .await
+            .map_err(|_| AgentLoopExecutorError::HostUnavailable {
+                stage: HostStage::Input,
+            })?;
+        let (drained, ack_tokens, cancelled_reason_kind) =
+            consume_drainable_inputs(&batch, mode, &mut state)?;
+        Ok(DrainedInputs {
+            state,
+            drained,
+            ack_tokens,
+            cancelled_reason_kind,
+        })
+    }
 }
 
 pub(super) fn consume_drainable_inputs(

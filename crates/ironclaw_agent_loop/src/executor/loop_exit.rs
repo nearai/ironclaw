@@ -3,8 +3,26 @@ use super::*;
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct ExitStage;
 
+pub(super) struct ExitInput {
+    pub(super) state: LoopExecutionState,
+    pub(super) kind: StopKind,
+}
+
+#[async_trait]
+impl ExecutorStage<ExitInput> for ExitStage {
+    type Output = LoopExit;
+
+    async fn process(
+        &self,
+        ctx: StageContext<'_>,
+        input: ExitInput,
+    ) -> Result<LoopExit, AgentLoopExecutorError> {
+        self.for_stop(ctx, input.state, input.kind).await
+    }
+}
+
 impl ExitStage {
-    pub(super) async fn for_stop(
+    async fn for_stop(
         &self,
         ctx: StageContext<'_>,
         state: LoopExecutionState,

@@ -33,6 +33,24 @@ pub(crate) struct TurnSummary {
     pub batch_result_refs: Vec<LoopResultRef>,
 }
 
+impl TurnSummary {
+    pub(crate) fn reply_only(reply_ref: LoopMessageRef) -> Self {
+        Self {
+            kind: TurnEndKind::ReplyOnly,
+            assistant_message_ref: Some(reply_ref),
+            batch_result_refs: Vec::new(),
+        }
+    }
+
+    pub(crate) fn after_capability_batch(result_refs: Vec<LoopResultRef>) -> Self {
+        Self {
+            kind: TurnEndKind::AfterCapabilityBatch,
+            assistant_message_ref: None,
+            batch_result_refs: result_refs,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 #[serde(rename_all = "snake_case")]

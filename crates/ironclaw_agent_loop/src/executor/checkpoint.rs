@@ -1,4 +1,3 @@
-use super::input::{UserFacingInputDrainMode, consume_drainable_inputs};
 use super::*;
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -144,49 +143,23 @@ impl CheckpointStage {
             Err(error) => Err(error),
         }
     }
+}
 
-    pub(super) async fn drain_user_inputs(
+pub(super) struct CheckpointInput {
+    pub(super) state: LoopExecutionState,
+    pub(super) kind: CheckpointKind,
+}
+
+#[async_trait]
+impl ExecutorStage<CheckpointInput> for CheckpointStage {
+    type Output = CheckpointWrite;
+
+    async fn process(
         &self,
         ctx: StageContext<'_>,
-        mut state: LoopExecutionState,
-    ) -> Result<DrainedInputs, AgentLoopExecutorError> {
-        let batch = ctx
-            .host
-            .poll_inputs(state.input_cursor.clone(), MAX_INPUT_DRAIN)
-            .await
-            .map_err(|_| AgentLoopExecutorError::HostUnavailable {
-                stage: HostStage::Input,
-            })?;
-        let (drained, ack_tokens, cancelled_reason_kind) =
-            consume_drainable_inputs(&batch, UserFacingInputDrainMode::Steering, &mut state)?;
-        Ok(DrainedInputs {
-            state,
-            drained,
-            ack_tokens,
-            cancelled_reason_kind,
-        })
-    }
-
-    pub(super) async fn drain_followup(
-        &self,
-        ctx: StageContext<'_>,
-        mut state: LoopExecutionState,
-    ) -> Result<DrainedInputs, AgentLoopExecutorError> {
-        let batch = ctx
-            .host
-            .poll_inputs(state.input_cursor.clone(), MAX_INPUT_DRAIN)
-            .await
-            .map_err(|_| AgentLoopExecutorError::HostUnavailable {
-                stage: HostStage::Input,
-            })?;
-        let (drained, ack_tokens, cancelled_reason_kind) =
-            consume_drainable_inputs(&batch, UserFacingInputDrainMode::FollowUp, &mut state)?;
-        Ok(DrainedInputs {
-            state,
-            drained,
-            ack_tokens,
-            cancelled_reason_kind,
-        })
+        input: CheckpointInput,
+    ) -> Result<CheckpointWrite, AgentLoopExecutorError> {
+        self.write(ctx, input.state, input.kind).await
     }
 }
 
@@ -202,7 +175,7 @@ impl CanonicalAgentLoopExecutor {
             planner: family.planner(),
             host,
         };
-        CheckpointStage.drain_user_inputs(ctx, state).await
+        InputStage.drain_user_inputs(ctx, state).await
     }
 
     pub(super) async fn drain_followup(
@@ -215,6 +188,6 @@ impl CanonicalAgentLoopExecutor {
             planner: family.planner(),
             host,
         };
-        CheckpointStage.drain_followup(ctx, state).await
+        InputStage.drain_followup(ctx, state).await
     }
 }

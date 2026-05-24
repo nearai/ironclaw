@@ -113,6 +113,222 @@ async fn progress_port_failure_does_not_abort_reply_only_run() {
 }
 
 #[tokio::test]
+async fn budget_stage_exits_at_iteration_limit() {
+    let host = MockHost::new(Vec::new());
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.iteration = family.planner().budget().iteration_limit(&state);
+
+    let step = BudgetStage
+        .process(
+            ctx,
+            BudgetInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await
+        .expect("budget stage");
+
+    assert!(matches!(step, BudgetStep::Exit(LoopExit::Failed(_))));
+    assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
+}
+
+#[tokio::test]
+async fn input_stage_steering_drain_carries_pending_ack() {
+    let host = MockHost::new(Vec::new());
+    let run_context = host.run_context().clone();
+    let host = host.with_input_batches(vec![LoopInputBatch {
+        inputs: vec![LoopInput::UserMessage {
+            message_ref: message_ref("msg:user-drained"),
+        }],
+        input_acks: vec![input_ack(
+            &run_context,
+            "input-cursor:after-user",
+            "input-ack:after-user",
+        )],
+        next_cursor: input_cursor(&run_context, "input-cursor:after-user"),
+    }]);
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let step = InputStage
+        .process(
+            ctx,
+            InputInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+                mode: UserFacingInputDrainMode::Steering,
+            },
+        )
+        .await
+        .expect("input stage");
+
+    match step {
+        InputStep::Continue {
+            state,
+            mut pending_input_ack,
+            drained,
+        } => {
+            assert!(drained);
+            assert_eq!(
+                state.input_cursor,
+                input_cursor(&run_context, "input-cursor:after-user")
+            );
+            assert!(host.acked_input_tokens().is_empty());
+            pending_input_ack.ack(&host).await.expect("ack inputs");
+            assert_eq!(
+                host.acked_input_tokens(),
+                vec![LoopInputAckToken::new("input-ack:after-user").expect("valid")]
+            );
+        }
+        InputStep::Exit(exit) => panic!("expected continue, got {exit:?}"),
+    }
+}
+
+#[tokio::test]
+async fn assistant_reply_stage_returns_reply_summary() {
+    let host = MockHost::new(Vec::new());
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+    let reply = match reply_response().output {
+        ParentLoopOutput::AssistantReply(reply) => reply,
+        ParentLoopOutput::CapabilityCalls(_) => panic!("expected reply fixture"),
+    };
+
+    let step = AssistantReplyStage
+        .process(ctx, AssistantReplyInput { state, reply })
+        .await
+        .expect("assistant reply stage");
+
+    match step {
+        TurnCompletedStep::Continue { state, summary } => {
+            assert_eq!(state.assistant_refs, vec![message_ref("msg:assistant")]);
+            assert_eq!(
+                summary,
+                TurnSummary::reply_only(message_ref("msg:assistant"))
+            );
+        }
+        TurnCompletedStep::Exit(exit) => panic!("expected continue, got {exit:?}"),
+    }
+}
+
+#[tokio::test]
+async fn capability_stage_returns_after_batch_summary() {
+    let result_ref = LoopResultRef::new("result:done").expect("valid");
+    let host = MockHost::new(Vec::new()).with_batch_outcomes(vec![
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
+                result_ref: result_ref.clone(),
+                safe_summary: "done".to_string(),
+                terminate_hint: false,
+            })],
+            stopped_on_suspension: false,
+        },
+    ]);
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+    let calls = match calls_response().output {
+        ParentLoopOutput::CapabilityCalls(calls) => calls,
+        ParentLoopOutput::AssistantReply(_) => panic!("expected calls fixture"),
+    };
+
+    let step = CapabilityStage
+        .process(
+            ctx,
+            CapabilityBatchInput {
+                state,
+                surface: ironclaw_turns::run_profile::LoopCapabilityPort::visible_capabilities(
+                    &host,
+                    VisibleCapabilityRequest,
+                )
+                .await
+                .expect("visible surface"),
+                calls,
+            },
+        )
+        .await
+        .expect("capability stage");
+
+    match step {
+        TurnCompletedStep::Continue { state, summary } => {
+            assert_eq!(state.result_refs, vec![result_ref.clone()]);
+            assert_eq!(
+                summary,
+                TurnSummary::after_capability_batch(vec![result_ref])
+            );
+        }
+        TurnCompletedStep::Exit(exit) => panic!("expected continue, got {exit:?}"),
+    }
+}
+
+#[tokio::test]
+async fn stop_stage_preserves_ack_and_returns_stop_kind() {
+    let host = MockHost::new(Vec::new());
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.stop_state.last_batch_total = 1;
+    state.stop_state.terminate_hints_in_last_batch = 1;
+    let mut pending_input_ack = PendingInputAck::default();
+    pending_input_ack
+        .replace(vec![
+            LoopInputAckToken::new("input-ack:pending").expect("valid"),
+        ])
+        .expect("store pending ack");
+
+    let step = StopStage
+        .process(
+            ctx,
+            StopInput {
+                state,
+                summary: TurnSummary::after_capability_batch(vec![
+                    LoopResultRef::new("result:done").expect("valid"),
+                ]),
+                pending_input_ack,
+            },
+        )
+        .await
+        .expect("stop stage");
+
+    match step {
+        StopStep::Stop {
+            mut pending_input_ack,
+            kind,
+            ..
+        } => {
+            assert_eq!(kind, StopKind::GracefulStop);
+            assert!(host.acked_input_tokens().is_empty());
+            pending_input_ack.ack(&host).await.expect("ack inputs");
+            assert_eq!(
+                host.acked_input_tokens(),
+                vec![LoopInputAckToken::new("input-ack:pending").expect("valid")]
+            );
+        }
+        StopStep::Continue { .. } | StopStep::Exit(_) => panic!("expected graceful stop"),
+    }
+}
+
+#[tokio::test]
 async fn terminate_hint_after_batch_completes_without_extra_model_call() {
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
         ironclaw_turns::run_profile::CapabilityBatchOutcome {

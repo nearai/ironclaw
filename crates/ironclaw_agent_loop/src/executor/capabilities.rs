@@ -5,29 +5,25 @@ use super::*;
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct CapabilityStage;
 
-pub(super) struct CapabilityBatchInput<G> {
+pub(super) struct CapabilityBatchInput {
     pub(super) state: LoopExecutionState,
     pub(super) surface: VisibleCapabilitySurface,
     pub(super) calls: Vec<CapabilityCallCandidate>,
-    pub(super) gates: G,
 }
 
 #[async_trait]
-impl<G> ExecutorStage<CapabilityBatchInput<G>> for CapabilityStage
-where
-    G: ExecutorStage<GateInput, Output = BatchStep> + Send + Sync + Copy + 'static,
-{
-    type Output = BatchStep;
+impl ExecutorStage<CapabilityBatchInput> for CapabilityStage {
+    type Output = TurnCompletedStep;
 
     async fn process(
         &self,
         ctx: StageContext<'_>,
-        input: CapabilityBatchInput<G>,
-    ) -> Result<BatchStep, AgentLoopExecutorError> {
+        input: CapabilityBatchInput,
+    ) -> Result<TurnCompletedStep, AgentLoopExecutorError> {
         let mut state = input.state;
+        let result_refs_start = state.result_refs.len();
         let surface = &input.surface;
         let calls = input.calls;
-        let gates = &input.gates;
         state.stop_state.last_batch_total = 0;
         state.stop_state.terminate_hints_in_last_batch = 0;
 
@@ -50,7 +46,7 @@ where
         let stop_on_first_suspension = matches!(policy, BatchPolicy::Sequential);
         match CheckpointStage.cancel_if_requested(ctx, state).await? {
             CancelCheck::Continue(next) => state = *next,
-            CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
+            CancelCheck::Exit(exit) => return Ok(TurnCompletedStep::Exit(exit)),
         }
 
         state = CheckpointStage
@@ -59,7 +55,7 @@ where
             .state;
         match CheckpointStage.cancel_if_requested(ctx, state).await? {
             CancelCheck::Continue(next) => state = *next,
-            CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
+            CancelCheck::Exit(exit) => return Ok(TurnCompletedStep::Exit(exit)),
         }
 
         let mut signatures = HashSet::new();
@@ -76,17 +72,17 @@ where
                 diagnostic_ref: None,
             };
             match self
-                .handle_capability_error(ctx, gates, state, call, summary)
+                .handle_capability_error(ctx, state, call, summary)
                 .await?
             {
                 BatchStep::Continue(next) => state = *next,
-                BatchStep::Exit(exit) => return Ok(BatchStep::Exit(exit)),
+                BatchStep::Exit(exit) => return Ok(TurnCompletedStep::Exit(exit)),
             }
         }
 
         state.stop_state.last_batch_total = visible_calls.len() as u32;
         if visible_calls.is_empty() {
-            return Ok(BatchStep::Continue(Box::new(state)));
+            return self.completed_turn(ctx, state, result_refs_start).await;
         }
 
         CheckpointStage
@@ -154,32 +150,46 @@ where
             }
             push_call_signature_once(&mut state, &mut signatures, &call)?;
             match self
-                .handle_capability_outcome(ctx, gates, state, call, outcome)
+                .handle_capability_outcome(ctx, state, call, outcome)
                 .await?
             {
                 BatchStep::Continue(next) => {
                     state = *next;
                 }
-                BatchStep::Exit(exit) => return Ok(BatchStep::Exit(exit)),
+                BatchStep::Exit(exit) => return Ok(TurnCompletedStep::Exit(exit)),
             }
         }
 
-        Ok(BatchStep::Continue(Box::new(state)))
+        self.completed_turn(ctx, state, result_refs_start).await
     }
 }
 
 impl CapabilityStage {
-    async fn handle_capability_outcome<G>(
+    async fn completed_turn(
         &self,
         ctx: StageContext<'_>,
-        gates: &G,
+        state: LoopExecutionState,
+        result_refs_start: usize,
+    ) -> Result<TurnCompletedStep, AgentLoopExecutorError> {
+        let state = match CheckpointStage.cancel_if_requested(ctx, state).await? {
+            CancelCheck::Continue(state) => *state,
+            CancelCheck::Exit(exit) => return Ok(TurnCompletedStep::Exit(exit)),
+        };
+        let summary =
+            TurnSummary::after_capability_batch(state.result_refs[result_refs_start..].to_vec());
+        Ok(TurnCompletedStep::Continue {
+            state: Box::new(state),
+            summary,
+        })
+    }
+
+    async fn handle_capability_outcome(
+        &self,
+        ctx: StageContext<'_>,
         mut state: LoopExecutionState,
         call: CapabilityCallCandidate,
         outcome: CapabilityOutcome,
-    ) -> Result<BatchStep, AgentLoopExecutorError>
-    where
-        G: ExecutorStage<GateInput, Output = BatchStep> + Send + Sync,
-    {
+    ) -> Result<BatchStep, AgentLoopExecutorError> {
         match outcome {
             CapabilityOutcome::Completed(result) => {
                 append_capability_result_ref(ctx.host, &call, &result).await?;
@@ -187,7 +197,7 @@ impl CapabilityStage {
                 Ok(BatchStep::Continue(Box::new(state)))
             }
             CapabilityOutcome::ApprovalRequired { gate_ref, .. } => {
-                gates
+                GateStage
                     .process(
                         ctx,
                         GateInput {
@@ -200,7 +210,7 @@ impl CapabilityStage {
                     .await
             }
             CapabilityOutcome::AuthRequired { gate_ref, .. } => {
-                gates
+                GateStage
                     .process(
                         ctx,
                         GateInput {
@@ -213,7 +223,7 @@ impl CapabilityStage {
                     .await
             }
             CapabilityOutcome::ResourceBlocked { gate_ref, .. } => {
-                gates
+                GateStage
                     .process(
                         ctx,
                         GateInput {
@@ -238,7 +248,7 @@ impl CapabilityStage {
                     safe_summary: sanitized_strategy_summary(denied.safe_summary)?,
                     diagnostic_ref: None,
                 };
-                self.handle_capability_error(ctx, gates, state, call, summary)
+                self.handle_capability_error(ctx, state, call, summary)
                     .await
             }
             CapabilityOutcome::Failed(failure) => {
@@ -253,23 +263,19 @@ impl CapabilityStage {
                     safe_summary: sanitized_strategy_summary(failure.safe_summary)?,
                     diagnostic_ref: None,
                 };
-                self.handle_capability_error(ctx, gates, state, call, summary)
+                self.handle_capability_error(ctx, state, call, summary)
                     .await
             }
         }
     }
 
-    async fn handle_capability_error<G>(
+    async fn handle_capability_error(
         &self,
         ctx: StageContext<'_>,
-        gates: &G,
         mut state: LoopExecutionState,
         call: CapabilityCallCandidate,
         mut summary: CapabilityErrorSummary,
-    ) -> Result<BatchStep, AgentLoopExecutorError>
-    where
-        G: ExecutorStage<GateInput, Output = BatchStep> + Send + Sync,
-    {
+    ) -> Result<BatchStep, AgentLoopExecutorError> {
         for _ in 0..MAX_CAPABILITY_RETRIES {
             match ctx
                 .planner
@@ -352,7 +358,7 @@ impl CapabilityStage {
                                 return Ok(BatchStep::Continue(Box::new(state)));
                             }
                             CapabilityOutcome::ApprovalRequired { gate_ref, .. } => {
-                                return gates
+                                return GateStage
                                     .process(
                                         ctx,
                                         GateInput {
@@ -365,7 +371,7 @@ impl CapabilityStage {
                                     .await;
                             }
                             CapabilityOutcome::AuthRequired { gate_ref, .. } => {
-                                return gates
+                                return GateStage
                                     .process(
                                         ctx,
                                         GateInput {
@@ -378,7 +384,7 @@ impl CapabilityStage {
                                     .await;
                             }
                             CapabilityOutcome::ResourceBlocked { gate_ref, .. } => {
-                                return gates
+                                return GateStage
                                     .process(
                                         ctx,
                                         GateInput {
