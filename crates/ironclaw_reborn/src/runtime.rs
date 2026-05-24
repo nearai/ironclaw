@@ -85,7 +85,9 @@ where
     /// contract for the activation behind `HOOKS_ENABLED`. `Some(factory)`
     /// (only when the flag is ON) wires the factory through
     /// [`RebornLoopDriverHostFactory::with_hook_dispatcher_builder_factory`],
-    /// so each host build mints a fresh dispatcher (per-run isolation) and the
+    /// so each host build mints a fresh dispatcher (per-run isolation of
+    /// dispatcher-local state — slot-poisoning, registry edits; predicate
+    /// counters remain tenant-scoped, shared across runs by design) and the
     /// host attaches a run-scoped milestone sink internally (per-run telemetry
     /// attribution, the #3573 lesson).
     pub hook_dispatcher_builder_factory: Option<HookDispatcherBuilderFactory>,
@@ -362,10 +364,12 @@ where
     }
     // Hook framework activation (item 6 of #3934). When the builder factory is
     // present (flag ON), wire it so each host build mints a fresh dispatcher
-    // with per-run isolation; the host factory attaches the run-scoped
-    // milestone sink internally for per-run telemetry attribution. When `None`
-    // (flag OFF / default), no dispatcher is composed and behavior is
-    // identical to the pre-hooks runtime.
+    // with per-run isolation of dispatcher-local state (slot-poisoning,
+    // registry edits); predicate counters stay tenant-scoped and shared across
+    // runs by design. The host factory attaches the run-scoped milestone sink
+    // internally for per-run telemetry attribution. When `None` (flag OFF /
+    // default), no dispatcher is composed and behavior is identical to the
+    // pre-hooks runtime.
     if let Some(factory) = parts.hook_dispatcher_builder_factory {
         host_factory = host_factory.with_hook_dispatcher_builder_factory(move || factory());
     }

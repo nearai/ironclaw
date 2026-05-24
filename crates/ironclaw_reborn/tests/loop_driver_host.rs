@@ -2301,8 +2301,21 @@ async fn build_runtime_host_with_optional_hooks(
     (host, runtime, io, surface.version)
 }
 
-/// First-party-only builder factory: installs just the no-op observer, exactly
-/// like the composition's first-party-only state.
+// NOTE (review item #6): the two builder factories below are HAND-BUILT test
+// doubles that exercise the `ironclaw_reborn` host-factory PLUMBING — i.e. that
+// a dispatcher minted by a builder factory is wired through
+// `HookedLoopCapabilityPort` and that a deny short-circuits the inner runtime
+// port. They are deliberately NOT a substitute for activation coverage: they do
+// not prove the production composition root wires the canonical registry/config.
+// That activation coverage now lives where it belongs — driving the REAL
+// `build_hook_dispatcher_builder_factory` and `build_reborn_runtime` — in
+// `ironclaw_reborn_composition::hooks` and
+// `ironclaw_reborn_composition::runtime` tests. Keep this split: host plumbing
+// is tested here; composition activation is tested in the composition crate.
+
+/// First-party-only builder factory: installs just the no-op observer, mirroring
+/// the composition's first-party-only state. Host-plumbing double only — see the
+/// note above.
 fn first_party_only_hook_factory() -> ironclaw_reborn::loop_driver_host::HookDispatcherBuilderFactory
 {
     Arc::new(|| {

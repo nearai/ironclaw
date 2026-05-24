@@ -804,10 +804,19 @@ where
     /// closure on every `build_text_only_host*` call to obtain a fresh
     /// `HookDispatcher`, wraps it in `Arc`, and then plumbs it through
     /// `HookedLoopCapabilityPort` / `HookedLoopPromptPort`. Building a fresh
-    /// dispatcher per host build means slot-poisoning state, the per-tenant
-    /// predicate counter, and any registry mutations done while a run is
-    /// active do not leak into the next run. Default behavior (no factory) is
-    /// unchanged from the pre-hooks shape.
+    /// dispatcher per host build means **dispatcher-local** state —
+    /// slot-poisoning and any registry mutations done while a run is active —
+    /// does not leak into the next run.
+    ///
+    /// This per-run freshness applies to the dispatcher/registry only. It does
+    /// **not** apply to predicate counter state: rate-limit / value-cap
+    /// counters are keyed `(hook, tenant, capability)` with no `run_id` and are
+    /// deliberately TENANT-scoped, so they are shared across every run within a
+    /// tenant (a run-scoped rate limit would reset each run and enforce
+    /// nothing). The composition root captures one `PredicateEvaluator` per
+    /// tenant and shares it across the dispatchers this factory mints — see
+    /// `ironclaw_reborn_composition::hooks` ("Predicate counter scoping").
+    /// Default behavior (no factory) is unchanged from the pre-hooks shape.
     hook_dispatcher_factory: Option<HookDispatcherFactory>,
     /// Per-build builder factory. Preferred over `hook_dispatcher_factory`
     /// because it lets the host factory attach the run-scoped milestone
@@ -1053,8 +1062,11 @@ where
     /// N+1, N+2, …
     ///
     /// New callers should prefer [`Self::with_hook_dispatcher_factory`],
-    /// which mints a fresh dispatcher per host build and provides full
-    /// per-run isolation of hook state.
+    /// which mints a fresh dispatcher per host build and isolates
+    /// dispatcher-local state (slot-poisoning, registry mutations) per run.
+    /// Predicate counter state is the exception: it is tenant-scoped and shared
+    /// across runs by design (see [`Self::with_hook_dispatcher_factory`] and
+    /// `ironclaw_reborn_composition::hooks`, "Predicate counter scoping").
     pub fn with_hook_dispatcher(self, dispatcher: Arc<HookDispatcher>) -> Self {
         // Single-instance Arc cloning preserves the legacy shared-state shape
         // so existing call sites and tests behave identically. New code paths
@@ -1197,9 +1209,12 @@ where
         context_adapter = context_adapter.with_milestone_sink(Arc::clone(&self.milestone_sink));
         let context: Arc<dyn LoopContextPort> = Arc::new(context_adapter);
         // Mint a fresh dispatcher per build when a factory is installed. This
-        // localizes dispatcher-owned state (slot poisoning, registry edits,
-        // predicate counters) to this one host so it cannot leak into the
-        // next run that shares this factory.
+        // localizes dispatcher-owned state (slot poisoning, registry edits) to
+        // this one host so it cannot leak into the next run that shares this
+        // factory. NOTE: predicate counter state is NOT localized here — the
+        // evaluator/backend is captured once per tenant by the composition root
+        // and shared across runs by design (tenant-scoped rate/value caps; see
+        // `ironclaw_reborn_composition::hooks`, "Predicate counter scoping").
         //
         // Builder-factory path (preferred): the factory hands back a
         // mutable builder; we attach a `RunScopedHookMilestoneSink` keyed
