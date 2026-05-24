@@ -20,7 +20,7 @@ impl RuntimeProjectionState {
         apply_capability_activity_event(&mut self.capability_activities, entry);
     }
 
-    pub(crate) fn into_sorted_parts(
+    pub(crate) fn into_parts(
         self,
     ) -> (Vec<RunStatusProjection>, Vec<CapabilityActivityProjection>) {
         (

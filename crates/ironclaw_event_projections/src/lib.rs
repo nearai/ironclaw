@@ -1360,7 +1360,7 @@ impl EventProjectionService for ReplayEventProjectionService {
         // `Running` status for a run whose terminal event lives on the
         // next page — see PR #3212 review feedback (discussion_r3195454963).
         let folded = self.fold_runtime_to_head(&scope).await?;
-        let (mut runs, mut capability_activities) = folded.into_sorted_parts();
+        let (mut runs, mut capability_activities) = folded.into_parts();
         sort_runs_for_projection(&mut runs);
         sort_capability_activities_for_projection(&mut capability_activities);
         Ok(ProjectionSnapshot {
@@ -1389,7 +1389,7 @@ impl EventProjectionService for ReplayEventProjectionService {
             let folded = self
                 .fold_runtime_prefix(&scope, page.next_cursor.runtime, &touched_runs)
                 .await?;
-            folded.into_sorted_parts()
+            folded.into_parts()
         };
         sort_runs_for_projection(&mut runs);
         sort_capability_activities_for_projection(&mut capability_activities);

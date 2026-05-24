@@ -260,7 +260,7 @@ impl EventProjectionService for ActivityThreadMismatchProjectionService {
         &self,
         request: ProjectionRequest,
     ) -> Result<ProjectionReplay, ProjectionError> {
-        Ok(replay(&request.scope, 2, 3))
+        Ok(replay_with_activity_thread(&request.scope, 2, 3, "thread-b"))
     }
 }
 
