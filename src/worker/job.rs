@@ -586,6 +586,47 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         // Fetch job context early for approval checking and other needs
         let mut job_ctx = deps.context_manager.get_context(job_id).await?;
 
+        // Channel routing enforcement — execution-time gate (defense in depth).
+        //
+        // The agent's LLM-driven worker loop does NOT go through
+        // `ToolDispatcher::dispatch`, so the dispatcher's gate doesn't cover it.
+        // `tool_definitions_for_current_context` already filters the tool list
+        // the LLM sees, but that's a presentation-layer hint: a jailbroken or
+        // confused model can still name a hidden tool directly. Block it here
+        // before execution. Channel + metadata are read from the same job-context
+        // fields the presentation filter uses, so the two stay consistent
+        // (including DM bypass). builtin names are fetched before taking the
+        // routing read lock so the lock is only held across the sync check.
+        let builtin_names = deps.tools.builtin_tool_names().await;
+        if let Some(config) = deps.channel_routing.read().await.as_ref() {
+            let routing_channel = job_ctx
+                .metadata
+                .get("notify_channel")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let null_metadata = serde_json::Value::Null;
+            let routing_metadata = job_ctx
+                .metadata
+                .get("notify_metadata")
+                .filter(|value| value.is_object())
+                .unwrap_or(&null_metadata);
+            if !config.is_tool_permitted(
+                routing_channel,
+                routing_metadata,
+                tool_name,
+                &builtin_names,
+            ) {
+                return Err(crate::error::ToolError::AutonomousUnavailable {
+                    name: tool_name.to_string(),
+                    reason: format!(
+                        "Tool '{}' is not permitted on channel '{}' by channel routing",
+                        tool_name, routing_channel
+                    ),
+                }
+                .into());
+            }
+        }
+
         // Check approval: additive semantics - BOTH job-level AND worker-level must approve
         let requirement = tool.requires_approval(&normalized_params);
 
@@ -2935,6 +2976,118 @@ mod tests {
         assert!(names.contains("Notion_post_search"));
         assert!(names.contains("memory_search"));
         assert!(!names.contains("Archon_search"));
+    }
+
+    /// Regression test for the worker execution-time routing gate.
+    ///
+    /// The presentation filter (`tool_definitions_for_current_context`, tested
+    /// above) only hides tools from the LLM. This drives the actual execution
+    /// path (`execute_tool` → `execute_tool_inner`) to prove a tool routing
+    /// blocked is *rejected at execution time* even when named directly — the
+    /// case a jailbroken LLM exploits. Tools allowed by routing still run.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn routed_jobs_block_filtered_tool_at_execution_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = crate::db::libsql::LibSqlBackend::new_local(&dir.path().join("test.db"))
+            .await
+            .unwrap();
+        backend.run_migrations().await.unwrap();
+
+        // content group: only Notion MCP + memory_search built-in.
+        let routing: crate::agent::channel_routing::ChannelRoutingConfig =
+            serde_json::from_value(serde_json::json!({
+                "groups": { "content": ["Notion"] },
+                "builtin_whitelist": { "content": ["memory_search"] },
+                "channels": { "telegram": "content" },
+                "default_group": "content"
+            }))
+            .unwrap();
+        routing.save_to_store(&backend, "user-1").await.unwrap();
+        let channel_routing = ChannelRoutingConfig::none_arc();
+        ChannelRoutingConfig::reload_from_store(&backend, "user-1", &channel_routing).await;
+
+        let registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(SlowTool {
+                tool_name: "Notion_post_search".to_string(),
+                delay: Duration::ZERO,
+            }))
+            .await;
+        registry
+            .register(Arc::new(SlowTool {
+                tool_name: "Archon_search".to_string(),
+                delay: Duration::ZERO,
+            }))
+            .await;
+        registry.register_sync(Arc::new(SlowTool {
+            tool_name: "memory_search".to_string(),
+            delay: Duration::ZERO,
+        }));
+
+        let cm = Arc::new(crate::context::ContextManager::new(5));
+        let job_id = cm
+            .create_job("test", "test routed exec gate")
+            .await
+            .unwrap();
+        cm.update_context(job_id, |ctx| {
+            ctx.user_id = "user-1".to_string();
+            // Group message (not a DM) so routing applies.
+            ctx.metadata = serde_json::json!({
+                "notify_channel": "telegram",
+                "notify_metadata": { "chat_type": "group" }
+            });
+            Ok::<(), String>(())
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        let db: Arc<dyn crate::db::Database> = Arc::new(backend);
+        let worker = Worker::new(
+            job_id,
+            WorkerDeps {
+                context_manager: cm,
+                llm: Arc::new(StubLlm),
+                safety: Arc::new(SafetyLayer::new(&SafetyConfig {
+                    max_output_length: 100_000,
+                    injection_check_enabled: false,
+                })),
+                tools: Arc::new(registry),
+                store: Some(crate::tenant::SystemScope::new(db)),
+                hooks: Arc::new(crate::hooks::HookRegistry::new()),
+                timeout: Duration::from_secs(30),
+                use_planning: false,
+                sse_tx: None,
+                approval_context: None,
+                http_interceptor: None,
+                multi_tenant: false,
+                channel_routing,
+            },
+        );
+
+        let params = serde_json::json!({});
+
+        // Allowed by routing → executes.
+        assert!(
+            worker
+                .execute_tool("Notion_post_search", &params)
+                .await
+                .is_ok(),
+            "Notion is in the content group and must execute"
+        );
+        assert!(
+            worker.execute_tool("memory_search", &params).await.is_ok(),
+            "memory_search is whitelisted and must execute"
+        );
+
+        // Hidden from the LLM AND must be rejected when named directly.
+        let blocked = worker.execute_tool("Archon_search", &params).await;
+        let err = blocked.expect_err("Archon is not in the content group; must be blocked");
+        assert!(
+            err.to_string().contains("channel routing"),
+            "expected a channel-routing rejection, got: {err}"
+        );
     }
 
     /// Regression test: only `EmptyResponse` errors are eligible for

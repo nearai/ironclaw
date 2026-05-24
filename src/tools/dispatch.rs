@@ -70,6 +70,16 @@ impl std::fmt::Display for DispatchSource {
 /// misbehaving gateway handler from executing a filtered tool by naming it
 /// directly. The presentation-layer filter (`apply_channel_routing`) hides
 /// tools from the LLM; dispatch-time enforcement is the authoritative gate.
+///
+/// **Scope of this gate.** `dispatch()` covers only non-agent callers routed
+/// through it (gateway handlers, CLI, routine engine). The agent's own
+/// LLM-driven worker loop does **not** go through `dispatch()` — it calls
+/// `Tool::execute` via `crate::worker::job::JobWorker::execute_tool_inner`,
+/// which carries the *parallel* execution-time gate (same
+/// [`ChannelRoutingConfig::is_tool_permitted`] check, fed the job's
+/// `notify_channel` / `notify_metadata`). Both paths must keep their gate in
+/// sync with the presentation filter so a tool the LLM can see is exactly a
+/// tool it can execute.
 pub struct ToolDispatcher {
     registry: Arc<ToolRegistry>,
     safety: Arc<SafetyLayer>,
@@ -157,7 +167,16 @@ impl ToolDispatcher {
             let routing = routing_arc.read().await;
             if let Some(ref config) = *routing {
                 let builtin_names = self.registry.builtin_tool_names().await;
-                if !config.is_tool_permitted(channel, &resolved_name, &builtin_names) {
+                // `DispatchSource::Channel` carries no per-message metadata, so
+                // pass `Null` — only `DM_EXACT` channels bypass here. The worker
+                // agent loop has its own gate (see `crate::worker::job`) which
+                // passes real `notify_metadata`.
+                if !config.is_tool_permitted(
+                    channel,
+                    &serde_json::Value::Null,
+                    &resolved_name,
+                    &builtin_names,
+                ) {
                     return Err(ToolError::ExecutionFailed(format!(
                         "tool '{resolved_name}' is not available on channel '{channel}'"
                     )));

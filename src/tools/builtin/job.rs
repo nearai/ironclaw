@@ -329,25 +329,19 @@ impl CreateJobTool {
         // "telegram", not the platform-specific ID in notify_metadata.channel.
         let routing_channel = ctx.metadata.get("notify_channel").and_then(|v| v.as_str());
 
-        let routing_channel = match routing_channel {
-            Some(ch) => ch,
-            None => {
-                // No channel context (e.g., routine or heartbeat spawned job).
-                // Fail-closed: apply the default group rather than bypassing routing.
-                return routing.groups.get(&routing.default_group).cloned();
-            }
-        };
-
-        if ChannelRoutingConfig::is_dm(routing_channel, routing_metadata) {
-            return None;
+        // Shared group resolution + DM bypass (same logic as the tool filters).
+        match routing.routing_group_for(routing_channel, routing_metadata) {
+            // DM — no MCP constraint; the job inherits the full unfiltered set.
+            None => None,
+            // Constrained to the resolved group's servers. Fall back to the
+            // default group's servers if the group somehow has no entry, and to
+            // the default group entirely for routine/heartbeat jobs (no channel).
+            Some(group) => routing
+                .groups
+                .get(group)
+                .or_else(|| routing.groups.get(&routing.default_group))
+                .cloned(),
         }
-
-        let group = routing.resolve_group(routing_channel);
-        routing
-            .groups
-            .get(group)
-            .or_else(|| routing.groups.get(&routing.default_group))
-            .cloned()
     }
 
     /// Persist a sandbox job record (fire-and-forget).

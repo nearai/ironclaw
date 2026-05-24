@@ -357,6 +357,80 @@ impl ChannelRoutingConfig {
         false
     }
 
+    /// Core allow/deny decision for a single tool name within an
+    /// already-resolved `group`.
+    ///
+    /// Single source of truth for the allowed-set / built-in-whitelist /
+    /// fail-closed branching, shared by [`Self::filter_tool_defs`] (the
+    /// presentation filter that hides tools from the LLM) and
+    /// [`Self::is_tool_permitted`] (the execution-time gate). Keeping both
+    /// callers on this one implementation is what guarantees a tool the LLM
+    /// can see is exactly a tool it can execute, and vice versa.
+    ///
+    /// Does **not** handle DM bypass — callers resolve that (via
+    /// [`Self::routing_group_for`]) before passing a group in. An unknown
+    /// `group` (absent from `allowed_servers_sets`) is treated fail-closed: MCP
+    /// tools blocked, built-ins gated by the *default* group's whitelist.
+    fn permit_in_group(
+        &self,
+        group: &str,
+        tool_name: &str,
+        builtin_names: &std::collections::HashSet<String>,
+    ) -> bool {
+        match self.allowed_servers_sets.get(group) {
+            Some(allowed_set) => {
+                if let Some(server) = self.extract_mcp_server(tool_name) {
+                    allowed_set.contains(server)
+                } else if builtin_names.contains(tool_name) {
+                    match self.builtin_whitelist_sets.get(group) {
+                        Some(set) => set.contains(tool_name),
+                        None => true,
+                    }
+                } else {
+                    // Neither a known MCP server prefix nor a registered
+                    // built-in — fail closed so unregistered-server tools
+                    // can't leak through as apparent built-ins.
+                    false
+                }
+            }
+            None => {
+                // Unknown group — fail-closed: block MCP, apply default built-in policy.
+                if self.extract_mcp_server(tool_name).is_some() {
+                    return false;
+                }
+                if !builtin_names.contains(tool_name) {
+                    return false;
+                }
+                match self.builtin_whitelist_sets.get(&self.default_group) {
+                    Some(set) => set.contains(tool_name),
+                    None => true,
+                }
+            }
+        }
+    }
+
+    /// Resolve the effective routing group for a message/job given its origin
+    /// `channel` and `metadata`.
+    ///
+    /// Returns `None` when the message is a DM (routing bypassed entirely).
+    /// `Some(group)` otherwise. When `channel` is `None` (e.g. a routine- or
+    /// heartbeat-spawned job with no origin channel) this falls back to the
+    /// default group — fail-closed, never a DM bypass.
+    ///
+    /// Shared by [`crate::tools::builtin::job`]'s `derive_routed_mcp_servers`
+    /// so the group-resolution + DM-bypass logic isn't reimplemented there.
+    pub fn routing_group_for(
+        &self,
+        channel: Option<&str>,
+        metadata: &serde_json::Value,
+    ) -> Option<&str> {
+        match channel {
+            Some(ch) if Self::is_dm(ch, metadata) => None,
+            Some(ch) => Some(self.resolve_group(ch)),
+            None => Some(&self.default_group),
+        }
+    }
+
     /// Filter tool definitions based on channel routing rules.
     ///
     /// MCP tools are identified by having an underscore-separated server prefix
@@ -364,7 +438,9 @@ impl ChannelRoutingConfig {
     /// known MCP server prefix are checked against `builtin_names`; tools that
     /// are neither a known MCP server NOR a registered built-in are blocked
     /// (fail-closed) to prevent tools from unregistered MCP servers leaking
-    /// through as apparent built-ins.
+    /// through as apparent built-ins. The per-tool decision is delegated to
+    /// [`Self::permit_in_group`] — the same predicate the execution-time gate
+    /// [`Self::is_tool_permitted`] uses.
     pub fn filter_tool_defs(
         &self,
         channel: &str,
@@ -372,111 +448,65 @@ impl ChannelRoutingConfig {
         tools: Vec<ToolDefinition>,
         builtin_names: &std::collections::HashSet<String>,
     ) -> Vec<ToolDefinition> {
-        if Self::is_dm(channel, metadata) {
-            return tools;
-        }
-
-        let group = self.resolve_group(channel);
-
-        let allowed_set = match self.allowed_servers_sets.get(group) {
-            Some(set) => set,
-            None => {
-                let default_whitelist_set = self.builtin_whitelist_sets.get(&self.default_group);
-                tracing::warn!(
-                    group,
-                    default_group = %self.default_group,
-                    "Channel routing group not found, blocking MCP tools and applying default built-in policy"
-                );
-                return tools
-                    .into_iter()
-                    .filter(|tool| {
-                        if self.extract_mcp_server(&tool.name).is_some() {
-                            return false;
-                        }
-                        // Fail-closed: unknown-source tools (not in builtin registry) are blocked.
-                        if !builtin_names.contains(&tool.name) {
-                            return false;
-                        }
-                        match default_whitelist_set {
-                            Some(set) => set.contains(tool.name.as_str()),
-                            None => true,
-                        }
-                    })
-                    .collect();
-            }
+        // DM bypass + group resolution share one implementation with the
+        // execution gate and `derive_routed_mcp_servers`.
+        let group = match self.routing_group_for(Some(channel), metadata) {
+            None => return tools, // DM — routing does not apply.
+            Some(group) => group,
         };
 
-        let builtin_set = self.builtin_whitelist_sets.get(group);
+        // Warn once (not per tool) when the resolved group is unknown — a
+        // misconfiguration. `permit_in_group` still fails closed below.
+        if !self.allowed_servers_sets.contains_key(group) {
+            tracing::warn!(
+                group,
+                default_group = %self.default_group,
+                "Channel routing group not found, blocking MCP tools and applying default built-in policy"
+            );
+        }
 
         tools
             .into_iter()
             .filter(|tool| {
-                if let Some(server) = self.extract_mcp_server(&tool.name) {
-                    allowed_set.contains(server)
-                } else if builtin_names.contains(&tool.name) {
-                    match builtin_set {
-                        Some(set) => set.contains(tool.name.as_str()),
-                        None => true,
-                    }
-                } else {
-                    // Unknown MCP server not in any routing group — fail closed.
+                let permitted = self.permit_in_group(group, &tool.name, builtin_names);
+                if !permitted {
                     tracing::debug!(
                         tool_name = %tool.name,
                         channel,
-                        "Channel routing: blocking unknown-source tool (not in any MCP group and not a built-in)"
+                        group,
+                        "Channel routing: blocking tool not permitted in group"
                     );
-                    false
                 }
+                permitted
             })
             .collect()
     }
 
     /// Returns `true` if the named tool is permitted to execute on `channel`.
     ///
-    /// Uses the same allowlist logic as [`Self::filter_tool_defs`] but for a
-    /// single tool name, without requiring a full `ToolDefinition`. Does NOT
-    /// check metadata-based DM status (no metadata is available at dispatch
-    /// time) — channels in `DM_EXACT` still bypass routing. This is the
-    /// execution-layer enforcement called from [`crate::tools::dispatch::ToolDispatcher`].
+    /// Execution-layer counterpart to [`Self::filter_tool_defs`] for a single
+    /// tool name (no full `ToolDefinition` required). Uses the same allow/deny
+    /// core ([`Self::permit_in_group`]) and the same DM handling
+    /// ([`Self::is_dm`]) as the presentation filter, so the set of executable
+    /// tools matches the set shown to the LLM.
+    ///
+    /// Called from two gates:
+    /// - [`crate::tools::dispatch::ToolDispatcher::dispatch`] (gateway/CLI/
+    ///   routine path) passes `Value::Null` for `metadata` — those callers
+    ///   carry no per-message metadata, so only `DM_EXACT` channels bypass.
+    /// - the worker agent loop in [`crate::worker::job`] passes the job's
+    ///   `notify_metadata`, so metadata-based DM bypass (Slack `D…`, Telegram
+    ///   `private`, the trusted flag) matches what the LLM was shown.
     pub fn is_tool_permitted(
         &self,
         channel: &str,
+        metadata: &serde_json::Value,
         tool_name: &str,
         builtin_names: &std::collections::HashSet<String>,
     ) -> bool {
-        // DM_EXACT channels bypass routing at execution layer too.
-        if DM_EXACT.contains(&channel) {
-            return true;
-        }
-
-        let group = self.resolve_group(channel);
-
-        let allowed_set = match self.allowed_servers_sets.get(group) {
-            Some(set) => set,
-            None => {
-                // Unknown group — fail-closed: block MCP tools, apply default built-in policy.
-                if self.extract_mcp_server(tool_name).is_some() {
-                    return false;
-                }
-                if !builtin_names.contains(tool_name) {
-                    return false;
-                }
-                return match self.builtin_whitelist_sets.get(&self.default_group) {
-                    Some(set) => set.contains(tool_name),
-                    None => true,
-                };
-            }
-        };
-
-        if let Some(server) = self.extract_mcp_server(tool_name) {
-            allowed_set.contains(server)
-        } else if builtin_names.contains(tool_name) {
-            match self.builtin_whitelist_sets.get(group) {
-                Some(set) => set.contains(tool_name),
-                None => true,
-            }
-        } else {
-            false
+        match self.routing_group_for(Some(channel), metadata) {
+            None => true, // DM — routing bypassed, same as the presentation filter.
+            Some(group) => self.permit_in_group(group, tool_name, builtin_names),
         }
     }
 
@@ -486,10 +516,21 @@ impl ChannelRoutingConfig {
     /// `Kit` matching `KitchenAI_recipe_search`.
     fn extract_mcp_server<'a>(&self, tool_name: &'a str) -> Option<&'a str> {
         for server in &self.sorted_prefixes {
+            // `server.len()` is a *byte* length (servers may be multi-byte,
+            // e.g. "Café" — see `test_extract_mcp_server_handles_multibyte_prefix`).
+            // Indexing `as_bytes()` at that offset is bounds-checked by the
+            // preceding length guard, and is always valid on a byte slice.
             if tool_name.len() > server.len()
                 && tool_name.as_bytes()[server.len()] == b'_'
                 && tool_name.starts_with(server.as_str())
             {
+                // `starts_with` guarantees the prefix matches byte-for-byte, so
+                // `server.len()` falls on a char boundary of `tool_name` and the
+                // UTF-8-safe slice below always returns `Some`.
+                debug_assert!(
+                    tool_name.is_char_boundary(server.len()),
+                    "matched MCP prefix must end on a char boundary"
+                );
                 return tool_name.get(..server.len());
             }
         }
@@ -1079,24 +1120,84 @@ mod tests {
                 .map(|s| s.to_string())
                 .collect();
 
+        let md = no_metadata();
+
         // DM_EXACT channels bypass routing entirely.
-        assert!(config.is_tool_permitted("gateway", "Smartlead_send", &builtin_names));
-        assert!(config.is_tool_permitted("cli", "shell", &builtin_names));
+        assert!(config.is_tool_permitted("gateway", &md, "Smartlead_send", &builtin_names));
+        assert!(config.is_tool_permitted("cli", &md, "shell", &builtin_names));
 
         // Dev channel: Archon + Kiro allowed, all builtins allowed (no whitelist).
-        assert!(config.is_tool_permitted("agentiffai-dev", "Archon_list", &builtin_names));
-        assert!(config.is_tool_permitted("agentiffai-dev", "Kiro_run", &builtin_names));
-        assert!(!config.is_tool_permitted("agentiffai-dev", "Smartlead_send", &builtin_names));
-        assert!(config.is_tool_permitted("agentiffai-dev", "shell", &builtin_names)); // no whitelist → all builtins
+        assert!(config.is_tool_permitted("agentiffai-dev", &md, "Archon_list", &builtin_names));
+        assert!(config.is_tool_permitted("agentiffai-dev", &md, "Kiro_run", &builtin_names));
+        assert!(!config.is_tool_permitted("agentiffai-dev", &md, "Smartlead_send", &builtin_names));
+        assert!(config.is_tool_permitted("agentiffai-dev", &md, "shell", &builtin_names)); // no whitelist → all builtins
 
         // Minimal (default) channel: Archon only, create_job built-in only.
-        assert!(config.is_tool_permitted("other-channel", "Archon_list", &builtin_names));
-        assert!(!config.is_tool_permitted("other-channel", "Kiro_run", &builtin_names));
-        assert!(config.is_tool_permitted("other-channel", "create_job", &builtin_names));
-        assert!(!config.is_tool_permitted("other-channel", "shell", &builtin_names));
+        assert!(config.is_tool_permitted("other-channel", &md, "Archon_list", &builtin_names));
+        assert!(!config.is_tool_permitted("other-channel", &md, "Kiro_run", &builtin_names));
+        assert!(config.is_tool_permitted("other-channel", &md, "create_job", &builtin_names));
+        assert!(!config.is_tool_permitted("other-channel", &md, "shell", &builtin_names));
 
         // Unknown MCP server (not in any group, not a builtin) — fail closed.
-        assert!(!config.is_tool_permitted("other-channel", "Serpstat_keywords", &builtin_names));
-        assert!(!config.is_tool_permitted("agentiffai-dev", "Serpstat_keywords", &builtin_names));
+        assert!(!config.is_tool_permitted(
+            "other-channel",
+            &md,
+            "Serpstat_keywords",
+            &builtin_names
+        ));
+        assert!(!config.is_tool_permitted(
+            "agentiffai-dev",
+            &md,
+            "Serpstat_keywords",
+            &builtin_names
+        ));
+    }
+
+    #[test]
+    fn test_is_tool_permitted_metadata_dm_bypass() {
+        // Metadata-based DM (Slack D-channel) must bypass routing at the
+        // execution gate too — otherwise the worker would hide a tool from the
+        // LLM's view via filter_tool_defs (DM → all tools) but then refuse to
+        // execute it. The two gates must agree.
+        let config = sample_config();
+        let builtin_names = test_builtin_names();
+
+        let slack_dm = serde_json::json!({"channel": "D12345"});
+        // "slack" is not in DM_EXACT, but the metadata marks it a DM.
+        assert!(config.is_tool_permitted("slack", &slack_dm, "Smartlead_send", &builtin_names));
+
+        // Same channel as a group message (C-channel) → routing applies, and
+        // Smartlead is not in the default "minimal" group → blocked.
+        let slack_channel = serde_json::json!({"channel": "C12345"});
+        assert!(!config.is_tool_permitted(
+            "slack",
+            &slack_channel,
+            "Smartlead_send",
+            &builtin_names
+        ));
+    }
+
+    #[test]
+    fn test_routing_group_for_dm_and_fallback() {
+        let config = sample_config();
+        let md = no_metadata();
+
+        // Mapped channel → its group.
+        assert_eq!(
+            config.routing_group_for(Some("agentiffai-dev-issues"), &md),
+            Some("dev")
+        );
+        // Unmapped channel → default group.
+        assert_eq!(
+            config.routing_group_for(Some("random"), &md),
+            Some("minimal")
+        );
+        // DM_EXACT channel → None (routing bypassed).
+        assert_eq!(config.routing_group_for(Some("gateway"), &md), None);
+        // Metadata DM → None.
+        let slack_dm = serde_json::json!({"channel": "D1"});
+        assert_eq!(config.routing_group_for(Some("slack"), &slack_dm), None);
+        // No channel (routine/heartbeat) → default group, never DM bypass.
+        assert_eq!(config.routing_group_for(None, &md), Some("minimal"));
     }
 }
