@@ -2678,6 +2678,7 @@ mod tests {
                 parameters_schema: serde_json::json!({"type":"object"}),
                 effects: vec![EffectKind::DispatchCapability],
                 default_permission: PermissionMode::Allow,
+                runtime_credentials: Vec::new(),
                 resource_profile: None,
             },
             access: VisibleCapabilityAccess::Available,
