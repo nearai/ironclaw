@@ -11,15 +11,15 @@ use ironclaw_turns::{
 };
 
 use crate::state::{CheckpointKind, LoopExecutionState};
-use crate::strategies::{CapabilityFilter, StopKind, TurnSummary};
+use crate::strategies::{CapabilityFilter, GateKind, GateOutcome, StopKind, TurnSummary};
 
 use super::{
-    AgentLoopExecutor, AgentLoopExecutorError, AssistantReplyInput, AssistantReplyStage,
+    AgentLoopExecutor, AgentLoopExecutorError, AssistantReplyInput, AssistantReplyStage, BatchStep,
     BudgetInput, BudgetStage, BudgetStep, CanonicalAgentLoopExecutor, CapabilityInput,
-    CapabilityStage, DrainInput, ExecutorStage, ExitInput, ExitStage, HostStage, InputStage,
-    InputStep, PendingInputAck, PromptInput, PromptStage, StageContext, StopInput, StopStage,
-    StopStep, TurnCompletedStep, UserFacingInputDrainMode, consume_drainable_inputs,
-    sanitize_result_ref_suffix, synthetic_provider_error_result_ref,
+    CapabilityStage, DrainInput, ExecutorStage, ExitInput, ExitStage, GateInput, GateStage,
+    HostStage, InputStage, InputStep, PendingInputAck, PromptInput, PromptStage, StageContext,
+    StopInput, StopStage, StopStep, TurnCompletedStep, UserFacingInputDrainMode,
+    consume_drainable_inputs, sanitize_result_ref_suffix, synthetic_provider_error_result_ref,
 };
 
 #[allow(dead_code)]
@@ -714,6 +714,91 @@ async fn gate_blocks_with_before_block_checkpoint() {
         })
         .expect("batch completed progress event");
     assert_eq!(completed, (0, 0, 1, 0));
+}
+
+#[tokio::test]
+async fn gate_stage_skips_and_continues_records_skipped_summary() {
+    let family = family_with_gate_outcome(GateOutcome::SkipAndContinue {
+        gate: empty_gate_state(),
+    });
+    let host = MockHost::new(Vec::new());
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+    let call = match provider_calls_response().output {
+        ParentLoopOutput::CapabilityCalls(mut calls) => calls.remove(0),
+        ParentLoopOutput::AssistantReply(_) => panic!("expected provider call fixture"),
+    };
+    let gate_ref = LoopGateRef::new("gate:auth-skip").expect("valid");
+
+    let step = GateStage
+        .process(
+            ctx,
+            GateInput {
+                state,
+                call,
+                kind: GateKind::Auth,
+                gate_ref,
+            },
+        )
+        .await
+        .expect("gate stage");
+
+    let BatchStep::Continue(state) = step else {
+        panic!("expected skip-and-continue");
+    };
+    assert_eq!(state.result_refs.len(), 1);
+    let appended = host.appended_result_refs();
+    assert_eq!(appended.len(), 1);
+    assert_eq!(appended[0].safe_summary, "auth gate skipped");
+    assert!(host.checkpoint_kinds().is_empty());
+}
+
+#[tokio::test]
+async fn gate_stage_aborts_returns_failed_exit() {
+    let failure_kind = LoopFailureKind::CapabilityProtocolError;
+    let family = family_with_gate_outcome(GateOutcome::Abort {
+        gate: empty_gate_state(),
+        failure_kind,
+    });
+    let host = MockHost::new(Vec::new());
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+    let call = match provider_calls_response().output {
+        ParentLoopOutput::CapabilityCalls(mut calls) => calls.remove(0),
+        ParentLoopOutput::AssistantReply(_) => panic!("expected provider call fixture"),
+    };
+    let gate_ref = LoopGateRef::new("gate:auth-abort").expect("valid");
+
+    let step = GateStage
+        .process(
+            ctx,
+            GateInput {
+                state,
+                call,
+                kind: GateKind::Auth,
+                gate_ref,
+            },
+        )
+        .await
+        .expect("gate stage");
+
+    match step {
+        BatchStep::Exit(LoopExit::Failed(failed)) => {
+            assert_eq!(failed.reason_kind, failure_kind);
+            assert!(failed.checkpoint_id.is_some());
+        }
+        other => panic!("expected failed exit, got {other:?}"),
+    }
+    assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
+    let appended = host.appended_result_refs();
+    assert_eq!(appended.len(), 1);
+    assert_eq!(appended[0].safe_summary, "auth gate aborted");
 }
 
 #[tokio::test]

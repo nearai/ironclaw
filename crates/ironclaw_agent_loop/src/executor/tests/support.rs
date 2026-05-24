@@ -27,10 +27,11 @@ use ironclaw_turns::{
 use crate::{
     default_planner::DefaultPlanner,
     family::{ComponentDigest, ComponentIdentity, LoopFamily, LoopFamilyId},
-    state::{CheckpointKind, LoopExecutionState},
+    state::{CheckpointKind, GateStrategyState, LoopExecutionState},
     strategies::{
         CapabilityErrorClass, CapabilityErrorSummary, CapabilityFilter, CapabilityStrategy,
-        InputDrainStrategy, ModelErrorSummary, RecoveryOutcome, RecoveryStrategy, RetryScope,
+        GateHandlingStrategy, GateOutcome, GateSummary, InputDrainStrategy, ModelErrorSummary,
+        RecoveryOutcome, RecoveryStrategy, RetryScope,
     },
 };
 
@@ -256,6 +257,17 @@ impl InputDrainStrategy for FixedDrainStrategy {
 
     async fn drain_followup(&self, _state: &LoopExecutionState) -> bool {
         self.drain_followup
+    }
+}
+
+pub(super) struct FixedGateStrategy {
+    outcome: GateOutcome,
+}
+
+#[async_trait]
+impl GateHandlingStrategy for FixedGateStrategy {
+    async fn handle(&self, _state: &LoopExecutionState, _gate: &GateSummary) -> GateOutcome {
+        self.outcome.clone()
     }
 }
 
@@ -741,6 +753,18 @@ pub(super) fn family_with_drain(drain_steering: bool, drain_followup: bool) -> L
     let id = LoopFamilyId::new("executor-drain-test").expect("valid test family id");
     let version = ComponentIdentity::from_static("executor-drain-test", ComponentDigest([2; 32]));
     LoopFamily::new(id, version, Arc::new(planner))
+}
+
+pub(super) fn family_with_gate_outcome(outcome: GateOutcome) -> LoopFamily {
+    let planner =
+        DefaultPlanner::compose_default().with_gate(Arc::new(FixedGateStrategy { outcome }));
+    let id = LoopFamilyId::new("executor-gate-test").expect("valid test family id");
+    let version = ComponentIdentity::from_static("executor-gate-test", ComponentDigest([4; 32]));
+    LoopFamily::new(id, version, Arc::new(planner))
+}
+
+pub(super) fn empty_gate_state() -> GateStrategyState {
+    GateStrategyState::default()
 }
 
 pub(super) fn family_with_retry_policy_denied_recovery() -> LoopFamily {

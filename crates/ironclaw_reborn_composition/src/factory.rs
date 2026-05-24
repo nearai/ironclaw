@@ -498,7 +498,7 @@ fn planned_run_profile_resolver() -> Result<Arc<InMemoryRunProfileResolver>, Reb
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-struct ProductionStoreGraph<F>
+struct ProductionStoreBundle<F>
 where
     F: RootFilesystem + 'static,
 {
@@ -510,7 +510,7 @@ where
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-impl<F> ProductionStoreGraph<F>
+impl<F> ProductionStoreBundle<F>
 where
     F: RootFilesystem + 'static,
 {
@@ -540,9 +540,9 @@ where
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-async fn build_database_production<F>(
+async fn build_backend_production<F>(
     context: RebornProductionBuildContext,
-    stores: ProductionStoreGraph<F>,
+    stores: ProductionStoreBundle<F>,
 ) -> Result<RebornServices, RebornBuildError>
 where
     F: RootFilesystem + 'static,
@@ -606,7 +606,7 @@ async fn build_libsql_production(
 
     let filesystem = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&db)));
     filesystem.run_migrations().await?;
-    let stores = ProductionStoreGraph::new(
+    let stores = ProductionStoreBundle::new(
         filesystem,
         secret_master_key,
         ironclaw_reborn_event_store::RebornEventStoreConfig::Libsql {
@@ -615,7 +615,7 @@ async fn build_libsql_production(
         },
     )?;
 
-    build_database_production(context, stores).await
+    build_backend_production(context, stores).await
 }
 
 #[cfg(feature = "postgres")]
@@ -629,13 +629,13 @@ async fn build_postgres_production(
 
     let filesystem = Arc::new(PostgresRootFilesystem::new(pool.clone()));
     filesystem.run_migrations().await?;
-    let stores = ProductionStoreGraph::new(
+    let stores = ProductionStoreBundle::new(
         filesystem,
         secret_master_key,
         ironclaw_reborn_event_store::RebornEventStoreConfig::Postgres { url },
     )?;
 
-    build_database_production(context, stores).await
+    build_backend_production(context, stores).await
 }
 
 fn readiness_for(
