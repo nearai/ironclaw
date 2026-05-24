@@ -10,6 +10,7 @@ use ironclaw_auth::{
     OAuthCallbackInput, OAuthProviderCallbackRequest, OpaqueStateHash, ProviderCallbackOutcome,
     SecretCleanupService,
 };
+use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
 use serde::{Deserialize, Serialize};
 
 #[async_trait]
@@ -20,9 +21,11 @@ pub trait RebornAuthContinuationDispatcher: Send + Sync {
     ) -> Result<(), AuthProductError>;
 }
 
+#[cfg(test)]
 #[derive(Debug, Default)]
 struct NoopAuthContinuationDispatcher;
 
+#[cfg(test)]
 #[async_trait]
 impl RebornAuthContinuationDispatcher for NoopAuthContinuationDispatcher {
     async fn dispatch_auth_continuation(
@@ -30,6 +33,16 @@ impl RebornAuthContinuationDispatcher for NoopAuthContinuationDispatcher {
         _event: AuthContinuationEvent,
     ) -> Result<(), AuthProductError> {
         Ok(())
+    }
+}
+
+#[async_trait]
+impl RebornAuthContinuationDispatcher for ProductAuthTurnGateResumeDispatcher {
+    async fn dispatch_auth_continuation(
+        &self,
+        event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        ProductAuthTurnGateResumeDispatcher::dispatch_auth_continuation(self, event).await
     }
 }
 
@@ -86,6 +99,102 @@ impl From<AuthProductError> for RebornOAuthCallbackError {
     }
 }
 
+/// Product-auth ports supplied to Reborn composition before the turn coordinator
+/// exists. The factory turns these ports into a complete
+/// [`RebornProductAuthServices`] after composing the coordinator, so auth
+/// continuations cannot accidentally keep a stale or no-op resume dispatcher.
+#[derive(Clone)]
+pub struct RebornProductAuthServicePorts {
+    flow_manager: Arc<dyn AuthFlowManager>,
+    interaction_service: Arc<dyn AuthInteractionService>,
+    credential_setup_service: Arc<dyn CredentialSetupService>,
+    credential_account_service: Arc<dyn CredentialAccountService>,
+    provider_client: Arc<dyn AuthProviderClient>,
+    cleanup_service: Arc<dyn SecretCleanupService>,
+}
+
+impl std::fmt::Debug for RebornProductAuthServicePorts {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RebornProductAuthServicePorts")
+            .field("flow_manager", &"Arc<dyn AuthFlowManager>")
+            .field("interaction_service", &"Arc<dyn AuthInteractionService>")
+            .field(
+                "credential_setup_service",
+                &"Arc<dyn CredentialSetupService>",
+            )
+            .field(
+                "credential_account_service",
+                &"Arc<dyn CredentialAccountService>",
+            )
+            .field("provider_client", &"Arc<dyn AuthProviderClient>")
+            .field("cleanup_service", &"Arc<dyn SecretCleanupService>")
+            .finish()
+    }
+}
+
+impl RebornProductAuthServicePorts {
+    pub fn new(
+        flow_manager: Arc<dyn AuthFlowManager>,
+        interaction_service: Arc<dyn AuthInteractionService>,
+        credential_setup_service: Arc<dyn CredentialSetupService>,
+        credential_account_service: Arc<dyn CredentialAccountService>,
+        provider_client: Arc<dyn AuthProviderClient>,
+        cleanup_service: Arc<dyn SecretCleanupService>,
+    ) -> Self {
+        Self {
+            flow_manager,
+            interaction_service,
+            credential_setup_service,
+            credential_account_service,
+            provider_client,
+            cleanup_service,
+        }
+    }
+
+    pub fn from_shared<T>(services: Arc<T>) -> Self
+    where
+        T: AuthFlowManager
+            + AuthInteractionService
+            + CredentialSetupService
+            + CredentialAccountService
+            + AuthProviderClient
+            + SecretCleanupService
+            + 'static,
+    {
+        let flow_manager: Arc<dyn AuthFlowManager> = services.clone();
+        let interaction_service: Arc<dyn AuthInteractionService> = services.clone();
+        let credential_setup_service: Arc<dyn CredentialSetupService> = services.clone();
+        let credential_account_service: Arc<dyn CredentialAccountService> = services.clone();
+        let provider_client: Arc<dyn AuthProviderClient> = services.clone();
+        let cleanup_service: Arc<dyn SecretCleanupService> = services;
+
+        Self::new(
+            flow_manager,
+            interaction_service,
+            credential_setup_service,
+            credential_account_service,
+            provider_client,
+            cleanup_service,
+        )
+    }
+
+    pub(crate) fn into_services(
+        self,
+        continuation_dispatcher: Arc<dyn RebornAuthContinuationDispatcher>,
+    ) -> RebornProductAuthServices {
+        RebornProductAuthServices::new(
+            self.flow_manager,
+            self.interaction_service,
+            self.credential_setup_service,
+            self.credential_account_service,
+            self.provider_client,
+            self.cleanup_service,
+            continuation_dispatcher,
+        )
+    }
+}
+
 /// Reborn product-auth service bundle exposed by the composition root.
 ///
 /// This is the single composition seam for product-facing auth flows,
@@ -136,6 +245,7 @@ impl RebornProductAuthServices {
         credential_account_service: Arc<dyn CredentialAccountService>,
         provider_client: Arc<dyn AuthProviderClient>,
         cleanup_service: Arc<dyn SecretCleanupService>,
+        continuation_dispatcher: Arc<dyn RebornAuthContinuationDispatcher>,
     ) -> Self {
         Self {
             flow_manager,
@@ -144,7 +254,7 @@ impl RebornProductAuthServices {
             credential_account_service,
             provider_client,
             cleanup_service,
-            continuation_dispatcher: Arc::new(NoopAuthContinuationDispatcher),
+            continuation_dispatcher,
         }
     }
 
@@ -154,7 +264,10 @@ impl RebornProductAuthServices {
     /// [`InMemoryAuthProductServices`]. Production composition should prefer
     /// [`Self::new`] so storage, provider egress, interaction, and cleanup can
     /// be supplied by separate implementations.
-    pub fn from_shared<T>(services: Arc<T>) -> Self
+    pub fn from_shared<T>(
+        services: Arc<T>,
+        continuation_dispatcher: Arc<dyn RebornAuthContinuationDispatcher>,
+    ) -> Self
     where
         T: AuthFlowManager
             + AuthInteractionService
@@ -178,7 +291,22 @@ impl RebornProductAuthServices {
             credential_account_service,
             provider_client,
             cleanup_service,
+            continuation_dispatcher,
         )
+    }
+
+    #[cfg(test)]
+    pub fn from_shared_with_noop_dispatcher_for_tests<T>(services: Arc<T>) -> Self
+    where
+        T: AuthFlowManager
+            + AuthInteractionService
+            + CredentialSetupService
+            + CredentialAccountService
+            + AuthProviderClient
+            + SecretCleanupService
+            + 'static,
+    {
+        Self::from_shared(services, Arc::new(NoopAuthContinuationDispatcher))
     }
 
     pub fn flow_manager(&self) -> Arc<dyn AuthFlowManager> {
@@ -318,10 +446,7 @@ impl RebornProductAuthServices {
                 error_code = ?error.code(),
                 "reborn auth callback completed but continuation dispatch failed"
             );
-            return Err(RebornOAuthCallbackError {
-                code: AuthErrorCode::BackendUnavailable,
-                retryable: true,
-            });
+            return Err(error.into());
         }
 
         Ok(RebornOAuthCallbackResponse {
@@ -332,8 +457,11 @@ impl RebornProductAuthServices {
         })
     }
 
-    pub(crate) fn local_dev_in_memory() -> Self {
-        Self::from_shared(Arc::new(InMemoryAuthProductServices::new()))
+    pub(crate) fn local_dev_in_memory(
+        continuation_dispatcher: Arc<dyn RebornAuthContinuationDispatcher>,
+    ) -> Self {
+        RebornProductAuthServicePorts::from_shared(Arc::new(InMemoryAuthProductServices::new()))
+            .into_services(continuation_dispatcher)
     }
 }
 
@@ -374,6 +502,7 @@ mod tests {
             credential_account_service.clone(),
             provider_client.clone(),
             cleanup_service.clone(),
+            Arc::new(NoopAuthContinuationDispatcher),
         );
 
         assert_eq!(
@@ -407,7 +536,10 @@ mod tests {
         let shared = Arc::new(SharedAuthTestDouble);
         let shared_ptr = arc_data_ptr(&shared);
 
-        let services = RebornProductAuthServices::from_shared(shared);
+        let services = RebornProductAuthServices::from_shared(
+            shared,
+            Arc::new(NoopAuthContinuationDispatcher),
+        );
 
         assert_eq!(arc_data_ptr(&services.flow_manager()), shared_ptr);
         assert_eq!(arc_data_ptr(&services.interaction_service()), shared_ptr);

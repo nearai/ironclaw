@@ -21,7 +21,13 @@ use ironclaw_product_adapters::{
     ProjectionCursor as ProductProjectionCursor, ProjectionStream, ProjectionSubscriptionRequest,
     RedactedString,
 };
-use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
+use ironclaw_turns::{
+    ReplyTargetBindingRef, TurnActor, TurnCoordinator, TurnEventProjectionCursor,
+    TurnEventProjectionSource, TurnRunId, TurnScope,
+};
+
+mod turn_events;
+use turn_events::{TurnEventBridge, TurnEventPayload};
 
 const WEBUI_PROJECTION_PAGE_LIMIT: usize = 256;
 const WEBUI_PROJECTION_ADAPTER_ID: &str = "webui_v2";
@@ -30,13 +36,24 @@ const WEBUI_PROJECTION_INSTALLATION_ID: &str = "webui_v2.local";
 #[derive(Clone)]
 pub(crate) struct RebornProjectionServices {
     event_stream_manager: Arc<EventStreamManager>,
+    turn_events: TurnEventBridge,
     webui_reply_target_binding_ref: ReplyTargetBindingRef,
 }
 
 impl RebornProjectionServices {
+    pub(crate) fn with_turn_events(
+        mut self,
+        turn_event_source: Arc<dyn TurnEventProjectionSource>,
+        turn_coordinator: Arc<dyn TurnCoordinator>,
+    ) -> Self {
+        self.turn_events = TurnEventBridge::enabled(turn_event_source, turn_coordinator);
+        self
+    }
+
     pub(crate) fn webui_event_stream(&self) -> Arc<dyn ProjectionStream> {
         Arc::new(WebuiRunStatusProjectionStream {
             manager: Arc::clone(&self.event_stream_manager),
+            turn_events: self.turn_events.clone(),
             reply_target_binding_ref: self.webui_reply_target_binding_ref.clone(),
         })
     }
@@ -58,6 +75,7 @@ pub(crate) fn build_reborn_projection_services(
     ));
     RebornProjectionServices {
         event_stream_manager,
+        turn_events: TurnEventBridge::default(),
         webui_reply_target_binding_ref,
     }
 }
@@ -69,6 +87,7 @@ pub(crate) fn build_reborn_projection_services(
 /// until the browser event schema grows a first-class timeline-entry mapper.
 struct WebuiRunStatusProjectionStream {
     manager: Arc<EventStreamManager>,
+    turn_events: TurnEventBridge,
     reply_target_binding_ref: ReplyTargetBindingRef,
 }
 
@@ -79,10 +98,12 @@ impl ProjectionStream for WebuiRunStatusProjectionStream {
         request: ProjectionSubscriptionRequest,
     ) -> Result<Vec<ProductOutboundEnvelope>, ProductAdapterError> {
         let projection_scope = runtime_projection_scope(&request.actor, &request.scope);
-        let after_cursor = request
+        let origin_cursor = request
             .after_cursor
-            .map(|cursor| parse_event_projection_cursor(cursor.as_str()))
-            .transpose()?;
+            .map(|cursor| parse_webui_projection_cursor(cursor.as_str()))
+            .transpose()?
+            .unwrap_or_default();
+        validate_webui_projection_cursor_scope(&origin_cursor, &request.scope)?;
         let mut subscription = self
             .manager
             .subscribe(ProjectionSubscribeRequest {
@@ -92,23 +113,100 @@ impl ProjectionStream for WebuiRunStatusProjectionStream {
                 target: ProjectionTarget::Thread {
                     thread_id: request.scope.thread_id.clone(),
                 },
-                after_cursor,
+                after_cursor: origin_cursor.runtime.clone(),
                 limit: WEBUI_PROJECTION_PAGE_LIMIT,
                 capabilities: SubscriberCapabilities::default(),
             })
             .await
             .map_err(map_event_stream_error)?;
 
-        match subscription.next().await {
-            Some(item) => item_to_outbound(
-                item,
-                &request.scope,
-                &request.actor,
-                &self.reply_target_binding_ref,
-            )
-            .map(|item| item.into_iter().collect()),
-            None => Ok(Vec::new()),
+        let mut batch = WebuiProjectionBatch::new(origin_cursor);
+        if let Some(item) = subscription.next().await {
+            batch.push_runtime_item(item, &request.scope)?;
+            for _ in 1..WEBUI_PROJECTION_PAGE_LIMIT {
+                let Some(item) = subscription.try_next_buffered() else {
+                    break;
+                };
+                batch.push_runtime_item(item, &request.scope)?;
+            }
         }
+
+        let turn_after = batch.cursor().turn.clone();
+        let turn_drain = self.turn_events.drain(&request.scope, turn_after).await?;
+        for TurnEventPayload {
+            cursor: turn_cursor,
+            payload,
+        } in turn_drain.payloads
+        {
+            batch.push_turn(turn_cursor, payload);
+        }
+        if let Some(next_cursor) = turn_drain.next_cursor
+            && batch.cursor().turn.as_ref() != Some(&next_cursor)
+        {
+            batch.push_turn(next_cursor, ProductOutboundPayload::KeepAlive);
+        }
+
+        batch
+            .into_payloads()
+            .map(|(cursor, payload)| {
+                envelope_to_outbound(
+                    product_cursor_from_webui_cursor(&cursor)?,
+                    payload,
+                    &request.scope,
+                    &request.actor,
+                    &self.reply_target_binding_ref,
+                )
+            })
+            .collect()
+    }
+}
+
+struct WebuiProjectionBatch {
+    cursor: WebuiProjectionCursor,
+    payloads: Vec<(WebuiProjectionCursor, ProductOutboundPayload)>,
+}
+
+impl WebuiProjectionBatch {
+    fn new(cursor: WebuiProjectionCursor) -> Self {
+        Self {
+            cursor,
+            payloads: Vec::new(),
+        }
+    }
+
+    fn cursor(&self) -> &WebuiProjectionCursor {
+        &self.cursor
+    }
+
+    fn push_runtime(&mut self, cursor: EventProjectionCursor, payload: ProductOutboundPayload) {
+        self.cursor.runtime = Some(cursor);
+        self.push(payload);
+    }
+
+    fn push_runtime_item(
+        &mut self,
+        item: ProjectionStreamItem,
+        scope: &TurnScope,
+    ) -> Result<(), ProductAdapterError> {
+        if let Some((cursor, payload)) = item_to_payload(item, scope)? {
+            self.push_runtime(cursor, payload);
+        }
+        Ok(())
+    }
+
+    fn push_turn(&mut self, cursor: TurnEventProjectionCursor, payload: ProductOutboundPayload) {
+        self.cursor.turn = Some(cursor);
+        self.push(payload);
+    }
+
+    fn push(&mut self, payload: ProductOutboundPayload) {
+        self.payloads.push((self.cursor.clone(), payload));
+    }
+
+    fn into_payloads(
+        self,
+    ) -> impl Iterator<Item = (WebuiProjectionCursor, ProductOutboundPayload)> {
+        self.payloads.into_iter()
     }
 }
 
@@ -128,46 +226,77 @@ fn runtime_projection_scope(actor: &TurnActor, scope: &TurnScope) -> EventProjec
     }
 }
 
-fn parse_event_projection_cursor(
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct WebuiProjectionCursor {
+    runtime: Option<EventProjectionCursor>,
+    turn: Option<TurnEventProjectionCursor>,
+}
+
+fn parse_webui_projection_cursor(
     cursor: &str,
-) -> Result<EventProjectionCursor, ProductAdapterError> {
-    serde_json::from_str(cursor).map_err(|_| ProductAdapterError::InvalidIdentifier {
-        kind: "projection_cursor",
-        reason: "must be a WebUI projection cursor".to_string(),
+) -> Result<WebuiProjectionCursor, ProductAdapterError> {
+    if let Ok(parsed) = serde_json::from_str::<WebuiProjectionCursor>(cursor)
+        && (parsed.runtime.is_some() || parsed.turn.is_some())
+    {
+        return Ok(parsed);
+    }
+    let runtime = serde_json::from_str::<EventProjectionCursor>(cursor).map_err(|_| {
+        ProductAdapterError::InvalidIdentifier {
+            kind: "projection_cursor",
+            reason: "must be a WebUI projection cursor".to_string(),
+        }
+    })?;
+    Ok(WebuiProjectionCursor {
+        runtime: Some(runtime),
+        turn: None,
     })
 }
 
-fn item_to_outbound(
+fn validate_webui_projection_cursor_scope(
+    cursor: &WebuiProjectionCursor,
+    scope: &TurnScope,
+) -> Result<(), ProductAdapterError> {
+    if let Some(turn) = cursor.turn.as_ref()
+        && &turn.scope != scope
+    {
+        return Err(ProductAdapterError::InvalidIdentifier {
+            kind: "projection_cursor",
+            reason: "turn cursor scope does not match subscription scope".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn product_cursor_from_webui_cursor(
+    cursor: &WebuiProjectionCursor,
+) -> Result<ProductProjectionCursor, ProductAdapterError> {
+    ProductProjectionCursor::new(
+        serde_json::to_string(cursor).map_err(|_| internal_projection_error("cursor encode"))?,
+    )
+}
+
+fn item_to_payload(
     item: ProjectionStreamItem,
     scope: &TurnScope,
-    actor: &TurnActor,
-    reply_target_binding_ref: &ReplyTargetBindingRef,
-) -> Result<Option<ProductOutboundEnvelope>, ProductAdapterError> {
+) -> Result<Option<(EventProjectionCursor, ProductOutboundPayload)>, ProductAdapterError> {
     match item {
-        ProjectionStreamItem::Snapshot(envelope) => envelope_to_outbound(
-            envelope.cursor(),
-            snapshot_state(scope, snapshot_from_envelope(envelope)?)?
-                .map(|state| ProductOutboundPayload::ProjectionSnapshot { state }),
-            scope,
-            actor,
-            reply_target_binding_ref,
-        ),
-        ProjectionStreamItem::Update(envelope) => envelope_to_outbound(
-            envelope.cursor(),
-            replay_state(scope, replay_from_envelope(envelope.as_ref())?)?
-                .map(|state| ProductOutboundPayload::ProjectionUpdate { state }),
-            scope,
-            actor,
-            reply_target_binding_ref,
-        ),
-        ProjectionStreamItem::RebaseRequired { snapshot, .. } => envelope_to_outbound(
-            snapshot.cursor(),
-            snapshot_state(scope, snapshot_from_envelope(*snapshot)?)?
-                .map(|state| ProductOutboundPayload::ProjectionSnapshot { state }),
-            scope,
-            actor,
-            reply_target_binding_ref,
-        ),
+        ProjectionStreamItem::Snapshot(envelope) => {
+            let cursor = envelope.cursor();
+            Ok(snapshot_state(scope, snapshot_from_envelope(envelope)?)?
+                .map(|state| (cursor, ProductOutboundPayload::ProjectionSnapshot { state })))
+        }
+        ProjectionStreamItem::Update(envelope) => {
+            let cursor = envelope.cursor();
+            Ok(
+                replay_state(scope, replay_from_envelope(envelope.as_ref())?)?
+                    .map(|state| (cursor, ProductOutboundPayload::ProjectionUpdate { state })),
+            )
+        }
+        ProjectionStreamItem::RebaseRequired { snapshot, .. } => {
+            let cursor = snapshot.cursor();
+            Ok(snapshot_state(scope, snapshot_from_envelope(*snapshot)?)?
+                .map(|state| (cursor, ProductOutboundPayload::ProjectionSnapshot { state })))
+        }
         ProjectionStreamItem::Lagged { .. } => Err(ProductAdapterError::WorkflowRejected {
             kind: ProductWorkflowRejectionKind::Unavailable,
             status_code: 503,
@@ -232,18 +361,12 @@ fn run_status_projection_state(
 }
 
 fn envelope_to_outbound(
-    cursor: EventProjectionCursor,
-    payload: Option<ProductOutboundPayload>,
+    projection_cursor: ProductProjectionCursor,
+    payload: ProductOutboundPayload,
     scope: &TurnScope,
     actor: &TurnActor,
     reply_target_binding_ref: &ReplyTargetBindingRef,
-) -> Result<Option<ProductOutboundEnvelope>, ProductAdapterError> {
-    let Some(payload) = payload else {
-        return Ok(None);
-    };
-    let projection_cursor = ProductProjectionCursor::new(
-        serde_json::to_string(&cursor).map_err(|_| internal_projection_error("cursor encode"))?,
-    )?;
+) -> Result<ProductOutboundEnvelope, ProductAdapterError> {
     let adapter_id = ProductAdapterId::new(WEBUI_PROJECTION_ADAPTER_ID)?;
     let installation_id = AdapterInstallationId::new(WEBUI_PROJECTION_INSTALLATION_ID)?;
     let target = ProductOutboundTarget::new(
@@ -255,13 +378,13 @@ fn envelope_to_outbound(
             None::<String>,
         )?),
     );
-    Ok(Some(ProductOutboundEnvelope::new(
+    Ok(ProductOutboundEnvelope::new(
         adapter_id,
         installation_id,
         target,
         projection_cursor,
         payload,
-    )))
+    ))
 }
 
 fn run_status_wire(status: RunProjectionStatus) -> &'static str {
@@ -312,236 +435,4 @@ fn internal_projection_error(detail: &'static str) -> ProductAdapterError {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    use ironclaw_events::{InMemoryDurableEventLog, RuntimeEvent};
-    use ironclaw_host_api::{
-        AgentId, CapabilityId, InvocationId, ResourceScope, TenantId, ThreadId, UserId,
-    };
-    use ironclaw_product_adapters::{ProductOutboundEnvelope, ProductOutboundPayload};
-
-    #[tokio::test]
-    async fn webui_event_stream_drains_run_status_projection_from_event_stream_manager() {
-        let tenant_id = TenantId::new("webui-events-tenant").unwrap();
-        let user_id = UserId::new("webui-events-user").unwrap();
-        let agent_id = AgentId::new("webui-events-agent").unwrap();
-        let thread_id = ThreadId::new("webui-events-thread").unwrap();
-        let invocation_id = InvocationId::new();
-        let event_log = Arc::new(InMemoryDurableEventLog::new());
-        event_log
-            .append(RuntimeEvent::model_started(
-                ResourceScope {
-                    tenant_id: tenant_id.clone(),
-                    user_id: user_id.clone(),
-                    agent_id: Some(agent_id.clone()),
-                    project_id: None,
-                    mission_id: None,
-                    thread_id: Some(thread_id.clone()),
-                    invocation_id,
-                },
-                CapabilityId::new("loop.model").unwrap(),
-            ))
-            .await
-            .unwrap();
-
-        let event_log: Arc<dyn DurableEventLog> = event_log;
-        let actor = TurnActor::new(user_id);
-        let services = build_reborn_projection_services(
-            event_log,
-            ReplyTargetBindingRef::new("webui-events-reply").unwrap(),
-        );
-        let events = services
-            .webui_event_stream()
-            .drain(ProjectionSubscriptionRequest {
-                actor,
-                scope: TurnScope::new(tenant_id, Some(agent_id), None, thread_id),
-                after_cursor: None,
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(events.len(), 1);
-        let ProductOutboundPayload::ProjectionSnapshot { state } = events[0].payload() else {
-            panic!("expected projection snapshot");
-        };
-        assert_eq!(state.items.len(), 1);
-        assert!(matches!(
-            state.items[0],
-            ProductProjectionItem::RunStatus { ref status, .. } if status == "running"
-        ));
-    }
-
-    #[tokio::test]
-    async fn webui_event_stream_resumes_after_serialized_projection_cursor() {
-        let tenant_id = TenantId::new("webui-events-tenant").unwrap();
-        let user_id = UserId::new("webui-events-user").unwrap();
-        let agent_id = AgentId::new("webui-events-agent").unwrap();
-        let thread_id = ThreadId::new("webui-events-thread").unwrap();
-        let first_run = InvocationId::new();
-        let second_run = InvocationId::new();
-        let event_log = Arc::new(InMemoryDurableEventLog::new());
-        event_log
-            .append(RuntimeEvent::model_started(
-                resource_scope(&tenant_id, &user_id, &agent_id, &thread_id, first_run),
-                CapabilityId::new("loop.model").unwrap(),
-            ))
-            .await
-            .unwrap();
-
-        let event_log_dyn: Arc<dyn DurableEventLog> = event_log.clone();
-        let actor = TurnActor::new(user_id.clone());
-        let services = build_reborn_projection_services(
-            event_log_dyn,
-            ReplyTargetBindingRef::new("webui-events-reply").unwrap(),
-        );
-        let first = services
-            .webui_event_stream()
-            .drain(ProjectionSubscriptionRequest {
-                actor: actor.clone(),
-                scope: TurnScope::new(
-                    tenant_id.clone(),
-                    Some(agent_id.clone()),
-                    None,
-                    thread_id.clone(),
-                ),
-                after_cursor: None,
-            })
-            .await
-            .unwrap();
-
-        event_log
-            .append(RuntimeEvent::model_started(
-                resource_scope(&tenant_id, &user_id, &agent_id, &thread_id, second_run),
-                CapabilityId::new("loop.model").unwrap(),
-            ))
-            .await
-            .unwrap();
-        let resumed = services
-            .webui_event_stream()
-            .drain(ProjectionSubscriptionRequest {
-                actor,
-                scope: TurnScope::new(tenant_id, Some(agent_id), None, thread_id),
-                after_cursor: Some(first[0].projection_cursor().clone()),
-            })
-            .await
-            .unwrap();
-
-        assert!(contains_run_status(&resumed, second_run, "running"));
-        assert!(!contains_run_status(&resumed, first_run, "running"));
-    }
-
-    #[tokio::test]
-    async fn webui_event_stream_uses_request_actor_for_projection_scope() {
-        let tenant_id = TenantId::new("webui-events-tenant").unwrap();
-        let owner_user_id = UserId::new("webui-events-owner").unwrap();
-        let other_user_id = UserId::new("webui-events-other").unwrap();
-        let agent_id = AgentId::new("webui-events-agent").unwrap();
-        let thread_id = ThreadId::new("webui-events-thread").unwrap();
-        let event_log = Arc::new(InMemoryDurableEventLog::new());
-        event_log
-            .append(RuntimeEvent::model_started(
-                resource_scope(
-                    &tenant_id,
-                    &owner_user_id,
-                    &agent_id,
-                    &thread_id,
-                    InvocationId::new(),
-                ),
-                CapabilityId::new("loop.model").unwrap(),
-            ))
-            .await
-            .unwrap();
-
-        let event_log: Arc<dyn DurableEventLog> = event_log;
-        let services = build_reborn_projection_services(
-            event_log,
-            ReplyTargetBindingRef::new("webui-events-reply").unwrap(),
-        );
-        let events = services
-            .webui_event_stream()
-            .drain(ProjectionSubscriptionRequest {
-                actor: TurnActor::new(other_user_id),
-                scope: TurnScope::new(tenant_id, Some(agent_id), None, thread_id),
-                after_cursor: None,
-            })
-            .await
-            .unwrap();
-
-        assert!(
-            events.is_empty(),
-            "projection stream must not read another user's event stream through a hidden runtime actor"
-        );
-    }
-
-    #[tokio::test]
-    async fn webui_event_stream_rejects_malformed_projection_cursor() {
-        let tenant_id = TenantId::new("webui-events-tenant").unwrap();
-        let user_id = UserId::new("webui-events-user").unwrap();
-        let agent_id = AgentId::new("webui-events-agent").unwrap();
-        let thread_id = ThreadId::new("webui-events-thread").unwrap();
-        let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
-        let actor = TurnActor::new(user_id);
-        let services = build_reborn_projection_services(
-            event_log,
-            ReplyTargetBindingRef::new("webui-events-reply").unwrap(),
-        );
-
-        let error = services
-            .webui_event_stream()
-            .drain(ProjectionSubscriptionRequest {
-                actor,
-                scope: TurnScope::new(tenant_id, Some(agent_id), None, thread_id),
-                after_cursor: Some(ProductProjectionCursor::new("not-json").unwrap()),
-            })
-            .await
-            .unwrap_err();
-
-        assert!(matches!(
-            error,
-            ProductAdapterError::InvalidIdentifier {
-                kind: "projection_cursor",
-                ..
-            }
-        ));
-    }
-
-    fn resource_scope(
-        tenant_id: &TenantId,
-        user_id: &UserId,
-        agent_id: &AgentId,
-        thread_id: &ThreadId,
-        invocation_id: InvocationId,
-    ) -> ResourceScope {
-        ResourceScope {
-            tenant_id: tenant_id.clone(),
-            user_id: user_id.clone(),
-            agent_id: Some(agent_id.clone()),
-            project_id: None,
-            mission_id: None,
-            thread_id: Some(thread_id.clone()),
-            invocation_id,
-        }
-    }
-
-    fn contains_run_status(
-        events: &[ProductOutboundEnvelope],
-        invocation_id: InvocationId,
-        expected_status: &str,
-    ) -> bool {
-        let expected_run_id = TurnRunId::from_uuid(invocation_id.as_uuid());
-        events.iter().any(|event| match event.payload() {
-            ProductOutboundPayload::ProjectionSnapshot { state }
-            | ProductOutboundPayload::ProjectionUpdate { state } => {
-                state.items.iter().any(|item| {
-                    matches!(
-                        item,
-                        ProductProjectionItem::RunStatus { run_id, status }
-                            if *run_id == expected_run_id && status == expected_status
-                    )
-                })
-            }
-            _ => false,
-        })
-    }
-}
+mod tests;

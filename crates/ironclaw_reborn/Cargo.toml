@@ -75,3 +75,6 @@ wat = "1.245.1"
 [[test]]
 name = "llm_gateway"
 required-features = ["root-llm-provider"]
+
+[lints]
+workspace = true

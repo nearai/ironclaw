@@ -1,11 +1,11 @@
-use crate::FirstPartyCapabilityError;
+use super::CodingCapabilityError;
 
 use super::{
     guest_error,
     types::{FileEncoding, FuzzyMatch, LineEnding, MatchMethod},
 };
 
-pub(super) fn reject_binary_probe(bytes: &[u8]) -> Result<(), FirstPartyCapabilityError> {
+pub(super) fn reject_binary_probe(bytes: &[u8]) -> Result<(), CodingCapabilityError> {
     if detect_encoding(bytes) == FileEncoding::Utf16Le {
         return Ok(());
     }
@@ -18,7 +18,7 @@ pub(super) fn reject_binary_probe(bytes: &[u8]) -> Result<(), FirstPartyCapabili
 
 pub(super) fn decode_text(
     bytes: &[u8],
-) -> Result<(String, FileEncoding, LineEnding), FirstPartyCapabilityError> {
+) -> Result<(String, FileEncoding, LineEnding), CodingCapabilityError> {
     let encoding = detect_encoding(bytes);
     let raw = match encoding {
         FileEncoding::Utf8 => String::from_utf8(bytes.to_vec()).map_err(|_| guest_error())?,
@@ -92,7 +92,7 @@ pub(super) fn replace_content(
     new_string: &str,
     replace_all: bool,
     match_count: usize,
-) -> Result<(String, usize), FirstPartyCapabilityError> {
+) -> Result<(String, usize), CodingCapabilityError> {
     if replace_all {
         let mut matches = Vec::new();
         let mut search_offset = 0usize;
@@ -137,6 +137,7 @@ fn find_match_from(haystack: &str, needle: &str, start_offset: usize) -> Option<
         return Some(FuzzyMatch {
             start,
             end: start + needle.len(),
+            method: MatchMethod::Exact,
         });
     }
     let needle_stripped = strip_trailing_whitespace(needle);
@@ -145,6 +146,7 @@ fn find_match_from(haystack: &str, needle: &str, start_offset: usize) -> Option<
         return Some(FuzzyMatch {
             start: start_offset + start,
             end: start_offset + end,
+            method: MatchMethod::TrailingWhitespace,
         });
     }
     let needle_normalized = normalize_quotes(needle);
@@ -157,6 +159,7 @@ fn find_match_from(haystack: &str, needle: &str, start_offset: usize) -> Option<
         return Some(FuzzyMatch {
             start: start_offset + start,
             end: start_offset + end,
+            method: MatchMethod::QuoteNormalization,
         });
     }
     let needle_both = normalize_quotes(&needle_stripped);
@@ -164,33 +167,25 @@ fn find_match_from(haystack: &str, needle: &str, start_offset: usize) -> Option<
     find_normalized_span(search, &haystack_both, &needle_both).map(|(start, end)| FuzzyMatch {
         start: start_offset + start,
         end: start_offset + end,
+        method: MatchMethod::Both,
     })
 }
 
 pub(super) fn count_matches(haystack: &str, needle: &str) -> (usize, MatchMethod) {
-    let exact = haystack.matches(needle).count();
-    if exact > 0 {
-        return (exact, MatchMethod::Exact);
+    let mut count = 0usize;
+    let mut method = MatchMethod::Exact;
+    let mut search_offset = 0usize;
+    while let Some(item) = find_match_from(haystack, needle, search_offset) {
+        if item.end <= item.start {
+            break;
+        }
+        if count == 0 {
+            method = item.method;
+        }
+        count += 1;
+        search_offset = item.end;
     }
-    let needle_stripped = strip_trailing_whitespace(needle);
-    let haystack_stripped = strip_trailing_whitespace(haystack);
-    let stripped_count = haystack_stripped.matches(&needle_stripped).count();
-    if stripped_count > 0 {
-        return (stripped_count, MatchMethod::TrailingWhitespace);
-    }
-    let needle_normalized = normalize_quotes(needle);
-    let haystack_normalized = normalize_quotes(haystack);
-    let normalized_count = haystack_normalized.matches(&needle_normalized).count();
-    if normalized_count > 0 {
-        return (normalized_count, MatchMethod::QuoteNormalization);
-    }
-    let needle_both = normalize_quotes(&needle_stripped);
-    let haystack_both = normalize_quotes(&haystack_stripped);
-    let both_count = haystack_both.matches(&needle_both).count();
-    if both_count > 0 {
-        return (both_count, MatchMethod::Both);
-    }
-    (0, MatchMethod::Exact)
+    (count, method)
 }
 
 fn strip_trailing_whitespace(value: &str) -> String {
@@ -267,4 +262,17 @@ pub(super) fn previous_char_boundary(value: &str, mut end: usize) -> usize {
         end -= 1;
     }
     end
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn count_matches_ignores_unlocatable_trailing_whitespace_normalization() {
+        let (count, method) = count_matches("\na", "\n ");
+
+        assert_eq!(count, 0);
+        assert_eq!(method, MatchMethod::Exact);
+    }
 }

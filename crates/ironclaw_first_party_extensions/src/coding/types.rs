@@ -55,4 +55,5 @@ pub(super) enum MatchMethod {
 pub(super) struct FuzzyMatch {
     pub(super) start: usize,
     pub(super) end: usize,
+    pub(super) method: MatchMethod,
 }

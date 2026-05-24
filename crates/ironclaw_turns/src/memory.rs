@@ -1221,6 +1221,14 @@ impl Inner {
                     to: TurnStatus::Queued,
                 });
             }
+            if let Some(required) = request.precondition.required_status()
+                && record.status != required
+            {
+                return Err(TurnError::InvalidTransition {
+                    from: record.status,
+                    to: TurnStatus::Queued,
+                });
+            }
             if record.actor != request.actor {
                 return Err(TurnError::Unauthorized);
             }
