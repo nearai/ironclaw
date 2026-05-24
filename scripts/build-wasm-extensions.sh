@@ -64,7 +64,9 @@ build_first_party_extension() {
     local extension_root
     local source_dir
     local module_path
+    local target_root
     local artifact
+    local candidate
     local name
 
     extension_root=$(dirname "$manifest_path")
@@ -81,7 +83,6 @@ build_first_party_extension() {
         FAILED+=("$name")
         return 1
     fi
-    artifact="$source_dir/target/wasm32-wasip1/release/$(basename "$module_path")"
 
     echo "  BUILD $name from $source_dir"
     if ! cargo component build --release --target wasm32-wasip2 --manifest-path "$source_dir/Cargo.toml" 2>&1; then
@@ -89,8 +90,17 @@ build_first_party_extension() {
         FAILED+=("$name")
         return 1
     fi
+    target_root="${CARGO_TARGET_DIR:-$source_dir/target}"
+    artifact=""
+    for target_triple in wasm32-wasip1 wasm32-wasip2 wasm32-wasi; do
+        candidate="$target_root/$target_triple/release/$(basename "$module_path")"
+        if [ -f "$candidate" ]; then
+            artifact="$candidate"
+            break
+        fi
+    done
     if [ ! -f "$artifact" ]; then
-        echo "  FAIL $name (expected artifact $artifact not found)"
+        echo "  FAIL $name (expected artifact $(basename "$module_path") not found under $target_root)"
         FAILED+=("$name")
         return 1
     fi
