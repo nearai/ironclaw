@@ -2,14 +2,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
+use ironclaw_first_party_extensions::skills::{
+    SkillManagementCapabilityError, SkillManagementCapabilityKind,
+    SkillManagementCapabilityRequest, dispatch,
+};
 use ironclaw_host_api::{
     CapabilityId, EffectKind, HostApiError, PermissionMode, ResourceUsage, RuntimeDispatchErrorKind,
 };
-use ironclaw_skills::{
-    SkillInstallRequest, SkillManagementContext, SkillManagementError, SkillManagementErrorKind,
-    SkillRemoveRequest, SkillSummary, install_skill, list_skills, remove_skill,
-};
-use serde_json::{Value, json};
 
 use crate::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
@@ -72,16 +71,26 @@ impl FirstPartyCapabilityHandler for SkillManagementToolHandler {
         &self,
         request: FirstPartyCapabilityRequest,
     ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
-        let output = match request.capability_id.as_str() {
-            SKILL_LIST_CAPABILITY_ID => dispatch_list(&request).await?,
-            SKILL_INSTALL_CAPABILITY_ID => dispatch_install(&request).await?,
-            SKILL_REMOVE_CAPABILITY_ID => dispatch_remove(&request).await?,
+        let kind = match request.capability_id.as_str() {
+            SKILL_LIST_CAPABILITY_ID => SkillManagementCapabilityKind::List,
+            SKILL_INSTALL_CAPABILITY_ID => SkillManagementCapabilityKind::Install,
+            SKILL_REMOVE_CAPABILITY_ID => SkillManagementCapabilityKind::Remove,
             _ => {
                 return Err(FirstPartyCapabilityError::new(
                     RuntimeDispatchErrorKind::UndeclaredCapability,
                 ));
             }
         };
+        let skill_request = SkillManagementCapabilityRequest::new(
+            kind,
+            &request.scope,
+            request.mounts.as_ref(),
+            Arc::clone(&request.services.filesystem),
+            &request.input,
+        );
+        let output = dispatch(&skill_request)
+            .await
+            .map_err(skill_management_error)?;
         Ok(FirstPartyCapabilityResult::new(
             output,
             ResourceUsage::default(),
@@ -89,96 +98,6 @@ impl FirstPartyCapabilityHandler for SkillManagementToolHandler {
     }
 }
 
-async fn dispatch_list(
-    request: &FirstPartyCapabilityRequest,
-) -> Result<Value, FirstPartyCapabilityError> {
-    let context = management_context(request)?;
-    let skills = list_skills(&context).await.map_err(capability_error)?;
-    Ok(json!({
-        "skills": skills.iter().map(skill_summary_json).collect::<Vec<_>>(),
-        "count": skills.len(),
-    }))
-}
-
-async fn dispatch_install(
-    request: &FirstPartyCapabilityRequest,
-) -> Result<Value, FirstPartyCapabilityError> {
-    let content = request
-        .input
-        .get("content")
-        .and_then(Value::as_str)
-        .ok_or_else(input_error)?;
-    let name = request.input.get("name").and_then(Value::as_str);
-    let context = management_context(request)?;
-    let installed = install_skill(&context, SkillInstallRequest { name, content })
-        .await
-        .map_err(capability_error)?;
-
-    Ok(json!({
-        "installed": true,
-        "name": installed.name,
-        "path": installed.scoped_path,
-    }))
-}
-
-async fn dispatch_remove(
-    request: &FirstPartyCapabilityRequest,
-) -> Result<Value, FirstPartyCapabilityError> {
-    let name = request
-        .input
-        .get("name")
-        .and_then(Value::as_str)
-        .ok_or_else(input_error)?;
-    let context = management_context(request)?;
-    let removed = remove_skill(&context, SkillRemoveRequest { name })
-        .await
-        .map_err(capability_error)?;
-
-    Ok(json!({
-        "removed": true,
-        "name": removed.name,
-    }))
-}
-
-fn management_context(
-    request: &FirstPartyCapabilityRequest,
-) -> Result<SkillManagementContext, FirstPartyCapabilityError> {
-    let Some(mounts) = request.mounts.as_ref() else {
-        return Err(FirstPartyCapabilityError::new(
-            RuntimeDispatchErrorKind::FilesystemDenied,
-        ));
-    };
-    Ok(SkillManagementContext::new(
-        Arc::clone(&request.services.filesystem),
-        mounts.clone(),
-        request.scope.clone(),
-    ))
-}
-
-fn skill_summary_json(skill: &SkillSummary) -> Value {
-    json!({
-        "name": skill.name,
-        "version": skill.version,
-        "description": skill.description,
-        "source": skill.source.as_str(),
-        "keywords": skill.keywords,
-        "tags": skill.tags,
-        "requires_skills": skill.requires_skills,
-    })
-}
-
-fn input_error() -> FirstPartyCapabilityError {
-    FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode)
-}
-
-fn capability_error(error: SkillManagementError) -> FirstPartyCapabilityError {
-    let kind = match error.kind() {
-        SkillManagementErrorKind::InvalidInput => RuntimeDispatchErrorKind::InputEncode,
-        SkillManagementErrorKind::FilesystemDenied => RuntimeDispatchErrorKind::FilesystemDenied,
-        SkillManagementErrorKind::NotFound
-        | SkillManagementErrorKind::Conflict
-        | SkillManagementErrorKind::InvalidSkill => RuntimeDispatchErrorKind::Guest,
-        SkillManagementErrorKind::Resource => RuntimeDispatchErrorKind::Resource,
-    };
-    FirstPartyCapabilityError::new(kind)
+fn skill_management_error(error: SkillManagementCapabilityError) -> FirstPartyCapabilityError {
+    FirstPartyCapabilityError::new(error.kind())
 }

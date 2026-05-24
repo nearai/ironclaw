@@ -16,6 +16,7 @@ glob = "0.3"
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_safety = { path = "../ironclaw_safety" }
+ironclaw_skills = { path = "../ironclaw_skills" }
 regex = "1"
 serde_json = "1"
 thiserror = "2"

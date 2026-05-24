@@ -6,3 +6,4 @@
 #![forbid(unsafe_code)]
 
 pub mod coding;
+pub mod skills;
