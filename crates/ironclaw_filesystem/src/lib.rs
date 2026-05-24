@@ -6,13 +6,14 @@
 //! operation against a trusted root filesystem namespace addressed by
 //! [`VirtualPath`]. Backend implementations alone touch raw host paths.
 //!
-//! The local backend canonicalizes existing paths and their nearest existing
-//! ancestors before opening files, and it re-roots new leaf paths on the checked
-//! canonical parent. That narrows symlink escape opportunities but does not
-//! provide a kernel-enforced race-free guarantee against a writable mount root
-//! being modified between containment checks and opens. Production hardening for
-//! hostile local directories should use fd-relative traversal such as `openat2`
-//! with `RESOLVE_BENEATH`, `O_NOFOLLOW`, or a capability filesystem crate.
+//! The local backend resolves every operation **fd-relative** to a mount-root
+//! directory fd that is opened once during trusted setup. On Linux it uses a
+//! single `openat2(RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS)` syscall; on other
+//! Unix platforms it performs an `openat(O_NOFOLLOW)` per-component walk. No
+//! operation re-resolves an absolute host path or trusts `canonicalize`, so
+//! containment within the mount root holds **by construction** — the
+//! time-of-check/time-of-use window against a concurrently mutated, hostile
+//! mount root is closed on every platform, not merely narrowed.
 #![warn(unreachable_pub)]
 
 mod backend;
