@@ -120,17 +120,7 @@ impl LifecycleProductFacade for RecordingLifecycleProductFacade {
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         self.commands.lock().expect("lock").push(action.clone());
         Ok(LifecycleProductResponse::projection(
-            match &action {
-                LifecycleProductAction::ExtensionInstall { package_ref }
-                | LifecycleProductAction::ExtensionAuth { package_ref }
-                | LifecycleProductAction::ExtensionActivate { package_ref }
-                | LifecycleProductAction::ExtensionConfigure { package_ref, .. }
-                | LifecycleProductAction::ExtensionRemove { package_ref }
-                | LifecycleProductAction::SkillRemove { package_ref } => Some(package_ref.clone()),
-                LifecycleProductAction::ExtensionSearch { .. }
-                | LifecycleProductAction::SkillSearch { .. }
-                | LifecycleProductAction::SkillInstall { .. } => None,
-            },
+            action.package_ref().cloned(),
             LifecyclePhase::Installed,
             vec![],
         ))

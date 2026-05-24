@@ -5,7 +5,7 @@
 //! dedicated services; lifecycle projections may only carry redacted refs to
 //! the owning interaction.
 
-use std::{fmt, ops::Deref, sync::Arc};
+use std::{fmt, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
@@ -20,6 +20,51 @@ use crate::{ProductCommand, ProductCommandContext, ProductCommandService, Produc
 const LIFECYCLE_ID_MAX_BYTES: usize = 256;
 const LIFECYCLE_REF_MAX_BYTES: usize = 512;
 
+macro_rules! bounded_lifecycle_string {
+    ($name:ident, $label:literal, $max:expr) => {
+        #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+        #[serde(transparent)]
+        pub struct $name(String);
+
+        impl $name {
+            pub fn new(value: impl Into<String>) -> Result<Self, ProductWorkflowError> {
+                validate_lifecycle_string(value.into(), $label, $max).map(Self)
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl AsRef<str> for $name {
+            fn as_ref(&self) -> &str {
+                self.as_str()
+            }
+        }
+
+        impl std::ops::Deref for $name {
+            type Target = str;
+
+            fn deref(&self) -> &Self::Target {
+                self.as_str()
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+    };
+}
+
+bounded_lifecycle_string!(LifecyclePackageId, "lifecycle package id", LIFECYCLE_ID_MAX_BYTES);
+bounded_lifecycle_string!(
+    LifecycleBlockerRef,
+    "lifecycle blocker ref",
+    LIFECYCLE_REF_MAX_BYTES
+);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LifecyclePackageKind {
@@ -27,80 +72,6 @@ pub enum LifecyclePackageKind {
     Skill,
     Mcp,
     Wasm,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct LifecyclePackageId(String);
-
-impl LifecyclePackageId {
-    pub fn new(id: impl Into<String>) -> Result<Self, ProductWorkflowError> {
-        validate_lifecycle_string(id.into(), "lifecycle package id", LIFECYCLE_ID_MAX_BYTES)
-            .map(Self)
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl AsRef<str> for LifecyclePackageId {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl Deref for LifecyclePackageId {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        self.as_str()
-    }
-}
-
-impl fmt::Display for LifecyclePackageId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct LifecycleBlockerRef(String);
-
-impl LifecycleBlockerRef {
-    pub fn new(ref_id: impl Into<String>) -> Result<Self, ProductWorkflowError> {
-        validate_lifecycle_string(
-            ref_id.into(),
-            "lifecycle blocker ref",
-            LIFECYCLE_REF_MAX_BYTES,
-        )
-        .map(Self)
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl AsRef<str> for LifecycleBlockerRef {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl Deref for LifecycleBlockerRef {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        self.as_str()
-    }
-}
-
-impl fmt::Display for LifecycleBlockerRef {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,6 +191,22 @@ impl LifecycleProductAction {
             Self::SkillRemove { .. } => "skill_remove",
         }
     }
+
+    /// Returns the `LifecyclePackageRef` when this action targets a single
+    /// package, otherwise `None`.
+    pub fn package_ref(&self) -> Option<&LifecyclePackageRef> {
+        match self {
+            Self::ExtensionInstall { package_ref }
+            | Self::ExtensionAuth { package_ref }
+            | Self::ExtensionActivate { package_ref }
+            | Self::ExtensionConfigure { package_ref, .. }
+            | Self::ExtensionRemove { package_ref }
+            | Self::SkillRemove { package_ref } => Some(package_ref),
+            Self::ExtensionSearch { .. }
+            | Self::SkillSearch { .. }
+            | Self::SkillInstall { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -300,6 +287,11 @@ impl ProductCommandService for LifecycleProductCommandService {
                 format!("command routing unavailable: {}", command.name()),
             )));
         };
+        // Lifecycle commands are admitted and executed by the facade;
+        // the structured response (phase, blockers, payload) belongs to
+        // the lifecycle projection stream, not the command ack channel.
+        // TODO: once the product surface surfaces lifecycle projections
+        // to the caller, wire the response into the projection stream.
         self.facade
             .execute(LifecycleProductContext::Command(context), action)
             .await?;
@@ -327,9 +319,8 @@ impl UnsupportedLifecycleProductFacade {
         &self,
         action: &LifecycleProductAction,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        let package_ref = package_ref_for_action(action);
         Ok(LifecycleProductResponse::projection(
-            package_ref,
+            action.package_ref().cloned(),
             LifecyclePhase::UnsupportedOrLegacy,
             vec![LifecycleReadinessBlocker::runtime(Some(
                 self.runtime_ref.clone(),
@@ -356,17 +347,17 @@ pub fn parse_lifecycle_command_payload(payload: &InboundCommandPayload) -> Produ
                 query: payload.arguments.trim().to_string(),
             },
         },
-        "extension_install" => lifecycle_package_command(payload, |package_ref| {
+        "extension_install" => extension_package_command(payload, |package_ref| {
             LifecycleProductAction::ExtensionInstall { package_ref }
         }),
-        "extension_auth" => lifecycle_package_command(payload, |package_ref| {
+        "extension_auth" => extension_package_command(payload, |package_ref| {
             LifecycleProductAction::ExtensionAuth { package_ref }
         }),
-        "extension_activate" => lifecycle_package_command(payload, |package_ref| {
+        "extension_activate" => extension_package_command(payload, |package_ref| {
             LifecycleProductAction::ExtensionActivate { package_ref }
         }),
         "extension_configure" => parse_extension_configure_command(payload),
-        "extension_remove" => lifecycle_package_command(payload, |package_ref| {
+        "extension_remove" => extension_package_command(payload, |package_ref| {
             LifecycleProductAction::ExtensionRemove { package_ref }
         }),
         "skill_search" => ProductCommand::Lifecycle {
@@ -382,16 +373,16 @@ pub fn parse_lifecycle_command_payload(payload: &InboundCommandPayload) -> Produ
 
 fn parse_extension_configure_command(payload: &InboundCommandPayload) -> ProductCommand {
     let args = payload.arguments.trim();
-    let (id, config_payload) = if let Ok(json) = serde_json::from_str::<Value>(args) {
-        (
-            json.get("id")
+    let (id, config_payload) = match serde_json::from_str::<Value>(args) {
+        Ok(json) => {
+            let id = json
+                .get("id")
                 .and_then(Value::as_str)
                 .unwrap_or("")
-                .to_string(),
-            json.get("payload").cloned(),
-        )
-    } else {
-        (first_argument(args).to_string(), None)
+                .to_string();
+            (id, json.get("payload").cloned())
+        }
+        Err(_) => (first_argument(args).to_string(), None),
     };
     match lifecycle_package_ref(LifecyclePackageKind::Extension, id) {
         Ok(package_ref) => ProductCommand::Lifecycle {
@@ -409,16 +400,16 @@ fn parse_skill_install_command(payload: &InboundCommandPayload) -> ProductComman
     let Ok(json) = serde_json::from_str::<Value>(args) else {
         return unknown_lifecycle_command(payload);
     };
-    let content = json
-        .get("content")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    let Ok(content) = validate_lifecycle_text(content, "skill content", 64 * 1024) else {
-        return unknown_lifecycle_command(payload);
+    let content = match json.get("content").and_then(Value::as_str) {
+        Some(content) => content,
+        None => return unknown_lifecycle_command(payload),
+    };
+    let content = match validate_lifecycle_text(content.to_string(), "skill content", 64 * 1024) {
+        Ok(content) => content,
+        Err(_) => return unknown_lifecycle_command(payload),
     };
     let name = match json.get("name").and_then(Value::as_str) {
-        Some(name) => match validate_lifecycle_string(name.to_string(), "skill name", 256) {
+        Some(name) => match validate_lifecycle_string(name.to_string(), "skill name", LIFECYCLE_ID_MAX_BYTES) {
             Ok(name) => Some(name),
             Err(_) => return unknown_lifecycle_command(payload),
         },
@@ -448,7 +439,7 @@ fn parse_skill_remove_command(payload: &InboundCommandPayload) -> ProductCommand
     }
 }
 
-fn lifecycle_package_command(
+fn extension_package_command(
     payload: &InboundCommandPayload,
     build: fn(LifecyclePackageRef) -> LifecycleProductAction,
 ) -> ProductCommand {
@@ -480,20 +471,6 @@ fn unknown_lifecycle_command(payload: &InboundCommandPayload) -> ProductCommand 
     }
 }
 
-fn package_ref_for_action(action: &LifecycleProductAction) -> Option<LifecyclePackageRef> {
-    match action {
-        LifecycleProductAction::ExtensionInstall { package_ref }
-        | LifecycleProductAction::ExtensionAuth { package_ref }
-        | LifecycleProductAction::ExtensionActivate { package_ref }
-        | LifecycleProductAction::ExtensionConfigure { package_ref, .. }
-        | LifecycleProductAction::ExtensionRemove { package_ref }
-        | LifecycleProductAction::SkillRemove { package_ref } => Some(package_ref.clone()),
-        LifecycleProductAction::ExtensionSearch { .. }
-        | LifecycleProductAction::SkillSearch { .. }
-        | LifecycleProductAction::SkillInstall { .. } => None,
-    }
-}
-
 pub fn lifecycle_package_ref(
     kind: LifecyclePackageKind,
     id: impl Into<String>,
@@ -501,34 +478,31 @@ pub fn lifecycle_package_ref(
     LifecyclePackageRef::new(kind, id)
 }
 
+/// Validates a lifecycle string: non-empty, within byte limit, with optional
+/// control-character filtering.
 pub fn validate_lifecycle_string(
     value: String,
     label: &'static str,
     max_bytes: usize,
 ) -> Result<String, ProductWorkflowError> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Err(ProductWorkflowError::InvalidBindingRequest {
-            reason: format!("{label} must not be empty"),
-        });
-    }
-    if trimmed.len() > max_bytes {
-        return Err(ProductWorkflowError::InvalidBindingRequest {
-            reason: format!("{label} must be at most {max_bytes} bytes"),
-        });
-    }
-    if trimmed.chars().any(|c| c == '\0' || c.is_control()) {
-        return Err(ProductWorkflowError::InvalidBindingRequest {
-            reason: format!("{label} must not contain NUL/control characters"),
-        });
-    }
-    Ok(trimmed.to_string())
+    validate_lifecycle_value(value, label, max_bytes, true)
 }
 
+/// Validates free-form lifecycle text that may contain control characters
+/// (e.g. newlines in skill markdown) but still blocks NUL.
 pub fn validate_lifecycle_text(
     value: String,
     label: &'static str,
     max_bytes: usize,
+) -> Result<String, ProductWorkflowError> {
+    validate_lifecycle_value(value, label, max_bytes, false)
+}
+
+fn validate_lifecycle_value(
+    value: String,
+    label: &'static str,
+    max_bytes: usize,
+    reject_control: bool,
 ) -> Result<String, ProductWorkflowError> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -541,9 +515,17 @@ pub fn validate_lifecycle_text(
             reason: format!("{label} must be at most {max_bytes} bytes"),
         });
     }
-    if trimmed.chars().any(|c| c == '\0') {
+    let has_bad_char = if reject_control {
+        trimmed.chars().any(|c| c == '\0' || c.is_control())
+    } else {
+        trimmed.chars().any(|c| c == '\0')
+    };
+    if has_bad_char {
         return Err(ProductWorkflowError::InvalidBindingRequest {
-            reason: format!("{label} must not contain NUL characters"),
+            reason: format!(
+                "{label} must not contain NUL{} characters",
+                if reject_control { "/control" } else { "" }
+            ),
         });
     }
     Ok(trimmed.to_string())

@@ -289,58 +289,48 @@ fn paths_overlap(left: &Path, right: &Path) -> bool {
     left == right || left.starts_with(right) || right.starts_with(left)
 }
 
-fn local_dev_skill_mount_view() -> Result<MountView, RebornBuildError> {
-    let grant = |alias: &str, target: &str| -> Result<MountGrant, RebornBuildError> {
-        Ok(MountGrant::new(
-            MountAlias::new(alias).map_err(|error| RebornBuildError::InvalidConfig {
-                reason: error.to_string(),
-            })?,
-            VirtualPath::new(target).map_err(|error| RebornBuildError::InvalidConfig {
-                reason: error.to_string(),
-            })?,
-            MountPermissions::read_only(),
-        ))
-    };
-    MountView::new(vec![
-        grant("/skills", "/projects/skills")?,
-        grant("/tenant-shared/skills", "/projects/tenant-shared/skills")?,
-        grant("/system/skills", "/projects/system/skills")?,
-    ])
-    .map_err(|error| RebornBuildError::InvalidConfig {
+fn local_dev_skill_management_mount_view() -> Result<MountView, RebornBuildError> {
+    let grants = local_dev_skill_mount_grants(MountPermissions::read_write_list_delete())?;
+    MountView::new(grants).map_err(|error| RebornBuildError::InvalidConfig {
         reason: error.to_string(),
     })
 }
 
-fn local_dev_skill_management_mount_view() -> Result<MountView, RebornBuildError> {
-    let grant = |alias: &str,
-                 target: &str,
-                 permissions: MountPermissions|
-     -> Result<MountGrant, RebornBuildError> {
-        Ok(MountGrant::new(
-            MountAlias::new(alias).map_err(|error| RebornBuildError::InvalidConfig {
-                reason: error.to_string(),
-            })?,
-            VirtualPath::new(target).map_err(|error| RebornBuildError::InvalidConfig {
-                reason: error.to_string(),
-            })?,
-            permissions,
-        ))
-    };
-    MountView::new(vec![
-        grant(
-            "/skills",
-            "/projects/skills",
-            MountPermissions::read_write_list_delete(),
-        )?,
-        grant(
-            "/system/skills",
-            "/projects/system/skills",
-            MountPermissions::read_only(),
-        )?,
-    ])
-    .map_err(|error| RebornBuildError::InvalidConfig {
+fn local_dev_skill_mount_view() -> Result<MountView, RebornBuildError> {
+    let mut grants = local_dev_skill_mount_grants(MountPermissions::read_only())?;
+    grants.push(mount_grant(
+        "/tenant-shared/skills",
+        "/projects/tenant-shared/skills",
+        MountPermissions::read_only(),
+    )?);
+    MountView::new(grants).map_err(|error| RebornBuildError::InvalidConfig {
         reason: error.to_string(),
     })
+}
+
+fn local_dev_skill_mount_grants(
+    skill_permissions: MountPermissions,
+) -> Result<Vec<MountGrant>, RebornBuildError> {
+    Ok(vec![
+        mount_grant("/skills", "/projects/skills", skill_permissions)?,
+        mount_grant("/system/skills", "/projects/system/skills", MountPermissions::read_only())?,
+    ])
+}
+
+fn mount_grant(
+    alias: &str,
+    target: &str,
+    permissions: MountPermissions,
+) -> Result<MountGrant, RebornBuildError> {
+    Ok(MountGrant::new(
+        MountAlias::new(alias).map_err(|error| RebornBuildError::InvalidConfig {
+            reason: error.to_string(),
+        })?,
+        VirtualPath::new(target).map_err(|error| RebornBuildError::InvalidConfig {
+            reason: error.to_string(),
+        })?,
+        permissions,
+    ))
 }
 
 fn local_dev_workspace_mount_view() -> Result<MountView, RebornBuildError> {

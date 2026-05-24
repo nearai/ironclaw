@@ -70,6 +70,17 @@ fn map_lifecycle_error(error: ProductWorkflowError) -> RebornServicesError {
             RebornServicesError::from_status(RebornServicesErrorCode::Forbidden, 403, false)
         }
         ProductWorkflowError::Transient { .. } => RebornServicesError::service_unavailable(true),
-        _ => RebornServicesError::internal_invariant(),
+        ProductWorkflowError::BindingResolutionFailed { .. }
+        | ProductWorkflowError::BindingRequired { .. }
+        | ProductWorkflowError::TurnSubmissionRejected { .. }
+        | ProductWorkflowError::TurnSubmissionFailed { .. }
+        | ProductWorkflowError::TurnResumeRejected { .. }
+        | ProductWorkflowError::TurnResumeDenied { .. }
+        | ProductWorkflowError::AuthContinuationRejected { .. }
+        | ProductWorkflowError::BeforeInboundPolicyFailed { .. }
+        | ProductWorkflowError::DuplicateAction { .. }
+        | ProductWorkflowError::UnknownInstallation => {
+            RebornServicesError::internal_invariant()
+        }
     }
 }
