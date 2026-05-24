@@ -13,6 +13,7 @@ use crate::{
     strategies::{ModelErrorSummary, RecoveryOutcome},
 };
 
+use super::prompt::build_prompt_bundle_for_surface;
 use super::{
     AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, HostStage,
     MAX_MODEL_RETRIES, StageContext, failed_exit, honor_retry_alteration, model_error_class,
@@ -58,7 +59,7 @@ impl ExecutorStage<ModelInput> for ModelStage {
             CancelCheck::Continue(state) => *state,
             CancelCheck::Exit(exit) => return Ok(ModelStep::Exit(exit)),
         };
-        let request = LoopModelRequest {
+        let mut request = LoopModelRequest {
             messages: input.messages,
             surface_version: Some(input.surface_version),
             model_preference,
@@ -162,6 +163,18 @@ impl ExecutorStage<ModelInput> for ModelStage {
                                     })?,
                                 )
                                 .await;
+                            let messages = build_prompt_bundle_for_surface(
+                                ctx,
+                                &state,
+                                request.surface_version.clone(),
+                                request.capability_view.clone(),
+                            )
+                            .await?;
+                            match CheckpointStage.cancel_if_requested(ctx, state).await? {
+                                CancelCheck::Continue(next) => state = *next,
+                                CancelCheck::Exit(exit) => return Ok(ModelStep::Exit(exit)),
+                            }
+                            request.messages = messages;
                         }
                         RecoveryOutcome::SkipResult { .. } => {
                             return Err(AgentLoopExecutorError::PlannerContract {
