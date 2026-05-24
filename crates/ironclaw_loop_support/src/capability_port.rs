@@ -218,8 +218,7 @@ impl SurfaceSnapshot {
         }
         let requested_id = CapabilityId::new(requested).ok()?;
         self.capabilities
-            .iter()
-            .find(|(capability_id, _)| *capability_id == &requested_id)
+            .get_key_value(&requested_id)
             .map(|(capability_id, capability)| capability.capability_info(capability_id))
     }
 }
@@ -916,6 +915,12 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             .into_iter()
             .map(|capability| {
                 let capability_id = capability.descriptor.id.clone();
+                if self.synthetic_tools.contains_capability(&capability_id) {
+                    return Err(AgentLoopHostError::new(
+                        AgentLoopHostErrorKind::InvalidInvocation,
+                        "host runtime capability id is reserved for a synthetic loop capability",
+                    ));
+                }
                 let provider_tool_name =
                     provider_tool_name(&capability.descriptor.id, &snapshot.provider_names);
                 snapshot
@@ -933,7 +938,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                         provider_tool_name,
                     },
                 );
-                CapabilityDescriptorView {
+                Ok(CapabilityDescriptorView {
                     capability_id,
                     provider: Some(capability.descriptor.provider),
                     runtime: capability.descriptor.runtime,
@@ -941,9 +946,9 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                     safe_description: capability.descriptor.description,
                     concurrency_hint: concurrency_hint_from_effects(&capability.descriptor.effects),
                     parameters_schema: capability.descriptor.parameters_schema,
-                }
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, AgentLoopHostError>>()?;
 
         let mut snapshots = lock_mut(&self.snapshots, "capability surface snapshot store")?;
         snapshots.clear();
@@ -963,29 +968,32 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
         &self,
         request: CapabilityInvocation,
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
-        if self
+        let is_synthetic_capability = self
             .synthetic_tools
-            .contains_capability(&request.capability_id)
-        {
-            return self.invoke_synthetic_capability(request).await;
-        }
+            .contains_capability(&request.capability_id);
         let snapshot = self.snapshot_for(&request.surface_version)?;
-        let Some(capability) = snapshot.capabilities.get(&request.capability_id).cloned() else {
-            return Ok(CapabilityOutcome::Denied(CapabilityDenied {
-                reason_kind: capability_denied_reason_kind("outside_visible_surface")?,
-                safe_summary: "capability was not visible on the cited surface".to_string(),
-            }));
-        };
-        let Some(trust_decision) = self
-            .visible_request
-            .provider_trust
-            .get(&capability.provider)
-            .cloned()
-        else {
-            return Ok(CapabilityOutcome::Denied(CapabilityDenied {
-                reason_kind: capability_denied_reason_kind("missing_provider_trust")?,
-                safe_summary: "capability provider trust is unavailable".to_string(),
-            }));
+        let runtime_dispatch = if is_synthetic_capability {
+            None
+        } else {
+            let Some(capability) = snapshot.capabilities.get(&request.capability_id).cloned()
+            else {
+                return Ok(CapabilityOutcome::Denied(CapabilityDenied {
+                    reason_kind: capability_denied_reason_kind("outside_visible_surface")?,
+                    safe_summary: "capability was not visible on the cited surface".to_string(),
+                }));
+            };
+            let Some(trust_decision) = self
+                .visible_request
+                .provider_trust
+                .get(&capability.provider)
+                .cloned()
+            else {
+                return Ok(CapabilityOutcome::Denied(CapabilityDenied {
+                    reason_kind: capability_denied_reason_kind("missing_provider_trust")?,
+                    safe_summary: "capability provider trust is unavailable".to_string(),
+                }));
+            };
+            Some((capability, trust_decision))
         };
         let idempotency_key = invocation_idempotency_key(&self.run_context, &request)?;
         loop {
@@ -1013,6 +1021,19 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
         // `finish_runtime_outcome` rather than cleared.
         let guard = self.dispatch_reservation_guard(&idempotency_key);
 
+        if is_synthetic_capability {
+            let result = self.invoke_synthetic_capability(request).await;
+            self.record_loop_completed(&idempotency_key, result.clone())?;
+            guard.commit();
+            return result;
+        }
+
+        let Some((capability, trust_decision)) = runtime_dispatch else {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Internal,
+                "runtime dispatch metadata missing for non-synthetic capability",
+            ));
+        };
         let input = self
             .input_resolver
             .resolve_capability_input(&self.run_context, &request.input_ref)
@@ -2409,6 +2430,17 @@ mod tests {
                 .iter()
                 .any(|definition| definition.name == capability_info::TOOL_NAME)
         );
+        let capability_info_definition = tool_definitions
+            .iter()
+            .find(|definition| definition.name == capability_info::TOOL_NAME)
+            .expect("capability_info definition is advertised");
+        assert_eq!(
+            capability_info_definition.parameters["anyOf"],
+            serde_json::json!([
+                { "required": ["name"] },
+                { "required": ["capability_id"] }
+            ])
+        );
         assert!(
             tool_definitions
                 .iter()
@@ -2430,16 +2462,26 @@ mod tests {
             capability_info::CAPABILITY_ID
         );
 
+        let invocation = CapabilityInvocation {
+            surface_version: surface.version,
+            capability_id: candidate.capability_id,
+            input_ref: candidate.input_ref,
+        };
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
-                surface_version: surface.version,
-                capability_id: candidate.capability_id,
-                input_ref: candidate.input_ref,
-            })
+            .invoke_capability(invocation.clone())
             .await
             .expect("capability_info invocation succeeds");
+        let replayed_outcome = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: invocation.surface_version,
+                capability_id: invocation.capability_id,
+                input_ref: invocation.input_ref,
+            })
+            .await
+            .expect("capability_info invocation replays");
 
         assert!(matches!(outcome, CapabilityOutcome::Completed(_)));
+        assert!(matches!(replayed_outcome, CapabilityOutcome::Completed(_)));
         let records = result_writer.records();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].0.as_str(), capability_info::CAPABILITY_ID);
@@ -2449,6 +2491,144 @@ mod tests {
             runtime.take_requests().is_empty(),
             "capability_info must be served by the loop port without dispatching to the host runtime"
         );
+    }
+
+    #[tokio::test]
+    async fn capability_info_rejects_invalid_detail_arguments() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let context = execution_context("thread-capability-info-invalid-detail");
+        let run_context = loop_run_context(&context).await;
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+            capability_id.clone(),
+            provider_id,
+        )]));
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            runtime,
+            visible_request(context),
+            dummy_input_resolver(),
+            dummy_result_writer(),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+        port.visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+
+        for arguments in [
+            serde_json::json!({ "name": capability_id.as_str(), "include_schema": 1 }),
+            serde_json::json!({ "name": capability_id.as_str(), "detail": "everything" }),
+        ] {
+            let mut call = provider_tool_call();
+            call.name = capability_info::TOOL_NAME.to_string();
+            call.arguments = arguments;
+            let error = port
+                .register_provider_tool_call(call)
+                .await
+                .expect_err("invalid capability_info arguments should fail");
+            assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        }
+    }
+
+    #[tokio::test]
+    async fn capability_info_rejects_targets_outside_visible_surface() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let context = execution_context("thread-capability-info-invisible-target");
+        let run_context = loop_run_context(&context).await;
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+            capability_id,
+            provider_id,
+        )]));
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            runtime,
+            visible_request(context),
+            dummy_input_resolver(),
+            dummy_result_writer(),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+        port.visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+
+        let mut call = provider_tool_call();
+        call.name = capability_info::TOOL_NAME.to_string();
+        call.arguments = serde_json::json!({ "name": "demo.missing" });
+        let error = port
+            .register_provider_tool_call(call)
+            .await
+            .expect_err("unknown target should fail");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    }
+
+    #[tokio::test]
+    async fn capability_info_returns_names_and_summary_details() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let context = execution_context("thread-capability-info-detail-modes");
+        let run_context = loop_run_context(&context).await;
+        let mut visible = visible_capability(capability_id.clone(), provider_id);
+        visible.descriptor.parameters_schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "count": { "type": "integer" },
+                "message": { "type": "string" }
+            },
+            "required": ["message"]
+        });
+        let result_writer = Arc::new(RecordingResultWriter::default());
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            Arc::new(RecordingHostRuntime::new(vec![visible])),
+            visible_request(context),
+            dummy_input_resolver(),
+            result_writer.clone(),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+
+        for (detail, expected_summary) in [(None, false), (Some("summary"), true)] {
+            let mut call = provider_tool_call();
+            call.name = capability_info::TOOL_NAME.to_string();
+            call.arguments = serde_json::json!({ "name": capability_id.as_str() });
+            if let Some(detail) = detail {
+                call.arguments["detail"] = serde_json::json!(detail);
+            }
+            let candidate = port
+                .register_provider_tool_call(call)
+                .await
+                .expect("capability_info call should register");
+            port.invoke_capability(CapabilityInvocation {
+                surface_version: surface.version.clone(),
+                capability_id: candidate.capability_id,
+                input_ref: candidate.input_ref,
+            })
+            .await
+            .expect("capability_info invocation succeeds");
+
+            let records = result_writer.records();
+            let output = &records.last().expect("result was written").1;
+            assert_eq!(
+                output["parameters"],
+                serde_json::json!(["count", "message"])
+            );
+            assert_eq!(output.get("summary").is_some(), expected_summary);
+            if expected_summary {
+                assert_eq!(
+                    output["summary"]["always_required"],
+                    serde_json::json!(["message"])
+                );
+                assert_eq!(
+                    output["summary"]["notes"],
+                    serde_json::json!(["runtime: first_party", "effects: dispatch_capability"])
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -2498,6 +2678,34 @@ mod tests {
         let requests = runtime.take_requests();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].capability_id, capability_id);
+    }
+
+    #[tokio::test]
+    async fn runtime_capability_with_reserved_synthetic_id_is_rejected_from_surface() {
+        let capability_id =
+            CapabilityId::new(capability_info::CAPABILITY_ID).expect("valid capability id");
+        let provider_id = ExtensionId::new("ironclaw.loop").expect("valid provider id");
+        let context = execution_context("thread-capability-info-reserved-id");
+        let run_context = loop_run_context(&context).await;
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+            capability_id,
+            provider_id,
+        )]));
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            runtime,
+            visible_request(context),
+            dummy_input_resolver(),
+            dummy_result_writer(),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+
+        let error = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect_err("reserved synthetic capability id should be rejected");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
     }
 
     #[tokio::test]

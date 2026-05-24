@@ -5,8 +5,8 @@ use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, ProviderToolDefinition,
 };
 
-pub(super) const TOOL_NAME: &str = "capability_info";
-pub(super) const CAPABILITY_ID: &str = "ironclaw.loop.capability_info";
+pub(crate) const TOOL_NAME: &str = "capability_info";
+pub(crate) const CAPABILITY_ID: &str = "ironclaw.loop.capability_info";
 
 pub(super) struct CapabilityInfoEntry<'a> {
     pub(super) capability_id: &'a CapabilityId,
@@ -52,7 +52,7 @@ impl Detail {
     }
 }
 
-pub(super) fn capability_id() -> Result<CapabilityId, AgentLoopHostError> {
+pub(crate) fn capability_id() -> Result<CapabilityId, AgentLoopHostError> {
     CapabilityId::new(CAPABILITY_ID).map_err(|_| {
         AgentLoopHostError::new(
             AgentLoopHostErrorKind::Internal,
@@ -61,8 +61,12 @@ pub(super) fn capability_id() -> Result<CapabilityId, AgentLoopHostError> {
     })
 }
 
-pub(super) fn is_capability_id(capability_id: &CapabilityId) -> bool {
+pub(crate) fn is_capability_id(capability_id: &CapabilityId) -> bool {
     capability_id.as_str() == CAPABILITY_ID
+}
+
+pub(crate) fn is_tool_name(tool_name: &str) -> bool {
+    tool_name == TOOL_NAME
 }
 
 pub(super) fn tool_definition() -> Result<ProviderToolDefinition, AgentLoopHostError> {
@@ -99,6 +103,10 @@ pub(super) fn schema() -> serde_json::Value {
                 "description": "Compatibility alias for detail=schema."
             }
         },
+        "anyOf": [
+            { "required": ["name"] },
+            { "required": ["capability_id"] }
+        ],
     })
 }
 
@@ -138,6 +146,40 @@ pub(super) fn output<'a>(
         }
     }
     Ok(output)
+}
+
+pub(crate) fn validate_filtered_provider_arguments(
+    arguments: &serde_json::Value,
+    resolve: impl FnOnce(&str) -> Option<CapabilityId>,
+    permits: impl FnOnce(&CapabilityId) -> bool,
+) -> Result<(), AgentLoopHostError> {
+    let input = provider_arguments_input(arguments)?;
+    let requested = requested_name(&input)?;
+    let Some(capability_id) = resolve(requested) else {
+        return Err(target_not_visible());
+    };
+    if is_capability_id(&capability_id) || !permits(&capability_id) {
+        return Err(target_not_visible());
+    }
+    Ok(())
+}
+
+fn provider_arguments_input(
+    arguments: &serde_json::Value,
+) -> Result<serde_json::Value, AgentLoopHostError> {
+    let Some(text) = arguments.as_str() else {
+        return Ok(arguments.clone());
+    };
+    let trimmed = text.trim();
+    if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
+        return Ok(arguments.clone());
+    }
+    serde_json::from_str(trimmed).map_err(|_| {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "capability_info provider arguments could not be parsed as JSON",
+        )
+    })
 }
 
 fn requested_name(input: &serde_json::Value) -> Result<&str, AgentLoopHostError> {
