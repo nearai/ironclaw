@@ -939,7 +939,6 @@ async fn model_port_preserves_capability_info_for_filtered_capability_view() {
     let messages = user_model_messages(&fixture);
     issue_prompt_grant(&fixture.run_context, &messages);
 
-    let capability_info_id = CapabilityId::new("ironclaw.loop.capability_info").unwrap();
     let allowed_id = CapabilityId::new("demo.allowed").unwrap();
     let hidden_id = CapabilityId::new("demo.hidden").unwrap();
     let gateway = Arc::new(RecordingGateway::reply("model says hi"));
@@ -951,7 +950,10 @@ async fn model_port_preserves_capability_info_for_filtered_capability_view() {
         16,
     )
     .with_capability_port(Arc::new(StaticToolDefinitionPort::new(vec![
-        provider_tool_definition(capability_info_id.clone(), "capability_info"),
+        provider_tool_definition(
+            CapabilityId::new("ironclaw.loop.capability_info").unwrap(),
+            "capability_info",
+        ),
         provider_tool_definition(allowed_id.clone(), "demo__allowed"),
         provider_tool_definition(hidden_id, "demo__hidden"),
     ])));
@@ -962,7 +964,7 @@ async fn model_port_preserves_capability_info_for_filtered_capability_view() {
             surface_version: None,
             model_preference: None,
             capability_view: Some(LoopModelCapabilityView {
-                visible_capability_ids: vec![capability_info_id, allowed_id],
+                visible_capability_ids: vec![allowed_id],
             }),
         })
         .await

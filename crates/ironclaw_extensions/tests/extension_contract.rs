@@ -435,13 +435,6 @@ fn capability_provider_host_api_reuses_capability_validation() {
         ),
         (
             CAPABILITY_PROVIDER_MANIFEST.replace(
-                "prompt_doc_ref = \"prompts/telegram/send_message.md\"\n",
-                "",
-            ),
-            "prompt_doc_ref",
-        ),
-        (
-            CAPABILITY_PROVIDER_MANIFEST.replace(
                 "effects = [\"network\"]",
                 "effects = [\"network\", \"network\"]",
             ),
@@ -466,6 +459,24 @@ fn capability_provider_host_api_reuses_capability_validation() {
             "expected reason containing {expected:?}, got {err:?}"
         );
     }
+}
+
+#[test]
+fn capability_provider_host_api_allows_missing_prompt_doc_ref() {
+    let manifest = CAPABILITY_PROVIDER_MANIFEST.replace(
+        "prompt_doc_ref = \"prompts/telegram/send_message.md\"\n",
+        "",
+    );
+
+    let manifest = ExtensionManifest::parse_with_host_api_contracts(
+        &manifest,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
+    )
+    .expect("prompt_doc_ref is optional lazy help metadata");
+
+    assert!(manifest.capabilities[0].prompt_doc_ref.is_none());
 }
 
 #[test]

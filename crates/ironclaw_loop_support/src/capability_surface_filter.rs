@@ -9,7 +9,7 @@ use ironclaw_turns::run_profile::{
     ProviderToolDefinition, VisibleCapabilityRequest, VisibleCapabilitySurface,
 };
 
-use crate::CapabilityAllowSet;
+use crate::{CapabilityAllowSet, capability_info};
 
 #[derive(Clone)]
 pub struct CapabilitySurfaceProfileFilter {
@@ -49,7 +49,11 @@ impl CapabilitySurfaceVisibleFilter {
 impl LoopCapabilityPort for CapabilitySurfaceVisibleFilter {
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         let mut definitions = self.inner.tool_definitions()?;
-        definitions.retain(|definition| self.permits(&definition.capability_id));
+        definitions.retain(|definition| {
+            provider_capability_permitted(&definition.capability_id, |capability_id| {
+                self.permits(capability_id)
+            })
+        });
         Ok(definitions)
     }
 
@@ -97,7 +101,9 @@ impl LoopCapabilityPort for CapabilitySurfaceVisibleFilter {
         &self,
         request: CapabilityInvocation,
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
-        if !self.permits(&request.capability_id) {
+        if !provider_capability_permitted(&request.capability_id, |capability_id| {
+            self.permits(capability_id)
+        }) {
             return Ok(model_view_denied_outcome());
         }
         self.inner.invoke_capability(request).await
@@ -110,7 +116,11 @@ impl LoopCapabilityPort for CapabilitySurfaceVisibleFilter {
         invoke_filtered_batch(
             &*self.inner,
             request,
-            |invocation| self.permits(&invocation.capability_id),
+            |invocation| {
+                provider_capability_permitted(&invocation.capability_id, |capability_id| {
+                    self.permits(capability_id)
+                })
+            },
             model_view_denied_outcome,
         )
         .await
@@ -124,7 +134,11 @@ impl LoopCapabilityPort for CapabilitySurfaceProfileFilter {
             return self.inner.tool_definitions();
         }
         let mut definitions = self.inner.tool_definitions()?;
-        definitions.retain(|definition| self.allow_set.permits(&definition.capability_id));
+        definitions.retain(|definition| {
+            provider_capability_permitted(&definition.capability_id, |capability_id| {
+                self.allow_set.permits(capability_id)
+            })
+        });
         Ok(definitions)
     }
 
@@ -154,7 +168,9 @@ impl LoopCapabilityPort for CapabilitySurfaceProfileFilter {
             )?;
         }
         let candidate = self.inner.register_provider_tool_call(tool_call).await?;
-        if !self.allow_set.permits(&candidate.capability_id) {
+        if !provider_capability_permitted(&candidate.capability_id, |capability_id| {
+            self.allow_set.permits(capability_id)
+        }) {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::InvalidInvocation,
                 "provider tool call is outside the run-profile surface",
@@ -169,9 +185,11 @@ impl LoopCapabilityPort for CapabilitySurfaceProfileFilter {
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
         let mut surface = self.inner.visible_capabilities(request).await?;
         if matches!(self.allow_set.as_ref(), CapabilityAllowSet::Allowlist(_)) {
-            surface
-                .descriptors
-                .retain(|descriptor| self.allow_set.permits(&descriptor.capability_id));
+            surface.descriptors.retain(|descriptor| {
+                provider_capability_permitted(&descriptor.capability_id, |capability_id| {
+                    self.allow_set.permits(capability_id)
+                })
+            });
         }
         Ok(surface)
     }
@@ -180,7 +198,9 @@ impl LoopCapabilityPort for CapabilitySurfaceProfileFilter {
         &self,
         request: CapabilityInvocation,
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
-        if !self.allow_set.permits(&request.capability_id) {
+        if !provider_capability_permitted(&request.capability_id, |capability_id| {
+            self.allow_set.permits(capability_id)
+        }) {
             return Ok(surface_profile_denied_outcome());
         }
         self.inner.invoke_capability(request).await
@@ -197,7 +217,11 @@ impl LoopCapabilityPort for CapabilitySurfaceProfileFilter {
         invoke_filtered_batch(
             &*self.inner,
             request,
-            |invocation| self.allow_set.permits(&invocation.capability_id),
+            |invocation| {
+                provider_capability_permitted(&invocation.capability_id, |capability_id| {
+                    self.allow_set.permits(capability_id)
+                })
+            },
             surface_profile_denied_outcome,
         )
         .await
@@ -283,9 +307,11 @@ fn apply_visible_filter_to_surface(
     surface: &mut VisibleCapabilitySurface,
     visible_capability_ids: &HashSet<CapabilityId>,
 ) {
-    surface
-        .descriptors
-        .retain(|descriptor| visible_capability_ids.contains(&descriptor.capability_id));
+    surface.descriptors.retain(|descriptor| {
+        provider_capability_permitted(&descriptor.capability_id, |capability_id| {
+            visible_capability_ids.contains(capability_id)
+        })
+    });
 }
 
 fn validate_provider_tool_call_capability_scope(
@@ -293,11 +319,11 @@ fn validate_provider_tool_call_capability_scope(
     permits: impl Fn(&CapabilityId) -> bool,
     denial_message: &'static str,
 ) -> Result<(), AgentLoopHostError> {
-    if !permits(&capability_ids.provider_capability_id)
+    if !provider_capability_permitted(&capability_ids.provider_capability_id, &permits)
         || capability_ids
             .effective_capability_ids
             .iter()
-            .any(|capability_id| !permits(capability_id))
+            .any(|capability_id| !provider_capability_permitted(capability_id, &permits))
     {
         return Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::InvalidInvocation,
@@ -305,6 +331,13 @@ fn validate_provider_tool_call_capability_scope(
         ));
     }
     Ok(())
+}
+
+fn provider_capability_permitted(
+    capability_id: &CapabilityId,
+    permits: impl Fn(&CapabilityId) -> bool,
+) -> bool {
+    permits(capability_id) || capability_info::is_capability_id(capability_id)
 }
 
 fn model_view_denied_outcome() -> CapabilityOutcome {
@@ -359,8 +392,6 @@ mod tests {
         CapabilitySurfaceVersion, ConcurrencyHint,
     };
     use ironclaw_turns::{LoopGateRef, LoopResultRef};
-
-    use crate::capability_info;
 
     use super::*;
 
@@ -645,6 +676,71 @@ mod tests {
                 ("demo.allowed", "demo__allowed"),
                 ("demo.other_allowed", "demo__other_allowed"),
             ]
+        );
+    }
+
+    #[test]
+    fn tool_definitions_preserve_capability_info_for_filtered_surface() {
+        let inner = Arc::new(SpyPort::default());
+        *inner
+            .tool_definitions
+            .lock()
+            .expect("tool definitions lock") = vec![
+            provider_definition(capability_info::CAPABILITY_ID, capability_info::TOOL_NAME),
+            provider_definition("demo.allowed", "demo__allowed"),
+            provider_definition("demo.denied", "demo__denied"),
+        ];
+        let filter = CapabilitySurfaceProfileFilter::new(
+            inner,
+            Arc::new(CapabilityAllowSet::allowlist([capability_id(
+                "demo.allowed",
+            )])),
+        );
+
+        let definitions = filter.tool_definitions().expect("tool definitions");
+
+        assert_eq!(
+            definitions
+                .iter()
+                .map(|definition| (definition.capability_id.as_str(), definition.name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (capability_info::CAPABILITY_ID, capability_info::TOOL_NAME),
+                ("demo.allowed", "demo__allowed"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn visible_capabilities_preserve_capability_info_for_filtered_surface() {
+        let inner = Arc::new(SpyPort::default());
+        *inner.surface.lock().expect("surface lock") = Some(VisibleCapabilitySurface {
+            version: surface_version(),
+            descriptors: vec![
+                descriptor(capability_info::CAPABILITY_ID),
+                descriptor("demo.allowed"),
+                descriptor("demo.denied"),
+            ],
+        });
+        let filter = CapabilitySurfaceProfileFilter::new(
+            inner,
+            Arc::new(CapabilityAllowSet::allowlist([capability_id(
+                "demo.allowed",
+            )])),
+        );
+
+        let surface = filter
+            .visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("surface");
+
+        assert_eq!(
+            surface
+                .descriptors
+                .iter()
+                .map(|descriptor| descriptor.capability_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![capability_info::CAPABILITY_ID, "demo.allowed"]
         );
     }
 
