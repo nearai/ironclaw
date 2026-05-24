@@ -223,14 +223,33 @@ mod hex_bytes {
     }
 
     pub(super) fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
-        let s = s.strip_prefix("0x").unwrap_or(s);
-        if !s.len().is_multiple_of(2) {
+        // Decode over raw bytes, never by `&str` byte-range indexing: a valid
+        // JSON string can carry multi-byte UTF-8, and slicing `&s[i..i + 2]` on
+        // a non-char-boundary panics. Working over `&[u8]` is panic-free and any
+        // non-ASCII byte is rejected cleanly as a non-hex digit.
+        let bytes = s.strip_prefix("0x").unwrap_or(s).as_bytes();
+        if !bytes.len().is_multiple_of(2) {
             return Err("odd-length hex".to_string());
         }
-        (0..s.len())
-            .step_by(2)
-            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| e.to_string()))
+        bytes
+            .chunks_exact(2)
+            .map(|pair| {
+                let hi = hex_digit(pair[0])?;
+                let lo = hex_digit(pair[1])?;
+                Ok((hi << 4) | lo)
+            })
             .collect()
+    }
+
+    /// Decode a single ASCII hex digit byte to its 0–15 value, rejecting any
+    /// non-hex (including non-ASCII) byte without panicking.
+    fn hex_digit(b: u8) -> Result<u8, String> {
+        match b {
+            b'0'..=b'9' => Ok(b - b'0'),
+            b'a'..=b'f' => Ok(b - b'a' + 10),
+            b'A'..=b'F' => Ok(b - b'A' + 10),
+            other => Err(format!("invalid hex digit: {other:#04x}")),
+        }
     }
 }
 

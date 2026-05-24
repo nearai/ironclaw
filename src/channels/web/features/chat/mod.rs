@@ -303,6 +303,35 @@ pub(crate) async fn chat_approval_handler(
     ))
 }
 
+/// Classify a gate resolution into the mission auto-resume outcome that should
+/// be fanned out to a paused background mission waiting on the same
+/// `request_id`, or `None` if this resolution must NOT drive a mission resume.
+///
+/// Security invariant (PR7 review): an injected-wallet proof must NEVER
+/// pre-classify as `Approved`. Its verified-proof -> broadcast ->
+/// authoritative-gate-resume handoff is deferred to PR10, and the proof may be
+/// malformed / unverified / not-yet-wired. Returning `None` here, combined with
+/// the caller only firing the resume hook on a *successful* (`Ok`) resolution,
+/// makes the injected-proof failure path fully inert w.r.t. mission/gate state:
+/// it can never transition a paused mission `Paused -> Active`.
+///
+/// PR10: once the authoritative gate record + accepted-resume/broadcast handoff
+/// exists, drive the mission resume from that authoritative success outcome —
+/// never from this request-body classification.
+fn mission_outcome_for_resolution(
+    resolution: &GateResolutionPayload,
+) -> Option<ironclaw_engine::GateResolutionOutcome> {
+    match resolution {
+        GateResolutionPayload::Approved { .. }
+        | GateResolutionPayload::CredentialProvided { .. } => {
+            Some(ironclaw_engine::GateResolutionOutcome::Approved)
+        }
+        GateResolutionPayload::Denied => Some(ironclaw_engine::GateResolutionOutcome::Denied),
+        GateResolutionPayload::Cancelled => Some(ironclaw_engine::GateResolutionOutcome::Cancelled),
+        GateResolutionPayload::InjectedWalletProof { .. } => None,
+    }
+}
+
 pub(crate) async fn chat_gate_resolve_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
@@ -330,15 +359,7 @@ pub(crate) async fn chat_gate_resolve_handler(
             "Invalid request_id (expected UUID)".to_string(),
         )
     })?;
-    let mission_outcome = match req.resolution {
-        GateResolutionPayload::Approved { .. }
-        | GateResolutionPayload::CredentialProvided { .. }
-        | GateResolutionPayload::InjectedWalletProof { .. } => {
-            Some(ironclaw_engine::GateResolutionOutcome::Approved)
-        }
-        GateResolutionPayload::Denied => Some(ironclaw_engine::GateResolutionOutcome::Denied),
-        GateResolutionPayload::Cancelled => Some(ironclaw_engine::GateResolutionOutcome::Cancelled),
-    };
+    let mission_outcome = mission_outcome_for_resolution(&req.resolution);
     let mission_resume = mission_outcome.map(|outcome| (outcome, gate_request_id));
 
     let response: Result<Json<ActionResponse>, (StatusCode, String)> = match req.resolution {
@@ -456,7 +477,15 @@ pub(crate) async fn chat_gate_resolve_handler(
         }
     };
 
-    if let Some((outcome, gate_request_id)) = mission_resume {
+    // Mission auto-resume / `Paused -> Active` transition MUST run only after a
+    // SUCCESSFUL gate resolution. A failed resolution (e.g. a malformed or
+    // unverified proof returning Err(400/503)) leaves the paused mission and the
+    // gate untouched — the failure path is fully inert w.r.t. mission/gate
+    // state. (Injected-wallet proofs additionally never produce a
+    // `mission_resume` outcome in PR7; see the classification above.)
+    if response.is_ok()
+        && let Some((outcome, gate_request_id)) = mission_resume
+    {
         let _ = crate::bridge::resume_paused_missions_for_gate_request(
             &user.user_id,
             gate_request_id,
@@ -3182,6 +3211,110 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "fail-closed gate resolution must not forward a submission"
+        );
+    }
+
+    /// PR7 review regression: an injected-wallet proof must NEVER classify as a
+    /// mission-resume outcome. The verified-proof -> broadcast -> authoritative
+    /// resume handoff is deferred to PR10; pre-classifying it as `Approved` (the
+    /// pre-fix behavior) let a malformed / unverified proof transition a paused
+    /// mission `Paused -> Active` even when `resolve_injected_wallet_proof`
+    /// returned `Err`. The classifier is the single seam the handler's
+    /// mission-resume hook is built from, so gating it here proves the resume
+    /// can never be reached for an injected proof.
+    #[test]
+    fn injected_wallet_proof_never_classifies_as_mission_resume() {
+        let injected = GateResolutionPayload::InjectedWalletProof {
+            scheme: "evm".into(),
+            signer: "0x00000000000000000000000000000000000000aa".into(),
+            signature: "00".repeat(65),
+            approved_tx_hash: "07".repeat(32),
+            public_key: None,
+        };
+        assert!(
+            mission_outcome_for_resolution(&injected).is_none(),
+            "injected-wallet proof must not produce a mission-resume outcome in PR7"
+        );
+
+        // The other arms keep their existing classification so foreground gates
+        // and OAuth/credential flows still drive mission resume.
+        assert!(matches!(
+            mission_outcome_for_resolution(&GateResolutionPayload::Approved { always: false }),
+            Some(ironclaw_engine::GateResolutionOutcome::Approved)
+        ));
+        assert!(matches!(
+            mission_outcome_for_resolution(&GateResolutionPayload::CredentialProvided {
+                token: "t".into()
+            }),
+            Some(ironclaw_engine::GateResolutionOutcome::Approved)
+        ));
+        assert!(matches!(
+            mission_outcome_for_resolution(&GateResolutionPayload::Denied),
+            Some(ironclaw_engine::GateResolutionOutcome::Denied)
+        ));
+        assert!(matches!(
+            mission_outcome_for_resolution(&GateResolutionPayload::Cancelled),
+            Some(ironclaw_engine::GateResolutionOutcome::Cancelled)
+        ));
+    }
+
+    /// PR7 review regression at the `/api/chat/gate/resolve` boundary: with a
+    /// PAUSED background mission waiting on the same `request_id`, a PR7-disabled
+    /// (composition-not-wired) injected proof must fail closed (503) and leave
+    /// mission/gate state untouched — no submission forwarded, no resume. The
+    /// engine is intentionally not booted, so `resume_paused_missions_for_gate_request`
+    /// is a no-op even if reached; the durable guarantee that it is *never*
+    /// reached for an injected proof is enforced by
+    /// `injected_wallet_proof_never_classifies_as_mission_resume` above (the
+    /// classifier is the only input to the resume hook) plus the handler's
+    /// `response.is_ok()` gate on the resume call.
+    #[tokio::test]
+    async fn test_chat_gate_resolve_injected_proof_does_not_resume_paused_mission() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let state = test_gateway_state(None);
+        *state.msg_tx.write().await = Some(tx);
+
+        let app = Router::new()
+            .route("/api/chat/gate/resolve", post(chat_gate_resolve_handler))
+            .with_state(state);
+
+        let request_id = Uuid::new_v4();
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/chat/gate/resolve")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "request_id": request_id,
+                    "thread_id": "gateway-thread-sign",
+                    "resolution": "injected_wallet_proof",
+                    "scheme": "evm",
+                    "signer": "0x00000000000000000000000000000000000000aa",
+                    "signature": "00".repeat(65),
+                    "approved_tx_hash": "07".repeat(32),
+                })
+                .to_string(),
+            ))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "member-1".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        // Fail closed: PR7 composition is not wired.
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        // The failure path must be inert: nothing forwarded to the agent loop,
+        // so no paused mission can be resumed via a submission either.
+        assert!(
+            rx.try_recv().is_err(),
+            "failed injected-proof resolution must not forward any submission"
         );
     }
 

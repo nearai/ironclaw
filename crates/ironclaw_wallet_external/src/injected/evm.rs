@@ -39,6 +39,14 @@ pub(super) fn verify_signer_over_hash(
 
     // Split r ∥ s ∥ v and normalize v to a 0/1 recovery id (accepts 27/28 and
     // EIP-155-style large v by taking the low bit's parity).
+    //
+    // Signature malleability (low-S) is not a vulnerability here: recovery is
+    // performed against a fixed recovery id and the recovered address is then
+    // bound 1:1 to the sealed, one-shot grant (claimed atomically in
+    // `verify_resume`), so a malleated (r, n−s) variant cannot be replayed and
+    // recovers to the same signer set anyway. `k256` does not reject high-S in
+    // `Signature::from_slice`; we intentionally do not add a low-S gate because
+    // the grant CAS already provides anti-replay (see the crate's threat #1).
     let sig = Signature::from_slice(&signature[..64]).map_err(|e| {
         SigningProviderError::ProofInvalid {
             reason: format!("invalid evm signature scalars: {e}"),
@@ -95,19 +103,34 @@ fn address_from_verifying_key(key: &VerifyingKey) -> [u8; 20] {
 
 /// Parse a `0x`-prefixed (case-insensitive) hex EVM address into 20 bytes.
 fn parse_evm_address(s: &str) -> Result<[u8; 20], SigningProviderError> {
-    let stripped = s.strip_prefix("0x").unwrap_or(s);
+    // Decode over raw bytes: the bound account is untrusted input and may carry
+    // multi-byte UTF-8 of even byte length, so `&str` byte-range slicing would
+    // panic on a non-char-boundary. `&[u8]` indexing is panic-free and any
+    // non-ASCII byte is rejected cleanly below.
+    let stripped = s.strip_prefix("0x").unwrap_or(s).as_bytes();
     if stripped.len() != 40 {
         return Err(SigningProviderError::ProofInvalid {
             reason: format!("bound account is not a 20-byte evm address: {s}"),
         });
     }
     let mut out = [0u8; 20];
-    for (i, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&stripped[i * 2..i * 2 + 2], 16).map_err(|e| {
-            SigningProviderError::ProofInvalid {
-                reason: format!("bound account hex invalid: {e}"),
-            }
-        })?;
+    for (byte, pair) in out.iter_mut().zip(stripped.chunks_exact(2)) {
+        let hi = hex_digit(pair[0])?;
+        let lo = hex_digit(pair[1])?;
+        *byte = (hi << 4) | lo;
     }
     Ok(out)
+}
+
+/// Decode a single ASCII hex digit byte to its 0–15 value, rejecting any
+/// non-hex (including non-ASCII) byte without panicking.
+fn hex_digit(b: u8) -> Result<u8, SigningProviderError> {
+    match b {
+        b'0'..=b'9' => Ok(b - b'0'),
+        b'a'..=b'f' => Ok(b - b'a' + 10),
+        b'A'..=b'F' => Ok(b - b'A' + 10),
+        other => Err(SigningProviderError::ProofInvalid {
+            reason: format!("bound account hex invalid digit: {other:#04x}"),
+        }),
+    }
 }

@@ -195,15 +195,36 @@ fn parse_hash(s: &str) -> Result<ApprovedTxHash, (StatusCode, String)> {
 }
 
 /// Decode a hex string (optionally `0x`-prefixed) to bytes.
+///
+/// Decodes over raw bytes, never by `&str` byte-range indexing: the input is
+/// attacker-supplied JSON and may carry multi-byte UTF-8 of even byte length,
+/// so slicing `&s[i..i + 2]` on a non-char-boundary would panic (500 / info
+/// leak). Working over `&[u8]` is panic-free and rejects any non-ASCII /
+/// non-hex byte cleanly, surfacing as a `BAD_REQUEST` at the caller.
 fn parse_hex(s: &str) -> Result<Vec<u8>, String> {
-    let s = s.strip_prefix("0x").unwrap_or(s);
-    if !s.len().is_multiple_of(2) {
+    let bytes = s.strip_prefix("0x").unwrap_or(s).as_bytes();
+    if !bytes.len().is_multiple_of(2) {
         return Err("odd-length hex".to_string());
     }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| e.to_string()))
+    bytes
+        .chunks_exact(2)
+        .map(|pair| {
+            let hi = hex_digit(pair[0])?;
+            let lo = hex_digit(pair[1])?;
+            Ok((hi << 4) | lo)
+        })
         .collect()
+}
+
+/// Decode a single ASCII hex digit byte to its 0–15 value, rejecting any
+/// non-hex (including non-ASCII) byte without panicking.
+fn hex_digit(b: u8) -> Result<u8, String> {
+    match b {
+        b'0'..=b'9' => Ok(b - b'0'),
+        b'a'..=b'f' => Ok(b - b'a' + 10),
+        b'A'..=b'F' => Ok(b - b'A' + 10),
+        other => Err(format!("invalid hex digit: {other:#04x}")),
+    }
 }
 
 #[cfg(test)]
@@ -262,6 +283,89 @@ mod tests {
         })
         .expect_err("short hash must reject");
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    /// Attacker-supplied Unicode in any hex field must reject as a clean
+    /// `BAD_REQUEST`, never panic. A multi-byte UTF-8 char of even byte length
+    /// (e.g. `é` = 2 bytes, `\u{0561}` = 2 bytes) used to panic the `&str`
+    /// byte-range slicer; it must now fail closed.
+    #[test]
+    fn proof_from_input_rejects_unicode_signature_without_panic() {
+        // "é" is 2 UTF-8 bytes; padded to even byte length so the odd-length
+        // guard does not short-circuit before the (former) slice panic.
+        let err = proof_from_input(&InjectedWalletProofInput {
+            scheme: "evm".into(),
+            signer: "0x".to_string() + &"0".repeat(40),
+            signature: "éé".into(),
+            approved_tx_hash: "00".repeat(32),
+            public_key: None,
+        })
+        .expect_err("unicode signature must reject");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn proof_from_input_rejects_unicode_approved_tx_hash_without_panic() {
+        let err = proof_from_input(&InjectedWalletProofInput {
+            scheme: "evm".into(),
+            signer: "0x".to_string() + &"0".repeat(40),
+            signature: "00".repeat(65),
+            // 64 bytes of multi-byte UTF-8 (32 × "é"): even byte length, would
+            // panic the old slicer on the first non-char-boundary.
+            approved_tx_hash: "é".repeat(32),
+            public_key: None,
+        })
+        .expect_err("unicode approved_tx_hash must reject");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn proof_from_input_rejects_unicode_public_key_without_panic() {
+        let err = proof_from_input(&InjectedWalletProofInput {
+            scheme: "solana".into(),
+            signer: "00".repeat(32),
+            signature: "00".repeat(64),
+            approved_tx_hash: "00".repeat(32),
+            public_key: Some("é".repeat(32)),
+        })
+        .expect_err("unicode public_key must reject");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    /// Unicode in the *bound account* reaches the per-scheme parser
+    /// (`parse_evm_address` / `parse_solana_pubkey`) through
+    /// `verify_injected_proof`. A 40-byte (EVM) / 64-byte (Solana) non-ASCII
+    /// bound account passes the byte-length check, so it used to panic the
+    /// slicer; it must now fail closed as `ProofInvalid`.
+    #[tokio::test]
+    async fn verify_injected_proof_rejects_unicode_bound_account_without_panic() {
+        let store = Arc::new(InMemorySealedGrantStore::new());
+        // 32 × "é" = 64 bytes: matches the Solana key byte-length gate exactly.
+        let unicode_account = "é".repeat(32);
+        let context = ctx(&unicode_account);
+        let hash = ApprovedTxHash::from_bytes([5u8; 32]);
+        let gk = GrantKey::from_context(&context, hash);
+        store
+            .seal(AttestedSigningGrant::seal(gk, 1_000, None))
+            .await
+            .expect("seal");
+
+        let key = EdSigningKey::from_bytes(&[0x22u8; 32]);
+        let pubkey = key.verifying_key().to_bytes();
+        let sig = key.sign(hash.as_bytes());
+        let proof = proof_from_input(&InjectedWalletProofInput {
+            scheme: "solana".into(),
+            signer: unicode_account.clone(),
+            signature: lower_hex(&sig.to_bytes()),
+            approved_tx_hash: lower_hex(hash.as_bytes()),
+            public_key: Some(lower_hex(&pubkey)),
+        })
+        .expect("proof parses");
+
+        let err = verify_injected_proof(store, &context, &hash, &proof)
+            .await
+            .expect_err("unicode bound account must reject, not panic");
+        assert!(matches!(err, SigningProviderError::ProofInvalid { .. }));
     }
 
     #[tokio::test]

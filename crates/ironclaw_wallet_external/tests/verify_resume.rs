@@ -347,6 +347,107 @@ async fn non_injected_proof_is_rejected() {
     assert!(matches!(err, SigningProviderError::ProofInvalid { .. }));
 }
 
+// ── Panic-free hex parsing on attacker-supplied Unicode ──
+//
+// Every hex field (bound account, proof signature, proof public_key) is parsed
+// from untrusted input. A valid JSON string carrying multi-byte UTF-8 of even
+// byte length used to panic the `&str` byte-range slicer (500 / info leak); it
+// must now fail closed as `ProofInvalid`, never panic.
+
+#[tokio::test]
+async fn evm_unicode_bound_account_is_proof_invalid_not_panic() {
+    let store = Arc::new(InMemorySealedGrantStore::new());
+    let provider = InjectedSigningProvider::new(store.clone());
+
+    let key = evm_key();
+    // 40 bytes of multi-byte UTF-8 (20 × "é"): passes the byte-length gate, so
+    // it reaches the (formerly panicking) hex slicer.
+    let unicode_account = "é".repeat(20);
+    assert_eq!(unicode_account.len(), 40);
+    let ctx = ctx_for(&unicode_account, "eip155:1");
+    let hash = ApprovedTxHash::from_bytes([7u8; 32]);
+    seal_grant(&store, &ctx, hash).await;
+
+    let payload = InjectedProofPayload {
+        scheme: InjectedScheme::Evm,
+        approved_tx_hash: hash,
+        claimed_signer: unicode_account.clone(),
+        signature: evm_personal_sign(&key, hash.as_bytes()),
+        public_key: None,
+    };
+    let proof = SigningProof::InjectedProof(encode_injected_proof(&payload));
+
+    let err = provider
+        .verify_resume(&ctx, &hash, &proof)
+        .await
+        .expect_err("unicode evm bound account must fail closed");
+    assert!(matches!(err, SigningProviderError::ProofInvalid { .. }));
+}
+
+#[tokio::test]
+async fn solana_unicode_bound_account_is_proof_invalid_not_panic() {
+    let store = Arc::new(InMemorySealedGrantStore::new());
+    let provider = InjectedSigningProvider::new(store.clone());
+
+    let key = solana_key();
+    let pubkey = solana_pubkey(&key);
+    // 64 bytes of multi-byte UTF-8 (32 × "é"): passes the byte-length gate.
+    let unicode_account = "é".repeat(32);
+    assert_eq!(unicode_account.len(), 64);
+    let ctx = ctx_for(&unicode_account, "solana:mainnet");
+    let hash = ApprovedTxHash::from_bytes([5u8; 32]);
+    seal_grant(&store, &ctx, hash).await;
+
+    let sig = key.sign(hash.as_bytes());
+    let payload = InjectedProofPayload {
+        scheme: InjectedScheme::Solana,
+        approved_tx_hash: hash,
+        claimed_signer: unicode_account.clone(),
+        signature: sig.to_bytes().to_vec(),
+        public_key: Some(pubkey.to_vec()),
+    };
+    let proof = SigningProof::InjectedProof(encode_injected_proof(&payload));
+
+    let err = provider
+        .verify_resume(&ctx, &hash, &proof)
+        .await
+        .expect_err("unicode solana bound account must fail closed");
+    assert!(matches!(err, SigningProviderError::ProofInvalid { .. }));
+}
+
+/// Build a valid `approved_tx_hash` JSON fragment (a 32-element byte array, the
+/// `#[serde(transparent)]` `[u8; 32]` form) so the decoder reaches the
+/// signature/public_key hex fields under test.
+fn zero_hash_json_array() -> String {
+    let zeros: Vec<&str> = vec!["0"; 32];
+    format!("[{}]", zeros.join(","))
+}
+
+#[test]
+fn decode_injected_proof_rejects_unicode_signature_without_panic() {
+    // Hand-crafted JSON proof body with Unicode in the `signature` hex field.
+    // `decode_injected_proof` runs the serde `hex_bytes` decoder, which used to
+    // slice `&str` by byte offset and panic on a non-char-boundary.
+    let json = format!(
+        r#"{{"scheme":"evm","approved_tx_hash":{},"claimed_signer":"0x00","signature":"éé"}}"#,
+        zero_hash_json_array()
+    );
+    let err = ironclaw_wallet_external::decode_injected_proof(json.as_bytes())
+        .expect_err("unicode signature must reject");
+    assert!(matches!(err, SigningProviderError::ProofInvalid { .. }));
+}
+
+#[test]
+fn decode_injected_proof_rejects_unicode_public_key_without_panic() {
+    let json = format!(
+        r#"{{"scheme":"solana","approved_tx_hash":{},"claimed_signer":"aa","signature":"0000","public_key":"éé"}}"#,
+        zero_hash_json_array()
+    );
+    let err = ironclaw_wallet_external::decode_injected_proof(json.as_bytes())
+        .expect_err("unicode public_key must reject");
+    assert!(matches!(err, SigningProviderError::ProofInvalid { .. }));
+}
+
 #[tokio::test]
 async fn proof_payload_round_trips_through_opaque_bytes() {
     let hash = ApprovedTxHash::from_bytes([4u8; 32]);

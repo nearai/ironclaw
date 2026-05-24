@@ -64,19 +64,34 @@ pub(super) fn verify_signer_over_hash(
 
 /// Parse the lowercase-hex 32-byte ed25519 public key bound account.
 fn parse_solana_pubkey(s: &str) -> Result<[u8; 32], SigningProviderError> {
-    let stripped = s.strip_prefix("0x").unwrap_or(s);
+    // Decode over raw bytes: the bound account is untrusted input and may carry
+    // multi-byte UTF-8 of even byte length, so `&str` byte-range slicing would
+    // panic on a non-char-boundary. `&[u8]` indexing is panic-free and any
+    // non-ASCII byte is rejected cleanly below.
+    let stripped = s.strip_prefix("0x").unwrap_or(s).as_bytes();
     if stripped.len() != 64 {
         return Err(SigningProviderError::ProofInvalid {
             reason: format!("bound account is not a 32-byte ed25519 key: {s}"),
         });
     }
     let mut out = [0u8; 32];
-    for (i, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&stripped[i * 2..i * 2 + 2], 16).map_err(|e| {
-            SigningProviderError::ProofInvalid {
-                reason: format!("bound account hex invalid: {e}"),
-            }
-        })?;
+    for (byte, pair) in out.iter_mut().zip(stripped.chunks_exact(2)) {
+        let hi = hex_digit(pair[0])?;
+        let lo = hex_digit(pair[1])?;
+        *byte = (hi << 4) | lo;
     }
     Ok(out)
+}
+
+/// Decode a single ASCII hex digit byte to its 0–15 value, rejecting any
+/// non-hex (including non-ASCII) byte without panicking.
+fn hex_digit(b: u8) -> Result<u8, SigningProviderError> {
+    match b {
+        b'0'..=b'9' => Ok(b - b'0'),
+        b'a'..=b'f' => Ok(b - b'a' + 10),
+        b'A'..=b'F' => Ok(b - b'A' + 10),
+        other => Err(SigningProviderError::ProofInvalid {
+            reason: format!("bound account hex invalid digit: {other:#04x}"),
+        }),
+    }
 }
