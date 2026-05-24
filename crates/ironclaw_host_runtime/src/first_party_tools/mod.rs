@@ -34,7 +34,7 @@ use crate::{
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
 
-use self::schemas::resolve_builtin_package_input_schemas;
+pub(crate) use self::schemas::resolve_builtin_input_schema_ref;
 
 pub use echo::ECHO_CAPABILITY_ID;
 pub use http::HTTP_CAPABILITY_ID;
@@ -118,7 +118,7 @@ const CODING_CAPABILITIES: &[CodingCapabilityMetadata] = &[
 /// Create the host-assigned package that declares built-in first-party
 /// capabilities for the capability surface.
 pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError> {
-    let mut package = ExtensionPackage::from_manifest(
+    ExtensionPackage::from_manifest(
         ExtensionManifest {
             schema_version: MANIFEST_SCHEMA_VERSION.to_string(),
             id: ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
@@ -148,9 +148,7 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
             },
         },
         VirtualPath::new("/system/extensions/builtin")?,
-    )?;
-    resolve_builtin_package_input_schemas(&mut package)?;
-    Ok(package)
+    )
 }
 
 fn coding_manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {

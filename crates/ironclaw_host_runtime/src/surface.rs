@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 
 use crate::{
     CapabilitySurfaceVersion, HostRuntimeError, VisibleCapabilityRequest, VisibleCapabilitySurface,
+    first_party_tools::{BUILTIN_FIRST_PARTY_PROVIDER, resolve_builtin_input_schema_ref},
     plan_capability,
 };
 
@@ -180,7 +181,7 @@ impl<'a> CapabilityCatalog<'a> {
             };
 
             capabilities.push(VisibleCapability {
-                descriptor: descriptor.clone(),
+                descriptor: surface_descriptor(descriptor)?,
                 access,
                 estimated_resources: estimate,
             });
@@ -197,6 +198,31 @@ impl<'a> CapabilityCatalog<'a> {
             capabilities,
         })
     }
+}
+
+fn surface_descriptor(
+    descriptor: &CapabilityDescriptor,
+) -> Result<CapabilityDescriptor, HostRuntimeError> {
+    let mut descriptor = descriptor.clone();
+    if descriptor.provider.as_str() != BUILTIN_FIRST_PARTY_PROVIDER {
+        return Ok(descriptor);
+    }
+    let Some(reference) = descriptor
+        .parameters_schema
+        .get("$ref")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    else {
+        return Ok(descriptor);
+    };
+    descriptor.parameters_schema =
+        resolve_builtin_input_schema_ref(&reference).ok_or_else(|| {
+            HostRuntimeError::invalid_request(format!(
+                "built-in capability {} references unknown input schema {}",
+                descriptor.id, reference
+            ))
+        })?;
+    Ok(descriptor)
 }
 
 fn surface_version(

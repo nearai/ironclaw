@@ -400,14 +400,12 @@ async fn visible_surface_uses_caller_provider_trust_not_host_trust_policy() {
 #[tokio::test]
 async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
     let package = builtin_first_party_package().unwrap();
-    for descriptor in &package.capabilities {
-        assert!(
-            descriptor.parameters_schema.get("$ref").is_none(),
-            "{} should be registered with a concrete input schema, got {:?}",
-            descriptor.id,
-            descriptor.parameters_schema
-        );
-    }
+    assert!(
+        package
+            .capabilities
+            .iter()
+            .all(|descriptor| descriptor.parameters_schema.get("$ref").is_some())
+    );
 
     let mut registry = ExtensionRegistry::new();
     registry.insert(package.clone()).unwrap();
@@ -429,6 +427,14 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
 
     assert_eq!(surface.capabilities.len(), package.capabilities.len());
     for capability in &surface.capabilities {
+        jsonschema::validator_for(&capability.descriptor.parameters_schema).unwrap_or_else(
+            |error| {
+                panic!(
+                    "{} should expose a valid JSON schema: {error}",
+                    capability.descriptor.id
+                )
+            },
+        );
         assert!(
             capability
                 .descriptor

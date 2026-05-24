@@ -2,9 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use ironclaw_host_api::{CapabilityDescriptor, CapabilityId, ExtensionId};
 
-use crate::{ExtensionError, ExtensionPackage, ManifestSource};
-
-const BUILTIN_FIRST_PARTY_EXTENSION_ID: &str = "builtin";
+use crate::{ExtensionError, ExtensionPackage};
 
 /// Registry of validated extension packages and declared capabilities.
 #[derive(Debug, Default)]
@@ -190,32 +188,10 @@ pub(crate) fn validate_package_consistency(
             ),
         });
     }
-    // The built-in first-party package may pre-resolve manifest schema refs into
-    // concrete descriptors; all other descriptor fields must still match.
-    if package.capabilities != expected.capabilities
-        && !host_bundled_capabilities_match_except_parameters_schema(package, &expected)
-    {
+    if package.capabilities != expected.capabilities {
         return Err(ExtensionError::InvalidManifest {
             reason: "package capability descriptors do not match manifest declarations".to_string(),
         });
     }
     Ok(())
-}
-
-fn host_bundled_capabilities_match_except_parameters_schema(
-    package: &ExtensionPackage,
-    expected: &ExtensionPackage,
-) -> bool {
-    if package.manifest.source != ManifestSource::HostBundled
-        || package.id.as_str() != BUILTIN_FIRST_PARTY_EXTENSION_ID
-        || package.capabilities.len() != expected.capabilities.len()
-    {
-        return false;
-    }
-
-    let mut normalized = package.capabilities.clone();
-    for (actual, expected) in normalized.iter_mut().zip(&expected.capabilities) {
-        actual.parameters_schema = expected.parameters_schema.clone();
-    }
-    normalized == expected.capabilities
 }

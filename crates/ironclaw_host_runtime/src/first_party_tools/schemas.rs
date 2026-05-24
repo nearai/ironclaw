@@ -1,34 +1,6 @@
-use ironclaw_extensions::{ExtensionError, ExtensionPackage};
 use serde_json::{Value, json};
 
-pub(super) fn resolve_builtin_package_input_schemas(
-    package: &mut ExtensionPackage,
-) -> Result<(), ExtensionError> {
-    for descriptor in &mut package.capabilities {
-        let Some(reference) = descriptor
-            .parameters_schema
-            .get("$ref")
-            .and_then(Value::as_str)
-        else {
-            return Err(ExtensionError::InvalidManifest {
-                reason: format!(
-                    "built-in capability {} must declare an input schema ref",
-                    descriptor.id
-                ),
-            });
-        };
-        descriptor.parameters_schema =
-            builtin_input_schema(reference).ok_or_else(|| ExtensionError::InvalidManifest {
-                reason: format!(
-                    "built-in capability {} references unknown input schema {}",
-                    descriptor.id, reference
-                ),
-            })?;
-    }
-    Ok(())
-}
-
-fn builtin_input_schema(reference: &str) -> Option<Value> {
+pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value> {
     Some(match reference {
         "schemas/builtin/echo.input.v1.json" => json!({
             "type": "object",
