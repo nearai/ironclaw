@@ -6,6 +6,7 @@ use ironclaw_turns::{
         VisibleCapabilitySurface,
     },
 };
+use tracing::debug;
 
 use crate::state::LoopExecutionState;
 
@@ -64,6 +65,21 @@ impl ExecutorStage<PromptInput> for PromptStage {
                 stage: HostStage::Capability,
             })?;
         apply_capability_filter(&mut surface, &surface_filter);
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let visible_capability_sample = surface
+                .descriptors
+                .iter()
+                .take(20)
+                .map(|descriptor| descriptor.capability_id.as_str())
+                .collect::<Vec<_>>();
+            debug!(
+                iteration = state.iteration,
+                surface_version = %surface.version,
+                visible_capability_count = surface.descriptors.len(),
+                visible_capability_sample = ?visible_capability_sample,
+                "agent loop prompt capability surface prepared"
+            );
+        }
         let capability_view = LoopModelCapabilityView {
             visible_capability_ids: surface
                 .descriptors

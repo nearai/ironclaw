@@ -6,6 +6,7 @@ use ironclaw_turns::{
         LoopProgressEvent, LoopSafeSummary,
     },
 };
+use tracing::debug;
 
 use crate::{
     state::{CheckpointKind, LoopExecutionState},
@@ -63,11 +64,50 @@ impl ExecutorStage<ModelInput> for ModelStage {
             model_preference,
             capability_view: Some(input.capability_view),
         };
+        let visible_capability_count = request
+            .capability_view
+            .as_ref()
+            .map(|view| view.visible_capability_ids.len())
+            .unwrap_or(0);
+        debug!(
+            iteration = state.iteration,
+            surface_version = request
+                .surface_version
+                .as_ref()
+                .map(|version| version.as_str())
+                .unwrap_or("<none>"),
+            visible_capability_count,
+            model_preference = request
+                .model_preference
+                .as_ref()
+                .map(|profile| profile.as_str())
+                .unwrap_or("<none>"),
+            message_count = request.messages.len(),
+            "agent loop model request prepared"
+        );
 
         let mut recorded_failure = false;
         for _ in 0..MAX_MODEL_RETRIES {
             match ctx.host.stream_model(request.clone()).await {
                 Ok(response) => {
+                    match &response.output {
+                        ironclaw_turns::run_profile::ParentLoopOutput::AssistantReply(reply) => {
+                            debug!(
+                                iteration = state.iteration,
+                                response_kind = "assistant_reply",
+                                content_bytes = reply.content.len(),
+                                "agent loop model response classified"
+                            );
+                        }
+                        ironclaw_turns::run_profile::ParentLoopOutput::CapabilityCalls(calls) => {
+                            debug!(
+                                iteration = state.iteration,
+                                response_kind = "capability_calls",
+                                capability_call_count = calls.len(),
+                                "agent loop model response classified"
+                            );
+                        }
+                    }
                     state.recovery_state = state.recovery_state.cleared_attempts();
                     return Ok(ModelStep::Response(Box::new(state), response));
                 }

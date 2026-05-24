@@ -175,6 +175,20 @@ where
                 self.run_profile_resolver.as_ref(),
             )
             .await?;
+        let SubmitTurnResponse::Accepted {
+            run_id,
+            status,
+            resolved_run_profile_id,
+            resolved_run_profile_version,
+            ..
+        } = &response;
+        debug!(
+            run_id = %run_id,
+            status = ?status,
+            resolved_run_profile_id = resolved_run_profile_id.as_str(),
+            resolved_run_profile_version = resolved_run_profile_version.as_u64(),
+            "turn coordinator accepted turn with resolved run profile"
+        );
         notify_queued_run_best_effort(self.wake_notifier.as_ref(), submit_wake(scope, &response));
         Ok(response)
     }
