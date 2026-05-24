@@ -346,8 +346,8 @@ fn input_error() -> FirstPartyCapabilityError {
     FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode)
 }
 
-fn guest_error() -> FirstPartyCapabilityError {
-    FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Guest)
+fn operation_error() -> FirstPartyCapabilityError {
+    FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
 }
 
 fn coding_error(error: CodingCapabilityError) -> FirstPartyCapabilityError {

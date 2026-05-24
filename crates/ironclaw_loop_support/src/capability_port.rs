@@ -1527,8 +1527,10 @@ fn runtime_failure_kind_to_loop(
         RuntimeFailureKind::Cancelled => CapabilityFailureKind::Cancelled,
         RuntimeFailureKind::Dispatcher => CapabilityFailureKind::Dispatcher,
         RuntimeFailureKind::InvalidInput => CapabilityFailureKind::InvalidInput,
+        RuntimeFailureKind::InvalidOutput => CapabilityFailureKind::InvalidOutput,
         RuntimeFailureKind::MissingRuntime => CapabilityFailureKind::MissingRuntime,
         RuntimeFailureKind::Network => CapabilityFailureKind::Network,
+        RuntimeFailureKind::OperationFailed => CapabilityFailureKind::OperationFailed,
         RuntimeFailureKind::OutputTooLarge => CapabilityFailureKind::OutputTooLarge,
         RuntimeFailureKind::Process => CapabilityFailureKind::Process,
         RuntimeFailureKind::Resource => CapabilityFailureKind::Resource,
@@ -1720,10 +1722,18 @@ mod tests {
                 CapabilityFailureKind::InvalidInput,
             ),
             (
+                RuntimeFailureKind::InvalidOutput,
+                CapabilityFailureKind::InvalidOutput,
+            ),
+            (
                 RuntimeFailureKind::MissingRuntime,
                 CapabilityFailureKind::MissingRuntime,
             ),
             (RuntimeFailureKind::Network, CapabilityFailureKind::Network),
+            (
+                RuntimeFailureKind::OperationFailed,
+                CapabilityFailureKind::OperationFailed,
+            ),
             (
                 RuntimeFailureKind::OutputTooLarge,
                 CapabilityFailureKind::OutputTooLarge,

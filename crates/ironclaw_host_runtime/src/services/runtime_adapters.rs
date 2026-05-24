@@ -580,7 +580,7 @@ where
             &execution.usage,
         )?;
         return Err(DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::Guest,
+            kind: RuntimeDispatchErrorKind::OperationFailed,
         });
     }
     let Some(output_json) = execution.output_json else {

@@ -96,6 +96,9 @@ pub(crate) enum CapabilityErrorClass {
     Permanent,
     /// Host rejected malformed capability input.
     InputInvalid,
+    /// Capability implementation ran but could not complete the requested
+    /// operation in a model-visible way.
+    OperationFailed,
     /// Host policy denied the capability call.
     PolicyDenied,
     /// Capability provider or backing service is unavailable.
@@ -171,8 +174,8 @@ pub(crate) enum RetryScope {
 /// exponential backoff.
 ///
 /// This strategy:
-/// - Turns `PolicyDenied` and `InputInvalid` into model-visible tool error
-///   results without consuming retry budget.
+/// - Turns `PolicyDenied`, `InputInvalid`, and `OperationFailed` into
+///   model-visible tool error results without consuming retry budget.
 /// - Aborts immediately on `Permanent` and `ContentFiltered`.
 /// - Retries capability/model transient, unavailable, and internal errors up
 ///   to [`Self::max_attempts_per_class`] times with `Backoff`.
@@ -294,7 +297,9 @@ impl RecoveryStrategy for DefaultRecoveryStrategy {
 fn capability_error_is_model_visible_tool_failure(class: CapabilityErrorClass) -> bool {
     matches!(
         class,
-        CapabilityErrorClass::PolicyDenied | CapabilityErrorClass::InputInvalid
+        CapabilityErrorClass::PolicyDenied
+            | CapabilityErrorClass::InputInvalid
+            | CapabilityErrorClass::OperationFailed
     )
 }
 
@@ -331,6 +336,7 @@ fn capability_retry_attempt_class(class: CapabilityErrorClass) -> Option<Recover
         CapabilityErrorClass::Internal => Some(RecoveryAttemptClass::CapabilityInternal),
         CapabilityErrorClass::Permanent
         | CapabilityErrorClass::InputInvalid
+        | CapabilityErrorClass::OperationFailed
         | CapabilityErrorClass::PolicyDenied => None,
     }
 }
@@ -353,6 +359,7 @@ fn capability_error_to_failure_kind(class: CapabilityErrorClass) -> LoopFailureK
         CapabilityErrorClass::Transient
         | CapabilityErrorClass::Permanent
         | CapabilityErrorClass::InputInvalid
+        | CapabilityErrorClass::OperationFailed
         | CapabilityErrorClass::Unavailable
         | CapabilityErrorClass::Internal => LoopFailureKind::CapabilityProtocolError,
     }
@@ -488,6 +495,7 @@ mod tests {
             (CapabilityErrorClass::Transient, "transient"),
             (CapabilityErrorClass::Permanent, "permanent"),
             (CapabilityErrorClass::InputInvalid, "input_invalid"),
+            (CapabilityErrorClass::OperationFailed, "operation_failed"),
             (CapabilityErrorClass::PolicyDenied, "policy_denied"),
             (CapabilityErrorClass::Unavailable, "unavailable"),
             (CapabilityErrorClass::Internal, "internal"),
@@ -846,6 +854,23 @@ mod tests {
 
             let outcome = strategy
                 .on_capability_error(&state, &cap_err(CapabilityErrorClass::InputInvalid))
+                .await;
+
+            match outcome {
+                RecoveryOutcome::ToolErrorResult { recovery } => {
+                    assert_eq!(recovery, RecoveryStrategyState::default());
+                }
+                other => panic!("expected ToolErrorResult, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn capability_operation_failed_becomes_tool_error_result() {
+            let strategy = DefaultRecoveryStrategy::default();
+            let state = state_with_no_attempts();
+
+            let outcome = strategy
+                .on_capability_error(&state, &cap_err(CapabilityErrorClass::OperationFailed))
                 .await;
 
             match outcome {
