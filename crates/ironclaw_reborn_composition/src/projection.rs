@@ -121,10 +121,14 @@ impl ProjectionStream for WebuiRunStatusProjectionStream {
             .map_err(map_event_stream_error)?;
 
         let mut batch = WebuiProjectionBatch::new(origin_cursor);
-        if let Some(item) = subscription.next().await
-            && let Some((runtime_cursor, payload)) = item_to_payload(item, &request.scope)?
-        {
-            batch.push_runtime(runtime_cursor, payload);
+        if let Some(item) = subscription.next().await {
+            batch.push_runtime_item(item, &request.scope)?;
+            for _ in 1..WEBUI_PROJECTION_PAGE_LIMIT {
+                let Some(item) = subscription.try_next_buffered() else {
+                    break;
+                };
+                batch.push_runtime_item(item, &request.scope)?;
+            }
         }
 
         let turn_after = batch.cursor().turn.clone();
@@ -177,6 +181,17 @@ impl WebuiProjectionBatch {
     fn push_runtime(&mut self, cursor: EventProjectionCursor, payload: ProductOutboundPayload) {
         self.cursor.runtime = Some(cursor);
         self.push(payload);
+    }
+
+    fn push_runtime_item(
+        &mut self,
+        item: ProjectionStreamItem,
+        scope: &TurnScope,
+    ) -> Result<(), ProductAdapterError> {
+        if let Some((cursor, payload)) = item_to_payload(item, scope)? {
+            self.push_runtime(cursor, payload);
+        }
+        Ok(())
     }
 
     fn push_turn(&mut self, cursor: TurnEventProjectionCursor, payload: ProductOutboundPayload) {

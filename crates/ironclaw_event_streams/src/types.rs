@@ -240,6 +240,26 @@ impl ProjectionSubscription {
         }
     }
 
+    pub fn try_next_buffered(&mut self) -> Option<ProjectionStreamItem> {
+        if self.terminated {
+            return None;
+        }
+        if let Some(item) = self.pending_terminal.take() {
+            return self.observe_terminal_item(item);
+        }
+        match self.terminal_receiver.try_recv() {
+            Ok(item) => return self.observe_terminal_item(item),
+            Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {}
+        }
+        match self.receiver.try_recv() {
+            Ok(item) => self.observe_item(Some(item)),
+            Err(mpsc::error::TryRecvError::Empty) => None,
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                self.observe_item_or_terminal_on_close(None)
+            }
+        }
+    }
+
     fn observe_item_or_terminal_on_close(
         &mut self,
         item: Option<ProjectionStreamItem>,
@@ -335,4 +355,52 @@ fn with_observed_terminal_cursor(
 
 pub fn keep_alive_item() -> ProjectionStreamItem {
     ProjectionStreamItem::KeepAlive
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn try_next_buffered_returns_ready_item_without_waiting() {
+        let (sender, receiver) = mpsc::channel(2);
+        let (_terminal_sender, terminal_receiver) = mpsc::channel(1);
+        sender.try_send(ProjectionStreamItem::KeepAlive).unwrap();
+        let mut subscription = ProjectionSubscription::new(
+            receiver,
+            terminal_receiver,
+            ProjectionStreamAdmissionPermit::detached(),
+        );
+
+        assert!(matches!(
+            subscription.try_next_buffered(),
+            Some(ProjectionStreamItem::KeepAlive)
+        ));
+        assert!(subscription.try_next_buffered().is_none());
+    }
+
+    #[test]
+    fn try_next_buffered_defers_terminal_item_until_buffered_items_drain() {
+        let (sender, receiver) = mpsc::channel(2);
+        let (terminal_sender, terminal_receiver) = mpsc::channel(1);
+        sender.try_send(ProjectionStreamItem::KeepAlive).unwrap();
+        terminal_sender
+            .try_send(ProjectionStreamItem::KeepAlive)
+            .unwrap();
+        let mut subscription = ProjectionSubscription::new(
+            receiver,
+            terminal_receiver,
+            ProjectionStreamAdmissionPermit::detached(),
+        );
+
+        assert!(matches!(
+            subscription.try_next_buffered(),
+            Some(ProjectionStreamItem::KeepAlive)
+        ));
+        assert!(matches!(
+            subscription.try_next_buffered(),
+            Some(ProjectionStreamItem::KeepAlive)
+        ));
+        assert!(subscription.try_next_buffered().is_none());
+    }
 }
