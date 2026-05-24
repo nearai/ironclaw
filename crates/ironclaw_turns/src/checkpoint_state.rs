@@ -64,6 +64,17 @@ pub struct CheckpointStateRecord {
     pub created_at: TurnTimestamp,
 }
 
+#[derive(Clone, Copy)]
+pub struct CheckpointStateMatchMetadata<'a> {
+    pub state_ref: &'a LoopCheckpointStateRef,
+    pub scope: &'a TurnScope,
+    pub turn_id: TurnId,
+    pub run_id: TurnRunId,
+    pub schema_id: &'a CheckpointSchemaId,
+    pub schema_version: RunProfileVersion,
+    pub kind: LoopCheckpointKind,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct PutCheckpointStateRequest {
     pub scope: TurnScope,
@@ -299,13 +310,31 @@ pub fn checkpoint_state_record_matches_request(
     record: &CheckpointStateRecord,
     request: &GetCheckpointStateRequest,
 ) -> bool {
-    record.state_ref == request.state_ref
-        && record.scope == request.scope
-        && record.turn_id == request.turn_id
-        && record.run_id == request.run_id
-        && record.schema_id == request.schema_id
-        && record.schema_version == request.schema_version
-        && record.kind == request.kind
+    checkpoint_state_metadata_matches_request(
+        CheckpointStateMatchMetadata {
+            state_ref: &record.state_ref,
+            scope: &record.scope,
+            turn_id: record.turn_id,
+            run_id: record.run_id,
+            schema_id: &record.schema_id,
+            schema_version: record.schema_version,
+            kind: record.kind,
+        },
+        request,
+    )
+}
+
+pub fn checkpoint_state_metadata_matches_request(
+    metadata: CheckpointStateMatchMetadata<'_>,
+    request: &GetCheckpointStateRequest,
+) -> bool {
+    metadata.state_ref == &request.state_ref
+        && metadata.scope == &request.scope
+        && metadata.turn_id == request.turn_id
+        && metadata.run_id == request.run_id
+        && metadata.schema_id == &request.schema_id
+        && metadata.schema_version == request.schema_version
+        && metadata.kind == request.kind
 }
 
 fn loop_checkpoint_record_matches_request(

@@ -27,10 +27,11 @@ use ironclaw_host_api::ScopedPath;
 use serde::{Deserialize, Serialize};
 
 use ironclaw_turns::{
-    CheckpointSchemaId, CheckpointStateRecord, CheckpointStateStore, GetCheckpointStateRequest,
-    LoopCheckpointKind, LoopCheckpointStateRef, PutCheckpointStateRequest,
-    RedactedCheckpointPayload, RunProfileVersion, TurnError, TurnId, TurnRunId, TurnScope,
-    TurnTimestamp, new_checkpoint_state_ref,
+    CheckpointSchemaId, CheckpointStateMatchMetadata, CheckpointStateRecord, CheckpointStateStore,
+    GetCheckpointStateRequest, LoopCheckpointKind, LoopCheckpointStateRef,
+    PutCheckpointStateRequest, RedactedCheckpointPayload, RunProfileVersion, TurnError, TurnId,
+    TurnRunId, TurnScope, TurnTimestamp, checkpoint_state_metadata_matches_request,
+    new_checkpoint_state_ref,
 };
 
 const CHECKPOINT_STATE_PREFIX: &str = "/checkpoint-state";
@@ -160,13 +161,18 @@ impl StoredCheckpointStateRecord {
     }
 
     fn matches_request(&self, request: &GetCheckpointStateRequest) -> bool {
-        self.state_ref == request.state_ref
-            && self.scope == request.scope
-            && self.turn_id == request.turn_id
-            && self.run_id == request.run_id
-            && self.schema_id == request.schema_id
-            && self.schema_version == request.schema_version
-            && self.kind == request.kind
+        checkpoint_state_metadata_matches_request(
+            CheckpointStateMatchMetadata {
+                state_ref: &self.state_ref,
+                scope: &self.scope,
+                turn_id: self.turn_id,
+                run_id: self.run_id,
+                schema_id: &self.schema_id,
+                schema_version: self.schema_version,
+                kind: self.kind,
+            },
+            request,
+        )
     }
 
     fn into_record(self) -> Result<CheckpointStateRecord, TurnError> {
