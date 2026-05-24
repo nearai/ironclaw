@@ -470,6 +470,13 @@ pub struct GatewayState {
     /// Channel-agnostic tool dispatcher for routing handler operations through
     /// the tool pipeline with audit trail.
     pub tool_dispatcher: Option<Arc<crate::tools::dispatch::ToolDispatcher>>,
+    /// Sealed one-shot signing-grant store for the attested-signing substrate
+    /// (PR7). When set, the `/api/chat/gate/resolve` injected-wallet-proof arm
+    /// constructs an `InjectedSigningProvider` over it and runs
+    /// `verify_resume` (signer recovery + hash binding + one-shot grant claim).
+    /// `None` until the composition layer (PR10) wires a durable store; the
+    /// injected-proof resolution arm fails closed when it is absent.
+    pub attested_grant_store: Option<Arc<dyn ironclaw_attestation::SealedGrantStore>>,
 }
 
 /// Cached result of `build_frontend_html()`, keyed by a cheap workspace

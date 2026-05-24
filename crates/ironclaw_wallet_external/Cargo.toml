@@ -1,0 +1,37 @@
+[package]
+name = "ironclaw_wallet_external"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "External-wallet signing providers (browser injected window.ethereum / window.solana) for the IronClaw attested-signing substrate"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+
+[package.metadata.dist]
+dist = false
+
+[dependencies]
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+# Attested-signing substrate (lower PRs in the stack).
+ironclaw_signing_provider = { path = "../ironclaw_signing_provider" }
+ironclaw_attestation = { path = "../ironclaw_attestation" }
+
+# EVM signer recovery (ecrecover over secp256k1). Direct k256, matching the
+# chain-signing crate (PR6); no full alloy wire stack is pulled into PR7.
+k256 = { version = "0.13", features = ["ecdsa"] }
+# Solana ed25519 signature verification — already vendored in-tree, so the heavy
+# solana-sdk is NOT pulled.
+ed25519-dalek = { version = "2.2.0", features = ["std"] }
+sha3 = "0.10"
+sha2 = "0.10"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+hex = "0.4"
+rand_core = "0.6"

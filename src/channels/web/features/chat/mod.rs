@@ -53,6 +53,8 @@
 //! unpersisted next turn, legacy live-state vs completed-turn). Any
 //! change to the helpers must keep those tests green.
 
+mod attested;
+
 use std::sync::Arc;
 
 use axum::{
@@ -330,7 +332,8 @@ pub(crate) async fn chat_gate_resolve_handler(
     })?;
     let mission_outcome = match req.resolution {
         GateResolutionPayload::Approved { .. }
-        | GateResolutionPayload::CredentialProvided { .. } => {
+        | GateResolutionPayload::CredentialProvided { .. }
+        | GateResolutionPayload::InjectedWalletProof { .. } => {
             Some(ironclaw_engine::GateResolutionOutcome::Approved)
         }
         GateResolutionPayload::Denied => Some(ironclaw_engine::GateResolutionOutcome::Denied),
@@ -388,6 +391,28 @@ pub(crate) async fn chat_gate_resolve_handler(
             )
             .await?;
             Ok(Json(ActionResponse::ok("Credential submitted.")))
+        }
+        GateResolutionPayload::InjectedWalletProof {
+            scheme,
+            signer,
+            signature,
+            approved_tx_hash,
+            public_key,
+        } => {
+            attested::resolve_injected_wallet_proof(
+                &state,
+                &user.user_id,
+                gate_request_id,
+                req.thread_id.clone(),
+                attested::InjectedWalletProofInput {
+                    scheme,
+                    signer,
+                    signature,
+                    approved_tx_hash,
+                    public_key,
+                },
+            )
+            .await
         }
         GateResolutionPayload::Cancelled => {
             // Mission-only gates have no foreground `thread_id` — the
@@ -3102,6 +3127,103 @@ mod tests {
             incoming.metadata.get("thread_id").and_then(|v| v.as_str()),
             Some("gateway-thread-auth")
         );
+    }
+
+    #[tokio::test]
+    async fn test_chat_gate_resolve_injected_wallet_proof_fails_closed_without_composition() {
+        // PR7: the injected-wallet proof arm routes through the existing
+        // gate/resolve handler. Without the PR10 composition (sealed-grant store
+        // + persisted attested binding), it must fail closed with 503 — never
+        // panic, never silently accept, and never forward a submission.
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let state = test_gateway_state(None);
+        *state.msg_tx.write().await = Some(tx);
+        assert!(
+            state.attested_grant_store.is_none(),
+            "PR7 default state has no attested grant store"
+        );
+
+        let app = Router::new()
+            .route("/api/chat/gate/resolve", post(chat_gate_resolve_handler))
+            .with_state(state);
+
+        let request_id = Uuid::new_v4();
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/chat/gate/resolve")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "request_id": request_id,
+                    "thread_id": "gateway-thread-sign",
+                    "resolution": "injected_wallet_proof",
+                    "scheme": "evm",
+                    "signer": "0x00000000000000000000000000000000000000aa",
+                    "signature": "00".repeat(65),
+                    "approved_tx_hash": "07".repeat(32),
+                })
+                .to_string(),
+            ))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "member-1".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        // No submission must have been forwarded to the agent loop.
+        assert!(
+            rx.try_recv().is_err(),
+            "fail-closed gate resolution must not forward a submission"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_chat_gate_resolve_injected_wallet_proof_malformed_hash_is_bad_request() {
+        // A malformed proof (short approved_tx_hash) must reject at the wire
+        // boundary with 400 regardless of composition state.
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let state = test_gateway_state(None);
+        let app = Router::new()
+            .route("/api/chat/gate/resolve", post(chat_gate_resolve_handler))
+            .with_state(state);
+
+        let request_id = Uuid::new_v4();
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/chat/gate/resolve")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "request_id": request_id,
+                    "resolution": "injected_wallet_proof",
+                    "scheme": "evm",
+                    "signer": "0x00000000000000000000000000000000000000aa",
+                    "signature": "00".repeat(65),
+                    "approved_tx_hash": "07".repeat(16),
+                })
+                .to_string(),
+            ))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "member-1".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
