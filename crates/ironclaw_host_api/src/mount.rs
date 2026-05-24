@@ -164,3 +164,227 @@ impl MountView {
 fn alias_matches(alias: &str, path: &str) -> bool {
     path == alias || path.starts_with(&format!("{alias}/"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[track_caller]
+    fn grant(alias: &str, target: &str, permissions: MountPermissions) -> MountGrant {
+        MountGrant::new(
+            MountAlias::new(alias).expect("test grant alias should be a valid mount alias"),
+            VirtualPath::new(target).expect("test grant target should be a valid virtual path"),
+            permissions,
+        )
+    }
+
+    #[test]
+    fn resolve_uses_longest_alias_without_prefix_confusion() {
+        let view = MountView::new(vec![
+            grant(
+                "/workspace",
+                "/projects/root",
+                MountPermissions::read_only(),
+            ),
+            grant(
+                "/workspace/cache",
+                "/memory/cache",
+                MountPermissions::read_write(),
+            ),
+        ])
+        .unwrap();
+
+        let (resolved, selected) = view
+            .resolve_with_grant(&ScopedPath::new("/workspace/cache/item.json").unwrap())
+            .unwrap();
+        assert_eq!(resolved.as_str(), "/memory/cache/item.json");
+        assert_eq!(selected.alias.as_str(), "/workspace/cache");
+
+        assert!(
+            view.resolve(&ScopedPath::new("/workspace-cache/item.json").unwrap())
+                .is_err(),
+            "sibling aliases must not match by string prefix"
+        );
+    }
+
+    #[test]
+    fn empty_mount_view_is_subset() {
+        let child = MountView::new(vec![]).unwrap();
+        let parent = MountView::new(vec![grant(
+            "/workspace",
+            "/projects/demo",
+            MountPermissions::read_write(),
+        )])
+        .unwrap();
+
+        assert!(child.is_subset_of(&parent));
+    }
+
+    #[test]
+    fn subset_allows_same_targets_with_equal_or_narrower_permissions() {
+        let parent = MountView::new(vec![
+            grant(
+                "/workspace",
+                "/projects/demo",
+                MountPermissions {
+                    read: true,
+                    write: true,
+                    delete: true,
+                    list: true,
+                    execute: true,
+                },
+            ),
+            grant("/cache", "/memory/cache", MountPermissions::read_write()),
+        ])
+        .unwrap();
+        let child = MountView::new(vec![
+            grant(
+                "/workspace",
+                "/projects/demo",
+                MountPermissions::read_write(),
+            ),
+            grant("/cache", "/memory/cache", MountPermissions::read_only()),
+        ])
+        .unwrap();
+
+        assert!(child.is_subset_of(&parent));
+    }
+
+    #[test]
+    fn subset_rejects_missing_parent_alias() {
+        let parent = MountView::new(vec![grant(
+            "/workspace",
+            "/projects/demo",
+            MountPermissions::read_write(),
+        )])
+        .unwrap();
+        let child = MountView::new(vec![grant(
+            "/cache",
+            "/memory/cache",
+            MountPermissions::read_only(),
+        )])
+        .unwrap();
+
+        assert!(!child.is_subset_of(&parent));
+    }
+
+    #[test]
+    fn subset_rejects_different_target_for_same_alias() {
+        let parent = MountView::new(vec![grant(
+            "/workspace",
+            "/projects/demo",
+            MountPermissions::read_write(),
+        )])
+        .unwrap();
+        let child = MountView::new(vec![grant(
+            "/workspace",
+            "/projects/other",
+            MountPermissions::read_only(),
+        )])
+        .unwrap();
+
+        assert!(!child.is_subset_of(&parent));
+    }
+
+    #[test]
+    fn subset_rejects_narrower_target_without_explicit_grant() {
+        let parent = MountView::new(vec![grant(
+            "/workspace",
+            "/projects/demo",
+            MountPermissions::read_write(),
+        )])
+        .unwrap();
+        let child = MountView::new(vec![grant(
+            "/workspace",
+            "/projects/demo/subdir",
+            MountPermissions::read_only(),
+        )])
+        .unwrap();
+
+        assert!(!child.is_subset_of(&parent));
+    }
+
+    #[test]
+    fn subset_rejects_each_broader_permission_bit() {
+        let parent = MountView::new(vec![grant(
+            "/workspace",
+            "/projects/demo",
+            MountPermissions::none(),
+        )])
+        .unwrap();
+
+        for (permission_name, child_permissions) in [
+            (
+                "read",
+                MountPermissions {
+                    read: true,
+                    ..MountPermissions::none()
+                },
+            ),
+            (
+                "write",
+                MountPermissions {
+                    write: true,
+                    ..MountPermissions::none()
+                },
+            ),
+            (
+                "delete",
+                MountPermissions {
+                    delete: true,
+                    ..MountPermissions::none()
+                },
+            ),
+            (
+                "list",
+                MountPermissions {
+                    list: true,
+                    ..MountPermissions::none()
+                },
+            ),
+            (
+                "execute",
+                MountPermissions {
+                    execute: true,
+                    ..MountPermissions::none()
+                },
+            ),
+        ] {
+            let child = MountView::new(vec![grant(
+                "/workspace",
+                "/projects/demo",
+                child_permissions,
+            )])
+            .unwrap();
+
+            assert!(
+                !child.is_subset_of(&parent),
+                "{permission_name} permission must not be delegated when parent lacks it"
+            );
+        }
+    }
+
+    #[test]
+    fn subset_rejects_when_any_child_mount_is_not_subset() {
+        let parent = MountView::new(vec![
+            grant(
+                "/workspace",
+                "/projects/demo",
+                MountPermissions::read_write(),
+            ),
+            grant("/cache", "/memory/cache", MountPermissions::read_only()),
+        ])
+        .unwrap();
+        let child = MountView::new(vec![
+            grant(
+                "/workspace",
+                "/projects/demo",
+                MountPermissions::read_only(),
+            ),
+            grant("/cache", "/memory/cache", MountPermissions::read_write()),
+        ])
+        .unwrap();
+
+        assert!(!child.is_subset_of(&parent));
+    }
+}
