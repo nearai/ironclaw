@@ -526,13 +526,36 @@ fn default_poll_interval_ms() -> u32 {
     30_000
 }
 
+/// Deserialize a value that may be a JSON string or number into `Option<String>`.
+fn deserialize_string_or_number<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(s)) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed.to_string()))
+            }
+        }
+        Some(serde_json::Value::Number(n)) => Ok(n.as_i64().map(|id| id.to_string())),
+        Some(_) => Ok(None),
+    }
+}
+
 /// Channel configuration from capabilities file.
 #[derive(Debug, Deserialize)]
 struct DiscordConfig {
     #[serde(default)]
     #[allow(dead_code)]
     require_signature_verification: bool,
-    #[serde(default)]
+    /// Accepts both JSON string ("12345") and number (12345) for compatibility
+    #[serde(default, deserialize_with = "deserialize_string_or_number")]
     owner_id: Option<String>,
     #[serde(default)]
     dm_policy: Option<String>,
@@ -1651,6 +1674,20 @@ mod tests {
             "embeds": [{"title": "embed title"}]
         })
         .to_string()
+    }
+
+    #[test]
+    fn test_config_with_numeric_owner_id() {
+        let json = r#"{"owner_id": 123456789}"#;
+        let config: DiscordConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.owner_id, Some("123456789".to_string()));
+    }
+
+    #[test]
+    fn test_config_with_string_owner_id() {
+        let json = r#"{"owner_id": "123456789"}"#;
+        let config: DiscordConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.owner_id, Some("123456789".to_string()));
     }
 
     #[test]
