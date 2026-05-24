@@ -99,8 +99,8 @@ impl ExecutorStage<PromptInput> for PromptStage {
         let messages = build_prompt_bundle_for_surface(
             ctx,
             &state,
-            Some(surface.version.clone()),
-            Some(capability_view.clone()),
+            surface.version.clone(),
+            capability_view.clone(),
         )
         .await?;
         state = match CheckpointStage
@@ -123,12 +123,12 @@ impl ExecutorStage<PromptInput> for PromptStage {
 pub(super) async fn build_prompt_bundle_for_surface(
     ctx: StageContext<'_>,
     state: &LoopExecutionState,
-    surface_version: Option<CapabilitySurfaceVersion>,
-    capability_view: Option<LoopModelCapabilityView>,
+    surface_version: CapabilitySurfaceVersion,
+    capability_view: LoopModelCapabilityView,
 ) -> Result<Vec<LoopModelMessage>, AgentLoopExecutorError> {
     let mut context_request = ctx.planner.context().plan_context_request(state).await;
-    context_request.surface_version = surface_version;
-    context_request.capability_view = capability_view;
+    context_request.surface_version = Some(surface_version);
+    context_request.capability_view = Some(capability_view);
     let prompt_mode = context_request.mode;
     let prompt_bundle = ctx
         .host
