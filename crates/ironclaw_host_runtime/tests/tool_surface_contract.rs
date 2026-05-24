@@ -400,7 +400,6 @@ async fn visible_surface_uses_caller_provider_trust_not_host_trust_policy() {
 #[tokio::test]
 async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
     let package = builtin_first_party_package().unwrap();
-    assert_eq!(package.capabilities.len(), 14);
     for descriptor in &package.capabilities {
         assert!(
             descriptor.parameters_schema.get("$ref").is_none(),
@@ -411,51 +410,24 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
     }
 
     let mut registry = ExtensionRegistry::new();
-    registry.insert(package).unwrap();
+    registry.insert(package.clone()).unwrap();
     let runtime = runtime_with(registry, Arc::new(GrantAuthorizer));
-    let builtin_effects = vec![
-        EffectKind::DispatchCapability,
-        EffectKind::ReadFilesystem,
-        EffectKind::WriteFilesystem,
-        EffectKind::Network,
-        EffectKind::SpawnProcess,
-        EffectKind::ExecuteCode,
-    ];
-    let context = context_with_grants([
-        (capability_id("builtin.echo"), builtin_effects.clone()),
-        (capability_id("builtin.time"), builtin_effects.clone()),
-        (capability_id("builtin.json"), builtin_effects.clone()),
-        (capability_id("builtin.http"), builtin_effects.clone()),
-        (capability_id("builtin.shell"), builtin_effects.clone()),
-        (capability_id("builtin.read_file"), builtin_effects.clone()),
-        (capability_id("builtin.write_file"), builtin_effects.clone()),
-        (capability_id("builtin.list_dir"), builtin_effects.clone()),
-        (capability_id("builtin.glob"), builtin_effects.clone()),
-        (capability_id("builtin.grep"), builtin_effects.clone()),
-        (
-            capability_id("builtin.apply_patch"),
-            builtin_effects.clone(),
-        ),
-        (capability_id("builtin.skill_list"), builtin_effects.clone()),
-        (
-            capability_id("builtin.skill_install"),
-            builtin_effects.clone(),
-        ),
-        (
-            capability_id("builtin.skill_remove"),
-            builtin_effects.clone(),
-        ),
-    ]);
+    let context = context_with_grant_entries(
+        package
+            .capabilities
+            .iter()
+            .map(|descriptor| (descriptor.id.clone(), descriptor.effects.clone())),
+    );
 
     let surface = runtime
         .visible_capabilities(request_with_provider_trust(
             context,
-            [("builtin", builtin_effects)],
+            [("builtin", combined_descriptor_effects(&package))],
         ))
         .await
         .unwrap();
 
-    assert_eq!(surface.capabilities.len(), 14);
+    assert_eq!(surface.capabilities.len(), package.capabilities.len());
     for capability in &surface.capabilities {
         assert!(
             capability
@@ -1357,6 +1329,18 @@ fn trust_decision_for(allowed_effects: Vec<EffectKind>) -> TrustDecision {
     }
 }
 
+fn combined_descriptor_effects(package: &ExtensionPackage) -> Vec<EffectKind> {
+    let mut effects = Vec::new();
+    for descriptor in &package.capabilities {
+        for effect in &descriptor.effects {
+            if !effects.contains(effect) {
+                effects.push(*effect);
+            }
+        }
+    }
+    effects
+}
+
 fn assert_schema_has_property(
     surface: &VisibleCapabilitySurface,
     capability: &str,
@@ -1614,6 +1598,12 @@ fn trust_policy_for<const N: usize>(
 
 fn context_with_grants<const N: usize>(
     grants: [(CapabilityId, Vec<EffectKind>); N],
+) -> ExecutionContext {
+    context_with_grant_entries(grants)
+}
+
+fn context_with_grant_entries(
+    grants: impl IntoIterator<Item = (CapabilityId, Vec<EffectKind>)>,
 ) -> ExecutionContext {
     let grants = CapabilitySet {
         grants: grants

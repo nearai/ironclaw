@@ -121,15 +121,7 @@ fn registry_rejects_host_bundled_non_builtin_package_with_mutated_parameters_sch
 
 #[test]
 fn registry_allows_builtin_host_bundled_package_with_resolved_parameters_schema() {
-    let manifest = ExtensionManifest::parse(
-        &WASM_MANIFEST
-            .replace("id = \"echo\"", "id = \"builtin\"")
-            .replace("id = \"echo.say\"", "id = \"builtin.say\""),
-        ManifestSource::HostBundled,
-        &HostPortCatalog::empty(),
-    )
-    .unwrap();
-    let mut package = package_from_manifest(manifest, "builtin");
+    let mut package = builtin_host_bundled_echo_package();
     package.capabilities[0].parameters_schema = serde_json::json!({
         "type": "object",
         "properties": {
@@ -160,15 +152,7 @@ fn registry_allows_builtin_host_bundled_package_with_resolved_parameters_schema(
 
 #[test]
 fn registry_rejects_builtin_host_bundled_package_with_mutated_non_schema_descriptor_fields() {
-    let manifest = ExtensionManifest::parse(
-        &WASM_MANIFEST
-            .replace("id = \"echo\"", "id = \"builtin\"")
-            .replace("id = \"echo.say\"", "id = \"builtin.say\""),
-        ManifestSource::HostBundled,
-        &HostPortCatalog::empty(),
-    )
-    .unwrap();
-    let mut package = package_from_manifest(manifest, "builtin");
+    let mut package = builtin_host_bundled_echo_package();
     package.capabilities[0].parameters_schema = serde_json::json!({"type": "object"});
     package.capabilities[0].default_permission = PermissionMode::Ask;
 
@@ -178,6 +162,18 @@ fn registry_rejects_builtin_host_bundled_package_with_mutated_non_schema_descrip
         err,
         ExtensionError::InvalidManifest { reason } if reason.contains("capability descriptors")
     ));
+}
+
+fn builtin_host_bundled_echo_package() -> ExtensionPackage {
+    let manifest = ExtensionManifest::parse(
+        &WASM_MANIFEST
+            .replace("id = \"echo\"", "id = \"builtin\"")
+            .replace("id = \"echo.say\"", "id = \"builtin.say\""),
+        ManifestSource::HostBundled,
+        &HostPortCatalog::empty(),
+    )
+    .unwrap();
+    package_from_manifest(manifest, "builtin")
 }
 
 #[test]

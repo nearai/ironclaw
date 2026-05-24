@@ -742,19 +742,20 @@ async fn local_dev_adapter_exposes_skill_install_provider_tool_schema_requires_s
     let run_context = loop_run_context("provider-skill-install").await;
     let io = Arc::new(ProductLiveCapabilityIo::default());
     let capability_id = capability_id(SKILL_INSTALL_CAPABILITY_ID);
+    let user_id = UserId::new("user-provider-skill-install").unwrap();
     let adapters = ProductLivePlannedRuntimeAdapters::from_services(
         &services,
         ProductLivePlannedRuntimeAdapterConfig {
             capability_authority_resolver: authority_resolver(
                 ProductLiveVisibleCapabilityRequestConfig::new(
-                    UserId::new("user-provider-skill-install").unwrap(),
+                    user_id.clone(),
                     RuntimeKind::FirstParty,
                     TrustClass::FirstParty,
                     SurfaceKind::new("agent_loop").unwrap(),
                     CapabilitySurfacePolicy::allow_all(),
                 )
                 .with_grants(grants_for_principal_with_effects(
-                    Principal::User(UserId::new("user-provider-skill-install").unwrap()),
+                    Principal::User(user_id),
                     [SKILL_INSTALL_CAPABILITY_ID],
                     vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
                 ))
