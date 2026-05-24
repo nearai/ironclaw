@@ -535,9 +535,22 @@ pub struct CapabilityDescriptor {
     pub parameters_schema: serde_json::Value,
     pub effects: Vec<EffectKind>,
     pub default_permission: PermissionMode,
+    pub runtime_credentials: Vec<RuntimeCredentialRequirement>,
     pub resource_profile: Option<ResourceProfile>,
 }
+
+pub struct RuntimeCredentialRequirement {
+    pub handle: SecretHandle,
+    pub audience: NetworkTargetPattern,
+    pub target: RuntimeCredentialTarget,
+    pub required: bool,
+}
 ```
+
+`runtime_credentials` is declarative host-owned injection metadata only. A
+credential requirement names the secret handle, HTTPS audience, injection target,
+and required/optional behavior; authorization and runtime egress still decide
+whether material is staged and consumed for a specific invocation.
 
 ### 10.3 Capability grants
 
