@@ -949,7 +949,7 @@ async fn builtin_http_maps_runtime_egress_errors_by_source() {
                 request_bytes: 4,
                 response_bytes: 1024,
             },
-            RuntimeFailureKind::InvalidOutput,
+            RuntimeFailureKind::OperationFailed,
         ),
     ];
 

@@ -210,7 +210,7 @@ async fn first_party_handler_maps_egress_error_codes_to_dispatch_errors() {
                 request_bytes: 11,
                 response_bytes: 22,
             },
-            RuntimeFailureKind::InvalidOutput,
+            RuntimeFailureKind::OperationFailed,
         ),
         (
             RuntimeHttpEgressError::Response {
@@ -218,7 +218,7 @@ async fn first_party_handler_maps_egress_error_codes_to_dispatch_errors() {
                 request_bytes: 11,
                 response_bytes: 4097,
             },
-            RuntimeFailureKind::InvalidOutput,
+            RuntimeFailureKind::OutputTooLarge,
         ),
     ];
 
@@ -328,11 +328,11 @@ fn http_error_kind_maps_all_reason_codes() {
         ),
         (
             RuntimeHttpEgressReasonCode::ResponseError,
-            RuntimeDispatchErrorKind::OutputDecode,
+            RuntimeDispatchErrorKind::OperationFailed,
         ),
         (
             RuntimeHttpEgressReasonCode::ResponseBodyLimitExceeded,
-            RuntimeDispatchErrorKind::OutputDecode,
+            RuntimeDispatchErrorKind::OutputTooLarge,
         ),
     ];
 
@@ -759,9 +759,9 @@ fn http_error_kind(reason: RuntimeHttpEgressReasonCode) -> RuntimeDispatchErrorK
         RuntimeHttpEgressReasonCode::CredentialUnavailable => RuntimeDispatchErrorKind::Client,
         RuntimeHttpEgressReasonCode::RequestDenied => RuntimeDispatchErrorKind::InputEncode,
         RuntimeHttpEgressReasonCode::NetworkError => RuntimeDispatchErrorKind::NetworkDenied,
-        RuntimeHttpEgressReasonCode::ResponseError => RuntimeDispatchErrorKind::OutputDecode,
+        RuntimeHttpEgressReasonCode::ResponseError => RuntimeDispatchErrorKind::OperationFailed,
         RuntimeHttpEgressReasonCode::ResponseBodyLimitExceeded => {
-            RuntimeDispatchErrorKind::OutputDecode
+            RuntimeDispatchErrorKind::OutputTooLarge
         }
     }
 }

@@ -290,7 +290,7 @@ fn http_error(error: RuntimeHttpEgressError) -> FirstPartyCapabilityError {
         RuntimeHttpEgressReasonCode::CredentialUnavailable => RuntimeDispatchErrorKind::Client,
         RuntimeHttpEgressReasonCode::RequestDenied => RuntimeDispatchErrorKind::InputEncode,
         RuntimeHttpEgressReasonCode::NetworkError => RuntimeDispatchErrorKind::NetworkDenied,
-        RuntimeHttpEgressReasonCode::ResponseError => RuntimeDispatchErrorKind::OutputDecode,
+        RuntimeHttpEgressReasonCode::ResponseError => RuntimeDispatchErrorKind::OperationFailed,
         RuntimeHttpEgressReasonCode::ResponseBodyLimitExceeded => {
             RuntimeDispatchErrorKind::OutputTooLarge
         }

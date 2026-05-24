@@ -222,7 +222,7 @@ pub(super) fn filesystem_error(error: FilesystemError) -> CodingCapabilityError 
             CodingCapabilityError::new(RuntimeDispatchErrorKind::FilesystemDenied)
         }
         FilesystemError::NotFound { .. } => operation_error(),
-        FilesystemError::Backend { .. } => {
+        FilesystemError::Backend { .. } | FilesystemError::BackendInfrastructure { .. } => {
             CodingCapabilityError::new(RuntimeDispatchErrorKind::Backend)
         }
         // The unified record/index/CAS variants are surfaced when a backend
