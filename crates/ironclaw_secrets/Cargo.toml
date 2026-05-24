@@ -22,6 +22,7 @@ sha2 = "0.10"
 subtle = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt", "sync"] }
+tracing = "0.1"
 url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 

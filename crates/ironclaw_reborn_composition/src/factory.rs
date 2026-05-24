@@ -459,13 +459,15 @@ async fn build_production_shaped(
 async fn resolve_secret_master_key(
     explicit: Option<ironclaw_secrets::SecretMaterial>,
 ) -> Result<ironclaw_secrets::SecretMaterial, RebornBuildError> {
-    let resolved = match explicit {
-        Some(master_key) => Some(master_key),
-        None => ironclaw_secrets::keychain::resolve_master_key()
-            .await
-            .map(ironclaw_secrets::SecretMaterial::from),
-    };
-    select_secret_master_key(resolved)
+    if let Some(master_key) = explicit {
+        select_secret_master_key(Some(master_key))
+    } else if let Some(master_key) =
+        ironclaw_secrets::keychain::resolve_master_key_material().await?
+    {
+        select_secret_master_key(Some(master_key))
+    } else {
+        select_secret_master_key(None)
+    }
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]

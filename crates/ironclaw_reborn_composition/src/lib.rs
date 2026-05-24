@@ -170,6 +170,7 @@ pub fn reborn_runtime_readiness_snapshot() -> RebornRuntimeReadinessSnapshot {
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
+use std::future::Future;
 use std::sync::Arc;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -388,15 +389,40 @@ where
     TPolicy: TrustPolicy + 'static,
     TWake: TurnRunWakeNotifier + 'static,
 {
+    build_libsql_production_host_runtime_services_with_master_key_resolver(config, || {
+        ironclaw_secrets::keychain::resolve_master_key_material()
+    })
+    .await
+}
+
+#[cfg(feature = "libsql")]
+async fn build_libsql_production_host_runtime_services_with_master_key_resolver<
+    TPolicy,
+    TWake,
+    FResolve,
+    FResolveFuture,
+>(
+    config: LibSqlProductionSubstrateConfig<TPolicy, TWake>,
+    resolve_default_master_key: FResolve,
+) -> Result<LibSqlProductionHostRuntimeServices, RebornCompositionError>
+where
+    TPolicy: TrustPolicy + 'static,
+    TWake: TurnRunWakeNotifier + 'static,
+    FResolve: FnOnce() -> FResolveFuture,
+    FResolveFuture: Future<Output = Result<Option<SecretMaterial>, SecretError>>,
+{
     let filesystem = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&config.database)));
     filesystem.run_migrations().await?;
 
     let scoped_filesystem = wrap_scoped(Arc::clone(&filesystem));
     let process_services = ProcessServices::filesystem(Arc::clone(&scoped_filesystem));
 
-    let secret_store =
-        build_filesystem_secret_store(Arc::clone(&scoped_filesystem), config.secret_master_key)
-            .await?;
+    let secret_store = build_filesystem_secret_store_with_master_key_resolver(
+        Arc::clone(&scoped_filesystem),
+        config.secret_master_key,
+        resolve_default_master_key,
+    )
+    .await?;
 
     let resource_store = FilesystemResourceGovernorStore::new(Arc::clone(&scoped_filesystem));
     let governor = Arc::new(PersistentResourceGovernor::new(resource_store));
@@ -515,7 +541,7 @@ where
 /// ([`FilesystemSecretStore::verify_can_decrypt_existing_secrets`])
 /// preserves the same fail-loud-on-master-key-mismatch contract the deleted
 /// libSQL/Postgres backends carried.
-#[cfg(any(feature = "libsql", feature = "postgres"))]
+#[cfg(feature = "postgres")]
 async fn build_filesystem_secret_store<F>(
     scoped_filesystem: Arc<ScopedFilesystem<F>>,
     master_key: Option<SecretMaterial>,
@@ -524,6 +550,33 @@ where
     F: RootFilesystem + 'static,
 {
     let crypto = secrets_crypto(master_key).await?;
+    build_filesystem_secret_store_with_crypto(scoped_filesystem, crypto)
+}
+
+#[cfg(feature = "libsql")]
+async fn build_filesystem_secret_store_with_master_key_resolver<F, FResolve, FResolveFuture>(
+    scoped_filesystem: Arc<ScopedFilesystem<F>>,
+    master_key: Option<SecretMaterial>,
+    resolve_default_master_key: FResolve,
+) -> Result<Arc<SharedSecretStore>, RebornCompositionError>
+where
+    F: RootFilesystem + 'static,
+    FResolve: FnOnce() -> FResolveFuture,
+    FResolveFuture: Future<Output = Result<Option<SecretMaterial>, SecretError>>,
+{
+    let crypto =
+        secrets_crypto_with_master_key_resolver(master_key, resolve_default_master_key).await?;
+    build_filesystem_secret_store_with_crypto(scoped_filesystem, crypto)
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn build_filesystem_secret_store_with_crypto<F>(
+    scoped_filesystem: Arc<ScopedFilesystem<F>>,
+    crypto: Arc<SecretsCrypto>,
+) -> Result<Arc<SharedSecretStore>, RebornCompositionError>
+where
+    F: RootFilesystem + 'static,
+{
     let store = FilesystemSecretStore::new(scoped_filesystem, crypto);
     // The FS-stored master-key sentinel was removed alongside the tenant-aware
     // ScopedFilesystem rework — see filesystem_store.rs. Master-key
@@ -532,7 +585,7 @@ where
     Ok(Arc::new(SharedSecretStore::new(store)))
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
+#[cfg(feature = "postgres")]
 async fn secrets_crypto(
     master_key: Option<SecretMaterial>,
 ) -> Result<Arc<SecretsCrypto>, RebornCompositionError> {
@@ -540,16 +593,46 @@ async fn secrets_crypto(
     Ok(Arc::new(SecretsCrypto::new(master_key)?))
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
+#[cfg(feature = "libsql")]
+async fn secrets_crypto_with_master_key_resolver<FResolve, FResolveFuture>(
+    master_key: Option<SecretMaterial>,
+    resolve_default_master_key: FResolve,
+) -> Result<Arc<SecretsCrypto>, RebornCompositionError>
+where
+    FResolve: FnOnce() -> FResolveFuture,
+    FResolveFuture: Future<Output = Result<Option<SecretMaterial>, SecretError>>,
+{
+    let master_key =
+        resolve_composition_secret_master_key_with_resolver(master_key, resolve_default_master_key)
+            .await?;
+    Ok(Arc::new(SecretsCrypto::new(master_key)?))
+}
+
+#[cfg(feature = "postgres")]
 async fn resolve_composition_secret_master_key(
     explicit: Option<SecretMaterial>,
 ) -> Result<SecretMaterial, RebornCompositionError> {
-    match explicit {
-        Some(master_key) => Ok(master_key),
-        None => ironclaw_secrets::keychain::resolve_master_key()
-            .await
-            .map(SecretMaterial::from)
-            .ok_or(RebornCompositionError::MissingSecretMasterKey),
+    resolve_composition_secret_master_key_with_resolver(explicit, || {
+        ironclaw_secrets::keychain::resolve_master_key_material()
+    })
+    .await
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+async fn resolve_composition_secret_master_key_with_resolver<FResolve, FResolveFuture>(
+    explicit: Option<SecretMaterial>,
+    resolve_default_master_key: FResolve,
+) -> Result<SecretMaterial, RebornCompositionError>
+where
+    FResolve: FnOnce() -> FResolveFuture,
+    FResolveFuture: Future<Output = Result<Option<SecretMaterial>, SecretError>>,
+{
+    if let Some(master_key) = explicit {
+        Ok(master_key)
+    } else if let Some(master_key) = resolve_default_master_key().await? {
+        Ok(master_key)
+    } else {
+        Err(RebornCompositionError::MissingSecretMasterKey)
     }
 }
 
@@ -871,5 +954,75 @@ mod two_tenant_isolation_tests {
         let lease_b = store.lease_once(&scope_b, &handle).await.unwrap();
         let material_b = store.consume(&scope_b, lease_b.id).await.unwrap();
         assert_eq!(material_b.expose_secret(), "bob-secret");
+    }
+}
+
+#[cfg(all(test, feature = "libsql"))]
+mod production_secret_master_key_tests {
+    use super::*;
+    use ironclaw_host_api::{
+        AuditMode, DeploymentMode, FilesystemBackendKind, NetworkMode, ProcessBackendKind,
+        RuntimeProfile, SecretMode,
+        runtime_policy::{ApprovalPolicy, EffectiveRuntimePolicy},
+    };
+    use ironclaw_turns::{TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError};
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn libsql_production_builder_rejects_missing_resolved_secret_master_key() {
+        let dir = tempdir().unwrap();
+        let state_db_path = dir.path().join("state.db");
+        let events_db_path = dir.path().join("events.db");
+        let database = Arc::new(
+            libsql::Builder::new_local(state_db_path.display().to_string())
+                .build()
+                .await
+                .unwrap(),
+        );
+
+        let result = build_libsql_production_host_runtime_services_with_master_key_resolver(
+            LibSqlProductionSubstrateConfig {
+                database,
+                event_store: RebornEventStoreConfig::Libsql {
+                    path_or_url: events_db_path.display().to_string(),
+                    auth_token: None,
+                },
+                secret_master_key: None,
+                trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
+                runtime_policy: production_runtime_policy(),
+                turn_run_wake_notifier: Arc::new(RecordingSchedulerWakeNotifier),
+                surface_version: CapabilitySurfaceVersion::new("test-surface").unwrap(),
+            },
+            || async { Ok(None) },
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(RebornCompositionError::MissingSecretMasterKey)
+        ));
+    }
+
+    fn production_runtime_policy() -> EffectiveRuntimePolicy {
+        EffectiveRuntimePolicy {
+            deployment: DeploymentMode::LocalSingleUser,
+            requested_profile: RuntimeProfile::LocalDev,
+            resolved_profile: RuntimeProfile::LocalDev,
+            filesystem_backend: FilesystemBackendKind::HostWorkspace,
+            process_backend: ProcessBackendKind::LocalHost,
+            network_mode: NetworkMode::DirectLogged,
+            secret_mode: SecretMode::ScrubbedEnv,
+            approval_policy: ApprovalPolicy::AskDestructive,
+            audit_mode: AuditMode::LocalMinimal,
+        }
+    }
+
+    #[derive(Debug)]
+    struct RecordingSchedulerWakeNotifier;
+
+    impl TurnRunWakeNotifier for RecordingSchedulerWakeNotifier {
+        fn notify_queued_run(&self, _wake: TurnRunWake) -> Result<(), TurnRunWakeNotifyError> {
+            Ok(())
+        }
     }
 }
