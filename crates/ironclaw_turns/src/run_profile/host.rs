@@ -1093,6 +1093,24 @@ pub struct CapabilityCallCandidate {
     pub provider_replay: Option<ProviderToolCallReplay>,
 }
 
+/// Capability ids a provider tool call may touch before it is staged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderToolCallCapabilityIds {
+    /// Canonical capability id backing the provider-facing tool name.
+    pub provider_capability_id: CapabilityId,
+    /// Capabilities whose policy surface is used by this call.
+    pub effective_capability_ids: Vec<CapabilityId>,
+}
+
+impl ProviderToolCallCapabilityIds {
+    pub fn single(capability_id: CapabilityId) -> Self {
+        Self {
+            provider_capability_id: capability_id.clone(),
+            effective_capability_ids: vec![capability_id],
+        }
+    }
+}
+
 /// Provider-originated tool-call metadata needed to replay tool results back to the same provider.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderToolCallReplay {
@@ -1482,6 +1500,25 @@ impl<'de> Deserialize<'de> for CapabilityFailureKind {
 pub trait LoopCapabilityPort: Send + Sync {
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         Ok(Vec::new())
+    }
+
+    fn provider_tool_call_capability_ids(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<ProviderToolCallCapabilityIds, AgentLoopHostError> {
+        let Some(definition) = self
+            .tool_definitions()?
+            .into_iter()
+            .find(|definition| definition.name == tool_call.name)
+        else {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "provider tool call is outside the visible capability surface",
+            ));
+        };
+        Ok(ProviderToolCallCapabilityIds::single(
+            definition.capability_id,
+        ))
     }
 
     fn validate_provider_tool_call(

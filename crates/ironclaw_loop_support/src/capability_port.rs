@@ -21,8 +21,8 @@ use ironclaw_turns::{
         CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, ConcurrencyHint,
         LoopCapabilityPort, LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopProcessRef,
         LoopRunContext, LoopSafeSummary, ProcessHandleSummary, ProviderToolCall,
-        ProviderToolCallReplay, ProviderToolDefinition, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 use tokio::sync::Notify;
@@ -192,7 +192,7 @@ impl HostRuntimeLoopCapabilityPortFactory {
 }
 
 #[derive(Clone)]
-struct SurfaceCapabilitySnapshot {
+struct RuntimeSurfaceCapabilitySnapshot {
     provider: ExtensionId,
     runtime: RuntimeKind,
     estimate: ResourceEstimate,
@@ -202,6 +202,23 @@ struct SurfaceCapabilitySnapshot {
     provider_tool_name: String,
 }
 
+#[derive(Clone)]
+struct SyntheticSurfaceCapabilitySnapshot {
+    provider_tool_name: String,
+    kind: SyntheticCapabilityKind,
+}
+
+#[derive(Clone, Copy)]
+enum SyntheticCapabilityKind {
+    CapabilityInfo,
+}
+
+#[derive(Clone)]
+enum SurfaceCapabilitySnapshot {
+    Runtime(Box<RuntimeSurfaceCapabilitySnapshot>),
+    Synthetic(SyntheticSurfaceCapabilitySnapshot),
+}
+
 #[derive(Clone, Default)]
 struct SurfaceSnapshot {
     capabilities: HashMap<CapabilityId, SurfaceCapabilitySnapshot>,
@@ -209,21 +226,63 @@ struct SurfaceSnapshot {
 }
 
 impl SurfaceSnapshot {
+    fn insert_synthetic_capabilities(&mut self) -> Result<(), AgentLoopHostError> {
+        let capability_id = capability_info::capability_id()?;
+        self.provider_names.insert(
+            capability_info::TOOL_NAME.to_string(),
+            capability_id.clone(),
+        );
+        self.capabilities.insert(
+            capability_id,
+            SurfaceCapabilitySnapshot::Synthetic(SyntheticSurfaceCapabilitySnapshot {
+                provider_tool_name: capability_info::TOOL_NAME.to_string(),
+                kind: SyntheticCapabilityKind::CapabilityInfo,
+            }),
+        );
+        Ok(())
+    }
+
     fn capability_info(&self, requested: &str) -> Option<CapabilityInfoEntry<'_>> {
         if let Some(capability_id) = self.provider_names.get(requested)
-            && !capability_info::is_capability_id(capability_id)
-            && let Some(capability) = self.capabilities.get(capability_id)
+            && let Some(capability) = self
+                .capabilities
+                .get(capability_id)
+                .and_then(SurfaceCapabilitySnapshot::as_runtime)
         {
             return Some(capability.capability_info(capability_id));
         }
         let requested_id = CapabilityId::new(requested).ok()?;
         self.capabilities
             .get_key_value(&requested_id)
+            .and_then(|(capability_id, capability)| {
+                capability
+                    .as_runtime()
+                    .map(|capability| (capability_id, capability))
+            })
             .map(|(capability_id, capability)| capability.capability_info(capability_id))
+    }
+
+    fn provider_capability(
+        &self,
+        provider_tool_name: &str,
+    ) -> Result<(&CapabilityId, &SurfaceCapabilitySnapshot), AgentLoopHostError> {
+        let Some(capability_id) = self.provider_names.get(provider_tool_name) else {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "provider tool call is outside the visible capability surface",
+            ));
+        };
+        let Some(capability) = self.capabilities.get(capability_id) else {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::StaleSurface,
+                "capability surface snapshot is missing provider metadata",
+            ));
+        };
+        Ok((capability_id, capability))
     }
 }
 
-impl SurfaceCapabilitySnapshot {
+impl RuntimeSurfaceCapabilitySnapshot {
     fn capability_info<'a>(&'a self, capability_id: &'a CapabilityId) -> CapabilityInfoEntry<'a> {
         CapabilityInfoEntry {
             capability_id,
@@ -236,75 +295,154 @@ impl SurfaceCapabilitySnapshot {
     }
 }
 
+impl SurfaceCapabilitySnapshot {
+    fn as_runtime(&self) -> Option<&RuntimeSurfaceCapabilitySnapshot> {
+        match self {
+            Self::Runtime(capability) => Some(capability.as_ref()),
+            Self::Synthetic(_) => None,
+        }
+    }
+
+    fn tool_definition(
+        &self,
+        capability_id: &CapabilityId,
+    ) -> Result<Option<ProviderToolDefinition>, AgentLoopHostError> {
+        match self {
+            Self::Runtime(capability) => {
+                if !provider_schema_is_usable(&capability.parameters_schema) {
+                    tracing::debug!(
+                        capability_id = capability_id.as_str(),
+                        "capability omitted from provider tool definitions because its parameter schema is not provider-usable"
+                    );
+                    return Ok(None);
+                }
+                Ok(Some(ProviderToolDefinition {
+                    capability_id: capability_id.clone(),
+                    name: capability.provider_tool_name.clone(),
+                    description: capability.safe_description.clone(),
+                    parameters: capability.parameters_schema.clone(),
+                }))
+            }
+            Self::Synthetic(capability) => capability.tool_definition(capability_id).map(Some),
+        }
+    }
+
+    fn prepare_provider_tool_call(
+        &self,
+        capability_id: &CapabilityId,
+        snapshot: &SurfaceSnapshot,
+        tool_call: &ProviderToolCall,
+    ) -> Result<PreparedSurfaceCapabilityCall, AgentLoopHostError> {
+        match self {
+            Self::Runtime(capability) => {
+                capability.prepare_provider_tool_call(capability_id, tool_call)
+            }
+            Self::Synthetic(capability) => {
+                capability.prepare_provider_tool_call(capability_id, snapshot, tool_call)
+            }
+        }
+    }
+}
+
+impl RuntimeSurfaceCapabilitySnapshot {
+    fn prepare_provider_tool_call(
+        &self,
+        capability_id: &CapabilityId,
+        tool_call: &ProviderToolCall,
+    ) -> Result<PreparedSurfaceCapabilityCall, AgentLoopHostError> {
+        if !provider_schema_is_usable(&self.parameters_schema) {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "provider tool call was not advertised to the model",
+            ));
+        }
+        let normalized_arguments = normalize_provider_arguments(
+            &tool_call.arguments,
+            &self.parameters_schema,
+            "provider arguments",
+        )?;
+        validate_provider_arguments(&normalized_arguments)?;
+        Ok(PreparedSurfaceCapabilityCall {
+            capability_id: capability_id.clone(),
+            normalized_arguments,
+            effective_capability_ids: vec![capability_id.clone()],
+        })
+    }
+}
+
+impl SyntheticSurfaceCapabilitySnapshot {
+    fn tool_definition(
+        &self,
+        capability_id: &CapabilityId,
+    ) -> Result<ProviderToolDefinition, AgentLoopHostError> {
+        match self.kind {
+            SyntheticCapabilityKind::CapabilityInfo => {
+                debug_assert!(capability_info::is_capability_id(capability_id));
+                let mut definition = capability_info::tool_definition()?;
+                definition.name = self.provider_tool_name.clone();
+                Ok(definition)
+            }
+        }
+    }
+
+    fn prepare_provider_tool_call(
+        &self,
+        capability_id: &CapabilityId,
+        snapshot: &SurfaceSnapshot,
+        tool_call: &ProviderToolCall,
+    ) -> Result<PreparedSurfaceCapabilityCall, AgentLoopHostError> {
+        match self.kind {
+            SyntheticCapabilityKind::CapabilityInfo => {
+                let normalized_arguments = normalize_provider_arguments(
+                    &tool_call.arguments,
+                    &capability_info::schema(),
+                    "provider arguments",
+                )?;
+                validate_provider_arguments(&normalized_arguments)?;
+                let request = capability_info::CapabilityInfoRequest::parse(&normalized_arguments)?;
+                let target = snapshot
+                    .capability_info(request.requested_name())
+                    .ok_or_else(|| {
+                        AgentLoopHostError::new(
+                            AgentLoopHostErrorKind::InvalidInvocation,
+                            "capability_info target is not on the visible surface",
+                        )
+                    })?;
+                Ok(PreparedSurfaceCapabilityCall {
+                    capability_id: capability_id.clone(),
+                    normalized_arguments,
+                    effective_capability_ids: vec![
+                        capability_id.clone(),
+                        target.capability_id.clone(),
+                    ],
+                })
+            }
+        }
+    }
+
+    fn output<'a>(
+        &self,
+        input: &serde_json::Value,
+        resolve: impl FnOnce(&str) -> Option<CapabilityInfoEntry<'a>>,
+    ) -> Result<serde_json::Value, AgentLoopHostError> {
+        match self.kind {
+            SyntheticCapabilityKind::CapabilityInfo => capability_info::output(input, resolve),
+        }
+    }
+}
+
+struct PreparedSurfaceCapabilityCall {
+    capability_id: CapabilityId,
+    normalized_arguments: serde_json::Value,
+    effective_capability_ids: Vec<CapabilityId>,
+}
+
 struct PreparedProviderToolCall {
     surface_version: ironclaw_turns::run_profile::CapabilitySurfaceVersion,
     capability_id: CapabilityId,
     provider_turn_id: String,
     normalized_arguments: serde_json::Value,
-}
-
-#[derive(Clone, Copy, Default)]
-struct SyntheticCapabilityTools;
-
-struct PreparedSyntheticToolCall {
-    capability_id: CapabilityId,
-    normalized_arguments: serde_json::Value,
-}
-
-impl SyntheticCapabilityTools {
-    fn reserve_provider_names(
-        self,
-        provider_names: &mut HashMap<String, CapabilityId>,
-    ) -> Result<(), AgentLoopHostError> {
-        provider_names.insert(
-            capability_info::TOOL_NAME.to_string(),
-            capability_info::capability_id()?,
-        );
-        Ok(())
-    }
-
-    fn tool_definitions(self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
-        Ok(vec![capability_info::tool_definition()?])
-    }
-
-    fn prepare_provider_tool_call(
-        self,
-        snapshot: &SurfaceSnapshot,
-        tool_call: &ProviderToolCall,
-    ) -> Result<Option<PreparedSyntheticToolCall>, AgentLoopHostError> {
-        if tool_call.name != capability_info::TOOL_NAME {
-            return Ok(None);
-        }
-        let normalized_arguments = normalize_provider_arguments(
-            &tool_call.arguments,
-            &capability_info::schema(),
-            "provider arguments",
-        )?;
-        validate_provider_arguments(&normalized_arguments)?;
-        capability_info::validate_input(&normalized_arguments, |requested| {
-            snapshot.capability_info(requested)
-        })?;
-        Ok(Some(PreparedSyntheticToolCall {
-            capability_id: capability_info::capability_id()?,
-            normalized_arguments,
-        }))
-    }
-
-    fn contains_capability(self, capability_id: &CapabilityId) -> bool {
-        capability_info::is_capability_id(capability_id)
-    }
-
-    fn output<'a>(
-        self,
-        capability_id: &CapabilityId,
-        input: &serde_json::Value,
-        resolve: impl FnOnce(&str) -> Option<CapabilityInfoEntry<'a>>,
-    ) -> Result<Option<serde_json::Value>, AgentLoopHostError> {
-        if !self.contains_capability(capability_id) {
-            return Ok(None);
-        }
-        capability_info::output(input, resolve).map(Some)
-    }
+    effective_capability_ids: Vec<CapabilityId>,
 }
 
 const MAX_IN_MEMORY_DISPATCH_RECORDS: usize = 128;
@@ -483,7 +621,6 @@ pub struct HostRuntimeLoopCapabilityPort {
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
-    synthetic_tools: SyntheticCapabilityTools,
     execution_mounts: MountView,
     capability_execution_mounts: HashMap<CapabilityId, MountView>,
     snapshots: Mutex<HashMap<String, SurfaceSnapshot>>,
@@ -525,7 +662,6 @@ impl HostRuntimeLoopCapabilityPort {
             input_resolver,
             result_writer,
             milestone_sink,
-            synthetic_tools: SyntheticCapabilityTools,
             execution_mounts: MountView::default(),
             capability_execution_mounts: HashMap::new(),
             snapshots: Mutex::new(HashMap::new()),
@@ -739,23 +875,14 @@ impl HostRuntimeLoopCapabilityPort {
     async fn invoke_synthetic_capability(
         &self,
         request: CapabilityInvocation,
+        capability: SyntheticSurfaceCapabilitySnapshot,
+        snapshot: SurfaceSnapshot,
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
-        let snapshot = self.snapshot_for(&request.surface_version)?;
         let input = self
             .input_resolver
             .resolve_capability_input(&self.run_context, &request.input_ref)
             .await?;
-        let Some(output) =
-            self.synthetic_tools
-                .output(&request.capability_id, &input, |requested| {
-                    snapshot.capability_info(requested)
-                })?
-        else {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::InvalidInvocation,
-                "capability is not a synthetic loop capability",
-            ));
-        };
+        let output = capability.output(&input, |requested| snapshot.capability_info(requested))?;
         let result_ref = self
             .result_writer
             .write_capability_result(&self.run_context, &request.capability_id, output)
@@ -785,46 +912,15 @@ impl HostRuntimeLoopCapabilityPort {
                 "capability surface is unavailable",
             ));
         };
-        if let Some(prepared) = self
-            .synthetic_tools
-            .prepare_provider_tool_call(&snapshot, tool_call)?
-        {
-            return Ok(PreparedProviderToolCall {
-                surface_version: loop_surface_version(&version)?,
-                capability_id: prepared.capability_id,
-                provider_turn_id,
-                normalized_arguments: prepared.normalized_arguments,
-            });
-        }
-        let Some(capability_id) = snapshot.provider_names.get(&tool_call.name).cloned() else {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::InvalidInvocation,
-                "provider tool call is outside the visible capability surface",
-            ));
-        };
-        let Some(capability) = snapshot.capabilities.get(&capability_id) else {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::StaleSurface,
-                "capability surface snapshot is missing provider metadata",
-            ));
-        };
-        if !provider_schema_is_usable(&capability.parameters_schema) {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::InvalidInvocation,
-                "provider tool call was not advertised to the model",
-            ));
-        }
-        let normalized_arguments = normalize_provider_arguments(
-            &tool_call.arguments,
-            &capability.parameters_schema,
-            "provider arguments",
-        )?;
-        validate_provider_arguments(&normalized_arguments)?;
+        let (capability_id, capability) = snapshot.provider_capability(&tool_call.name)?;
+        let prepared =
+            capability.prepare_provider_tool_call(capability_id, &snapshot, tool_call)?;
         Ok(PreparedProviderToolCall {
             surface_version: loop_surface_version(&version)?,
-            capability_id,
+            capability_id: prepared.capability_id,
             provider_turn_id,
-            normalized_arguments,
+            normalized_arguments: prepared.normalized_arguments,
+            effective_capability_ids: prepared.effective_capability_ids,
         })
     }
 }
@@ -836,28 +932,25 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
         let Some((_, snapshot)) = self.current_snapshot()? else {
             return Ok(Vec::new());
         };
-        let mut definitions = snapshot
-            .capabilities
-            .iter()
-            .filter_map(|(capability_id, capability)| {
-                if !provider_schema_is_usable(&capability.parameters_schema) {
-                    tracing::debug!(
-                        capability_id = capability_id.as_str(),
-                        "capability omitted from provider tool definitions because its parameter schema is not provider-usable"
-                    );
-                    return None;
-                }
-                Some(ProviderToolDefinition {
-                    capability_id: capability_id.clone(),
-                    name: capability.provider_tool_name.clone(),
-                    description: capability.safe_description.clone(),
-                    parameters: capability.parameters_schema.clone(),
-                })
-            })
-            .collect::<Vec<_>>();
-        definitions.extend(self.synthetic_tools.tool_definitions()?);
+        let mut definitions = Vec::new();
+        for (capability_id, capability) in &snapshot.capabilities {
+            if let Some(definition) = capability.tool_definition(capability_id)? {
+                definitions.push(definition);
+            }
+        }
         definitions.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(definitions)
+    }
+
+    fn provider_tool_call_capability_ids(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<ProviderToolCallCapabilityIds, AgentLoopHostError> {
+        let prepared = self.prepare_provider_tool_call(tool_call)?;
+        Ok(ProviderToolCallCapabilityIds {
+            provider_capability_id: prepared.capability_id,
+            effective_capability_ids: prepared.effective_capability_ids,
+        })
     }
 
     fn validate_provider_tool_call(
@@ -908,14 +1001,13 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             .map_err(host_runtime_error)?;
         let version = loop_surface_version(runtime_surface.version.as_str())?;
         let mut snapshot = SurfaceSnapshot::default();
-        self.synthetic_tools
-            .reserve_provider_names(&mut snapshot.provider_names)?;
+        snapshot.insert_synthetic_capabilities()?;
         let descriptors = runtime_surface
             .capabilities
             .into_iter()
             .map(|capability| {
                 let capability_id = capability.descriptor.id.clone();
-                if self.synthetic_tools.contains_capability(&capability_id) {
+                if snapshot.capabilities.contains_key(&capability_id) {
                     return Err(AgentLoopHostError::new(
                         AgentLoopHostErrorKind::InvalidInvocation,
                         "host runtime capability id is reserved for a synthetic loop capability",
@@ -928,15 +1020,17 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                     .insert(provider_tool_name.clone(), capability_id.clone());
                 snapshot.capabilities.insert(
                     capability_id.clone(),
-                    SurfaceCapabilitySnapshot {
-                        provider: capability.descriptor.provider.clone(),
-                        runtime: capability.descriptor.runtime,
-                        estimate: capability.estimated_resources.clone(),
-                        safe_description: capability.descriptor.description.clone(),
-                        parameters_schema: capability.descriptor.parameters_schema.clone(),
-                        effects: capability.descriptor.effects.clone(),
-                        provider_tool_name,
-                    },
+                    SurfaceCapabilitySnapshot::Runtime(Box::new(
+                        RuntimeSurfaceCapabilitySnapshot {
+                            provider: capability.descriptor.provider.clone(),
+                            runtime: capability.descriptor.runtime,
+                            estimate: capability.estimated_resources.clone(),
+                            safe_description: capability.descriptor.description.clone(),
+                            parameters_schema: capability.descriptor.parameters_schema.clone(),
+                            effects: capability.descriptor.effects.clone(),
+                            provider_tool_name,
+                        },
+                    )),
                 );
                 Ok(CapabilityDescriptorView {
                     capability_id,
@@ -968,32 +1062,12 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
         &self,
         request: CapabilityInvocation,
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
-        let is_synthetic_capability = self
-            .synthetic_tools
-            .contains_capability(&request.capability_id);
         let snapshot = self.snapshot_for(&request.surface_version)?;
-        let runtime_dispatch = if is_synthetic_capability {
-            None
-        } else {
-            let Some(capability) = snapshot.capabilities.get(&request.capability_id).cloned()
-            else {
-                return Ok(CapabilityOutcome::Denied(CapabilityDenied {
-                    reason_kind: capability_denied_reason_kind("outside_visible_surface")?,
-                    safe_summary: "capability was not visible on the cited surface".to_string(),
-                }));
-            };
-            let Some(trust_decision) = self
-                .visible_request
-                .provider_trust
-                .get(&capability.provider)
-                .cloned()
-            else {
-                return Ok(CapabilityOutcome::Denied(CapabilityDenied {
-                    reason_kind: capability_denied_reason_kind("missing_provider_trust")?,
-                    safe_summary: "capability provider trust is unavailable".to_string(),
-                }));
-            };
-            Some((capability, trust_decision))
+        let Some(capability) = snapshot.capabilities.get(&request.capability_id).cloned() else {
+            return Ok(CapabilityOutcome::Denied(CapabilityDenied {
+                reason_kind: capability_denied_reason_kind("outside_visible_surface")?,
+                safe_summary: "capability was not visible on the cited surface".to_string(),
+            }));
         };
         let idempotency_key = invocation_idempotency_key(&self.run_context, &request)?;
         loop {
@@ -1021,18 +1095,28 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
         // `finish_runtime_outcome` rather than cleared.
         let guard = self.dispatch_reservation_guard(&idempotency_key);
 
-        if is_synthetic_capability {
-            let result = self.invoke_synthetic_capability(request).await;
-            self.record_loop_completed(&idempotency_key, result.clone())?;
-            guard.commit();
-            return result;
-        }
+        let capability = match capability {
+            SurfaceCapabilitySnapshot::Runtime(capability) => capability,
+            SurfaceCapabilitySnapshot::Synthetic(capability) => {
+                let result = self
+                    .invoke_synthetic_capability(request, capability, snapshot)
+                    .await;
+                self.record_loop_completed(&idempotency_key, result.clone())?;
+                guard.commit();
+                return result;
+            }
+        };
 
-        let Some((capability, trust_decision)) = runtime_dispatch else {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::Internal,
-                "runtime dispatch metadata missing for non-synthetic capability",
-            ));
+        let Some(trust_decision) = self
+            .visible_request
+            .provider_trust
+            .get(&capability.provider)
+            .cloned()
+        else {
+            return Ok(CapabilityOutcome::Denied(CapabilityDenied {
+                reason_kind: capability_denied_reason_kind("missing_provider_trust")?,
+                safe_summary: "capability provider trust is unavailable".to_string(),
+            }));
         };
         let input = self
             .input_resolver
@@ -1593,7 +1677,7 @@ fn invocation_context_from_visible(
     base: &ExecutionContext,
     run_context: &LoopRunContext,
     capability_id: &CapabilityId,
-    capability: &SurfaceCapabilitySnapshot,
+    capability: &RuntimeSurfaceCapabilitySnapshot,
     trust: ironclaw_host_api::TrustClass,
     allowed_effects: &[EffectKind],
     execution_mounts: &MountView,
@@ -2576,7 +2660,19 @@ mod tests {
                 "count": { "type": "integer" },
                 "message": { "type": "string" }
             },
-            "required": ["message"]
+            "required": ["message"],
+            "allOf": [{
+                "properties": {
+                    "limit": { "type": "integer" }
+                },
+                "required": ["limit"]
+            }],
+            "anyOf": [{
+                "properties": {
+                    "mode": { "type": "string" }
+                },
+                "required": ["mode"]
+            }]
         });
         let result_writer = Arc::new(RecordingResultWriter::default());
         let port = HostRuntimeLoopCapabilityPortFactory::new(
@@ -2615,13 +2711,13 @@ mod tests {
             let output = &records.last().expect("result was written").1;
             assert_eq!(
                 output["parameters"],
-                serde_json::json!(["count", "message"])
+                serde_json::json!(["count", "limit", "message", "mode"])
             );
             assert_eq!(output.get("summary").is_some(), expected_summary);
             if expected_summary {
                 assert_eq!(
                     output["summary"]["always_required"],
-                    serde_json::json!(["message"])
+                    serde_json::json!(["limit", "message", "mode"])
                 );
                 assert_eq!(
                     output["summary"]["notes"],
@@ -2829,7 +2925,7 @@ mod tests {
                 max_invocations: None,
             },
         });
-        let capability = SurfaceCapabilitySnapshot {
+        let capability = RuntimeSurfaceCapabilitySnapshot {
             provider: ExtensionId::new("demo").expect("valid provider"),
             runtime: RuntimeKind::Wasm,
             estimate: ResourceEstimate::default(),
@@ -2881,7 +2977,7 @@ mod tests {
                 max_invocations: None,
             },
         });
-        let capability = SurfaceCapabilitySnapshot {
+        let capability = RuntimeSurfaceCapabilitySnapshot {
             provider: ExtensionId::new("demo").expect("valid provider"),
             runtime: RuntimeKind::Wasm,
             estimate: ResourceEstimate::default(),
@@ -2930,7 +3026,7 @@ mod tests {
                 max_invocations: None,
             },
         });
-        let capability = SurfaceCapabilitySnapshot {
+        let capability = RuntimeSurfaceCapabilitySnapshot {
             provider: ExtensionId::new("demo").expect("valid provider"),
             runtime: RuntimeKind::Wasm,
             estimate: ResourceEstimate::default(),
@@ -2980,7 +3076,7 @@ mod tests {
                 max_invocations: None,
             },
         });
-        let capability = SurfaceCapabilitySnapshot {
+        let capability = RuntimeSurfaceCapabilitySnapshot {
             provider: ExtensionId::new("demo").expect("valid provider"),
             runtime: RuntimeKind::FirstParty,
             estimate: ResourceEstimate::default(),
@@ -3063,7 +3159,7 @@ mod tests {
                 max_invocations: None,
             },
         });
-        let capability = SurfaceCapabilitySnapshot {
+        let capability = RuntimeSurfaceCapabilitySnapshot {
             provider: ExtensionId::new("demo").expect("valid provider"),
             runtime: RuntimeKind::Script,
             estimate: ResourceEstimate::default(),

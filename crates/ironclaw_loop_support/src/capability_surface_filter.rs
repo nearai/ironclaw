@@ -5,11 +5,11 @@ use ironclaw_host_api::CapabilityId;
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation, CapabilityBatchOutcome,
     CapabilityCallCandidate, CapabilityDenied, CapabilityDeniedReasonKind, CapabilityInvocation,
-    CapabilityOutcome, LoopCapabilityPort, ProviderToolCall, ProviderToolDefinition,
-    VisibleCapabilityRequest, VisibleCapabilitySurface,
+    CapabilityOutcome, LoopCapabilityPort, ProviderToolCall, ProviderToolCallCapabilityIds,
+    ProviderToolDefinition, VisibleCapabilityRequest, VisibleCapabilitySurface,
 };
 
-use crate::{CapabilityAllowSet, capability_info};
+use crate::CapabilityAllowSet;
 
 #[derive(Clone)]
 pub struct CapabilitySurfaceProfileFilter {
@@ -57,25 +57,11 @@ impl LoopCapabilityPort for CapabilitySurfaceVisibleFilter {
         &self,
         tool_call: &ProviderToolCall,
     ) -> Result<(), AgentLoopHostError> {
-        let definitions = self.inner.tool_definitions()?;
-        let Some(definition) = definitions
-            .iter()
-            .find(|definition| definition.name == tool_call.name)
-        else {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::InvalidInvocation,
-                "provider tool call is outside the visible capability surface",
-            ));
-        };
-        if !self.permits(&definition.capability_id) {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::InvalidInvocation,
-                "provider tool call is outside the model-visible capability view",
-            ));
-        }
-        validate_capability_info_target(tool_call, &definitions, |capability_id| {
-            self.permits(capability_id)
-        })?;
+        validate_provider_tool_call_capability_scope(
+            self.inner.provider_tool_call_capability_ids(tool_call)?,
+            |capability_id| self.permits(capability_id),
+            "provider tool call is outside the model-visible capability view",
+        )?;
         self.inner.validate_provider_tool_call(tool_call)
     }
 
@@ -83,25 +69,11 @@ impl LoopCapabilityPort for CapabilitySurfaceVisibleFilter {
         &self,
         tool_call: ProviderToolCall,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
-        let definitions = self.inner.tool_definitions()?;
-        let Some(definition) = definitions
-            .iter()
-            .find(|definition| definition.name == tool_call.name)
-        else {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::InvalidInvocation,
-                "provider tool call is outside the visible capability surface",
-            ));
-        };
-        if !self.permits(&definition.capability_id) {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::InvalidInvocation,
-                "provider tool call is outside the model-visible capability view",
-            ));
-        }
-        validate_capability_info_target(&tool_call, &definitions, |capability_id| {
-            self.permits(capability_id)
-        })?;
+        validate_provider_tool_call_capability_scope(
+            self.inner.provider_tool_call_capability_ids(&tool_call)?,
+            |capability_id| self.permits(capability_id),
+            "provider tool call is outside the model-visible capability view",
+        )?;
         let candidate = self.inner.register_provider_tool_call(tool_call).await?;
         if !self.permits(&candidate.capability_id) {
             return Err(AgentLoopHostError::new(
@@ -161,25 +133,11 @@ impl LoopCapabilityPort for CapabilitySurfaceProfileFilter {
         tool_call: &ProviderToolCall,
     ) -> Result<(), AgentLoopHostError> {
         if !matches!(self.allow_set.as_ref(), CapabilityAllowSet::All) {
-            let definitions = self.inner.tool_definitions()?;
-            let Some(definition) = definitions
-                .iter()
-                .find(|definition| definition.name == tool_call.name)
-            else {
-                return Err(AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::InvalidInvocation,
-                    "provider tool call is outside the visible capability surface",
-                ));
-            };
-            if !self.allow_set.permits(&definition.capability_id) {
-                return Err(AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::InvalidInvocation,
-                    "provider tool call is outside the run-profile surface",
-                ));
-            }
-            validate_capability_info_target(tool_call, &definitions, |capability_id| {
-                self.allow_set.permits(capability_id)
-            })?;
+            validate_provider_tool_call_capability_scope(
+                self.inner.provider_tool_call_capability_ids(tool_call)?,
+                |capability_id| self.allow_set.permits(capability_id),
+                "provider tool call is outside the run-profile surface",
+            )?;
         }
         self.inner.validate_provider_tool_call(tool_call)
     }
@@ -189,25 +147,11 @@ impl LoopCapabilityPort for CapabilitySurfaceProfileFilter {
         tool_call: ProviderToolCall,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
         if !matches!(self.allow_set.as_ref(), CapabilityAllowSet::All) {
-            let definitions = self.inner.tool_definitions()?;
-            let Some(definition) = definitions
-                .iter()
-                .find(|definition| definition.name == tool_call.name)
-            else {
-                return Err(AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::InvalidInvocation,
-                    "provider tool call is outside the visible capability surface",
-                ));
-            };
-            if !self.allow_set.permits(&definition.capability_id) {
-                return Err(AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::InvalidInvocation,
-                    "provider tool call is outside the run-profile surface",
-                ));
-            }
-            validate_capability_info_target(&tool_call, &definitions, |capability_id| {
-                self.allow_set.permits(capability_id)
-            })?;
+            validate_provider_tool_call_capability_scope(
+                self.inner.provider_tool_call_capability_ids(&tool_call)?,
+                |capability_id| self.allow_set.permits(capability_id),
+                "provider tool call is outside the run-profile surface",
+            )?;
         }
         let candidate = self.inner.register_provider_tool_call(tool_call).await?;
         if !self.allow_set.permits(&candidate.capability_id) {
@@ -344,25 +288,23 @@ fn apply_visible_filter_to_surface(
         .retain(|descriptor| visible_capability_ids.contains(&descriptor.capability_id));
 }
 
-fn validate_capability_info_target(
-    tool_call: &ProviderToolCall,
-    definitions: &[ProviderToolDefinition],
-    permits: impl FnOnce(&CapabilityId) -> bool,
+fn validate_provider_tool_call_capability_scope(
+    capability_ids: ProviderToolCallCapabilityIds,
+    permits: impl Fn(&CapabilityId) -> bool,
+    denial_message: &'static str,
 ) -> Result<(), AgentLoopHostError> {
-    if !capability_info::is_tool_name(&tool_call.name) {
-        return Ok(());
+    if !permits(&capability_ids.provider_capability_id)
+        || capability_ids
+            .effective_capability_ids
+            .iter()
+            .any(|capability_id| !permits(capability_id))
+    {
+        return Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            denial_message,
+        ));
     }
-    capability_info::validate_filtered_provider_arguments(
-        &tool_call.arguments,
-        |requested| {
-            definitions
-                .iter()
-                .find(|definition| definition.name == requested)
-                .map(|definition| definition.capability_id.clone())
-                .or_else(|| CapabilityId::new(requested).ok())
-        },
-        permits,
-    )
+    Ok(())
 }
 
 fn model_view_denied_outcome() -> CapabilityOutcome {
@@ -409,7 +351,7 @@ fn surface_profile_denied_kind() -> CapabilityDeniedReasonKind {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::{collections::HashMap, sync::Mutex};
 
     use ironclaw_host_api::{CapabilityId, RuntimeKind};
     use ironclaw_turns::run_profile::{
@@ -418,6 +360,8 @@ mod tests {
     };
     use ironclaw_turns::{LoopGateRef, LoopResultRef};
 
+    use crate::capability_info;
+
     use super::*;
 
     #[derive(Default)]
@@ -425,6 +369,7 @@ mod tests {
         surface: Mutex<Option<VisibleCapabilitySurface>>,
         batch_outcome: Mutex<Option<CapabilityBatchOutcome>>,
         tool_definitions: Mutex<Vec<ProviderToolDefinition>>,
+        provider_call_capability_ids: Mutex<HashMap<String, ProviderToolCallCapabilityIds>>,
         provider_calls: Mutex<Vec<ProviderToolCall>>,
         visible_calls: Mutex<usize>,
         invocations: Mutex<Vec<CapabilityInvocation>>,
@@ -439,6 +384,34 @@ mod tests {
                 .lock()
                 .expect("tool definitions lock")
                 .clone())
+        }
+
+        fn provider_tool_call_capability_ids(
+            &self,
+            tool_call: &ProviderToolCall,
+        ) -> Result<ProviderToolCallCapabilityIds, AgentLoopHostError> {
+            if let Some(capability_ids) = self
+                .provider_call_capability_ids
+                .lock()
+                .expect("provider call capability ids lock")
+                .get(&tool_call.name)
+                .cloned()
+            {
+                return Ok(capability_ids);
+            }
+            let Some(definition) = self
+                .tool_definitions()?
+                .into_iter()
+                .find(|definition| definition.name == tool_call.name)
+            else {
+                return Err(AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    "provider tool call is outside the visible capability surface",
+                ));
+            };
+            Ok(ProviderToolCallCapabilityIds::single(
+                definition.capability_id,
+            ))
         }
 
         async fn register_provider_tool_call(
@@ -537,6 +510,17 @@ mod tests {
             name: name.to_string(),
             description: format!("{capability} description"),
             parameters: serde_json::json!({"type":"object"}),
+        }
+    }
+
+    fn provider_call_capability_ids(capability_ids: &[&str]) -> ProviderToolCallCapabilityIds {
+        let provider_capability_id = capability_id(capability_ids[0]);
+        ProviderToolCallCapabilityIds {
+            provider_capability_id,
+            effective_capability_ids: capability_ids
+                .iter()
+                .map(|capability| capability_id(capability))
+                .collect(),
         }
     }
 
@@ -720,6 +704,14 @@ mod tests {
             provider_definition("demo.allowed", "demo__allowed"),
             provider_definition("demo.denied", "demo__denied"),
         ];
+        inner
+            .provider_call_capability_ids
+            .lock()
+            .expect("provider call capability ids lock")
+            .insert(
+                capability_info::TOOL_NAME.to_string(),
+                provider_call_capability_ids(&[capability_info::CAPABILITY_ID, "demo.denied"]),
+            );
         let filter = CapabilitySurfaceProfileFilter::new(
             inner.clone(),
             Arc::new(CapabilityAllowSet::allowlist([
@@ -754,6 +746,14 @@ mod tests {
             provider_definition("demo.allowed", "demo__allowed"),
             provider_definition("demo.denied", "demo__denied"),
         ];
+        inner
+            .provider_call_capability_ids
+            .lock()
+            .expect("provider call capability ids lock")
+            .insert(
+                capability_info::TOOL_NAME.to_string(),
+                provider_call_capability_ids(&[capability_info::CAPABILITY_ID, "demo.denied"]),
+            );
         let filter = CapabilitySurfaceVisibleFilter::new(
             inner.clone(),
             [

@@ -52,6 +52,28 @@ impl Detail {
     }
 }
 
+pub(super) struct CapabilityInfoRequest {
+    requested_name: String,
+    detail: Detail,
+}
+
+impl CapabilityInfoRequest {
+    pub(super) fn parse(input: &serde_json::Value) -> Result<Self, AgentLoopHostError> {
+        Ok(Self {
+            requested_name: requested_name(input)?.to_string(),
+            detail: Detail::parse(input)?,
+        })
+    }
+
+    pub(super) fn requested_name(&self) -> &str {
+        self.requested_name.as_str()
+    }
+
+    fn detail(&self) -> Detail {
+        self.detail
+    }
+}
+
 pub(crate) fn capability_id() -> Result<CapabilityId, AgentLoopHostError> {
     CapabilityId::new(CAPABILITY_ID).map_err(|_| {
         AgentLoopHostError::new(
@@ -63,10 +85,6 @@ pub(crate) fn capability_id() -> Result<CapabilityId, AgentLoopHostError> {
 
 pub(crate) fn is_capability_id(capability_id: &CapabilityId) -> bool {
     capability_id.as_str() == CAPABILITY_ID
-}
-
-pub(crate) fn is_tool_name(tool_name: &str) -> bool {
-    tool_name == TOOL_NAME
 }
 
 pub(super) fn tool_definition() -> Result<ProviderToolDefinition, AgentLoopHostError> {
@@ -110,34 +128,24 @@ pub(super) fn schema() -> serde_json::Value {
     })
 }
 
-pub(super) fn validate_input<'a>(
-    input: &serde_json::Value,
-    resolve: impl FnOnce(&str) -> Option<CapabilityInfoEntry<'a>>,
-) -> Result<(), AgentLoopHostError> {
-    let requested = requested_name(input)?;
-    Detail::parse(input)?;
-    resolve(requested).ok_or_else(target_not_visible)?;
-    Ok(())
-}
-
 pub(super) fn output<'a>(
     input: &serde_json::Value,
     resolve: impl FnOnce(&str) -> Option<CapabilityInfoEntry<'a>>,
 ) -> Result<serde_json::Value, AgentLoopHostError> {
-    let requested = requested_name(input)?;
-    let detail = Detail::parse(input)?;
-    let capability = resolve(requested).ok_or_else(target_not_visible)?;
+    let request = CapabilityInfoRequest::parse(input)?;
+    let capability = resolve(request.requested_name()).ok_or_else(target_not_visible)?;
+    let schema_summary = SchemaSummary::for_schema(capability.parameters_schema);
     let mut output = serde_json::json!({
         "name": capability.provider_tool_name,
         "capability_id": capability.capability_id.as_str(),
         "description": capability.safe_description,
-        "parameters": schema_param_names(capability.parameters_schema),
+        "parameters": schema_summary.parameter_names,
     });
-    match detail {
+    match request.detail() {
         Detail::Names => {}
         Detail::Summary => {
             output["summary"] = serde_json::json!({
-                "always_required": required_param_names(capability.parameters_schema),
+                "always_required": schema_summary.required_names,
                 "notes": notes(&capability),
             });
         }
@@ -146,40 +154,6 @@ pub(super) fn output<'a>(
         }
     }
     Ok(output)
-}
-
-pub(crate) fn validate_filtered_provider_arguments(
-    arguments: &serde_json::Value,
-    resolve: impl FnOnce(&str) -> Option<CapabilityId>,
-    permits: impl FnOnce(&CapabilityId) -> bool,
-) -> Result<(), AgentLoopHostError> {
-    let input = provider_arguments_input(arguments)?;
-    let requested = requested_name(&input)?;
-    let Some(capability_id) = resolve(requested) else {
-        return Err(target_not_visible());
-    };
-    if is_capability_id(&capability_id) || !permits(&capability_id) {
-        return Err(target_not_visible());
-    }
-    Ok(())
-}
-
-fn provider_arguments_input(
-    arguments: &serde_json::Value,
-) -> Result<serde_json::Value, AgentLoopHostError> {
-    let Some(text) = arguments.as_str() else {
-        return Ok(arguments.clone());
-    };
-    let trimmed = text.trim();
-    if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
-        return Ok(arguments.clone());
-    }
-    serde_json::from_str(trimmed).map_err(|_| {
-        AgentLoopHostError::new(
-            AgentLoopHostErrorKind::InvalidInvocation,
-            "capability_info provider arguments could not be parsed as JSON",
-        )
-    })
 }
 
 fn requested_name(input: &serde_json::Value) -> Result<&str, AgentLoopHostError> {
@@ -210,40 +184,44 @@ fn validate_name(value: &str) -> Result<(), AgentLoopHostError> {
     Ok(())
 }
 
-fn schema_param_names(schema: &serde_json::Value) -> Vec<String> {
-    let mut names = BTreeSet::new();
-    if let Some(properties) = schema
-        .get("properties")
-        .and_then(serde_json::Value::as_object)
-    {
-        names.extend(properties.keys().cloned());
-    }
-    for key in ["allOf", "oneOf", "anyOf"] {
-        if let Some(variants) = schema.get(key).and_then(serde_json::Value::as_array) {
-            for variant in variants {
-                if let Some(properties) = variant
-                    .get("properties")
-                    .and_then(serde_json::Value::as_object)
-                {
-                    names.extend(properties.keys().cloned());
+struct SchemaSummary {
+    parameter_names: Vec<String>,
+    required_names: Vec<String>,
+}
+
+impl SchemaSummary {
+    fn for_schema(schema: &serde_json::Value) -> Self {
+        let mut parameter_names = BTreeSet::new();
+        let mut required_names = BTreeSet::new();
+        let mut stack = vec![schema];
+        while let Some(current) = stack.pop() {
+            if let Some(properties) = current
+                .get("properties")
+                .and_then(serde_json::Value::as_object)
+            {
+                parameter_names.extend(properties.keys().cloned());
+            }
+            if let Some(required) = current
+                .get("required")
+                .and_then(serde_json::Value::as_array)
+            {
+                required_names.extend(
+                    required
+                        .iter()
+                        .filter_map(|value| value.as_str().map(str::to_string)),
+                );
+            }
+            for key in ["allOf", "oneOf", "anyOf"] {
+                if let Some(variants) = current.get(key).and_then(serde_json::Value::as_array) {
+                    stack.extend(variants);
                 }
             }
         }
+        Self {
+            parameter_names: parameter_names.into_iter().collect(),
+            required_names: required_names.into_iter().collect(),
+        }
     }
-    names.into_iter().collect()
-}
-
-fn required_param_names(schema: &serde_json::Value) -> Vec<String> {
-    schema
-        .get("required")
-        .and_then(serde_json::Value::as_array)
-        .map(|required| {
-            required
-                .iter()
-                .filter_map(|value| value.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 fn notes(capability: &CapabilityInfoEntry<'_>) -> Vec<String> {
