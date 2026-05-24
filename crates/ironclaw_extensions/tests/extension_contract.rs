@@ -360,6 +360,96 @@ fn capability_provider_host_api_contract_accepts_valid_manifest() {
 }
 
 #[test]
+fn capability_provider_host_api_projects_runtime_credentials() {
+    let manifest = CAPABILITY_PROVIDER_MANIFEST.replace(
+        "effects = [\"network\"]",
+        r#"effects = ["network", "use_secret"]
+runtime_credentials = [
+  { handle = "telegram_token", audience = { scheme = "https", host_pattern = "api.telegram.org" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]"#,
+    );
+    let manifest = ExtensionManifest::parse_with_host_api_contracts(
+        &manifest,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
+    )
+    .unwrap();
+
+    let credential = manifest.capabilities[0].runtime_credentials[0].clone();
+    assert_eq!(
+        credential.handle,
+        SecretHandle::new("telegram_token").unwrap()
+    );
+    assert_eq!(
+        credential.audience,
+        NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: "api.telegram.org".to_string(),
+            port: None,
+        }
+    );
+    assert_eq!(
+        credential.target,
+        RuntimeCredentialTarget::Header {
+            name: "authorization".to_string(),
+            prefix: Some("Bearer ".to_string()),
+        }
+    );
+    assert!(credential.required);
+
+    let package = package_from_manifest(manifest, "telegram");
+    assert_eq!(package.capabilities[0].runtime_credentials.len(), 1);
+    assert_eq!(package.capabilities[0].runtime_credentials[0], credential);
+}
+
+#[test]
+fn capability_provider_host_api_preserves_runtime_credential_validation_errors() {
+    let cases = [
+        (
+            r#"{ handle = "../telegram_token", audience = { scheme = "https", host_pattern = "api.telegram.org" }, target = { type = "header", name = "authorization" } }"#,
+            "invalid secret",
+        ),
+        (
+            r#"{ handle = "telegram_token", audience = { scheme = "http", host_pattern = "api.telegram.org" }, target = { type = "header", name = "authorization" } }"#,
+            "https scheme",
+        ),
+        (
+            r#"{ handle = "telegram_token", audience = { scheme = "https", host_pattern = "api.telegram.org" }, target = { type = "header", name = "bad header" } }"#,
+            "invalid runtime credential target",
+        ),
+    ];
+
+    for (credential, expected) in cases {
+        let manifest = CAPABILITY_PROVIDER_MANIFEST.replace(
+            "effects = [\"network\"]",
+            &format!(
+                r#"effects = ["network", "use_secret"]
+runtime_credentials = [
+  {credential},
+]"#
+            ),
+        );
+        let err = ExtensionManifest::parse_with_host_api_contracts(
+            &manifest,
+            ManifestSource::InstalledLocal,
+            &HostPortCatalog::empty(),
+            &capability_provider_contracts(),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(
+                err,
+                ExtensionError::ManifestV2(ManifestV2Error::HostApiSectionRejected { ref reason, .. })
+                    if reason.contains(expected)
+            ),
+            "expected reason containing {expected:?}, got {err:?}"
+        );
+    }
+}
+
+#[test]
 fn capability_provider_host_api_fails_without_registered_contract() {
     let err = ExtensionManifest::parse_with_host_api_contracts(
         CAPABILITY_PROVIDER_MANIFEST,

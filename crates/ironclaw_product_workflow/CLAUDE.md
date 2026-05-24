@@ -26,6 +26,7 @@ handling, gate routing, mission routing, and redacted acknowledgements.
 ## Dependencies
 
 - `ironclaw_product_adapters` — trait definitions, envelope/ack types, `ProjectionStream` for SSE
+- `ironclaw_auth` — typed product-auth continuation events consumed by the workflow auth bridge
 - `ironclaw_conversations` — canonical actor/conversation binding and thread route ownership
 - `ironclaw_turns` — turn coordinator, scope, IDs
 - `ironclaw_threads` — session thread service contract

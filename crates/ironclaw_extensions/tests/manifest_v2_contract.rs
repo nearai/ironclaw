@@ -9,7 +9,8 @@ use ironclaw_extensions::{
 };
 use ironclaw_host_api::{
     CapabilityProfileId, ExtensionId, HostPortCatalog, HostPortCatalogEntry, HostPortId,
-    PermissionMode, RequestedTrustClass, RuntimeKind, TrustClass,
+    NetworkScheme, NetworkTargetPattern, PermissionMode, RequestedTrustClass,
+    RuntimeCredentialTarget, RuntimeKind, SecretHandle, TrustClass,
 };
 
 const TELEGRAM_TOKEN_PORT: &str = "host.secrets.telegram_bot_token";
@@ -70,6 +71,155 @@ fn parses_minimum_valid_v2_manifest_for_installed_third_party_extension() {
     assert_eq!(cap.visibility, CapabilityVisibility::Model);
     assert_eq!(cap.default_permission, PermissionMode::Allow);
     assert!(cap.prompt_doc_ref.is_none());
+}
+
+#[test]
+fn parses_runtime_credentials_from_capability_declarations() {
+    let toml = third_party_wasm_manifest("acme-tools", "acme-tools.echo").replace(
+        r#"default_permission = "allow""#,
+        r#"effects = ["network", "use_secret"]
+runtime_credentials = [
+  { handle = "github_token", audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "allow""#,
+    );
+    let manifest =
+        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap();
+
+    let credential = &manifest.capabilities[0].runtime_credentials[0];
+    assert_eq!(
+        credential.handle,
+        SecretHandle::new("github_token").unwrap()
+    );
+    assert!(credential.required);
+    assert_eq!(
+        credential.audience,
+        NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: "api.github.com".to_string(),
+            port: None,
+        }
+    );
+    assert_eq!(
+        credential.target,
+        RuntimeCredentialTarget::Header {
+            name: "authorization".to_string(),
+            prefix: Some("Bearer ".to_string()),
+        }
+    );
+}
+
+#[test]
+fn rejects_runtime_credentials_without_use_secret_effect() {
+    let toml = third_party_wasm_manifest("acme-tools", "acme-tools.echo").replace(
+        r#"default_permission = "allow""#,
+        r#"runtime_credentials = [
+  { handle = "github_token", audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization" } },
+]
+default_permission = "allow""#,
+    );
+    let err =
+        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap_err();
+    assert!(matches!(err, ManifestV2Error::Invalid { .. }), "{err:?}");
+    assert!(err.to_string().contains("use_secret"), "{err:?}");
+}
+
+#[test]
+fn rejects_runtime_credentials_with_invalid_target_shape() {
+    let toml = third_party_wasm_manifest("acme-tools", "acme-tools.echo").replace(
+        r#"default_permission = "allow""#,
+        r#"effects = ["network", "use_secret"]
+runtime_credentials = [
+  { handle = "github_token", audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "bad header" } },
+]
+default_permission = "allow""#,
+    );
+    let err =
+        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap_err();
+    assert!(matches!(err, ManifestV2Error::Invalid { .. }), "{err:?}");
+    assert!(
+        err.to_string()
+            .contains("invalid runtime credential target"),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn rejects_runtime_credentials_with_invalid_audience_shape() {
+    let toml = third_party_wasm_manifest("acme-tools", "acme-tools.echo").replace(
+        r#"default_permission = "allow""#,
+        r#"effects = ["network", "use_secret"]
+runtime_credentials = [
+  { handle = "github_token", audience = { scheme = "https", host_pattern = "" }, target = { type = "header", name = "authorization" } },
+]
+default_permission = "allow""#,
+    );
+    let err =
+        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap_err();
+    assert!(matches!(err, ManifestV2Error::Invalid { .. }), "{err:?}");
+    assert!(
+        err.to_string()
+            .contains("invalid runtime credential audience"),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn rejects_runtime_credentials_without_https_audience_scheme() {
+    for audience in [
+        r#"{ scheme = "http", host_pattern = "api.github.com" }"#,
+        r#"{ host_pattern = "api.github.com" }"#,
+    ] {
+        let toml = third_party_wasm_manifest("acme-tools", "acme-tools.echo").replace(
+            r#"default_permission = "allow""#,
+            &format!(
+                r#"effects = ["network", "use_secret"]
+runtime_credentials = [
+  {{ handle = "github_token", audience = {audience}, target = {{ type = "header", name = "authorization" }} }},
+]
+default_permission = "allow""#
+            ),
+        );
+        let err = ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog())
+            .unwrap_err();
+        assert!(matches!(err, ManifestV2Error::Invalid { .. }), "{err:?}");
+        assert!(err.to_string().contains("https scheme"), "{err:?}");
+    }
+}
+
+#[test]
+fn rejects_runtime_credentials_with_invalid_handle() {
+    let toml = third_party_wasm_manifest("acme-tools", "acme-tools.echo").replace(
+        r#"default_permission = "allow""#,
+        r#"effects = ["network", "use_secret"]
+runtime_credentials = [
+  { handle = "../github_token", audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization" } },
+]
+default_permission = "allow""#,
+    );
+    let err =
+        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap_err();
+    assert!(err.to_string().contains("invalid secret"), "{err:?}");
+}
+
+#[test]
+fn rejects_duplicate_runtime_credential_handles() {
+    let toml = third_party_wasm_manifest("acme-tools", "acme-tools.echo").replace(
+        r#"default_permission = "allow""#,
+        r#"effects = ["network", "use_secret"]
+runtime_credentials = [
+  { handle = "github_token", audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization" } },
+  { handle = "github_token", audience = { scheme = "https", host_pattern = "uploads.github.com" }, target = { type = "header", name = "authorization" } },
+]
+default_permission = "allow""#,
+    );
+    let err =
+        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap_err();
+    assert!(matches!(err, ManifestV2Error::Invalid { .. }), "{err:?}");
+    assert!(
+        err.to_string().contains("duplicate runtime credential"),
+        "{err:?}"
+    );
 }
 
 #[test]

@@ -58,6 +58,7 @@ mod production;
 mod services;
 mod surface;
 mod turn_scheduler;
+mod wasm_credentials;
 
 pub use capability_catalog::{
     HotCapabilityCatalog, HotCapabilityRecord, MAX_HOT_PROMPT_BYTES, MAX_HOT_SCHEMA_BYTES,
@@ -96,8 +97,9 @@ pub use process_port::{
 };
 pub use production::DefaultHostRuntime;
 pub use services::{
-    HostRuntimeServices, ProductionWiringComponent, ProductionWiringConfig, ProductionWiringIssue,
-    ProductionWiringIssueKind, ProductionWiringReport, RegisteredRuntimeHealth,
+    HostRuntimeServices, ProductionEventStoreWiringError, ProductionWiringComponent,
+    ProductionWiringConfig, ProductionWiringIssue, ProductionWiringIssueKind,
+    ProductionWiringReport, RegisteredRuntimeHealth,
 };
 pub use surface::{CapabilitySurfacePolicy, VisibleCapability, VisibleCapabilityAccess};
 pub use turn_scheduler::{
@@ -1086,21 +1088,23 @@ fn lease_secret_for_injection<S>(
 where
     S: SecretStore,
 {
-    let metadata = block_on_secret(secrets.metadata(&request.scope, &injection.handle))?;
-    if metadata.is_none() {
-        if injection.required {
-            return Err(RuntimeHttpEgressError::Credential {
-                reason: "required credential is unavailable".to_string(),
-            });
+    block_on_secret_store(async {
+        let metadata = secrets.metadata(&request.scope, &injection.handle).await?;
+        if metadata.is_none() {
+            return Ok(None);
         }
-        return Ok(None);
-    }
-    let lease = block_on_secret(secrets.lease_once(&request.scope, &injection.handle))?;
-    let material = block_on_secret(secrets.consume(&request.scope, lease.id))?;
-    Ok(Some(material))
+        let lease = secrets
+            .lease_once(&request.scope, &injection.handle)
+            .await?;
+        secrets.consume(&request.scope, lease.id).await.map(Some)
+    })?
+    .map_or_else(
+        || missing_runtime_credential(injection.required),
+        |material| Ok(Some(material)),
+    )
 }
 
-fn block_on_secret<T>(
+fn block_on_secret_store<T>(
     future: impl std::future::Future<Output = Result<T, SecretStoreError>> + Send,
 ) -> Result<T, RuntimeHttpEgressError>
 where
@@ -1151,13 +1155,13 @@ fn apply_credential_injection(
     target: &RuntimeCredentialTarget,
     value: &str,
 ) -> Result<(), RuntimeHttpEgressError> {
+    target
+        .validate_declaration()
+        .map_err(|_| RuntimeHttpEgressError::Credential {
+            reason: "credential injection target is invalid".to_string(),
+        })?;
     match target {
         RuntimeCredentialTarget::Header { name, prefix } => {
-            if !valid_injected_header_name(name) {
-                return Err(RuntimeHttpEgressError::Credential {
-                    reason: "credential injection header name is invalid".to_string(),
-                });
-            }
             let injected = match prefix {
                 Some(prefix) => format!("{prefix}{value}"),
                 None => value.to_string(),
@@ -1179,30 +1183,6 @@ fn apply_credential_injection(
         }
     }
     Ok(())
-}
-
-fn valid_injected_header_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric()
-                || matches!(
-                    byte,
-                    b'!' | b'#'
-                        | b'$'
-                        | b'%'
-                        | b'&'
-                        | b'\''
-                        | b'*'
-                        | b'+'
-                        | b'-'
-                        | b'.'
-                        | b'^'
-                        | b'_'
-                        | b'`'
-                        | b'|'
-                        | b'~'
-                )
-        })
 }
 
 fn runtime_network_error(error: NetworkHttpError) -> RuntimeHttpEgressError {

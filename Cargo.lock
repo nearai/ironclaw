@@ -4114,6 +4114,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -4354,7 +4355,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_first_party_extensions"
+name = "ironclaw_first_party_extension_ports"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -4366,6 +4367,24 @@ dependencies = [
  "ironclaw_turns",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ironclaw_first_party_extensions"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "glob",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_safety",
+ "ironclaw_skills",
+ "regex",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -4426,13 +4445,11 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
- "blake3",
  "chrono",
  "chrono-tz",
  "deadpool-postgres",
  "dirs",
  "futures-util",
- "glob",
  "ironclaw_approvals",
  "ironclaw_authorization",
  "ironclaw_capabilities",
@@ -4441,6 +4458,7 @@ dependencies = [
  "ironclaw_events",
  "ironclaw_extensions",
  "ironclaw_filesystem",
+ "ironclaw_first_party_extensions",
  "ironclaw_host_api",
  "ironclaw_mcp",
  "ironclaw_memory",
@@ -4455,14 +4473,12 @@ dependencies = [
  "ironclaw_safety",
  "ironclaw_scripts",
  "ironclaw_secrets",
- "ironclaw_skills",
  "ironclaw_trust",
  "ironclaw_turns",
  "ironclaw_wasm",
  "jsonschema",
  "libc",
  "libsql",
- "regex",
  "rust_decimal",
  "secrecy",
  "serde_json",
@@ -4670,6 +4686,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "ironclaw_auth",
  "ironclaw_common",
  "ironclaw_conversations",
  "ironclaw_host_api",
@@ -4800,7 +4817,7 @@ dependencies = [
  "ironclaw_events",
  "ironclaw_extensions",
  "ironclaw_filesystem",
- "ironclaw_first_party_extensions",
+ "ironclaw_first_party_extension_ports",
  "ironclaw_host_api",
  "ironclaw_host_runtime",
  "ironclaw_llm",

@@ -3,8 +3,12 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_authorization::FilesystemCapabilityLeaseStore;
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::ExtensionRegistry;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_filesystem::RootFilesystem;
 use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
@@ -16,8 +20,11 @@ use ironclaw_host_runtime::{
     builtin_first_party_handlers, builtin_first_party_package,
 };
 use ironclaw_processes::ProcessServices;
+use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_run_state::{InMemoryApprovalRequestStore, InMemoryRunStateStore};
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_secrets::FilesystemSecretStore;
 use ironclaw_threads::InMemorySessionThreadService;
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -29,8 +36,9 @@ use ironclaw_turns::{
 
 use crate::input::RebornStorageInput;
 use crate::{
-    RebornBuildError, RebornBuildInput, RebornCompositionProfile, RebornFacadeReadiness,
-    RebornProductAuthServices, RebornReadiness, RebornReadinessState,
+    RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
+    RebornFacadeReadiness, RebornProductAuthServicePorts, RebornProductAuthServices,
+    RebornReadiness, RebornReadinessState,
 };
 
 pub struct RebornServices {
@@ -47,6 +55,7 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) loop_checkpoint_store: Arc<InMemoryLoopCheckpointStore>,
     pub(crate) thread_service: Arc<InMemorySessionThreadService>,
     pub(crate) skill_filesystem: Arc<ScopedFilesystem<LocalFilesystem>>,
+    pub(crate) workspace_filesystem: Arc<ScopedFilesystem<LocalFilesystem>>,
 }
 
 impl std::fmt::Debug for RebornServices {
@@ -91,6 +100,19 @@ pub async fn build_reborn_services(
     }
 }
 
+fn auth_continuation_dispatcher(
+    turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
+) -> Arc<dyn RebornAuthContinuationDispatcher> {
+    Arc::new(ProductAuthTurnGateResumeDispatcher::new(turn_coordinator))
+}
+
+fn compose_product_auth_services(
+    ports: RebornProductAuthServicePorts,
+    turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
+) -> Arc<RebornProductAuthServices> {
+    Arc::new(ports.into_services(auth_continuation_dispatcher(turn_coordinator)))
+}
+
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 fn production_config(
     required_runtime_backends: Vec<ironclaw_host_api::RuntimeKind>,
@@ -112,7 +134,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         profile,
         storage,
         runtime_policy,
-        product_auth_services,
+        product_auth_ports,
         ..
     } = input;
     let RebornStorageInput::LocalDev {
@@ -158,6 +180,10 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         Arc::clone(&filesystem),
         local_dev_skill_mount_view()?,
     ));
+    let workspace_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(&filesystem),
+        local_dev_workspace_mount_view()?,
+    ));
 
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
@@ -168,6 +194,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         loop_checkpoint_store: Arc::new(InMemoryLoopCheckpointStore::default()),
         thread_service: Arc::new(InMemorySessionThreadService::default()),
         skill_filesystem,
+        workspace_filesystem,
     });
 
     let mut services = HostRuntimeServices::new(
@@ -197,10 +224,12 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         Arc::new(services.host_runtime_for_local_testing());
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
         Arc::new(DefaultTurnCoordinator::new(turn_state));
-    let product_auth = Some(
-        product_auth_services
-            .unwrap_or_else(|| Arc::new(RebornProductAuthServices::local_dev_in_memory())),
-    );
+    let product_auth = Some(match product_auth_ports {
+        Some(ports) => compose_product_auth_services(ports, turn_coordinator.clone()),
+        None => Arc::new(RebornProductAuthServices::local_dev_in_memory(
+            auth_continuation_dispatcher(turn_coordinator.clone()),
+        )),
+    });
     let product_auth_ready = product_auth.is_some();
 
     Ok(RebornServices {
@@ -269,6 +298,23 @@ fn local_dev_skill_mount_view() -> Result<MountView, RebornBuildError> {
     })
 }
 
+fn local_dev_workspace_mount_view() -> Result<MountView, RebornBuildError> {
+    MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").map_err(|error| RebornBuildError::InvalidConfig {
+            reason: error.to_string(),
+        })?,
+        VirtualPath::new("/projects/workspace").map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: error.to_string(),
+            }
+        })?,
+        MountPermissions::read_only(),
+    )])
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: error.to_string(),
+    })
+}
+
 fn builtin_extension_registry() -> Result<ExtensionRegistry, RebornBuildError> {
     // Shared by local-dev and production composition so host-owned first-party
     // capabilities expose the same built-in package contract in both profiles.
@@ -329,7 +375,7 @@ async fn build_production_shaped(
         required_runtime_backends,
         require_runtime_http_egress,
         require_wasm_credentials,
-        product_auth_services,
+        product_auth_ports,
     } = input;
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     let wiring_config = production_config(
@@ -345,7 +391,7 @@ async fn build_production_shaped(
         required_runtime_backends,
         require_runtime_http_egress,
         require_wasm_credentials,
-        product_auth_services,
+        product_auth_ports,
     );
 
     match storage {
@@ -376,7 +422,7 @@ async fn build_production_shaped(
                 profile,
                 wiring_config,
                 production_wiring,
-                product_auth_services,
+                product_auth_ports,
             };
             build_libsql_production(context, db, path_or_url, auth_token, secret_master_key).await
         }
@@ -398,7 +444,7 @@ async fn build_production_shaped(
                 profile,
                 wiring_config,
                 production_wiring,
-                product_auth_services,
+                product_auth_ports,
             };
             build_postgres_production(context, pool, url, secret_master_key).await
         }
@@ -417,7 +463,7 @@ struct RebornProductionBuildContext {
     profile: RebornCompositionProfile,
     wiring_config: ironclaw_host_runtime::ProductionWiringConfig,
     production_wiring: RebornProductionWiring,
-    product_auth_services: Option<Arc<RebornProductAuthServices>>,
+    product_auth_ports: Option<RebornProductAuthServicePorts>,
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -451,6 +497,103 @@ fn planned_run_profile_resolver() -> Result<Arc<InMemoryRunProfileResolver>, Reb
     ))
 }
 
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+struct ProductionStoreBundle<F>
+where
+    F: RootFilesystem + 'static,
+{
+    filesystem: Arc<F>,
+    scoped_filesystem: Arc<ScopedFilesystem<F>>,
+    leases: Arc<FilesystemCapabilityLeaseStore<F>>,
+    secret_store: Arc<FilesystemSecretStore<F>>,
+    event_store: ironclaw_reborn_event_store::RebornEventStoreConfig,
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+impl<F> ProductionStoreBundle<F>
+where
+    F: RootFilesystem + 'static,
+{
+    fn new(
+        filesystem: Arc<F>,
+        secret_master_key: ironclaw_secrets::SecretMaterial,
+        event_store: ironclaw_reborn_event_store::RebornEventStoreConfig,
+    ) -> Result<Self, RebornBuildError> {
+        let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
+        let leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
+            &scoped_filesystem,
+        )));
+        let secret_crypto = Arc::new(ironclaw_secrets::SecretsCrypto::new(secret_master_key)?);
+        let secret_store = Arc::new(FilesystemSecretStore::new(
+            Arc::clone(&scoped_filesystem),
+            secret_crypto,
+        ));
+
+        Ok(Self {
+            filesystem,
+            scoped_filesystem,
+            leases,
+            secret_store,
+            event_store,
+        })
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+async fn build_backend_production<F>(
+    context: RebornProductionBuildContext,
+    stores: ProductionStoreBundle<F>,
+) -> Result<RebornServices, RebornBuildError>
+where
+    F: RootFilesystem + 'static,
+{
+    let RebornProductionBuildContext {
+        profile,
+        wiring_config,
+        production_wiring,
+        product_auth_ports,
+    } = context;
+    let services = HostRuntimeServices::new(
+        Arc::new(builtin_extension_registry()?),
+        Arc::clone(&stores.filesystem),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::filesystem(Arc::clone(&stores.scoped_filesystem)),
+        CapabilitySurfaceVersion::new("reborn-app-v1")?,
+    )
+    .with_trust_policy(production_wiring.trust_policy)
+    .with_runtime_policy(production_wiring.runtime_policy)
+    .with_first_party_capabilities(Arc::new(builtin_first_party_registry()?))
+    .with_capability_leases(stores.leases)
+    .with_secret_store(stores.secret_store)
+    .try_with_host_http_egress(ironclaw_network::PolicyNetworkHttpEgress::new(
+        ironclaw_network::ReqwestNetworkTransport::default(),
+    ))?
+    .with_filesystem_resource_governor(Arc::clone(&stores.scoped_filesystem))
+    .with_reborn_event_store_config(profile.to_event_store_profile(), stores.event_store)
+    .await?
+    .with_filesystem_run_state(Arc::clone(&stores.scoped_filesystem))
+    .with_filesystem_turn_state_store(stores.scoped_filesystem)
+    .with_run_profile_resolver(planned_run_profile_resolver()?)
+    .with_turn_run_wake_notifier(production_wiring.turn_run_wake_notifier);
+
+    let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
+        Arc::new(services.turn_coordinator_for_production()?);
+    let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
+        Arc::new(services.host_runtime_for_production(&wiring_config)?);
+    let product_auth = product_auth_ports
+        .map(|ports| compose_product_auth_services(ports, turn_coordinator.clone()));
+    let product_auth_ready = product_auth.is_some();
+
+    Ok(RebornServices {
+        host_runtime: Some(host_runtime),
+        turn_coordinator: Some(turn_coordinator),
+        readiness: readiness_for(profile, true, true, product_auth_ready),
+        product_auth,
+        local_runtime: None,
+    })
+}
+
 #[cfg(feature = "libsql")]
 async fn build_libsql_production(
     context: RebornProductionBuildContext,
@@ -459,75 +602,20 @@ async fn build_libsql_production(
     auth_token: Option<ironclaw_secrets::SecretMaterial>,
     secret_master_key: ironclaw_secrets::SecretMaterial,
 ) -> Result<RebornServices, RebornBuildError> {
-    use ironclaw_authorization::FilesystemCapabilityLeaseStore;
     use ironclaw_filesystem::LibSqlRootFilesystem;
-    use ironclaw_secrets::FilesystemSecretStore;
-
-    let RebornProductionBuildContext {
-        profile,
-        wiring_config,
-        production_wiring,
-        product_auth_services,
-    } = context;
 
     let filesystem = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&db)));
     filesystem.run_migrations().await?;
+    let stores = ProductionStoreBundle::new(
+        filesystem,
+        secret_master_key,
+        ironclaw_reborn_event_store::RebornEventStoreConfig::Libsql {
+            path_or_url,
+            auth_token,
+        },
+    )?;
 
-    let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
-    let leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
-        &scoped_filesystem,
-    )));
-
-    let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
-
-    let secret_crypto = Arc::new(ironclaw_secrets::SecretsCrypto::new(secret_master_key)?);
-    let secret_store = Arc::new(FilesystemSecretStore::new(
-        Arc::clone(&scoped_filesystem),
-        Arc::clone(&secret_crypto),
-    ));
-
-    let event_store = ironclaw_reborn_event_store::RebornEventStoreConfig::Libsql {
-        path_or_url,
-        auth_token,
-    };
-
-    let services = HostRuntimeServices::new(
-        Arc::new(builtin_extension_registry()?),
-        Arc::clone(&filesystem),
-        Arc::new(InMemoryResourceGovernor::new()),
-        Arc::new(GrantAuthorizer::new()),
-        ProcessServices::filesystem(Arc::clone(&scoped_filesystem)),
-        CapabilitySurfaceVersion::new("reborn-app-v1")?,
-    )
-    .with_trust_policy(production_wiring.trust_policy)
-    .with_runtime_policy(production_wiring.runtime_policy)
-    .with_first_party_capabilities(Arc::new(builtin_first_party_registry()?))
-    .with_capability_leases(leases)
-    .with_secret_store(secret_store)
-    .try_with_host_http_egress(ironclaw_network::PolicyNetworkHttpEgress::new(
-        ironclaw_network::ReqwestNetworkTransport::default(),
-    ))?
-    .with_filesystem_resource_governor(Arc::clone(&scoped_filesystem))
-    .with_reborn_event_store_config(profile.to_event_store_profile(), event_store)
-    .await?
-    .with_filesystem_run_state(Arc::clone(&scoped_filesystem))
-    .with_filesystem_turn_state_store(scoped_filesystem)
-    .with_run_profile_resolver(planned_run_profile_resolver()?)
-    .with_turn_run_wake_notifier(production_wiring.turn_run_wake_notifier);
-
-    let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
-        Arc::new(services.turn_coordinator_for_production()?);
-    let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
-        Arc::new(services.host_runtime_for_production(&wiring_config)?);
-    let product_auth_ready = product_auth_services.is_some();
-
-    Ok(RebornServices {
-        host_runtime: Some(host_runtime),
-        turn_coordinator: Some(turn_coordinator),
-        readiness: readiness_for(profile, true, true, product_auth_ready),
-        product_auth: product_auth_services,
-        local_runtime: None,
-    })
+    build_backend_production(context, stores).await
 }
 
 #[cfg(feature = "postgres")]
@@ -537,72 +625,17 @@ async fn build_postgres_production(
     url: ironclaw_secrets::SecretMaterial,
     secret_master_key: ironclaw_secrets::SecretMaterial,
 ) -> Result<RebornServices, RebornBuildError> {
-    use ironclaw_authorization::FilesystemCapabilityLeaseStore;
     use ironclaw_filesystem::PostgresRootFilesystem;
-    use ironclaw_secrets::FilesystemSecretStore;
-
-    let RebornProductionBuildContext {
-        profile,
-        wiring_config,
-        production_wiring,
-        product_auth_services,
-    } = context;
 
     let filesystem = Arc::new(PostgresRootFilesystem::new(pool.clone()));
     filesystem.run_migrations().await?;
+    let stores = ProductionStoreBundle::new(
+        filesystem,
+        secret_master_key,
+        ironclaw_reborn_event_store::RebornEventStoreConfig::Postgres { url },
+    )?;
 
-    let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
-    let leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
-        &scoped_filesystem,
-    )));
-
-    let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
-
-    let secret_crypto = Arc::new(ironclaw_secrets::SecretsCrypto::new(secret_master_key)?);
-    let secret_store = Arc::new(FilesystemSecretStore::new(
-        Arc::clone(&scoped_filesystem),
-        Arc::clone(&secret_crypto),
-    ));
-
-    let event_store = ironclaw_reborn_event_store::RebornEventStoreConfig::Postgres { url };
-
-    let services = HostRuntimeServices::new(
-        Arc::new(builtin_extension_registry()?),
-        Arc::clone(&filesystem),
-        Arc::new(InMemoryResourceGovernor::new()),
-        Arc::new(GrantAuthorizer::new()),
-        ProcessServices::filesystem(Arc::clone(&scoped_filesystem)),
-        CapabilitySurfaceVersion::new("reborn-app-v1")?,
-    )
-    .with_trust_policy(production_wiring.trust_policy)
-    .with_runtime_policy(production_wiring.runtime_policy)
-    .with_first_party_capabilities(Arc::new(builtin_first_party_registry()?))
-    .with_capability_leases(leases)
-    .with_secret_store(secret_store)
-    .try_with_host_http_egress(ironclaw_network::PolicyNetworkHttpEgress::new(
-        ironclaw_network::ReqwestNetworkTransport::default(),
-    ))?
-    .with_filesystem_resource_governor(Arc::clone(&scoped_filesystem))
-    .with_reborn_event_store_config(profile.to_event_store_profile(), event_store)
-    .await?
-    .with_filesystem_run_state(Arc::clone(&scoped_filesystem))
-    .with_filesystem_turn_state_store(scoped_filesystem)
-    .with_run_profile_resolver(planned_run_profile_resolver()?)
-    .with_turn_run_wake_notifier(production_wiring.turn_run_wake_notifier);
-
-    let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
-        Arc::new(services.turn_coordinator_for_production()?);
-    let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
-        Arc::new(services.host_runtime_for_production(&wiring_config)?);
-    let product_auth_ready = product_auth_services.is_some();
-
-    Ok(RebornServices {
-        host_runtime: Some(host_runtime),
-        turn_coordinator: Some(turn_coordinator),
-        readiness: readiness_for(profile, true, true, product_auth_ready),
-        product_auth: product_auth_services,
-        local_runtime: None,
-    })
+    build_backend_production(context, stores).await
 }
 
 fn readiness_for(
@@ -631,10 +664,11 @@ fn readiness_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_filesystem::FilesystemError;
     use ironclaw_host_api::{
         CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
-        ExecutionContext, ExtensionId, GrantConstraints, NetworkPolicy, Principal,
-        ResourceEstimate, RuntimeKind, TrustClass, UserId,
+        ExecutionContext, ExtensionId, GrantConstraints, InvocationId, NetworkPolicy, Principal,
+        ResourceEstimate, ResourceScope, RuntimeKind, ScopedPath, TrustClass, UserId,
     };
     use ironclaw_host_runtime::{
         RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind,
@@ -657,6 +691,52 @@ mod tests {
         assert!(services.product_auth.is_some());
         assert!(services.local_runtime.is_some());
         assert_eq!(services.readiness.state, RebornReadinessState::DevOnly);
+    }
+
+    #[tokio::test]
+    async fn local_dev_setup_marker_workspace_filesystem_is_read_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        let marker_path = storage_root.join("workspace/markers/setup.done");
+        std::fs::create_dir_all(marker_path.parent().expect("marker parent"))
+            .expect("marker directory");
+        std::fs::write(&marker_path, "done").expect("marker file");
+        let services = build_reborn_services(RebornBuildInput::local_dev(
+            "local-dev-marker-workspace-owner",
+            storage_root,
+        ))
+        .await
+        .expect("local-dev services build");
+        let local_runtime = services
+            .local_runtime
+            .as_ref()
+            .expect("local-dev runtime substrate");
+        let scope = ResourceScope::local_default(
+            UserId::new("local-dev-marker-user").expect("valid user"),
+            InvocationId::new(),
+        )
+        .expect("valid resource scope");
+
+        let stat = local_runtime
+            .workspace_filesystem
+            .stat(
+                &scope,
+                &ScopedPath::new("/workspace/markers/setup.done").expect("valid marker path"),
+            )
+            .await
+            .expect("marker stat succeeds");
+        assert_eq!(stat.len, 4);
+
+        let error = local_runtime
+            .workspace_filesystem
+            .write_file(
+                &scope,
+                &ScopedPath::new("/workspace/markers/new.done").expect("valid marker path"),
+                b"done",
+            )
+            .await
+            .expect_err("setup marker workspace filesystem should be read-only");
+        assert!(matches!(error, FilesystemError::PermissionDenied { .. }));
     }
 
     #[tokio::test]
@@ -747,6 +827,35 @@ mod tests {
 
         assert_eq!(failure, RuntimeFailureKind::Authorization);
         assert!(!storage_root.join("skills/blocked/SKILL.md").exists());
+    }
+
+    #[test]
+    fn local_dev_workspace_root_overlapping_skill_root_is_rejected() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+
+        for skill_root in [
+            storage_root.join("skills"),
+            storage_root.join("tenant-shared/skills"),
+            storage_root.join("system/skills"),
+        ] {
+            for workspace_root in [
+                skill_root.clone(),
+                skill_root
+                    .parent()
+                    .expect("skill root parent")
+                    .to_path_buf(),
+                skill_root.join("nested-workspace"),
+            ] {
+                let error =
+                    validate_local_dev_workspace_skill_isolation(&storage_root, &workspace_root)
+                        .expect_err("workspace root overlapping skill root should be rejected");
+                assert!(
+                    matches!(error, RebornBuildError::InvalidConfig { .. }),
+                    "unexpected error: {error:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -917,3 +1026,6 @@ mod tests {
         format!("---\nname: {name}\ndescription: {description}\n---\n{prompt}\n")
     }
 }
+
+#[cfg(test)]
+mod auth_tests;

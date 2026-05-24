@@ -5,7 +5,6 @@
 //! through `CapabilityHost`, trust policy, grants, resource accounting, and
 //! runtime dispatch before any handler runs.
 
-mod coding;
 mod echo;
 mod http;
 mod json;
@@ -20,6 +19,9 @@ use ironclaw_extensions::{
     CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionManifest, ExtensionPackage,
     ExtensionRuntime, MANIFEST_SCHEMA_VERSION, ManifestSource,
 };
+use ironclaw_first_party_extensions::coding::{
+    CodingCapabilityError, CodingCapabilityKind, CodingCapabilityRequest, CodingCapabilityState,
+};
 use ironclaw_host_api::{
     CapabilityId, CapabilityProfileSchemaRef, EffectKind, ExtensionId, HostApiError,
     PermissionMode, RequestedTrustClass, ResourceCeiling, ResourceEstimate, ResourceProfile,
@@ -31,10 +33,6 @@ use crate::{
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
 
-pub use coding::{
-    APPLY_PATCH_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID,
-    READ_FILE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
-};
 pub use echo::ECHO_CAPABILITY_ID;
 pub use http::HTTP_CAPABILITY_ID;
 pub use json::JSON_CAPABILITY_ID;
@@ -45,6 +43,12 @@ pub use skill_management::{
 pub use time::TIME_CAPABILITY_ID;
 
 pub const BUILTIN_FIRST_PARTY_PROVIDER: &str = "builtin";
+pub const READ_FILE_CAPABILITY_ID: &str = "builtin.read_file";
+pub const WRITE_FILE_CAPABILITY_ID: &str = "builtin.write_file";
+pub const LIST_DIR_CAPABILITY_ID: &str = "builtin.list_dir";
+pub const GLOB_CAPABILITY_ID: &str = "builtin.glob";
+pub const GREP_CAPABILITY_ID: &str = "builtin.grep";
+pub const APPLY_PATCH_CAPABILITY_ID: &str = "builtin.apply_patch";
 
 const MAX_FIRST_PARTY_INPUT_BYTES: usize = 1_048_576;
 const MAX_WRITE_FILE_INPUT_BYTES: usize = 6 * 1024 * 1024;
@@ -53,6 +57,60 @@ const FIRST_PARTY_DEFAULT_OUTPUT_BYTES: u64 = 16 * 1024;
 const FIRST_PARTY_MAX_OUTPUT_BYTES: u64 = 1_048_576;
 const FIRST_PARTY_DEFAULT_WALL_CLOCK_MS: u64 = 100;
 const FIRST_PARTY_MAX_WALL_CLOCK_MS: u64 = 5_000;
+
+#[derive(Debug, Clone, Copy)]
+struct CodingCapabilityMetadata {
+    id: &'static str,
+    kind: CodingCapabilityKind,
+    description: &'static str,
+    effects: &'static [EffectKind],
+    max_input_bytes: usize,
+}
+
+const CODING_CAPABILITIES: &[CodingCapabilityMetadata] = &[
+    CodingCapabilityMetadata {
+        id: READ_FILE_CAPABILITY_ID,
+        kind: CodingCapabilityKind::ReadFile,
+        description: "Read a file through scoped mounts with v1 read_file output shape",
+        effects: &[EffectKind::ReadFilesystem],
+        max_input_bytes: MAX_FIRST_PARTY_INPUT_BYTES,
+    },
+    CodingCapabilityMetadata {
+        id: WRITE_FILE_CAPABILITY_ID,
+        kind: CodingCapabilityKind::WriteFile,
+        description: "Write content through scoped mounts with v1 write_file output shape",
+        effects: &[EffectKind::WriteFilesystem],
+        max_input_bytes: MAX_WRITE_FILE_INPUT_BYTES,
+    },
+    CodingCapabilityMetadata {
+        id: LIST_DIR_CAPABILITY_ID,
+        kind: CodingCapabilityKind::ListDir,
+        description: "List directory contents through scoped mounts with v1 list_dir output shape",
+        effects: &[EffectKind::ReadFilesystem],
+        max_input_bytes: MAX_FIRST_PARTY_INPUT_BYTES,
+    },
+    CodingCapabilityMetadata {
+        id: GLOB_CAPABILITY_ID,
+        kind: CodingCapabilityKind::Glob,
+        description: "Find files under a scoped directory with v1 glob output shape",
+        effects: &[EffectKind::ReadFilesystem],
+        max_input_bytes: MAX_FIRST_PARTY_INPUT_BYTES,
+    },
+    CodingCapabilityMetadata {
+        id: GREP_CAPABILITY_ID,
+        kind: CodingCapabilityKind::Grep,
+        description: "Search scoped file contents with v1 grep output modes",
+        effects: &[EffectKind::ReadFilesystem],
+        max_input_bytes: MAX_FIRST_PARTY_INPUT_BYTES,
+    },
+    CodingCapabilityMetadata {
+        id: APPLY_PATCH_CAPABILITY_ID,
+        kind: CodingCapabilityKind::ApplyPatch,
+        description: "Apply exact/fuzzy search-replace edits through scoped mounts",
+        effects: &[EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
+        max_input_bytes: MAX_APPLY_PATCH_INPUT_BYTES,
+    },
+];
 
 /// Create the host-assigned package that declares built-in first-party
 /// capabilities for the capability surface.
@@ -81,13 +139,28 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                     http::manifest()?,
                     shell::manifest()?,
                 ];
-                capabilities.extend(coding::manifests()?);
+                capabilities.extend(coding_manifests()?);
                 capabilities.extend(skill_management::manifests()?);
                 capabilities
             },
         },
         VirtualPath::new("/system/extensions/builtin")?,
     )
+}
+
+fn coding_manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
+    CODING_CAPABILITIES
+        .iter()
+        .map(|metadata| {
+            first_party_capability_manifest(
+                metadata.id,
+                metadata.description,
+                metadata.effects.to_vec(),
+                PermissionMode::Allow,
+                resource_profile(),
+            )
+        })
+        .collect()
 }
 
 /// Create handlers for all built-in first-party capabilities.
@@ -98,16 +171,10 @@ pub fn builtin_first_party_handlers() -> Result<FirstPartyCapabilityRegistry, Ho
         .with_handler(CapabilityId::new(TIME_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(JSON_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(HTTP_CAPABILITY_ID)?, handler.clone())
-        .with_handler(CapabilityId::new(SHELL_CAPABILITY_ID)?, handler.clone())
-        .with_handler(CapabilityId::new(READ_FILE_CAPABILITY_ID)?, handler.clone())
-        .with_handler(
-            CapabilityId::new(WRITE_FILE_CAPABILITY_ID)?,
-            handler.clone(),
-        )
-        .with_handler(CapabilityId::new(LIST_DIR_CAPABILITY_ID)?, handler.clone())
-        .with_handler(CapabilityId::new(GLOB_CAPABILITY_ID)?, handler.clone())
-        .with_handler(CapabilityId::new(GREP_CAPABILITY_ID)?, handler.clone())
-        .with_handler(CapabilityId::new(APPLY_PATCH_CAPABILITY_ID)?, handler);
+        .with_handler(CapabilityId::new(SHELL_CAPABILITY_ID)?, handler.clone());
+    for metadata in CODING_CAPABILITIES {
+        registry.insert_handler(CapabilityId::new(metadata.id)?, handler.clone());
+    }
     skill_management::insert_handlers(&mut registry)?;
     Ok(registry)
 }
@@ -135,14 +202,14 @@ fn first_party_capability_manifest(
         ))?,
         prompt_doc_ref: None,
         required_host_ports: Vec::new(),
+        runtime_credentials: Vec::new(),
         resource_profile,
     })
 }
 
 #[derive(Debug, Default)]
 pub struct BuiltinFirstPartyTools {
-    coding_read_state: coding::SharedCodingReadState,
-    coding_edit_locks: coding::SharedCodingEditLocks,
+    coding_state: CodingCapabilityState,
 }
 
 #[async_trait]
@@ -185,18 +252,23 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
                     },
                 ));
             }
-            READ_FILE_CAPABILITY_ID
-            | WRITE_FILE_CAPABILITY_ID
-            | LIST_DIR_CAPABILITY_ID
-            | GLOB_CAPABILITY_ID
-            | GREP_CAPABILITY_ID
-            | APPLY_PATCH_CAPABILITY_ID => {
-                coding::dispatch(&request, &self.coding_read_state, &self.coding_edit_locks).await?
-            }
-            _ => {
-                return Err(FirstPartyCapabilityError::new(
-                    RuntimeDispatchErrorKind::UndeclaredCapability,
-                ));
+            capability_id => {
+                let Some(metadata) = coding_capability_metadata(capability_id) else {
+                    return Err(FirstPartyCapabilityError::new(
+                        RuntimeDispatchErrorKind::UndeclaredCapability,
+                    ));
+                };
+                let request = CodingCapabilityRequest::new(
+                    metadata.kind,
+                    &request.scope,
+                    request.mounts.as_ref(),
+                    Arc::clone(&request.services.filesystem),
+                    &request.input,
+                );
+                self.coding_state
+                    .dispatch(&request)
+                    .await
+                    .map_err(coding_error)?
             }
         };
         let wall_clock_ms = start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
@@ -226,11 +298,9 @@ fn bounded_input_size(
     input: &serde_json::Value,
 ) -> Result<(), FirstPartyCapabilityError> {
     let bytes = serde_json::to_vec(input).map_err(|_| input_error())?;
-    let max_bytes = match capability_id {
-        WRITE_FILE_CAPABILITY_ID => MAX_WRITE_FILE_INPUT_BYTES,
-        APPLY_PATCH_CAPABILITY_ID => MAX_APPLY_PATCH_INPUT_BYTES,
-        _ => MAX_FIRST_PARTY_INPUT_BYTES,
-    };
+    let max_bytes = coding_capability_metadata(capability_id)
+        .map(|metadata| metadata.max_input_bytes)
+        .unwrap_or(MAX_FIRST_PARTY_INPUT_BYTES);
     if bytes.len() > max_bytes {
         return Err(FirstPartyCapabilityError::new(
             RuntimeDispatchErrorKind::Resource,
@@ -275,4 +345,15 @@ fn input_error() -> FirstPartyCapabilityError {
 
 fn guest_error() -> FirstPartyCapabilityError {
     FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Guest)
+}
+
+fn coding_error(error: CodingCapabilityError) -> FirstPartyCapabilityError {
+    FirstPartyCapabilityError::new(error.kind())
+}
+
+fn coding_capability_metadata(capability_id: &str) -> Option<CodingCapabilityMetadata> {
+    CODING_CAPABILITIES
+        .iter()
+        .copied()
+        .find(|metadata| metadata.id == capability_id)
 }

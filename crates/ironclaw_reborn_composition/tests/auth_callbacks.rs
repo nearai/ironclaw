@@ -99,8 +99,7 @@ impl RebornAuthContinuationDispatcher for FailingContinuationDispatcher {
 }
 
 fn auth_services(dispatcher: Arc<RecordingContinuationDispatcher>) -> RebornProductAuthServices {
-    RebornProductAuthServices::from_shared(Arc::new(InMemoryAuthProductServices::new()))
-        .with_continuation_dispatcher(dispatcher)
+    RebornProductAuthServices::from_shared(Arc::new(InMemoryAuthProductServices::new()), dispatcher)
 }
 
 fn scope(user: &str) -> AuthProductScope {
@@ -240,12 +239,14 @@ async fn oauth_callback_handler_completes_flow_and_dispatches_typed_continuation
 }
 
 #[tokio::test]
-async fn oauth_callback_handler_returns_retryable_error_when_continuation_dispatch_fails() {
+async fn oauth_callback_handler_preserves_continuation_dispatch_error() {
     let shared_auth = Arc::new(InMemoryAuthProductServices::new());
-    let services = RebornProductAuthServices::from_shared(shared_auth.clone())
-        .with_continuation_dispatcher(Arc::new(FailingContinuationDispatcher {
+    let services = RebornProductAuthServices::from_shared(
+        shared_auth.clone(),
+        Arc::new(FailingContinuationDispatcher {
             error: AuthProductError::TokenExchangeFailed,
-        }));
+        }),
+    );
     let owner = scope("alice");
     let flow_id = create_flow(&services, owner.clone()).await;
 
@@ -254,12 +255,11 @@ async fn oauth_callback_handler_returns_retryable_error_when_continuation_dispat
         .await
         .expect_err("dispatch failure is reported to caller");
 
-    assert_eq!(error.code, AuthErrorCode::BackendUnavailable);
-    assert!(error.retryable);
+    assert_eq!(error.code, AuthErrorCode::TokenExchangeFailed);
+    assert!(!error.retryable);
 
     let dispatcher = Arc::new(RecordingContinuationDispatcher::default());
-    let retry = RebornProductAuthServices::from_shared(shared_auth)
-        .with_continuation_dispatcher(dispatcher.clone())
+    let retry = RebornProductAuthServices::from_shared(shared_auth, dispatcher.clone())
         .handle_oauth_callback(authorized_request(owner.clone(), flow_id))
         .await
         .expect("completed callback can be retried for continuation dispatch");

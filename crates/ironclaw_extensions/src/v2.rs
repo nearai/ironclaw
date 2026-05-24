@@ -39,8 +39,9 @@ use std::sync::Arc;
 
 use ironclaw_host_api::{
     CapabilityId, CapabilityProfileId, CapabilityProfileSchemaRef, EffectKind, ExtensionId,
-    HostApiError, HostPortCatalog, HostPortId, PermissionMode, RequestedTrustClass,
-    ResourceProfile, RuntimeKind, TrustClass,
+    HostApiError, HostPortCatalog, HostPortId, NetworkScheme, NetworkTargetPattern, PermissionMode,
+    RequestedTrustClass, ResourceProfile, RuntimeCredentialRequirement, RuntimeCredentialTarget,
+    RuntimeKind, SecretHandle, TrustClass,
 };
 use serde::{Deserialize, Deserializer};
 use thiserror::Error;
@@ -320,6 +321,7 @@ pub struct CapabilityDeclV2 {
     pub output_schema_ref: CapabilityProfileSchemaRef,
     pub prompt_doc_ref: Option<CapabilityProfileSchemaRef>,
     pub required_host_ports: Vec<HostPortId>,
+    pub runtime_credentials: Vec<RuntimeCredentialRequirement>,
     pub resource_profile: Option<ResourceProfile>,
 }
 
@@ -831,6 +833,49 @@ impl CapabilityDeclV2 {
             required_host_ports.push(port);
         }
 
+        if !raw.runtime_credentials.is_empty() && !raw.effects.contains(&EffectKind::UseSecret) {
+            return Err(ManifestV2Error::Invalid {
+                reason: format!(
+                    "capability {id} declares runtime_credentials without use_secret effect"
+                ),
+            });
+        }
+        let mut credential_handles_seen = BTreeSet::new();
+        let mut runtime_credentials = Vec::with_capacity(raw.runtime_credentials.len());
+        for raw_credential in raw.runtime_credentials {
+            let handle = SecretHandle::new(raw_credential.handle)?;
+            if !credential_handles_seen.insert(handle.clone()) {
+                return Err(ManifestV2Error::Invalid {
+                    reason: format!(
+                        "capability {id} declares duplicate runtime credential handle {handle}"
+                    ),
+                });
+            }
+            raw_credential
+                .target
+                .validate_declaration()
+                .map_err(|error| ManifestV2Error::Invalid {
+                    reason: format!(
+                        "capability {id} declares invalid runtime credential target: {error}"
+                    ),
+                })?;
+            raw_credential
+                .audience
+                .validate_declaration()
+                .map_err(|error| ManifestV2Error::Invalid {
+                    reason: format!(
+                        "capability {id} declares invalid runtime credential audience: {error}"
+                    ),
+                })?;
+            validate_runtime_credential_audience(&id, &raw_credential.audience)?;
+            runtime_credentials.push(RuntimeCredentialRequirement {
+                handle,
+                audience: raw_credential.audience,
+                target: raw_credential.target,
+                required: raw_credential.required,
+            });
+        }
+
         Ok(Self {
             id,
             implements,
@@ -842,9 +887,24 @@ impl CapabilityDeclV2 {
             output_schema_ref,
             prompt_doc_ref,
             required_host_ports,
+            runtime_credentials,
             resource_profile: raw.resource_profile,
         })
     }
+}
+
+fn validate_runtime_credential_audience(
+    id: &CapabilityId,
+    audience: &NetworkTargetPattern,
+) -> Result<(), ManifestV2Error> {
+    if audience.scheme != Some(NetworkScheme::Https) {
+        return Err(ManifestV2Error::Invalid {
+            reason: format!(
+                "capability {id} declares runtime credential audience without https scheme"
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn validate_host_api_refs(
@@ -1358,5 +1418,21 @@ pub(crate) struct RawCapabilityV2 {
     #[serde(default)]
     required_host_ports: Vec<String>,
     #[serde(default)]
+    runtime_credentials: Vec<RawRuntimeCredentialV2>,
+    #[serde(default)]
     resource_profile: Option<ResourceProfile>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRuntimeCredentialV2 {
+    handle: String,
+    audience: NetworkTargetPattern,
+    target: RuntimeCredentialTarget,
+    #[serde(default = "default_runtime_credential_required")]
+    required: bool,
+}
+
+fn default_runtime_credential_required() -> bool {
+    true
 }
