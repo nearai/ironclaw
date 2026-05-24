@@ -80,7 +80,7 @@ async fn dispatch_list(
     let context = management_context(request)?;
     let skills = list_skills(&context).await.map_err(capability_error)?;
     Ok(json!({
-        "skills": skills.iter().map(skill_summary_json).collect::<Vec<_>>(),
+        "skills": Value::from_iter(skills.iter().map(skill_summary_json)),
         "count": skills.len(),
     }))
 }
