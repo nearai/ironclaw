@@ -224,8 +224,8 @@ pub struct ThreadHistoryRequest {
 ///
 /// Pagination is opaque: `cursor` is whatever value the backend
 /// returned as `next_cursor` in a prior response. Stores that have
-/// no enumeration support today return an empty list + `None`
-/// cursor, which is the default trait impl on `SessionThreadService`.
+/// no enumeration support fail closed through the default
+/// `SessionThreadService` implementation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListThreadsForScopeRequest {
     pub scope: ThreadScope,

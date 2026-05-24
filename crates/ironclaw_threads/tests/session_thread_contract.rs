@@ -9,6 +9,9 @@ use ironclaw_threads::{
     ToolResultSafeSummary, UpdateAssistantDraftRequest,
 };
 
+mod support;
+use support::{assert_two_page_thread_listing, seed_listable_threads};
+
 fn scope(label: &str) -> ThreadScope {
     ThreadScope {
         tenant_id: TenantId::new(format!("tenant-{label}")).unwrap(),
@@ -1438,6 +1441,16 @@ async fn read_thread_rejects_cross_scope_lookup_with_unknown_thread() {
         matches!(&err, ironclaw_threads::SessionThreadError::UnknownThread { thread_id } if thread_id == &thread.thread_id),
         "cross-scope read_thread must collapse to UnknownThread, got: {err:?}"
     );
+}
+
+#[tokio::test]
+async fn list_threads_for_scope_returns_only_owned_threads_and_paginates() {
+    let service = InMemorySessionThreadService::default();
+    let owned_scope = scope("list-owned");
+    let thread_ids =
+        seed_listable_threads(&service, &owned_scope, scope("list-other"), "list").await;
+
+    assert_two_page_thread_listing(&service, owned_scope, thread_ids).await;
 }
 
 #[test]

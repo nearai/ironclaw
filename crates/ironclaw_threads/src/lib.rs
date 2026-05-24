@@ -14,6 +14,7 @@ mod error;
 mod filesystem_service;
 mod identifiers;
 mod in_memory;
+mod listing;
 mod service;
 mod tool_result_reference;
 

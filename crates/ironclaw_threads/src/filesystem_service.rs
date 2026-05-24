@@ -35,23 +35,27 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, OnceLock, Weak},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{
-    CasExpectation, ContentType, Entry, FilesystemError, FilesystemOperation, RecordVersion,
-    RootFilesystem, ScopedFilesystem,
+    CasExpectation, ContentType, Entry, FileType, FilesystemError, FilesystemOperation, Filter,
+    IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, Page, RecordVersion, RootFilesystem,
+    ScopedFilesystem,
 };
 use ironclaw_host_api::{HostApiError, ResourceScope, ScopedPath, ThreadId};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::identifiers::SummaryArtifactId;
+use crate::listing::{ThreadListEntry, paginate_thread_entries};
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextMessage, ContextMessages,
-    ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest, LoadContextMessagesRequest,
-    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
+    ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest, ListThreadsForScopeRequest,
+    ListThreadsForScopeResponse, LoadContextMessagesRequest, LoadContextWindowRequest,
+    MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
     ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
     SessionThreadService, SummaryArtifact, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
     ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
@@ -70,6 +74,8 @@ struct StoredThreadRecord {
     #[serde(flatten)]
     record: SessionThreadRecord,
     next_sequence: u64,
+    #[serde(default)]
+    updated_at_unix_ms: i64,
 }
 
 /// On-disk inbound idempotency record. Includes the originating scope so
@@ -114,7 +120,16 @@ where
 
     fn thread_entry(record: &StoredThreadRecord) -> Result<Entry, SessionThreadError> {
         let body = serialize_pretty(record)?;
-        Ok(Entry::bytes(body).with_content_type(ContentType::json()))
+        Ok(Entry::bytes(body)
+            .with_content_type(ContentType::json())
+            .with_indexed(
+                index_key_thread_scope(),
+                IndexValue::Text(thread_scope_index_value(&record.record.scope)),
+            )
+            .with_indexed(
+                index_key_updated_at_unix_ms(),
+                IndexValue::I64(record.updated_at_unix_ms),
+            ))
     }
 
     fn message_entry(record: &ThreadMessageRecord) -> Result<Entry, SessionThreadError> {
@@ -287,6 +302,97 @@ where
         Ok(None)
     }
 
+    async fn list_thread_entries_via_index(
+        &self,
+        thread_scope: &ThreadScope,
+        resource_scope: &ResourceScope,
+        root: &ScopedPath,
+    ) -> Result<Vec<ThreadListEntry>, FilesystemError> {
+        self.filesystem
+            .ensure_index(
+                resource_scope,
+                root,
+                &IndexSpec::new(
+                    index_name_thread_scope(),
+                    vec![index_key_thread_scope()],
+                    IndexKind::Exact,
+                ),
+            )
+            .await?;
+        let filter = Filter::Eq {
+            key: index_key_thread_scope(),
+            value: IndexValue::Text(thread_scope_index_value(thread_scope)),
+        };
+
+        let mut entries = Vec::new();
+        let mut offset = 0_u64;
+        loop {
+            let page = Page::new(offset, Page::MAX_LIMIT);
+            let page_entries = match self
+                .filesystem
+                .query(resource_scope, root, &filter, page)
+                .await
+            {
+                Ok(page_entries) => page_entries,
+                Err(error) if is_not_found(&error) => return Ok(Vec::new()),
+                Err(error) => return Err(error),
+            };
+            let received = page_entries.len();
+            for entry in page_entries {
+                let stored = serde_json::from_slice::<StoredThreadRecord>(&entry.entry.body)
+                    .map_err(|error| FilesystemError::Backend {
+                        path: entry.path.clone(),
+                        operation: FilesystemOperation::Query,
+                        reason: format!("thread record deserialization failed: {error}"),
+                    })?;
+                if stored.record.scope == *thread_scope {
+                    entries.push(ThreadListEntry::new(
+                        stored.record,
+                        stored.updated_at_unix_ms,
+                    ));
+                }
+            }
+            if received < Page::MAX_LIMIT as usize {
+                break;
+            }
+            offset = offset.saturating_add(received as u64);
+        }
+        Ok(entries)
+    }
+
+    async fn list_thread_entries_via_dir(
+        &self,
+        thread_scope: &ThreadScope,
+        resource_scope: &ResourceScope,
+        root: &ScopedPath,
+    ) -> Result<Vec<ThreadListEntry>, SessionThreadError> {
+        let entries = match self.filesystem.list_dir(resource_scope, root).await {
+            Ok(entries) => entries,
+            Err(error) if is_not_found(&error) => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+
+        let mut threads = Vec::new();
+        for entry in entries {
+            if entry.file_type != FileType::Directory {
+                continue;
+            }
+            let thread_id = ThreadId::new(entry.name.clone()).map_err(|error| {
+                SessionThreadError::Backend(format!(
+                    "invalid stored thread id under {}: {error}",
+                    root.as_str()
+                ))
+            })?;
+            if let Some((stored, _)) = self.read_thread_versioned(thread_scope, &thread_id).await? {
+                threads.push(ThreadListEntry::new(
+                    stored.record,
+                    stored.updated_at_unix_ms,
+                ));
+            }
+        }
+        Ok(threads)
+    }
+
     /// Read-modify-write the `next_sequence` counter on the thread record
     /// with optimistic CAS and bounded retry. Returns the sequence
     /// assigned to the caller (i.e. `next_sequence` before the bump) plus
@@ -306,6 +412,7 @@ where
                 })?;
             let assigned = stored.next_sequence;
             stored.next_sequence = assigned + 1;
+            stored.updated_at_unix_ms = unix_millis_now();
             let entry = Self::thread_entry(&stored)?;
             match put_with_cas(
                 self.filesystem.as_ref(),
@@ -323,6 +430,41 @@ where
         }
         Err(SessionThreadError::Backend(format!(
             "filesystem CAS retries exhausted reserving thread sequence at {}",
+            path.as_str()
+        )))
+    }
+
+    async fn touch_thread_updated_at(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<(), SessionThreadError> {
+        let path = thread_record_path(scope, thread_id)?;
+        for _ in 0..FILESYSTEM_CAS_RETRIES {
+            let (mut stored, version) = self
+                .read_thread_versioned(scope, thread_id)
+                .await?
+                .ok_or_else(|| SessionThreadError::UnknownThread {
+                    thread_id: thread_id.clone(),
+                })?;
+            stored.updated_at_unix_ms = unix_millis_now();
+            let entry = Self::thread_entry(&stored)?;
+            match put_with_cas(
+                self.filesystem.as_ref(),
+                &scope.to_resource_scope(),
+                &path,
+                entry,
+                CasExpectation::Version(version),
+            )
+            .await
+            {
+                Ok(()) => return Ok(()),
+                Err(PutError::VersionMismatch) => continue,
+                Err(PutError::Other(error)) => return Err(error),
+            }
+        }
+        Err(SessionThreadError::Backend(format!(
+            "filesystem CAS retries exhausted touching thread updated_at at {}",
             path.as_str()
         )))
     }
@@ -357,7 +499,10 @@ where
             )
             .await
             {
-                Ok(()) => return Ok(message),
+                Ok(()) => {
+                    self.touch_thread_updated_at(scope, thread_id).await?;
+                    return Ok(message);
+                }
                 Err(PutError::VersionMismatch) => continue,
                 Err(PutError::Other(error)) => return Err(error),
             }
@@ -411,6 +556,7 @@ where
         let stored = StoredThreadRecord {
             record: record.clone(),
             next_sequence: 1,
+            updated_at_unix_ms: unix_millis_now(),
         };
         let entry = Self::thread_entry(&stored)?;
         let resource_scope = record.scope.to_resource_scope();
@@ -961,6 +1107,35 @@ where
         Ok(thread.record)
     }
 
+    async fn list_threads_for_scope(
+        &self,
+        request: ListThreadsForScopeRequest,
+    ) -> Result<ListThreadsForScopeResponse, SessionThreadError> {
+        let root = scope_threads_root(&request.scope)?;
+        let resource_scope = request.scope.to_resource_scope();
+        match self
+            .list_thread_entries_via_index(&request.scope, &resource_scope, &root)
+            .await
+        {
+            Ok(entries) => Ok(paginate_thread_entries(
+                entries,
+                request.limit,
+                request.cursor.as_deref(),
+            )),
+            Err(error) if is_unsupported(&error) => {
+                let entries = self
+                    .list_thread_entries_via_dir(&request.scope, &resource_scope, &root)
+                    .await?;
+                Ok(paginate_thread_entries(
+                    entries,
+                    request.limit,
+                    request.cursor.as_deref(),
+                ))
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
     async fn create_summary_artifact(
         &self,
         request: CreateSummaryArtifactRequest,
@@ -1030,7 +1205,11 @@ where
         )
         .await
         {
-            Ok(()) => Ok(artifact),
+            Ok(()) => {
+                self.touch_thread_updated_at(&request.scope, &request.thread_id)
+                    .await?;
+                Ok(artifact)
+            }
             Err(PutError::VersionMismatch) => Err(SessionThreadError::Backend(format!(
                 "filesystem CAS Absent rejected new summary artifact at {}",
                 path.as_str()
@@ -1098,6 +1277,10 @@ fn thread_record_path(
         "{}/thread.json",
         thread_root_string(scope, thread_id)
     ))
+}
+
+fn scope_threads_root(scope: &ThreadScope) -> Result<ScopedPath, SessionThreadError> {
+    scoped_path(&format!("{}/threads", scope_axes_string(scope)))
 }
 
 fn messages_root(
@@ -1179,6 +1362,28 @@ fn scope_axes_string(scope: &ThreadScope) -> String {
     base
 }
 
+fn thread_scope_index_value(scope: &ThreadScope) -> String {
+    scope_axes_string(scope)
+}
+
+fn index_name_thread_scope() -> IndexName {
+    IndexName::new("thread_scope").unwrap_or_else(|_| {
+        unreachable!("thread index name `thread_scope` must be a simple identifier")
+    })
+}
+
+fn index_key_thread_scope() -> IndexKey {
+    IndexKey::new("thread_scope").unwrap_or_else(|_| {
+        unreachable!("thread index key `thread_scope` must be a simple identifier")
+    })
+}
+
+fn index_key_updated_at_unix_ms() -> IndexKey {
+    IndexKey::new("updated_at_unix_ms").unwrap_or_else(|_| {
+        unreachable!("thread index key `updated_at_unix_ms` must be a simple identifier")
+    })
+}
+
 fn scoped_path(raw: &str) -> Result<ScopedPath, SessionThreadError> {
     ScopedPath::new(raw).map_err(invalid_path)
 }
@@ -1224,6 +1429,17 @@ where
 
 fn is_not_found(error: &FilesystemError) -> bool {
     matches!(error, FilesystemError::NotFound { .. })
+}
+
+fn is_unsupported(error: &FilesystemError) -> bool {
+    matches!(error, FilesystemError::Unsupported { .. })
+}
+
+fn unix_millis_now() -> i64 {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(duration) => i64::try_from(duration.as_millis()).unwrap_or(i64::MAX),
+        Err(_) => 0,
+    }
 }
 
 // ── Transcript helpers (shared semantics) ──────────────────────
@@ -1445,7 +1661,8 @@ async fn put_with_cas<F>(
 where
     F: RootFilesystem,
 {
-    let fallback_entry = entry.clone();
+    let fallback_entry =
+        Entry::bytes(entry.body.clone()).with_content_type(entry.content_type.clone());
     match filesystem.put(scope, path, entry, cas).await {
         Ok(_) => Ok(()),
         Err(FilesystemError::VersionMismatch { .. }) => Err(PutError::VersionMismatch),

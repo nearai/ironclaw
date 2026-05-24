@@ -21,6 +21,9 @@ use ironclaw_threads::{
     ThreadHistoryRequest, ThreadScope, UpdateAssistantDraftRequest,
 };
 
+mod support;
+use support::{assert_two_page_thread_listing, seed_listable_threads};
+
 #[tokio::test]
 async fn durable_history_round_trips_through_filesystem_store() {
     let backend = Arc::new(InMemoryBackend::new());
@@ -165,6 +168,20 @@ async fn filesystem_session_thread_service_isolates_two_tenants_with_same_user_p
         replay.is_none(),
         "tenant B must NOT replay tenant A's inbound idempotency record"
     );
+}
+
+#[tokio::test]
+async fn filesystem_store_lists_threads_for_exact_scope_after_reopen() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-a", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let owned_scope = scope("fs-list-owned");
+    let thread_ids =
+        seed_listable_threads(&service, &owned_scope, scope("fs-list-other"), "fs-list").await;
+
+    let scoped = scoped_threads_fs_at(backend, "tenant-a", "alice");
+    let reopened = FilesystemSessionThreadService::new(scoped);
+    assert_two_page_thread_listing(&reopened, owned_scope, thread_ids).await;
 }
 
 #[tokio::test]

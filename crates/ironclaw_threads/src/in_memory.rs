@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
@@ -9,11 +10,13 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::identifiers::SummaryArtifactId;
+use crate::listing::{ThreadListEntry, paginate_thread_entries};
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextMessage, ContextMessages,
-    ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest, LoadContextMessagesRequest,
-    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
+    ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest, ListThreadsForScopeRequest,
+    ListThreadsForScopeResponse, LoadContextMessagesRequest, LoadContextWindowRequest,
+    MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
     ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
     SessionThreadService, SummaryArtifact, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
     ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
@@ -36,6 +39,7 @@ struct StoredThread {
     messages: Vec<ThreadMessageRecord>,
     summary_artifacts: Vec<SummaryArtifact>,
     next_sequence: u64,
+    updated_at_unix_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -93,6 +97,7 @@ impl SessionThreadService for InMemorySessionThreadService {
                 messages: Vec::new(),
                 summary_artifacts: Vec::new(),
                 next_sequence: 1,
+                updated_at_unix_ms: unix_millis_now(),
             },
         );
         Ok(record)
@@ -139,6 +144,7 @@ impl SessionThreadService for InMemorySessionThreadService {
         let message_id = ThreadMessageId::new();
         let sequence = thread.next_sequence;
         thread.next_sequence += 1;
+        touch_thread(thread);
         thread.messages.push(ThreadMessageRecord {
             message_id,
             thread_id: request.thread_id.clone(),
@@ -219,12 +225,16 @@ impl SessionThreadService for InMemorySessionThreadService {
         turn_run_id: String,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         let mut state = self.state.lock().await;
-        let message = get_message_mut(&mut state, scope, thread_id, message_id)?;
-        ensure_user_accepted(message, "mark_message_submitted")?;
-        message.status = MessageStatus::Submitted;
-        message.turn_id = Some(turn_id);
-        message.turn_run_id = Some(turn_run_id);
-        Ok(message.clone())
+        let message = {
+            let message = get_message_mut(&mut state, scope, thread_id, message_id)?;
+            ensure_user_accepted(message, "mark_message_submitted")?;
+            message.status = MessageStatus::Submitted;
+            message.turn_id = Some(turn_id);
+            message.turn_run_id = Some(turn_run_id);
+            message.clone()
+        };
+        touch_thread(get_thread_mut(&mut state, scope, thread_id)?);
+        Ok(message)
     }
 
     async fn mark_message_deferred_busy(
@@ -234,12 +244,16 @@ impl SessionThreadService for InMemorySessionThreadService {
         message_id: ThreadMessageId,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         let mut state = self.state.lock().await;
-        let message = get_message_mut(&mut state, scope, thread_id, message_id)?;
-        ensure_user_accepted(message, "mark_message_deferred_busy")?;
-        message.status = MessageStatus::DeferredBusy;
-        message.turn_id = None;
-        message.turn_run_id = None;
-        Ok(message.clone())
+        let message = {
+            let message = get_message_mut(&mut state, scope, thread_id, message_id)?;
+            ensure_user_accepted(message, "mark_message_deferred_busy")?;
+            message.status = MessageStatus::DeferredBusy;
+            message.turn_id = None;
+            message.turn_run_id = None;
+            message.clone()
+        };
+        touch_thread(get_thread_mut(&mut state, scope, thread_id)?);
+        Ok(message)
     }
 
     async fn append_assistant_draft(
@@ -272,6 +286,7 @@ impl SessionThreadService for InMemorySessionThreadService {
             redaction_ref: None,
         };
         thread.next_sequence += 1;
+        touch_thread(thread);
         thread.messages.push(message.clone());
         Ok(message)
     }
@@ -306,7 +321,9 @@ impl SessionThreadService for InMemorySessionThreadService {
                     }
                 }
             }
-            return Ok(existing.clone());
+            let message = existing.clone();
+            touch_thread(thread);
+            return Ok(message);
         }
         if let Some(provider_call) = &provider_call {
             provider_call
@@ -332,6 +349,7 @@ impl SessionThreadService for InMemorySessionThreadService {
             redaction_ref: None,
         };
         thread.next_sequence += 1;
+        touch_thread(thread);
         thread.messages.push(message.clone());
         Ok(message)
     }
@@ -341,15 +359,23 @@ impl SessionThreadService for InMemorySessionThreadService {
         request: UpdateAssistantDraftRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         let mut state = self.state.lock().await;
-        let message = get_message_mut(
+        let message = {
+            let message = get_message_mut(
+                &mut state,
+                &request.scope,
+                &request.thread_id,
+                request.message_id,
+            )?;
+            ensure_draft(message)?;
+            message.content = Some(request.content.into_text());
+            message.clone()
+        };
+        touch_thread(get_thread_mut(
             &mut state,
             &request.scope,
             &request.thread_id,
-            request.message_id,
-        )?;
-        ensure_draft(message)?;
-        message.content = Some(request.content.into_text());
-        Ok(message.clone())
+        )?);
+        Ok(message)
     }
 
     async fn finalize_assistant_message(
@@ -360,11 +386,15 @@ impl SessionThreadService for InMemorySessionThreadService {
         content: MessageContent,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         let mut state = self.state.lock().await;
-        let message = get_message_mut(&mut state, scope, thread_id, message_id)?;
-        ensure_draft(message)?;
-        message.status = MessageStatus::Finalized;
-        message.content = Some(content.into_text());
-        Ok(message.clone())
+        let message = {
+            let message = get_message_mut(&mut state, scope, thread_id, message_id)?;
+            ensure_draft(message)?;
+            message.status = MessageStatus::Finalized;
+            message.content = Some(content.into_text());
+            message.clone()
+        };
+        touch_thread(get_thread_mut(&mut state, scope, thread_id)?);
+        Ok(message)
     }
 
     async fn redact_message(
@@ -372,17 +402,25 @@ impl SessionThreadService for InMemorySessionThreadService {
         request: RedactMessageRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         let mut state = self.state.lock().await;
-        let message = get_message_mut(
+        let message = {
+            let message = get_message_mut(
+                &mut state,
+                &request.scope,
+                &request.thread_id,
+                request.message_id,
+            )?;
+            message.status = MessageStatus::Redacted;
+            message.content = None;
+            message.tool_result_provider_call = None;
+            message.redaction_ref = Some(request.redaction_ref);
+            message.clone()
+        };
+        touch_thread(get_thread_mut(
             &mut state,
             &request.scope,
             &request.thread_id,
-            request.message_id,
-        )?;
-        message.status = MessageStatus::Redacted;
-        message.content = None;
-        message.tool_result_provider_call = None;
-        message.redaction_ref = Some(request.redaction_ref);
-        Ok(message.clone())
+        )?);
+        Ok(message)
     }
 
     async fn load_context_window(
@@ -434,6 +472,24 @@ impl SessionThreadService for InMemorySessionThreadService {
         let state = self.state.lock().await;
         let thread = get_thread(&state, &request.scope, &request.thread_id)?;
         Ok(thread.record.clone())
+    }
+
+    async fn list_threads_for_scope(
+        &self,
+        request: ListThreadsForScopeRequest,
+    ) -> Result<ListThreadsForScopeResponse, SessionThreadError> {
+        let state = self.state.lock().await;
+        let threads: Vec<_> = state
+            .threads
+            .values()
+            .filter(|thread| thread.record.scope == request.scope)
+            .map(|thread| ThreadListEntry::new(thread.record.clone(), thread.updated_at_unix_ms))
+            .collect();
+        Ok(paginate_thread_entries(
+            threads,
+            request.limit,
+            request.cursor.as_deref(),
+        ))
     }
 
     async fn create_summary_artifact(
@@ -488,6 +544,7 @@ impl SessionThreadService for InMemorySessionThreadService {
             model_context_policy: request.model_context_policy,
         };
         thread.summary_artifacts.push(artifact.clone());
+        touch_thread(thread);
         Ok(artifact)
     }
 }
@@ -495,6 +552,17 @@ impl SessionThreadService for InMemorySessionThreadService {
 fn generated_thread_id() -> Result<ThreadId, SessionThreadError> {
     ThreadId::new(Uuid::new_v4().to_string())
         .map_err(|error| SessionThreadError::GeneratedThreadId(error.to_string()))
+}
+
+fn touch_thread(thread: &mut StoredThread) {
+    thread.updated_at_unix_ms = unix_millis_now();
+}
+
+fn unix_millis_now() -> i64 {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(duration) => i64::try_from(duration.as_millis()).unwrap_or(i64::MAX),
+        Err(_) => 0,
+    }
 }
 
 fn get_thread<'a>(

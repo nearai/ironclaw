@@ -499,6 +499,12 @@ struct ScriptedThreadService {
 }
 
 impl ScriptedThreadService {
+    fn without_list_threads_override() -> Self {
+        // Intentionally do not override SessionThreadService::list_threads_for_scope;
+        // tests using this constructor exercise the trait's fail-closed default.
+        Self::backend_history()
+    }
+
     fn backend_history() -> Self {
         Self {
             behavior: ScriptedThreadBehavior::BackendHistory,
@@ -2716,7 +2722,7 @@ fn facade_source_avoids_forbidden_runtime_dependencies() {
 #[tokio::test]
 async fn list_threads_unimplemented_backend_returns_service_unavailable() {
     let services = RebornServices::new(
-        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(ScriptedThreadService::without_list_threads_override()),
         Arc::new(FakeTurnCoordinator::default()),
     );
 
@@ -2744,4 +2750,55 @@ async fn list_threads_unimplemented_backend_returns_service_unavailable() {
         "wire code must be snake_case `unavailable`; got: {json}"
     );
     assert_eq!(json["retryable"], true);
+}
+
+#[tokio::test]
+async fn list_threads_returns_threads_owned_by_authenticated_caller() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+    create_thread_for(&services, caller(), "thread-list-alpha").await;
+    create_thread_for(&services, caller(), "thread-list-beta").await;
+    create_thread_for(
+        &services,
+        caller_for_user("user-other"),
+        "thread-list-other",
+    )
+    .await;
+
+    let first = services
+        .list_threads(
+            caller(),
+            WebUiListThreadsRequest {
+                limit: Some(1),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("list owned threads");
+    assert_eq!(first.threads.len(), 1);
+    assert!(first.next_cursor.is_some());
+
+    let second = services
+        .list_threads(
+            caller(),
+            WebUiListThreadsRequest {
+                limit: Some(10),
+                cursor: first.next_cursor,
+            },
+        )
+        .await
+        .expect("list next page");
+    assert_eq!(second.threads.len(), 1);
+    assert!(second.next_cursor.is_none());
+
+    let mut listed_ids: Vec<_> = first
+        .threads
+        .iter()
+        .chain(second.threads.iter())
+        .map(|thread| thread.thread_id.as_str())
+        .collect();
+    listed_ids.sort();
+    assert_eq!(listed_ids, vec!["thread-list-alpha", "thread-list-beta"]);
 }
