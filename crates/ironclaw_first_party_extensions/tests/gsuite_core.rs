@@ -1,13 +1,21 @@
 use std::sync::{Arc, Mutex};
 
 use ironclaw_auth::{
-    AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountService,
-    CredentialAccountStatus, CredentialOwnership, GOOGLE_GMAIL_SEND_SCOPE,
+    AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel,
+    CredentialAccountService, CredentialAccountStatus, CredentialOwnership,
+    GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE,
     InMemoryAuthProductServices, NewCredentialAccount, ProviderScope,
 };
 use ironclaw_first_party_extensions::gsuite::{
-    GMAIL_SEND_MESSAGE_CAPABILITY_ID, GMAIL_TRASH_MESSAGE_CAPABILITY_ID, GsuiteDispatchRequest,
-    GsuiteExecutor, google_provider_id, gsuite_package_specs,
+    CALENDAR_ADD_ATTENDEES_CAPABILITY_ID, CALENDAR_CREATE_EVENT_CAPABILITY_ID,
+    CALENDAR_DELETE_EVENT_CAPABILITY_ID, CALENDAR_FIND_FREE_SLOTS_CAPABILITY_ID,
+    CALENDAR_GET_EVENT_CAPABILITY_ID, CALENDAR_LIST_CALENDARS_CAPABILITY_ID,
+    CALENDAR_LIST_EVENTS_CAPABILITY_ID, CALENDAR_SET_REMINDER_CAPABILITY_ID,
+    CALENDAR_UPDATE_EVENT_CAPABILITY_ID, GMAIL_CREATE_DRAFT_CAPABILITY_ID,
+    GMAIL_GET_MESSAGE_CAPABILITY_ID, GMAIL_LIST_MESSAGES_CAPABILITY_ID,
+    GMAIL_REPLY_TO_MESSAGE_CAPABILITY_ID, GMAIL_SEND_MESSAGE_CAPABILITY_ID,
+    GMAIL_TRASH_MESSAGE_CAPABILITY_ID, GsuiteDispatchError, GsuiteDispatchRequest, GsuiteExecutor,
+    google_provider_id, gsuite_package_specs,
 };
 use ironclaw_host_api::{
     CapabilityId, InvocationId, ResourceScope, RuntimeHttpEgress, RuntimeHttpEgressError,
@@ -63,22 +71,52 @@ async fn auth_with_google_account(
     scope: &ResourceScope,
     scopes: Vec<ProviderScope>,
 ) -> Arc<InMemoryAuthProductServices> {
+    auth_with_google_account_status(scope, scopes, CredentialAccountStatus::Configured, true).await
+}
+
+async fn auth_with_google_account_status(
+    scope: &ResourceScope,
+    scopes: Vec<ProviderScope>,
+    status: CredentialAccountStatus,
+    include_access_secret: bool,
+) -> Arc<InMemoryAuthProductServices> {
     let auth = Arc::new(InMemoryAuthProductServices::new());
     auth.create_account(NewCredentialAccount {
         scope: auth_scope(scope),
         provider: google_provider_id().unwrap(),
-        label: ironclaw_auth::CredentialAccountLabel::new("work google").unwrap(),
-        status: CredentialAccountStatus::Configured,
+        label: CredentialAccountLabel::new("work google").unwrap(),
+        status,
         ownership: CredentialOwnership::UserReusable,
         owner_extension: None,
         granted_extensions: Vec::new(),
-        access_secret: Some(SecretHandle::new("google-access-token").unwrap()),
+        access_secret: include_access_secret
+            .then(|| SecretHandle::new("google-access-token").unwrap()),
         refresh_secret: None,
         scopes,
     })
     .await
     .unwrap();
     auth
+}
+
+async fn dispatch_error(
+    auth: Arc<InMemoryAuthProductServices>,
+    scope: ResourceScope,
+    capability: &str,
+    input: serde_json::Value,
+    egress: Arc<RecordingEgress>,
+) -> GsuiteDispatchError {
+    let executor = GsuiteExecutor::new(auth);
+    let capability_id = capability_id(capability);
+    executor
+        .dispatch(GsuiteDispatchRequest {
+            capability_id: &capability_id,
+            scope: &scope,
+            input: &input,
+            runtime_http_egress: egress,
+        })
+        .await
+        .unwrap_err()
 }
 
 #[test]
@@ -172,7 +210,126 @@ fn gsuite_package_specs_include_core_capabilities() {
         })
         .collect::<Vec<_>>();
 
-    assert!(capability_ids.contains(&GMAIL_SEND_MESSAGE_CAPABILITY_ID.to_string()));
-    assert!(capability_ids.contains(&GMAIL_TRASH_MESSAGE_CAPABILITY_ID.to_string()));
+    for id in [
+        CALENDAR_LIST_CALENDARS_CAPABILITY_ID,
+        CALENDAR_LIST_EVENTS_CAPABILITY_ID,
+        CALENDAR_GET_EVENT_CAPABILITY_ID,
+        CALENDAR_FIND_FREE_SLOTS_CAPABILITY_ID,
+        CALENDAR_CREATE_EVENT_CAPABILITY_ID,
+        CALENDAR_UPDATE_EVENT_CAPABILITY_ID,
+        CALENDAR_DELETE_EVENT_CAPABILITY_ID,
+        CALENDAR_ADD_ATTENDEES_CAPABILITY_ID,
+        CALENDAR_SET_REMINDER_CAPABILITY_ID,
+        GMAIL_LIST_MESSAGES_CAPABILITY_ID,
+        GMAIL_GET_MESSAGE_CAPABILITY_ID,
+        GMAIL_SEND_MESSAGE_CAPABILITY_ID,
+        GMAIL_CREATE_DRAFT_CAPABILITY_ID,
+        GMAIL_REPLY_TO_MESSAGE_CAPABILITY_ID,
+        GMAIL_TRASH_MESSAGE_CAPABILITY_ID,
+    ] {
+        assert!(
+            capability_ids.contains(&id.to_string()),
+            "missing capability spec for {id}"
+        );
+    }
     assert!(AuthProviderId::new("google").is_ok());
+}
+
+#[tokio::test]
+async fn gsuite_handler_fails_before_egress_when_account_is_not_configured() {
+    let scope = scope();
+    let auth = auth_with_google_account_status(
+        &scope,
+        vec![provider_scope(GOOGLE_GMAIL_SEND_SCOPE)],
+        CredentialAccountStatus::PendingSetup,
+        true,
+    )
+    .await;
+    let egress = Arc::new(RecordingEgress::default());
+
+    let error = dispatch_error(
+        auth,
+        scope,
+        GMAIL_SEND_MESSAGE_CAPABILITY_ID,
+        json!({ "message": { "raw": "base64url-rfc822" } }),
+        egress.clone(),
+    )
+    .await;
+
+    assert_eq!(
+        error.kind(),
+        ironclaw_host_api::RuntimeDispatchErrorKind::Client
+    );
+    assert!(egress.requests().is_empty());
+}
+
+#[tokio::test]
+async fn gsuite_handler_fails_before_egress_when_access_secret_is_missing() {
+    let scope = scope();
+    let auth = auth_with_google_account_status(
+        &scope,
+        vec![provider_scope(GOOGLE_GMAIL_SEND_SCOPE)],
+        CredentialAccountStatus::Configured,
+        false,
+    )
+    .await;
+    let egress = Arc::new(RecordingEgress::default());
+
+    let error = dispatch_error(
+        auth,
+        scope,
+        GMAIL_SEND_MESSAGE_CAPABILITY_ID,
+        json!({ "message": { "raw": "base64url-rfc822" } }),
+        egress.clone(),
+    )
+    .await;
+
+    assert_eq!(
+        error.kind(),
+        ironclaw_host_api::RuntimeDispatchErrorKind::Client
+    );
+    assert!(egress.requests().is_empty());
+}
+
+#[tokio::test]
+async fn gsuite_handler_rejects_missing_required_input() {
+    let scope = scope();
+    let auth =
+        auth_with_google_account(&scope, vec![provider_scope(GOOGLE_GMAIL_READONLY_SCOPE)]).await;
+
+    let error = dispatch_error(
+        auth,
+        scope,
+        GMAIL_GET_MESSAGE_CAPABILITY_ID,
+        json!({}),
+        Arc::new(RecordingEgress::default()),
+    )
+    .await;
+
+    assert_eq!(
+        error.kind(),
+        ironclaw_host_api::RuntimeDispatchErrorKind::InputEncode
+    );
+}
+
+#[tokio::test]
+async fn calendar_id_default_does_not_swallow_invalid_type() {
+    let scope = scope();
+    let auth =
+        auth_with_google_account(&scope, vec![provider_scope(GOOGLE_CALENDAR_READONLY_SCOPE)])
+            .await;
+
+    let error = dispatch_error(
+        auth,
+        scope,
+        CALENDAR_LIST_EVENTS_CAPABILITY_ID,
+        json!({ "calendar_id": false }),
+        Arc::new(RecordingEgress::default()),
+    )
+    .await;
+
+    assert_eq!(
+        error.kind(),
+        ironclaw_host_api::RuntimeDispatchErrorKind::InputEncode
+    );
 }
