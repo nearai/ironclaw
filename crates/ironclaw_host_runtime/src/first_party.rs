@@ -57,6 +57,30 @@ impl PartialEq for FirstPartyCapabilityRequest {
     }
 }
 
+impl FirstPartyCapabilityRequest {
+    #[doc(hidden)]
+    pub fn for_test(
+        capability_id: CapabilityId,
+        scope: ResourceScope,
+        input: Value,
+        runtime_http_egress: Option<Arc<dyn ironclaw_host_api::RuntimeHttpEgress>>,
+    ) -> Self {
+        Self {
+            capability_id,
+            scope,
+            estimate: ResourceEstimate::default(),
+            mounts: None,
+            services: InvocationServices {
+                filesystem: Arc::new(ironclaw_filesystem::InMemoryBackend::new()),
+                runtime_http_egress,
+                process: Arc::new(crate::LocalHostProcessPort::new()),
+                secret_store: None,
+            },
+            input,
+        }
+    }
+}
+
 /// Normalized first-party capability output before resource reconciliation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]

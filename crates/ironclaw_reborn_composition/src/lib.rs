@@ -21,6 +21,7 @@
 mod auth;
 mod error;
 mod factory;
+mod gsuite;
 mod input;
 #[cfg(feature = "root-llm-provider")]
 mod llm_catalog;
@@ -52,6 +53,7 @@ pub use auth::{
 };
 pub use error::RebornBuildError;
 pub use factory::{RebornServices, build_reborn_services};
+pub use gsuite::{bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers};
 pub use input::{RebornBuildInput, RebornRuntimeProcessBinding};
 #[cfg(feature = "root-llm-provider")]
 pub use llm_catalog::{
