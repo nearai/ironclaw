@@ -8,6 +8,10 @@ authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
+# Internal workspace crate — not published to crates.io. cargo-deny's
+# allow-wildcard-paths exemption is skipped for publishable crates (crates.io
+# disallows path deps), so this crate's path deps would otherwise be flagged.
+publish = false
 
 [package.metadata.dist]
 dist = false
