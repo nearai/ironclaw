@@ -20,18 +20,40 @@ SLUG = "clickup"
 VERSION = "0.1.0"
 UID = "e2e-user"
 AID = "e2e-agent"
+ARTIFACT_DIGEST = "4e205e4f8061512d5bca40ebe50acbb93d44afa3e083981a7b434f9ee3bab6a3"
 
 
-def install_payload(slug: str, version: str, uid: str, aid: str, ts: int, nonce: str) -> str:
-    return f"install:{slug}:{version}:{uid}:{aid}:{ts}:{nonce}"
+def install_payload(
+    slug: str, version: str, uid: str, aid: str, ts: int, nonce: str, artifact_digest: str
+) -> str:
+    return f"install:{slug}:{version}:{uid}:{aid}:{ts}:{nonce}:{artifact_digest}"
 
 
-def sign_install(key: str, slug: str, version: str, uid: str, aid: str, ts: int, nonce: str) -> str:
-    msg = install_payload(slug, version, uid, aid, ts, nonce)
+def sign_install(
+    key: str,
+    slug: str,
+    version: str,
+    uid: str,
+    aid: str,
+    ts: int,
+    nonce: str,
+    artifact_digest: str = ARTIFACT_DIGEST,
+) -> str:
+    msg = install_payload(slug, version, uid, aid, ts, nonce, artifact_digest)
     return hmac.new(key.encode("utf-8"), msg.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
-def install_hash(*, slug: str, version: str, uid: str, aid: str, ts: int, nonce: str, sig: str) -> str:
+def install_hash(
+    *,
+    slug: str,
+    version: str,
+    uid: str,
+    aid: str,
+    ts: int,
+    nonce: str,
+    sig: str,
+    artifact_digest: str = ARTIFACT_DIGEST,
+) -> str:
     return (
         f"#/install/{slug}"
         f"?slug={slug}"
@@ -41,6 +63,7 @@ def install_hash(*, slug: str, version: str, uid: str, aid: str, ts: int, nonce:
         f"&ts={ts}"
         f"&nonce={nonce}"
         f"&sig={sig}"
+        f"&artifact_digest={artifact_digest}"
     )
 
 
@@ -113,7 +136,11 @@ async def test_deep_link_install_confirm_click_posts_to_install_endpoint(page, i
 
     assert install_requests, "clicking confirm must POST /api/ironhub/install"
     body = install_requests[0].post_data_json or {}
-    assert body.get("name") == SLUG, f"install body must carry slug, got: {body!r}"
+    assert body.get("slug") == SLUG, f"install body must carry slug, got: {body!r}"
+    assert body.get("version") == VERSION, f"install body must carry version, got: {body!r}"
+    assert body.get("artifact_digest") == ARTIFACT_DIGEST, (
+        f"install body must carry the signed artifact_digest, got: {body!r}"
+    )
 
 
 async def test_deep_link_install_tampered_signature_shows_mismatch(page, ironclaw_server):

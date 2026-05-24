@@ -1252,6 +1252,7 @@ pub struct IronhubInstallRequest {
     pub ts: u64,
     pub nonce: String,
     pub sig: String,
+    pub artifact_digest: String,
     #[serde(default)]
     pub acknowledge_unverified: bool,
 }
@@ -1289,6 +1290,7 @@ pub struct IronhubVerifyIntentRequest {
     pub ts: u64,
     pub nonce: String,
     pub sig: String,
+    pub artifact_digest: String,
 }
 
 #[derive(Debug, Deserialize)]

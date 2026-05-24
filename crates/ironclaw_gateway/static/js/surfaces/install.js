@@ -112,6 +112,7 @@ function ironhubInstallConfirm(signed, requireAck) {
     ts: parseInt(signed.ts, 10),
     nonce: signed.nonce,
     sig: signed.sig,
+    artifact_digest: signed.artifact_digest,
   };
   if (requireAck) {
     body.acknowledge_unverified = true;
@@ -151,8 +152,9 @@ function startIronhubInstall(params) {
   var ts = params && params.ts;
   var nonce = params && params.nonce;
   var sig = params && params.sig;
+  var artifactDigest = params && params.artifact_digest;
 
-  if (!slug || !version || !uid || !aid || !ts || !nonce || !sig) {
+  if (!slug || !version || !uid || !aid || !ts || !nonce || !sig || !artifactDigest) {
     renderIronhubInstallError(I18n.t('ironhub.install.missingParams'));
     return;
   }
@@ -165,6 +167,7 @@ function startIronhubInstall(params) {
     ts: parseInt(ts, 10),
     nonce: nonce,
     sig: sig,
+    artifact_digest: artifactDigest,
   };
 
   apiFetch('/api/ironhub/verify-intent', {

@@ -162,6 +162,7 @@ pub async fn ironhub_install_handler(
         ts: req.ts,
         nonce: &req.nonce,
         sig: &req.sig,
+        artifact_digest: &req.artifact_digest,
     };
     match verify_signed_install(store.as_ref(), &user.user_id, &signed).await {
         Ok(()) => {}
@@ -185,6 +186,10 @@ pub async fn ironhub_install_handler(
     let mut params = serde_json::Map::new();
     params.insert("name".into(), serde_json::Value::String(req.slug));
     params.insert("version".into(), serde_json::Value::String(req.version));
+    params.insert(
+        "artifact_digest".into(),
+        serde_json::Value::String(req.artifact_digest),
+    );
     params.insert(
         "acknowledge_unverified".into(),
         serde_json::Value::Bool(req.acknowledge_unverified),
@@ -314,8 +319,9 @@ fn install_payload(
     aid: &str,
     ts: u64,
     nonce: &str,
+    artifact_digest: &str,
 ) -> String {
-    format!("install:{slug}:{version}:{uid}:{aid}:{ts}:{nonce}")
+    format!("install:{slug}:{version}:{uid}:{aid}:{ts}:{nonce}:{artifact_digest}")
 }
 
 fn register_payload(uid: &str, aid: &str, ts: u64, nonce: &str) -> String {
@@ -330,6 +336,7 @@ struct SignedInstall<'a> {
     ts: u64,
     nonce: &'a str,
     sig: &'a str,
+    artifact_digest: &'a str,
 }
 
 enum SignedInstallError {
@@ -367,6 +374,7 @@ async fn verify_signed_install(
         signed.aid,
         signed.ts,
         signed.nonce,
+        signed.artifact_digest,
     );
     let expected = hmac_hex(decrypted.expose(), &payload).map_err(SignedInstallError::Internal)?;
 
@@ -464,6 +472,7 @@ pub async fn ironhub_verify_intent_handler(
         ts: req.ts,
         nonce: &req.nonce,
         sig: &req.sig,
+        artifact_digest: &req.artifact_digest,
     };
     match verify_signed_install(store.as_ref(), &user.user_id, &signed).await {
         Ok(()) => Ok(Json(IronhubVerifyIntentResponse {
@@ -592,6 +601,7 @@ mod tests {
                 "kind": { "type": "string", "enum": ["tool", "skill"] },
                 "release_tag": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$", "minLength": 1, "maxLength": 128 },
                 "version": { "type": "string", "minLength": 1, "maxLength": 128 },
+                "artifact_digest": { "type": "string", "minLength": 1, "maxLength": 128 },
                 "force": { "type": "boolean", "default": false },
                 "acknowledge_unverified": { "type": "boolean", "default": false }
             },
@@ -759,7 +769,7 @@ mod tests {
     }
 
     fn install_signed_body(slug: &str, nonce: &str, ts: u64) -> serde_json::Value {
-        let payload = install_payload(slug, "1.0.0", "u1", "a1", ts, nonce);
+        let payload = install_payload(slug, "1.0.0", "u1", "a1", ts, nonce, TEST_ARTIFACT_DIGEST);
         let sig = hmac_hex(TEST_SHARED_KEY, &payload).expect("sign");
         serde_json::json!({
             "slug": slug,
@@ -769,6 +779,7 @@ mod tests {
             "ts": ts,
             "nonce": nonce,
             "sig": sig,
+            "artifact_digest": TEST_ARTIFACT_DIGEST,
         })
     }
 
@@ -980,6 +991,11 @@ mod tests {
             params.get("version").and_then(|v| v.as_str()),
             Some("1.0.0"),
             "gateway handler must forward the signed version so the tool binds the install to it"
+        );
+        assert_eq!(
+            params.get("artifact_digest").and_then(|v| v.as_str()),
+            Some(TEST_ARTIFACT_DIGEST),
+            "gateway handler must forward the signed artifact_digest so the tool binds the install to the artifact content"
         );
     }
 
@@ -1230,6 +1246,7 @@ mod tests {
             "ts": now_unix(),
             "nonce": nonce,
             "sig": "deadbeef".repeat(8),
+            "artifact_digest": "d0",
         });
         let req = req_with_identity(
             "POST",
@@ -1288,9 +1305,11 @@ mod tests {
     fn install_hmac_is_deterministic_and_payload_sensitive() {
         let key_a = "ihub_sk_aaaaaaaaaaaaaaaaaaaaaaaa";
         let key_b = "ihub_sk_bbbbbbbbbbbbbbbbbbbbbbbb";
-        let p1 = install_payload("clickup", "1.0.0", "u1", "a1", 1_700_000_000, "n1");
-        let p_other_slug = install_payload("evm-rpc", "1.0.0", "u1", "a1", 1_700_000_000, "n1");
-        let p_other_nonce = install_payload("clickup", "1.0.0", "u1", "a1", 1_700_000_000, "n2");
+        let p1 = install_payload("clickup", "1.0.0", "u1", "a1", 1_700_000_000, "n1", "d0");
+        let p_other_slug =
+            install_payload("evm-rpc", "1.0.0", "u1", "a1", 1_700_000_000, "n1", "d0");
+        let p_other_nonce =
+            install_payload("clickup", "1.0.0", "u1", "a1", 1_700_000_000, "n2", "d0");
         let s1 = hmac_hex(key_a, &p1).expect("hmac");
         let s2 = hmac_hex(key_a, &p1).expect("hmac");
         let s3 = hmac_hex(key_b, &p1).expect("hmac");
@@ -1305,8 +1324,16 @@ mod tests {
 
     #[test]
     fn install_payload_format_is_stable() {
-        let p = install_payload("clickup", "1.0.0", "u1", "a1", 1_700_000_000, "n1");
-        assert_eq!(p, "install:clickup:1.0.0:u1:a1:1700000000:n1");
+        let p = install_payload(
+            "clickup",
+            "1.0.0",
+            "u1",
+            "a1",
+            1_700_000_000,
+            "n1",
+            "deadbeef",
+        );
+        assert_eq!(p, "install:clickup:1.0.0:u1:a1:1700000000:n1:deadbeef");
     }
 
     #[test]
@@ -1337,6 +1364,8 @@ mod tests {
     }
 
     const TEST_SHARED_KEY: &str = "ihub_sk_x7K2p9mQ4vR8tL3nB6wZ1yD5cF0jH";
+    const TEST_ARTIFACT_DIGEST: &str =
+        "4e205e4f8061512d5bca40ebe50acbb93d44afa3e083981a7b434f9ee3bab6a3";
 
     #[tokio::test]
     async fn verify_intent_is_rate_limited_per_user() {
@@ -1359,7 +1388,8 @@ mod tests {
             "aid": "a1",
             "ts": now_unix(),
             "nonce": "rl-verify-1",
-            "sig": "deadbeef"
+            "sig": "deadbeef",
+            "artifact_digest": "d0"
         })
         .to_string();
         let first = req_with_identity(
@@ -1446,7 +1476,15 @@ mod tests {
             .with_state(state);
         let ts = now_unix();
         let nonce = uuid::Uuid::new_v4().to_string();
-        let payload = install_payload("clickup", "1.0.0", "u1", "a1", ts, &nonce);
+        let payload = install_payload(
+            "clickup",
+            "1.0.0",
+            "u1",
+            "a1",
+            ts,
+            &nonce,
+            TEST_ARTIFACT_DIGEST,
+        );
         let sig = hmac_hex(TEST_SHARED_KEY, &payload).expect("sign");
         (app, sig, nonce, ts)
     }
@@ -1460,6 +1498,7 @@ mod tests {
             "ts": ts,
             "nonce": nonce,
             "sig": sig,
+            "artifact_digest": TEST_ARTIFACT_DIGEST,
         })
     }
 

@@ -87,6 +87,20 @@ fn classify_and_gate(
     Ok((kind, provenance))
 }
 
+fn entry_artifact_digest(kind: HubEntryKind, manifest: &HubManifest, name: &str) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let input = match kind {
+        HubEntryKind::Tool => {
+            let t = manifest.find_tool(name)?;
+            format!("{}:{}", t.wasm.sha256, t.capabilities.sha256)
+        }
+        HubEntryKind::Skill => manifest.find_skill(name)?.skill_md.sha256.clone(),
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    Some(hex::encode(hasher.finalize()))
+}
+
 fn classify(
     manifest: &HubManifest,
     name: &str,
@@ -356,6 +370,17 @@ impl IronhubInstallTool {
             }
         }
 
+        if let Some(expected) = parsed.artifact_digest.as_deref() {
+            let actual = entry_artifact_digest(kind, &manifest, &parsed.name);
+            if actual.as_deref() != Some(expected) {
+                let current = actual.as_deref().unwrap_or("unknown");
+                return Err(ToolError::InvalidParameters(format!(
+                    "signed artifact digest '{expected}' does not match the current IronHub catalog artifact for '{}' (computed '{current}'); the artifact changed since this install was approved",
+                    parsed.name
+                )));
+            }
+        }
+
         let skills_dir = match kind {
             HubEntryKind::Skill => skill_install_dir(&self.deps.skill_registry),
             HubEntryKind::Tool => None,
@@ -428,6 +453,7 @@ struct InstallParams {
     kind_hint: Option<HubEntryKind>,
     release_tag: Option<String>,
     version: Option<String>,
+    artifact_digest: Option<String>,
     force: bool,
     acknowledge_unverified: bool,
 }
@@ -457,6 +483,17 @@ impl InstallParams {
                 "version must be 1 to 128 characters".into(),
             ));
         }
+        let artifact_digest = params
+            .get("artifact_digest")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        if let Some(d) = &artifact_digest
+            && (d.is_empty() || d.len() > 128)
+        {
+            return Err(ToolError::InvalidParameters(
+                "artifact_digest must be 1 to 128 characters".into(),
+            ));
+        }
         let force = params
             .get("force")
             .and_then(|v| v.as_bool())
@@ -470,6 +507,7 @@ impl InstallParams {
             kind_hint,
             release_tag,
             version,
+            artifact_digest,
             force,
             acknowledge_unverified,
         })
@@ -513,6 +551,12 @@ impl Tool for IronhubInstallTool {
                     "minLength": 1,
                     "maxLength": 128,
                     "description": "Exact catalog version this install was signed for; if set, the install fails unless the current IronHub entry matches"
+                },
+                "artifact_digest": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "description": "Signed sha256 over the entry's artifact hashes; if set, the install fails unless the current IronHub artifact matches"
                 },
                 "force": { "type": "boolean", "default": false },
                 "acknowledge_unverified": { "type": "boolean", "default": false }
@@ -1320,6 +1364,7 @@ mod tests {
             kind_hint: None,
             release_tag: None,
             version: None,
+            artifact_digest: None,
             force: false,
             acknowledge_unverified: false,
         };
@@ -1353,6 +1398,7 @@ mod tests {
             kind_hint: None,
             release_tag: None,
             version: None,
+            artifact_digest: None,
             force: false,
             acknowledge_unverified: true,
         };
@@ -1415,6 +1461,7 @@ mod tests {
             kind_hint: None,
             release_tag: None,
             version: Some("9.9.9".into()),
+            artifact_digest: None,
             force: false,
             acknowledge_unverified: false,
         };
@@ -1443,6 +1490,7 @@ mod tests {
             kind_hint: None,
             release_tag: None,
             version: Some("0.1.0".into()),
+            artifact_digest: None,
             force: false,
             acknowledge_unverified: false,
         };
@@ -1454,6 +1502,85 @@ mod tests {
         assert!(
             !matches!(&err, ToolError::InvalidParameters(m) if m.contains("does not match")),
             "a matching version must clear the bind check; got the bind rejection instead: {err:?}"
+        );
+    }
+
+    #[test]
+    fn entry_artifact_digest_matches_cross_language_vectors() {
+        let tool_manifest = manifest_with_provenance("clickup", Provenance::Official, None, None);
+        let tool_digest = entry_artifact_digest(HubEntryKind::Tool, &tool_manifest, "clickup")
+            .expect("tool entry present");
+        assert_eq!(
+            tool_digest, "3bef8b777d4b0dc782fbba98c00b622da35e098642e8e103b94e395679b5499a",
+            "tool digest must equal sha256(wasm_sha:capabilities_sha); drift here breaks IronHub signing"
+        );
+        let skill_manifest = manifest_with_provenance(
+            "official-tool",
+            Provenance::Official,
+            Some("indie-skill"),
+            Some(Provenance::New),
+        );
+        let skill_digest =
+            entry_artifact_digest(HubEntryKind::Skill, &skill_manifest, "indie-skill")
+                .expect("skill entry present");
+        assert_eq!(
+            skill_digest, "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb",
+            "skill digest must equal sha256(skill_md_sha); drift here breaks IronHub signing"
+        );
+    }
+
+    #[tokio::test]
+    async fn install_from_manifest_rejects_artifact_digest_mismatch() {
+        let (tool, _tools_dir, _channels_dir) = install_tool_with_ext_mgr();
+        let manifest = manifest_with_provenance("clickup", Provenance::Official, None, None);
+        let parsed = InstallParams {
+            name: "clickup".into(),
+            kind_hint: None,
+            release_tag: None,
+            version: None,
+            artifact_digest: Some("0".repeat(64)),
+            force: false,
+            acknowledge_unverified: false,
+        };
+        let ctx = JobContext::with_user("test", "digest mismatch test", "");
+        let err = tool
+            .install_from_manifest(std::time::Instant::now(), manifest, parsed, &ctx)
+            .await
+            .expect_err("a signed artifact digest that does not match the catalog must be rejected before install");
+        match err {
+            ToolError::InvalidParameters(msg) => assert!(
+                msg.contains("artifact digest") && msg.contains("does not match"),
+                "digest-bind rejection must name the mismatch: {msg}"
+            ),
+            other => panic!(
+                "artifact digest mismatch must reject as InvalidParameters before the install side effect; got {other:?}"
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn install_from_manifest_accepts_matching_artifact_digest() {
+        let (tool, _tools_dir, _channels_dir) = install_tool_with_ext_mgr();
+        let manifest = manifest_with_provenance("clickup", Provenance::Official, None, None);
+        let parsed = InstallParams {
+            name: "clickup".into(),
+            kind_hint: None,
+            release_tag: None,
+            version: None,
+            artifact_digest: Some(
+                "3bef8b777d4b0dc782fbba98c00b622da35e098642e8e103b94e395679b5499a".into(),
+            ),
+            force: false,
+            acknowledge_unverified: false,
+        };
+        let ctx = JobContext::with_user("test", "digest match test", "");
+        let err = tool
+            .install_from_manifest(std::time::Instant::now(), manifest, parsed, &ctx)
+            .await
+            .expect_err("fake artifact URLs make the install fail downstream of the digest gate");
+        assert!(
+            !matches!(&err, ToolError::InvalidParameters(m) if m.contains("artifact digest")),
+            "a matching artifact digest must clear the bind check; got the bind rejection instead: {err:?}"
         );
     }
 

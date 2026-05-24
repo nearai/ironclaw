@@ -136,6 +136,7 @@ function restoreFromHash() {
           ts: params.get('ts'),
           nonce: params.get('nonce'),
           sig: params.get('sig'),
+          artifact_digest: params.get('artifact_digest'),
         });
         break;
       }
