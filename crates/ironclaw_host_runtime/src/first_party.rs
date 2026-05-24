@@ -57,9 +57,10 @@ impl PartialEq for FirstPartyCapabilityRequest {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl FirstPartyCapabilityRequest {
     #[doc(hidden)]
-    pub fn for_test(
+    pub fn request_for_test(
         capability_id: CapabilityId,
         scope: ResourceScope,
         input: Value,

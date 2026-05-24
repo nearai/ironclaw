@@ -6,6 +6,7 @@ pub const CALENDAR_EXTENSION_ID: &str = "google-calendar";
 pub const GMAIL_EXTENSION_ID: &str = "gmail";
 
 pub const GSUITE_RESPONSE_BODY_LIMIT: u64 = 1024 * 1024;
+pub const GSUITE_OUTPUT_BYTES_LIMIT: u64 = GSUITE_RESPONSE_BODY_LIMIT + 4096;
 pub const GSUITE_TIMEOUT_MS: u32 = 30_000;
 const DEFAULT_NETWORK_EGRESS_BYTES: u64 = 16 * 1024;
 const MAX_NETWORK_EGRESS_BYTES: u64 = 512 * 1024;
@@ -169,7 +170,7 @@ pub fn gsuite_resource_profile() -> ResourceProfile {
     ResourceProfile {
         default_estimate: ResourceEstimate {
             wall_clock_ms: Some(u64::from(GSUITE_TIMEOUT_MS)),
-            output_bytes: Some(GSUITE_RESPONSE_BODY_LIMIT),
+            output_bytes: Some(GSUITE_OUTPUT_BYTES_LIMIT),
             network_egress_bytes: Some(DEFAULT_NETWORK_EGRESS_BYTES),
             ..ResourceEstimate::default()
         },
@@ -178,7 +179,7 @@ pub fn gsuite_resource_profile() -> ResourceProfile {
             max_input_tokens: None,
             max_output_tokens: None,
             max_wall_clock_ms: Some(u64::from(GSUITE_TIMEOUT_MS)),
-            max_output_bytes: Some(GSUITE_RESPONSE_BODY_LIMIT),
+            max_output_bytes: Some(GSUITE_OUTPUT_BYTES_LIMIT),
             sandbox: Some(SandboxQuota {
                 network_egress_bytes: Some(MAX_NETWORK_EGRESS_BYTES),
                 ..SandboxQuota::default()

@@ -18,8 +18,8 @@ pub use handlers::{
     GsuiteDispatchResult, GsuiteExecutor,
 };
 pub use manifest::{
-    CALENDAR_EXTENSION_ID, GMAIL_EXTENSION_ID, GSUITE_RESPONSE_BODY_LIMIT, GSUITE_TIMEOUT_MS,
-    GsuiteCapabilitySpec, GsuitePackageSpec, calendar_package_spec, gmail_package_spec,
-    gsuite_package_specs, gsuite_resource_profile,
+    CALENDAR_EXTENSION_ID, GMAIL_EXTENSION_ID, GSUITE_OUTPUT_BYTES_LIMIT,
+    GSUITE_RESPONSE_BODY_LIMIT, GSUITE_TIMEOUT_MS, GsuiteCapabilitySpec, GsuitePackageSpec,
+    calendar_package_spec, gmail_package_spec, gsuite_package_specs, gsuite_resource_profile,
 };
 pub use network::google_api_network_policy;

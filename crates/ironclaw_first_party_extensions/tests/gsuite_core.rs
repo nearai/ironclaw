@@ -6,8 +6,8 @@ use std::{
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel,
     CredentialAccountService, CredentialAccountStatus, CredentialOwnership,
-    GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE,
-    InMemoryAuthProductServices, NewCredentialAccount, ProviderScope,
+    GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_GMAIL_MODIFY_SCOPE, GOOGLE_GMAIL_READONLY_SCOPE,
+    GOOGLE_GMAIL_SEND_SCOPE, InMemoryAuthProductServices, NewCredentialAccount, ProviderScope,
 };
 use ironclaw_first_party_extensions::gsuite::{
     CALENDAR_ADD_ATTENDEES_CAPABILITY_ID, CALENDAR_CREATE_EVENT_CAPABILITY_ID,
@@ -17,13 +17,15 @@ use ironclaw_first_party_extensions::gsuite::{
     CALENDAR_UPDATE_EVENT_CAPABILITY_ID, GMAIL_CREATE_DRAFT_CAPABILITY_ID,
     GMAIL_GET_MESSAGE_CAPABILITY_ID, GMAIL_LIST_MESSAGES_CAPABILITY_ID,
     GMAIL_REPLY_TO_MESSAGE_CAPABILITY_ID, GMAIL_SEND_MESSAGE_CAPABILITY_ID,
-    GMAIL_TRASH_MESSAGE_CAPABILITY_ID, GsuiteDispatchError, GsuiteDispatchRequest, GsuiteExecutor,
-    google_provider_id, gsuite_package_specs,
+    GMAIL_TRASH_MESSAGE_CAPABILITY_ID, GSUITE_OUTPUT_BYTES_LIMIT, GSUITE_RESPONSE_BODY_LIMIT,
+    GsuiteDispatchError, GsuiteDispatchRequest, GsuiteExecutor, google_provider_id,
+    gsuite_package_specs, gsuite_resource_profile,
 };
 use ironclaw_host_api::{
-    CapabilityId, InvocationId, NetworkMethod, RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED,
-    ResourceScope, RuntimeDispatchErrorKind, RuntimeHttpEgress, RuntimeHttpEgressError,
-    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, SecretHandle, UserId,
+    CapabilityId, InvocationId, NetworkMethod, NetworkScheme,
+    RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED, ResourceScope, RuntimeDispatchErrorKind,
+    RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
+    SecretHandle, UserId,
 };
 use serde_json::json;
 
@@ -49,11 +51,18 @@ impl RecordingEgress {
     }
 
     fn json(body: serde_json::Value) -> RuntimeHttpEgressResponse {
+        Self::json_with_request_bytes(body, 123)
+    }
+
+    fn json_with_request_bytes(
+        body: serde_json::Value,
+        request_bytes: u64,
+    ) -> RuntimeHttpEgressResponse {
         let body = serde_json::to_vec(&body).expect("response body serializes");
         RuntimeHttpEgressResponse {
             status: 200,
             headers: Vec::new(),
-            request_bytes: 123,
+            request_bytes,
             response_bytes: body.len() as u64,
             body,
             redaction_applied: true,
@@ -262,6 +271,42 @@ async fn gsuite_handler_uses_selected_credential_handle_for_runtime_egress() {
 }
 
 #[tokio::test]
+async fn gsuite_handler_applies_google_api_network_policy() {
+    let scope = scope();
+    let auth =
+        auth_with_google_account(&scope, vec![provider_scope(GOOGLE_GMAIL_SEND_SCOPE)]).await;
+    let executor = GsuiteExecutor::new(auth);
+    let capability_id = capability_id(GMAIL_SEND_MESSAGE_CAPABILITY_ID);
+    let egress = Arc::new(RecordingEgress::default());
+
+    executor
+        .dispatch(GsuiteDispatchRequest {
+            capability_id: &capability_id,
+            scope: &scope,
+            input: &json!({ "message": { "raw": "base64url-rfc822" } }),
+            runtime_http_egress: egress.clone(),
+        })
+        .await
+        .unwrap();
+
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 1);
+    let policy = &requests[0].network_policy;
+    assert!(policy.deny_private_ip_ranges);
+    assert_eq!(policy.max_egress_bytes, Some(10 * 1024 * 1024));
+    let allowed = policy
+        .allowed_targets
+        .iter()
+        .map(|target| (target.scheme, target.host_pattern.as_str()))
+        .collect::<Vec<_>>();
+    assert!(allowed.contains(&(Some(NetworkScheme::Https), "www.googleapis.com")));
+    assert!(allowed.contains(&(Some(NetworkScheme::Https), "gmail.googleapis.com")));
+    assert!(allowed.contains(&(Some(NetworkScheme::Https), "calendar.googleapis.com")));
+    assert!(allowed.contains(&(Some(NetworkScheme::Https), "oauth2.googleapis.com")));
+    assert!(allowed.contains(&(Some(NetworkScheme::Https), "accounts.google.com")));
+}
+
+#[tokio::test]
 async fn gsuite_handler_fails_before_egress_when_scope_is_missing() {
     let scope = scope();
     let auth =
@@ -285,6 +330,27 @@ async fn gsuite_handler_fails_before_egress_when_scope_is_missing() {
         ironclaw_host_api::RuntimeDispatchErrorKind::Client
     );
     assert!(egress.requests().is_empty());
+}
+
+#[tokio::test]
+async fn gsuite_handler_allows_reply_to_message_with_send_scope_only() {
+    let scope = scope();
+    let auth =
+        auth_with_google_account(&scope, vec![provider_scope(GOOGLE_GMAIL_SEND_SCOPE)]).await;
+    let egress = Arc::new(RecordingEgress::default());
+
+    dispatch_ok(
+        auth,
+        scope,
+        GMAIL_REPLY_TO_MESSAGE_CAPABILITY_ID,
+        json!({ "message": { "raw": "base64url-rfc822", "threadId": "thread-1" } }),
+        egress.clone(),
+    )
+    .await;
+
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].url.ends_with("/users/me/messages/send"));
 }
 
 #[test]
@@ -571,7 +637,7 @@ async fn gsuite_handlers_build_expected_requests_for_each_capability() {
         provider_scope(ironclaw_auth::GOOGLE_CALENDAR_EVENTS_SCOPE),
         provider_scope(GOOGLE_GMAIL_READONLY_SCOPE),
         provider_scope(GOOGLE_GMAIL_SEND_SCOPE),
-        provider_scope(ironclaw_auth::GOOGLE_GMAIL_MODIFY_SCOPE),
+        provider_scope(GOOGLE_GMAIL_MODIFY_SCOPE),
     ];
     let auth = auth_with_google_account(&scope, all_scopes).await;
     let egress = Arc::new(RecordingEgress::default());
@@ -723,4 +789,58 @@ async fn gsuite_handlers_build_expected_requests_for_each_capability() {
             .iter()
             .any(|attendee| attendee["email"] == "new@example.com")
     );
+}
+
+#[test]
+fn gsuite_resource_profile_allows_wrapped_response_headroom() {
+    let profile = gsuite_resource_profile();
+
+    assert!(GSUITE_OUTPUT_BYTES_LIMIT > GSUITE_RESPONSE_BODY_LIMIT);
+    assert_eq!(
+        profile.default_estimate.output_bytes,
+        Some(GSUITE_OUTPUT_BYTES_LIMIT)
+    );
+    assert_eq!(
+        profile
+            .hard_ceiling
+            .as_ref()
+            .and_then(|ceiling| ceiling.max_output_bytes),
+        Some(GSUITE_OUTPUT_BYTES_LIMIT)
+    );
+}
+
+#[tokio::test]
+async fn add_attendees_reports_both_google_api_requests() {
+    let scope = scope();
+    let auth = auth_with_google_account(
+        &scope,
+        vec![provider_scope(ironclaw_auth::GOOGLE_CALENDAR_EVENTS_SCOPE)],
+    )
+    .await;
+    let executor = GsuiteExecutor::new(auth);
+    let capability_id = capability_id(CALENDAR_ADD_ATTENDEES_CAPABILITY_ID);
+    let egress = Arc::new(RecordingEgress::with_responses(vec![
+        RecordingEgress::json_with_request_bytes(
+            json!({"attendees":[{"email":"existing@example.com"}]}),
+            101,
+        ),
+        RecordingEgress::json_with_request_bytes(json!({"id":"evt-1"}), 211),
+    ]));
+
+    let result = executor
+        .dispatch(GsuiteDispatchRequest {
+            capability_id: &capability_id,
+            scope: &scope,
+            input: &json!({
+                "calendar_id": "primary",
+                "event_id": "evt-1",
+                "attendees": [{"email": "new@example.com"}]
+            }),
+            runtime_http_egress: egress.clone(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(egress.requests().len(), 2);
+    assert_eq!(result.usage.network_egress_bytes, 312);
 }

@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Instant};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use ironclaw_auth::{
     CredentialAccountService, GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE,
@@ -68,12 +68,17 @@ impl GsuiteExecutor {
             .resolve(request.scope, &extension, &scopes)
             .await
             .map_err(map_credential_error)?;
-        let response = if matches!(kind, GsuiteCapability::CalendarAddAttendees) {
-            execute_add_attendees(&request, credential.access_secret).await?
-        } else {
-            let api_request = kind.request(&request, credential.access_secret)?;
-            execute_runtime_http(api_request, Arc::clone(&request.runtime_http_egress)).await?
-        };
+        let (response, network_egress_bytes) =
+            if matches!(kind, GsuiteCapability::CalendarAddAttendees) {
+                execute_add_attendees(&request, credential.access_secret).await?
+            } else {
+                let api_request = kind.request(&request, credential.access_secret)?;
+                let response =
+                    execute_runtime_http(api_request, Arc::clone(&request.runtime_http_egress))
+                        .await?;
+                let network_egress_bytes = response.request_bytes;
+                (response, network_egress_bytes)
+            };
         let output = response_output(&response)?;
         let wall_clock_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
         let output_bytes = serde_json::to_vec(&output)
@@ -84,7 +89,7 @@ impl GsuiteExecutor {
             usage: ResourceUsage {
                 wall_clock_ms,
                 output_bytes,
-                network_egress_bytes: response.request_bytes,
+                network_egress_bytes,
                 ..ResourceUsage::default()
             },
         })
@@ -152,7 +157,7 @@ enum GsuiteCapability {
 async fn execute_add_attendees(
     request: &GsuiteDispatchRequest<'_>,
     access_secret: ironclaw_host_api::SecretHandle,
-) -> Result<ironclaw_host_api::RuntimeHttpEgressResponse, GsuiteDispatchError> {
+) -> Result<(ironclaw_host_api::RuntimeHttpEgressResponse, u64), GsuiteDispatchError> {
     let url = calendar_event_url(request.input)?;
     let current_response = execute_runtime_http(
         runtime_request(
@@ -165,24 +170,35 @@ async fn execute_add_attendees(
         Arc::clone(&request.runtime_http_egress),
     )
     .await?;
-    let current = response_body_json(&current_response)?;
+    let mut network_egress_bytes = current_response.request_bytes;
+    let current = response_body_json(&current_response)
+        .map_err(|error| add_network_usage(error, network_egress_bytes))?;
     let existing = current
         .get("attendees")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let attendees = merge_attendees(existing, required_array(request.input, "attendees")?);
+    let attendees = merge_attendees(
+        existing,
+        required_array(request.input, "attendees")
+            .map_err(|error| add_network_usage(error, network_egress_bytes))?,
+    );
     let mut patch = runtime_request(
         request,
         access_secret,
         NetworkMethod::Patch,
         url,
-        json_body(&json!({ "attendees": attendees }))?,
+        json_body(&json!({ "attendees": attendees }))
+            .map_err(|error| add_network_usage(error, network_egress_bytes))?,
     );
     if let Some(etag) = response_etag(&current_response, &current) {
         patch.headers.push(("if-match".to_string(), etag));
     }
-    execute_runtime_http(patch, Arc::clone(&request.runtime_http_egress)).await
+    let response = execute_runtime_http(patch, Arc::clone(&request.runtime_http_egress))
+        .await
+        .map_err(|error| add_network_usage(error, network_egress_bytes))?;
+    network_egress_bytes = network_egress_bytes.saturating_add(response.request_bytes);
+    Ok((response, network_egress_bytes))
 }
 
 async fn execute_runtime_http(
@@ -273,7 +289,7 @@ impl GsuiteCapability {
             Self::GmailListMessages | Self::GmailGetMessage => vec![GOOGLE_GMAIL_READONLY_SCOPE],
             Self::GmailSendMessage => vec![GOOGLE_GMAIL_SEND_SCOPE],
             Self::GmailCreateDraft | Self::GmailTrashMessage => vec![GOOGLE_GMAIL_MODIFY_SCOPE],
-            Self::GmailReplyToMessage => vec![GOOGLE_GMAIL_SEND_SCOPE, GOOGLE_GMAIL_MODIFY_SCOPE],
+            Self::GmailReplyToMessage => vec![GOOGLE_GMAIL_SEND_SCOPE],
         };
         scopes
             .into_iter()
@@ -436,6 +452,14 @@ fn map_egress_error(error: RuntimeHttpEgressError) -> GsuiteDispatchError {
     })
 }
 
+fn add_network_usage(error: GsuiteDispatchError, network_egress_bytes: u64) -> GsuiteDispatchError {
+    let mut usage = error.usage().cloned().unwrap_or_default();
+    usage.network_egress_bytes = usage
+        .network_egress_bytes
+        .saturating_add(network_egress_bytes);
+    error.with_usage(usage)
+}
+
 fn calendar_events_url(
     input: &Value,
     extra_query: Option<&str>,
@@ -543,6 +567,16 @@ fn json_body(value: &Value) -> Result<Vec<u8>, GsuiteDispatchError> {
 }
 
 fn merge_attendees(mut existing: Vec<Value>, additions: &Value) -> Vec<Value> {
+    let mut indexes_by_email = existing
+        .iter()
+        .enumerate()
+        .filter_map(|(index, attendee)| {
+            attendee
+                .get("email")
+                .and_then(Value::as_str)
+                .map(|email| (email.to_ascii_lowercase(), index))
+        })
+        .collect::<HashMap<_, _>>();
     let Some(additions) = additions.as_array() else {
         return existing;
     };
@@ -551,14 +585,13 @@ fn merge_attendees(mut existing: Vec<Value>, additions: &Value) -> Vec<Value> {
             existing.push(addition.clone());
             continue;
         };
-        match existing.iter().position(|attendee| {
-            attendee
-                .get("email")
-                .and_then(Value::as_str)
-                .is_some_and(|existing| existing.eq_ignore_ascii_case(email))
-        }) {
+        let email = email.to_ascii_lowercase();
+        match indexes_by_email.get(&email).copied() {
             Some(index) => existing[index] = addition.clone(),
-            None => existing.push(addition.clone()),
+            None => {
+                indexes_by_email.insert(email, existing.len());
+                existing.push(addition.clone());
+            }
         }
     }
     existing

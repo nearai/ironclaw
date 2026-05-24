@@ -109,6 +109,7 @@ async-trait = "0.1"
 http = "1"
 http-body-util = "0.1"
 ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_host_runtime = { path = "../ironclaw_host_runtime", features = ["test-support"] }
 ironclaw_skills = { path = "../ironclaw_skills" }
 ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_turns = { path = "../ironclaw_turns" }
