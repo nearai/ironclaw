@@ -786,10 +786,6 @@ pub async fn build_reborn_runtime(
     // Local-dev WebUI projections are process-local today; production fanout
     // will swap this for a retained durable log owned by the host runtime.
     let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
-    let projection_services = build_reborn_projection_services(
-        Arc::clone(&event_log),
-        validated_identity.reply_target_binding_ref.clone(),
-    );
     let milestone_thread_scope = ThreadScope {
         owner_user_id: Some(actor_user_id.clone()),
         ..thread_scope.clone()
@@ -850,6 +846,14 @@ pub async fn build_reborn_runtime(
         })?;
     let default_run_profile_id = default_resolved_run_profile.profile_id.as_str().to_string();
     let planned_turn_coordinator: Arc<dyn TurnCoordinator> = composition.coordinator.clone();
+    let projection_services = build_reborn_projection_services(
+        Arc::clone(&event_log),
+        validated_identity.reply_target_binding_ref.clone(),
+    )
+    .with_turn_events(
+        Arc::clone(&turn_state_store) as Arc<_>,
+        Arc::clone(&planned_turn_coordinator),
+    );
     services.turn_coordinator = Some(Arc::clone(&planned_turn_coordinator));
 
     let worker_cancel = CancellationToken::new();

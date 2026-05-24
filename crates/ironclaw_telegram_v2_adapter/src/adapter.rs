@@ -292,7 +292,8 @@ impl ProductAdapter for TelegramV2Adapter {
                 return Ok(ProductRenderOutcome::Deferred);
             }
             ProductOutboundPayload::ProjectionSnapshot { .. }
-            | ProductOutboundPayload::ProjectionUpdate { .. } => {
+            | ProductOutboundPayload::ProjectionUpdate { .. }
+            | ProductOutboundPayload::KeepAlive => {
                 // Telegram never consumes projection subscriptions; the
                 // workflow should not route these to a Telegram installation.
                 record_status(
