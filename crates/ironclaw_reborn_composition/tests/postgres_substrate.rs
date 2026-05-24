@@ -45,7 +45,7 @@ async fn postgres_substrate_builder_wires_production_components_without_local_on
 }
 
 #[tokio::test]
-async fn postgres_substrate_builder_rejects_missing_secret_master_key() {
+async fn postgres_substrate_builder_rejects_invalid_secret_master_key() {
     let Some((_container, pool, database_url)) = postgres_pool_or_skip().await else {
         return;
     };
@@ -56,7 +56,7 @@ async fn postgres_substrate_builder_rejects_missing_secret_master_key() {
             event_store: RebornEventStoreConfig::Postgres {
                 url: SecretString::from(database_url),
             },
-            secret_master_key: None,
+            secret_master_key: Some(SecretString::from("too-short")),
             trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
             runtime_policy: production_runtime_policy(),
             turn_run_wake_notifier: Arc::new(RecordingSchedulerWakeNotifier),
@@ -66,7 +66,9 @@ async fn postgres_substrate_builder_rejects_missing_secret_master_key() {
 
     assert!(matches!(
         result,
-        Err(RebornCompositionError::MissingSecretMasterKey)
+        Err(RebornCompositionError::Secret(
+            ironclaw_secrets::SecretError::InvalidMasterKey
+        ))
     ));
 }
 

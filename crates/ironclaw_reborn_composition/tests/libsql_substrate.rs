@@ -51,7 +51,7 @@ async fn libsql_substrate_builder_wires_production_components_without_local_only
 }
 
 #[tokio::test]
-async fn libsql_substrate_builder_rejects_missing_secret_master_key() {
+async fn libsql_substrate_builder_rejects_invalid_secret_master_key() {
     let dir = tempdir().unwrap();
     let state_db_path = dir.path().join("state.db");
     let events_db_path = dir.path().join("events.db");
@@ -68,7 +68,7 @@ async fn libsql_substrate_builder_rejects_missing_secret_master_key() {
             path_or_url: events_db_path.display().to_string(),
             auth_token: None,
         },
-        secret_master_key: None,
+        secret_master_key: Some(SecretString::from("too-short")),
         trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
         runtime_policy: production_runtime_policy(),
         turn_run_wake_notifier: Arc::new(RecordingSchedulerWakeNotifier),
@@ -78,7 +78,9 @@ async fn libsql_substrate_builder_rejects_missing_secret_master_key() {
 
     assert!(matches!(
         result,
-        Err(RebornCompositionError::MissingSecretMasterKey)
+        Err(RebornCompositionError::Secret(
+            ironclaw_secrets::SecretError::InvalidMasterKey
+        ))
     ));
 }
 

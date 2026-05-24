@@ -417,6 +417,7 @@ async fn build_production_shaped(
                 runtime_policy,
                 turn_run_wake_notifier,
             )?;
+            let secret_master_key = resolve_secret_master_key(secret_master_key).await?;
             // TODO(process-port): if production enables FirstParty runtime,
             // HostRuntimeServices must be given a production process port;
             // otherwise the LocalHostProcessPort default is rejected.
@@ -439,6 +440,7 @@ async fn build_production_shaped(
                 runtime_policy,
                 turn_run_wake_notifier,
             )?;
+            let secret_master_key = resolve_secret_master_key(secret_master_key).await?;
             // TODO(process-port): if production enables FirstParty runtime,
             // HostRuntimeServices must be given a production process port;
             // otherwise the LocalHostProcessPort default is rejected.
@@ -451,6 +453,26 @@ async fn build_production_shaped(
             build_postgres_production(context, pool, url, secret_master_key).await
         }
     }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+async fn resolve_secret_master_key(
+    explicit: Option<ironclaw_secrets::SecretMaterial>,
+) -> Result<ironclaw_secrets::SecretMaterial, RebornBuildError> {
+    let resolved = match explicit {
+        Some(master_key) => Some(master_key),
+        None => ironclaw_secrets::keychain::resolve_master_key()
+            .await
+            .map(ironclaw_secrets::SecretMaterial::from),
+    };
+    select_secret_master_key(resolved)
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn select_secret_master_key(
+    resolved: Option<ironclaw_secrets::SecretMaterial>,
+) -> Result<ironclaw_secrets::SecretMaterial, RebornBuildError> {
+    resolved.ok_or(RebornBuildError::MissingSecretMasterKey)
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -679,6 +701,46 @@ mod tests {
         SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
     };
     use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn resolved_secret_master_key_constructor_defers_to_keychain_resolution() {
+        let db = Arc::new(
+            libsql::Builder::new_local(":memory:")
+                .build()
+                .await
+                .expect("memory libsql db"),
+        );
+        let input = RebornBuildInput::libsql_with_resolved_secret_master_key(
+            RebornCompositionProfile::Production,
+            "test-owner",
+            db,
+            "events.db",
+            None,
+        );
+
+        match input.storage {
+            RebornStorageInput::Libsql {
+                secret_master_key, ..
+            } => assert!(secret_master_key.is_none()),
+            _ => panic!("expected libsql storage"),
+        }
+    }
+
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    #[test]
+    fn select_secret_master_key_requires_resolved_material() {
+        assert!(matches!(
+            select_secret_master_key(None),
+            Err(RebornBuildError::MissingSecretMasterKey)
+        ));
+        assert!(
+            select_secret_master_key(Some(ironclaw_secrets::SecretMaterial::from(
+                "01234567890123456789012345678901"
+            )))
+            .is_ok()
+        );
+    }
 
     #[tokio::test]
     async fn local_dev_services_include_repl_runtime_substrate() {

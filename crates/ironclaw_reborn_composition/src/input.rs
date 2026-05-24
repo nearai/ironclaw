@@ -31,13 +31,13 @@ pub(crate) enum RebornStorageInput {
         db: Arc<libsql::Database>,
         path_or_url: String,
         auth_token: Option<ironclaw_secrets::SecretMaterial>,
-        secret_master_key: ironclaw_secrets::SecretMaterial,
+        secret_master_key: Option<ironclaw_secrets::SecretMaterial>,
     },
     #[cfg(feature = "postgres")]
     Postgres {
         pool: deadpool_postgres::Pool,
         url: ironclaw_secrets::SecretMaterial,
-        secret_master_key: ironclaw_secrets::SecretMaterial,
+        secret_master_key: Option<ironclaw_secrets::SecretMaterial>,
     },
 }
 
@@ -111,7 +111,27 @@ impl RebornBuildInput {
                 db,
                 path_or_url: path_or_url.into(),
                 auth_token,
-                secret_master_key,
+                secret_master_key: Some(secret_master_key),
+            },
+        )
+    }
+
+    #[cfg(feature = "libsql")]
+    pub fn libsql_with_resolved_secret_master_key(
+        profile: RebornCompositionProfile,
+        owner_id: impl Into<String>,
+        db: Arc<libsql::Database>,
+        path_or_url: impl Into<String>,
+        auth_token: Option<ironclaw_secrets::SecretMaterial>,
+    ) -> Self {
+        Self::new(
+            profile,
+            owner_id,
+            RebornStorageInput::Libsql {
+                db,
+                path_or_url: path_or_url.into(),
+                auth_token,
+                secret_master_key: None,
             },
         )
     }
@@ -130,7 +150,25 @@ impl RebornBuildInput {
             RebornStorageInput::Postgres {
                 pool,
                 url,
-                secret_master_key,
+                secret_master_key: Some(secret_master_key),
+            },
+        )
+    }
+
+    #[cfg(feature = "postgres")]
+    pub fn postgres_with_resolved_secret_master_key(
+        profile: RebornCompositionProfile,
+        owner_id: impl Into<String>,
+        pool: deadpool_postgres::Pool,
+        url: ironclaw_secrets::SecretMaterial,
+    ) -> Self {
+        Self::new(
+            profile,
+            owner_id,
+            RebornStorageInput::Postgres {
+                pool,
+                url,
+                secret_master_key: None,
             },
         )
     }
