@@ -226,19 +226,18 @@ function loadAgentSettings() {
   loadIronhubSigningKeyCard();
 }
 
-function renderIronhubSigningKeyCard(bodyHtml) {
+function renderIronhubSigningKeyCard(rowHtml) {
   var card = document.getElementById('settings-ironhub-card');
   if (!card) return;
   card.innerHTML =
-    '<div class="ext-card">' +
-    '<h3>' + escapeHtml(I18n.t('ironhub.signingKey.title')) + '</h3>' +
-    '<p class="ironhub-install-source">' +
-    escapeHtml(I18n.t('ironhub.signingKey.description')) + '</p>' +
-    bodyHtml +
+    '<div class="settings-group">' +
+    '<div class="settings-group-title">' +
+    escapeHtml(I18n.t('ironhub.signingKey.title')) + '</div>' +
+    rowHtml +
     '</div>';
 }
 
-function ironhubSigningKeyFormHtml(hasKey) {
+function ironhubSigningKeyRowHtml(statusHtml, hasKey) {
   var submitLabel = hasKey
     ? I18n.t('ironhub.signingKey.replace')
     : I18n.t('ironhub.signingKey.save');
@@ -247,30 +246,43 @@ function ironhubSigningKeyFormHtml(hasKey) {
       escapeHtml(I18n.t('ironhub.signingKey.revoke')) + '</button>'
     : '';
   return '' +
-    '<form class="ironhub-install-row" onsubmit="ironhubSaveSigningKey(event); return false;">' +
-    '<input type="password" id="ironhub-key-input" autocomplete="off" ' +
+    '<div class="settings-row">' +
+    '<div class="settings-label-wrap">' +
+    '<label class="settings-label" for="ironhub-key-input">' +
+    escapeHtml(I18n.t('ironhub.signingKey.label')) + '</label>' +
+    '<div class="settings-description">' +
+    escapeHtml(I18n.t('ironhub.signingKey.description')) + '</div>' +
+    statusHtml +
+    '</div>' +
+    '<form style="display:flex;align-items:center;gap:8px" ' +
+    'onsubmit="ironhubSaveSigningKey(event); return false;">' +
+    '<input type="password" class="settings-input" id="ironhub-key-input" autocomplete="off" ' +
     'placeholder="' + escapeHtml(I18n.t('ironhub.signingKey.placeholder')) + '" />' +
     '<button class="btn-ext install" type="submit">' + escapeHtml(submitLabel) + '</button>' +
     revoke +
-    '</form>';
+    '</form>' +
+    '</div>';
 }
 
 function loadIronhubSigningKeyCard() {
   renderIronhubSigningKeyCard(
-    '<div class="empty-state">' + escapeHtml(I18n.t('extensions.loading')) + '</div>'
+    '<div class="settings-row"><div class="settings-label-wrap">' +
+    '<div class="settings-description">' + escapeHtml(I18n.t('extensions.loading')) + '</div>' +
+    '</div></div>'
   );
   apiFetch('/api/ironhub/signing-key').then(function(meta) {
     var status =
-      '<p>' + escapeHtml(I18n.t('ironhub.signingKey.active', {
+      '<div class="settings-description">' +
+      escapeHtml(I18n.t('ironhub.signingKey.active', {
         fingerprint: meta.fingerprint,
         created: meta.created_at,
-      })) + '</p>';
-    renderIronhubSigningKeyCard(status + ironhubSigningKeyFormHtml(true));
+      })) + '</div>';
+    renderIronhubSigningKeyCard(ironhubSigningKeyRowHtml(status, true));
   }).catch(function() {
-    renderIronhubSigningKeyCard(
-      '<p>' + escapeHtml(I18n.t('ironhub.signingKey.none')) + '</p>' +
-      ironhubSigningKeyFormHtml(false)
-    );
+    var status =
+      '<div class="settings-description">' +
+      escapeHtml(I18n.t('ironhub.signingKey.none')) + '</div>';
+    renderIronhubSigningKeyCard(ironhubSigningKeyRowHtml(status, false));
   });
 }
 

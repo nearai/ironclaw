@@ -864,6 +864,7 @@ I18n.register('en', {
   'ironhub.install.communityWarning': 'This is community-submitted content that has not been verified by the NEAR team. Review it carefully before installing.',
   'ironhub.install.ackUnverified': 'I understand this is unverified community content and want to install anyway.',
   'ironhub.signingKey.title': 'IronHub Integration',
+  'ironhub.signingKey.label': 'Shared key',
   'ironhub.signingKey.description': 'Generate a key in your IronHub profile, then paste it here so install requests from IronHub can be verified by this agent.',
   'ironhub.signingKey.placeholder': 'ihub_sk_...',
   'ironhub.signingKey.save': 'Save Key',
