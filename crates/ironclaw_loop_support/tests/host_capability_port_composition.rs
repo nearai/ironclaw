@@ -1,31 +1,34 @@
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, CapabilitySet, ExecutionContext, ExtensionId, MountAlias,
-    MountGrant, MountPermissions, MountView, PermissionMode, ResourceEstimate, RuntimeKind,
-    ThreadId, TrustClass, UserId, VirtualPath,
+    MountGrant, MountPermissions, MountView, PermissionMode, ResourceEstimate, ResourceUsage,
+    RuntimeKind, ThreadId, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, CapabilitySurfaceVersion, HostRuntime,
-    HostRuntimeError, HostRuntimeHealth, HostRuntimeStatus, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeStatusRequest, SurfaceKind,
-    VisibleCapability, VisibleCapabilityAccess,
+    HostRuntimeError, HostRuntimeHealth, HostRuntimeStatus, RuntimeCapabilityCompleted,
+    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
+    RuntimeStatusRequest, SurfaceKind, VisibleCapability, VisibleCapabilityAccess,
     VisibleCapabilityRequest as HostVisibleCapabilityRequest,
     VisibleCapabilitySurface as HostVisibleCapabilitySurface,
 };
 use ironclaw_loop_support::{
     HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
 };
+use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use ironclaw_turns::{
     InMemoryRunProfileResolver, LoopResultRef, RunProfileResolutionRequest, RunProfileResolver,
     TurnId, TurnRunId, TurnScope,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, InMemoryLoopHostMilestoneSink,
-        LoopCapabilityPort, LoopRunContext, ProviderToolCall, VisibleCapabilityRequest,
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInvocation,
+        InMemoryLoopHostMilestoneSink, LoopCapabilityPort, LoopRunContext, ProviderToolCall,
+        VisibleCapabilityRequest,
     },
 };
 
@@ -152,10 +155,15 @@ async fn factory_stages_provider_tool_call_arguments_without_custom_resolver_ove
     context.resource_scope.thread_id = Some(thread_id.clone());
     let run_context = loop_run_context(&context, thread_id).await;
     let visible_request =
-        HostVisibleCapabilityRequest::new(context, SurfaceKind::new("agent_loop").unwrap());
+        HostVisibleCapabilityRequest::new(context, SurfaceKind::new("agent_loop").unwrap())
+            .with_provider_trust(BTreeMap::from([(
+                ExtensionId::new("demo").unwrap(),
+                dispatch_trust_decision(),
+            )]));
 
+    let runtime = Arc::new(SingleToolHostRuntime::default());
     let factory = HostRuntimeLoopCapabilityPortFactory::new(
-        Arc::new(SingleToolHostRuntime),
+        runtime.clone(),
         visible_request,
         Arc::new(UnusedInputResolver),
         Arc::new(UnusedResultWriter),
@@ -166,6 +174,9 @@ async fn factory_stages_provider_tool_call_arguments_without_custom_resolver_ove
     port.visible_capabilities(VisibleCapabilityRequest)
         .await
         .expect("surface should snapshot provider tools");
+    let arguments = serde_json::json!({
+        "message": "hello\nfrom provider\r\n\twith tab"
+    });
     let candidate = port
         .register_provider_tool_call(ProviderToolCall {
             provider_id: "provider".to_string(),
@@ -173,7 +184,7 @@ async fn factory_stages_provider_tool_call_arguments_without_custom_resolver_ove
             turn_id: Some("turn_1".to_string()),
             id: "call_1".to_string(),
             name: "demo__echo".to_string(),
-            arguments: serde_json::json!({"message":"hello"}),
+            arguments: arguments.clone(),
             response_reasoning: None,
             reasoning: None,
             signature: None,
@@ -194,10 +205,27 @@ async fn factory_stages_provider_tool_call_arguments_without_custom_resolver_ove
     assert_eq!(
         candidate
             .provider_replay
+            .clone()
             .expect("provider replay")
             .arguments,
-        serde_json::json!({"message":"hello"})
+        arguments
     );
+    let outcome = port
+        .invoke_capability(CapabilityInvocation {
+            surface_version: candidate.surface_version,
+            capability_id: candidate.capability_id,
+            input_ref: candidate.input_ref,
+        })
+        .await
+        .expect("staged provider input should invoke");
+    assert!(
+        matches!(
+            outcome,
+            ironclaw_turns::run_profile::CapabilityOutcome::Completed(_)
+        ),
+        "expected completed provider invocation, got {outcome:?}"
+    );
+    assert_eq!(runtime.take_requests()[0].input, arguments);
 }
 
 fn workspace_root() -> PathBuf {
@@ -274,15 +302,34 @@ impl HostRuntime for EmptyHostRuntime {
     }
 }
 
-struct SingleToolHostRuntime;
+#[derive(Default)]
+struct SingleToolHostRuntime {
+    requests: Mutex<Vec<RuntimeCapabilityRequest>>,
+}
+
+impl SingleToolHostRuntime {
+    fn take_requests(&self) -> Vec<RuntimeCapabilityRequest> {
+        self.requests.lock().expect("requests lock").clone()
+    }
+}
 
 #[async_trait]
 impl HostRuntime for SingleToolHostRuntime {
     async fn invoke_capability(
         &self,
-        _request: RuntimeCapabilityRequest,
+        request: RuntimeCapabilityRequest,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-        Err(HostRuntimeError::unavailable("not used in this test"))
+        self.requests
+            .lock()
+            .expect("requests lock")
+            .push(request.clone());
+        Ok(RuntimeCapabilityOutcome::Completed(Box::new(
+            RuntimeCapabilityCompleted {
+                capability_id: request.capability_id,
+                output: serde_json::json!({"ok": true}),
+                usage: ResourceUsage::default(),
+            },
+        )))
     }
 
     async fn resume_capability(
@@ -373,6 +420,18 @@ impl LoopCapabilityResultWriter for UnusedResultWriter {
                 "result ref could not be represented",
             )
         })
+    }
+}
+
+fn dispatch_trust_decision() -> TrustDecision {
+    TrustDecision {
+        effective_trust: EffectiveTrustClass::user_trusted(),
+        authority_ceiling: AuthorityCeiling {
+            allowed_effects: vec![ironclaw_host_api::EffectKind::DispatchCapability],
+            max_resource_ceiling: None,
+        },
+        provenance: TrustProvenance::Default,
+        evaluated_at: chrono::Utc::now(),
     }
 }
 
