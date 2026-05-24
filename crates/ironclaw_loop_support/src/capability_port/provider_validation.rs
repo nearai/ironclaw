@@ -56,7 +56,14 @@ pub(super) fn validate_provider_arguments(
 }
 
 fn invalid_invocation(error: ProviderValidationError) -> AgentLoopHostError {
-    AgentLoopHostError::new(AgentLoopHostErrorKind::InvalidInvocation, error.to_string())
+    let safe_summary = error.to_string();
+    crate::raw_agent_loop_host_error(
+        "capability_provider_validation",
+        "validate_provider_arguments",
+        AgentLoopHostErrorKind::InvalidInvocation,
+        safe_summary,
+        error,
+    )
 }
 
 #[cfg(test)]

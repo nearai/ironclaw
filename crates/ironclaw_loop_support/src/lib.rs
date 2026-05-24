@@ -100,6 +100,44 @@ use serde::{Deserialize, Serialize};
 const EMPTY_SURFACE_VERSION: &str = "empty:v1";
 const LOOP_SYSTEM_ROLE: &str = "system";
 
+pub fn raw_agent_loop_host_error(
+    component: &'static str,
+    operation: &'static str,
+    kind: AgentLoopHostErrorKind,
+    safe_summary: impl Into<String>,
+    raw_detail: impl std::fmt::Display,
+) -> AgentLoopHostError {
+    let safe_summary = safe_summary.into();
+    tracing::warn!(
+        component,
+        operation,
+        kind = ?kind,
+        safe_summary = %safe_summary,
+        raw_detail = %raw_detail,
+        "agent loop host error mapped to safe summary"
+    );
+    AgentLoopHostError::new(kind, safe_summary)
+}
+
+pub fn raw_host_managed_model_error(
+    component: &'static str,
+    operation: &'static str,
+    kind: HostManagedModelErrorKind,
+    safe_summary: impl Into<String>,
+    raw_detail: impl std::fmt::Display,
+) -> HostManagedModelError {
+    let safe_summary = safe_summary.into();
+    tracing::warn!(
+        component,
+        operation,
+        kind = ?kind,
+        safe_summary = %safe_summary,
+        raw_detail = %raw_detail,
+        "host-managed model error mapped to safe summary"
+    );
+    HostManagedModelError::safe(kind, safe_summary)
+}
+
 /// Thread-backed context adapter for text-only Reborn loops.
 #[derive(Clone)]
 pub struct ThreadBackedLoopContextPort<S>
@@ -1624,17 +1662,23 @@ fn empty_capability_error() -> AgentLoopHostError {
     )
 }
 
-fn context_read_error(_error: SessionThreadError) -> AgentLoopHostError {
-    AgentLoopHostError::new(
+fn context_read_error(error: SessionThreadError) -> AgentLoopHostError {
+    raw_agent_loop_host_error(
+        "thread_context",
+        "read_context",
         AgentLoopHostErrorKind::Unavailable,
         "thread context is unavailable",
+        error,
     )
 }
 
-fn transcript_write_error(_error: SessionThreadError) -> AgentLoopHostError {
-    AgentLoopHostError::new(
+fn transcript_write_error(error: SessionThreadError) -> AgentLoopHostError {
+    raw_agent_loop_host_error(
+        "thread_transcript",
+        "write_transcript",
         AgentLoopHostErrorKind::TranscriptWriteFailed,
         "assistant transcript write failed",
+        error,
     )
 }
 

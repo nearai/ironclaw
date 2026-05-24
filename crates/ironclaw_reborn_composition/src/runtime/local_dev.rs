@@ -232,10 +232,13 @@ impl StagedValueStore {
 fn staged_value_bytes(value: &serde_json::Value) -> Result<usize, AgentLoopHostError> {
     serde_json::to_vec(value)
         .map(|bytes| bytes.len())
-        .map_err(|_| {
-            AgentLoopHostError::new(
+        .map_err(|error| {
+            ironclaw_loop_support::raw_agent_loop_host_error(
+                "local_dev_capability_io",
+                "measure_payload",
                 AgentLoopHostErrorKind::InvalidInvocation,
                 "capability payload could not be measured",
+                error,
             )
         })
 }
@@ -360,10 +363,13 @@ fn hydrate_tool_result_messages(
             continue;
         }
         let mut envelope: ToolResultReferenceEnvelope = serde_json::from_str(&message.content)
-            .map_err(|_| {
-                HostManagedModelError::safe(
+            .map_err(|error| {
+                ironclaw_loop_support::raw_host_managed_model_error(
+                    "local_dev_model_replay",
+                    "decode_tool_result_envelope",
                     HostManagedModelErrorKind::InvalidRequest,
                     "tool result reference transcript content is invalid",
+                    error,
                 )
             })?;
         let output = capability_io
@@ -373,16 +379,23 @@ fn hydrate_tool_result_messages(
             continue;
         };
         envelope.safe_summary = ToolResultSafeSummary::new(model_visible_tool_output(&output))
-            .map_err(|_| {
-                HostManagedModelError::safe(
+            .map_err(|error| {
+                ironclaw_loop_support::raw_host_managed_model_error(
+                    "local_dev_model_replay",
+                    "sanitize_tool_result",
                     HostManagedModelErrorKind::InvalidRequest,
                     "tool result output could not be represented safely for model replay",
+                    error,
                 )
             })?;
         message.content = serde_json::to_string(&envelope).map_err(|error| {
-            HostManagedModelError::safe(
+            let safe_summary = error.to_string();
+            ironclaw_loop_support::raw_host_managed_model_error(
+                "local_dev_model_replay",
+                "encode_tool_result_envelope",
                 HostManagedModelErrorKind::InvalidRequest,
-                error.to_string(),
+                safe_summary,
+                error,
             )
         })?;
     }
@@ -699,8 +712,17 @@ fn capability_io_error() -> AgentLoopHostError {
     )
 }
 
-fn host_api_agent_loop_error(error: impl std::fmt::Display) -> AgentLoopHostError {
-    AgentLoopHostError::new(AgentLoopHostErrorKind::InvalidInvocation, error.to_string())
+fn host_api_agent_loop_error(
+    error: impl std::fmt::Debug + std::fmt::Display,
+) -> AgentLoopHostError {
+    let safe_summary = error.to_string();
+    ironclaw_loop_support::raw_agent_loop_host_error(
+        "local_dev_host_api",
+        "validate_local_dev_runtime_input",
+        AgentLoopHostErrorKind::InvalidInvocation,
+        safe_summary,
+        format!("{error:?}"),
+    )
 }
 
 #[cfg(test)]

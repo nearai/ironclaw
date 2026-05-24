@@ -304,10 +304,13 @@ fn capability_id(value: &'static str) -> Result<CapabilityId, AgentLoopHostError
     })
 }
 
-fn durable_event_error(_error: EventError) -> AgentLoopHostError {
-    AgentLoopHostError::new(
+fn durable_event_error(error: EventError) -> AgentLoopHostError {
+    ironclaw_loop_support::raw_agent_loop_host_error(
+        "loop_milestone_events",
+        "append_event",
         AgentLoopHostErrorKind::Unavailable,
         "loop milestone event log is unavailable",
+        error,
     )
 }
 
