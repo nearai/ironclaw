@@ -2125,6 +2125,82 @@ async fn runner_claim_and_block_update_persistent_run_lock_and_checkpoint_record
     );
 }
 
+async fn block_run_with_reason_yields_expected_blocked_gate(
+    thread_id: &str,
+    idem_key: &str,
+    reason_builder: impl Fn(GateRef) -> BlockedReason,
+    expected_kind: ironclaw_turns::TurnBlockedGateKind,
+    gate_ref_str: &str,
+) {
+    let (coordinator, store) = coordinator();
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(thread_id, idem_key))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    let gate_ref = GateRef::new(gate_ref_str).unwrap();
+    let state_ref = LoopCheckpointStateRef::new("checkpoint:reason-block-state").unwrap();
+    store
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref,
+            reason: reason_builder(gate_ref.clone()),
+        })
+        .await
+        .unwrap();
+
+    let blocked_event = store
+        .events()
+        .into_iter()
+        .find(|event| event.kind == TurnEventKind::Blocked && event.run_id == run_id)
+        .expect("block_run emits a Blocked lifecycle event");
+    let blocked_gate = blocked_event
+        .blocked_gate
+        .expect("block_run sets blocked_gate metadata for the reason");
+    assert_eq!(blocked_gate.gate_ref, gate_ref);
+    assert_eq!(blocked_gate.gate_kind, expected_kind);
+}
+
+#[tokio::test]
+async fn block_run_auth_emits_blocked_event_with_auth_gate_kind() {
+    block_run_with_reason_yields_expected_blocked_gate(
+        "thread-block-auth",
+        "idem-submit-auth",
+        |gate_ref| BlockedReason::Auth { gate_ref },
+        ironclaw_turns::TurnBlockedGateKind::Auth,
+        "auth-gate",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn block_run_resource_emits_blocked_event_with_resource_gate_kind() {
+    block_run_with_reason_yields_expected_blocked_gate(
+        "thread-block-resource",
+        "idem-submit-resource",
+        |gate_ref| BlockedReason::Resource { gate_ref },
+        ironclaw_turns::TurnBlockedGateKind::Resource,
+        "resource-gate",
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn resume_updates_persisted_run_binding_refs_and_replay_envelope() {
     let (coordinator, store) = coordinator();

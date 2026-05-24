@@ -66,6 +66,11 @@ pub struct TurnLifecycleEvent {
     pub kind: TurnEventKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_gate: Option<TurnBlockedGateMetadata>,
+    // `skip_serializing_if` matches the other optional fields above:
+    // pre-projection event rows emitted `"sanitized_reason": null`; new rows
+    // omit the field entirely. `serde(default)` rehydrates omitted fields as
+    // `None`, so the wire change is round-trip safe in both directions and
+    // adapters that persist `TurnLifecycleEvent` do not need a migration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sanitized_reason: Option<String>,
 }

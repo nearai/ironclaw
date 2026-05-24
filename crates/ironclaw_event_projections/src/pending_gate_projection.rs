@@ -9,7 +9,7 @@ use ironclaw_turns::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::ProjectionError;
+use crate::{MissingMetadataField, ProjectionError};
 
 /// Stable consumer id used to persist pending-gate replay progress.
 ///
@@ -75,8 +75,12 @@ pub struct PendingGateProjectionRow {
 /// Storage boundary for projected pending gate rows.
 ///
 /// Implementations must apply the cursor ordering guard described on each
-/// method and should enforce bounded per-scope retention through row limits,
-/// TTL eviction, or an equivalent storage policy.
+/// method and must enforce bounded per-scope retention through row limits,
+/// TTL eviction, or an equivalent storage policy — a turn flood that blocks
+/// repeatedly on auth/approval gates can otherwise grow the read model
+/// without bound. The projection layer is stateless and intentionally does
+/// not duplicate this guard; the sink owns persistent state, so retention
+/// belongs with whoever durably stores the row.
 #[async_trait]
 pub trait PendingGateProjectionSink: Send + Sync {
     /// Upsert a pending-gate row only if `row.source_cursor` is not older than
@@ -218,11 +222,7 @@ impl PendingGateProjection {
         })
     }
 
-    async fn project_event(
-        &self,
-        event: TurnLifecycleEvent,
-        advance_cursor: bool,
-    ) -> Result<(), ProjectionError> {
+    async fn project_event(&self, event: TurnLifecycleEvent) -> Result<(), ProjectionError> {
         match event.kind {
             TurnEventKind::Blocked => {
                 let Some(gate_kind) = TurnBlockedGateKind::from_status(event.status) else {
@@ -243,32 +243,46 @@ impl PendingGateProjection {
             }
             _ => {}
         }
-
-        if advance_cursor {
-            self.cursor_store
-                .advance_pending_gate_cursor(self.consumer_id, &event.scope, event.cursor)
-                .await?;
-        }
         Ok(())
     }
 
     async fn project_replay_event(&self, event: TurnLifecycleEvent) -> Result<(), ProjectionError> {
-        match self.project_event(event.clone(), false).await {
+        // Keep only the kind (cheap to clone) for the error-tolerance check
+        // so the happy path does not clone the full event.
+        let kind = event.kind.clone();
+        match self.project_event(event).await {
             Ok(()) => Ok(()),
-            Err(ProjectionError::InvalidRequest { reason })
-                if is_replayable_legacy_metadata_gap(&event, reason) =>
-            {
+            Err(ProjectionError::MissingProjectionMetadata { .. }) if is_replayable_kind(&kind) => {
                 Ok(())
             }
             Err(error) => Err(error),
         }
+    }
+
+    /// Project an event and advance the durable replay cursor in one step.
+    ///
+    /// Test-only: production replay owns cursor progress in
+    /// [`Self::replay_scope`] (batch advance per page) and live delivery does
+    /// not advance the durable cursor. Exposing the combined step on the
+    /// public surface would let a future caller double-advance the cursor.
+    #[cfg(test)]
+    pub(crate) async fn project_event_and_advance_cursor(
+        &self,
+        event: TurnLifecycleEvent,
+    ) -> Result<(), ProjectionError> {
+        let cursor = event.cursor;
+        let scope = event.scope.clone();
+        self.project_event(event).await?;
+        self.cursor_store
+            .advance_pending_gate_cursor(self.consumer_id, &scope, cursor)
+            .await
     }
 }
 
 #[async_trait]
 impl TurnEventSink for PendingGateProjection {
     async fn publish(&self, event: TurnLifecycleEvent) -> Result<(), ironclaw_turns::TurnError> {
-        self.project_event(event, false)
+        self.project_event(event)
             .await
             .map_err(|error| match error {
                 ProjectionError::InvalidRequest { reason } => {
@@ -276,8 +290,27 @@ impl TurnEventSink for PendingGateProjection {
                         reason: format!("pending gate projection failed: {reason}"),
                     }
                 }
-                other => ironclaw_turns::TurnError::Unavailable {
-                    reason: format!("pending gate projection failed: {other}"),
+                ProjectionError::MissingProjectionMetadata { field } => {
+                    ironclaw_turns::TurnError::InvalidRequest {
+                        reason: format!(
+                            "pending gate projection failed: {}",
+                            field.as_static_str()
+                        ),
+                    }
+                }
+                // Avoid leaking the inner cursor values into the error reason
+                // string crossing the turn-runtime boundary.
+                ProjectionError::TurnEventRebaseRequired { .. } => {
+                    ironclaw_turns::TurnError::Unavailable {
+                        reason: "pending gate projection failed: turn event rebase required"
+                            .to_string(),
+                    }
+                }
+                ProjectionError::RebaseRequired { .. } => ironclaw_turns::TurnError::Unavailable {
+                    reason: "pending gate projection failed: runtime rebase required".to_string(),
+                },
+                ProjectionError::Source { operation } => ironclaw_turns::TurnError::Unavailable {
+                    reason: format!("pending gate projection failed: source {operation}"),
                 },
             })
     }
@@ -287,15 +320,18 @@ fn row_from_blocked_event(
     event: &TurnLifecycleEvent,
     gate_kind: TurnBlockedGateKind,
 ) -> Result<PendingGateProjectionRow, ProjectionError> {
-    let blocked_gate = event
-        .blocked_gate
-        .as_ref()
-        .ok_or(ProjectionError::InvalidRequest {
-            reason: "blocked turn event missing gate metadata",
+    let blocked_gate =
+        event
+            .blocked_gate
+            .as_ref()
+            .ok_or(ProjectionError::MissingProjectionMetadata {
+                field: MissingMetadataField::BlockedGate,
+            })?;
+    let blocked_at = event
+        .occurred_at
+        .ok_or(ProjectionError::MissingProjectionMetadata {
+            field: MissingMetadataField::OccurredAt,
         })?;
-    let blocked_at = event.occurred_at.ok_or(ProjectionError::InvalidRequest {
-        reason: "blocked turn event missing timestamp",
-    })?;
 
     Ok(PendingGateProjectionRow {
         key: key_from_lifecycle_event(event)?,
@@ -309,12 +345,13 @@ fn row_from_blocked_event(
 fn key_from_lifecycle_event(
     event: &TurnLifecycleEvent,
 ) -> Result<PendingGateProjectionKey, ProjectionError> {
-    let owner_user_id = event
-        .owner_user_id
-        .clone()
-        .ok_or(ProjectionError::InvalidRequest {
-            reason: "turn event missing owner metadata",
-        })?;
+    let owner_user_id =
+        event
+            .owner_user_id
+            .clone()
+            .ok_or(ProjectionError::MissingProjectionMetadata {
+                field: MissingMetadataField::OwnerUserId,
+            })?;
 
     Ok(PendingGateProjectionKey {
         tenant_id: event.scope.tenant_id.clone(),
@@ -326,22 +363,13 @@ fn key_from_lifecycle_event(
     })
 }
 
-fn is_replayable_legacy_metadata_gap(event: &TurnLifecycleEvent, reason: &'static str) -> bool {
-    let missing_metadata = matches!(
-        reason,
-        "blocked turn event missing gate metadata"
-            | "blocked turn event missing timestamp"
-            | "turn event missing owner metadata"
-    );
-    if !missing_metadata {
-        return false;
-    }
-
-    // Replay can encounter events retained from before pending-gate metadata
-    // existed. Those historical events could not have produced a resolvable
-    // pending-gate row, so skip them and let the replay cursor advance.
+/// `TurnLifecycleEvent` kinds that the pending-gate projection can derive a
+/// row from (or remove a row for). Other kinds are silent-skip; the
+/// replay-tolerance path uses this predicate to bound the kinds for which
+/// missing legacy metadata may be ignored.
+fn is_replayable_kind(kind: &TurnEventKind) -> bool {
     matches!(
-        event.kind,
+        kind,
         TurnEventKind::Blocked
             | TurnEventKind::Completed
             | TurnEventKind::Failed

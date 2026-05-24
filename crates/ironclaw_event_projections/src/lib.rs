@@ -8,8 +8,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-mod pending_gate_projection;
-
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_events::{
@@ -29,9 +27,11 @@ use ironclaw_memory::{
     PromptWriteOperation, PromptWriteSafetyEvent, PromptWriteSafetyEventKind,
     PromptWriteSafetyEventSink,
 };
+use ironclaw_turns::EventCursor as TurnEventCursor;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod pending_gate_projection;
 mod runtime_projection;
 use runtime_projection::{
     RuntimeProjectionState, sort_capability_activities_for_projection, sort_runs_for_projection,
@@ -310,10 +310,43 @@ pub enum CapabilityActivityStatus {
     Killed,
 }
 
+/// Replay-tolerable projection metadata field absent from a legacy
+/// `TurnLifecycleEvent`.
+///
+/// Variants are matched structurally by replay-tolerance logic; do not add a
+/// `String` payload — match-on-string-literals is what this enum exists to
+/// replace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissingMetadataField {
+    /// `TurnLifecycleEvent.blocked_gate` was absent on a `Blocked` event.
+    BlockedGate,
+    /// `TurnLifecycleEvent.occurred_at` was absent on an event whose
+    /// projection row records the blocked timestamp.
+    OccurredAt,
+    /// `TurnLifecycleEvent.owner_user_id` was absent on an event whose
+    /// projection key requires the owner identity.
+    OwnerUserId,
+}
+
+impl MissingMetadataField {
+    pub fn as_static_str(self) -> &'static str {
+        match self {
+            Self::BlockedGate => "blocked turn event missing gate metadata",
+            Self::OccurredAt => "blocked turn event missing timestamp",
+            Self::OwnerUserId => "turn event missing owner metadata",
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ProjectionError {
     #[error("projection request rejected: {reason}")]
     InvalidRequest { reason: &'static str },
+    /// A `TurnLifecycleEvent` arrived without metadata the projection requires
+    /// to materialize or key its row. Replay tolerates this for legacy events
+    /// retained from before the metadata existed; live delivery surfaces it.
+    #[error("projection metadata missing: {}", .field.as_static_str())]
+    MissingProjectionMetadata { field: MissingMetadataField },
     #[error(
         "projection rebase required: requested runtime cursor {requested:?} cannot replay from earliest retained runtime cursor {earliest:?}"
     )]
@@ -329,8 +362,8 @@ pub enum ProjectionError {
         "turn event projection rebase required: requested turn cursor {requested:?} cannot replay from earliest retained turn cursor {earliest:?}"
     )]
     TurnEventRebaseRequired {
-        requested: ironclaw_turns::EventCursor,
-        earliest: ironclaw_turns::EventCursor,
+        requested: TurnEventCursor,
+        earliest: TurnEventCursor,
     },
     #[error("projection source failed during {operation}")]
     Source { operation: &'static str },
