@@ -236,6 +236,14 @@ fn authorization_url_builder_rejects_bad_endpoint_urls() {
         authorization_endpoint: "http://accounts.google.com/o/oauth2/v2/auth",
         ..valid_authorization_request(&challenge, &scopes, &[])
     }));
+    assert_invalid_request(build_authorization_url(OAuthAuthorizeUrlRequest {
+        authorization_endpoint: "https://user:pass@accounts.google.com/o/oauth2/v2/auth",
+        ..valid_authorization_request(&challenge, &scopes, &[])
+    }));
+    assert_invalid_request(build_authorization_url(OAuthAuthorizeUrlRequest {
+        authorization_endpoint: "https://accounts.google.com/o/oauth2/v2/auth?state=predefined",
+        ..valid_authorization_request(&challenge, &scopes, &[])
+    }));
 }
 
 #[test]
@@ -258,6 +266,34 @@ fn authorization_url_builder_rejects_bad_extra_params() {
         &scopes,
         &[("login_hint", "bad\u{0000}value")],
     )));
+    assert_invalid_request(build_authorization_url(valid_authorization_request(
+        &challenge,
+        &scopes,
+        &[("state", "override")],
+    )));
+    assert_invalid_request(build_authorization_url(valid_authorization_request(
+        &challenge,
+        &scopes,
+        &[("redirect_uri", "https://attacker.example/callback")],
+    )));
+}
+
+#[test]
+fn authorization_url_builder_handles_empty_scopes_and_extra_params() {
+    let challenge = verifier_challenge();
+    let scopes = Vec::new();
+
+    let url =
+        build_authorization_url(valid_authorization_request(&challenge, &scopes, &[])).unwrap();
+    let parsed = url::Url::parse(url.as_str()).unwrap();
+    let query = parsed.query_pairs().collect::<Vec<_>>();
+
+    assert!(
+        query
+            .iter()
+            .any(|(name, value)| name == "scope" && value.is_empty())
+    );
+    assert!(!query.iter().any(|(name, _)| name == "access_type"));
 }
 
 #[test]

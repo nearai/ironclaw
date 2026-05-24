@@ -180,6 +180,13 @@ pub fn build_authorization_url(
             "oauth authorization endpoint host is required",
         ));
     }
+    for (name, _) in url.query_pairs() {
+        if is_reserved_authorize_param(name.as_ref()) {
+            return Err(AuthProductError::invalid_request(
+                "oauth authorization endpoint must not predefine reserved query parameters",
+            ));
+        }
+    }
 
     {
         let mut pairs = url.query_pairs_mut();
@@ -192,7 +199,7 @@ pub fn build_authorization_url(
             .append_pair("code_challenge", request.code_challenge.as_str())
             .append_pair("code_challenge_method", "S256");
         for (name, value) in request.extra_params {
-            validate_authorize_fragment("oauth query parameter name", name)?;
+            validate_extra_param_name(name)?;
             validate_authorize_fragment("oauth query parameter value", value)?;
             pairs.append_pair(name, value);
         }
@@ -207,14 +214,14 @@ pub fn build_google_authorization_url(
     state: &str,
     code_challenge: &PkceCodeChallenge,
     scopes: &[ProviderScope],
-    allowed_hosted_domain: Option<&str>,
+    hosted_domain_hint: Option<&str>,
 ) -> Result<OAuthAuthorizationUrl, AuthProductError> {
     let mut extra_params = vec![
         ("access_type", "offline"),
         ("prompt", "consent"),
         ("include_granted_scopes", "true"),
     ];
-    if let Some(hosted_domain) = allowed_hosted_domain {
+    if let Some(hosted_domain) = hosted_domain_hint {
         validate_authorize_fragment("google hosted domain", hosted_domain)?;
         extra_params.push(("hd", hosted_domain));
     }
@@ -264,4 +271,27 @@ fn validate_authorize_fragment(label: &'static str, value: &str) -> Result<(), A
         )));
     }
     Ok(())
+}
+
+fn validate_extra_param_name(name: &str) -> Result<(), AuthProductError> {
+    validate_authorize_fragment("oauth query parameter name", name)?;
+    if is_reserved_authorize_param(name) {
+        return Err(AuthProductError::invalid_request(
+            "oauth query parameter name is reserved",
+        ));
+    }
+    Ok(())
+}
+
+fn is_reserved_authorize_param(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "client_id"
+            | "redirect_uri"
+            | "response_type"
+            | "scope"
+            | "state"
+            | "code_challenge"
+            | "code_challenge_method"
+    )
 }
