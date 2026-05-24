@@ -654,6 +654,14 @@ async fn local_dev_adapter_registers_provider_tool_calls_as_run_scoped_inputs() 
         .into_iter()
         .find(|definition| definition.capability_id == capability_id)
         .expect("builtin echo should be advertised as a provider tool");
+    assert!(
+        tool_definition
+            .parameters
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|properties| properties.contains_key("message")),
+        "provider tool definitions should receive resolved built-in input schemas"
+    );
 
     let provider_tool_call = ProviderToolCall {
         provider_id: "nearai".to_string(),

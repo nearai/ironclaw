@@ -25,7 +25,7 @@ use ironclaw_host_runtime::{
     CapabilitySurfacePolicy, CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime,
     MAX_HOT_PROMPT_BYTES, MAX_HOT_SCHEMA_BYTES, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
     RuntimeFailureKind, SurfaceKind, VisibleCapabilityAccess, VisibleCapabilityRequest,
-    VisibleCapabilitySurface, publish_hot_capability_catalog,
+    VisibleCapabilitySurface, builtin_first_party_package, publish_hot_capability_catalog,
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
@@ -395,6 +395,74 @@ async fn visible_surface_uses_caller_provider_trust_not_host_trust_policy() {
         .unwrap();
 
     assert_eq!(visible_ids(&surface), vec![capability_id("echo.say")]);
+}
+
+#[tokio::test]
+async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
+    let mut registry = ExtensionRegistry::new();
+    registry
+        .insert(builtin_first_party_package().unwrap())
+        .unwrap();
+    let runtime = runtime_with(registry, Arc::new(GrantAuthorizer));
+    let builtin_effects = vec![
+        EffectKind::DispatchCapability,
+        EffectKind::ReadFilesystem,
+        EffectKind::WriteFilesystem,
+        EffectKind::Network,
+        EffectKind::SpawnProcess,
+        EffectKind::ExecuteCode,
+    ];
+    let context = context_with_grants([
+        (capability_id("builtin.echo"), builtin_effects.clone()),
+        (capability_id("builtin.time"), builtin_effects.clone()),
+        (capability_id("builtin.json"), builtin_effects.clone()),
+        (capability_id("builtin.http"), builtin_effects.clone()),
+        (capability_id("builtin.shell"), builtin_effects.clone()),
+        (capability_id("builtin.read_file"), builtin_effects.clone()),
+        (capability_id("builtin.write_file"), builtin_effects.clone()),
+        (capability_id("builtin.list_dir"), builtin_effects.clone()),
+        (capability_id("builtin.glob"), builtin_effects.clone()),
+        (capability_id("builtin.grep"), builtin_effects.clone()),
+        (
+            capability_id("builtin.apply_patch"),
+            builtin_effects.clone(),
+        ),
+        (capability_id("builtin.skill_list"), builtin_effects.clone()),
+        (
+            capability_id("builtin.skill_install"),
+            builtin_effects.clone(),
+        ),
+        (
+            capability_id("builtin.skill_remove"),
+            builtin_effects.clone(),
+        ),
+    ]);
+
+    let surface = runtime
+        .visible_capabilities(request_with_provider_trust(
+            context,
+            [("builtin", builtin_effects)],
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(surface.capabilities.len(), 14);
+    for capability in &surface.capabilities {
+        assert!(
+            capability
+                .descriptor
+                .parameters_schema
+                .get("$ref")
+                .is_none(),
+            "{} should expose a concrete input schema, got {:?}",
+            capability.descriptor.id,
+            capability.descriptor.parameters_schema
+        );
+    }
+    assert_schema_has_property(&surface, "builtin.glob", "pattern");
+    assert_schema_has_property(&surface, "builtin.grep", "pattern");
+    assert_schema_has_property(&surface, "builtin.skill_install", "content");
+    assert_schema_has_property(&surface, "builtin.skill_install", "name");
 }
 
 #[tokio::test]
@@ -1278,6 +1346,27 @@ fn trust_decision_for(allowed_effects: Vec<EffectKind>) -> TrustDecision {
         provenance: TrustProvenance::Default,
         evaluated_at: Utc::now(),
     }
+}
+
+fn assert_schema_has_property(
+    surface: &VisibleCapabilitySurface,
+    capability: &str,
+    property: &str,
+) {
+    let schema = &surface
+        .capabilities
+        .iter()
+        .find(|entry| entry.descriptor.id == capability_id(capability))
+        .unwrap_or_else(|| panic!("{capability} should be visible"))
+        .descriptor
+        .parameters_schema;
+    assert!(
+        schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|properties| properties.contains_key(property)),
+        "{capability} schema should expose property {property}, got {schema:?}"
+    );
 }
 
 fn visible_ids(surface: &VisibleCapabilitySurface) -> Vec<CapabilityId> {
