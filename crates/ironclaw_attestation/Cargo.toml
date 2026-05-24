@@ -1,0 +1,22 @@
+[package]
+name = "ironclaw_attestation"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Canonical signing-bytes + ApprovedTxHash core for the IronClaw attested-signing substrate (chain-SDK-free, no secrets/webauthn)"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+
+[package.metadata.dist]
+dist = false
+
+[dependencies]
+ironclaw_signing_provider = { path = "../ironclaw_signing_provider" }
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+thiserror = "2"
+
+[dev-dependencies]
+serde_json = "1"

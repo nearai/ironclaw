@@ -4140,6 +4140,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_attestation"
+version = "0.1.0"
+dependencies = [
+ "ironclaw_signing_provider",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "ironclaw_auth"
 version = "0.1.0"
 dependencies = [

@@ -78,6 +78,65 @@ fn signing_provider_trait_crate_has_no_chain_crypto_or_secrets_dependency() {
     );
 }
 
+/// The dependency names the attestation crate (PR2) must never carry. It is the
+/// canonical / render / hash core and stays one layer above the chain crates:
+/// no chain SDK, no key custody, no webauthn (those land in PR4/PR6). `sha2`
+/// (its hashing primitive) and `serde` are allowed and so are deliberately
+/// absent from this list.
+const ATTESTATION_FORBIDDEN_DEPENDENCY_PREFIXES: &[&str] = &[
+    "solana-sdk",
+    "solana-program",
+    "solana",
+    "near-",
+    "alloy",
+    "k256",
+    "sha3",
+    "webauthn-rs",
+    "ironclaw_secrets",
+    "ironclaw_chain_signing",
+];
+
+#[test]
+fn attestation_crate_has_no_chain_secrets_or_webauthn_dependency() {
+    let metadata = cargo_metadata();
+    let packages = metadata["packages"]
+        .as_array()
+        .expect("cargo metadata must include packages");
+
+    let package = packages
+        .iter()
+        .find(|package| package["name"] == "ironclaw_attestation")
+        .expect(
+            "ironclaw_attestation must be a workspace member; add it to the root \
+             Cargo.toml `workspace.members` (see attested-signing PR2)",
+        );
+
+    let dependencies = package["dependencies"]
+        .as_array()
+        .expect("package dependencies must be an array");
+
+    let mut violations = Vec::new();
+    for dependency in dependencies {
+        let Some(name) = dependency["name"].as_str() else {
+            continue;
+        };
+        for forbidden in ATTESTATION_FORBIDDEN_DEPENDENCY_PREFIXES {
+            if name == *forbidden || name.starts_with(forbidden) {
+                let kind = dependency["kind"].as_str().unwrap_or("normal").to_string();
+                violations.push(format!("{name} (kind: {kind}) matched `{forbidden}`"));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "ironclaw_attestation is the canonical/render/hash core (PR2) and must carry no chain \
+         SDK, secrets, or webauthn dependency — those belong in PR4/PR6. Forbidden dependencies \
+         found:\n{}\nSee docs/plans/2026-05-23-attested-signing-substrate.md.",
+        violations.join("\n")
+    );
+}
+
 fn cargo_metadata() -> Value {
     let manifest_path = workspace_root().join("Cargo.toml");
     let output = Command::new("cargo")
