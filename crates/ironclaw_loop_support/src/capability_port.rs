@@ -1543,7 +1543,7 @@ fn runtime_model_visible_failure_to_loop(
     }
 
     Ok(CapabilityOutcome::Failed(CapabilityFailure {
-        error_kind: model_visible_runtime_failure_kind_to_loop(failure.kind),
+        error_kind: model_visible_runtime_failure_kind_to_loop(failure.kind)?,
         safe_summary: runtime_failure_safe_summary(&failure, "capability invocation failed"),
     }))
 }
@@ -1573,19 +1573,20 @@ fn runtime_failure_kind_to_loop(
     })
 }
 
-fn model_visible_runtime_failure_kind_to_loop(kind: RuntimeFailureKind) -> CapabilityFailureKind {
-    match kind {
-        RuntimeFailureKind::InvalidInput => CapabilityFailureKind::InvalidInput,
-        RuntimeFailureKind::OperationFailed => CapabilityFailureKind::OperationFailed,
-        RuntimeFailureKind::OutputTooLarge => CapabilityFailureKind::OutputTooLarge,
-        _ => CapabilityFailureKind::OperationFailed,
-    }
+fn model_visible_runtime_failure_kind_to_loop(
+    kind: RuntimeFailureKind,
+) -> Result<CapabilityFailureKind, AgentLoopHostError> {
+    runtime_failure_kind_to_loop(kind)
 }
 
 fn recoverable_runtime_failure_kind_to_loop(
     kind: RuntimeFailureKind,
 ) -> Result<CapabilityFailureKind, AgentLoopHostError> {
+    // Only protocol kinds with useful loop-level categories stay distinct here.
+    // Other recoverable dispositions abort as `Permanent` by design instead of
+    // being appended as ordinary model-visible tool results.
     Ok(match kind {
+        RuntimeFailureKind::Cancelled => CapabilityFailureKind::Cancelled,
         RuntimeFailureKind::InvalidOutput => CapabilityFailureKind::InvalidOutput,
         RuntimeFailureKind::Dispatcher => CapabilityFailureKind::Dispatcher,
         RuntimeFailureKind::Unknown => capability_failure_kind("unknown")?,
@@ -1867,16 +1868,16 @@ mod tests {
         assert!(matches!(
             missing_runtime,
             CapabilityOutcome::Failed(failure)
-                if failure.error_kind == CapabilityFailureKind::OperationFailed
+                if failure.error_kind == CapabilityFailureKind::MissingRuntime
                     && failure.safe_summary == "tool runtime is missing"
         ));
     }
 
     #[test]
-    fn runtime_failure_to_loop_distinguishes_retry_and_retry_exhaustion() {
+    fn runtime_failure_to_loop_routes_retryable_failures_to_retry_classes() {
         let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
         let retry = runtime_failure_to_loop(RuntimeCapabilityFailure::new(
-            capability_id.clone(),
+            capability_id,
             RuntimeFailureKind::Transient,
             Some("temporary outage".to_string()),
         ))
@@ -1885,22 +1886,6 @@ mod tests {
             retry,
             CapabilityOutcome::Failed(failure)
                 if failure.error_kind == CapabilityFailureKind::Transient
-                    && failure.safe_summary == "temporary outage"
-        ));
-
-        let exhausted = runtime_failure_to_loop(
-            RuntimeCapabilityFailure::new(
-                capability_id,
-                RuntimeFailureKind::Transient,
-                Some("temporary outage".to_string()),
-            )
-            .with_retry_exhausted(true),
-        )
-        .expect("convert exhausted retryable failure");
-        assert!(matches!(
-            exhausted,
-            CapabilityOutcome::Failed(failure)
-                if failure.error_kind == CapabilityFailureKind::OperationFailed
                     && failure.safe_summary == "temporary outage"
         ));
     }
@@ -1921,20 +1906,17 @@ mod tests {
                     && failure.safe_summary == "runtime returned malformed output"
         ));
 
-        let uncertain = runtime_failure_to_loop(
-            RuntimeCapabilityFailure::new(
-                capability_id,
-                RuntimeFailureKind::OperationFailed,
-                Some("side effects uncertain".to_string()),
-            )
-            .with_side_effects_uncertain(true),
-        )
-        .expect("convert uncertain side-effect failure");
+        let cancelled = runtime_failure_to_loop(RuntimeCapabilityFailure::new(
+            capability_id,
+            RuntimeFailureKind::Cancelled,
+            Some("capability cancelled".to_string()),
+        ))
+        .expect("convert cancelled failure");
         assert!(matches!(
-            uncertain,
+            cancelled,
             CapabilityOutcome::Failed(failure)
-                if failure.error_kind == CapabilityFailureKind::Permanent
-                    && failure.safe_summary == "side effects uncertain"
+                if failure.error_kind == CapabilityFailureKind::Cancelled
+                    && failure.safe_summary == "capability cancelled"
         ));
     }
 

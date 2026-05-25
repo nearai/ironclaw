@@ -506,14 +506,6 @@ pub struct RuntimeCapabilityFailure {
     pub capability_id: CapabilityId,
     pub kind: RuntimeFailureKind,
     pub message: Option<String>,
-    /// True when the caller/runtime already spent the bounded retry budget
-    /// for a retryable failure class. This lets the agent loop distinguish
-    /// "try the identical call again" from "show this failure to the model".
-    pub retry_exhausted: bool,
-    /// True when the runtime cannot truthfully state whether the capability's
-    /// side effects happened. The agent loop must not synthesize a normal tool
-    /// result or retry blindly when this is set.
-    pub side_effects_uncertain: bool,
 }
 
 /// Explicit fallback for outcome categories that the loop adapter cannot handle
@@ -676,6 +668,8 @@ pub enum CapabilityFailureDisposition {
     /// Return a normal tool error observation to the model in the same loop.
     ModelVisibleToolError,
     /// Retry the same runtime invocation before exposing anything to the model.
+    /// The loop recovery strategy owns the retry budget and post-exhaustion
+    /// fallback; the host-runtime disposition only classifies the first outcome.
     RetrySameCall,
     /// End this unsafe run cleanly and provide recovery context on the next turn.
     RecoverableRunFailure,
@@ -693,19 +687,7 @@ impl RuntimeCapabilityFailure {
             capability_id,
             kind,
             message,
-            retry_exhausted: false,
-            side_effects_uncertain: false,
         }
-    }
-
-    pub fn with_retry_exhausted(mut self, retry_exhausted: bool) -> Self {
-        self.retry_exhausted = retry_exhausted;
-        self
-    }
-
-    pub fn with_side_effects_uncertain(mut self, side_effects_uncertain: bool) -> Self {
-        self.side_effects_uncertain = side_effects_uncertain;
-        self
     }
 
     pub fn safe_summary(&self) -> Option<String> {
@@ -722,12 +704,7 @@ impl RuntimeCapabilityFailure {
             .message
             .as_deref()
             .is_some_and(|summary| !summary.trim().is_empty());
-        capability_failure_disposition(
-            self.kind,
-            has_safe_summary,
-            self.retry_exhausted,
-            self.side_effects_uncertain,
-        )
+        capability_failure_disposition(self.kind, has_safe_summary)
     }
 }
 
@@ -747,20 +724,18 @@ fn bounded_runtime_failure_summary(summary: &str) -> String {
 /// Central disposition policy for runtime capability failures.
 ///
 /// Same-loop continuation is reserved for failures the runtime can summarize
-/// safely and truthfully. Integrity failures end the current run even if they
-/// have a displayable message, so the next turn can receive recovery context
-/// without corrupting the assistant/tool-result transcript.
+/// safely. Protocol, cancellation, and unknown failures end the current run
+/// even if they have a displayable message, so the next turn can receive
+/// recovery context without corrupting the assistant/tool-result transcript.
 pub const fn capability_failure_disposition(
     kind: RuntimeFailureKind,
     has_safe_summary: bool,
-    retry_exhausted: bool,
-    side_effects_uncertain: bool,
 ) -> CapabilityFailureDisposition {
-    if side_effects_uncertain || runtime_failure_requires_run_recovery(kind) {
+    if runtime_failure_requires_run_recovery(kind) {
         return CapabilityFailureDisposition::RecoverableRunFailure;
     }
 
-    if runtime_failure_is_retryable(kind) && !retry_exhausted {
+    if runtime_failure_is_retryable(kind) {
         return CapabilityFailureDisposition::RetrySameCall;
     }
 
@@ -774,7 +749,8 @@ pub const fn capability_failure_disposition(
 const fn runtime_failure_requires_run_recovery(kind: RuntimeFailureKind) -> bool {
     matches!(
         kind,
-        RuntimeFailureKind::InvalidOutput
+        RuntimeFailureKind::Cancelled
+            | RuntimeFailureKind::InvalidOutput
             | RuntimeFailureKind::Dispatcher
             | RuntimeFailureKind::Unknown
     )

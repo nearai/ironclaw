@@ -114,6 +114,12 @@ pub(super) fn capability_host_error(error: AgentLoopHostError) -> AgentLoopExecu
 }
 
 pub(super) fn capability_error_class(kind: &CapabilityFailureKind) -> CapabilityErrorClass {
+    // Runtime capability failures are first dispositioned in
+    // `ironclaw_host_runtime` and adapted by `ironclaw_loop_support`.
+    // Keep this recovery class mapping aligned with that adapter: retryable
+    // runtime kinds must arrive here as Transient/Unavailable/Internal,
+    // model-visible kinds as OperationFailed/InputInvalid/PolicyDenied, and
+    // run-ending protocol/cancellation kinds as Permanent or Cancelled.
     match kind {
         CapabilityFailureKind::Network | CapabilityFailureKind::Transient => {
             CapabilityErrorClass::Transient

@@ -1395,30 +1395,29 @@ mod tests {
         use crate::CapabilityFailureDisposition::*;
 
         let safe = true;
-        let exhausted = true;
         let cases = [
             (RuntimeFailureKind::Authorization, ModelVisibleToolError),
-            (RuntimeFailureKind::Backend, ModelVisibleToolError),
-            (RuntimeFailureKind::Cancelled, ModelVisibleToolError),
+            (RuntimeFailureKind::Backend, RetrySameCall),
+            (RuntimeFailureKind::Cancelled, RecoverableRunFailure),
             (RuntimeFailureKind::Dispatcher, RecoverableRunFailure),
-            (RuntimeFailureKind::Internal, ModelVisibleToolError),
+            (RuntimeFailureKind::Internal, RetrySameCall),
             (RuntimeFailureKind::InvalidInput, ModelVisibleToolError),
             (RuntimeFailureKind::InvalidOutput, RecoverableRunFailure),
             (RuntimeFailureKind::MissingRuntime, ModelVisibleToolError),
-            (RuntimeFailureKind::Network, ModelVisibleToolError),
+            (RuntimeFailureKind::Network, RetrySameCall),
             (RuntimeFailureKind::OperationFailed, ModelVisibleToolError),
             (RuntimeFailureKind::OutputTooLarge, ModelVisibleToolError),
             (RuntimeFailureKind::PolicyDenied, ModelVisibleToolError),
             (RuntimeFailureKind::Process, ModelVisibleToolError),
             (RuntimeFailureKind::Resource, ModelVisibleToolError),
-            (RuntimeFailureKind::Transient, ModelVisibleToolError),
-            (RuntimeFailureKind::Unavailable, ModelVisibleToolError),
+            (RuntimeFailureKind::Transient, RetrySameCall),
+            (RuntimeFailureKind::Unavailable, RetrySameCall),
             (RuntimeFailureKind::Unknown, RecoverableRunFailure),
         ];
 
         for (kind, expected) in cases {
             assert_eq!(
-                crate::capability_failure_disposition(kind, safe, exhausted, false),
+                crate::capability_failure_disposition(kind, safe),
                 expected,
                 "{kind:?}"
             );
@@ -1436,24 +1435,11 @@ mod tests {
             RuntimeFailureKind::Unavailable,
         ] {
             assert_eq!(
-                crate::capability_failure_disposition(kind, true, false, false),
+                crate::capability_failure_disposition(kind, true),
                 RetrySameCall,
                 "{kind:?}"
             );
         }
-    }
-
-    #[test]
-    fn capability_failure_disposition_never_model_visible_when_side_effects_uncertain() {
-        assert_eq!(
-            crate::capability_failure_disposition(
-                RuntimeFailureKind::InvalidInput,
-                true,
-                true,
-                true
-            ),
-            crate::CapabilityFailureDisposition::RecoverableRunFailure
-        );
     }
 
     #[test]
@@ -1475,7 +1461,18 @@ mod tests {
             Some("x".repeat(3000)),
         );
         let summary = long.safe_summary().expect("long message is still safe");
-        assert_eq!(summary.len(), 515);
+        assert_eq!(summary.chars().count(), 515);
+        assert!(summary.ends_with("..."));
+
+        let multibyte = RuntimeCapabilityFailure::new(
+            cap(),
+            RuntimeFailureKind::InvalidInput,
+            Some("é".repeat(3000)),
+        );
+        let summary = multibyte
+            .safe_summary()
+            .expect("long multibyte message is still safe");
+        assert_eq!(summary.chars().count(), 515);
         assert!(summary.ends_with("..."));
     }
 

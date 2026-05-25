@@ -1364,6 +1364,11 @@ async fn model_visible_provider_tool_failures_append_failure_tool_result_for_rep
             "capability failed with invalid_input: invalid input",
         ),
         (
+            CapabilityFailureKind::MissingRuntime,
+            "runtime missing",
+            "capability failed with missing_runtime: runtime missing",
+        ),
+        (
             CapabilityFailureKind::OperationFailed,
             "operation failed",
             "capability failed with operation_failed: operation failed",
