@@ -1,13 +1,11 @@
-use std::{
-    collections::VecDeque,
-    sync::{Arc, Mutex},
-};
+mod support;
+
+use std::sync::Arc;
 
 use ironclaw_auth::{
-    AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel,
-    CredentialAccountService, CredentialAccountStatus, CredentialOwnership,
-    GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_GMAIL_MODIFY_SCOPE, GOOGLE_GMAIL_READONLY_SCOPE,
-    GOOGLE_GMAIL_SEND_SCOPE, InMemoryAuthProductServices, NewCredentialAccount, ProviderScope,
+    AuthProviderId, CredentialAccountStatus, GOOGLE_CALENDAR_READONLY_SCOPE,
+    GOOGLE_GMAIL_MODIFY_SCOPE, GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE,
+    InMemoryAuthProductServices,
 };
 use ironclaw_first_party_extensions::{
     CALENDAR_ADD_ATTENDEES_CAPABILITY_ID, CALENDAR_CREATE_EVENT_CAPABILITY_ID,
@@ -18,204 +16,15 @@ use ironclaw_first_party_extensions::{
     GMAIL_GET_MESSAGE_CAPABILITY_ID, GMAIL_LIST_MESSAGES_CAPABILITY_ID,
     GMAIL_REPLY_TO_MESSAGE_CAPABILITY_ID, GMAIL_SEND_MESSAGE_CAPABILITY_ID,
     GMAIL_TRASH_MESSAGE_CAPABILITY_ID, GSUITE_OUTPUT_BYTES_LIMIT, GSUITE_RESPONSE_BODY_LIMIT,
-    GsuiteDispatchError, GsuiteDispatchRequest, GsuiteExecutor, google_provider_id,
-    gsuite_package_specs, gsuite_resource_profile,
+    GsuiteDispatchRequest, GsuiteExecutor, google_provider_id, gsuite_package_specs,
+    gsuite_resource_profile,
 };
 use ironclaw_host_api::{
-    CapabilityId, InvocationId, NetworkMethod, NetworkScheme,
-    RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED, ResourceScope, RuntimeDispatchErrorKind,
-    RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
-    SecretHandle, UserId,
+    NetworkMethod, NetworkScheme, RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED,
+    RuntimeDispatchErrorKind, RuntimeHttpEgressError, SecretHandle,
 };
 use serde_json::json;
-
-#[derive(Default)]
-struct RecordingEgress {
-    requests: Mutex<Vec<RuntimeHttpEgressRequest>>,
-    responses: Mutex<VecDeque<Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError>>>,
-}
-
-impl RecordingEgress {
-    fn with_responses(responses: Vec<RuntimeHttpEgressResponse>) -> Self {
-        Self {
-            requests: Mutex::new(Vec::new()),
-            responses: Mutex::new(responses.into_iter().map(Ok).collect()),
-        }
-    }
-
-    fn with_errors(errors: Vec<RuntimeHttpEgressError>) -> Self {
-        Self {
-            requests: Mutex::new(Vec::new()),
-            responses: Mutex::new(errors.into_iter().map(Err).collect()),
-        }
-    }
-
-    fn json(body: serde_json::Value) -> RuntimeHttpEgressResponse {
-        Self::json_with_request_bytes(body, 123)
-    }
-
-    fn json_with_request_bytes(
-        body: serde_json::Value,
-        request_bytes: u64,
-    ) -> RuntimeHttpEgressResponse {
-        let body = serde_json::to_vec(&body).expect("response body serializes");
-        RuntimeHttpEgressResponse {
-            status: 200,
-            headers: Vec::new(),
-            request_bytes,
-            response_bytes: body.len() as u64,
-            body,
-            redaction_applied: true,
-        }
-    }
-
-    fn malformed_json() -> RuntimeHttpEgressResponse {
-        RuntimeHttpEgressResponse {
-            status: 200,
-            headers: Vec::new(),
-            request_bytes: 123,
-            response_bytes: 1,
-            body: b"{".to_vec(),
-            redaction_applied: true,
-        }
-    }
-
-    fn requests(&self) -> Vec<RuntimeHttpEgressRequest> {
-        self.requests.lock().expect("egress lock").clone()
-    }
-}
-
-impl RuntimeHttpEgress for RecordingEgress {
-    fn execute(
-        &self,
-        request: RuntimeHttpEgressRequest,
-    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
-        self.requests.lock().expect("egress lock").push(request);
-        self.responses
-            .lock()
-            .expect("response lock")
-            .pop_front()
-            .unwrap_or_else(|| Ok(RecordingEgress::json(json!({"id":"sent-message"}))))
-    }
-}
-
-fn scope() -> ResourceScope {
-    ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap()
-}
-
-fn auth_scope(scope: &ResourceScope) -> AuthProductScope {
-    AuthProductScope::new(scope.clone(), AuthSurface::Api)
-}
-
-fn provider_scope(value: &str) -> ProviderScope {
-    ProviderScope::new(value).unwrap()
-}
-
-fn capability_id(value: &str) -> CapabilityId {
-    CapabilityId::new(value).unwrap()
-}
-
-async fn auth_with_google_account(
-    scope: &ResourceScope,
-    scopes: Vec<ProviderScope>,
-) -> Arc<InMemoryAuthProductServices> {
-    let auth = Arc::new(InMemoryAuthProductServices::new());
-    add_google_account(
-        &auth,
-        scope,
-        "work google",
-        scopes,
-        CredentialAccountStatus::Configured,
-        true,
-    )
-    .await;
-    auth
-}
-
-async fn auth_with_google_account_status(
-    scope: &ResourceScope,
-    scopes: Vec<ProviderScope>,
-    status: CredentialAccountStatus,
-    include_access_secret: bool,
-) -> Arc<InMemoryAuthProductServices> {
-    let auth = Arc::new(InMemoryAuthProductServices::new());
-    add_google_account(
-        &auth,
-        scope,
-        "work google",
-        scopes,
-        status,
-        include_access_secret,
-    )
-    .await;
-    auth
-}
-
-async fn add_google_account(
-    auth: &InMemoryAuthProductServices,
-    scope: &ResourceScope,
-    label: &str,
-    scopes: Vec<ProviderScope>,
-    status: CredentialAccountStatus,
-    include_access_secret: bool,
-) {
-    auth.create_account(NewCredentialAccount {
-        scope: auth_scope(scope),
-        provider: google_provider_id().unwrap(),
-        label: CredentialAccountLabel::new(label).unwrap(),
-        status,
-        ownership: CredentialOwnership::UserReusable,
-        owner_extension: None,
-        granted_extensions: Vec::new(),
-        access_secret: include_access_secret
-            .then(|| SecretHandle::new("google-access-token").unwrap()),
-        refresh_secret: None,
-        scopes,
-    })
-    .await
-    .unwrap();
-}
-
-async fn dispatch_ok(
-    auth: Arc<InMemoryAuthProductServices>,
-    scope: ResourceScope,
-    capability: &str,
-    input: serde_json::Value,
-    egress: Arc<RecordingEgress>,
-) -> serde_json::Value {
-    let executor = GsuiteExecutor::new(auth);
-    let capability_id = capability_id(capability);
-    executor
-        .dispatch(GsuiteDispatchRequest {
-            capability_id: &capability_id,
-            scope: &scope,
-            input: &input,
-            runtime_http_egress: egress,
-        })
-        .await
-        .unwrap()
-        .output
-}
-
-async fn dispatch_error(
-    auth: Arc<InMemoryAuthProductServices>,
-    scope: ResourceScope,
-    capability: &str,
-    input: serde_json::Value,
-    egress: Arc<RecordingEgress>,
-) -> GsuiteDispatchError {
-    let executor = GsuiteExecutor::new(auth);
-    let capability_id = capability_id(capability);
-    executor
-        .dispatch(GsuiteDispatchRequest {
-            capability_id: &capability_id,
-            scope: &scope,
-            input: &input,
-            runtime_http_egress: egress,
-        })
-        .await
-        .unwrap_err()
-}
+use support::*;
 
 #[test]
 fn gsuite_packages_declare_calendar_and_gmail_capabilities() {
@@ -249,7 +58,7 @@ async fn calendar_handler_integration_tests() {
         ],
     )
     .await;
-    let egress = Arc::new(RecordingEgress::default());
+    let egress = Arc::new(RecordingEgress::permissive_success());
 
     dispatch_ok(
         auth.clone(),
@@ -285,7 +94,7 @@ async fn gmail_handler_integration_tests() {
     let scope = scope();
     let auth =
         auth_with_google_account(&scope, vec![provider_scope(GOOGLE_GMAIL_READONLY_SCOPE)]).await;
-    let egress = Arc::new(RecordingEgress::default());
+    let egress = Arc::new(RecordingEgress::permissive_success());
 
     dispatch_ok(
         auth.clone(),
@@ -324,7 +133,7 @@ async fn gsuite_handler_uses_selected_credential_handle_for_runtime_egress() {
         auth_with_google_account(&scope, vec![provider_scope(GOOGLE_GMAIL_SEND_SCOPE)]).await;
     let executor = GsuiteExecutor::new(auth);
     let capability_id = capability_id(GMAIL_SEND_MESSAGE_CAPABILITY_ID);
-    let egress = Arc::new(RecordingEgress::default());
+    let egress = Arc::new(RecordingEgress::permissive_success());
 
     let result = executor
         .dispatch(GsuiteDispatchRequest {
@@ -361,7 +170,7 @@ async fn gsuite_handler_applies_google_api_network_policy() {
         auth_with_google_account(&scope, vec![provider_scope(GOOGLE_GMAIL_SEND_SCOPE)]).await;
     let executor = GsuiteExecutor::new(auth);
     let capability_id = capability_id(GMAIL_SEND_MESSAGE_CAPABILITY_ID);
-    let egress = Arc::new(RecordingEgress::default());
+    let egress = Arc::new(RecordingEgress::permissive_success());
 
     executor
         .dispatch(GsuiteDispatchRequest {
@@ -397,7 +206,7 @@ async fn gsuite_handler_fails_before_egress_when_scope_is_missing() {
         auth_with_google_account(&scope, vec![provider_scope(GOOGLE_GMAIL_SEND_SCOPE)]).await;
     let executor = GsuiteExecutor::new(auth);
     let capability_id = capability_id(GMAIL_TRASH_MESSAGE_CAPABILITY_ID);
-    let egress = Arc::new(RecordingEgress::default());
+    let egress = Arc::new(RecordingEgress::permissive_success());
 
     let error = executor
         .dispatch(GsuiteDispatchRequest {
@@ -421,7 +230,7 @@ async fn gsuite_handler_allows_reply_to_message_with_send_scope_only() {
     let scope = scope();
     let auth =
         auth_with_google_account(&scope, vec![provider_scope(GOOGLE_GMAIL_SEND_SCOPE)]).await;
-    let egress = Arc::new(RecordingEgress::default());
+    let egress = Arc::new(RecordingEgress::permissive_success());
 
     dispatch_ok(
         auth,
@@ -484,7 +293,7 @@ async fn gsuite_handler_fails_before_egress_when_account_is_not_configured() {
         true,
     )
     .await;
-    let egress = Arc::new(RecordingEgress::default());
+    let egress = Arc::new(RecordingEgress::permissive_success());
 
     let error = dispatch_error(
         auth,
@@ -512,7 +321,7 @@ async fn gsuite_handler_fails_before_egress_when_access_secret_is_missing() {
         false,
     )
     .await;
-    let egress = Arc::new(RecordingEgress::default());
+    let egress = Arc::new(RecordingEgress::permissive_success());
 
     let error = dispatch_error(
         auth,
@@ -541,7 +350,7 @@ async fn gsuite_handler_rejects_missing_required_input() {
         scope,
         GMAIL_GET_MESSAGE_CAPABILITY_ID,
         json!({}),
-        Arc::new(RecordingEgress::default()),
+        Arc::new(RecordingEgress::permissive_success()),
     )
     .await;
 
@@ -563,7 +372,7 @@ async fn calendar_id_default_does_not_swallow_invalid_type() {
         scope,
         CALENDAR_LIST_EVENTS_CAPABILITY_ID,
         json!({ "calendar_id": false }),
-        Arc::new(RecordingEgress::default()),
+        Arc::new(RecordingEgress::permissive_success()),
     )
     .await;
 
@@ -667,7 +476,7 @@ async fn gsuite_handler_maps_runtime_egress_errors() {
 async fn gsuite_handler_fails_before_egress_when_google_account_is_missing_or_ambiguous() {
     let scope = scope();
     let auth = Arc::new(InMemoryAuthProductServices::new());
-    let egress = Arc::new(RecordingEgress::default());
+    let egress = Arc::new(RecordingEgress::permissive_success());
 
     let error = dispatch_error(
         auth.clone(),
@@ -722,7 +531,7 @@ async fn gsuite_handlers_build_expected_requests_for_each_capability() {
         provider_scope(GOOGLE_GMAIL_MODIFY_SCOPE),
     ];
     let auth = auth_with_google_account(&scope, all_scopes).await;
-    let egress = Arc::new(RecordingEgress::default());
+    let egress = Arc::new(RecordingEgress::permissive_success());
 
     let cases = [
         (

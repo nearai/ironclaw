@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": 403,
+    "status": "PERMISSION_DENIED",
+    "message": "Request had insufficient authentication scopes.",
+    "details": [{ "reason": "insufficient_scope" }]
+  }
+}
