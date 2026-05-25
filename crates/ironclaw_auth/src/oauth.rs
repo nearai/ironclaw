@@ -53,17 +53,180 @@ impl fmt::Display for PkceCodeChallenge {
     }
 }
 
+/// Validated OAuth authorization endpoint.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OAuthAuthorizationEndpoint(String);
+
+impl OAuthAuthorizationEndpoint {
+    pub fn new(value: impl Into<String>) -> Result<Self, AuthProductError> {
+        let value = value.into();
+        let url = Url::parse(&value).map_err(|_| {
+            AuthProductError::invalid_request(
+                "oauth authorization endpoint must be an absolute url",
+            )
+        })?;
+        if url.scheme() != "https" {
+            return Err(AuthProductError::invalid_request(
+                "oauth authorization endpoint must use https",
+            ));
+        }
+        if url.host_str().is_none() {
+            return Err(AuthProductError::invalid_request(
+                "oauth authorization endpoint host is required",
+            ));
+        }
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err(AuthProductError::invalid_request(
+                "oauth authorization endpoint must not include userinfo",
+            ));
+        }
+        for (name, _) in url.query_pairs() {
+            if is_reserved_authorize_param(name.as_ref()) {
+                return Err(AuthProductError::invalid_request(
+                    "oauth authorization endpoint must not predefine reserved query parameters",
+                ));
+            }
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for OAuthAuthorizationEndpoint {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Validated OAuth client id.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OAuthClientId(String);
+
+impl OAuthClientId {
+    pub fn new(value: impl Into<String>) -> Result<Self, AuthProductError> {
+        let value = value.into();
+        validate_authorize_fragment("oauth client id", &value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for OAuthClientId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("[REDACTED]")
+    }
+}
+
+/// Validated OAuth redirect URI.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OAuthRedirectUri(String);
+
+impl OAuthRedirectUri {
+    pub fn new(value: impl Into<String>) -> Result<Self, AuthProductError> {
+        let value = value.into();
+        validate_authorize_fragment("oauth redirect uri", &value)?;
+        let url = Url::parse(&value)
+            .map_err(|_| AuthProductError::invalid_request("oauth redirect uri must be a url"))?;
+        let is_loopback_http = url.scheme() == "http"
+            && url
+                .host_str()
+                .is_some_and(|host| matches!(host, "localhost" | "127.0.0.1" | "[::1]"));
+        if url.scheme() != "https" && !is_loopback_http {
+            return Err(AuthProductError::invalid_request(
+                "oauth redirect uri must use https unless it targets loopback localhost",
+            ));
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for OAuthRedirectUri {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Validated opaque OAuth state value.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OAuthState(String);
+
+impl OAuthState {
+    pub fn new(value: impl Into<String>) -> Result<Self, AuthProductError> {
+        let value = value.into();
+        validate_authorize_fragment("oauth state", &value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for OAuthState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("[REDACTED]")
+    }
+}
+
+/// Validated provider-specific OAuth authorization query parameter.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OAuthExtraParam {
+    name: String,
+    value: String,
+}
+
+impl OAuthExtraParam {
+    pub fn new(
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Result<Self, AuthProductError> {
+        let name = name.into();
+        let value = value.into();
+        validate_extra_param_name(&name)?;
+        validate_authorize_fragment("oauth query parameter value", &value)?;
+        Ok(Self { name, value })
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+}
+
+impl fmt::Debug for OAuthExtraParam {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OAuthExtraParam")
+            .field("name", &self.name)
+            .field("value", &"[REDACTED]")
+            .finish()
+    }
+}
+
 /// Provider authorization URL input. This is protocol-only: callers still own
 /// durable auth-flow records, callback routing, and provider exchange.
 #[derive(Clone)]
 pub struct OAuthAuthorizeUrlRequest<'a> {
-    pub authorization_endpoint: &'a str,
-    pub client_id: &'a str,
-    pub redirect_uri: &'a str,
-    pub state: &'a str,
+    pub authorization_endpoint: &'a OAuthAuthorizationEndpoint,
+    pub client_id: &'a OAuthClientId,
+    pub redirect_uri: &'a OAuthRedirectUri,
+    pub state: &'a OAuthState,
     pub code_challenge: &'a PkceCodeChallenge,
     pub scopes: &'a [ProviderScope],
-    pub extra_params: &'a [(&'a str, &'a str)],
+    pub extra_params: &'a [OAuthExtraParam],
 }
 
 impl fmt::Debug for OAuthAuthorizeUrlRequest<'_> {
@@ -165,45 +328,21 @@ pub fn pkce_s256_challenge(verifier: &PkceVerifierSecret) -> PkceCodeChallenge {
 pub fn build_authorization_url(
     request: OAuthAuthorizeUrlRequest<'_>,
 ) -> Result<OAuthAuthorizationUrl, AuthProductError> {
-    validate_authorize_fragment("oauth client id", request.client_id)?;
-    validate_authorize_fragment("oauth redirect uri", request.redirect_uri)?;
-    validate_authorize_fragment("oauth state", request.state)?;
-
-    let mut url = Url::parse(request.authorization_endpoint).map_err(|_| {
+    let mut url = Url::parse(request.authorization_endpoint.as_str()).map_err(|_| {
         AuthProductError::invalid_request("oauth authorization endpoint must be an absolute url")
     })?;
-    if url.scheme() != "https" {
-        return Err(AuthProductError::invalid_request(
-            "oauth authorization endpoint must use https",
-        ));
-    }
-    if url.host_str().is_none() {
-        return Err(AuthProductError::invalid_request(
-            "oauth authorization endpoint host is required",
-        ));
-    }
-    for (name, _) in url.query_pairs() {
-        if is_reserved_authorize_param(name.as_ref()) {
-            return Err(AuthProductError::invalid_request(
-                "oauth authorization endpoint must not predefine reserved query parameters",
-            ));
-        }
-    }
-
     {
         let mut pairs = url.query_pairs_mut();
         pairs
-            .append_pair("client_id", request.client_id)
-            .append_pair("redirect_uri", request.redirect_uri)
+            .append_pair("client_id", request.client_id.as_str())
+            .append_pair("redirect_uri", request.redirect_uri.as_str())
             .append_pair("response_type", "code")
             .append_pair("scope", &scope_text(request.scopes))
-            .append_pair("state", request.state)
+            .append_pair("state", request.state.as_str())
             .append_pair("code_challenge", request.code_challenge.as_str())
             .append_pair("code_challenge_method", "S256");
-        for (name, value) in request.extra_params {
-            validate_extra_param_name(name)?;
-            validate_authorize_fragment("oauth query parameter value", value)?;
-            pairs.append_pair(name, value);
+        for param in request.extra_params {
+            pairs.append_pair(param.name(), param.value());
         }
     }
 
@@ -218,20 +357,24 @@ pub fn build_google_authorization_url(
     scopes: &[ProviderScope],
     hosted_domain_hint: Option<&str>,
 ) -> Result<OAuthAuthorizationUrl, AuthProductError> {
+    let authorization_endpoint = OAuthAuthorizationEndpoint::new(GOOGLE_AUTHORIZATION_ENDPOINT)?;
+    let client_id = OAuthClientId::new(client_id)?;
+    let redirect_uri = OAuthRedirectUri::new(redirect_uri)?;
+    let state = OAuthState::new(state)?;
     let mut extra_params = vec![
-        ("access_type", "offline"),
-        ("prompt", "consent"),
-        ("include_granted_scopes", "true"),
+        OAuthExtraParam::new("access_type", "offline")?,
+        OAuthExtraParam::new("prompt", "consent")?,
+        OAuthExtraParam::new("include_granted_scopes", "true")?,
     ];
     if let Some(hosted_domain) = hosted_domain_hint {
         validate_authorize_fragment("google hosted domain", hosted_domain)?;
-        extra_params.push(("hd", hosted_domain));
+        extra_params.push(OAuthExtraParam::new("hd", hosted_domain)?);
     }
     build_authorization_url(OAuthAuthorizeUrlRequest {
-        authorization_endpoint: GOOGLE_AUTHORIZATION_ENDPOINT,
-        client_id,
-        redirect_uri,
-        state,
+        authorization_endpoint: &authorization_endpoint,
+        client_id: &client_id,
+        redirect_uri: &redirect_uri,
+        state: &state,
         code_challenge,
         scopes,
         extra_params: &extra_params,

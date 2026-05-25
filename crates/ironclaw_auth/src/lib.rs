@@ -48,8 +48,9 @@ pub use interaction::{
 pub use oauth::{
     GOOGLE_AUTHORIZATION_ENDPOINT, GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE,
     GOOGLE_GMAIL_MODIFY_SCOPE, GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE,
-    GOOGLE_PROVIDER_ID, GOOGLE_TOKEN_ENDPOINT, OAuthAuthorizeUrlRequest, OAuthTokenResponse,
-    PkceCodeChallenge, authorization_code_hash, build_authorization_url,
+    GOOGLE_PROVIDER_ID, GOOGLE_TOKEN_ENDPOINT, OAuthAuthorizationEndpoint,
+    OAuthAuthorizeUrlRequest, OAuthClientId, OAuthExtraParam, OAuthRedirectUri, OAuthState,
+    OAuthTokenResponse, PkceCodeChallenge, authorization_code_hash, build_authorization_url,
     build_google_authorization_url, opaque_state_hash, pkce_s256_challenge, pkce_verifier_hash,
     scope_text,
 };

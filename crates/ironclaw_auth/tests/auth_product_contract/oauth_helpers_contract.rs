@@ -1,9 +1,10 @@
 use super::common::*;
 use ironclaw_auth::{
     GOOGLE_AUTHORIZATION_ENDPOINT, GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE,
-    OAuthAuthorizationCode, OAuthAuthorizeUrlRequest, OAuthTokenResponse, PkceCodeChallenge,
-    PkceVerifierSecret, build_authorization_url, build_google_authorization_url, opaque_state_hash,
-    pkce_s256_challenge, pkce_verifier_hash, scope_text,
+    OAuthAuthorizationCode, OAuthAuthorizationEndpoint, OAuthAuthorizeUrlRequest, OAuthClientId,
+    OAuthExtraParam, OAuthRedirectUri, OAuthState, OAuthTokenResponse, PkceCodeChallenge,
+    PkceVerifierSecret, ProviderScope, build_authorization_url, build_google_authorization_url,
+    opaque_state_hash, pkce_s256_challenge, pkce_verifier_hash, scope_text,
 };
 use secrecy::ExposeSecret;
 
@@ -12,23 +13,45 @@ fn verifier_challenge() -> PkceCodeChallenge {
     pkce_s256_challenge(&verifier)
 }
 
-fn valid_scopes() -> Vec<ironclaw_auth::ProviderScope> {
+fn valid_scopes() -> Vec<ProviderScope> {
     provider_scopes(&[GOOGLE_CALENDAR_READONLY_SCOPE])
 }
 
-fn valid_authorization_request<'a>(
-    challenge: &'a PkceCodeChallenge,
-    scopes: &'a [ironclaw_auth::ProviderScope],
-    extra_params: &'a [(&'a str, &'a str)],
-) -> OAuthAuthorizeUrlRequest<'a> {
-    OAuthAuthorizeUrlRequest {
-        authorization_endpoint: GOOGLE_AUTHORIZATION_ENDPOINT,
-        client_id: "client-id.apps.googleusercontent.com",
-        redirect_uri: "http://127.0.0.1:5555/oauth/callback/google",
-        state: "opaque-state",
-        code_challenge: challenge,
-        scopes,
-        extra_params,
+struct ValidAuthorizationRequest {
+    authorization_endpoint: OAuthAuthorizationEndpoint,
+    client_id: OAuthClientId,
+    redirect_uri: OAuthRedirectUri,
+    state: OAuthState,
+    code_challenge: PkceCodeChallenge,
+    scopes: Vec<ProviderScope>,
+    extra_params: Vec<OAuthExtraParam>,
+}
+
+impl ValidAuthorizationRequest {
+    fn new(scopes: Vec<ProviderScope>, extra_params: Vec<OAuthExtraParam>) -> Self {
+        Self {
+            authorization_endpoint: OAuthAuthorizationEndpoint::new(GOOGLE_AUTHORIZATION_ENDPOINT)
+                .unwrap(),
+            client_id: OAuthClientId::new("client-id.apps.googleusercontent.com").unwrap(),
+            redirect_uri: OAuthRedirectUri::new("http://127.0.0.1:5555/oauth/callback/google")
+                .unwrap(),
+            state: OAuthState::new("opaque-state").unwrap(),
+            code_challenge: verifier_challenge(),
+            scopes,
+            extra_params,
+        }
+    }
+
+    fn request(&self) -> OAuthAuthorizeUrlRequest<'_> {
+        OAuthAuthorizeUrlRequest {
+            authorization_endpoint: &self.authorization_endpoint,
+            client_id: &self.client_id,
+            redirect_uri: &self.redirect_uri,
+            state: &self.state,
+            code_challenge: &self.code_challenge,
+            scopes: &self.scopes,
+            extra_params: &self.extra_params,
+        }
     }
 }
 
@@ -68,20 +91,13 @@ fn pkce_s256_challenge_uses_url_safe_base64_without_padding() {
 
 #[test]
 fn authorization_url_builder_sets_core_oauth_parameters() {
-    let verifier = PkceVerifierSecret::new(secret("raw-pkce-verifier")).unwrap();
-    let challenge = pkce_s256_challenge(&verifier);
     let scopes = provider_scopes(&[GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE]);
+    let request = ValidAuthorizationRequest::new(
+        scopes,
+        vec![OAuthExtraParam::new("access_type", "offline").unwrap()],
+    );
 
-    let url = build_authorization_url(OAuthAuthorizeUrlRequest {
-        authorization_endpoint: GOOGLE_AUTHORIZATION_ENDPOINT,
-        client_id: "client-id.apps.googleusercontent.com",
-        redirect_uri: "http://127.0.0.1:5555/oauth/callback/google",
-        state: "opaque-state",
-        code_challenge: &challenge,
-        scopes: &scopes,
-        extra_params: &[("access_type", "offline")],
-    })
-    .unwrap();
+    let url = build_authorization_url(request.request()).unwrap();
     let parsed = url::Url::parse(url.as_str()).unwrap();
 
     assert_eq!(parsed.scheme(), "https");
@@ -94,7 +110,8 @@ fn authorization_url_builder_sets_core_oauth_parameters() {
     assert!(
         query
             .iter()
-            .any(|(name, value)| name == "code_challenge" && value == challenge.as_str())
+            .any(|(name, value)| name == "code_challenge"
+                && value == request.code_challenge.as_str())
     );
     assert!(
         query
@@ -212,177 +229,102 @@ fn token_response_rejects_invalid_scope() {
 
 #[test]
 fn authorization_url_request_debug_redacts_sensitive_fields() {
-    let challenge = verifier_challenge();
-    let scopes = valid_scopes();
-    let request = valid_authorization_request(&challenge, &scopes, &[]);
+    let request = ValidAuthorizationRequest::new(
+        valid_scopes(),
+        vec![OAuthExtraParam::new("login_hint", "ada@example.com").unwrap()],
+    );
+    let authorize_request = request.request();
 
-    let debug = format!("{request:?}");
+    let debug = format!("{authorize_request:?}");
 
     assert!(!debug.contains("client-id.apps.googleusercontent.com"));
     assert!(!debug.contains("opaque-state"));
-    assert!(!debug.contains(challenge.as_str()));
+    assert!(!debug.contains(request.code_challenge.as_str()));
+    assert!(!debug.contains("ada@example.com"));
+    assert!(debug.contains("login_hint"));
     assert!(debug.contains("[REDACTED]"));
 }
 
 #[test]
 fn build_authorization_url_rejects_empty_client_id() {
-    let challenge = verifier_challenge();
-    let scopes = valid_scopes();
-
-    assert_invalid_request(build_authorization_url(OAuthAuthorizeUrlRequest {
-        client_id: "",
-        ..valid_authorization_request(&challenge, &scopes, &[])
-    }));
+    assert_invalid_request(OAuthClientId::new(""));
 }
 
 #[test]
 fn build_authorization_url_rejects_empty_redirect_uri() {
-    let challenge = verifier_challenge();
-    let scopes = valid_scopes();
-
-    assert_invalid_request(build_authorization_url(OAuthAuthorizeUrlRequest {
-        redirect_uri: "",
-        ..valid_authorization_request(&challenge, &scopes, &[])
-    }));
+    assert_invalid_request(OAuthRedirectUri::new(""));
 }
 
 #[test]
 fn build_authorization_url_rejects_empty_state() {
-    let challenge = verifier_challenge();
-    let scopes = valid_scopes();
-
-    assert_invalid_request(build_authorization_url(OAuthAuthorizeUrlRequest {
-        state: "",
-        ..valid_authorization_request(&challenge, &scopes, &[])
-    }));
+    assert_invalid_request(OAuthState::new(""));
 }
 
 #[test]
 fn build_authorization_url_rejects_invalid_endpoint() {
-    let challenge = verifier_challenge();
-    let scopes = valid_scopes();
-
-    assert_invalid_request(build_authorization_url(OAuthAuthorizeUrlRequest {
-        authorization_endpoint: "not a url",
-        ..valid_authorization_request(&challenge, &scopes, &[])
-    }));
+    assert_invalid_request(OAuthAuthorizationEndpoint::new("not a url"));
 }
 
 #[test]
 fn authorization_url_builder_rejects_non_https_scheme() {
-    let challenge = verifier_challenge();
-    let scopes = valid_scopes();
-
-    assert_invalid_request(build_authorization_url(OAuthAuthorizeUrlRequest {
-        authorization_endpoint: "http://accounts.google.com/o/oauth2/v2/auth",
-        ..valid_authorization_request(&challenge, &scopes, &[])
-    }));
+    assert_invalid_request(OAuthAuthorizationEndpoint::new(
+        "http://accounts.google.com/o/oauth2/v2/auth",
+    ));
 }
 
 #[test]
 fn build_authorization_url_rejects_missing_host() {
-    let challenge = verifier_challenge();
-    let scopes = valid_scopes();
-
-    assert_invalid_request(build_authorization_url(OAuthAuthorizeUrlRequest {
-        authorization_endpoint: "https://",
-        ..valid_authorization_request(&challenge, &scopes, &[])
-    }));
+    assert_invalid_request(OAuthAuthorizationEndpoint::new("https://"));
 }
 
 #[test]
 fn build_authorization_url_rejects_userinfo_endpoint() {
-    let challenge = verifier_challenge();
-    let scopes = valid_scopes();
-
-    assert_invalid_request(build_authorization_url(OAuthAuthorizeUrlRequest {
-        authorization_endpoint: "https://user:pass@accounts.google.com/o/oauth2/v2/auth",
-        ..valid_authorization_request(&challenge, &scopes, &[])
-    }));
+    assert_invalid_request(OAuthAuthorizationEndpoint::new(
+        "https://user:pass@accounts.google.com/o/oauth2/v2/auth",
+    ));
 }
 
 #[test]
 fn build_authorization_url_rejects_reserved_endpoint_query_param() {
-    let challenge = verifier_challenge();
-    let scopes = valid_scopes();
-
-    assert_invalid_request(build_authorization_url(OAuthAuthorizeUrlRequest {
-        authorization_endpoint: "https://accounts.google.com/o/oauth2/v2/auth?state=predefined",
-        ..valid_authorization_request(&challenge, &scopes, &[])
-    }));
+    assert_invalid_request(OAuthAuthorizationEndpoint::new(
+        "https://accounts.google.com/o/oauth2/v2/auth?state=predefined",
+    ));
 }
 
 #[test]
 fn build_authorization_url_rejects_empty_param_name() {
-    let challenge = verifier_challenge();
-    let scopes = valid_scopes();
-
-    assert_invalid_request(build_authorization_url(valid_authorization_request(
-        &challenge,
-        &scopes,
-        &[("", "value")],
-    )));
+    assert_invalid_request(OAuthExtraParam::new("", "value"));
 }
 
 #[test]
 fn build_authorization_url_rejects_empty_param_value() {
-    let challenge = verifier_challenge();
-    let scopes = valid_scopes();
-
-    assert_invalid_request(build_authorization_url(valid_authorization_request(
-        &challenge,
-        &scopes,
-        &[("login_hint", "")],
-    )));
+    assert_invalid_request(OAuthExtraParam::new("login_hint", ""));
 }
 
 #[test]
 fn validate_authorize_fragment_rejects_control_chars() {
-    let challenge = verifier_challenge();
-    let scopes = valid_scopes();
-
-    assert_invalid_request(build_authorization_url(valid_authorization_request(
-        &challenge,
-        &scopes,
-        &[("login_hint", "bad\u{0000}value")],
-    )));
+    assert_invalid_request(OAuthExtraParam::new("login_hint", "bad\u{0000}value"));
 }
 
 #[test]
 fn authorization_url_builder_rejects_control_characters() {
-    let challenge = verifier_challenge();
-    let scopes = valid_scopes();
-
-    assert_invalid_request(build_authorization_url(OAuthAuthorizeUrlRequest {
-        state: "opaque\nstate",
-        ..valid_authorization_request(&challenge, &scopes, &[])
-    }));
+    assert_invalid_request(OAuthState::new("opaque\nstate"));
 }
 
 #[test]
 fn build_authorization_url_rejects_reserved_extra_param_name() {
-    let challenge = verifier_challenge();
-    let scopes = valid_scopes();
-
-    assert_invalid_request(build_authorization_url(valid_authorization_request(
-        &challenge,
-        &scopes,
-        &[("state", "override")],
-    )));
-    assert_invalid_request(build_authorization_url(valid_authorization_request(
-        &challenge,
-        &scopes,
-        &[("redirect_uri", "https://attacker.example/callback")],
-    )));
+    assert_invalid_request(OAuthExtraParam::new("state", "override"));
+    assert_invalid_request(OAuthExtraParam::new(
+        "redirect_uri",
+        "https://attacker.example/callback",
+    ));
 }
 
 #[test]
 fn authorization_url_builder_handles_empty_scopes_and_extra_params() {
-    let challenge = verifier_challenge();
-    let scopes = Vec::new();
+    let request = ValidAuthorizationRequest::new(Vec::new(), Vec::new());
 
-    let url =
-        build_authorization_url(valid_authorization_request(&challenge, &scopes, &[])).unwrap();
+    let url = build_authorization_url(request.request()).unwrap();
     let parsed = url::Url::parse(url.as_str()).unwrap();
     let query = parsed.query_pairs().collect::<Vec<_>>();
 
