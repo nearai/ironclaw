@@ -210,25 +210,23 @@ impl ApprovalTurnRunLocator for InMemoryApprovalTurnRunLocator {
         &self,
         scope: &ApprovalInteractionScope,
     ) -> Result<Vec<ApprovalBlockedTurnRun>, ironclaw_product_workflow::ProductWorkflowError> {
-        let snapshot = self.turn_state.persistence_snapshot();
-        let turn_actors = snapshot
-            .turns
+        let turn_scope = TurnScope::new(
+            scope.tenant_id.clone(),
+            scope.agent_id.clone(),
+            scope.project_id.clone(),
+            scope.thread_id.clone(),
+        );
+        let actor = TurnActor::new(scope.user_id.clone());
+        let runs = self
+            .turn_state
+            .blocked_approval_runs_for_actor(&turn_scope, &actor)
+            .map_err(
+                |_| ironclaw_product_workflow::ProductWorkflowError::Transient {
+                    reason: "approval turn-run locator unavailable".to_string(),
+                },
+            )?;
+        Ok(runs
             .into_iter()
-            .map(|turn| (turn.turn_id, turn.actor.user_id))
-            .collect::<HashMap<_, _>>();
-        Ok(snapshot
-            .runs
-            .into_iter()
-            .filter(|run| {
-                run.status == TurnStatus::BlockedApproval
-                    && run.scope.tenant_id == scope.tenant_id
-                    && run.scope.agent_id == scope.agent_id
-                    && run.scope.project_id == scope.project_id
-                    && run.scope.thread_id == scope.thread_id
-                    && turn_actors
-                        .get(&run.turn_id)
-                        .is_some_and(|user_id| user_id == &scope.user_id)
-            })
             .filter_map(|run| {
                 run.gate_ref.map(|gate_ref| ApprovalBlockedTurnRun {
                     run_id: run.run_id,
@@ -236,6 +234,27 @@ impl ApprovalTurnRunLocator for InMemoryApprovalTurnRunLocator {
                 })
             })
             .collect())
+    }
+
+    async fn approval_run_for_gate(
+        &self,
+        scope: &ApprovalInteractionScope,
+        gate_ref: &ironclaw_turns::GateRef,
+    ) -> Result<Option<TurnRunId>, ironclaw_product_workflow::ProductWorkflowError> {
+        let turn_scope = TurnScope::new(
+            scope.tenant_id.clone(),
+            scope.agent_id.clone(),
+            scope.project_id.clone(),
+            scope.thread_id.clone(),
+        );
+        let actor = TurnActor::new(scope.user_id.clone());
+        self.turn_state
+            .approval_run_for_actor_and_gate(&turn_scope, &actor, gate_ref)
+            .map_err(
+                |_| ironclaw_product_workflow::ProductWorkflowError::Transient {
+                    reason: "approval turn-run locator unavailable".to_string(),
+                },
+            )
     }
 }
 
@@ -1169,10 +1188,11 @@ mod tests {
     use std::time::Duration;
 
     use async_trait::async_trait;
+    use ironclaw_authorization::CapabilityLeaseStore;
     use ironclaw_host_api::{
         Action, AgentId, ApprovalRequest, ApprovalRequestId, CapabilityId, CorrelationId,
-        InvocationFingerprint, InvocationId, Principal, ResourceEstimate, ResourceScope, TenantId,
-        UserId,
+        EffectKind, InvocationFingerprint, InvocationId, Principal, ResourceEstimate,
+        ResourceScope, TenantId, UserId,
         runtime_policy::{
             ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy,
             FilesystemBackendKind, NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -2621,7 +2641,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_dev_webui_approval_resolution_emits_redacted_audit_event() {
+    async fn local_dev_webui_spawn_approval_emits_redacted_audit_and_grants_process() {
         let root = tempfile::tempdir().expect("tempdir");
         let gateway = Arc::new(RecordingGateway {
             reply: "unused".to_string(),
@@ -2729,7 +2749,7 @@ mod tests {
             id: request_id,
             correlation_id: CorrelationId::new(),
             requested_by: Principal::User(actor.user_id.clone()),
-            action: Box::new(Action::Dispatch {
+            action: Box::new(Action::SpawnCapability {
                 capability: capability.clone(),
                 estimated_resources: ResourceEstimate::default(),
             }),
@@ -2738,7 +2758,7 @@ mod tests {
             reusable_scope: None,
         };
         approval.invocation_fingerprint = Some(
-            InvocationFingerprint::for_dispatch(
+            InvocationFingerprint::for_spawn(
                 &resource_scope,
                 &capability,
                 &ResourceEstimate::default(),
@@ -2748,7 +2768,7 @@ mod tests {
         );
         local_runtime
             .approval_requests
-            .save_pending(resource_scope, approval)
+            .save_pending(resource_scope.clone(), approval)
             .await
             .expect("save approval");
 
@@ -2778,6 +2798,18 @@ mod tests {
                 "approval audit leaked {forbidden}: {serialized}"
             );
         }
+        let leases = local_runtime
+            .capability_leases
+            .leases_for_scope(&resource_scope)
+            .await;
+        assert_eq!(leases.len(), 1);
+        assert!(
+            leases[0]
+                .grant
+                .constraints
+                .allowed_effects
+                .contains(&EffectKind::SpawnProcess)
+        );
         runtime.shutdown().await.expect("runtime shutdown");
     }
 

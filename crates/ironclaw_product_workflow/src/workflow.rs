@@ -26,6 +26,9 @@ use crate::binding::{
     ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
     ResolvedBinding,
 };
+use crate::binding_ref::{
+    DEFAULT_BINDING_REF_RAW_MAX_BYTES, binding_ref_segment, bounded_idempotency_key,
+};
 use crate::command_dispatch::{
     ProductCommandAdmission, ProductCommandAdmissionService, ProductCommandContext,
     ProductCommandService, RejectingProductCommandAdmissionService, RejectingProductCommandService,
@@ -363,7 +366,7 @@ async fn dispatch_payload(
             dispatch_approval_resolution(
                 envelope,
                 payload,
-                action_id,
+                action_fingerprint,
                 ports.binding_service,
                 ports.approval_interaction_service,
             )
@@ -394,7 +397,7 @@ async fn dispatch_payload(
 async fn dispatch_approval_resolution(
     envelope: &ProductInboundEnvelope,
     payload: &ironclaw_product_adapters::ApprovalResolutionPayload,
-    action_id: crate::ProductActionId,
+    action_fingerprint: ActionFingerprintKey,
     binding_service: &dyn ConversationBindingService,
     approval_interaction_service: &dyn ApprovalInteractionService,
 ) -> Result<DispatchedAction, ProductWorkflowError> {
@@ -417,12 +420,7 @@ async fn dispatch_approval_resolution(
             kind: ApprovalInteractionRejectionKind::InvalidGateRef,
         }
     })?;
-    let idempotency_key =
-        IdempotencyKey::new(format!("product-approval:{action_id}")).map_err(|_| {
-            ProductWorkflowError::ApprovalInteractionRejected {
-                kind: ApprovalInteractionRejectionKind::InvalidBindingRef,
-            }
-        })?;
+    let idempotency_key = approval_resolution_idempotency_key(&action_fingerprint)?;
     approval_interaction_service
         .resolve(ResolveApprovalInteractionRequest {
             scope,
@@ -437,6 +435,25 @@ async fn dispatch_approval_resolution(
         ack: ProductInboundAck::NoOp,
         dispatch_kind: ActionDispatchKind::try_from_payload(envelope.payload())?,
     })
+}
+
+fn approval_resolution_idempotency_key(
+    fingerprint: &ActionFingerprintKey,
+) -> Result<IdempotencyKey, ProductWorkflowError> {
+    let raw = format!(
+        "{}{}{}{}{}{}",
+        binding_ref_segment("adapter", fingerprint.adapter_id.as_str()),
+        binding_ref_segment("installation", fingerprint.installation_id.as_str()),
+        binding_ref_segment("actor_kind", fingerprint.external_actor_ref.kind()),
+        binding_ref_segment("actor_id", fingerprint.external_actor_ref.id()),
+        binding_ref_segment("source", fingerprint.source_binding_key.as_str()),
+        binding_ref_segment("event", fingerprint.external_event_id.as_str())
+    );
+    bounded_idempotency_key("product-approval", &raw, DEFAULT_BINDING_REF_RAW_MAX_BYTES).map_err(
+        |_| ProductWorkflowError::ApprovalInteractionRejected {
+            kind: ApprovalInteractionRejectionKind::InvalidBindingRef,
+        },
+    )
 }
 
 fn turn_scope_from_binding(binding: &ResolvedBinding) -> TurnScope {

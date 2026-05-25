@@ -23,7 +23,7 @@ CapabilityHost
 
 ApprovalResolver
   -> reads Pending ApprovalRecord under the same tenant/user/agent scope
-  -> approve: durably issues a scoped CapabilityLease carrying the invocation fingerprint, then marks Approved
+  -> approve: marks Approved as the durable decision, then issues a scoped CapabilityLease carrying the invocation fingerprint
   -> deny: marks Denied and issues no lease
   -> optionally emits metadata-only AuditEnvelope::approval_resolved records
 
@@ -204,11 +204,11 @@ No lease is issued for denied requests.
 Approval resolution is ordered fail-closed around lease persistence:
 
 1. Re-read the approval request and require `Pending`.
-2. Build and persist the exact fingerprinted lease.
-3. Only after lease persistence succeeds, mark the approval request `Approved`.
-4. If the approval status write fails after lease persistence, attempt to revoke the issued lease before returning the run-state error.
+2. Mark the approval request `Approved`; this approval record is the durable decision authority.
+3. Build and persist the exact fingerprinted lease.
+4. If lease persistence fails after the approval status write succeeds, leave the request `Approved` and return the lease error.
 
-This prevents an approval record from becoming `Approved` without durable resume authority, and with lease stores that can revoke the issued record it prevents an approval-write failure from leaving an active orphan lease. The resolver still spans separate stores, so this is a fail-closed coordination rule rather than a single database ACID transaction.
+This prevents a live lease from existing while the approval request still appears user-actionable as `Pending`. Because the resolver spans separate stores, an approval can become `Approved` before the lease write succeeds. Callers recover that window by invoking `retry_lease_issue_for_dispatch` or `retry_lease_issue_for_spawn` against the already-approved request with the same lease terms.
 
 Approval resolution can also emit best-effort audit records when configured with an `AuditSink`:
 
@@ -249,8 +249,8 @@ The dispatcher remains auth-blind and state-blind. It never resolves approvals o
 This slice intentionally keeps approval resolution narrow:
 
 - no reusable approval-scope expansion yet; V1 leases are exact-invocation only
-- no single-store ACID transaction across approval status update and lease issuance yet; resolver ordering and rollback provide fail-closed semantics across separate async stores
-- no approval support for non-dispatch actions yet
+- no single-store ACID transaction across approval status update and lease issuance yet; an `Approved` request without a lease is recovered by retrying lease issuance against the durable approval decision
+- no approval support for actions other than dispatch and one-shot spawn yet
 - spawn approvals are supported only for one-shot `Action::SpawnCapability` requests through the approval interaction boundary; there is no reusable or persistent long-running-task approval policy in this slice
 
 Before a durable/user-facing approval resume UI ships, the host should revisit whether approval records, lease writes, and run-state transitions should share one transactional persistence boundary.

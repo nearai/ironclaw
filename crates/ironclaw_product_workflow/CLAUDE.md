@@ -24,7 +24,7 @@ handling, gate routing, mission routing, and redacted acknowledgements.
 | `ProductCommandAdmissionService` | Source/auth-aware admission port that decides whether a typed product command may execute |
 | `ProductCommandService` | Reborn-native product command execution port for already-admitted typed commands |
 | `ApprovalInteractionService` / `DefaultApprovalInteractionService` | Approval-only product/WebUI boundary for listing redacted pending approval gates and resolving click approve/deny through canonical approval resolver + turn coordinator ports |
-| `RunStateApprovalInteractionReadModel` | Canonical read model that lists pending blocked approvals from scoped run-state and approval-request stores |
+| `RunStateApprovalInteractionReadModel` | Canonical read model that returns status-bearing approval gates from scoped approval-request records plus the parked turn-run locator; `ApprovalInteractionService::list_pending` filters those records to pending UI DTOs |
 | `RebornServicesApi` / `RebornServices` | Native WebChat v2 facade — stable surface beta WebUI route handlers consume in place of reaching into turn coordination, thread stores, runtime lanes, dispatchers, or capability hosts. Enforces caller ownership of the thread before any turn mutation; rejects stale or attacker-supplied `gate_ref` on denied/cancelled gate resolutions; refuses persistent (`always: true`) approvals until an approval-policy port lands |
 
 ## Dependencies

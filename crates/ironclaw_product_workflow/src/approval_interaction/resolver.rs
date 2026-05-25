@@ -118,10 +118,8 @@ impl ApprovalResolverPort {
             .await
             .into_iter()
             .any(|lease| {
-                matches!(
-                    lease.status,
-                    CapabilityLeaseStatus::Active | CapabilityLeaseStatus::Claimed
-                ) && lease.grant.capability == *capability
+                lease.status == CapabilityLeaseStatus::Active
+                    && lease.grant.capability == *capability
                     && lease.grant.grantee == record.request.requested_by
                     && lease.invocation_fingerprint.as_ref() == Some(fingerprint)
             }))

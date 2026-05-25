@@ -3,7 +3,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_approvals::{DenyApproval, LeaseApproval};
-use ironclaw_authorization::{CapabilityLeaseStore, InMemoryCapabilityLeaseStore};
+use ironclaw_authorization::{
+    CapabilityLeaseStatus, CapabilityLeaseStore, InMemoryCapabilityLeaseStore,
+};
 use ironclaw_events::InMemoryAuditSink;
 use ironclaw_host_api::{
     Action, ApprovalRequest, ApprovalRequestId, CapabilityId, CorrelationId, EffectKind,
@@ -49,12 +51,21 @@ impl FakeReadModel {
 #[derive(Default)]
 struct FakeTurnRunLocator {
     runs: Mutex<Vec<ApprovalBlockedTurnRun>>,
+    historical_runs: Mutex<Vec<ApprovalBlockedTurnRun>>,
 }
 
 impl FakeTurnRunLocator {
     fn with_run(run_id: TurnRunId, gate_ref: GateRef) -> Self {
         Self {
             runs: Mutex::new(vec![ApprovalBlockedTurnRun { run_id, gate_ref }]),
+            historical_runs: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn with_historical_run(run_id: TurnRunId, gate_ref: GateRef) -> Self {
+        Self {
+            runs: Mutex::new(Vec::new()),
+            historical_runs: Mutex::new(vec![ApprovalBlockedTurnRun { run_id, gate_ref }]),
         }
     }
 }
@@ -66,6 +77,21 @@ impl ApprovalTurnRunLocator for FakeTurnRunLocator {
         _scope: &ApprovalInteractionScope,
     ) -> Result<Vec<ApprovalBlockedTurnRun>, ironclaw_product_workflow::ProductWorkflowError> {
         Ok(self.runs.lock().expect("lock").clone())
+    }
+
+    async fn approval_run_for_gate(
+        &self,
+        _scope: &ApprovalInteractionScope,
+        gate_ref: &GateRef,
+    ) -> Result<Option<TurnRunId>, ironclaw_product_workflow::ProductWorkflowError> {
+        Ok(self
+            .runs
+            .lock()
+            .expect("lock")
+            .iter()
+            .chain(self.historical_runs.lock().expect("lock").iter())
+            .find(|run| &run.gate_ref == gate_ref)
+            .map(|run| run.run_id))
     }
 }
 
@@ -613,6 +639,90 @@ async fn already_approved_gate_retries_lease_issue_then_resumes() {
 }
 
 #[tokio::test]
+async fn already_approved_replay_reaches_turn_coordinator_when_run_is_not_parked() {
+    let (service, resolver, coordinator, run_id, gate_ref) = service_fixture_for_request_status(
+        approval_request("send the email"),
+        ApprovalStatus::Approved,
+    );
+    coordinator.set_status(TurnStatus::Queued);
+
+    let response = service
+        .resolve(ResolveApprovalInteractionRequest {
+            scope: scope(),
+            actor: actor("user-alpha"),
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: ApprovalInteractionDecision::ApproveOnce,
+            idempotency_key: IdempotencyKey::new("replay-approved").expect("idempotency"),
+        })
+        .await
+        .expect("replay approved");
+
+    assert!(matches!(
+        response,
+        ResolveApprovalInteractionResponse::Approved(_)
+    ));
+    assert_eq!(resolver.dispatch_lease_retry_count(), 0);
+    assert_eq!(coordinator.resumption_count(), 1);
+}
+
+#[tokio::test]
+async fn already_approved_product_replay_without_run_hint_recovers_historical_run_id() {
+    let actor = actor("user-alpha");
+    let approval_scope = resource_scope(&actor);
+    let request = approval_request("send the email");
+    let request_id = request.id;
+    let gate_ref = approval_gate_ref(request_id).expect("approval gate");
+    let run_id = TurnRunId::new();
+    let approvals = Arc::new(InMemoryApprovalRequestStore::new());
+    approvals
+        .save_pending(approval_scope.clone(), request)
+        .await
+        .expect("save approval");
+    approvals
+        .approve(&approval_scope, request_id)
+        .await
+        .expect("mark approved");
+    let coordinator = Arc::new(FakeTurnCoordinator::blocked(
+        actor.clone(),
+        gate_ref.clone(),
+    ));
+    coordinator.set_status(TurnStatus::Queued);
+    let resolver = Arc::new(RecordingApprovalResolver::default());
+    let service = DefaultApprovalInteractionService::new(
+        Arc::new(RunStateApprovalInteractionReadModel::new(
+            approvals,
+            Arc::new(FakeTurnRunLocator::with_historical_run(
+                run_id,
+                gate_ref.clone(),
+            )),
+        )),
+        Arc::new(FixedLeaseTermsProvider),
+        resolver.clone(),
+        coordinator.clone(),
+    );
+
+    let response = service
+        .resolve(ResolveApprovalInteractionRequest {
+            scope: scope(),
+            actor,
+            run_id_hint: None,
+            gate_ref,
+            decision: ApprovalInteractionDecision::ApproveOnce,
+            idempotency_key: IdempotencyKey::new("replay-approved-no-hint").expect("idempotency"),
+        })
+        .await
+        .expect("replay approved without hint");
+
+    assert!(matches!(
+        response,
+        ResolveApprovalInteractionResponse::Approved(_)
+    ));
+    assert_eq!(resolver.dispatch_lease_retry_count(), 0);
+    assert_eq!(coordinator.last_resumption_run_id(), Some(run_id));
+}
+
+#[tokio::test]
 async fn already_denied_gate_cancels_without_reissuing_denial() {
     let (service, resolver, coordinator, run_id, gate_ref) = service_fixture_for_request_status(
         approval_request("delete a file"),
@@ -630,6 +740,34 @@ async fn already_denied_gate_cancels_without_reissuing_denial() {
         })
         .await
         .expect("retry denied");
+
+    assert!(matches!(
+        response,
+        ResolveApprovalInteractionResponse::Denied(_)
+    ));
+    assert_eq!(resolver.denial_count(), 0);
+    assert_eq!(coordinator.cancellation_count(), 1);
+}
+
+#[tokio::test]
+async fn already_denied_replay_reaches_turn_coordinator_when_run_is_not_parked() {
+    let (service, resolver, coordinator, run_id, gate_ref) = service_fixture_for_request_status(
+        approval_request("delete a file"),
+        ApprovalStatus::Denied,
+    );
+    coordinator.set_status(TurnStatus::Cancelled);
+
+    let response = service
+        .resolve(ResolveApprovalInteractionRequest {
+            scope: scope(),
+            actor: actor("user-alpha"),
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: ApprovalInteractionDecision::Deny,
+            idempotency_key: IdempotencyKey::new("replay-denied").expect("idempotency"),
+        })
+        .await
+        .expect("replay denied");
 
     assert!(matches!(
         response,
@@ -692,6 +830,51 @@ async fn missing_gate_returns_deterministic_not_found_without_resolution() {
         }
     ));
     assert_eq!(resolver.approval_count(), 0);
+}
+
+#[tokio::test]
+async fn resolve_rejects_malformed_approval_gate_ref_without_side_effects() {
+    let resolver = Arc::new(RecordingApprovalResolver::default());
+    let bad_gate_ref = GateRef::new("gate:approval-not-a-request-id").expect("gate ref");
+    let coordinator = Arc::new(FakeTurnCoordinator::blocked(
+        actor("user-alpha"),
+        bad_gate_ref.clone(),
+    ));
+    let service = DefaultApprovalInteractionService::new(
+        Arc::new(RunStateApprovalInteractionReadModel::new(
+            Arc::new(InMemoryApprovalRequestStore::new()),
+            Arc::new(FakeTurnRunLocator::with_run(
+                TurnRunId::new(),
+                bad_gate_ref.clone(),
+            )),
+        )),
+        Arc::new(FixedLeaseTermsProvider),
+        resolver.clone(),
+        coordinator.clone(),
+    );
+
+    let err = service
+        .resolve(ResolveApprovalInteractionRequest {
+            scope: scope(),
+            actor: actor("user-alpha"),
+            run_id_hint: None,
+            gate_ref: bad_gate_ref,
+            decision: ApprovalInteractionDecision::ApproveOnce,
+            idempotency_key: IdempotencyKey::new("malformed-gate").expect("idempotency"),
+        })
+        .await
+        .expect_err("malformed approval gate");
+
+    assert!(matches!(
+        err,
+        ironclaw_product_workflow::ProductWorkflowError::ApprovalInteractionRejected {
+            kind: ApprovalInteractionRejectionKind::InvalidGateRef
+        }
+    ));
+    assert_eq!(resolver.approval_count(), 0);
+    assert_eq!(resolver.denial_count(), 0);
+    assert_eq!(coordinator.resumption_count(), 0);
+    assert_eq!(coordinator.cancellation_count(), 0);
 }
 
 #[tokio::test]
@@ -1071,6 +1254,107 @@ async fn approval_resolver_port_does_not_duplicate_existing_lease_for_approved_r
         .ensure_dispatch_lease(&resource_scope, request_id, approval)
         .await
         .expect("existing lease is enough");
+
+    assert_eq!(leases.leases_for_scope(&resource_scope).await.len(), 1);
+}
+
+#[tokio::test]
+async fn approval_resolver_port_reissues_when_existing_dispatch_lease_is_claimed() {
+    let alpha_actor = actor("user-alpha");
+    let resource_scope = resource_scope(&alpha_actor);
+    let mut request = approval_request("approval required");
+    request.invocation_fingerprint = Some(
+        InvocationFingerprint::for_dispatch(
+            &resource_scope,
+            &CapabilityId::new("demo.echo").expect("capability"),
+            &ResourceEstimate::default(),
+            &serde_json::json!({"message": "approved"}),
+        )
+        .expect("fingerprint"),
+    );
+    let fingerprint = request.invocation_fingerprint.clone().expect("fingerprint");
+    let request_id = request.id;
+    let approvals = Arc::new(InMemoryApprovalRequestStore::new());
+    approvals
+        .save_pending(resource_scope.clone(), request)
+        .await
+        .expect("save approval");
+    let leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let resolver = ApprovalResolverPort::new(approvals, leases.clone());
+    let approval = dispatch_lease_approval(Principal::User(alpha_actor.user_id.clone()));
+    resolver
+        .approve_dispatch(&resource_scope, request_id, approval.clone())
+        .await
+        .expect("approve and issue lease");
+    let lease_id = leases
+        .leases_for_scope(&resource_scope)
+        .await
+        .into_iter()
+        .next()
+        .expect("lease")
+        .grant
+        .id;
+    leases
+        .claim(&resource_scope, lease_id, &fingerprint)
+        .await
+        .expect("claim lease");
+
+    resolver
+        .ensure_dispatch_lease(&resource_scope, request_id, approval)
+        .await
+        .expect("claimed lease is not enough");
+
+    let leases = leases.leases_for_scope(&resource_scope).await;
+    assert_eq!(leases.len(), 2);
+    assert!(
+        leases
+            .iter()
+            .any(|lease| lease.status == CapabilityLeaseStatus::Claimed)
+    );
+    assert!(
+        leases
+            .iter()
+            .any(|lease| lease.status == CapabilityLeaseStatus::Active)
+    );
+}
+
+#[tokio::test]
+async fn approval_resolver_port_does_not_duplicate_existing_spawn_lease_for_approved_request() {
+    let alpha_actor = actor("user-alpha");
+    let resource_scope = resource_scope(&alpha_actor);
+    let mut request = spawn_approval_request("approval required");
+    let capability = match request.action.as_ref() {
+        Action::SpawnCapability { capability, .. } => capability.clone(),
+        _ => panic!("test request should be spawn"),
+    };
+    request.invocation_fingerprint = Some(
+        InvocationFingerprint::for_spawn(
+            &resource_scope,
+            &capability,
+            &ResourceEstimate::default(),
+            &serde_json::json!({"process": "approved"}),
+        )
+        .expect("fingerprint"),
+    );
+    let request_id = request.id;
+    let approvals = Arc::new(InMemoryApprovalRequestStore::new());
+    approvals
+        .save_pending(resource_scope.clone(), request)
+        .await
+        .expect("save approval");
+    let leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let resolver = ApprovalResolverPort::new(approvals, leases.clone());
+    let mut approval = dispatch_lease_approval(Principal::User(alpha_actor.user_id));
+    approval.allowed_effects.push(EffectKind::SpawnProcess);
+    resolver
+        .approve_spawn(&resource_scope, request_id, approval.clone())
+        .await
+        .expect("approve and issue spawn lease");
+
+    resolver
+        .ensure_spawn_lease(&resource_scope, request_id, approval)
+        .await
+        .expect("existing spawn lease is enough");
 
     assert_eq!(leases.leases_for_scope(&resource_scope).await.len(), 1);
 }

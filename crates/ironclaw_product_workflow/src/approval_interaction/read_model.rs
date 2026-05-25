@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{InvocationId, ResourceScope};
@@ -33,6 +33,14 @@ pub trait ApprovalTurnRunLocator: Send + Sync {
             .into_iter()
             .find(|run| &run.gate_ref == gate_ref)
             .map(|run| run.run_id))
+    }
+
+    async fn approval_run_for_gate(
+        &self,
+        scope: &ApprovalInteractionScope,
+        gate_ref: &GateRef,
+    ) -> Result<Option<TurnRunId>, ProductWorkflowError> {
+        self.blocked_approval_run(scope, gate_ref).await
     }
 }
 
@@ -76,32 +84,25 @@ impl ApprovalInteractionReadModel for RunStateApprovalInteractionReadModel {
         scope: &ApprovalInteractionScope,
     ) -> Result<Vec<ApprovalGateRecord>, ProductWorkflowError> {
         let owner_scope = resource_scope_for_interaction(scope);
-        let approvals = self
-            .approval_requests
-            .records_for_scope(&owner_scope)
-            .await
-            .map_err(map_approval_read_error)?
-            .into_iter()
-            .map(|record| (record.request.id, record))
-            .collect::<HashMap<_, _>>();
-        if approvals.is_empty() {
-            return Ok(Vec::new());
-        }
-
         let mut gates = Vec::new();
         for run in self.turn_runs.blocked_approval_runs(scope).await? {
             let request_id = approval_request_id_from_gate_ref(&run.gate_ref)?;
-            let Some(approval) = approvals.get(&request_id) else {
+            let Some(approval) = self
+                .approval_requests
+                .get(&owner_scope, request_id)
+                .await
+                .map_err(map_approval_read_error)?
+            else {
                 continue;
             };
             if !same_interaction_owner(&approval.scope, &owner_scope) {
                 continue;
             }
             gates.push(ApprovalGateRecord::with_status(
-                approval.scope.clone(),
+                approval.scope,
                 run.run_id,
                 run.gate_ref,
-                approval.request.clone(),
+                approval.request,
                 approval.status,
             )?);
         }
@@ -130,7 +131,10 @@ impl ApprovalInteractionReadModel for RunStateApprovalInteractionReadModel {
         let run_id = match run_id_hint {
             Some(run_id) => run_id,
             None => {
-                let Some(run_id) = self.turn_runs.blocked_approval_run(scope, gate_ref).await?
+                let Some(run_id) = self
+                    .turn_runs
+                    .approval_run_for_gate(scope, gate_ref)
+                    .await?
                 else {
                     return Ok(None);
                 };

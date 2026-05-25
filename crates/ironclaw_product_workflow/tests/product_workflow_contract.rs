@@ -529,9 +529,103 @@ async fn approval_resolution_payload_routes_through_approval_interaction_service
     assert_eq!(resolutions.len(), 1);
     assert_eq!(resolutions[0].gate_ref, gate_ref);
     assert_eq!(resolutions[0].run_id_hint, None);
+    assert!(
+        resolutions[0]
+            .idempotency_key
+            .as_str()
+            .contains("approval-resolution")
+    );
     assert_eq!(
         resolutions[0].decision,
         ApprovalInteractionDecision::ApproveOnce
+    );
+}
+
+#[tokio::test]
+async fn approval_resolution_idempotency_key_is_stable_for_same_external_event() {
+    let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
+    let build = || {
+        let inbound = Arc::new(FakeInboundTurnService::new());
+        let ledger = Arc::new(FakeIdempotencyLedger::new());
+        let binding = Arc::new(FakeConversationBindingService::new());
+        let approval_service = Arc::new(RecordingApprovalInteractionService::new(
+            gate_ref.clone(),
+            TurnRunId::new(),
+        ));
+        let workflow = DefaultProductWorkflow::new(inbound, ledger, binding)
+            .with_approval_interaction_service(approval_service.clone());
+        (workflow, approval_service)
+    };
+    let envelope = || {
+        sample_envelope_with_payload(
+            "approval-resolution-stable",
+            ProductInboundPayload::ApprovalResolution(
+                ApprovalResolutionPayload::new(gate_ref.as_str(), ApprovalDecision::ApproveOnce)
+                    .expect("approval payload"),
+            ),
+        )
+    };
+    let (workflow_a, approval_a) = build();
+    let (workflow_b, approval_b) = build();
+
+    workflow_a
+        .accept_inbound(envelope())
+        .await
+        .expect("first accept");
+    workflow_b
+        .accept_inbound(envelope())
+        .await
+        .expect("second accept");
+
+    assert_eq!(
+        approval_a.resolutions()[0].idempotency_key,
+        approval_b.resolutions()[0].idempotency_key
+    );
+}
+
+#[tokio::test]
+async fn approval_resolution_idempotency_key_ignores_actor_display_name() {
+    let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
+    let build = || {
+        let inbound = Arc::new(FakeInboundTurnService::new());
+        let ledger = Arc::new(FakeIdempotencyLedger::new());
+        let binding = Arc::new(FakeConversationBindingService::new());
+        let approval_service = Arc::new(RecordingApprovalInteractionService::new(
+            gate_ref.clone(),
+            TurnRunId::new(),
+        ));
+        let workflow = DefaultProductWorkflow::new(inbound, ledger, binding)
+            .with_approval_interaction_service(approval_service.clone());
+        (workflow, approval_service)
+    };
+    let envelope = |display_name| {
+        sample_envelope_with_context(
+            ProductAdapterId::new("test_adapter").expect("valid"),
+            AdapterInstallationId::new("install_alpha").expect("valid"),
+            ExternalEventId::new("evt:approval-display-name").expect("valid"),
+            ExternalActorRef::new("test", "user1", Some(display_name)).expect("valid actor"),
+            ExternalConversationRef::new(None, "conv1", None, None).expect("valid conversation"),
+            ProductInboundPayload::ApprovalResolution(
+                ApprovalResolutionPayload::new(gate_ref.as_str(), ApprovalDecision::ApproveOnce)
+                    .expect("approval payload"),
+            ),
+        )
+    };
+    let (workflow_a, approval_a) = build();
+    let (workflow_b, approval_b) = build();
+
+    workflow_a
+        .accept_inbound(envelope("Alice A."))
+        .await
+        .expect("first accept");
+    workflow_b
+        .accept_inbound(envelope("Alice B."))
+        .await
+        .expect("second accept");
+
+    assert_eq!(
+        approval_a.resolutions()[0].idempotency_key,
+        approval_b.resolutions()[0].idempotency_key
     );
 }
 
@@ -600,6 +694,37 @@ async fn approval_resolution_always_allow_is_rejected_without_approval_interacti
         }
     ));
     assert!(approval_service.resolutions().is_empty());
+}
+
+#[tokio::test]
+async fn approval_resolution_without_interaction_service_returns_retryable_unavailable() {
+    let inbound = Arc::new(FakeInboundTurnService::new());
+    let ledger = Arc::new(FakeIdempotencyLedger::new());
+    let binding = Arc::new(FakeConversationBindingService::new());
+    let workflow = DefaultProductWorkflow::new(inbound, ledger, binding);
+    let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
+    let envelope = sample_envelope_with_payload(
+        "approval-unwired",
+        ProductInboundPayload::ApprovalResolution(
+            ApprovalResolutionPayload::new(gate_ref.as_str(), ApprovalDecision::ApproveOnce)
+                .expect("approval payload"),
+        ),
+    );
+
+    let err = workflow
+        .accept_inbound(envelope)
+        .await
+        .expect_err("unwired approval service");
+
+    assert!(matches!(
+        err,
+        ProductAdapterError::WorkflowRejected {
+            kind: ProductWorkflowRejectionKind::Unavailable,
+            status_code: 503,
+            retryable: true,
+            ..
+        }
+    ));
 }
 
 #[tokio::test]

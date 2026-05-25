@@ -68,6 +68,12 @@ enum ApprovalCapabilityAction {
     Spawn,
 }
 
+#[derive(Clone, Copy)]
+enum ApprovalTurnGateState {
+    ParkedOnGate,
+    NotParkedOnGate,
+}
+
 impl ApprovalCapabilityAction {
     fn from_action(action: &Action) -> Result<Self, ProductWorkflowError> {
         match action {
@@ -107,11 +113,11 @@ impl DefaultApprovalInteractionService {
             .ok_or_else(|| approval_rejected(ApprovalInteractionRejectionKind::MissingGate))
     }
 
-    async fn assert_turn_is_parked_on_gate(
+    async fn turn_gate_state(
         &self,
         request: &ResolveApprovalInteractionRequest,
         run_id: TurnRunId,
-    ) -> Result<(), ProductWorkflowError> {
+    ) -> Result<ApprovalTurnGateState, ProductWorkflowError> {
         let state = self
             .turn_coordinator
             .get_run_state(GetRunStateRequest {
@@ -128,11 +134,9 @@ impl DefaultApprovalInteractionService {
         if state.status != TurnStatus::BlockedApproval
             || state.gate_ref.as_ref() != Some(&request.gate_ref)
         {
-            return Err(approval_rejected(
-                ApprovalInteractionRejectionKind::StaleGate,
-            ));
+            return Ok(ApprovalTurnGateState::NotParkedOnGate);
         }
-        Ok(())
+        Ok(ApprovalTurnGateState::ParkedOnGate)
     }
 
     async fn approve_gate(
@@ -233,6 +237,47 @@ impl DefaultApprovalInteractionService {
             .map_err(map_approval_resume_error)?;
         Ok(ResolveApprovalInteractionResponse::Denied(response))
     }
+
+    async fn replay_approved_gate(
+        &self,
+        request: ResolveApprovalInteractionRequest,
+        run_id: TurnRunId,
+    ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
+        let response = self
+            .turn_coordinator
+            .resume_turn(ResumeTurnRequest {
+                scope: request.scope,
+                actor: request.actor,
+                run_id,
+                gate_resolution_ref: request.gate_ref.clone(),
+                precondition: ResumeTurnPrecondition::BlockedApprovalGate,
+                source_binding_ref: approval_source_binding_ref(&request.gate_ref)?,
+                reply_target_binding_ref: approval_reply_binding_ref(&request.gate_ref)?,
+                idempotency_key: request.idempotency_key,
+            })
+            .await
+            .map_err(map_approval_resume_error)?;
+        Ok(ResolveApprovalInteractionResponse::Approved(response))
+    }
+
+    async fn replay_denied_gate(
+        &self,
+        request: ResolveApprovalInteractionRequest,
+        run_id: TurnRunId,
+    ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
+        let response = self
+            .turn_coordinator
+            .cancel_run(CancelRunRequest {
+                scope: request.scope,
+                actor: request.actor,
+                run_id,
+                reason: SanitizedCancelReason::UserRequested,
+                idempotency_key: request.idempotency_key,
+            })
+            .await
+            .map_err(map_approval_resume_error)?;
+        Ok(ResolveApprovalInteractionResponse::Denied(response))
+    }
 }
 
 #[async_trait]
@@ -268,12 +313,30 @@ impl ApprovalInteractionService for DefaultApprovalInteractionService {
             .find_gate(&scope, request.run_id_hint, &request.gate_ref)
             .await?;
         let run_id = request.run_id_hint.unwrap_or_else(|| gate.run_id());
-        self.assert_turn_is_parked_on_gate(&request, run_id).await?;
-        match request.decision {
-            ApprovalInteractionDecision::ApproveOnce => {
+        match (
+            self.turn_gate_state(&request, run_id).await?,
+            gate.status(),
+            request.decision,
+        ) {
+            (ApprovalTurnGateState::ParkedOnGate, _, ApprovalInteractionDecision::ApproveOnce) => {
                 self.approve_gate(request, gate, run_id).await
             }
-            ApprovalInteractionDecision::Deny => self.deny_gate(request, gate, run_id).await,
+            (ApprovalTurnGateState::ParkedOnGate, _, ApprovalInteractionDecision::Deny) => {
+                self.deny_gate(request, gate, run_id).await
+            }
+            (
+                ApprovalTurnGateState::NotParkedOnGate,
+                ApprovalStatus::Approved,
+                ApprovalInteractionDecision::ApproveOnce,
+            ) => self.replay_approved_gate(request, run_id).await,
+            (
+                ApprovalTurnGateState::NotParkedOnGate,
+                ApprovalStatus::Denied,
+                ApprovalInteractionDecision::Deny,
+            ) => self.replay_denied_gate(request, run_id).await,
+            _ => Err(approval_rejected(
+                ApprovalInteractionRejectionKind::StaleGate,
+            )),
         }
     }
 }
