@@ -292,6 +292,7 @@ impl ProductAdapter for TelegramV2Adapter {
                 return Ok(ProductRenderOutcome::Deferred);
             }
             ProductOutboundPayload::CapabilityActivity(_)
+            | ProductOutboundPayload::CapabilityDisplayPreview(_)
             | ProductOutboundPayload::ProjectionSnapshot { .. }
             | ProductOutboundPayload::ProjectionUpdate { .. }
             | ProductOutboundPayload::KeepAlive => {

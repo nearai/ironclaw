@@ -173,6 +173,7 @@ pub fn reborn_runtime_readiness_snapshot() -> RebornRuntimeReadinessSnapshot {
     }
 }
 
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use std::sync::Arc;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]

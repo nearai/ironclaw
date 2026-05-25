@@ -6,10 +6,10 @@
 //! refs, or delivery attempt ids.
 
 use ironclaw_product_workflow::{
-    AuthPromptView, CapabilityActivityView, FinalReplyView, GatePromptView,
-    ProductOutboundEnvelope, ProductOutboundPayload, ProductProjectionState, ProgressKind,
-    ProgressUpdateView, ProjectionCursor, RebornCancelRunResponse, RebornGetRunStateResponse,
-    RebornSubmitTurnResponse,
+    AuthPromptView, CapabilityActivityView, CapabilityDisplayPreviewView, FinalReplyView,
+    GatePromptView, ProductOutboundEnvelope, ProductOutboundPayload, ProductProjectionState,
+    ProgressKind, ProgressUpdateView, ProjectionCursor, RebornCancelRunResponse,
+    RebornGetRunStateResponse, RebornSubmitTurnResponse,
 };
 use serde::{Deserialize, Serialize};
 
@@ -63,6 +63,9 @@ pub enum WebChatV2Event {
     CapabilityActivity {
         activity: CapabilityActivityView,
     },
+    CapabilityDisplayPreview {
+        preview: CapabilityDisplayPreviewView,
+    },
     Gate {
         prompt: GatePromptView,
     },
@@ -94,6 +97,7 @@ impl WebChatV2Event {
             Self::Running { .. } => "running",
             Self::CapabilityProgress { .. } => "capability_progress",
             Self::CapabilityActivity { .. } => "capability_activity",
+            Self::CapabilityDisplayPreview { .. } => "capability_display_preview",
             Self::Gate { .. } => "gate",
             Self::AuthRequired { .. } => "auth_required",
             Self::FinalReply { .. } => "final_reply",
@@ -117,6 +121,9 @@ impl From<ProductOutboundPayload> for WebChatV2Event {
             }
             ProductOutboundPayload::CapabilityActivity(activity) => {
                 Self::CapabilityActivity { activity }
+            }
+            ProductOutboundPayload::CapabilityDisplayPreview(preview) => {
+                Self::CapabilityDisplayPreview { preview }
             }
             ProductOutboundPayload::Progress(progress) => Self::Running { progress },
             ProductOutboundPayload::GatePrompt(prompt) => Self::Gate { prompt },

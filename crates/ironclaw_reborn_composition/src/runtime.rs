@@ -852,7 +852,8 @@ pub async fn build_reborn_runtime(
         Arc::clone(&event_log),
         validated_identity.reply_target_binding_ref.clone(),
     )
-    .with_turn_events(turn_event_source, Arc::clone(&planned_turn_coordinator));
+    .with_turn_events(turn_event_source, Arc::clone(&planned_turn_coordinator))
+    .with_display_previews(Arc::clone(&local_dev_capabilities.display_previews));
     services.turn_coordinator = Some(Arc::clone(&planned_turn_coordinator));
 
     let worker_cancel = CancellationToken::new();
@@ -2438,6 +2439,7 @@ mod tests {
             stream.events.iter().all(|event| matches!(
                 event.payload(),
                 ProductOutboundPayload::CapabilityActivity(_)
+                    | ProductOutboundPayload::CapabilityDisplayPreview(_)
                     | ProductOutboundPayload::ProjectionSnapshot { .. }
                     | ProductOutboundPayload::ProjectionUpdate { .. }
             )),

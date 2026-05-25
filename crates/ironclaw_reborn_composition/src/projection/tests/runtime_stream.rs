@@ -97,6 +97,201 @@ async fn webui_event_stream_drains_capability_activity_from_projection() {
 }
 
 #[tokio::test]
+async fn webui_event_stream_enriches_activity_with_display_preview_from_store() {
+    let tenant_id = TenantId::new("webui-preview-tenant").unwrap();
+    let user_id = UserId::new("webui-preview-user").unwrap();
+    let agent_id = AgentId::new("webui-preview-agent").unwrap();
+    let thread_id = ThreadId::new("webui-preview-thread").unwrap();
+    let invocation_id = InvocationId::new();
+    let run_id = TurnRunId::from_uuid(invocation_id.as_uuid());
+    let capability = CapabilityId::new("builtin.read_file").unwrap();
+    let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
+    display_previews.record_input(
+        &run_id.to_string(),
+        "read_file",
+        &serde_json::json!({
+            "path": "src/main.rs",
+            "token": "sk-secret",
+            "max_bytes": 4096
+        }),
+    );
+    display_previews.record_result(
+        &run_id.to_string(),
+        &capability,
+        "result:preview-output",
+        &serde_json::json!({"content": "fn main() {}"}),
+        64,
+    );
+    let event_log = Arc::new(InMemoryDurableEventLog::new());
+    event_log
+        .append(RuntimeEvent::dispatch_succeeded(
+            resource_scope(&tenant_id, &user_id, &agent_id, &thread_id, invocation_id),
+            capability.clone(),
+            ExtensionId::new("builtin").unwrap(),
+            RuntimeKind::FirstParty,
+            64,
+        ))
+        .await
+        .unwrap();
+
+    let event_log: Arc<dyn DurableEventLog> = event_log;
+    let services = build_reborn_projection_services(
+        event_log,
+        ReplyTargetBindingRef::new("webui-preview-reply").unwrap(),
+    )
+    .with_display_previews(Arc::clone(&display_previews));
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id),
+            scope: TurnScope::new(tenant_id, Some(agent_id), None, thread_id.clone()),
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                event.payload(),
+                ProductOutboundPayload::CapabilityDisplayPreview(preview)
+                    if preview.invocation_id == invocation_id
+                        && preview.thread_id.as_ref() == Some(&thread_id)
+                        && preview.capability_id == capability
+                        && preview.title == "read_file"
+                        && preview.subtitle.as_deref() == Some("src/main.rs")
+                        && preview.input_summary.as_deref().is_some_and(|summary| summary.contains("path: src/main.rs"))
+                        && preview.output_preview.as_deref() == Some("fn main() {}")
+                        && preview.result_ref.as_deref() == Some("result:preview-output")
+                        && preview.output_bytes == Some(64)
+            )
+        }),
+        "events: {events:#?}"
+    );
+    let rendered = serde_json::to_string(&events).unwrap();
+    assert!(!rendered.contains("sk-secret"));
+}
+
+#[tokio::test]
+async fn capability_display_preview_store_redacts_unsafe_paths_and_secrets() {
+    let run_id = TurnRunId::new();
+    let capability = CapabilityId::new("builtin.read_file").unwrap();
+    let store = CapabilityDisplayPreviewStore::default();
+    store.record_input(
+        &run_id.to_string(),
+        "read_file",
+        &serde_json::json!({
+            "path": "/Users/alice/secret.rs",
+            "api_key": "sk-secret"
+        }),
+    );
+    store.record_result(
+        &run_id.to_string(),
+        &capability,
+        "result:redacted-preview",
+        &serde_json::json!({"content": "{\"path\":\"/Users/alice/out.txt\", token:\"sk-secret\"}"}),
+        42,
+    );
+    let preview = store
+        .preview(&CapabilityActivityProjection {
+            invocation_id: InvocationId::from_uuid(run_id.as_uuid()),
+            capability_id: capability,
+            thread_id: Some(ThreadId::new("webui-preview-thread").unwrap()),
+            status: ironclaw_event_projections::CapabilityActivityStatus::Completed,
+            provider: None,
+            runtime: None,
+            process_id: None,
+            output_bytes: Some(42),
+            error_kind: None,
+            last_cursor: ironclaw_events::EventCursor::new(1),
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(preview.subtitle.is_none());
+    let rendered = serde_json::to_string(&preview).unwrap();
+    assert!(!rendered.contains("sk-secret"));
+    assert!(!rendered.contains("/Users/alice"));
+    assert!(rendered.contains("[redacted]"));
+}
+
+#[tokio::test]
+async fn capability_display_preview_falls_back_for_failed_tool_without_result() {
+    let capability = CapabilityId::new("script.fail").unwrap();
+    let store = CapabilityDisplayPreviewStore::default();
+    let preview = store
+        .preview(&CapabilityActivityProjection {
+            invocation_id: InvocationId::new(),
+            capability_id: capability,
+            thread_id: Some(ThreadId::new("webui-preview-thread").unwrap()),
+            status: ironclaw_event_projections::CapabilityActivityStatus::Failed,
+            provider: None,
+            runtime: None,
+            process_id: None,
+            output_bytes: None,
+            error_kind: Some("operation_failed".to_string()),
+            last_cursor: ironclaw_events::EventCursor::new(1),
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(preview.title, "fail");
+    assert_eq!(preview.output_kind.as_deref(), Some("text"));
+    assert_eq!(preview.result_ref, None);
+    assert!(
+        preview
+            .output_summary
+            .as_deref()
+            .is_some_and(|summary| summary.contains("operation_failed"))
+    );
+}
+
+#[tokio::test]
+async fn capability_display_preview_store_truncates_long_output_by_lines() {
+    let run_id = TurnRunId::new();
+    let capability = CapabilityId::new("script.long_output").unwrap();
+    let store = CapabilityDisplayPreviewStore::default();
+    store.record_result(
+        &run_id.to_string(),
+        &capability,
+        "result:long-preview",
+        &serde_json::Value::String(
+            (0..130)
+                .map(|index| format!("line-{index}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        2048,
+    );
+    let preview = store
+        .preview(&CapabilityActivityProjection {
+            invocation_id: InvocationId::from_uuid(run_id.as_uuid()),
+            capability_id: capability,
+            thread_id: Some(ThreadId::new("webui-preview-thread").unwrap()),
+            status: ironclaw_event_projections::CapabilityActivityStatus::Completed,
+            provider: None,
+            runtime: None,
+            process_id: None,
+            output_bytes: Some(2048),
+            error_kind: None,
+            last_cursor: ironclaw_events::EventCursor::new(1),
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    let output_preview = preview.output_preview.unwrap();
+    assert!(preview.truncated);
+    assert!(output_preview.lines().count() <= 120);
+    assert!(!output_preview.contains("line-129"));
+}
+
+#[tokio::test]
 async fn webui_event_stream_preserves_sanitized_capability_activity_error_kind() {
     let tenant_id = TenantId::new("webui-activity-redacted-tenant").unwrap();
     let user_id = UserId::new("webui-activity-redacted-user").unwrap();
@@ -261,8 +456,8 @@ async fn webui_event_stream_accepts_legacy_partial_origin_cursor() {
     ));
 }
 
-#[test]
-fn webui_projection_snapshot_bounds_activity_fanout_before_payload_mapping() {
+#[tokio::test]
+async fn webui_projection_snapshot_bounds_activity_fanout_before_payload_mapping() {
     let tenant_id = TenantId::new("webui-activity-cap-tenant").unwrap();
     let user_id = UserId::new("webui-activity-cap-user").unwrap();
     let agent_id = AgentId::new("webui-activity-cap-agent").unwrap();
@@ -308,14 +503,17 @@ fn webui_projection_snapshot_bounds_activity_fanout_before_payload_mapping() {
         truncated: false,
     };
 
+    let display_previews = NoopCapabilityDisplayPreviewSource;
     let item = snapshot_payloads(
         &scope,
+        &display_previews,
         snapshot,
         cursor.clone(),
         None,
         0,
         WEBUI_PROJECTION_PAGE_LIMIT + 11,
     )
+    .await
     .unwrap()
     .unwrap();
 
@@ -332,6 +530,109 @@ fn webui_projection_snapshot_bounds_activity_fanout_before_payload_mapping() {
             .count(),
         WEBUI_PROJECTION_PAGE_LIMIT
     );
+}
+
+#[tokio::test]
+async fn webui_projection_snapshot_resumes_preview_payload() {
+    let tenant_id = TenantId::new("webui-preview-resume-tenant").unwrap();
+    let user_id = UserId::new("webui-preview-resume-user").unwrap();
+    let agent_id = AgentId::new("webui-preview-resume-agent").unwrap();
+    let thread_id = ThreadId::new("webui-preview-resume-thread").unwrap();
+    let capability = CapabilityId::new("builtin.read_file").unwrap();
+    let invocation_id = InvocationId::new();
+    let actor = TurnActor::new(user_id.clone());
+    let scope = TurnScope::new(tenant_id, Some(agent_id), None, thread_id.clone());
+    let projection_scope = runtime_projection_scope(&actor, &scope);
+    let cursor =
+        EventProjectionCursor::for_scope(projection_scope, ironclaw_events::EventCursor::new(1));
+    let display_previews = CapabilityDisplayPreviewStore::default();
+    let run_id = TurnRunId::from_uuid(invocation_id.as_uuid());
+    display_previews.record_input(
+        &run_id.to_string(),
+        "read_file",
+        &serde_json::json!({"path": "src/main.rs"}),
+    );
+    display_previews.record_result(
+        &run_id.to_string(),
+        &capability,
+        "result:preview-resume",
+        &serde_json::json!({"content": "fn main() {}"}),
+        12,
+    );
+    let snapshot = ProjectionSnapshot {
+        timeline: ThreadTimeline {
+            entries: Vec::new(),
+        },
+        runs: vec![RunStatusProjection {
+            invocation_id,
+            capability_id: capability.clone(),
+            thread_id: Some(thread_id.clone()),
+            status: RunProjectionStatus::Completed,
+            provider: None,
+            runtime: None,
+            process_id: None,
+            error_kind: None,
+            last_cursor: ironclaw_events::EventCursor::new(1),
+            updated_at: chrono::Utc::now(),
+        }],
+        capability_activities: vec![CapabilityActivityProjection {
+            invocation_id,
+            capability_id: capability,
+            thread_id: Some(thread_id),
+            status: ironclaw_event_projections::CapabilityActivityStatus::Completed,
+            provider: None,
+            runtime: None,
+            process_id: None,
+            output_bytes: Some(12),
+            error_kind: None,
+            last_cursor: ironclaw_events::EventCursor::new(1),
+            updated_at: chrono::Utc::now(),
+        }],
+        next_cursor: cursor.clone(),
+        truncated: false,
+    };
+
+    let first = snapshot_payloads(
+        &scope,
+        &display_previews,
+        snapshot.clone(),
+        cursor.clone(),
+        None,
+        0,
+        2,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(first.total, 3);
+    assert_eq!(first.payloads.len(), 2);
+    assert!(matches!(
+        first.payloads[0],
+        ProductOutboundPayload::ProjectionSnapshot { .. }
+    ));
+    assert!(matches!(
+        first.payloads[1],
+        ProductOutboundPayload::CapabilityActivity(_)
+    ));
+
+    let resumed = snapshot_payloads(
+        &scope,
+        &display_previews,
+        snapshot,
+        cursor,
+        Some(first.item_cursor.runtime),
+        2,
+        2,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(resumed.payloads.len(), 1);
+    assert!(matches!(
+        &resumed.payloads[0],
+        ProductOutboundPayload::CapabilityDisplayPreview(preview)
+            if preview.result_ref.as_deref() == Some("result:preview-resume")
+    ));
 }
 
 #[tokio::test]

@@ -51,10 +51,10 @@ pub use inbound::{
 };
 pub use outbound::{
     AuthPromptView, CapabilityActivityStatusView, CapabilityActivityView,
-    CapabilityActivityViewInput, FinalReplyView, GatePromptView, ProductOutboundEnvelope,
-    ProductOutboundPayload, ProductOutboundTarget, ProductProjectionItem, ProductProjectionState,
-    ProductRenderOutcome, ProductSynchronousResponse, ProgressKind, ProgressUpdateView,
-    ProjectionCursor,
+    CapabilityActivityViewInput, CapabilityDisplayPreviewView, CapabilityDisplayPreviewViewInput,
+    FinalReplyView, GatePromptView, ProductOutboundEnvelope, ProductOutboundPayload,
+    ProductOutboundTarget, ProductProjectionItem, ProductProjectionState, ProductRenderOutcome,
+    ProductSynchronousResponse, ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
 pub use projection::{ProjectionStream, ProjectionSubscriptionRequest};
 pub use redaction::{REDACTED_PLACEHOLDER, RedactedDebug, RedactedString};
