@@ -369,15 +369,18 @@ where
     let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
         Arc::new(SubagentAwareCapabilityPortFactory::new(
             parts.capability_factory,
-            Arc::clone(&coordinator) as Arc<dyn ironclaw_turns::TurnCoordinator>,
-            turn_state_store.clone(),
-            Arc::clone(&parts.thread_service_dyn),
-            Arc::clone(&parts.subagent_goal_store) as Arc<dyn SubagentSpawnGoalStore>,
-            Arc::clone(&parts.subagent_gate_store)
-                as Arc<dyn ironclaw_loop_support::SubagentGateResolutionStore>,
-            Arc::clone(&parts.subagent_flavor_resolver),
-            Arc::clone(&parts.subagent_spawn_input_codec),
-            Arc::clone(&parts.capability_result_writer),
+            SubagentSpawnDeps {
+                coordinator: Arc::clone(&coordinator) as Arc<dyn ironclaw_turns::TurnCoordinator>,
+                turn_state_store: turn_state_store.clone(),
+                thread_service: Arc::clone(&parts.thread_service_dyn),
+                goal_store: Arc::clone(&parts.subagent_goal_store)
+                    as Arc<dyn SubagentSpawnGoalStore>,
+                gate_store: Arc::clone(&parts.subagent_gate_store)
+                    as Arc<dyn ironclaw_loop_support::SubagentGateResolutionStore>,
+                flavor_resolver: Arc::clone(&parts.subagent_flavor_resolver),
+                spawn_input_codec: Arc::clone(&parts.subagent_spawn_input_codec),
+                result_writer: Arc::clone(&parts.capability_result_writer),
+            },
             subagent_prompt_composer.clone(),
         )?);
     let mut host_factory = RebornLoopDriverHostFactory::new(
@@ -453,17 +456,9 @@ struct SubagentAwareCapabilityPortFactory {
 }
 
 impl SubagentAwareCapabilityPortFactory {
-    #[allow(clippy::too_many_arguments)]
     fn new(
         inner: Arc<dyn LoopCapabilityPortFactory>,
-        coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
-        turn_state_store: Arc<dyn TurnStateStore>,
-        thread_service: Arc<dyn SessionThreadService>,
-        goal_store: Arc<dyn SubagentSpawnGoalStore>,
-        gate_store: Arc<dyn ironclaw_loop_support::SubagentGateResolutionStore>,
-        flavor_resolver: Arc<dyn SubagentFlavorPolicyResolver>,
-        spawn_input_codec: Arc<dyn SpawnSubagentInputCodec>,
-        result_writer: Arc<dyn LoopCapabilityResultWriter>,
+        spawn_deps: SubagentSpawnDeps,
         prompt_composer: SubagentPromptComposer,
     ) -> Result<Self, DefaultPlannedRuntimeBuildError> {
         let spawn_id =
@@ -471,16 +466,7 @@ impl SubagentAwareCapabilityPortFactory {
                 .map_err(|error| DefaultPlannedRuntimeBuildError::RunProfile(error.to_string()))?;
         Ok(Self {
             inner,
-            spawn_deps: Arc::new(SubagentSpawnDeps {
-                coordinator,
-                turn_state_store,
-                thread_service,
-                goal_store,
-                gate_store,
-                flavor_resolver,
-                spawn_input_codec,
-                result_writer,
-            }),
+            spawn_deps: Arc::new(spawn_deps),
             spawn_id,
             prompt_composer,
         })

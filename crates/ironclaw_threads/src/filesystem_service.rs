@@ -851,10 +851,7 @@ where
         let message = existing
             .into_iter()
             .find(|message| {
-                message.kind == MessageKind::ToolResultReference
-                    && message.status == MessageStatus::Finalized
-                    && message.turn_run_id.as_deref() == Some(request.turn_run_id.as_str())
-                    && message.tool_result_ref.as_deref() == Some(request.result_ref.as_str())
+                matches_tool_result_reference(message, &request.turn_run_id, &request.result_ref)
             })
             .ok_or_else(|| {
                 SessionThreadError::Backend(format!(
@@ -862,11 +859,25 @@ where
                     request.result_ref, request.thread_id
                 ))
             })?;
+        // Re-validate inside the CAS closure: on retry the pre-scan record is
+        // stale, so a concurrent writer that flipped status, changed
+        // turn_run_id, or rewrote tool_result_ref between the scan and our
+        // retry must not be silently overwritten. The closure refuses the
+        // mutation in that case and surfaces the same "not found" error as
+        // the pre-scan path.
+        let turn_run_id = request.turn_run_id.clone();
+        let result_ref = request.result_ref.clone();
+        let thread_id_for_error = request.thread_id.clone();
         self.apply_message_update(
             &request.scope,
             &request.thread_id,
             message.message_id,
             |message| {
+                if !matches_tool_result_reference(message, &turn_run_id, &result_ref) {
+                    return Err(SessionThreadError::Backend(format!(
+                        "tool result reference {result_ref} was not found in thread {thread_id_for_error}",
+                    )));
+                }
                 message.content = Some(content.clone());
                 Ok(())
             },
@@ -1331,6 +1342,17 @@ fn is_model_visible(status: MessageStatus) -> bool {
         status,
         MessageStatus::Accepted | MessageStatus::Submitted | MessageStatus::Finalized
     )
+}
+
+fn matches_tool_result_reference(
+    message: &ThreadMessageRecord,
+    turn_run_id: &str,
+    result_ref: &str,
+) -> bool {
+    message.kind == MessageKind::ToolResultReference
+        && message.status == MessageStatus::Finalized
+        && message.turn_run_id.as_deref() == Some(turn_run_id)
+        && message.tool_result_ref.as_deref() == Some(result_ref)
 }
 
 const REDACTED_SUMMARY_CONTENT: &str = "[redacted]";

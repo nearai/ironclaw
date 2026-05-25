@@ -3,7 +3,7 @@ use std::{collections::BTreeSet, sync::Arc};
 use async_trait::async_trait;
 use ironclaw_host_api::CapabilityId;
 use ironclaw_loop_support::{
-    SubagentPromptGoal, SubagentPromptMaterial, SubagentPromptMaterialSource,
+    SubagentPromptGoal, SubagentPromptMaterial, SubagentPromptMaterialSource, SubagentThreadKind,
     SubagentThreadMetadata,
 };
 use ironclaw_threads::{
@@ -260,7 +260,7 @@ async fn thread_metadata_for_run(
 fn parse_subagent_thread_metadata(raw: &str) -> Option<SubagentThreadMetadata> {
     serde_json::from_str::<SubagentThreadMetadata>(raw)
         .ok()
-        .filter(|metadata| metadata.kind == "subagent")
+        .filter(|metadata| metadata.kind == SubagentThreadKind::Subagent)
 }
 
 fn thread_scope_for_run(run_context: &LoopRunContext) -> Result<ThreadScope, AgentLoopHostError> {

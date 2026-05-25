@@ -84,7 +84,8 @@ pub use subagent_spawn_port::{
     InMemorySubagentGateResolutionStore, JsonSpawnSubagentInputCodec, SpawnSubagentArgs,
     SpawnSubagentInputCodec, SpawnSubagentMode, SubagentFlavorPolicy, SubagentFlavorPolicyResolver,
     SubagentGateResolutionStore, SubagentGoalRecord, SubagentSpawnCapabilityPort,
-    SubagentSpawnDeps, SubagentSpawnGoalStore, SubagentSpawnLimits, SubagentThreadMetadata,
+    SubagentSpawnDeps, SubagentSpawnGoalStore, SubagentSpawnLimits, SubagentThreadKind,
+    SubagentThreadMetadata,
 };
 pub use turn_event_publisher::EventPublishingTurnRunTransitionPort;
 

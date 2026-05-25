@@ -98,9 +98,18 @@ pub struct AwaitedChildSetRecord {
     pub mode: SpawnSubagentMode,
 }
 
+/// Discriminator for child thread metadata. Single-variant today; the enum
+/// shape exists so callers cannot match against a magic `"subagent"` string
+/// (see `.claude/rules/types.md` "fixed small sets → enums").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentThreadKind {
+    Subagent,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubagentThreadMetadata {
-    pub kind: String,
+    pub kind: SubagentThreadKind,
     pub parent_run_id: TurnRunId,
     pub parent_thread_id: ThreadId,
     pub tree_root_run_id: TurnRunId,
@@ -282,7 +291,10 @@ impl SubagentSpawnCapabilityPort {
             .turn_state_store
             .get_run_record(&self.run_context.scope, self.run_context.run_id)
             .await
-            .map_err(map_turn_error)?
+            .map_err(|error| {
+                self.release_spawn_slot();
+                map_turn_error(error)
+            })?
             .ok_or_else(|| {
                 self.release_spawn_slot();
                 AgentLoopHostError::new(
@@ -295,12 +307,15 @@ impl SubagentSpawnCapabilityPort {
             self.release_spawn_slot();
             return Ok(spawn_rejected("depth_cap_exceeded"));
         }
-        match self
+        let parent_flavor_outcome = self
             .deps
             .flavor_resolver
             .flavor_of_run(self.run_context.run_id)
-            .await?
-        {
+            .await
+            .inspect_err(|_| {
+                self.release_spawn_slot();
+            })?;
+        match parent_flavor_outcome {
             Some(parent_flavor) if !parent_flavor.allow_nesting => {
                 self.release_spawn_slot();
                 return Ok(spawn_rejected("nesting_not_permitted"));
@@ -312,12 +327,15 @@ impl SubagentSpawnCapabilityPort {
             _ => {}
         }
 
-        let Some(flavor) = self
+        let resolved = self
             .deps
             .flavor_resolver
             .resolve_flavor(&args.flavor_id)
-            .await?
-        else {
+            .await
+            .inspect_err(|_| {
+                self.release_spawn_slot();
+            })?;
+        let Some(flavor) = resolved else {
             self.release_spawn_slot();
             return Ok(spawn_rejected("unknown_flavor"));
         };
@@ -465,6 +483,10 @@ impl SubagentSpawnCapabilityPort {
         Ok(())
     }
 
+    // arch-exempt: too_many_args, finish_spawn threads three compensation
+    // out-params (goal_written/gate_written/result_written) plus the
+    // resolved spawn context across a single async path; collapsing into a
+    // SpawnCompensationState struct is tracked as a follow-up refactor.
     #[allow(clippy::too_many_arguments)]
     async fn finish_spawn(
         &self,
@@ -511,7 +533,7 @@ impl SubagentSpawnCapabilityPort {
                 created_by_actor_id: format!("subagent:{}", self.run_context.run_id),
                 title: Some("Subagent".to_string()),
                 metadata_json: Some(child_thread_metadata(SubagentThreadMetadata {
-                    kind: "subagent".to_string(),
+                    kind: SubagentThreadKind::Subagent,
                     parent_run_id: self.run_context.run_id,
                     parent_thread_id: self.run_context.thread_id.clone(),
                     tree_root_run_id: tree_root,

@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt,
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{Arc, Mutex},
@@ -106,6 +106,11 @@ pub struct DefaultTurnCoordinator<S: ?Sized> {
     wake_notifier: Arc<dyn TurnRunWakeNotifier>,
     event_sink: Option<Arc<dyn TurnEventSink>>,
     delivered_event_cursors: Mutex<HashSet<EventCursor>>,
+    // Per-coordinator binding of run ids handed out by `prepare_turn` to the
+    // scope they were prepared under. `submit_turn` consumes the reservation
+    // when `requested_run_id` is set and rejects cross-scope submission so a
+    // prepared id cannot be used to inject lineage into a different scope.
+    prepared_run_id_scopes: Mutex<HashMap<TurnRunId, TurnScope>>,
 }
 
 impl<S> DefaultTurnCoordinator<S>
@@ -120,6 +125,7 @@ where
             wake_notifier: Arc::new(NoopTurnRunWakeNotifier),
             event_sink: None,
             delivered_event_cursors: Mutex::new(HashSet::new()),
+            prepared_run_id_scopes: Mutex::new(HashMap::new()),
         }
     }
 
@@ -162,6 +168,22 @@ where
                 delivered.insert(cursor)
             }
         }
+    }
+
+    fn record_prepared_run_id(&self, run_id: TurnRunId, scope: TurnScope) {
+        let mut prepared = match self.prepared_run_id_scopes.lock() {
+            Ok(prepared) => prepared,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        prepared.insert(run_id, scope);
+    }
+
+    fn consume_prepared_run_id(&self, run_id: TurnRunId) -> Option<TurnScope> {
+        let mut prepared = match self.prepared_run_id_scopes.lock() {
+            Ok(prepared) => prepared,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        prepared.remove(&run_id)
     }
 }
 
@@ -223,14 +245,30 @@ impl<S> TurnCoordinator for DefaultTurnCoordinator<S>
 where
     S: TurnStateStore + ?Sized + 'static,
 {
-    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
-        Ok(TurnRunId::new())
+    async fn prepare_turn(&self, scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        let run_id = TurnRunId::new();
+        self.record_prepared_run_id(run_id, scope);
+        Ok(run_id)
     }
 
     async fn submit_turn(
         &self,
         request: SubmitTurnRequest,
     ) -> Result<SubmitTurnResponse, TurnError> {
+        // If the caller passed a run id that came out of prepare_turn, verify
+        // it is being submitted under the same scope it was prepared under,
+        // unless this is a child run (parent_run_id set). Subagent spawn
+        // legitimately prepares a run id in the parent scope and submits it
+        // under a different child scope. Reservations are consumed on the
+        // first submit attempt; a second attempt with the same id falls back
+        // to the store's duplicate-bound check.
+        if let Some(requested) = request.requested_run_id
+            && let Some(prepared_scope) = self.consume_prepared_run_id(requested)
+            && request.parent_run_id.is_none()
+            && prepared_scope != request.scope
+        {
+            return Err(TurnError::Unauthorized);
+        }
         let scope = request.scope.clone();
         let event_scope = request.scope.clone();
         let actor = request.actor.clone();

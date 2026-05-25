@@ -789,7 +789,13 @@ fn ensure_local_dev_ref_scope(
     reference: &str,
     run_context: &LoopRunContext,
 ) -> Result<(), AgentLoopHostError> {
-    let expected_prefix = format!("{prefix}:{}:", run_context.run_id);
+    // Match product_live_adapters' convention: result refs are
+    // `result:<run_id>.<uuid>` (dot) so they tokenize cleanly when a uuid
+    // contains hyphens, while input refs stay `input:<run_id>:<n>` (colon).
+    // Keep this in sync with `ensure_ref_scoped_to_run` in
+    // `product_live_adapters.rs`.
+    let separator = if prefix == "result" { "." } else { ":" };
+    let expected_prefix = format!("{prefix}:{}{separator}", run_context.run_id);
     if reference.starts_with(&expected_prefix) {
         Ok(())
     } else {

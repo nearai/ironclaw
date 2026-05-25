@@ -4,7 +4,8 @@ use async_trait::async_trait;
 use ironclaw_host_api::CapabilityId;
 use ironclaw_loop_support::{
     AwaitedChildSetRecord, DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, LoopCapabilityResultWriter,
-    SpawnSubagentMode, SubagentGateResolutionStore, SubagentSpawnGoalStore, SubagentThreadMetadata,
+    SpawnSubagentMode, SubagentGateResolutionStore, SubagentSpawnGoalStore, SubagentThreadKind,
+    SubagentThreadMetadata,
 };
 use ironclaw_threads::{
     MessageKind, MessageStatus, SessionThreadService, ThreadHistoryRequest, ThreadScope,
@@ -276,11 +277,10 @@ where
                     record.parent_run_id, record.child_run_id
                 ))
                 .map_err(|reason| TurnError::InvalidRequest { reason })?,
-                // Subagent completion is the trusted resumer; AnyBlockedGate
-                // matches phase-1's default-behavior contract. Tightening to
-                // a dedicated AwaitDependentRunGate variant requires extending
-                // ResumeTurnPrecondition — tracked for phase-2 review follow-up.
-                precondition: ResumeTurnPrecondition::AnyBlockedGate,
+                // Pin the resume to the dependent-run gate so a child
+                // termination cannot unblock a parent that is actually
+                // waiting on an unrelated approval/auth/resource gate.
+                precondition: ResumeTurnPrecondition::BlockedDependentRunGate,
             })
             .await
             .map(|_| ())
@@ -734,7 +734,7 @@ fn awaited_child_record_from_persisted(
 fn parse_subagent_thread_metadata(raw: &str) -> Option<SubagentThreadMetadata> {
     serde_json::from_str::<SubagentThreadMetadata>(raw)
         .ok()
-        .filter(|metadata| metadata.kind == "subagent")
+        .filter(|metadata| metadata.kind == SubagentThreadKind::Subagent)
 }
 
 fn thread_scope_from_turn_scope(
