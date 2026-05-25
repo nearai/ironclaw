@@ -2743,8 +2743,10 @@ mod tests {
         let manager = Arc::new(ContextManager::new(5));
         let tool = CreateJobTool::new(manager).with_channel_routing(arc);
 
-        let mut ctx = JobContext::default();
-        ctx.metadata = serde_json::json!({ "notify_channel": "research-channel" });
+        let ctx = JobContext {
+            metadata: serde_json::json!({ "notify_channel": "research-channel" }),
+            ..Default::default()
+        };
 
         // Caller supplies Serpstat (allowed) + Kiro (not in research group).
         // Only Serpstat should survive the intersection.
