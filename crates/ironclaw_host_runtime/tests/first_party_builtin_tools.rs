@@ -933,7 +933,9 @@ async fn builtin_http_maps_runtime_egress_errors_by_source() {
                 request_bytes: 4,
                 response_bytes: 1024,
             },
-            RuntimeFailureKind::OutputTooLarge,
+            // An oversized remote response body is operational/remote, not our own
+            // output-contract violation, so it must stay recoverable and model-visible.
+            RuntimeFailureKind::OperationFailed,
         ),
         (
             RuntimeHttpEgressError::Response {
@@ -941,7 +943,7 @@ async fn builtin_http_maps_runtime_egress_errors_by_source() {
                 request_bytes: 4,
                 response_bytes: 1024,
             },
-            RuntimeFailureKind::OutputTooLarge,
+            RuntimeFailureKind::OperationFailed,
         ),
         (
             RuntimeHttpEgressError::Response {
@@ -949,7 +951,10 @@ async fn builtin_http_maps_runtime_egress_errors_by_source() {
                 request_bytes: 4,
                 response_bytes: 1024,
             },
-            RuntimeFailureKind::InvalidOutput,
+            // A remote HTTP error response is an operational failure surfaced to the
+            // model (retry / different endpoint / tell the user), never a run-aborting
+            // violation of our own output contract. Regression guard for #4014.
+            RuntimeFailureKind::OperationFailed,
         ),
     ];
 

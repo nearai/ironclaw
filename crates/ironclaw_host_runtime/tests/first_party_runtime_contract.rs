@@ -210,7 +210,9 @@ async fn first_party_handler_maps_egress_error_codes_to_dispatch_errors() {
                 request_bytes: 11,
                 response_bytes: 22,
             },
-            RuntimeFailureKind::InvalidOutput,
+            // A remote HTTP error response is operational and model-visible, never a
+            // run-aborting output-contract violation.
+            RuntimeFailureKind::OperationFailed,
         ),
         (
             RuntimeHttpEgressError::Response {
@@ -218,7 +220,9 @@ async fn first_party_handler_maps_egress_error_codes_to_dispatch_errors() {
                 request_bytes: 11,
                 response_bytes: 4097,
             },
-            RuntimeFailureKind::InvalidOutput,
+            // An oversized remote response body is likewise operational, not a violation
+            // of our own output contract, so it stays recoverable.
+            RuntimeFailureKind::OperationFailed,
         ),
     ];
 
@@ -328,11 +332,11 @@ fn http_error_kind_maps_all_reason_codes() {
         ),
         (
             RuntimeHttpEgressReasonCode::ResponseError,
-            RuntimeDispatchErrorKind::OutputDecode,
+            RuntimeDispatchErrorKind::OperationFailed,
         ),
         (
             RuntimeHttpEgressReasonCode::ResponseBodyLimitExceeded,
-            RuntimeDispatchErrorKind::OutputDecode,
+            RuntimeDispatchErrorKind::OperationFailed,
         ),
     ];
 
@@ -759,9 +763,11 @@ fn http_error_kind(reason: RuntimeHttpEgressReasonCode) -> RuntimeDispatchErrorK
         RuntimeHttpEgressReasonCode::CredentialUnavailable => RuntimeDispatchErrorKind::Client,
         RuntimeHttpEgressReasonCode::RequestDenied => RuntimeDispatchErrorKind::InputEncode,
         RuntimeHttpEgressReasonCode::NetworkError => RuntimeDispatchErrorKind::NetworkDenied,
-        RuntimeHttpEgressReasonCode::ResponseError => RuntimeDispatchErrorKind::OutputDecode,
+        // Remote HTTP error responses and oversized bodies are operational/remote
+        // failures surfaced to the model, never fatal output-contract violations.
+        RuntimeHttpEgressReasonCode::ResponseError => RuntimeDispatchErrorKind::OperationFailed,
         RuntimeHttpEgressReasonCode::ResponseBodyLimitExceeded => {
-            RuntimeDispatchErrorKind::OutputDecode
+            RuntimeDispatchErrorKind::OperationFailed
         }
     }
 }

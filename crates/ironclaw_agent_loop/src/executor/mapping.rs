@@ -169,3 +169,36 @@ pub(super) fn honor_retry_alteration(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Invariant: an operational capability failure (e.g. a remote HTTP error response,
+    /// which the first-party HTTP runtime classifies as `OperationFailed`) must be a
+    /// recoverable, model-visible error class — never the run-aborting `Permanent` class.
+    /// A remote HTTP response error must never abort the entire agent run. See the #4014
+    /// regression where `ResponseError` was mapped through `InvalidOutput -> Permanent`.
+    #[test]
+    fn operation_failed_is_recoverable_not_run_aborting() {
+        let class = capability_error_class(&CapabilityFailureKind::OperationFailed);
+        assert_eq!(class, CapabilityErrorClass::OperationFailed);
+        assert_ne!(
+            class,
+            CapabilityErrorClass::Permanent,
+            "operational failures must stay recoverable and model-visible, not abort the run"
+        );
+    }
+
+    /// Counterpart invariant: genuine output-contract violations (e.g. a WASM tool
+    /// returning a malformed result -> `InvalidOutput`) remain `Permanent`/run-aborting.
+    /// This guards against over-correcting the #4014 fix and silently downgrading real
+    /// contract violations to recoverable.
+    #[test]
+    fn invalid_output_remains_run_aborting() {
+        assert_eq!(
+            capability_error_class(&CapabilityFailureKind::InvalidOutput),
+            CapabilityErrorClass::Permanent
+        );
+    }
+}

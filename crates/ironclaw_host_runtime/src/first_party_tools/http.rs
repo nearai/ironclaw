@@ -290,9 +290,16 @@ fn http_error(error: RuntimeHttpEgressError) -> FirstPartyCapabilityError {
         RuntimeHttpEgressReasonCode::CredentialUnavailable => RuntimeDispatchErrorKind::Client,
         RuntimeHttpEgressReasonCode::RequestDenied => RuntimeDispatchErrorKind::InputEncode,
         RuntimeHttpEgressReasonCode::NetworkError => RuntimeDispatchErrorKind::NetworkDenied,
-        RuntimeHttpEgressReasonCode::ResponseError => RuntimeDispatchErrorKind::OutputDecode,
+        // A remote HTTP error response is an operational failure surfaced to the model
+        // (retry, try a different endpoint, tell the user), not a fatal violation of our
+        // own output contract. Mapping it to OutputDecode/InvalidOutput would classify it
+        // as Permanent and abort the entire agent run.
+        RuntimeHttpEgressReasonCode::ResponseError => RuntimeDispatchErrorKind::OperationFailed,
+        // An oversized remote response body is likewise an operational/remote condition,
+        // not a violation of our own output contract, so it must stay recoverable and
+        // model-visible rather than aborting the run.
         RuntimeHttpEgressReasonCode::ResponseBodyLimitExceeded => {
-            RuntimeDispatchErrorKind::OutputTooLarge
+            RuntimeDispatchErrorKind::OperationFailed
         }
     };
     tracing::debug!(
