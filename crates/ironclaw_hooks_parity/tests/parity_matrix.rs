@@ -714,10 +714,20 @@ fn in_memory() -> Arc<dyn PredicateStateBackend> {
     Arc::new(InMemoryPredicateStateBackend::new())
 }
 
-/// Build a fresh, migrated libSQL backend over a private temp-file db. The
-/// `TempDir` is leaked so the file outlives the returned handle for the
-/// duration of the (short-lived) test process.
-async fn libsql_backend() -> Arc<dyn PredicateStateBackend> {
+/// A libSQL backend bound to a private temp-file db that **owns** its
+/// `TempDir`, so the db file is reclaimed when the fixture drops — no
+/// `Box::leak`. The caller holds the fixture across the script run; on drop the
+/// `backend` field (and its db handle) drops *before* `_dir` (struct fields
+/// drop in declaration order), so the file is closed before the directory is
+/// removed.
+struct LibSqlFixture {
+    backend: Arc<dyn PredicateStateBackend>,
+    _dir: tempfile::TempDir,
+}
+
+/// Build a fresh, migrated libSQL backend over a private temp-file db, wrapped
+/// in a [`LibSqlFixture`] that owns the `TempDir` for RAII cleanup.
+async fn libsql_backend() -> LibSqlFixture {
     use ironclaw_hooks_libsql::LibSqlPredicateStateBackend;
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("parity.db");
@@ -729,8 +739,10 @@ async fn libsql_backend() -> Arc<dyn PredicateStateBackend> {
     );
     let backend = LibSqlPredicateStateBackend::new(db);
     backend.run_migrations().await.expect("migrate");
-    Box::leak(Box::new(dir));
-    Arc::new(backend)
+    LibSqlFixture {
+        backend: Arc::new(backend),
+        _dir: dir,
+    }
 }
 
 /// Build a fresh, migrated Postgres backend bound to an isolated schema and
@@ -902,7 +914,11 @@ where
     // -fill-at-a-time discipline without rewriting the parity binary's harness.
     let libsql_log = {
         let _guard = libsql_serial_guard().lock().await;
-        script(libsql_backend().await).await
+        // Hold the fixture (which owns the TempDir) across the whole script run,
+        // then let it drop — backend first, then the temp dir — so the db file
+        // is cleaned up rather than leaked.
+        let fixture = libsql_backend().await;
+        script(Arc::clone(&fixture.backend)).await
     };
     assert_eq!(
         libsql_log, expected,
