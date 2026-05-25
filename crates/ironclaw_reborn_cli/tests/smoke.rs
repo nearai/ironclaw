@@ -1624,6 +1624,32 @@ fn run_confirm_host_access_requires_home_or_userprofile() {
 }
 
 #[test]
+fn run_confirm_host_access_uses_userprofile_when_home_is_absent() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let host_home = temp.path().join("host-home");
+    std::fs::create_dir_all(&reborn_home).expect("reborn home");
+    std::fs::create_dir_all(&host_home).expect("host home");
+
+    let output = Command::new(reborn_bin())
+        .args(["run", "--confirm-host-access", "-m", "ping"])
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("IRONCLAW_REBORN_PROFILE", "local-dev-yolo")
+        .env("USERPROFILE", &host_home)
+        .output()
+        .expect("ironclaw-reborn run should not crash");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("HOME or USERPROFILE must be set")
+            && !stderr.contains("requires explicit disclosure acknowledgement")
+            && !stderr.contains("requires --confirm-host-access"),
+        "confirmed run should use USERPROFILE and pass the host-access gate; got: {stderr}"
+    );
+}
+
+#[test]
 fn repl_confirm_host_access_flag_gates_local_dev_yolo() {
     let temp = tempfile::tempdir().expect("tempdir");
     let missing = local_yolo_command(&temp, &["repl"])
@@ -1737,6 +1763,34 @@ listen_host = "0.0.0.0"
         stderr.contains("refuses non-loopback listener 0.0.0.0")
             && stderr.contains("trusted-laptop host access"),
         "stderr should reject config-driven non-loopback trusted-laptop access; got: {stderr}"
+    );
+}
+
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn serve_local_dev_allows_non_loopback_without_trusted_laptop_access() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let output = Command::new(reborn_bin())
+        .args(["serve", "--host", "0.0.0.0", "--port", "0"])
+        .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
+        .env_remove("IRONCLAW_REBORN_PROFILE")
+        .env_remove("IRONCLAW_REBORN_WEBUI_TOKEN")
+        .env_remove("IRONCLAW_REBORN_WEBUI_USER_ID")
+        .output()
+        .expect("ironclaw-reborn serve should not crash");
+
+    assert!(
+        !output.status.success(),
+        "serve should still fail closed on missing WebUI token"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("IRONCLAW_REBORN_WEBUI_TOKEN must be set"),
+        "ordinary local-dev serve should reach WebUI token validation; got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("trusted-laptop host access"),
+        "ordinary local-dev serve should not trigger the trusted-laptop listener refusal; got: {stderr}"
     );
 }
 

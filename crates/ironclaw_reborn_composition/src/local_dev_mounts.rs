@@ -23,18 +23,20 @@ pub(crate) fn workspace_mount_view(
         let mut seen_aliases = HashSet::new();
         for host_home_alias in host_home_aliases {
             let Some(host_home_alias) = host_home_alias.to_str() else {
-                continue;
+                return Err(HostApiError::InvalidPath {
+                    value: "<non-utf8-host-home-alias>".to_string(),
+                    reason: "confirmed host-home alias must be valid UTF-8".to_string(),
+                });
             };
-            if !seen_aliases.insert(host_home_alias.to_string()) {
+            let raw_host_home_alias = MountAlias::new(host_home_alias.to_string())?;
+            if !seen_aliases.insert(raw_host_home_alias.as_str().to_string()) {
                 continue;
             }
-            if let Ok(raw_host_home_alias) = MountAlias::new(host_home_alias.to_string()) {
-                mounts.push(MountGrant::new(
-                    raw_host_home_alias,
-                    VirtualPath::new(HOST_TARGET)?,
-                    permissions.clone(),
-                ));
-            }
+            mounts.push(MountGrant::new(
+                raw_host_home_alias,
+                VirtualPath::new(HOST_TARGET)?,
+                permissions.clone(),
+            ));
         }
     }
     MountView::new(mounts)
@@ -88,32 +90,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn workspace_mount_keeps_host_alias_when_raw_alias_is_not_mount_shaped() {
-        let mounts = workspace_mount_view(
+    fn workspace_mount_rejects_host_home_alias_that_is_not_mount_shaped() {
+        let err = workspace_mount_view(
             MountPermissions::read_write(),
             &[Path::new(r"C:\Users\alice")],
         )
-        .expect("mount view builds");
+        .expect_err("invalid raw alias should fail loudly");
 
         assert!(
-            mounts
-                .mounts
-                .iter()
-                .any(|mount| mount.alias.as_str() == "/host")
-        );
-        assert!(
-            mounts
-                .mounts
-                .iter()
-                .all(|mount| mount.alias.as_str() != r"C:\Users\alice")
+            err.to_string().contains("backslashes are not allowed"),
+            "unexpected error: {err}"
         );
     }
 
     #[test]
-    fn workspace_mount_deduplicates_host_home_aliases() {
+    fn workspace_mount_deduplicates_normalized_host_home_aliases() {
         let mounts = workspace_mount_view(
             MountPermissions::read_write(),
-            &[Path::new("/Users/alice"), Path::new("/Users/alice")],
+            &[
+                Path::new("/Users/alice"),
+                Path::new("/Users/alice/"),
+                Path::new("/Users/alice/."),
+            ],
         )
         .expect("mount view builds");
 
