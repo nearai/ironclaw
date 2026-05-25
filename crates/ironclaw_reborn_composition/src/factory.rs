@@ -215,37 +215,8 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     }
 
     let filesystem = Arc::new(filesystem);
-    let setup_workspace_mounts =
-        workspace_mount_view(MountPermissions::read_only(), &[]).map_err(|error| {
-            RebornBuildError::InvalidConfig {
-                reason: error.to_string(),
-            }
-        })?;
-    let host_home_aliases = host_home_root
-        .as_ref()
-        .map(|host_home_root| {
-            vec![
-                host_home_root.raw_alias.as_path(),
-                host_home_root.canonical_root.as_path(),
-            ]
-        })
-        .unwrap_or_default();
-    let runtime_workspace_mounts =
-        workspace_mount_view(MountPermissions::read_write(), &host_home_aliases).map_err(
-            |error| RebornBuildError::InvalidConfig {
-                reason: error.to_string(),
-            },
-        )?;
-    let skill_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
-        Arc::clone(&filesystem),
-        skill_context_mount_view().map_err(|error| RebornBuildError::InvalidConfig {
-            reason: error.to_string(),
-        })?,
-    ));
-    let workspace_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
-        Arc::clone(&filesystem),
-        setup_workspace_mounts,
-    ));
+    let (skill_filesystem, workspace_filesystem, runtime_workspace_mounts) =
+        build_workspace_filesystems(Arc::clone(&filesystem), host_home_root.as_ref())?;
 
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
@@ -315,6 +286,56 @@ fn canonicalize_local_dev_path(path: &Path, label: &str) -> Result<PathBuf, Rebo
 struct LocalDevHostHomeRoot {
     canonical_root: PathBuf,
     raw_alias: PathBuf,
+}
+
+impl LocalDevHostHomeRoot {
+    fn aliases(&self) -> Vec<&Path> {
+        vec![self.raw_alias.as_path(), self.canonical_root.as_path()]
+    }
+}
+
+/// Build the two ScopedFilesystem views used by local-dev: a read-only workspace view
+/// for skill context, and a read-write workspace view for runtime operations.
+///
+/// When `host_home_root` is present, the runtime view also grants raw host-home aliases
+/// so `/Users/alice`-style paths resolve through the `/host` mount.
+fn build_workspace_filesystems(
+    filesystem: Arc<LocalFilesystem>,
+    host_home_root: Option<&LocalDevHostHomeRoot>,
+) -> Result<
+    (
+        Arc<ScopedFilesystem<LocalFilesystem>>,
+        Arc<ScopedFilesystem<LocalFilesystem>>,
+        MountView,
+    ),
+    RebornBuildError,
+> {
+    let read_only_workspace_mounts =
+        workspace_mount_view(MountPermissions::read_only(), &[]).map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: error.to_string(),
+            }
+        })?;
+    let host_home_aliases = host_home_root
+        .map(|root| root.aliases())
+        .unwrap_or_default();
+    let runtime_workspace_mounts =
+        workspace_mount_view(MountPermissions::read_write(), &host_home_aliases).map_err(
+            |error| RebornBuildError::InvalidConfig {
+                reason: error.to_string(),
+            },
+        )?;
+    let skill_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(&filesystem),
+        skill_context_mount_view().map_err(|error| RebornBuildError::InvalidConfig {
+            reason: error.to_string(),
+        })?,
+    ));
+    let workspace_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        filesystem,
+        read_only_workspace_mounts,
+    ));
+    Ok((skill_filesystem, workspace_filesystem, runtime_workspace_mounts))
 }
 
 fn canonicalize_local_dev_existing_dir(
