@@ -33,7 +33,11 @@ use ironclaw_turns::{
     TurnEventProjectionSource, TurnRunId, TurnScope, run_profile::CapabilityInputRef,
 };
 
+mod runtime_replay;
 mod turn_events;
+use runtime_replay::{
+    RuntimePayloadCandidate, replay_payload_candidates, snapshot_payload_candidates,
+};
 use turn_events::{TurnEventBridge, TurnEventPayload};
 
 const WEBUI_PROJECTION_PAGE_LIMIT: usize = 256;
@@ -747,54 +751,10 @@ struct RuntimePayloadItem {
 
 type RuntimePayloadItemResult = Result<Option<RuntimePayloadItem>, ProductAdapterError>;
 
-enum RuntimePayloadCandidate {
-    State { runs: Vec<RunStatusProjection> },
-    CapabilityActivity(CapabilityActivityProjection),
-    CapabilityDisplayPreview(CapabilityActivityProjection),
-}
-
 #[derive(Clone, Copy)]
 enum StatePayloadKind {
     Snapshot,
     Update,
-}
-
-fn snapshot_payload_candidates(snapshot: ProjectionSnapshot) -> Vec<RuntimePayloadCandidate> {
-    runtime_payload_candidates(
-        snapshot.runs,
-        snapshot.capability_activities,
-        WEBUI_RUNTIME_ITEM_MAX_PAYLOADS,
-    )
-}
-
-fn replay_payload_candidates(replay: &ProjectionReplay) -> Vec<RuntimePayloadCandidate> {
-    runtime_payload_candidates(
-        replay.runs.clone(),
-        replay.capability_activities.clone(),
-        WEBUI_RUNTIME_ITEM_MAX_PAYLOADS,
-    )
-}
-
-fn runtime_payload_candidates(
-    runs: Vec<RunStatusProjection>,
-    capability_activities: Vec<CapabilityActivityProjection>,
-    max_payloads: usize,
-) -> Vec<RuntimePayloadCandidate> {
-    let state_payloads = usize::from(!runs.is_empty());
-    let activity_payloads = max_payloads.saturating_sub(state_payloads);
-    let mut candidates = Vec::with_capacity(
-        state_payloads.saturating_add(activity_payloads.min(capability_activities.len())),
-    );
-    if !runs.is_empty() {
-        candidates.push(RuntimePayloadCandidate::State { runs });
-    }
-    for activity in capability_activities.into_iter().take(activity_payloads) {
-        candidates.push(RuntimePayloadCandidate::CapabilityActivity(
-            activity.clone(),
-        ));
-        candidates.push(RuntimePayloadCandidate::CapabilityDisplayPreview(activity));
-    }
-    candidates
 }
 
 async fn runtime_payloads_from_candidates(

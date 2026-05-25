@@ -101,6 +101,108 @@ async fn webui_event_stream_drains_capability_activity_from_projection() {
 }
 
 #[tokio::test]
+async fn webui_event_stream_replays_capability_started_before_folded_completion() {
+    let tenant_id = TenantId::new("webui-activity-replay-tenant").unwrap();
+    let user_id = UserId::new("webui-activity-replay-user").unwrap();
+    let agent_id = AgentId::new("webui-activity-replay-agent").unwrap();
+    let thread_id = ThreadId::new("webui-activity-replay-thread").unwrap();
+    let run_id = InvocationId::new();
+    let capability_invocation = InvocationId::new();
+    let capability = CapabilityId::new("script.echo").unwrap();
+    let provider = ExtensionId::new("script").unwrap();
+    let event_log = Arc::new(InMemoryDurableEventLog::new());
+    event_log
+        .append(RuntimeEvent::model_started(
+            resource_scope(&tenant_id, &user_id, &agent_id, &thread_id, run_id),
+            CapabilityId::new("loop.model").unwrap(),
+        ))
+        .await
+        .unwrap();
+
+    let event_log_dyn: Arc<dyn DurableEventLog> = event_log.clone();
+    let actor = TurnActor::new(user_id.clone());
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+    let services = build_reborn_projection_services(
+        event_log_dyn,
+        ReplyTargetBindingRef::new("webui-activity-replay-reply").unwrap(),
+    );
+    let initial = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: actor.clone(),
+            scope: scope.clone(),
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    event_log
+        .append(RuntimeEvent::dispatch_requested(
+            resource_scope(
+                &tenant_id,
+                &user_id,
+                &agent_id,
+                &thread_id,
+                capability_invocation,
+            ),
+            capability.clone(),
+        ))
+        .await
+        .unwrap();
+    event_log
+        .append(RuntimeEvent::dispatch_succeeded(
+            resource_scope(
+                &tenant_id,
+                &user_id,
+                &agent_id,
+                &thread_id,
+                capability_invocation,
+            ),
+            capability.clone(),
+            provider,
+            RuntimeKind::Script,
+            42,
+        ))
+        .await
+        .unwrap();
+
+    let replayed = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor,
+            scope,
+            after_cursor: Some(initial[0].projection_cursor().clone()),
+        })
+        .await
+        .unwrap();
+
+    let statuses = replayed
+        .iter()
+        .filter_map(|event| match event.payload() {
+            ProductOutboundPayload::CapabilityActivity(activity)
+                if activity.invocation_id == capability_invocation
+                    && activity.capability_id == capability =>
+            {
+                Some(activity.status)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        statuses,
+        vec![
+            CapabilityActivityStatusView::Started,
+            CapabilityActivityStatusView::Completed,
+        ]
+    );
+}
+
+#[tokio::test]
 async fn webui_event_stream_enriches_activity_with_display_preview_from_store() {
     let tenant_id = TenantId::new("webui-preview-tenant").unwrap();
     let user_id = UserId::new("webui-preview-user").unwrap();

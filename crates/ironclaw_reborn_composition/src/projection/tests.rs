@@ -100,6 +100,27 @@ impl TurnEventProjectionSource for FakeTurnEventSource {
     }
 }
 
+struct RebaseTurnEventSource {
+    cursor: TurnEventCursor,
+}
+
+#[async_trait]
+impl TurnEventProjectionSource for RebaseTurnEventSource {
+    async fn read_turn_events_after(
+        &self,
+        _scope: &TurnScope,
+        _after: Option<TurnEventCursor>,
+        _limit: usize,
+    ) -> Result<TurnEventPage, TurnError> {
+        Ok(TurnEventPage {
+            entries: Vec::new(),
+            next_cursor: self.cursor,
+            truncated: false,
+            rebase_required: Some(self.cursor),
+        })
+    }
+}
+
 struct FakeTurnCoordinator {
     state: TurnRunState,
 }

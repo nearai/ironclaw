@@ -34,7 +34,8 @@ use thiserror::Error;
 mod pending_gate_projection;
 mod runtime_projection;
 use runtime_projection::{
-    RuntimeProjectionState, sort_capability_activities_for_projection, sort_runs_for_projection,
+    RuntimeProjectionState, capability_activity_transition_for_entry,
+    sort_capability_activities_for_projection, sort_runs_for_projection,
 };
 
 pub use pending_gate_projection::{
@@ -168,6 +169,8 @@ pub struct ProjectionSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectionReplay {
     pub updates: Vec<TimelineEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capability_activity_transitions: Vec<CapabilityActivityProjection>,
     pub runs: Vec<RunStatusProjection>,
     pub capability_activities: Vec<CapabilityActivityProjection>,
     pub next_cursor: ProjectionCursor,
@@ -1437,6 +1440,11 @@ impl EventProjectionService for ReplayEventProjectionService {
     ) -> Result<ProjectionReplay, ProjectionError> {
         let scope = request.scope.clone();
         let page = self.read_runtime(request).await?;
+        let capability_activity_transitions = page
+            .entries
+            .iter()
+            .filter_map(capability_activity_transition_for_entry)
+            .collect::<Vec<_>>();
         let touched_runs = page
             .entries
             .iter()
@@ -1454,6 +1462,7 @@ impl EventProjectionService for ReplayEventProjectionService {
         sort_capability_activities_for_projection(&mut capability_activities);
         Ok(ProjectionReplay {
             updates: project_timeline(&page.entries).entries,
+            capability_activity_transitions,
             runs,
             capability_activities,
             next_cursor: page.next_cursor,

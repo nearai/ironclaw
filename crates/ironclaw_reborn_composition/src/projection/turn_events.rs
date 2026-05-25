@@ -62,14 +62,25 @@ impl TurnEventBridge {
         let mut payloads = Vec::new();
         let mut next_cursor;
         loop {
-            let page = service
+            let page = match service
                 .updates(TurnEventProjectionRequest {
                     scope: scope.clone(),
                     after: after_cursor.clone(),
                     limit: WEBUI_TURN_EVENT_PAGE_LIMIT,
                 })
                 .await
-                .map_err(map_turn_event_projection_error)?;
+            {
+                Ok(page) => page,
+                Err(TurnEventProjectionError::RebaseRequired { earliest, .. })
+                    if after_cursor.is_none() =>
+                {
+                    return Ok(TurnEventDrain {
+                        next_cursor: Some(*earliest),
+                        payloads: Vec::new(),
+                    });
+                }
+                Err(error) => return Err(map_turn_event_projection_error(error)),
+            };
             next_cursor = Some(page.next_cursor.clone());
             for event in page.entries {
                 if let Some(payload) = turn_event_payload(coordinator.as_ref(), &event).await? {

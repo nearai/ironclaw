@@ -149,6 +149,7 @@ fn replay(scope: &ProjectionScope, cursor: u64, next: u64) -> ProjectionReplay {
             cursor,
             TimelineEntryKind::DispatchSucceeded,
         )],
+        capability_activity_transitions: Vec::new(),
         runs: vec![run_status(scope, next)],
         capability_activities: vec![capability_activity(scope, next)],
         next_cursor: ProjectionCursor::for_scope(scope.clone(), EventCursor::new(next)),
@@ -206,6 +207,20 @@ fn replay_with_activity_thread(
     for activity in &mut replay.capability_activities {
         activity.thread_id = thread_id.clone();
     }
+    replay
+}
+
+fn replay_with_activity_transition_thread(
+    scope: &ProjectionScope,
+    cursor: u64,
+    next: u64,
+    thread: &str,
+) -> ProjectionReplay {
+    let mut replay = replay(scope, cursor, next);
+    let mut transition = capability_activity(scope, next);
+    transition.thread_id = Some(ThreadId::new(thread).unwrap());
+    transition.status = CapabilityActivityStatus::Started;
+    replay.capability_activity_transitions = vec![transition];
     replay
 }
 

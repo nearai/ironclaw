@@ -84,6 +84,19 @@ pub(crate) fn sort_capability_activities_for_projection(
     });
 }
 
+pub(crate) fn capability_activity_transition_for_entry(
+    entry: &EventLogEntry<RuntimeEvent>,
+) -> Option<CapabilityActivityProjection> {
+    let status = capability_activity_status_for_event(entry.record.kind, None, false)?;
+    if !matches!(
+        status,
+        CapabilityActivityStatus::Started | CapabilityActivityStatus::Running
+    ) {
+        return None;
+    }
+    Some(capability_activity_projection_for_entry(entry, status))
+}
+
 fn apply_run_event(
     runs: &mut HashMap<InvocationId, RunStatusProjection>,
     entry: &EventLogEntry<RuntimeEvent>,
@@ -169,20 +182,7 @@ fn apply_capability_activity_event(
     let sanitized_error_kind = event.error_kind.clone().map(sanitize_error_kind);
     let activity = activities
         .entry(event.scope.invocation_id)
-        .or_insert_with(|| CapabilityActivityProjection {
-            invocation_id: event.scope.invocation_id,
-            run_id: event.parent_invocation_id,
-            capability_id: event.capability_id.clone(),
-            thread_id: event.scope.thread_id.clone(),
-            status,
-            provider: event.provider.clone(),
-            runtime: event.runtime,
-            process_id: event.process_id,
-            output_bytes: event.output_bytes,
-            error_kind: sanitized_error_kind.clone(),
-            last_cursor: entry.cursor,
-            updated_at: event.timestamp,
-        });
+        .or_insert_with(|| capability_activity_projection_for_entry(entry, status));
 
     activity.status = status;
     if event.parent_invocation_id.is_some() {
@@ -214,6 +214,27 @@ fn apply_capability_activity_event(
     }
     activity.last_cursor = entry.cursor;
     activity.updated_at = event.timestamp;
+}
+
+fn capability_activity_projection_for_entry(
+    entry: &EventLogEntry<RuntimeEvent>,
+    status: CapabilityActivityStatus,
+) -> CapabilityActivityProjection {
+    let event = &entry.record;
+    CapabilityActivityProjection {
+        invocation_id: event.scope.invocation_id,
+        run_id: event.parent_invocation_id,
+        capability_id: event.capability_id.clone(),
+        thread_id: event.scope.thread_id.clone(),
+        status,
+        provider: event.provider.clone(),
+        runtime: event.runtime,
+        process_id: event.process_id,
+        output_bytes: event.output_bytes,
+        error_kind: event.error_kind.clone().map(sanitize_error_kind),
+        last_cursor: entry.cursor,
+        updated_at: event.timestamp,
+    }
 }
 
 fn capability_activity_status_for_event(
