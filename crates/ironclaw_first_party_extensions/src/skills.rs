@@ -10,9 +10,9 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{MountView, ResourceScope, RuntimeDispatchErrorKind};
 use ironclaw_skills::{
-    SkillInstallFile, SkillInstallRequest, SkillInstallSource, SkillManagementContext,
-    SkillManagementError, SkillManagementErrorKind, SkillRemoveRequest, SkillSummary,
-    install_skill, list_skills, remove_skill,
+    InstalledSkillMetadataSource, SkillInstallFile, SkillInstallRequest, SkillInstallSource,
+    SkillManagementContext, SkillManagementError, SkillManagementErrorKind, SkillRemoveRequest,
+    SkillSummary, install_skill, list_skills, remove_skill,
 };
 use serde_json::{Value, json};
 
@@ -267,7 +267,9 @@ fn parse_install_source(
 ) -> Result<SkillInstallSource, SkillManagementCapabilityError> {
     match input.get("source").and_then(Value::as_str) {
         None => Ok(SkillInstallSource::User),
-        Some("installed_url") => Ok(SkillInstallSource::InstalledUrl),
+        Some(value) if value == InstalledSkillMetadataSource::InstalledUrl.as_str() => {
+            Ok(SkillInstallSource::InstalledUrl)
+        }
         Some(_) => Err(input_error()),
     }
 }

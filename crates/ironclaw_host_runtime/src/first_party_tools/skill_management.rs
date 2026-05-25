@@ -10,6 +10,7 @@ use ironclaw_first_party_extensions::skills::{
 use ironclaw_host_api::{
     CapabilityId, EffectKind, HostApiError, PermissionMode, ResourceUsage, RuntimeDispatchErrorKind,
 };
+use ironclaw_skills::InstalledSkillMetadataSource;
 use serde_json::{Value, json};
 
 use crate::{
@@ -161,7 +162,11 @@ async fn skill_install_input(
             rewritten.insert("content".to_string(), Value::String(payload.content));
             rewritten.insert(
                 "source".to_string(),
-                Value::String("installed_url".to_string()),
+                Value::String(
+                    InstalledSkillMetadataSource::InstalledUrl
+                        .as_str()
+                        .to_string(),
+                ),
             );
             rewritten.insert("source_url".to_string(), Value::String(url.to_string()));
             if !payload.files.is_empty() {

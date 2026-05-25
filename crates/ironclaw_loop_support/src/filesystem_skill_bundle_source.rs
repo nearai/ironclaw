@@ -3,10 +3,12 @@ use std::{collections::HashSet, sync::Arc};
 use async_trait::async_trait;
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{ResourceScope, ScopedPath, TenantId};
-use ironclaw_skills::{MAX_PROMPT_FILE_SIZE, SkillTrust, parse_skill_md};
+use ironclaw_skills::{
+    INSTALL_METADATA_FILE_NAME, InstalledSkillMetadata, MAX_INSTALL_METADATA_BYTES,
+    MAX_PROMPT_FILE_SIZE, SkillTrust, parse_skill_md,
+};
 use ironclaw_turns::run_profile::{LoopRunContext, SkillVisibility};
 use parking_lot::Mutex;
-use serde::Deserialize;
 use tracing::debug;
 
 use crate::{
@@ -16,14 +18,6 @@ use crate::{
 
 const DEFAULT_MAX_BUNDLE_FILE_BYTES: usize = 256 * 1024;
 const DEFAULT_MAX_BUNDLES_PER_ROOT: usize = 100;
-const INSTALL_METADATA_FILE_NAME: &str = ".ironclaw-install.json";
-const MAX_INSTALL_METADATA_BYTES: usize = 4096;
-
-#[derive(Debug, Deserialize)]
-struct InstallMetadata {
-    source: Option<String>,
-}
-
 /// One scoped filesystem root that can contain portable skill bundle folders.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilesystemSkillBundleRoot {
@@ -289,12 +283,10 @@ where
             Err(error) if is_not_found(&error) => return Ok(default_trust),
             Err(error) => return Err(map_file_read_error(error)),
         };
-        let Ok(metadata) = serde_json::from_slice::<InstallMetadata>(&bytes) else {
-            return Ok(Some(SkillTrust::Installed));
-        };
-        match metadata.source.as_deref() {
-            Some("installed_url") => Ok(Some(SkillTrust::Installed)),
-            Some(_) | None => Ok(Some(SkillTrust::Installed)),
+        if InstalledSkillMetadata::sidecar_bytes_mark_installed(&bytes) {
+            Ok(Some(SkillTrust::Installed))
+        } else {
+            Ok(default_trust)
         }
     }
 

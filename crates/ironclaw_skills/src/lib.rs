@@ -37,6 +37,7 @@
 //! controls tool access via capability leases.
 
 pub mod gating;
+pub mod install_metadata;
 pub mod management;
 mod parser;
 mod selector;
@@ -57,6 +58,10 @@ pub use types::{
 };
 
 pub use gating::{GatingResult, check_requirements, check_requirements_sync};
+pub use install_metadata::{
+    INSTALL_METADATA_FILE_NAME, InstalledSkillMetadata, InstalledSkillMetadataSource,
+    MAX_INSTALL_METADATA_BYTES,
+};
 pub use management::{
     MAX_INSTALL_BUNDLE_FILES, SkillInstallFile, SkillInstallRequest, SkillInstallResult,
     SkillInstallSource, SkillManagementContext, SkillManagementError, SkillManagementErrorKind,

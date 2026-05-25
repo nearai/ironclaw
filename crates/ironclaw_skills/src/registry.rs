@@ -16,10 +16,11 @@
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::gating;
+use crate::install_metadata::INSTALL_METADATA_FILE_NAME;
+pub use crate::install_metadata::InstalledSkillMetadata;
 use crate::parser::{
     SkillParseError, parse_skill_md, parse_skill_md_for_install_recovery,
     split_skill_md_frontmatter,
@@ -209,17 +210,6 @@ pub struct InstallFile {
     pub relative_path: PathBuf,
     pub contents: Vec<u8>,
 }
-
-/// Persisted metadata about how a skill bundle was installed.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InstalledSkillMetadata {
-    #[serde(default)]
-    pub source_url: Option<String>,
-    #[serde(default)]
-    pub source_subdir: Option<String>,
-}
-
-const INSTALL_METADATA_FILE: &str = ".ironclaw-install.json";
 
 fn validate_install_relative_path(path: &Path) -> Result<PathBuf, SkillRegistryError> {
     if path.as_os_str().is_empty() || path.is_absolute() {
@@ -676,7 +666,7 @@ impl SkillRegistry {
         }
 
         if let Some(metadata) = install_metadata {
-            let meta_path = skill_dir.join(INSTALL_METADATA_FILE);
+            let meta_path = skill_dir.join(INSTALL_METADATA_FILE_NAME);
             let meta_json = serde_json::to_vec_pretty(metadata).map_err(|e| {
                 SkillRegistryError::WriteError {
                     path: meta_path.display().to_string(),
@@ -832,7 +822,7 @@ impl SkillRegistry {
 
     /// Load persisted install metadata for a skill directory, if present.
     pub async fn read_install_metadata(path: &Path) -> Option<InstalledSkillMetadata> {
-        let meta_path = path.join(INSTALL_METADATA_FILE);
+        let meta_path = path.join(INSTALL_METADATA_FILE_NAME);
         let bytes = tokio::fs::read(&meta_path).await.ok()?;
         serde_json::from_slice(&bytes).ok()
     }
@@ -1230,6 +1220,7 @@ mod tests {
         let metadata = InstalledSkillMetadata {
             source_url: Some("https://github.com/Pika-Labs/Pika-Skills".to_string()),
             source_subdir: Some("pikastream-video-meeting".to_string()),
+            ..Default::default()
         };
 
         let (name, loaded) = SkillRegistry::prepare_install_bundle_to_disk(
