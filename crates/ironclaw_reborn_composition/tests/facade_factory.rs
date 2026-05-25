@@ -30,6 +30,8 @@ use ironclaw_host_runtime::{
 use ironclaw_reborn::planned_driver_factory::PLANNED_DEFAULT_PROFILE_ID;
 #[cfg(all(feature = "postgres", not(feature = "libsql")))]
 use ironclaw_reborn_composition::RebornCompositionProfile;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_reborn_composition::RebornRuntimeProcessBinding;
 #[cfg(feature = "libsql")]
 use ironclaw_reborn_composition::{RebornBuildError, RebornCompositionProfile};
 use ironclaw_reborn_composition::{RebornBuildInput, RebornReadinessState, build_reborn_services};
@@ -47,6 +49,47 @@ use ironclaw_turns::{
     runner::{ClaimedTurnRun, TurnRunTransitionPort},
 };
 use secrecy::SecretString;
+#[cfg(feature = "libsql")]
+use tokio::sync::Mutex;
+
+#[cfg(feature = "libsql")]
+static SECRETS_MASTER_KEY_ENV_LOCK: Mutex<()> = Mutex::const_new(());
+
+#[cfg(feature = "libsql")]
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+#[cfg(feature = "libsql")]
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(key);
+        // SAFETY: tests serialize process-env mutation with
+        // SECRETS_MASTER_KEY_ENV_LOCK and restore the prior value on drop.
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, previous }
+    }
+}
+
+#[cfg(feature = "libsql")]
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        // SAFETY: EnvVarGuard is only constructed while
+        // SECRETS_MASTER_KEY_ENV_LOCK is held by this test module.
+        unsafe {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
+
+#[path = "facade_factory/sandbox_process_ports.rs"]
+mod sandbox_process_ports;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 fn test_master_key() -> SecretMaterial {
@@ -332,6 +375,37 @@ async fn local_dev_builds_facades_without_production_claim() {
     assert!(services.product_auth.is_some());
 }
 
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn test_sandbox_process_binding() -> RebornRuntimeProcessBinding {
+    let process_port = Arc::new(ironclaw_host_runtime::TenantSandboxProcessPort::new(
+        Arc::new(ProductionReadySandboxTransport),
+    ));
+    RebornRuntimeProcessBinding::tenant_sandbox(process_port)
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+#[derive(Debug)]
+struct ProductionReadySandboxTransport;
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+#[async_trait::async_trait]
+impl ironclaw_host_runtime::SandboxCommandTransport for ProductionReadySandboxTransport {
+    async fn run_command(
+        &self,
+        _request: ironclaw_host_runtime::CommandExecutionRequest,
+    ) -> Result<
+        ironclaw_host_runtime::CommandExecutionOutput,
+        ironclaw_host_runtime::RuntimeProcessError,
+    > {
+        Ok(ironclaw_host_runtime::CommandExecutionOutput {
+            output: String::new(),
+            exit_code: 0,
+            sandboxed: true,
+            duration: std::time::Duration::ZERO,
+        })
+    }
+}
+
 #[tokio::test]
 async fn local_dev_product_auth_entrypoint_redacts_manual_token_submit() {
     let dir = tempfile::tempdir().unwrap();
@@ -544,7 +618,8 @@ async fn production_requires_live_turn_wake_notifier() {
             test_master_key(),
         )
         .with_production_trust_policy(production_trust_policy())
-        .with_runtime_policy(production_runtime_policy()),
+        .with_runtime_policy(production_runtime_policy())
+        .with_runtime_process_binding(test_sandbox_process_binding()),
     )
     .await;
 
@@ -657,6 +732,43 @@ async fn production_rejects_memory_libsql_event_store() {
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
+async fn production_libsql_resolved_secret_master_key_rejects_invalid_env_key() {
+    let _guard = SECRETS_MASTER_KEY_ENV_LOCK.lock().await;
+    let _env = EnvVarGuard::set(
+        ironclaw_secrets::keychain::SECRETS_MASTER_KEY_ENV,
+        "correct horse battery staple pad!!",
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let db = libsql_db_at(dir.path().join("reborn.db")).await;
+    let (notifier, handle) = live_wake_notifier();
+
+    let result = build_reborn_services(
+        RebornBuildInput::libsql_with_resolved_secret_master_key(
+            RebornCompositionProfile::Production,
+            "test-owner",
+            db,
+            dir.path().join("events.db").to_string_lossy(),
+            None,
+        )
+        .with_production_trust_policy(production_trust_policy())
+        .with_runtime_policy(production_runtime_policy())
+        .with_turn_run_wake_notifier(notifier)
+        .with_runtime_process_binding(test_sandbox_process_binding()),
+    )
+    .await;
+
+    handle.shutdown().await;
+
+    assert!(matches!(
+        result,
+        Err(RebornBuildError::Secret(
+            ironclaw_secrets::SecretError::InvalidMasterKey
+        ))
+    ));
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
 async fn production_libsql_services_wire_first_party_runtime_http_egress() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("reborn.db");
@@ -675,6 +787,7 @@ async fn production_libsql_services_wire_first_party_runtime_http_egress() {
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier)
+        .with_runtime_process_binding(test_sandbox_process_binding())
         .with_required_runtime_backends([RuntimeKind::FirstParty])
         .require_runtime_http_egress(),
     )
@@ -720,6 +833,7 @@ async fn production_postgres_services_wire_first_party_runtime_http_egress() {
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier)
+        .with_runtime_process_binding(test_sandbox_process_binding())
         .with_required_runtime_backends([RuntimeKind::FirstParty])
         .require_runtime_http_egress(),
     )
@@ -759,13 +873,14 @@ async fn migration_dry_run_validates_libsql_shape() {
             RebornCompositionProfile::MigrationDryRun,
             "test-owner",
             db,
-            db_path.to_string_lossy(),
+            dir.path().join("events.db").to_string_lossy(),
             None,
             test_master_key(),
         )
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(production_runtime_policy())
-        .with_turn_run_wake_notifier(notifier),
+        .with_turn_run_wake_notifier(notifier)
+        .with_runtime_process_binding(test_sandbox_process_binding()),
     )
     .await
     .unwrap();
@@ -814,7 +929,8 @@ async fn migration_dry_run_validates_postgres_planned_turn_profile() {
         )
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(production_runtime_policy())
-        .with_turn_run_wake_notifier(notifier),
+        .with_turn_run_wake_notifier(notifier)
+        .with_runtime_process_binding(test_sandbox_process_binding()),
     )
     .await
     .unwrap();

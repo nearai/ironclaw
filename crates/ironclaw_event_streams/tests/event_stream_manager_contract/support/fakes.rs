@@ -245,6 +245,25 @@ impl EventProjectionService for PayloadThreadMismatchProjectionService {
     }
 }
 
+struct ActivityThreadMismatchProjectionService;
+
+#[async_trait]
+impl EventProjectionService for ActivityThreadMismatchProjectionService {
+    async fn snapshot(
+        &self,
+        request: ProjectionRequest,
+    ) -> Result<ProjectionSnapshot, ProjectionError> {
+        Ok(snapshot_with_activity_thread(&request.scope, 10, "thread-b"))
+    }
+
+    async fn updates(
+        &self,
+        request: ProjectionRequest,
+    ) -> Result<ProjectionReplay, ProjectionError> {
+        Ok(replay_with_activity_thread(&request.scope, 2, 3, "thread-b"))
+    }
+}
+
 struct FailingUpdatesProjectionService {
     error: ProjectionError,
 }

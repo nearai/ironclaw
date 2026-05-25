@@ -1137,6 +1137,9 @@ fn dispatch_kind_to_failure(kind: DispatchFailureKind) -> RuntimeFailureKind {
         DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied) => {
             RuntimeFailureKind::Network
         }
+        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::PolicyDenied) => {
+            RuntimeFailureKind::Authorization
+        }
         DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OutputTooLarge) => {
             RuntimeFailureKind::OutputTooLarge
         }
@@ -1265,6 +1268,10 @@ mod tests {
             (
                 RuntimeDispatchErrorKind::OutputTooLarge,
                 RuntimeFailureKind::OutputTooLarge,
+            ),
+            (
+                RuntimeDispatchErrorKind::PolicyDenied,
+                RuntimeFailureKind::Authorization,
             ),
             (
                 RuntimeDispatchErrorKind::Resource,

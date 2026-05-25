@@ -329,6 +329,7 @@ fn runtime_dispatch_error_kinds_have_safe_event_tokens() {
         ),
         (RuntimeDispatchErrorKind::OutputDecode, "output_decode"),
         (RuntimeDispatchErrorKind::OutputTooLarge, "output_too_large"),
+        (RuntimeDispatchErrorKind::PolicyDenied, "policy_denied"),
         (RuntimeDispatchErrorKind::Resource, "resource"),
         (RuntimeDispatchErrorKind::SecretDenied, "secret_denied"),
         (

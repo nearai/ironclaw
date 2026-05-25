@@ -175,7 +175,10 @@ pub(crate) enum RetryScope {
 ///
 /// This strategy:
 /// - Turns `PolicyDenied`, `InputInvalid`, and `OperationFailed` into
-///   model-visible tool error results without consuming retry budget.
+///   model-visible tool error results without consuming retry budget. The
+///   operation-failed class includes ordinary tool failures such as HTTP
+///   network errors and output-size limits so the model can explain the
+///   failure or choose a different approach.
 /// - Aborts immediately on `Permanent` and `ContentFiltered`.
 /// - Retries capability/model transient, unavailable, and internal errors up
 ///   to [`Self::max_attempts_per_class`] times with `Backoff`.

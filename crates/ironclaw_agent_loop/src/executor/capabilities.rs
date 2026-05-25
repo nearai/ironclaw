@@ -30,6 +30,8 @@ use super::{
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct CapabilityStage;
 
+const MAX_SAFE_SUMMARY_BYTES: usize = 512;
+
 pub(super) struct CapabilityInput {
     pub(super) state: LoopExecutionState,
     pub(super) surface: VisibleCapabilitySurface,
@@ -206,6 +208,46 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
     }
 }
 
+fn capability_failed_summary(
+    error_kind: &CapabilityFailureKind,
+    safe_summary: String,
+) -> Result<SanitizedStrategySummary, AgentLoopExecutorError> {
+    prefixed_capability_summary(
+        format!("capability failed with {}: ", error_kind.as_str()),
+        safe_summary,
+    )
+}
+
+fn capability_denied_summary(
+    reason_kind: &str,
+    safe_summary: String,
+) -> Result<SanitizedStrategySummary, AgentLoopExecutorError> {
+    prefixed_capability_summary(
+        format!("capability denied with {reason_kind}: "),
+        safe_summary,
+    )
+}
+
+fn prefixed_capability_summary(
+    prefix: String,
+    safe_summary: String,
+) -> Result<SanitizedStrategySummary, AgentLoopExecutorError> {
+    let detail = sanitized_strategy_summary(safe_summary)?;
+    let detail = truncate_summary_detail(detail.as_str(), MAX_SAFE_SUMMARY_BYTES - prefix.len());
+    sanitized_strategy_summary(format!("{prefix}{detail}"))
+}
+
+fn truncate_summary_detail(detail: &str, max_bytes: usize) -> &str {
+    if detail.len() <= max_bytes {
+        return detail;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !detail.is_char_boundary(end) {
+        end -= 1;
+    }
+    &detail[..end]
+}
+
 impl CapabilityStage {
     async fn completed_turn(
         &self,
@@ -287,7 +329,10 @@ impl CapabilityStage {
                     .push(LoopFailureKind::PolicyDenied);
                 let summary = CapabilityErrorSummary {
                     class: CapabilityErrorClass::PolicyDenied,
-                    safe_summary: sanitized_strategy_summary(denied.safe_summary)?,
+                    safe_summary: capability_denied_summary(
+                        denied.reason_kind.as_str(),
+                        denied.safe_summary,
+                    )?,
                     diagnostic_ref: None,
                 };
                 self.handle_capability_error(ctx, state, call, summary)
@@ -302,7 +347,10 @@ impl CapabilityStage {
                     .push(capability_failure_kind(&failure.error_kind));
                 let summary = CapabilityErrorSummary {
                     class: capability_error_class(&failure.error_kind),
-                    safe_summary: sanitized_strategy_summary(failure.safe_summary)?,
+                    safe_summary: capability_failed_summary(
+                        &failure.error_kind,
+                        failure.safe_summary,
+                    )?,
                     diagnostic_ref: None,
                 };
                 self.handle_capability_error(ctx, state, call, summary)
@@ -389,7 +437,10 @@ impl CapabilityStage {
                             }
                             summary = CapabilityErrorSummary {
                                 class: capability_error_class(&failure.error_kind),
-                                safe_summary: sanitized_strategy_summary(failure.safe_summary)?,
+                                safe_summary: capability_failed_summary(
+                                    &failure.error_kind,
+                                    failure.safe_summary,
+                                )?,
                                 diagnostic_ref: None,
                             };
                         }

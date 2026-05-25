@@ -947,7 +947,7 @@ async fn builtin_http_maps_runtime_egress_errors_by_source() {
                 request_bytes: 0,
                 response_bytes: 0,
             },
-            RuntimeFailureKind::Network,
+            RuntimeFailureKind::Authorization,
         ),
         (
             RuntimeHttpEgressError::Network {
@@ -1045,7 +1045,7 @@ async fn builtin_http_exercises_real_policy_private_ip_rejection() {
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::Network);
+    assert_eq!(error, RuntimeFailureKind::Authorization);
     assert!(requests.lock().unwrap().is_empty());
 }
 

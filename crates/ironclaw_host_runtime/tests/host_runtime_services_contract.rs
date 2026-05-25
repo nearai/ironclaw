@@ -1212,6 +1212,35 @@ fn production_wiring_validation_tracks_tenant_sandbox_process_port_for_builtin_s
         ),
         "configured tenant sandbox process port should clear missing but remain unverified: {report:?}"
     );
+
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_builtin_first_party_package()),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_runtime_policy(hosted_dev_runtime_policy())
+    .with_production_tenant_sandbox_process_port(Arc::new(TenantSandboxProcessPort::new(
+        Arc::new(ProductionCandidateSandboxTransport),
+    )));
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([RuntimeKind::FirstParty]))
+        .expect_err("test service graph still uses local-only backing stores");
+
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::RuntimeProcessPort,
+            ProductionWiringIssueKind::Missing
+        ) && !report.contains(
+            ProductionWiringComponent::RuntimeProcessPort,
+            ProductionWiringIssueKind::UnverifiedProductionImplementation
+        ),
+        "verified tenant sandbox process port should satisfy the process-port gate: {report:?}"
+    );
 }
 
 #[test]

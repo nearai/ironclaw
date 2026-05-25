@@ -6,9 +6,10 @@
 //! refs, or delivery attempt ids.
 
 use ironclaw_product_workflow::{
-    AuthPromptView, FinalReplyView, GatePromptView, ProductOutboundEnvelope,
-    ProductOutboundPayload, ProductProjectionState, ProgressKind, ProgressUpdateView,
-    ProjectionCursor, RebornCancelRunResponse, RebornGetRunStateResponse, RebornSubmitTurnResponse,
+    AuthPromptView, CapabilityActivityView, FinalReplyView, GatePromptView,
+    ProductOutboundEnvelope, ProductOutboundPayload, ProductProjectionState, ProgressKind,
+    ProgressUpdateView, ProjectionCursor, RebornCancelRunResponse, RebornGetRunStateResponse,
+    RebornSubmitTurnResponse,
 };
 use serde::{Deserialize, Serialize};
 
@@ -59,6 +60,9 @@ pub enum WebChatV2Event {
     CapabilityProgress {
         progress: ProgressUpdateView,
     },
+    CapabilityActivity {
+        activity: CapabilityActivityView,
+    },
     Gate {
         prompt: GatePromptView,
     },
@@ -89,6 +93,7 @@ impl WebChatV2Event {
             Self::Accepted { .. } => "accepted",
             Self::Running { .. } => "running",
             Self::CapabilityProgress { .. } => "capability_progress",
+            Self::CapabilityActivity { .. } => "capability_activity",
             Self::Gate { .. } => "gate",
             Self::AuthRequired { .. } => "auth_required",
             Self::FinalReply { .. } => "final_reply",
@@ -109,6 +114,9 @@ impl From<ProductOutboundPayload> for WebChatV2Event {
                 if progress.kind == ProgressKind::ToolRunning =>
             {
                 Self::CapabilityProgress { progress }
+            }
+            ProductOutboundPayload::CapabilityActivity(activity) => {
+                Self::CapabilityActivity { activity }
             }
             ProductOutboundPayload::Progress(progress) => Self::Running { progress },
             ProductOutboundPayload::GatePrompt(prompt) => Self::Gate { prompt },

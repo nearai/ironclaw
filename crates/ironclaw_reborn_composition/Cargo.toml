@@ -31,6 +31,7 @@ root-llm-provider = [
 webui-v2-beta = [
     "dep:ironclaw_webui_v2",
     "ironclaw_webui_v2/webui-v2-beta",
+    "libsql",
     "dep:axum",
     "dep:tower",
     "dep:tower-http",
