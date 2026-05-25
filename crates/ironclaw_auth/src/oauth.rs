@@ -141,19 +141,21 @@ impl OAuthTokenResponse {
 }
 
 pub fn opaque_state_hash(state: &str) -> Result<OpaqueStateHash, AuthProductError> {
-    OpaqueStateHash::new(sha256_hex(state))
+    OpaqueStateHash::new(hex::encode(Sha256::digest(state.as_bytes())))
 }
 
 pub fn pkce_verifier_hash(
     verifier: &PkceVerifierSecret,
 ) -> Result<PkceVerifierHash, AuthProductError> {
-    PkceVerifierHash::new(sha256_hex(verifier.expose_secret()))
+    PkceVerifierHash::new(hex::encode(Sha256::digest(
+        verifier.expose_secret().as_bytes(),
+    )))
 }
 
 pub fn authorization_code_hash(
     code: &OAuthAuthorizationCode,
 ) -> Result<AuthorizationCodeHash, AuthProductError> {
-    AuthorizationCodeHash::new(sha256_hex(code.expose_secret()))
+    AuthorizationCodeHash::new(hex::encode(Sha256::digest(code.expose_secret().as_bytes())))
 }
 
 pub fn pkce_s256_challenge(verifier: &PkceVerifierSecret) -> PkceCodeChallenge {
@@ -242,12 +244,6 @@ pub fn scope_text(scopes: &[ProviderScope]) -> String {
         .map(ProviderScope::as_str)
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-fn sha256_hex(value: &str) -> String {
-    // Digest newtypes expose constant-time comparison for callback/state checks;
-    // this helper only constructs the canonical 64-character lowercase hex text.
-    hex::encode(Sha256::digest(value.as_bytes()))
 }
 
 fn validate_authorize_fragment(label: &'static str, value: &str) -> Result<(), AuthProductError> {

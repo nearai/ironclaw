@@ -269,7 +269,7 @@ fn build_authorization_url_rejects_invalid_endpoint() {
 }
 
 #[test]
-fn build_authorization_url_rejects_http_endpoint() {
+fn authorization_url_builder_rejects_non_https_scheme() {
     let challenge = verifier_challenge();
     let scopes = valid_scopes();
 
