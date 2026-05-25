@@ -75,6 +75,7 @@ use crate::projection::{RebornProjectionServices, build_reborn_projection_servic
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
 use crate::{RebornBuildError, RebornCompositionProfile, RebornServices, build_reborn_services};
 
+mod approval;
 mod local_dev;
 mod skills;
 
@@ -869,7 +870,7 @@ pub async fn build_reborn_runtime(
     let approval_interaction_service: Arc<dyn ApprovalInteractionService> =
         Arc::new(DefaultApprovalInteractionService::new(
             approval_read_model,
-            Arc::new(local_dev::LocalDevApprovalLeaseTermsProvider::new(
+            Arc::new(approval::LocalDevApprovalLeaseTermsProvider::new(
                 local_runtime.workspace_mounts.clone(),
                 local_runtime.skill_mounts.clone(),
             )),

@@ -64,6 +64,24 @@ pub struct DefaultApprovalInteractionService {
     turn_coordinator: Arc<dyn TurnCoordinator>,
 }
 
+#[derive(Clone, Copy)]
+enum ApprovalCapabilityAction {
+    Dispatch,
+    Spawn,
+}
+
+impl ApprovalCapabilityAction {
+    fn from_action(action: &Action) -> Result<Self, ProductWorkflowError> {
+        match action {
+            Action::Dispatch { .. } => Ok(Self::Dispatch),
+            Action::SpawnCapability { .. } => Ok(Self::Spawn),
+            _ => Err(approval_rejected(
+                ApprovalInteractionRejectionKind::UnsupportedAction,
+            )),
+        }
+    }
+}
+
 impl DefaultApprovalInteractionService {
     pub fn new(
         read_model: Arc<dyn ApprovalInteractionReadModel>,
@@ -133,15 +151,7 @@ impl DefaultApprovalInteractionService {
         gate: ApprovalGateRecord,
         run_id: TurnRunId,
     ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
-        let approve_dispatch = match gate.request().action.as_ref() {
-            Action::Dispatch { .. } => true,
-            Action::SpawnCapability { .. } => false,
-            _ => {
-                return Err(approval_rejected(
-                    ApprovalInteractionRejectionKind::UnsupportedAction,
-                ));
-            }
-        };
+        let action = ApprovalCapabilityAction::from_action(gate.request().action.as_ref())?;
         let status = gate.status();
         if matches!(status, ApprovalStatus::Denied | ApprovalStatus::Expired) {
             return Err(approval_rejected(
@@ -150,27 +160,31 @@ impl DefaultApprovalInteractionService {
         }
         let mut terms = self.lease_terms_provider.lease_terms_for(&gate).await?;
         terms.issued_by = Principal::User(request.actor.user_id.clone());
-        let already_approved = status == ApprovalStatus::Approved;
-        match (already_approved, approve_dispatch) {
-            (false, true) => {
+        match (status, action) {
+            (ApprovalStatus::Pending, ApprovalCapabilityAction::Dispatch) => {
                 self.resolver
                     .approve_dispatch(gate.resource_scope(), gate.request().id, terms)
                     .await?;
             }
-            (false, false) => {
+            (ApprovalStatus::Pending, ApprovalCapabilityAction::Spawn) => {
                 self.resolver
                     .approve_spawn(gate.resource_scope(), gate.request().id, terms)
                     .await?;
             }
-            (true, true) => {
+            (ApprovalStatus::Approved, ApprovalCapabilityAction::Dispatch) => {
                 self.resolver
                     .ensure_dispatch_lease(gate.resource_scope(), gate.request().id, terms)
                     .await?;
             }
-            (true, false) => {
+            (ApprovalStatus::Approved, ApprovalCapabilityAction::Spawn) => {
                 self.resolver
                     .ensure_spawn_lease(gate.resource_scope(), gate.request().id, terms)
                     .await?;
+            }
+            (ApprovalStatus::Denied | ApprovalStatus::Expired, _) => {
+                return Err(approval_rejected(
+                    ApprovalInteractionRejectionKind::StaleGate,
+                ));
             }
         }
 
