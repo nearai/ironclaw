@@ -51,7 +51,26 @@ pub(crate) const OAUTH_CALLBACK_PATH: &str = "/api/reborn/product-auth/oauth/cal
 const PKCE_VERIFIER_HEADER: &str = "x-reborn-pkce-verifier";
 const OAUTH_START_ROUTE_ID: &str = "product_auth.oauth.start";
 const OAUTH_CALLBACK_ROUTE_ID: &str = "product_auth.oauth.callback";
-const OAUTH_START_MAX_BODY_BYTES: u64 = 16 * 1024;
+const OAUTH_START_BODY_LIMIT_BYTES: NonZeroU64 = match NonZeroU64::new(16 * 1024) {
+    Some(value) => value,
+    // SAFETY: 16 KiB is a non-zero literal body cap.
+    None => unreachable!(),
+};
+const OAUTH_START_MAX_REQUESTS: NonZeroU32 = match NonZeroU32::new(20) {
+    Some(value) => value,
+    // SAFETY: 20 is a non-zero literal rate limit.
+    None => unreachable!(),
+};
+const OAUTH_CALLBACK_MAX_REQUESTS: NonZeroU32 = match NonZeroU32::new(120) {
+    Some(value) => value,
+    // SAFETY: 120 is a non-zero literal rate limit.
+    None => unreachable!(),
+};
+const OAUTH_RATE_WINDOW_SECONDS: NonZeroU32 = match NonZeroU32::new(60) {
+    Some(value) => value,
+    // SAFETY: 60 is a non-zero literal rate-limit window.
+    None => unreachable!(),
+};
 
 #[derive(Clone)]
 pub(crate) struct ProductAuthRouteState {
@@ -140,13 +159,12 @@ fn start_policy() -> IngressPolicy {
         },
         scope_source: ironclaw_host_api::IngressScopeSource::AuthenticatedCaller,
         body_limit: BodyLimitPolicy::Limited {
-            max_bytes: NonZeroU64::new(OAUTH_START_MAX_BODY_BYTES)
-                .expect("oauth start body limit must be non-zero"),
+            max_bytes: OAUTH_START_BODY_LIMIT_BYTES,
         },
         rate_limit: RateLimitPolicy::Limited {
             scope: RateLimitScope::PerCaller,
-            max_requests: NonZeroU32::new(20).expect("oauth start rate limit must be non-zero"),
-            window_seconds: NonZeroU32::new(60).expect("rate window must be non-zero"),
+            max_requests: OAUTH_START_MAX_REQUESTS,
+            window_seconds: OAUTH_RATE_WINDOW_SECONDS,
         },
         cors: CorsPolicy::SameOriginOnly,
         websocket_origin: WebSocketOriginPolicy::NotApplicable,
@@ -167,8 +185,8 @@ fn callback_policy() -> IngressPolicy {
         body_limit: BodyLimitPolicy::NoBody,
         rate_limit: RateLimitPolicy::Limited {
             scope: RateLimitScope::PerRoute,
-            max_requests: NonZeroU32::new(120).expect("oauth callback rate limit must be non-zero"),
-            window_seconds: NonZeroU32::new(60).expect("rate window must be non-zero"),
+            max_requests: OAUTH_CALLBACK_MAX_REQUESTS,
+            window_seconds: OAUTH_RATE_WINDOW_SECONDS,
         },
         cors: CorsPolicy::NotApplicable,
         websocket_origin: WebSocketOriginPolicy::NotApplicable,
