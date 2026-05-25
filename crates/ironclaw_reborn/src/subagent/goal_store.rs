@@ -93,60 +93,11 @@ where
     }
 }
 
-/// Production subagent goal store over the same scoped filesystem substrate
-/// used by Reborn turn state. In libSQL and PostgreSQL production composition,
-/// the scoped filesystem is backed by the selected database root filesystem.
-#[cfg(feature = "filesystem-goal-store")]
-pub struct DbBackedSubagentGoalStore<F>
-where
-    F: RootFilesystem,
-{
-    inner: FilesystemSubagentGoalStore<F>,
-}
-
-#[cfg(feature = "filesystem-goal-store")]
-impl<F> DbBackedSubagentGoalStore<F>
-where
-    F: RootFilesystem,
-{
-    pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
-        Self {
-            inner: FilesystemSubagentGoalStore::new(filesystem),
-        }
-    }
-}
-
-#[cfg(feature = "filesystem-goal-store")]
-#[async_trait]
-impl<F> SubagentGoalStore for DbBackedSubagentGoalStore<F>
-where
-    F: RootFilesystem + 'static,
-{
-    async fn put_goal(
-        &self,
-        scope: &TurnScope,
-        run_id: TurnRunId,
-        goal: SubagentGoal,
-    ) -> Result<(), SubagentGoalStoreError> {
-        self.inner.put_goal(scope, run_id, goal).await
-    }
-
-    async fn get_goal(
-        &self,
-        scope: &TurnScope,
-        run_id: TurnRunId,
-    ) -> Result<SubagentGoal, SubagentGoalStoreError> {
-        self.inner.get_goal(scope, run_id).await
-    }
-
-    async fn delete_goal(
-        &self,
-        scope: &TurnScope,
-        run_id: TurnRunId,
-    ) -> Result<(), SubagentGoalStoreError> {
-        self.inner.delete_goal(scope, run_id).await
-    }
-}
+// `FilesystemSubagentGoalStore` is the production subagent goal store. In
+// libSQL and PostgreSQL production composition, the scoped filesystem passed
+// in is backed by the selected database root filesystem — that distinction
+// belongs in the choice of `F` at the call site, not in a separate wrapper
+// type.
 
 #[cfg(feature = "filesystem-goal-store")]
 #[async_trait]
@@ -640,13 +591,6 @@ mod tests {
 
     #[cfg(feature = "filesystem-goal-store")]
     #[tokio::test]
-    async fn db_backed_goal_store_satisfies_subagent_goal_contract() {
-        let store = DbBackedSubagentGoalStore::new(scoped_goal_filesystem());
-        assert_goal_store_contract(&store).await;
-    }
-
-    #[cfg(feature = "filesystem-goal-store")]
-    #[tokio::test]
     async fn filesystem_goal_store_satisfies_subagent_goal_contract() {
         let store = FilesystemSubagentGoalStore::new(scoped_goal_filesystem());
         assert_goal_store_contract(&store).await;
@@ -654,9 +598,9 @@ mod tests {
 
     #[cfg(feature = "filesystem-goal-store")]
     #[tokio::test]
-    async fn db_backed_goal_store_reopens_over_same_backend() {
+    async fn filesystem_goal_store_reopens_over_same_backend() {
         let filesystem = scoped_goal_filesystem();
-        let first = DbBackedSubagentGoalStore::new(Arc::clone(&filesystem));
+        let first = FilesystemSubagentGoalStore::new(Arc::clone(&filesystem));
         let owner_scope = scope("thread-goal");
         let run_id = TurnRunId::new();
         let expected = goal("survives reopen");
@@ -665,7 +609,7 @@ mod tests {
             .put_goal(&owner_scope, run_id, expected.clone())
             .await
             .unwrap();
-        let reopened = DbBackedSubagentGoalStore::new(filesystem);
+        let reopened = FilesystemSubagentGoalStore::new(filesystem);
 
         assert_eq!(
             reopened.get_goal(&owner_scope, run_id).await.unwrap(),
@@ -678,8 +622,6 @@ mod tests {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<Arc<dyn SubagentGoalStore>>();
         assert_send_sync::<BoundedSubagentGoalStore>();
-        #[cfg(feature = "filesystem-goal-store")]
-        assert_send_sync::<DbBackedSubagentGoalStore<InMemoryBackend>>();
         #[cfg(feature = "filesystem-goal-store")]
         assert_send_sync::<FilesystemSubagentGoalStore<InMemoryBackend>>();
     }

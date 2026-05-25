@@ -500,7 +500,18 @@ impl TurnStateStore for InMemoryTurnStateStore {
                     self.submit_idempotency_ready.notify_all();
                     return response;
                 }
-                let expected_depth = parent.subagent_depth.saturating_add(1);
+                if parent.subagent_depth == u32::MAX {
+                    let response = Err(invalid_lineage("subagent depth would overflow"));
+                    inner.remember_submit_idempotency(
+                        idempotency_key.clone(),
+                        response.clone(),
+                        request.received_at,
+                    );
+                    inner.submit_idempotency_in_flight.remove(&idempotency_key);
+                    self.submit_idempotency_ready.notify_all();
+                    return response;
+                }
+                let expected_depth = parent.subagent_depth + 1;
                 if request.subagent_depth != expected_depth {
                     let response = Err(invalid_lineage(
                         "subagent_depth must be parent depth plus one",
@@ -781,15 +792,15 @@ impl TurnStateStore for InMemoryTurnStateStore {
         let mut released_reservation = false;
         if let Some(count) = inner.tree_reservations.get_mut(&key) {
             let previous = *count;
-            *count = count.saturating_sub(u64::from(delta));
             if previous < u64::from(delta) {
-                tracing::debug!(
-                    root_run_id = %canonical_root_run_id,
-                    attempted = delta,
-                    available = previous,
-                    "tree descendant release underflowed; saturated at zero"
-                );
+                // Reject over-release loudly so callers can diagnose
+                // double-release bugs instead of silently zeroing the
+                // reservation and uncapping the spawn tree.
+                return Err(TurnError::InvalidRequest {
+                    reason: "release delta exceeds current reservation count".to_string(),
+                });
             }
+            *count = previous - u64::from(delta);
             if *count == 0 {
                 inner.tree_reservations.remove(&key);
                 released_reservation = true;

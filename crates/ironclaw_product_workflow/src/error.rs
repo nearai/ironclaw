@@ -269,6 +269,15 @@ mod tests {
                 503,
                 true,
             ),
+            (
+                TurnError::capacity_exceeded(
+                    ironclaw_turns::TurnCapacityResource::SpawnTreeDescendants,
+                    3,
+                ),
+                ProductWorkflowRejectionKind::AdmissionRejected,
+                429,
+                true,
+            ),
         ] {
             let err: ProductAdapterError = ProductWorkflowError::TurnResumeDenied { error }.into();
 

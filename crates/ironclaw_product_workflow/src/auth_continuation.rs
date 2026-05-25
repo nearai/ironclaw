@@ -811,4 +811,26 @@ mod tests {
             }
         ));
     }
+
+    #[test]
+    fn workflow_error_kind_capacity_exceeded_returns_expected_strings() {
+        let submission = ProductWorkflowError::TurnSubmissionFailed {
+            error: TurnError::capacity_exceeded(
+                ironclaw_turns::TurnCapacityResource::SpawnTreeDescendants,
+                4,
+            ),
+        };
+        assert_eq!(workflow_error_kind(&submission), "turn_capacity_exceeded");
+
+        let resume = ProductWorkflowError::TurnResumeDenied {
+            error: TurnError::capacity_exceeded(
+                ironclaw_turns::TurnCapacityResource::SubmitTurn,
+                7,
+            ),
+        };
+        assert_eq!(
+            workflow_error_kind(&resume),
+            "turn_resume_capacity_exceeded"
+        );
+    }
 }

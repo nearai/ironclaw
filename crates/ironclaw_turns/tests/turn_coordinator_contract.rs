@@ -5051,6 +5051,131 @@ fn assert_no_forbidden_turn_event_content(label: &str, serialized: &str, forbidd
     }
 }
 
+#[test]
+fn turn_capacity_resource_wire_shape_is_stable() {
+    assert_eq!(
+        serde_json::to_value(TurnCapacityResource::SpawnTreeDescendants).unwrap(),
+        serde_json::json!("spawn_tree_descendants")
+    );
+    assert_eq!(
+        serde_json::to_value(TurnCapacityResource::SubmitTurn).unwrap(),
+        serde_json::json!("submit_turn")
+    );
+    // #[serde(other)] catch-all maps unknown forward variants to Replayed so a
+    // future producer adding a new resource cannot brick idempotency replay
+    // for an older consumer.
+    let unknown: TurnCapacityResource =
+        serde_json::from_value(serde_json::json!("unknown_future_variant")).unwrap();
+    assert_eq!(unknown, TurnCapacityResource::Replayed);
+    assert_eq!(
+        serde_json::to_value(TurnCapacityResource::Replayed).unwrap(),
+        serde_json::json!("replayed")
+    );
+}
+
+#[test]
+fn turn_blocked_gate_kind_await_dependent_run_maps_from_status_and_round_trips_wire() {
+    use ironclaw_turns::TurnBlockedGateKind;
+
+    assert_eq!(
+        TurnBlockedGateKind::from_status(TurnStatus::BlockedDependentRun),
+        Some(TurnBlockedGateKind::AwaitDependentRun)
+    );
+
+    let wire = serde_json::to_value(TurnBlockedGateKind::AwaitDependentRun).unwrap();
+    assert_eq!(wire, serde_json::json!("await_dependent_run"));
+    assert_eq!(
+        serde_json::from_value::<TurnBlockedGateKind>(wire).unwrap(),
+        TurnBlockedGateKind::AwaitDependentRun
+    );
+}
+
+#[tokio::test]
+async fn prepare_turn_rejects_cross_scope_submission_of_prepared_run_id() {
+    let (coordinator, _store) = coordinator();
+    let prepared_scope = scope("thread-prepared-cross-scope");
+    let prepared = coordinator.prepare_turn(prepared_scope).await.unwrap();
+
+    // Submit the prepared run id under a different thread scope; coordinator
+    // must reject before delegating to the store.
+    let mut cross_scope = submit_request("thread-other-scope", "idem-cross-scope");
+    cross_scope.requested_run_id = Some(prepared);
+    let err = coordinator.submit_turn(cross_scope).await.unwrap_err();
+    assert!(matches!(err, TurnError::Unauthorized));
+}
+
+#[tokio::test]
+async fn release_tree_descendants_rejects_over_release() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+
+    let root = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-tree-root", "idem-tree-root"))
+            .await
+            .unwrap(),
+    );
+    let owner_scope = scope("thread-tree-root");
+    store
+        .reserve_tree_descendants(&owner_scope, root, 2, 8)
+        .await
+        .unwrap();
+
+    let err = store
+        .release_tree_descendants(&owner_scope, root, 3)
+        .await
+        .unwrap_err();
+    match err {
+        TurnError::InvalidRequest { reason } => {
+            assert!(reason.contains("exceeds current reservation count"));
+        }
+        other => panic!("expected InvalidRequest, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn submit_turn_rejects_when_parent_subagent_depth_at_max() {
+    use ironclaw_turns::{InMemoryTurnStateStoreLimits, TurnPersistenceSnapshot};
+
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+
+    // Seed a parent record at u32::MAX depth via persistence snapshot — the
+    // submit_turn path itself caps at u32::MAX+1, so a depth-max parent is
+    // only reachable through a hand-crafted snapshot in tests.
+    let parent_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-depth-max", "idem-depth-max"))
+            .await
+            .unwrap(),
+    );
+    complete_queued_run(&store, parent_id, "thread-depth-max").await;
+    let mut snapshot: TurnPersistenceSnapshot = store.persistence_snapshot();
+    if let Some(run) = snapshot.runs.iter_mut().find(|r| r.run_id == parent_id) {
+        run.subagent_depth = u32::MAX;
+    }
+    let store = Arc::new(
+        InMemoryTurnStateStore::from_persistence_snapshot(
+            snapshot,
+            InMemoryTurnStateStoreLimits::default(),
+        )
+        .unwrap(),
+    );
+    let coordinator = DefaultTurnCoordinator::new(store);
+
+    let mut child = submit_request("thread-depth-child", "idem-depth-child");
+    child.parent_run_id = Some(parent_id);
+    child.subagent_depth = 0; // will be rejected before depth check matters
+    child.spawn_tree_root_run_id = Some(parent_id);
+    let err = coordinator.submit_turn(child).await.unwrap_err();
+    match err {
+        TurnError::InvalidRequest { reason } => {
+            assert!(reason.contains("subagent depth would overflow"));
+        }
+        other => panic!("expected InvalidRequest, got {other:?}"),
+    }
+}
+
 fn coordinator() -> (
     DefaultTurnCoordinator<InMemoryTurnStateStore>,
     Arc<InMemoryTurnStateStore>,

@@ -167,15 +167,35 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             // Non-suspended batches record completed outcomes before handling
             // possible gates/errors so partial parallel progress is durable in
             // any later suspension checkpoint. Keep this in sync with the
-            // Completed arm in handle_capability_outcome.
+            // Completed and SpawnedChildRun arms in handle_capability_outcome —
+            // both are completing (non-suspension) outcomes whose result_refs
+            // must be appended before any sibling AwaitDependentRun gate
+            // exits the loop, otherwise the parent run loses the child's
+            // result on resume.
             let mut pending_outcomes = Vec::new();
             for (call, outcome) in visible_calls.into_iter().zip(outcomes) {
-                if let CapabilityOutcome::Completed(result) = outcome {
-                    push_call_signature_once(&mut state, &mut signatures, &call)?;
-                    append_capability_result_ref(ctx.host, &call, &result).await?;
-                    push_completed_result(&mut state, result);
-                } else {
-                    pending_outcomes.push((call, outcome));
+                match outcome {
+                    CapabilityOutcome::Completed(result) => {
+                        push_call_signature_once(&mut state, &mut signatures, &call)?;
+                        append_capability_result_ref(ctx.host, &call, &result).await?;
+                        push_completed_result(&mut state, result);
+                    }
+                    CapabilityOutcome::SpawnedChildRun {
+                        result_ref,
+                        safe_summary,
+                        ..
+                    } => {
+                        push_call_signature_once(&mut state, &mut signatures, &call)?;
+                        let safe_summary = sanitized_strategy_summary(safe_summary)?.into_inner();
+                        let result = CapabilityResultMessage {
+                            result_ref,
+                            safe_summary,
+                            terminate_hint: false,
+                        };
+                        append_capability_result_ref(ctx.host, &call, &result).await?;
+                        push_completed_result(&mut state, result);
+                    }
+                    other => pending_outcomes.push((call, other)),
                 }
             }
             for (call, outcome) in pending_outcomes {
@@ -389,9 +409,7 @@ impl CapabilityStage {
         result_ref: LoopResultRef,
         safe_summary: String,
     ) -> Result<BatchStep, AgentLoopExecutorError> {
-        let safe_summary = sanitized_strategy_summary(safe_summary)?
-            .as_str()
-            .to_string();
+        let safe_summary = sanitized_strategy_summary(safe_summary)?.into_inner();
         let result = CapabilityResultMessage {
             result_ref,
             safe_summary,
