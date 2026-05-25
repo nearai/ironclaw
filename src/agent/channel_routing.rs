@@ -126,6 +126,13 @@ impl ChannelRoutingConfig {
     ) -> bool {
         let new_routing = Self::load_from_store(store, user_id).await;
         let mut guard = routing.write().await;
+        // Retain last-known-good: if the new value failed to load/parse (None)
+        // but we currently have a valid config (Some), keep the old one rather
+        // than silently disabling all routing. load_from_store already logged a
+        // warning, so the operator knows the config is stale.
+        if new_routing.is_none() && guard.is_some() {
+            return false;
+        }
         let changed = new_routing != *guard;
         *guard = new_routing;
         changed
@@ -371,6 +378,17 @@ impl ChannelRoutingConfig {
     /// [`Self::routing_group_for`]) before passing a group in. An unknown
     /// `group` (absent from `allowed_servers_sets`) is treated fail-closed: MCP
     /// tools blocked, built-ins gated by the *default* group's whitelist.
+    ///
+    /// **Classification order**: registered built-in names are checked *before* MCP
+    /// prefix extraction. An MCP server named, e.g. `memory` would otherwise cause
+    /// `memory_search` (a built-in) to be authorised as an MCP tool, bypassing the
+    /// `builtin_whitelist` check. Built-in registration is authoritative.
+    ///
+    /// **Built-in default**: a group with no `builtin_whitelist` entry denies all
+    /// built-ins. Operators must explicitly enumerate allowed built-ins (or use `"*"`
+    /// when that shorthand is added). This is the safe default — `shell`,
+    /// `http_request`, and `create_job` should not be silently granted to restricted
+    /// groups that omit the whitelist key.
     fn permit_in_group(
         &self,
         group: &str,
@@ -379,13 +397,19 @@ impl ChannelRoutingConfig {
     ) -> bool {
         match self.allowed_servers_sets.get(group) {
             Some(allowed_set) => {
-                if let Some(server) = self.extract_mcp_server(tool_name) {
-                    allowed_set.contains(server)
-                } else if builtin_names.contains(tool_name) {
+                // Check registered built-ins first — built-in registration is
+                // authoritative; checking MCP prefix first would let a server named
+                // "memory" authorise built-in "memory_search" via the MCP allowlist,
+                // bypassing the builtin_whitelist check.
+                if builtin_names.contains(tool_name) {
                     match self.builtin_whitelist_sets.get(group) {
                         Some(set) => set.contains(tool_name),
-                        None => true,
+                        // No whitelist entry ⇒ deny. Operators must enumerate allowed
+                        // built-ins explicitly; omitting the key is not a wildcard grant.
+                        None => false,
                     }
+                } else if let Some(server) = self.extract_mcp_server(tool_name) {
+                    allowed_set.contains(server)
                 } else {
                     // Neither a known MCP server prefix nor a registered
                     // built-in — fail closed so unregistered-server tools
@@ -394,16 +418,14 @@ impl ChannelRoutingConfig {
                 }
             }
             None => {
-                // Unknown group — fail-closed: block MCP, apply default built-in policy.
-                if self.extract_mcp_server(tool_name).is_some() {
-                    return false;
-                }
-                if !builtin_names.contains(tool_name) {
-                    return false;
-                }
-                match self.builtin_whitelist_sets.get(&self.default_group) {
-                    Some(set) => set.contains(tool_name),
-                    None => true,
+                // Unknown group — fail-closed: built-ins gated by default group's
+                // whitelist; anything else (MCP or unregistered) blocked.
+                if builtin_names.contains(tool_name) {
+                    self.builtin_whitelist_sets
+                        .get(&self.default_group)
+                        .is_some_and(|set| set.contains(tool_name))
+                } else {
+                    false
                 }
             }
         }
@@ -744,7 +766,12 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_allows_all_builtins_when_no_whitelist() {
+    fn test_filter_denies_builtins_when_no_whitelist() {
+        // A group without a `builtin_whitelist` entry denies all built-ins
+        // (deny-by-default). Operators must explicitly enumerate allowed built-ins.
+        // The "dev" group in sample_config has no whitelist, so shell and
+        // memory_search are blocked even though the group is otherwise permissive
+        // for MCP tools.
         let config = sample_config();
         let tools = vec![
             make_tool_def("Archon_list_tasks"),
@@ -754,7 +781,9 @@ mod tests {
         let md = no_metadata();
         let filtered =
             config.filter_tool_defs("agentiffai-dev-issues", &md, tools, &test_builtin_names());
-        assert_eq!(filtered.len(), 3);
+        // Only the MCP tool passes; built-ins are denied (no whitelist entry for "dev").
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "Archon_list_tasks");
     }
 
     #[test]
@@ -971,20 +1000,13 @@ mod tests {
             ]
         );
 
-        // Dev channel: Archon+Kiro+Notion MCP tools, all builtins (no whitelist)
+        // Dev channel: Archon+Kiro+Notion MCP tools only; no builtin_whitelist entry → built-ins denied
         let dev_tools =
             config.filter_tool_defs("agentiffai-dev-issues", &md, all_tools.clone(), &bn);
         let dev_names: Vec<&str> = dev_tools.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(
             dev_names,
-            vec![
-                "Archon_list_tasks",
-                "Notion_post_search",
-                "Kiro_run_task",
-                "memory_search",
-                "shell",
-                "create_job",
-            ]
+            vec!["Archon_list_tasks", "Notion_post_search", "Kiro_run_task",]
         );
 
         // DM (gateway): everything
@@ -1126,11 +1148,11 @@ mod tests {
         assert!(config.is_tool_permitted("gateway", &md, "Smartlead_send", &builtin_names));
         assert!(config.is_tool_permitted("cli", &md, "shell", &builtin_names));
 
-        // Dev channel: Archon + Kiro allowed, all builtins allowed (no whitelist).
+        // Dev channel: Archon + Kiro allowed; no builtin_whitelist entry → built-ins denied.
         assert!(config.is_tool_permitted("agentiffai-dev", &md, "Archon_list", &builtin_names));
         assert!(config.is_tool_permitted("agentiffai-dev", &md, "Kiro_run", &builtin_names));
         assert!(!config.is_tool_permitted("agentiffai-dev", &md, "Smartlead_send", &builtin_names));
-        assert!(config.is_tool_permitted("agentiffai-dev", &md, "shell", &builtin_names)); // no whitelist → all builtins
+        assert!(!config.is_tool_permitted("agentiffai-dev", &md, "shell", &builtin_names)); // no whitelist → builtins denied
 
         // Minimal (default) channel: Archon only, create_job built-in only.
         assert!(config.is_tool_permitted("other-channel", &md, "Archon_list", &builtin_names));

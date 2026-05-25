@@ -287,18 +287,17 @@ impl CreateJobTool {
         crate::tools::mcp::config::load_master_mcp_config_value(store.as_ref(), user_id).await
     }
 
-    /// Derive an implicit MCP server allowlist from the originating channel's
-    /// routing group when the caller did not pass `mcp_servers` explicitly.
-    ///
-    /// Determines the MCP server allowlist for a job based on its origin channel.
+    /// Derive an MCP server allowlist for a job based on its origin channel.
     ///
     /// Security model:
-    /// - `None` return means **no constraint** (DM bypass) — the caller inherits
-    ///   the full unfiltered MCP server set. This is intentional: DM channels are
-    ///   trusted contexts where routing restrictions do not apply.
+    /// - `None` return means **no constraint** (DM bypass or no routing config) —
+    ///   the job inherits the full unfiltered MCP server set.
     /// - `Some(servers)` means the job is constrained to those server prefixes.
     /// - An absent channel (routine/heartbeat) falls back to the default group
     ///   (fail-closed), never `None`.
+    /// - Caller-supplied `explicit_mcp_servers` are **intersected** with the
+    ///   channel's allowlist — a child job cannot request servers its parent
+    ///   channel forbids (privilege escalation by delegation).
     ///
     /// Uses the cached routing Arc when available (no extra DB round-trip).
     async fn derive_routed_mcp_servers(
@@ -306,10 +305,6 @@ impl CreateJobTool {
         ctx: &JobContext,
         explicit_mcp_servers: Option<Vec<String>>,
     ) -> Option<Vec<String>> {
-        if explicit_mcp_servers.is_some() {
-            return explicit_mcp_servers;
-        }
-
         // Read from cached Arc first; fall back to a DB query when not wired.
         let routing = if let Some(ref arc) = self.channel_routing {
             arc.read().await.clone()
@@ -317,7 +312,10 @@ impl CreateJobTool {
             let store = self.store.as_ref()?;
             ChannelRoutingConfig::load_from_store(store.as_ref(), &ctx.user_id).await
         };
-        let routing = routing?;
+        let Some(routing) = routing else {
+            // No routing config — no constraint; return explicit as-is.
+            return explicit_mcp_servers;
+        };
 
         let null_metadata = serde_json::Value::Null;
         let routing_metadata = ctx
@@ -332,15 +330,35 @@ impl CreateJobTool {
         // Shared group resolution + DM bypass (same logic as the tool filters).
         match routing.routing_group_for(routing_channel, routing_metadata) {
             // DM — no MCP constraint; the job inherits the full unfiltered set.
-            None => None,
-            // Constrained to the resolved group's servers. Fall back to the
-            // default group's servers if the group somehow has no entry, and to
-            // the default group entirely for routine/heartbeat jobs (no channel).
-            Some(group) => routing
-                .groups
-                .get(group)
-                .or_else(|| routing.groups.get(&routing.default_group))
-                .cloned(),
+            // Explicit servers pass through unchanged.
+            None => explicit_mcp_servers,
+            // Constrained to the resolved group's servers. Explicit `mcp_servers`
+            // from the tool call are **intersected** with the channel allowlist —
+            // a child job cannot request servers its parent channel forbids.
+            Some(group) => {
+                let group_allowed = routing
+                    .groups
+                    .get(group)
+                    .or_else(|| routing.groups.get(&routing.default_group))
+                    .cloned();
+                match (explicit_mcp_servers, group_allowed) {
+                    // No explicit request, group not in map — no constraint.
+                    (explicit, None) => explicit,
+                    // No explicit request — use routing-derived set.
+                    (None, Some(allowed)) => Some(allowed),
+                    // Explicit request — intersect; cannot widen past allowlist.
+                    (Some(explicit), Some(allowed)) => {
+                        let allowed_set: std::collections::HashSet<&str> =
+                            allowed.iter().map(|s| s.as_str()).collect();
+                        Some(
+                            explicit
+                                .into_iter()
+                                .filter(|s| allowed_set.contains(s.as_str()))
+                                .collect(),
+                        )
+                    }
+                }
+            }
         }
     }
 

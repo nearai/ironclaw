@@ -913,6 +913,15 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             bool, // allow_always
         )> = None;
 
+        // Snapshot routing state once for the entire preflight pass — avoids
+        // repeated lock acquisitions and keeps the gate consistent per turn.
+        let routing_snapshot = self.agent.deps.channel_routing.read().await.clone();
+        let routing_builtin_names = if routing_snapshot.is_some() {
+            Some(self.agent.deps.tools.builtin_tool_names().await)
+        } else {
+            None
+        };
+
         for (idx, original_tc) in tool_calls.iter().enumerate() {
             let mut tc = original_tc.clone();
 
@@ -973,6 +982,26 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     }
                 },
                 _ => {}
+            }
+
+            // Channel routing execution-time gate — mirrors worker/job.rs::execute_tool_inner.
+            // apply_channel_routing filtered the LLM's tool list (presentation layer);
+            // this gate enforces the same policy at execution time so a jailbroken model
+            // or replayed tool call cannot run a tool that was hidden from the LLM.
+            if let (Some(config), Some(builtin_names)) = (&routing_snapshot, &routing_builtin_names)
+                && !config.is_tool_permitted(
+                    &self.message.channel,
+                    &self.message.metadata,
+                    &tc.name,
+                    builtin_names,
+                )
+            {
+                let reject_msg = format!(
+                    "Tool '{}' is not permitted on channel '{}' by channel routing config",
+                    tc.name, self.message.channel
+                );
+                preflight.push((tc, PreflightOutcome::Rejected(reject_msg)));
+                continue;
             }
 
             // Check if tool requires approval

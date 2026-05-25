@@ -398,8 +398,9 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             .unwrap_or(50) as usize;
         let max_iterations = max_iterations.min(ironclaw_common::MAX_WORKER_ITERATIONS as usize);
 
-        // Initial tool definitions for planning (will be refreshed in loop)
-        reason_ctx.available_tools = self.tools().tool_definitions().await;
+        // Initial tool definitions for planning — use the same filtered set
+        // that execute_tool_calls sees, so the plan only references permitted tools.
+        reason_ctx.available_tools = self.tool_definitions_for_current_context().await;
 
         // Generate plan if planning is enabled
         let plan = if self.use_planning() {
