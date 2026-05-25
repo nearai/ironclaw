@@ -3,12 +3,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_auth::{
-    AuthContinuationEvent, AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowManager,
-    AuthFlowStatus, AuthInteractionService, AuthProductError, AuthProductScope, AuthProviderClient,
-    CredentialAccountId, CredentialAccountService, CredentialSetupService,
-    InMemoryAuthProductServices, OAuthCallbackClaimRequest, OAuthCallbackFailureInput,
-    OAuthCallbackInput, OAuthProviderCallbackRequest, OpaqueStateHash, ProviderCallbackOutcome,
-    SecretCleanupService,
+    AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthErrorCode, AuthFlowId,
+    AuthFlowKind, AuthFlowManager, AuthFlowRecord, AuthFlowStatus, AuthInteractionService,
+    AuthProductError, AuthProductScope, AuthProviderClient, AuthProviderId, CredentialAccountId,
+    CredentialAccountService, CredentialSetupService, InMemoryAuthProductServices, NewAuthFlow,
+    OAuthAuthorizationUrl, OAuthCallbackClaimRequest, OAuthCallbackFailureInput,
+    OAuthCallbackInput, OAuthProviderCallbackRequest, OpaqueStateHash, PkceVerifierHash,
+    ProviderCallbackOutcome, SecretCleanupService,
 };
 use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
 use serde::{Deserialize, Serialize};
@@ -60,6 +61,20 @@ pub struct RebornOAuthCallbackRequest {
     pub flow_id: AuthFlowId,
     pub opaque_state_hash: OpaqueStateHash,
     pub outcome: RebornOAuthCallbackOutcome,
+}
+
+/// Typed setup OAuth start request after host-route parsing and hashing.
+///
+/// The browser-facing route chooses neither flow kind nor continuation. Those
+/// product-auth semantics stay here with the auth service boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebornOAuthStartFlowRequest {
+    pub scope: AuthProductScope,
+    pub provider: AuthProviderId,
+    pub authorization_url: OAuthAuthorizationUrl,
+    pub opaque_state_hash: OpaqueStateHash,
+    pub pkce_verifier_hash: PkceVerifierHash,
+    pub expires_at: ironclaw_auth::Timestamp,
 }
 
 /// Host-route OAuth callback parse result.
@@ -455,6 +470,28 @@ impl RebornProductAuthServices {
             credential_account_id: completed.credential_account_id,
             continuation: completed.continuation,
         })
+    }
+
+    pub async fn start_setup_oauth_flow(
+        &self,
+        request: RebornOAuthStartFlowRequest,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        self.flow_manager
+            .create_flow(NewAuthFlow {
+                scope: request.scope,
+                kind: AuthFlowKind::IntegrationCredential,
+                provider: request.provider,
+                challenge: AuthChallenge::OAuthUrl {
+                    authorization_url: request.authorization_url,
+                    expires_at: request.expires_at,
+                },
+                continuation: AuthContinuationRef::SetupOnly,
+                update_binding: None,
+                opaque_state_hash: Some(request.opaque_state_hash),
+                pkce_verifier_hash: Some(request.pkce_verifier_hash),
+                expires_at: request.expires_at,
+            })
+            .await
     }
 
     pub(crate) fn local_dev_in_memory(

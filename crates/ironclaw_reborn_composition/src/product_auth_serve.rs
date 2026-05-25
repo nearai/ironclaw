@@ -19,11 +19,11 @@ use axum::{
 };
 use chrono::Utc;
 use ironclaw_auth::{
-    AuthChallenge, AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowKind, AuthFlowStatus,
-    AuthProductError, AuthProductScope, AuthProviderId, AuthSessionId, AuthSurface,
-    AuthorizationCodeHash, CredentialAccountLabel, NewAuthFlow, OAuthAuthorizationCode,
-    OAuthAuthorizationUrl, OAuthProviderCallbackRequest, OpaqueStateHash, PkceVerifierHash,
-    PkceVerifierSecret, ProviderScope, Timestamp,
+    AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowStatus, AuthProductError,
+    AuthProductScope, AuthProviderId, AuthSessionId, AuthSurface, AuthorizationCodeHash,
+    CredentialAccountLabel, OAuthAuthorizationCode, OAuthAuthorizationUrl,
+    OAuthProviderCallbackRequest, OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret,
+    ProviderScope, Timestamp,
 };
 use ironclaw_host_api::NetworkMethod;
 use ironclaw_host_api::ingress::{
@@ -42,7 +42,7 @@ use uuid::Uuid;
 
 use crate::{
     RebornOAuthCallbackError, RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
-    RebornOAuthCallbackResponse, RebornProductAuthServices,
+    RebornOAuthCallbackResponse, RebornOAuthStartFlowRequest, RebornProductAuthServices,
 };
 
 pub(crate) const OAUTH_START_PATH: &str = "/api/reborn/product-auth/oauth/start";
@@ -108,19 +108,21 @@ impl std::fmt::Debug for ProductAuthRouteState {
     }
 }
 
-pub(crate) struct ProductAuthRouters {
+pub(crate) struct ProductAuthRouteMount {
     pub(crate) protected: Router,
     pub(crate) public: Router,
+    pub(crate) descriptors: Vec<IngressRouteDescriptor>,
 }
 
-pub(crate) fn product_auth_routers(state: ProductAuthRouteState) -> ProductAuthRouters {
-    ProductAuthRouters {
+pub(crate) fn product_auth_route_mount(state: ProductAuthRouteState) -> ProductAuthRouteMount {
+    ProductAuthRouteMount {
         protected: Router::new()
             .route(OAUTH_START_PATH, post(oauth_start_handler))
             .with_state(state.clone()),
         public: Router::new()
             .route(OAUTH_CALLBACK_PATH, get(oauth_callback_handler))
             .with_state(state),
+        descriptors: product_auth_route_descriptors(),
     }
 }
 
@@ -341,19 +343,12 @@ async fn oauth_start_handler(
 
     let flow = state
         .product_auth
-        .flow_manager()
-        .create_flow(NewAuthFlow {
+        .start_setup_oauth_flow(RebornOAuthStartFlowRequest {
             scope: scope.clone(),
-            kind: AuthFlowKind::IntegrationCredential,
             provider: provider.clone(),
-            challenge: AuthChallenge::OAuthUrl {
-                authorization_url: authorization_url.clone(),
-                expires_at: request.expires_at,
-            },
-            continuation: AuthContinuationRef::SetupOnly,
-            update_binding: None,
-            opaque_state_hash: Some(opaque_state_hash),
-            pkce_verifier_hash: Some(pkce_verifier_hash),
+            authorization_url: authorization_url.clone(),
+            opaque_state_hash,
+            pkce_verifier_hash,
             expires_at: request.expires_at,
         })
         .await
@@ -388,49 +383,7 @@ async fn oauth_callback_handler(
             .as_str(),
     )?;
 
-    let outcome = if query
-        .error
-        .as_deref()
-        .is_some_and(|value| !value.is_empty())
-    {
-        RebornOAuthCallbackOutcome::ProviderDenied
-    } else {
-        let provider = AuthProviderId::new(
-            query
-                .provider
-                .clone()
-                .ok_or_else(ProductAuthRouteFailure::malformed_callback)?,
-        )
-        .map_err(|_| ProductAuthRouteFailure::malformed_callback())?;
-        let account_label = CredentialAccountLabel::new(
-            query
-                .account_label
-                .clone()
-                .ok_or_else(ProductAuthRouteFailure::malformed_callback)?,
-        )
-        .map_err(|_| ProductAuthRouteFailure::malformed_callback())?;
-        let code = query
-            .code
-            .as_ref()
-            .ok_or_else(ProductAuthRouteFailure::malformed_callback)?;
-        let pkce_verifier = raw_pkce_verifier_header(&headers)?;
-        let authorization_code_hash = authorization_code_hash(code.expose_secret())?;
-        let pkce_verifier_hash = pkce_verifier_hash(pkce_verifier.expose_secret())?;
-
-        RebornOAuthCallbackOutcome::Authorized {
-            provider_request: OAuthProviderCallbackRequest {
-                provider,
-                account_label,
-                authorization_code: OAuthAuthorizationCode::new(code.clone_secret())
-                    .map_err(ProductAuthRouteFailure::from)?,
-                authorization_code_hash,
-                pkce_verifier: PkceVerifierSecret::new(pkce_verifier)
-                    .map_err(ProductAuthRouteFailure::from)?,
-                pkce_verifier_hash,
-                scopes: parse_provider_scopes(query.scopes.as_deref())?,
-            },
-        }
-    };
+    let outcome = callback_outcome_from_query(&query, &headers)?;
 
     let response = state
         .product_auth
@@ -444,6 +397,49 @@ async fn oauth_callback_handler(
         .map_err(ProductAuthRouteFailure::from)?;
 
     Ok(Json(response))
+}
+
+fn callback_outcome_from_query(
+    query: &OAuthCallbackQuery,
+    headers: &HeaderMap,
+) -> Result<RebornOAuthCallbackOutcome, ProductAuthRouteFailure> {
+    if query
+        .error
+        .as_deref()
+        .is_some_and(|value| !value.is_empty())
+    {
+        return Ok(RebornOAuthCallbackOutcome::ProviderDenied);
+    }
+
+    let provider = required_callback_value(query.provider.as_deref())?;
+    let account_label = required_callback_value(query.account_label.as_deref())?;
+    let code = query
+        .code
+        .as_ref()
+        .ok_or_else(ProductAuthRouteFailure::malformed_callback)?;
+    let pkce_verifier = raw_pkce_verifier_header(headers)?;
+    let authorization_code_hash = authorization_code_hash(code.expose_secret())?;
+    let pkce_verifier_hash = pkce_verifier_hash(pkce_verifier.expose_secret())?;
+
+    Ok(RebornOAuthCallbackOutcome::Authorized {
+        provider_request: OAuthProviderCallbackRequest {
+            provider: AuthProviderId::new(provider.to_string())
+                .map_err(|_| ProductAuthRouteFailure::malformed_callback())?,
+            account_label: CredentialAccountLabel::new(account_label.to_string())
+                .map_err(|_| ProductAuthRouteFailure::malformed_callback())?,
+            authorization_code: OAuthAuthorizationCode::new(code.clone_secret())
+                .map_err(ProductAuthRouteFailure::from)?,
+            authorization_code_hash,
+            pkce_verifier: PkceVerifierSecret::new(pkce_verifier)
+                .map_err(ProductAuthRouteFailure::from)?,
+            pkce_verifier_hash,
+            scopes: parse_provider_scopes(query.scopes.as_deref())?,
+        },
+    })
+}
+
+fn required_callback_value(value: Option<&str>) -> Result<&str, ProductAuthRouteFailure> {
+    value.ok_or_else(ProductAuthRouteFailure::malformed_callback)
 }
 
 fn scope_from_authenticated_caller(

@@ -49,9 +49,7 @@ use tower_http::cors::{AllowHeaders, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
 
-use crate::product_auth_serve::{
-    ProductAuthRouteState, product_auth_route_descriptors, product_auth_routers,
-};
+use crate::product_auth_serve::{ProductAuthRouteState, product_auth_route_mount};
 use crate::webui::RebornWebuiBundle;
 use crate::webui_body_limit::{build_body_limit_state, enforce_body_limit};
 use crate::webui_rate_limit::{build_rate_limit_state, enforce_rate_limit};
@@ -312,16 +310,18 @@ pub fn webui_v2_app(
         authenticator: config.authenticator.clone(),
     };
 
-    let mut descriptors = ironclaw_webui_v2::webui_v2_routes();
-    let product_auth_state = bundle.product_auth.clone().map(|product_auth| {
-        descriptors.extend(product_auth_route_descriptors());
-        ProductAuthRouteState::new(
+    let product_auth_mount = bundle.product_auth.clone().map(|product_auth| {
+        product_auth_route_mount(ProductAuthRouteState::new(
             product_auth,
             config.tenant_id.clone(),
             config.default_agent_id.clone(),
             config.default_project_id.clone(),
-        )
+        ))
     });
+    let mut descriptors = ironclaw_webui_v2::webui_v2_routes();
+    if let Some(mount) = &product_auth_mount {
+        descriptors.extend(mount.descriptors.iter().cloned());
+    }
     let rate_limit_state = build_rate_limit_state(&descriptors)?;
     let body_limit_state = build_body_limit_state(&descriptors);
     let ws_origin_state = build_websocket_origin_state(
@@ -338,10 +338,9 @@ pub fn webui_v2_app(
 
     let mut protected_inner = Router::new().merge(v2_inner);
     let mut public_inner = None;
-    if let Some(product_auth_state) = product_auth_state {
-        let product_auth = product_auth_routers(product_auth_state);
-        protected_inner = protected_inner.merge(product_auth.protected);
-        public_inner = Some(product_auth.public);
+    if let Some(mount) = product_auth_mount {
+        protected_inner = protected_inner.merge(mount.protected);
+        public_inner = Some(mount.public);
     }
 
     // Layer order matters. `route_layer` stacks inside-out from the
