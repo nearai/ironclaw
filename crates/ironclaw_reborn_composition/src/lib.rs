@@ -419,9 +419,9 @@ where
     let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
         &scoped_filesystem,
     )));
-    let (runtime_policy, tenant_sandbox_process_port) = config.runtime_policy.into_parts();
+    let (runtime_policy, process_binding) = config.runtime_policy.into_parts();
 
-    let mut services = HostRuntimeServices::new(
+    let services = HostRuntimeServices::new(
         Arc::new(ExtensionRegistry::new()),
         filesystem,
         governor,
@@ -439,9 +439,8 @@ where
     .with_run_profile_resolver(Arc::new(
         ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver()?,
     ));
-    if let Some(process_port) = tenant_sandbox_process_port {
-        services = services.with_production_tenant_sandbox_process_port(process_port);
-    }
+    let services =
+        crate::factory::apply_production_runtime_process_binding(services, process_binding);
     let services = services
         .with_reborn_event_store_config(RebornProfile::Production, config.event_store)
         .await?;
@@ -489,9 +488,9 @@ where
     let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
         &scoped_filesystem,
     )));
-    let (runtime_policy, tenant_sandbox_process_port) = config.runtime_policy.into_parts();
+    let (runtime_policy, process_binding) = config.runtime_policy.into_parts();
 
-    let mut services = HostRuntimeServices::new(
+    let services = HostRuntimeServices::new(
         Arc::new(ExtensionRegistry::new()),
         filesystem,
         governor,
@@ -509,9 +508,8 @@ where
     .with_run_profile_resolver(Arc::new(
         ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver()?,
     ));
-    if let Some(process_port) = tenant_sandbox_process_port {
-        services = services.with_production_tenant_sandbox_process_port(process_port);
-    }
+    let services =
+        crate::factory::apply_production_runtime_process_binding(services, process_binding);
     let services = services
         .with_reborn_event_store_config(RebornProfile::Production, config.event_store)
         .await?;

@@ -7,7 +7,7 @@ use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_host_api::runtime_policy::{EffectiveRuntimePolicy, ProcessBackendKind};
+use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
 use ironclaw_host_api::{
     EffectKind, MountAlias, MountGrant, MountPermissions, MountView, PackageId, VirtualPath,
 };
@@ -52,7 +52,7 @@ where
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-fn apply_production_runtime_process_binding<F, G, S, R>(
+pub(crate) fn apply_production_runtime_process_binding<F, G, S, R>(
     services: HostRuntimeServices<F, G, S, R>,
     binding: RebornRuntimeProcessBinding,
 ) -> HostRuntimeServices<F, G, S, R>
@@ -484,25 +484,11 @@ fn validate_production_process_binding(
     runtime_policy: &EffectiveRuntimePolicy,
     binding: &RebornRuntimeProcessBinding,
 ) -> Result<(), RebornBuildError> {
-    match (runtime_policy.process_backend, binding) {
-        (ProcessBackendKind::TenantSandbox, RebornRuntimeProcessBinding::TenantSandbox { .. }) => {
-            Ok(())
-        }
-        (ProcessBackendKind::TenantSandbox, RebornRuntimeProcessBinding::None) => {
-            Err(RebornBuildError::InvalidConfig {
-                reason: "production tenant-sandbox process backend requires a tenant sandbox process binding".to_string(),
-            })
-        }
-        (_, RebornRuntimeProcessBinding::TenantSandbox { .. }) => {
-            Err(RebornBuildError::InvalidConfig {
-                reason: format!(
-                    "production runtime policy uses {:?} but a tenant sandbox process binding was supplied",
-                    runtime_policy.process_backend
-                ),
-            })
-        }
-        (_, RebornRuntimeProcessBinding::None) => Ok(()),
-    }
+    binding
+        .validate_for_production_policy(runtime_policy)
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: error.to_string(),
+        })
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]

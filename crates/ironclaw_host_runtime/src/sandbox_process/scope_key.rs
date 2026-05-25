@@ -5,7 +5,6 @@ use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RebornSandboxScopeKey {
-    raw: String,
     digest: String,
 }
 
@@ -33,7 +32,7 @@ impl RebornSandboxScopeKey {
 
         let raw = encode_scope_parts(&raw_parts);
         let digest = scope_digest(&raw);
-        Self { raw, digest }
+        Self { digest }
     }
 
     pub fn workspace_path(&self, root: &Path) -> PathBuf {

@@ -50,15 +50,15 @@ impl ContainerWorkdir {
         Self(CONTAINER_WORKSPACE_ROOT.to_string())
     }
 
-    fn from_relative(relative: impl AsRef<Path>) -> Result<Self, RuntimeProcessError> {
+    fn from_relative(relative: impl AsRef<Path>) -> Self {
         let relative = relative.as_ref().to_string_lossy();
         if relative.is_empty() || relative == "." {
-            return Ok(Self::workspace_root());
+            return Self::workspace_root();
         }
-        Ok(Self(format!(
+        Self(format!(
             "{CONTAINER_WORKSPACE_ROOT}/{}",
             relative.trim_start_matches('/')
-        )))
+        ))
     }
 
     fn into_string(self) -> String {
@@ -157,28 +157,34 @@ impl RebornScopedSandboxCommandTransport {
         TenantSandboxProcessPort::new(Arc::new(self))
     }
 
-    fn prepare_workspace(&self, scope: &ResourceScope) -> Result<PathBuf, RuntimeProcessError> {
+    async fn prepare_workspace(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<PathBuf, RuntimeProcessError> {
         let key = RebornSandboxScopeKey::from_scope(scope);
         let workspace = key.workspace_path(&self.config.workspace_root);
-        std::fs::create_dir_all(&workspace).map_err(|error| {
-            RuntimeProcessError::ExecutionFailed(format!(
-                "sandbox workspace could not be initialized: {error}"
-            ))
-        })?;
+        tokio::fs::create_dir_all(&workspace)
+            .await
+            .map_err(|error| {
+                RuntimeProcessError::ExecutionFailed(format!(
+                    "sandbox workspace could not be initialized: {error}"
+                ))
+            })?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(
+            tokio::fs::set_permissions(
                 &workspace,
                 std::fs::Permissions::from_mode(self.config.container_identity.workspace_mode()),
             )
+            .await
             .map_err(|error| {
                 RuntimeProcessError::ExecutionFailed(format!(
                     "sandbox workspace permissions could not be set: {error}"
                 ))
             })?;
         }
-        workspace.canonicalize().map_err(|error| {
+        tokio::fs::canonicalize(&workspace).await.map_err(|error| {
             RuntimeProcessError::ExecutionFailed(format!(
                 "sandbox workspace could not be resolved: {error}"
             ))
@@ -186,7 +192,6 @@ impl RebornScopedSandboxCommandTransport {
     }
 
     fn resolve_container_workdir(
-        workspace: &Path,
         workdir: Option<&str>,
     ) -> Result<ContainerWorkdir, RuntimeProcessError> {
         let Some(workdir) = workdir.map(str::trim).filter(|value| !value.is_empty()) else {
@@ -198,7 +203,7 @@ impl RebornScopedSandboxCommandTransport {
         }
         if let Some(relative) = workdir.strip_prefix("/workspace/") {
             validate_relative_workdir(Path::new(relative))?;
-            return ContainerWorkdir::from_relative(relative);
+            return Ok(ContainerWorkdir::from_relative(relative));
         }
 
         let requested = Path::new(workdir);
@@ -209,18 +214,7 @@ impl RebornScopedSandboxCommandTransport {
             ))
         } else {
             validate_relative_workdir(requested)?;
-            let canonical_workspace = workspace.canonicalize().map_err(|error| {
-                RuntimeProcessError::ExecutionFailed(format!(
-                    "sandbox workspace could not be resolved: {error}"
-                ))
-            })?;
-            let candidate = canonical_workspace.join(requested);
-            if !candidate.starts_with(&canonical_workspace) {
-                return Err(RuntimeProcessError::ExecutionFailed(
-                    "sandbox working directory must stay inside the scoped workspace".to_string(),
-                ));
-            }
-            ContainerWorkdir::from_relative(requested)
+            Ok(ContainerWorkdir::from_relative(requested))
         }
     }
 
@@ -345,8 +339,8 @@ impl SandboxCommandTransport for RebornScopedSandboxCommandTransport {
             ));
         }
 
-        let workspace = self.prepare_workspace(&request.scope)?;
-        let workdir = Self::resolve_container_workdir(&workspace, request.workdir.as_deref())?;
+        let workspace = self.prepare_workspace(&request.scope).await?;
+        let workdir = Self::resolve_container_workdir(request.workdir.as_deref())?;
         let timeout = request
             .timeout_secs
             .map(Duration::from_secs)
@@ -527,21 +521,17 @@ mod tests {
 
     #[test]
     fn relative_workdir_rejects_escape() {
-        let workspace = Path::new("/tmp/reborn-sandbox/tenant/user");
-        let error =
-            RebornScopedSandboxCommandTransport::resolve_container_workdir(workspace, Some("../x"))
-                .unwrap_err();
+        let error = RebornScopedSandboxCommandTransport::resolve_container_workdir(Some("../x"))
+            .unwrap_err();
 
         assert!(format!("{error}").contains("scoped workspace"));
     }
 
     #[test]
     fn container_workdir_rejects_host_absolute_paths() {
-        let workspace = Path::new("/tmp/reborn-sandbox/tenant/user");
-        let error = RebornScopedSandboxCommandTransport::resolve_container_workdir(
-            workspace,
-            Some("/tmp/reborn-sandbox/tenant/user/app"),
-        )
+        let error = RebornScopedSandboxCommandTransport::resolve_container_workdir(Some(
+            "/tmp/reborn-sandbox/tenant/user/app",
+        ))
         .unwrap_err();
 
         assert!(format!("{error}").contains("workspace-relative"));
@@ -549,12 +539,9 @@ mod tests {
 
     #[test]
     fn container_workdir_accepts_typed_container_paths() {
-        let workspace = Path::new("/tmp/reborn-sandbox/tenant/user");
-        let workdir = RebornScopedSandboxCommandTransport::resolve_container_workdir(
-            workspace,
-            Some("/workspace/app"),
-        )
-        .unwrap();
+        let workdir =
+            RebornScopedSandboxCommandTransport::resolve_container_workdir(Some("/workspace/app"))
+                .unwrap();
 
         assert_eq!(workdir.into_string(), "/workspace/app");
     }

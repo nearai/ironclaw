@@ -2,18 +2,42 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_host_api::runtime_policy::ProcessBackendKind;
 use ironclaw_host_runtime::{SchedulerTurnRunWakeNotifier, TenantSandboxProcessPort};
 use ironclaw_trust::HostTrustPolicy;
 
 use crate::{RebornCompositionProfile, RebornProductAuthServices};
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub enum RebornRuntimeProcessBinding {
     #[default]
     None,
     TenantSandbox {
         process_port: Arc<TenantSandboxProcessPort>,
     },
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RebornRuntimeProcessBindingError {
+    MissingTenantSandboxProcessPort,
+    UnexpectedTenantSandboxProcessPort { process_backend: ProcessBackendKind },
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+impl std::fmt::Display for RebornRuntimeProcessBindingError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingTenantSandboxProcessPort => formatter.write_str(
+                "production tenant-sandbox process backend requires a tenant sandbox process binding",
+            ),
+            Self::UnexpectedTenantSandboxProcessPort { process_backend } => write!(
+                formatter,
+                "production runtime policy uses {process_backend:?} but a tenant sandbox process binding was supplied"
+            ),
+        }
+    }
 }
 
 impl RebornRuntimeProcessBinding {
@@ -23,6 +47,28 @@ impl RebornRuntimeProcessBinding {
 
     pub fn tenant_sandbox(process_port: Arc<TenantSandboxProcessPort>) -> Self {
         Self::TenantSandbox { process_port }
+    }
+
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    pub(crate) fn validate_for_production_policy(
+        &self,
+        runtime_policy: &EffectiveRuntimePolicy,
+    ) -> Result<(), RebornRuntimeProcessBindingError> {
+        match (runtime_policy.process_backend, self) {
+            (
+                ProcessBackendKind::TenantSandbox,
+                RebornRuntimeProcessBinding::TenantSandbox { .. },
+            ) => Ok(()),
+            (ProcessBackendKind::TenantSandbox, RebornRuntimeProcessBinding::None) => {
+                Err(RebornRuntimeProcessBindingError::MissingTenantSandboxProcessPort)
+            }
+            (_, RebornRuntimeProcessBinding::TenantSandbox { .. }) => Err(
+                RebornRuntimeProcessBindingError::UnexpectedTenantSandboxProcessPort {
+                    process_backend: runtime_policy.process_backend,
+                },
+            ),
+            (_, RebornRuntimeProcessBinding::None) => Ok(()),
+        }
     }
 }
 
