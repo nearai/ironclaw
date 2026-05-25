@@ -76,6 +76,7 @@ impl FirstPartyCapabilityRequest {
                 runtime_http_egress,
                 process: Arc::new(crate::LocalHostProcessPort::new()),
                 secret_store: None,
+                unsafe_raw_diagnostics_allowed: false,
             },
             input,
         }

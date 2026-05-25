@@ -42,13 +42,7 @@ pub fn bundled_gsuite_first_party_handlers(
     let mut registry = FirstPartyCapabilityRegistry::new();
     for package in gsuite_package_specs() {
         for capability in package.capabilities {
-            registry.insert_handler(
-                CapabilityId::new(format!(
-                    "{}.{}",
-                    package.extension_id, capability.short_name
-                ))?,
-                Arc::clone(&handler),
-            );
+            registry.insert_handler(CapabilityId::new(capability.id)?, Arc::clone(&handler));
         }
     }
     Ok(registry)
@@ -92,7 +86,7 @@ fn package_from_spec(spec: &GsuitePackageSpec) -> Result<ExtensionPackage, Exten
     let capabilities = spec
         .capabilities
         .iter()
-        .map(|capability| capability_manifest(spec, capability))
+        .map(|capability| capability_manifest(capability, spec.schema_prefix))
         .collect::<Result<Vec<_>, _>>()?;
     ExtensionPackage::from_manifest(
         ExtensionManifest {
@@ -115,14 +109,11 @@ fn package_from_spec(spec: &GsuitePackageSpec) -> Result<ExtensionPackage, Exten
 }
 
 fn capability_manifest(
-    package: &GsuitePackageSpec,
     capability: &GsuiteCapabilitySpec,
+    schema_prefix: &str,
 ) -> Result<CapabilityManifest, ExtensionError> {
     Ok(CapabilityManifest {
-        id: CapabilityId::new(format!(
-            "{}.{}",
-            package.extension_id, capability.short_name
-        ))?,
+        id: CapabilityId::new(capability.id)?,
         implements: Vec::new(),
         description: capability.description.to_string(),
         effects: capability.effects.to_vec(),
@@ -130,17 +121,18 @@ fn capability_manifest(
         visibility: CapabilityVisibility::Model,
         input_schema_ref: CapabilityProfileSchemaRef::new(format!(
             "schemas/{}/{}.input.v1.json",
-            package.schema_prefix, capability.short_name
+            schema_prefix, capability.short_name
         ))?,
         output_schema_ref: CapabilityProfileSchemaRef::new(format!(
             "schemas/{}/{}.output.v1.json",
-            package.schema_prefix, capability.short_name
+            schema_prefix, capability.short_name
         ))?,
         prompt_doc_ref: Some(CapabilityProfileSchemaRef::new(format!(
             "prompts/{}/{}.md",
-            package.schema_prefix, capability.short_name
+            schema_prefix, capability.short_name
         ))?),
         required_host_ports: Vec::new(),
+        runtime_credentials: Vec::new(),
         resource_profile: Some(gsuite_resource_profile()),
     })
 }

@@ -5,8 +5,8 @@
 //! loop-facing adapter wiring.
 #![forbid(unsafe_code)]
 
-mod gsuite;
 pub mod coding;
+mod gsuite;
 pub mod skills;
 
 pub use gsuite::{
@@ -19,8 +19,8 @@ pub use gsuite::{
     GMAIL_LIST_MESSAGES_CAPABILITY_ID, GMAIL_REPLY_TO_MESSAGE_CAPABILITY_ID,
     GMAIL_SEND_MESSAGE_CAPABILITY_ID, GMAIL_TRASH_MESSAGE_CAPABILITY_ID, GSUITE_OUTPUT_BYTES_LIMIT,
     GSUITE_RESPONSE_BODY_LIMIT, GSUITE_TIMEOUT_MS, GoogleCredential, GoogleCredentialError,
-    GoogleCredentialResolver, GsuiteCapabilitySpec, GsuiteDispatchError, GsuiteDispatchRequest,
-    GsuiteDispatchResult, GsuiteExecutor, GsuitePackageSpec, calendar_package_spec,
-    gmail_package_spec, google_api_network_policy, google_provider_id, gsuite_package_specs,
-    gsuite_resource_profile,
+    GoogleCredentialResolver, GsuiteCapabilityOperation, GsuiteCapabilitySpec, GsuiteDispatchError,
+    GsuiteDispatchRequest, GsuiteDispatchResult, GsuiteExecutor, GsuitePackageSpec,
+    calendar_package_spec, find_gsuite_capability, gmail_package_spec, google_api_network_policy,
+    google_provider_id, gsuite_package_specs, gsuite_resource_profile,
 };
