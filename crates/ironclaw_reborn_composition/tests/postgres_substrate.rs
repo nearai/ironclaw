@@ -98,11 +98,7 @@ async fn postgres_substrate_builder_rejects_invalid_secret_master_key() {
             },
             secret_master_key: Some(SecretString::from("too-short")),
             trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
-            runtime_policy: RebornProductionRuntimePolicy::with_tenant_sandbox_process_port(
-                production_runtime_policy(),
-                sandbox_process_port(),
-            )
-            .unwrap(),
+            runtime_policy: production_runtime_policy(),
             turn_run_wake_notifier: Arc::new(RecordingSchedulerWakeNotifier),
             surface_version: CapabilitySurfaceVersion::new("test-surface").unwrap(),
         })

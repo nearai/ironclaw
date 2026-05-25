@@ -44,17 +44,6 @@ const DEFAULT_MEMORY_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const DEFAULT_CPU_SHARES: u32 = 1024;
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 64 * 1024;
 const CONTAINER_WORKSPACE_ROOT: &str = "/workspace";
-const REBORN_NETWORK_MODE_ENV: &str = "IRONCLAW_REBORN_NETWORK_MODE";
-const REBORN_HTTP_PROXY_ENV: &str = "IRONCLAW_REBORN_HTTP_PROXY";
-const REBORN_HTTP_BROKER_SOCKET_ENV: &str = "IRONCLAW_REBORN_HTTP_BROKER_SOCKET";
-const REBORN_HTTP_BROKER_URL_ENV: &str = "IRONCLAW_REBORN_HTTP_BROKER_URL";
-const REBORN_SECRET_MODE_ENV: &str = "IRONCLAW_REBORN_SECRET_MODE";
-const REBORN_SECRET_BROKER_ENV: &str = "IRONCLAW_REBORN_SECRET_BROKER_URL";
-const REBORN_SECRET_BROKER_SOCKET_ENV: &str = "IRONCLAW_REBORN_SECRET_BROKER_SOCKET";
-const HTTP_PROXY_ENV_KEYS: &[&str] = &["http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"];
-const CONTAINER_HTTP_BROKER_SOCKET: &str = "/tmp/ironclaw-http-broker.sock";
-const CONTAINER_SECRET_BROKER_SOCKET: &str = "/tmp/ironclaw-secret-broker.sock";
-const CONTAINER_BROKER_URL: &str = "http://ironclaw-broker";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ContainerWorkdir(String);
@@ -90,8 +79,6 @@ pub struct RebornSandboxConfig {
     cpu_shares: u32,
     max_output_bytes: usize,
     disable_network: bool,
-    network_broker: Option<RebornSandboxNetworkBroker>,
-    secret_broker: Option<RebornSandboxSecretBroker>,
     container_identity: RebornSandboxContainerIdentity,
 }
 
@@ -108,8 +95,6 @@ impl RebornSandboxConfig {
             cpu_shares: DEFAULT_CPU_SHARES,
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
             disable_network: true,
-            network_broker: None,
-            secret_broker: None,
             container_identity: RebornSandboxContainerIdentity::image_default(),
         }
     }
@@ -127,43 +112,6 @@ impl RebornSandboxConfig {
     pub fn with_network_enabled(mut self) -> Self {
         self.disable_network = false;
         self
-    }
-
-    pub fn with_network_broker_proxy_url(
-        mut self,
-        proxy_url: impl Into<String>,
-    ) -> Result<Self, RuntimeProcessError> {
-        self.network_broker = Some(RebornSandboxNetworkBroker::new(proxy_url)?);
-        Ok(self)
-    }
-
-    pub fn with_network_broker_port(mut self, port: u16) -> Self {
-        self.network_broker = Some(RebornSandboxNetworkBroker::from_port(port));
-        self
-    }
-
-    pub fn with_network_broker_unix_socket(
-        mut self,
-        host_socket: impl Into<PathBuf>,
-    ) -> Result<Self, RuntimeProcessError> {
-        self.network_broker = Some(RebornSandboxNetworkBroker::unix_socket(host_socket)?);
-        Ok(self)
-    }
-
-    pub fn with_secret_broker_url(
-        mut self,
-        broker_url: impl Into<String>,
-    ) -> Result<Self, RuntimeProcessError> {
-        self.secret_broker = Some(RebornSandboxSecretBroker::new(broker_url)?);
-        Ok(self)
-    }
-
-    pub fn with_secret_broker_unix_socket(
-        mut self,
-        host_socket: impl Into<PathBuf>,
-    ) -> Result<Self, RuntimeProcessError> {
-        self.secret_broker = Some(RebornSandboxSecretBroker::unix_socket(host_socket)?);
-        Ok(self)
     }
 
     pub fn with_local_mount_source(
@@ -190,142 +138,6 @@ impl RebornSandboxConfig {
             RebornSandboxContainerIdentity::configured_user(user, workspace_mode);
         self
     }
-
-    fn container_network_mode(&self) -> Option<String> {
-        if self.disable_network
-            && !self
-                .network_broker
-                .as_ref()
-                .is_some_and(RebornSandboxNetworkBroker::requires_docker_network)
-        {
-            Some("none".to_string())
-        } else {
-            None
-        }
-    }
-
-    fn command_env(
-        &self,
-        extra_env: HashMap<String, String>,
-    ) -> Result<Vec<String>, RuntimeProcessError> {
-        let mut env = validate_env(extra_env)?;
-        if let Some(broker) = &self.network_broker {
-            push_reserved_env(&mut env, REBORN_NETWORK_MODE_ENV, "brokered")?;
-            match broker {
-                RebornSandboxNetworkBroker::HttpProxy { proxy_url } => {
-                    push_reserved_env(&mut env, REBORN_HTTP_PROXY_ENV, proxy_url)?;
-                    for key in HTTP_PROXY_ENV_KEYS {
-                        push_reserved_env(&mut env, key, proxy_url)?;
-                    }
-                }
-                RebornSandboxNetworkBroker::UnixSocket { .. } => {
-                    push_reserved_env(
-                        &mut env,
-                        REBORN_HTTP_BROKER_SOCKET_ENV,
-                        CONTAINER_HTTP_BROKER_SOCKET,
-                    )?;
-                    push_reserved_env(&mut env, REBORN_HTTP_BROKER_URL_ENV, CONTAINER_BROKER_URL)?;
-                }
-            }
-        } else {
-            push_reserved_env(&mut env, REBORN_NETWORK_MODE_ENV, "disabled")?;
-        }
-        if let Some(broker) = &self.secret_broker {
-            push_reserved_env(&mut env, REBORN_SECRET_MODE_ENV, "brokered")?;
-            match broker {
-                RebornSandboxSecretBroker::HttpEndpoint { broker_url } => {
-                    push_reserved_env(&mut env, REBORN_SECRET_BROKER_ENV, broker_url)?;
-                }
-                RebornSandboxSecretBroker::UnixSocket { .. } => {
-                    push_reserved_env(
-                        &mut env,
-                        REBORN_SECRET_BROKER_SOCKET_ENV,
-                        CONTAINER_SECRET_BROKER_SOCKET,
-                    )?;
-                }
-            }
-        } else {
-            push_reserved_env(&mut env, REBORN_SECRET_MODE_ENV, "disabled")?;
-        }
-        Ok(env)
-    }
-
-    fn append_broker_binds(&self, binds: &mut Vec<String>) -> Result<(), RuntimeProcessError> {
-        if let Some(RebornSandboxNetworkBroker::UnixSocket { host_socket }) = &self.network_broker {
-            binds.push(docker_file_bind(
-                host_socket,
-                CONTAINER_HTTP_BROKER_SOCKET,
-                "network broker socket",
-            )?);
-        }
-        if let Some(RebornSandboxSecretBroker::UnixSocket { host_socket }) = &self.secret_broker {
-            binds.push(docker_file_bind(
-                host_socket,
-                CONTAINER_SECRET_BROKER_SOCKET,
-                "secret broker socket",
-            )?);
-        }
-        Ok(())
-    }
-}
-
-/// Broker affordance exposed to tenant sandbox commands.
-///
-/// The Unix-socket variant preserves Docker `--network none`; the HTTP-proxy
-/// variant intentionally requires Docker network attachment and is for
-/// compositions that accept proxy-enforced rather than Docker-enforced egress.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RebornSandboxNetworkBroker {
-    HttpProxy { proxy_url: String },
-    UnixSocket { host_socket: PathBuf },
-}
-
-impl RebornSandboxNetworkBroker {
-    pub fn new(proxy_url: impl Into<String>) -> Result<Self, RuntimeProcessError> {
-        let proxy_url = proxy_url.into();
-        validate_broker_url("network broker proxy URL", &proxy_url)?;
-        Ok(Self::HttpProxy { proxy_url })
-    }
-
-    pub fn from_port(port: u16) -> Self {
-        Self::HttpProxy {
-            proxy_url: format!("http://{}:{port}", docker_host_gateway()),
-        }
-    }
-
-    pub fn unix_socket(host_socket: impl Into<PathBuf>) -> Result<Self, RuntimeProcessError> {
-        let host_socket = host_socket.into();
-        validate_host_socket_path("network broker socket", &host_socket)?;
-        Ok(Self::UnixSocket { host_socket })
-    }
-
-    fn requires_docker_network(&self) -> bool {
-        matches!(self, Self::HttpProxy { .. })
-    }
-}
-
-/// Secret broker affordance exposed to tenant sandbox commands.
-///
-/// The value is an endpoint, not secret material. Concrete brokers remain
-/// responsible for authentication, one-shot leases, redaction, and audit.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RebornSandboxSecretBroker {
-    HttpEndpoint { broker_url: String },
-    UnixSocket { host_socket: PathBuf },
-}
-
-impl RebornSandboxSecretBroker {
-    pub fn new(broker_url: impl Into<String>) -> Result<Self, RuntimeProcessError> {
-        let broker_url = broker_url.into();
-        validate_broker_url("secret broker URL", &broker_url)?;
-        Ok(Self::HttpEndpoint { broker_url })
-    }
-
-    pub fn unix_socket(host_socket: impl Into<PathBuf>) -> Result<Self, RuntimeProcessError> {
-        let host_socket = host_socket.into();
-        validate_host_socket_path("secret broker socket", &host_socket)?;
-        Ok(Self::UnixSocket { host_socket })
-    }
 }
 
 #[derive(Clone)]
@@ -341,8 +153,6 @@ impl std::fmt::Debug for RebornScopedSandboxCommandTransport {
             .field("workspace_root", &self.config.workspace_root)
             .field("image", &self.config.image)
             .field("disable_network", &self.config.disable_network)
-            .field("network_broker", &self.config.network_broker)
-            .field("secret_broker", &self.config.secret_broker)
             .field("container_identity", &self.config.container_identity)
             .finish_non_exhaustive()
     }
@@ -436,9 +246,9 @@ impl RebornScopedSandboxCommandTransport {
             scope_key.container_name_prefix(),
             uuid::Uuid::new_v4()
         );
-        let env = self.config.command_env(request.extra_env)?;
+        let env = validate_env(request.extra_env)?;
         let container_user = self.config.container_identity.container_user()?;
-        let mut binds = self
+        let binds = self
             .config
             .mount_sources
             .prepare_container_binds(workspace, request.mounts.as_ref())
@@ -446,13 +256,12 @@ impl RebornScopedSandboxCommandTransport {
             .into_iter()
             .map(|bind| bind.into_docker_bind())
             .collect::<Vec<_>>();
-        self.config.append_broker_binds(&mut binds)?;
         let host_config = HostConfig {
             binds: Some(binds),
             memory: Some(self.config.memory_bytes as i64),
             cpu_shares: Some(self.config.cpu_shares as i64),
             auto_remove: Some(false),
-            network_mode: self.config.container_network_mode(),
+            network_mode: self.config.disable_network.then(|| "none".to_string()),
             cap_drop: Some(vec!["ALL".to_string()]),
             security_opt: Some(vec!["no-new-privileges:true".to_string()]),
             readonly_rootfs: Some(true),
@@ -701,68 +510,6 @@ fn validate_env(env: HashMap<String, String>) -> Result<Vec<String>, RuntimeProc
         .collect()
 }
 
-fn push_reserved_env(
-    env: &mut Vec<String>,
-    key: &str,
-    value: &str,
-) -> Result<(), RuntimeProcessError> {
-    if env
-        .iter()
-        .any(|entry| entry.starts_with(&format!("{key}=")))
-    {
-        return Err(RuntimeProcessError::ExecutionFailed(format!(
-            "environment variable {key} is reserved for the Reborn sandbox"
-        )));
-    }
-    reject_nul("environment variable name", key)?;
-    reject_nul("environment variable value", value)?;
-    env.push(format!("{key}={value}"));
-    Ok(())
-}
-
-fn validate_broker_url(label: &str, value: &str) -> Result<(), RuntimeProcessError> {
-    reject_nul(label, value)?;
-    if value.trim() != value
-        || value.is_empty()
-        || value.chars().any(char::is_control)
-        || !(value.starts_with("http://") || value.starts_with("https://"))
-    {
-        return Err(RuntimeProcessError::ExecutionFailed(format!(
-            "{label} must be an http(s) URL without control characters"
-        )));
-    }
-    Ok(())
-}
-
-fn validate_host_socket_path(label: &str, path: &Path) -> Result<(), RuntimeProcessError> {
-    let raw = path.to_string_lossy();
-    reject_nul(label, &raw)?;
-    if !path.is_absolute() || raw.contains(':') || raw.is_empty() {
-        return Err(RuntimeProcessError::ExecutionFailed(format!(
-            "{label} must be an absolute host path without ':'"
-        )));
-    }
-    Ok(())
-}
-
-fn docker_file_bind(
-    host_path: &Path,
-    container_path: &str,
-    label: &str,
-) -> Result<String, RuntimeProcessError> {
-    validate_host_socket_path(label, host_path)?;
-    reject_nul("container broker path", container_path)?;
-    Ok(format!("{}:{container_path}:rw", host_path.display()))
-}
-
-fn docker_host_gateway() -> &'static str {
-    if cfg!(target_os = "linux") {
-        "172.17.0.1"
-    } else {
-        "host.docker.internal"
-    }
-}
-
 fn validate_relative_workdir(path: &Path) -> Result<(), RuntimeProcessError> {
     for component in path.components() {
         match component {
@@ -818,120 +565,6 @@ mod tests {
 
         assert_eq!(private.container_identity.workspace_mode(), 0o700);
         assert_eq!(group_shared.container_identity.workspace_mode(), 0o770);
-    }
-
-    #[test]
-    fn default_sandbox_disables_ambient_network_and_secret_affordance() {
-        let config = RebornSandboxConfig::new("/tmp/reborn-sandbox");
-        let env = config.command_env(HashMap::new()).unwrap();
-
-        assert_eq!(config.container_network_mode(), Some("none".to_string()));
-        assert!(env.contains(&"IRONCLAW_REBORN_NETWORK_MODE=disabled".to_string()));
-        assert!(env.contains(&"IRONCLAW_REBORN_SECRET_MODE=disabled".to_string()));
-    }
-
-    #[test]
-    fn network_broker_exposes_proxy_env_without_none_network_mode() {
-        let config = RebornSandboxConfig::new("/tmp/reborn-sandbox")
-            .with_network_broker_proxy_url("http://broker.internal:8181")
-            .unwrap();
-        let env = config.command_env(HashMap::new()).unwrap();
-
-        assert_eq!(config.container_network_mode(), None);
-        assert!(env.contains(&"IRONCLAW_REBORN_NETWORK_MODE=brokered".to_string()));
-        assert!(
-            env.contains(&"IRONCLAW_REBORN_HTTP_PROXY=http://broker.internal:8181".to_string())
-        );
-        assert!(env.contains(&"http_proxy=http://broker.internal:8181".to_string()));
-        assert!(env.contains(&"https_proxy=http://broker.internal:8181".to_string()));
-        assert!(env.contains(&"HTTP_PROXY=http://broker.internal:8181".to_string()));
-        assert!(env.contains(&"HTTPS_PROXY=http://broker.internal:8181".to_string()));
-    }
-
-    #[test]
-    fn unix_socket_network_broker_preserves_none_network_mode_and_mounts_socket() {
-        let config = RebornSandboxConfig::new("/tmp/reborn-sandbox")
-            .with_network_broker_unix_socket("/tmp/reborn-http-broker.sock")
-            .unwrap();
-        let env = config.command_env(HashMap::new()).unwrap();
-        let mut binds = Vec::new();
-        config.append_broker_binds(&mut binds).unwrap();
-
-        assert_eq!(config.container_network_mode(), Some("none".to_string()));
-        assert!(env.contains(&"IRONCLAW_REBORN_NETWORK_MODE=brokered".to_string()));
-        assert!(env.contains(
-            &"IRONCLAW_REBORN_HTTP_BROKER_SOCKET=/tmp/ironclaw-http-broker.sock".to_string()
-        ));
-        assert!(
-            env.contains(&"IRONCLAW_REBORN_HTTP_BROKER_URL=http://ironclaw-broker".to_string())
-        );
-        assert_eq!(
-            binds,
-            vec!["/tmp/reborn-http-broker.sock:/tmp/ironclaw-http-broker.sock:rw".to_string()]
-        );
-    }
-
-    #[test]
-    fn secret_broker_exposes_endpoint_without_secret_material() {
-        let config = RebornSandboxConfig::new("/tmp/reborn-sandbox")
-            .with_secret_broker_url("https://broker.internal/secrets")
-            .unwrap();
-        let env = config.command_env(HashMap::new()).unwrap();
-
-        assert!(env.contains(&"IRONCLAW_REBORN_SECRET_MODE=brokered".to_string()));
-        assert!(env.contains(
-            &"IRONCLAW_REBORN_SECRET_BROKER_URL=https://broker.internal/secrets".to_string()
-        ));
-        assert!(
-            env.iter()
-                .all(|entry| !entry.contains("sk-") && !entry.contains("token="))
-        );
-    }
-
-    #[test]
-    fn unix_socket_secret_broker_exposes_socket_without_secret_material() {
-        let config = RebornSandboxConfig::new("/tmp/reborn-sandbox")
-            .with_secret_broker_unix_socket("/tmp/reborn-secret-broker.sock")
-            .unwrap();
-        let env = config.command_env(HashMap::new()).unwrap();
-        let mut binds = Vec::new();
-        config.append_broker_binds(&mut binds).unwrap();
-
-        assert!(env.contains(&"IRONCLAW_REBORN_SECRET_MODE=brokered".to_string()));
-        assert!(env.contains(
-            &"IRONCLAW_REBORN_SECRET_BROKER_SOCKET=/tmp/ironclaw-secret-broker.sock".to_string()
-        ));
-        assert!(
-            env.iter()
-                .all(|entry| !entry.contains("sk-") && !entry.contains("token="))
-        );
-        assert_eq!(
-            binds,
-            vec!["/tmp/reborn-secret-broker.sock:/tmp/ironclaw-secret-broker.sock:rw".to_string()]
-        );
-    }
-
-    #[test]
-    fn broker_env_rejects_user_override() {
-        let config = RebornSandboxConfig::new("/tmp/reborn-sandbox")
-            .with_network_broker_proxy_url("http://broker.internal:8181")
-            .unwrap();
-        let error = config
-            .command_env(HashMap::from([(
-                "http_proxy".to_string(),
-                "http://attacker.invalid:1".to_string(),
-            )]))
-            .unwrap_err();
-
-        assert!(format!("{error}").contains("reserved"));
-    }
-
-    #[test]
-    fn broker_urls_reject_control_characters_and_non_http_schemes() {
-        assert!(RebornSandboxNetworkBroker::new("unix:///tmp/broker.sock").is_err());
-        assert!(RebornSandboxSecretBroker::new("https://broker.internal/\nsecrets").is_err());
-        assert!(RebornSandboxNetworkBroker::unix_socket("relative.sock").is_err());
-        assert!(RebornSandboxSecretBroker::unix_socket("/tmp/bad:path.sock").is_err());
     }
 
     #[tokio::test]
