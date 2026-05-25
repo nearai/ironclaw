@@ -10,7 +10,7 @@ use ironclaw_auth::{
     CredentialAccountStatus, CredentialOwnership, InMemoryAuthProductServices,
     NewCredentialAccount, ProviderScope,
 };
-use ironclaw_first_party_extensions::gsuite::{
+use ironclaw_first_party_extensions::{
     GsuiteDispatchError, GsuiteDispatchRequest, GsuiteExecutor, google_provider_id,
 };
 use ironclaw_host_api::{
