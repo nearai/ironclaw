@@ -12,13 +12,13 @@ use crate::{
 pub(crate) struct RuntimeProjectionState {
     runs: HashMap<InvocationId, RunStatusProjection>,
     capability_activities: HashMap<InvocationId, CapabilityActivityProjection>,
-    capability_activity_limit: Option<usize>,
+    capability_activity_output_limit: Option<usize>,
 }
 
 impl RuntimeProjectionState {
-    pub(crate) fn with_capability_activity_limit(limit: usize) -> Self {
+    pub(crate) fn with_capability_activity_output_limit(limit: usize) -> Self {
         Self {
-            capability_activity_limit: Some(limit),
+            capability_activity_output_limit: Some(limit),
             ..Self::default()
         }
     }
@@ -32,15 +32,15 @@ impl RuntimeProjectionState {
         self,
     ) -> (Vec<RunStatusProjection>, Vec<CapabilityActivityProjection>) {
         let mut capability_activities = self.capability_activities.into_values().collect();
-        enforce_capability_activity_limit(
+        enforce_capability_activity_output_limit(
             &mut capability_activities,
-            self.capability_activity_limit,
+            self.capability_activity_output_limit,
         );
         (self.runs.into_values().collect(), capability_activities)
     }
 }
 
-fn enforce_capability_activity_limit(
+fn enforce_capability_activity_output_limit(
     activities: &mut Vec<CapabilityActivityProjection>,
     limit: Option<usize>,
 ) {

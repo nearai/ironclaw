@@ -1216,18 +1216,20 @@ impl ReplayEventProjectionService {
     /// consumers that use snapshots to rebase after a replay gap.
     ///
     /// The same bounded-memory contract applies: pages are folded
-    /// incrementally, allocation is `O(scoped runs + requested activity
-    /// window)` regardless of stream length, and scanning more than
-    /// [`STATE_REPLAY_MAX_EVENTS`] events surfaces
-    /// [`ProjectionError::RebaseRequired`] instead of silently returning a
-    /// partial run-state view.
+    /// incrementally, allocation is `O(scoped invocations)` regardless of
+    /// stream length, and scanning more than [`STATE_REPLAY_MAX_EVENTS`]
+    /// events surfaces [`ProjectionError::RebaseRequired`] instead of
+    /// silently returning a partial run-state view. The requested limit is
+    /// applied only to the emitted activity window after the fold, so late
+    /// terminal events cannot be lost while compacting the output.
     async fn fold_runtime_to_head(
         &self,
         scope: &ProjectionScope,
-        capability_activity_limit: usize,
+        capability_activity_output_limit: usize,
     ) -> Result<RuntimeProjectionState, ProjectionError> {
-        let mut state =
-            RuntimeProjectionState::with_capability_activity_limit(capability_activity_limit);
+        let mut state = RuntimeProjectionState::with_capability_activity_output_limit(
+            capability_activity_output_limit,
+        );
         let mut after: Option<EventCursor> = None;
         let mut scanned: usize = 0;
         loop {
