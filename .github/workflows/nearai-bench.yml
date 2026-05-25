@@ -1,0 +1,196 @@
+# Slash-command dispatcher for nearai-bench on PR comments. A maintainer
+# (write/maintain/admin permission) comments `/benchmark <suite>`
+# (optionally `--model <id>`) on a PR; this workflow validates auth,
+# parses the command, resolves the PR head SHA, reacts with 🚀, then
+# delegates to nearai/benchmarks's reusable workflow which builds the
+# harness against the PR's ironclaw SHA, runs the suite, compares against
+# a baseline, and posts a markdown comment back here.
+#
+# Setup / usage docs:
+# https://github.com/nearai/benchmarks/blob/main/docs/ci/README.md
+#
+# Requires `OPENROUTER_API_KEY` as an org-level (or repo-level) secret.
+# Only that one secret is forwarded — `secrets: inherit` is intentionally
+# NOT used (supply-chain hardening).
+
+name: nearai-bench
+
+on:
+  issue_comment:
+    types: [created]
+
+# Minimum surface for what this workflow actually does. The called
+# reusable workflow (in nearai/benchmarks) declares its own ceiling
+# (pull-requests:write + issues:write); the effective permissions in the
+# called job are the intersection of these two, so a hostile change in
+# the benchmarks repo can't acquire writes we didn't grant here.
+#
+# `pull-requests: write` (not just `issues: write`) is required because
+# GitHub's reactions endpoint for PR-issue-comments rejects an
+# `issues: write`-only GITHUB_TOKEN with `403 Resource not accessible by
+# integration`, despite the docs at
+# https://docs.github.com/rest/reactions/reactions#create-reaction-for-an-issue-comment
+# listing only `issues: write`. Observed in
+# https://github.com/nearai/ironclaw/actions/runs/26197185339 (the
+# canary on PR #3834 that found this bug).
+permissions:
+  pull-requests: write  # gh pr view + gh pr comment + reactions on PR comments
+  issues: write         # belt-and-suspenders; also covers parse-error comment
+  contents: read
+
+jobs:
+  parse:
+    # Tightened from `startsWith(body, '/benchmark')` to whole-word
+    # match — `/benchmarking-something` no longer enters the parse path.
+    if: >-
+      github.event.issue.pull_request != null
+      && (
+        startsWith(github.event.comment.body, '/benchmark ')
+        || github.event.comment.body == '/benchmark'
+      )
+    runs-on: ubuntu-latest
+    outputs:
+      suite: ${{ steps.parse.outputs.suite }}
+      model: ${{ steps.parse.outputs.model }}
+      head_sha: ${{ steps.parse.outputs.head_sha }}
+      authorized: ${{ steps.auth.outputs.authorized }}
+    steps:
+      - name: Check commenter has write permission
+        id: auth
+        # SHA-pinned to v7.0.1 to match the rest of this repo's workflows.
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.0.1
+        with:
+          script: |
+            // `getCollaboratorPermissionLevel` throws 404 for users who
+            // aren't collaborators at all (external contributors), and we
+            // want to silently drop those rather than fail the workflow
+            // with a noisy red run. Rethrow anything else.
+            let permission = 'none';
+            try {
+              const { data } = await github.rest.repos.getCollaboratorPermissionLevel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                username: context.payload.comment.user.login,
+              });
+              permission = data.permission;
+            } catch (err) {
+              if (err.status !== 404) throw err;
+              // 404 → not a collaborator → unauthorized.
+            }
+            const ok = ['admin', 'write', 'maintain'].includes(permission);
+            core.setOutput('authorized', ok ? 'yes' : 'no');
+            if (!ok) {
+              core.notice(`Comment author @${context.payload.comment.user.login} is not authorized to trigger benchmarks (permission: ${permission}).`);
+            }
+
+      - name: Parse command
+        id: parse
+        if: steps.auth.outputs.authorized == 'yes'
+        env:
+          BODY: ${{ github.event.comment.body }}
+          PR: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Pinned reviewed commit on nearai/benchmarks main. Must match
+          # the SHA in the `bench` job's `uses:` below — bump in both
+          # places together. Used here to validate the requested suite
+          # exists at the same SHA we'd actually run against.
+          BENCH_PIN: 67effacd8c8a7f6f43b422e30a1810822b9d6d5f
+        run: |
+          set -euo pipefail
+          # Grammar: /benchmark <suite> [--model <model-id>]
+          # Suite name: [A-Za-z0-9_-]+
+          # Model ID:   [A-Za-z0-9_./:-]+ (allows openrouter-style "vendor/model")
+          suite=$(printf '%s' "$BODY" | sed -nE 's@^/benchmark[[:space:]]+([A-Za-z0-9_-]+)([[:space:]]+--model[[:space:]]+[A-Za-z0-9_./:-]+)?[[:space:]]*$@\1@p')
+          model=$(printf '%s' "$BODY" | sed -nE 's@^/benchmark[[:space:]]+[A-Za-z0-9_-]+[[:space:]]+--model[[:space:]]+([A-Za-z0-9_./:-]+)[[:space:]]*$@\1@p')
+          if [ -z "$suite" ]; then
+            # User-input error — post a helpful reply and exit cleanly
+            # (exit 0 keeps the Actions tab green; bad syntax isn't infra
+            # failure).
+            gh pr comment "$PR" --repo "$REPO" --body $'Could not parse `/benchmark` command.\n\nUsage: `/benchmark <suite> [--model <model-id>]`\n\nExample: `/benchmark ironclaw-smoke`'
+            exit 0
+          fi
+          # Pre-dispatch suite check: refuse unknown suite names before
+          # we acknowledge with 🚀 or spend any LLM credit. Cheap GitHub
+          # API lookup against the pinned benchmarks SHA so the user gets
+          # the same answer the dispatched workflow would.
+          if ! gh api "repos/nearai/benchmarks/contents/suites/${suite}.toml?ref=${BENCH_PIN}" --silent >/dev/null 2>&1; then
+            available=$(gh api "repos/nearai/benchmarks/contents/suites?ref=${BENCH_PIN}" \
+              --jq '[.[] | select(.name | endswith(".toml")) | .name | rtrimstr(".toml")] | sort | join(", ")')
+            gh pr comment "$PR" --repo "$REPO" --body "Unknown suite \`${suite}\`. Available: ${available}"
+            exit 0
+          fi
+          sha=$(gh pr view "$PR" --repo "$REPO" --json headRefOid -q .headRefOid)
+          echo "suite=$suite" >> "$GITHUB_OUTPUT"
+          echo "model=$model" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Acknowledge with 🚀 reaction
+        if: steps.auth.outputs.authorized == 'yes' && steps.parse.outputs.suite != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+        run: |
+          gh api "/repos/${REPO}/issues/comments/${COMMENT_ID}/reactions" -F content=rocket
+
+      - name: Post "started" comment with link to dispatcher run
+        # Closes the gap between the 🚀 reaction and the eventual result
+        # comment (~5–10 min later from the called workflow). Gives the
+        # maintainer a clickable link straight to the Actions run.
+        if: steps.auth.outputs.authorized == 'yes' && steps.parse.outputs.suite != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.issue.number }}
+          SUITE: ${{ steps.parse.outputs.suite }}
+          MODEL: ${{ steps.parse.outputs.model }}
+          HEAD_SHA: ${{ steps.parse.outputs.head_sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          short_sha="${HEAD_SHA:0:10}"
+          model_part=""
+          if [ -n "$MODEL" ]; then
+            model_part=" (model \`$MODEL\`)"
+          fi
+          gh pr comment "$PR" --repo "$REPO" --body \
+            "🧪 Started \`$SUITE\`${model_part} against ironclaw \`$short_sha\` — [watch run]($RUN_URL)."
+
+  bench:
+    needs: parse
+    if: needs.parse.outputs.authorized == 'yes' && needs.parse.outputs.suite != ''
+    # Job-scoped writes so the called workflow can post the result
+    # comment + toggle the trigger-comment reaction. Called workflows
+    # can only DOWNGRADE the caller's GITHUB_TOKEN, so the workflow-level
+    # `pull-requests: read` (which the parse job uses for `gh pr view`)
+    # would otherwise leave the called workflow without write to publish
+    # results. The parse job stays on read; only this authorized,
+    # post-auth job grants writes.
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    # Concurrency lives on the authorized job, not the workflow root —
+    # otherwise an unauthorized commenter typing `/benchmark whatever`
+    # would acquire the per-PR group and cancel an in-flight maintainer
+    # run before failing auth.
+    concurrency:
+      group: nearai-bench-${{ github.event.issue.number }}
+      cancel-in-progress: true
+    # Pinned to a reviewed commit on nearai/benchmarks main — mutable @main
+    # + secrets: inherit was the supply-chain hole. Bump this SHA in a
+    # deliberate PR when nearai/benchmarks ships a new reusable workflow.
+    uses: nearai/benchmarks/.github/workflows/bench-pr-reusable.yml@67effacd8c8a7f6f43b422e30a1810822b9d6d5f
+    with:
+      ironclaw-rev: ${{ needs.parse.outputs.head_sha }}
+      pr-repo: ${{ github.repository }}
+      pr-number: ${{ github.event.issue.number }}
+      suite-name: ${{ needs.parse.outputs.suite }}
+      model: ${{ needs.parse.outputs.model }}
+      trigger-comment-id: ${{ github.event.comment.id }}
+    # Scope inherited secrets to only what the reusable workflow needs.
+    # Replaces `secrets: inherit`, which gave the called workflow access
+    # to every secret available here.
+    secrets:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}

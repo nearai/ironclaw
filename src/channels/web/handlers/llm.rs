@@ -434,6 +434,16 @@ fn build_llm_providers(nearai_has_session_token: bool) -> serde_json::Value {
         );
         entry.insert("api_key_required".into(), def.api_key_required.into());
         entry.insert("base_url_required".into(), def.base_url_required.into());
+        // `accepts_api_key` answers "should the configure UI show the
+        // API key input?", which is different from "is the API key
+        // required to make this provider work?". NEAR AI has dual auth
+        // (session token OR API key) — `api_key_required: false` but
+        // we still want the user to be able to enter `NEARAI_API_KEY`
+        // from the settings dialog. Drive the UI off the presence of
+        // an `api_key_env` declaration in the registry, which is true
+        // for every provider that actually consumes an API key.
+        let accepts_api_key = def.api_key_env.is_some();
+        entry.insert("accepts_api_key".into(), accepts_api_key.into());
         let can_list = def.setup.as_ref().is_some_and(|s| s.can_list_models());
         entry.insert("can_list_models".into(), can_list.into());
 
@@ -924,6 +934,65 @@ mod tests {
             assert!(
                 p.get("has_credentials").is_some(),
                 "{id} missing has_credentials"
+            );
+        }
+    }
+
+    /// Regression for nearai/ironclaw#3734: NEAR AI is dual-auth
+    /// (session token + API key). The configure UI must show the
+    /// API Key input and the "Fetch available models" button even
+    /// though `api_key_required: false` (because session_token alone
+    /// is a valid configuration). PR #3416 collapsed NEAR AI into the
+    /// generic registry path with the SessionToken setup hint, which
+    /// silently flipped both flags off on the wire. Lock in:
+    ///
+    ///   - `accepts_api_key: true` (provider has an api_key_env, so
+    ///     the API key field must be visible)
+    ///   - `can_list_models: true` (SessionToken setup hint propagates
+    ///     the per-provider can_list_models from providers.json)
+    ///
+    /// Also covers the corollary that providers without an api_key_env
+    /// (Bedrock, Codex device-code, Gemini OAuth) emit
+    /// `accepts_api_key: false`.
+    #[tokio::test]
+    async fn test_nearai_configure_ui_flags_3734() {
+        let _env_lock = crate::config::helpers::lock_env();
+        let arr = build_llm_providers(false);
+        let arr = arr.as_array().expect("array");
+
+        let nearai = find_provider(arr, "nearai").expect("nearai");
+        assert_eq!(
+            nearai.get("accepts_api_key").and_then(|v| v.as_bool()),
+            Some(true),
+            "nearai must expose accepts_api_key=true so the configure \
+             UI shows the API Key input (#3734)"
+        );
+        assert_eq!(
+            nearai.get("can_list_models").and_then(|v| v.as_bool()),
+            Some(true),
+            "nearai must expose can_list_models=true so the configure \
+             UI shows the Fetch models button (#3734)"
+        );
+
+        // Sanity-check the corollary: backends with no api_key_env
+        // (Bedrock, OpenAI Codex device-code, Gemini OAuth) must NOT
+        // surface the API Key field.
+        for id in ["bedrock", "openai_codex", "gemini_oauth"] {
+            let p = find_provider(arr, id).unwrap_or_else(|| panic!("{id} should exist"));
+            assert_eq!(
+                p.get("accepts_api_key").and_then(|v| v.as_bool()),
+                Some(false),
+                "{id}: no api_key_env means accepts_api_key must be false"
+            );
+        }
+
+        // Every entry must carry the field so the frontend gate is
+        // never undefined for any provider.
+        for p in arr {
+            let id = p.get("id").and_then(|v| v.as_str()).unwrap_or("<missing>");
+            assert!(
+                p.get("accepts_api_key").is_some(),
+                "{id} missing accepts_api_key"
             );
         }
     }
