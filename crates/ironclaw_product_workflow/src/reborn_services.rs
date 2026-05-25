@@ -606,7 +606,7 @@ impl RebornServicesApi for RebornServices {
                 .resolve(ResolveApprovalInteractionRequest {
                     scope,
                     actor,
-                    run_id,
+                    run_id: Some(run_id),
                     gate_ref,
                     decision,
                     idempotency_key: client_action_id,

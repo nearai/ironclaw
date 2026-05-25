@@ -192,7 +192,6 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
                 approval_request_id: ApprovalRequestId::new(),
                 summary: "Approval required".to_string(),
                 action: ironclaw_product_workflow::ApprovalInteractionActionView::Other,
-                invocation_fingerprint: None,
             }],
         })
     }
@@ -201,7 +200,7 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
         &self,
         request: ResolveApprovalInteractionRequest,
     ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
-        let run_id = request.run_id;
+        let run_id = request.run_id.unwrap_or(self.run_id);
         self.resolutions.lock().expect("lock").push(request);
         Ok(
             match self
@@ -529,11 +528,48 @@ async fn approval_resolution_payload_routes_through_approval_interaction_service
     let resolutions = approval_service.resolutions();
     assert_eq!(resolutions.len(), 1);
     assert_eq!(resolutions[0].gate_ref, gate_ref);
-    assert_eq!(resolutions[0].run_id, run_id);
+    assert_eq!(resolutions[0].run_id, None);
     assert_eq!(
         resolutions[0].decision,
         ApprovalInteractionDecision::ApproveOnce
     );
+}
+
+#[tokio::test]
+async fn approval_resolution_always_allow_is_rejected_without_approval_interaction() {
+    let inbound = Arc::new(FakeInboundTurnService::new());
+    let ledger = Arc::new(FakeIdempotencyLedger::new());
+    let binding = Arc::new(FakeConversationBindingService::new());
+    let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
+    let approval_service = Arc::new(RecordingApprovalInteractionService::new(
+        gate_ref.clone(),
+        TurnRunId::new(),
+    ));
+    let workflow = DefaultProductWorkflow::new(inbound, ledger, binding)
+        .with_approval_interaction_service(approval_service.clone());
+    let envelope = sample_envelope_with_payload(
+        "approval-always-allow",
+        ProductInboundPayload::ApprovalResolution(
+            ApprovalResolutionPayload::new(gate_ref.as_str(), ApprovalDecision::AlwaysAllow)
+                .expect("approval payload"),
+        ),
+    );
+
+    let err = workflow
+        .accept_inbound(envelope)
+        .await
+        .expect_err("always allow unsupported");
+
+    assert!(matches!(
+        err,
+        ProductAdapterError::WorkflowRejected {
+            kind: ironclaw_product_adapters::ProductWorkflowRejectionKind::InvalidRequest,
+            status_code: 400,
+            retryable: false,
+            ..
+        }
+    ));
+    assert!(approval_service.resolutions().is_empty());
 }
 
 #[tokio::test]

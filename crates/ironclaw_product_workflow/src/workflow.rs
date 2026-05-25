@@ -20,7 +20,7 @@ use tracing::debug;
 use crate::action::{ActionDispatchKind, ActionFingerprintKey, SourceBindingKey};
 use crate::approval_interaction::{
     ApprovalInteractionDecision, ApprovalInteractionRejectionKind, ApprovalInteractionService,
-    ListPendingApprovalsRequest, ResolveApprovalInteractionRequest,
+    RejectingApprovalInteractionService, ResolveApprovalInteractionRequest,
 };
 use crate::binding::{
     ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
@@ -46,7 +46,7 @@ pub struct DefaultProductWorkflow {
     binding_service: Arc<dyn ConversationBindingService>,
     command_admission_service: Arc<dyn ProductCommandAdmissionService>,
     command_service: Arc<dyn ProductCommandService>,
-    approval_interaction_service: Option<Arc<dyn ApprovalInteractionService>>,
+    approval_interaction_service: Arc<dyn ApprovalInteractionService>,
 }
 
 impl DefaultProductWorkflow {
@@ -62,7 +62,7 @@ impl DefaultProductWorkflow {
             binding_service,
             command_admission_service: Arc::new(RejectingProductCommandAdmissionService),
             command_service: Arc::new(RejectingProductCommandService),
-            approval_interaction_service: None,
+            approval_interaction_service: Arc::new(RejectingApprovalInteractionService),
         }
     }
 
@@ -94,7 +94,7 @@ impl DefaultProductWorkflow {
         mut self,
         approval_interaction_service: Arc<dyn ApprovalInteractionService>,
     ) -> Self {
-        self.approval_interaction_service = Some(approval_interaction_service);
+        self.approval_interaction_service = approval_interaction_service;
         self
     }
 }
@@ -151,7 +151,7 @@ impl ProductWorkflow for DefaultProductWorkflow {
                         binding_service: &*self.binding_service,
                         command_admission_service: &*self.command_admission_service,
                         command_service: &*self.command_service,
-                        approval_interaction_service: self.approval_interaction_service.as_deref(),
+                        approval_interaction_service: &*self.approval_interaction_service,
                     },
                 )
                 .await;
@@ -250,7 +250,7 @@ struct DispatchPorts<'a> {
     binding_service: &'a dyn ConversationBindingService,
     command_admission_service: &'a dyn ProductCommandAdmissionService,
     command_service: &'a dyn ProductCommandService,
-    approval_interaction_service: Option<&'a dyn ApprovalInteractionService>,
+    approval_interaction_service: &'a dyn ApprovalInteractionService,
 }
 
 fn resolve_binding_request(envelope: &ProductInboundEnvelope) -> ResolveBindingRequest {
@@ -396,13 +396,8 @@ async fn dispatch_approval_resolution(
     payload: &ironclaw_product_adapters::ApprovalResolutionPayload,
     action_id: crate::ProductActionId,
     binding_service: &dyn ConversationBindingService,
-    approval_interaction_service: Option<&dyn ApprovalInteractionService>,
+    approval_interaction_service: &dyn ApprovalInteractionService,
 ) -> Result<DispatchedAction, ProductWorkflowError> {
-    let Some(approval_interaction_service) = approval_interaction_service else {
-        return Err(ProductWorkflowError::ApprovalInteractionRejected {
-            kind: ApprovalInteractionRejectionKind::ResolverUnavailable,
-        });
-    };
     let decision = match payload.decision {
         ApprovalDecision::ApproveOnce => ApprovalInteractionDecision::ApproveOnce,
         ApprovalDecision::Deny => ApprovalInteractionDecision::Deny,
@@ -422,21 +417,6 @@ async fn dispatch_approval_resolution(
             kind: ApprovalInteractionRejectionKind::InvalidGateRef,
         }
     })?;
-    let pending = approval_interaction_service
-        .list_pending(ListPendingApprovalsRequest {
-            scope: scope.clone(),
-            actor: actor.clone(),
-        })
-        .await?;
-    let Some(gate) = pending
-        .approvals
-        .iter()
-        .find(|candidate| candidate.gate_ref == gate_ref)
-    else {
-        return Err(ProductWorkflowError::ApprovalInteractionRejected {
-            kind: ApprovalInteractionRejectionKind::MissingGate,
-        });
-    };
     let idempotency_key =
         IdempotencyKey::new(format!("product-approval:{action_id}")).map_err(|_| {
             ProductWorkflowError::ApprovalInteractionRejected {
@@ -447,7 +427,7 @@ async fn dispatch_approval_resolution(
         .resolve(ResolveApprovalInteractionRequest {
             scope,
             actor,
-            run_id: gate.run_id,
+            run_id: None,
             gate_ref,
             decision,
             idempotency_key,

@@ -7,8 +7,8 @@ use ironclaw_authorization::InMemoryCapabilityLeaseStore;
 use ironclaw_events::InMemoryAuditSink;
 use ironclaw_host_api::{
     Action, ApprovalRequest, ApprovalRequestId, CapabilityId, CorrelationId, EffectKind,
-    InvocationId, MountView, NetworkPolicy, Principal, ResourceEstimate, ResourceScope, TenantId,
-    ThreadId, UserId,
+    InvocationFingerprint, InvocationId, MountView, NetworkPolicy, Principal, ResourceEstimate,
+    ResourceScope, TenantId, ThreadId, UserId,
 };
 use ironclaw_product_workflow::{
     ApprovalInteractionDecision, ApprovalInteractionReadModel, ApprovalInteractionRejectionKind,
@@ -18,8 +18,8 @@ use ironclaw_product_workflow::{
     ResolveApprovalInteractionResponse, RunStateApprovalInteractionReadModel, approval_gate_ref,
 };
 use ironclaw_run_state::{
-    ApprovalRequestStore, InMemoryApprovalRequestStore, InMemoryRunStateStore, RunStart,
-    RunStateStore,
+    ApprovalRequestStore, ApprovalStatus, InMemoryApprovalRequestStore, InMemoryRunStateStore,
+    RunStart, RunStateStore,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
@@ -44,7 +44,7 @@ impl FakeReadModel {
 
 #[async_trait]
 impl ApprovalInteractionReadModel for FakeReadModel {
-    async fn pending_approvals(
+    async fn approval_gates(
         &self,
         scope: &ApprovalInteractionScope,
     ) -> Result<Vec<PendingApprovalGateRecord>, ironclaw_product_workflow::ProductWorkflowError>
@@ -85,6 +85,7 @@ impl ApprovalLeaseTermsProvider for FixedLeaseTermsProvider {
 #[derive(Default)]
 struct RecordingApprovalResolver {
     approvals: Mutex<Vec<RecordedApproval>>,
+    spawn_approvals: Mutex<Vec<RecordedApproval>>,
     denials: Mutex<Vec<(ResourceScope, ApprovalRequestId, Principal)>>,
 }
 
@@ -103,6 +104,10 @@ impl RecordingApprovalResolver {
 
     fn denial_count(&self) -> usize {
         self.denials.lock().expect("lock").len()
+    }
+
+    fn spawn_approval_count(&self) -> usize {
+        self.spawn_approvals.lock().expect("lock").len()
     }
 
     fn approvals(&self) -> Vec<RecordedApproval> {
@@ -129,11 +134,20 @@ impl ApprovalResolutionPort for RecordingApprovalResolver {
 
     async fn approve_spawn(
         &self,
-        _scope: &ResourceScope,
-        _request_id: ApprovalRequestId,
-        _approval: LeaseApproval,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+        approval: LeaseApproval,
     ) -> Result<(), ironclaw_product_workflow::ProductWorkflowError> {
-        panic!("dispatch test should not approve spawn")
+        self.spawn_approvals
+            .lock()
+            .expect("lock")
+            .push(RecordedApproval {
+                scope: scope.clone(),
+                request_id,
+                issued_by: approval.issued_by,
+                allowed_effects: approval.allowed_effects,
+            });
+        Ok(())
     }
 
     async fn deny(
@@ -285,6 +299,23 @@ fn approval_request(reason: &str) -> ApprovalRequest {
     }
 }
 
+fn spawn_approval_request(reason: &str) -> ApprovalRequest {
+    let mut request = approval_request(reason);
+    request.action = Box::new(Action::SpawnCapability {
+        capability: CapabilityId::new("demo.worker").expect("capability"),
+        estimated_resources: ResourceEstimate::default(),
+    });
+    request
+}
+
+fn unsupported_approval_request(reason: &str) -> ApprovalRequest {
+    let mut request = approval_request(reason);
+    request.action = Box::new(Action::EmitExternalEffect {
+        effect: EffectKind::ExternalWrite,
+    });
+    request
+}
+
 fn run_start(scope: ResourceScope, capability_id: CapabilityId) -> RunStart {
     RunStart {
         invocation_id: scope.invocation_id,
@@ -302,13 +333,42 @@ fn service_fixture(
     TurnRunId,
     GateRef,
 ) {
+    service_fixture_for_request(approval_request(reason))
+}
+
+fn service_fixture_for_request(
+    request: ApprovalRequest,
+) -> (
+    DefaultApprovalInteractionService,
+    Arc<RecordingApprovalResolver>,
+    Arc<FakeTurnCoordinator>,
+    TurnRunId,
+    GateRef,
+) {
+    service_fixture_for_request_status(request, ApprovalStatus::Pending)
+}
+
+fn service_fixture_for_request_status(
+    request: ApprovalRequest,
+    status: ApprovalStatus,
+) -> (
+    DefaultApprovalInteractionService,
+    Arc<RecordingApprovalResolver>,
+    Arc<FakeTurnCoordinator>,
+    TurnRunId,
+    GateRef,
+) {
     let actor = actor("user-alpha");
-    let request = approval_request(reason);
     let gate_ref = approval_gate_ref(request.id).expect("gate ref");
     let run_id = TurnRunId::new();
-    let gate =
-        PendingApprovalGateRecord::new(resource_scope(&actor), run_id, gate_ref.clone(), request)
-            .expect("pending gate");
+    let gate = PendingApprovalGateRecord::with_status(
+        resource_scope(&actor),
+        run_id,
+        gate_ref.clone(),
+        request,
+        status,
+    )
+    .expect("approval gate");
     let resolver = Arc::new(RecordingApprovalResolver::default());
     let coordinator = Arc::new(FakeTurnCoordinator::blocked(actor, gate_ref.clone()));
     let service = DefaultApprovalInteractionService::new(
@@ -327,7 +387,7 @@ async fn approve_resolves_pending_gate_then_resumes_blocked_approval() {
         .resolve(ResolveApprovalInteractionRequest {
             scope: scope(),
             actor: actor("user-alpha"),
-            run_id,
+            run_id: Some(run_id),
             gate_ref: gate_ref.clone(),
             decision: ApprovalInteractionDecision::ApproveOnce,
             idempotency_key: IdempotencyKey::new("approve-once").expect("idempotency"),
@@ -363,13 +423,120 @@ async fn approve_resolves_pending_gate_then_resumes_blocked_approval() {
 }
 
 #[tokio::test]
+async fn approve_spawn_capability_routes_to_spawn_resolver_then_resumes_blocked_approval() {
+    let (service, resolver, coordinator, run_id, gate_ref) =
+        service_fixture_for_request(spawn_approval_request("start the worker"));
+    let response = service
+        .resolve(ResolveApprovalInteractionRequest {
+            scope: scope(),
+            actor: actor("user-alpha"),
+            run_id: Some(run_id),
+            gate_ref,
+            decision: ApprovalInteractionDecision::ApproveOnce,
+            idempotency_key: IdempotencyKey::new("approve-spawn").expect("idempotency"),
+        })
+        .await
+        .expect("approve spawn");
+
+    assert!(matches!(
+        response,
+        ResolveApprovalInteractionResponse::Approved(_)
+    ));
+    assert_eq!(resolver.approval_count(), 0);
+    assert_eq!(resolver.spawn_approval_count(), 1);
+    assert_eq!(coordinator.resumption_count(), 1);
+}
+
+#[tokio::test]
+async fn unsupported_approval_action_returns_invalid_request_without_resolution() {
+    let (service, resolver, coordinator, run_id, gate_ref) =
+        service_fixture_for_request(unsupported_approval_request("external write"));
+    let err = service
+        .resolve(ResolveApprovalInteractionRequest {
+            scope: scope(),
+            actor: actor("user-alpha"),
+            run_id: Some(run_id),
+            gate_ref,
+            decision: ApprovalInteractionDecision::ApproveOnce,
+            idempotency_key: IdempotencyKey::new("unsupported-action").expect("idempotency"),
+        })
+        .await
+        .expect_err("unsupported action");
+
+    assert!(matches!(
+        err,
+        ironclaw_product_workflow::ProductWorkflowError::ApprovalInteractionRejected {
+            kind: ApprovalInteractionRejectionKind::UnsupportedAction
+        }
+    ));
+    assert_eq!(resolver.approval_count(), 0);
+    assert_eq!(resolver.spawn_approval_count(), 0);
+    assert_eq!(coordinator.resumption_count(), 0);
+}
+
+#[tokio::test]
+async fn already_approved_gate_resumes_without_reissuing_resolution() {
+    let (service, resolver, coordinator, run_id, gate_ref) = service_fixture_for_request_status(
+        approval_request("send the email"),
+        ApprovalStatus::Approved,
+    );
+
+    let response = service
+        .resolve(ResolveApprovalInteractionRequest {
+            scope: scope(),
+            actor: actor("user-alpha"),
+            run_id: Some(run_id),
+            gate_ref,
+            decision: ApprovalInteractionDecision::ApproveOnce,
+            idempotency_key: IdempotencyKey::new("retry-approved").expect("idempotency"),
+        })
+        .await
+        .expect("retry approved");
+
+    assert!(matches!(
+        response,
+        ResolveApprovalInteractionResponse::Approved(_)
+    ));
+    assert_eq!(resolver.approval_count(), 0);
+    assert_eq!(resolver.spawn_approval_count(), 0);
+    assert_eq!(coordinator.resumption_count(), 1);
+}
+
+#[tokio::test]
+async fn already_denied_gate_cancels_without_reissuing_denial() {
+    let (service, resolver, coordinator, run_id, gate_ref) = service_fixture_for_request_status(
+        approval_request("delete a file"),
+        ApprovalStatus::Denied,
+    );
+
+    let response = service
+        .resolve(ResolveApprovalInteractionRequest {
+            scope: scope(),
+            actor: actor("user-alpha"),
+            run_id: Some(run_id),
+            gate_ref,
+            decision: ApprovalInteractionDecision::Deny,
+            idempotency_key: IdempotencyKey::new("retry-denied").expect("idempotency"),
+        })
+        .await
+        .expect("retry denied");
+
+    assert!(matches!(
+        response,
+        ResolveApprovalInteractionResponse::Denied(_)
+    ));
+    assert_eq!(resolver.denial_count(), 0);
+    assert_eq!(coordinator.cancellation_count(), 1);
+}
+
+#[tokio::test]
 async fn deny_marks_pending_gate_denied_then_cancels_run() {
     let (service, resolver, coordinator, run_id, gate_ref) = service_fixture("delete a file");
     let response = service
         .resolve(ResolveApprovalInteractionRequest {
             scope: scope(),
             actor: actor("user-alpha"),
-            run_id,
+            run_id: Some(run_id),
             gate_ref,
             decision: ApprovalInteractionDecision::Deny,
             idempotency_key: IdempotencyKey::new("deny-once").expect("idempotency"),
@@ -400,7 +567,7 @@ async fn missing_gate_returns_deterministic_not_found_without_resolution() {
         .resolve(ResolveApprovalInteractionRequest {
             scope: scope(),
             actor: actor("user-alpha"),
-            run_id,
+            run_id: Some(run_id),
             gate_ref,
             decision: ApprovalInteractionDecision::ApproveOnce,
             idempotency_key: IdempotencyKey::new("missing").expect("idempotency"),
@@ -426,7 +593,7 @@ async fn stale_gate_returns_conflict_without_resolution() {
         .resolve(ResolveApprovalInteractionRequest {
             scope: scope(),
             actor: actor("user-alpha"),
-            run_id,
+            run_id: Some(run_id),
             gate_ref,
             decision: ApprovalInteractionDecision::ApproveOnce,
             idempotency_key: IdempotencyKey::new("stale").expect("idempotency"),
@@ -445,13 +612,34 @@ async fn stale_gate_returns_conflict_without_resolution() {
 
 #[tokio::test]
 async fn cross_scope_actor_is_rejected_before_resolution() {
-    let (service, resolver, _, run_id, gate_ref) = service_fixture("send the email");
+    let request = approval_request("send the email");
+    let beta_actor = actor("user-beta");
+    let gate_ref = approval_gate_ref(request.id).expect("gate ref");
+    let run_id = TurnRunId::new();
+    let gate = PendingApprovalGateRecord::new(
+        resource_scope(&beta_actor),
+        run_id,
+        gate_ref.clone(),
+        request,
+    )
+    .expect("approval gate");
+    let resolver = Arc::new(RecordingApprovalResolver::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::blocked(
+        actor("user-alpha"),
+        gate_ref.clone(),
+    ));
+    let service = DefaultApprovalInteractionService::new(
+        Arc::new(FakeReadModel::with_gate(gate)),
+        Arc::new(FixedLeaseTermsProvider),
+        resolver.clone(),
+        coordinator,
+    );
 
     let err = service
         .resolve(ResolveApprovalInteractionRequest {
             scope: scope(),
-            actor: actor("user-beta"),
-            run_id,
+            actor: beta_actor,
+            run_id: Some(run_id),
             gate_ref,
             decision: ApprovalInteractionDecision::ApproveOnce,
             idempotency_key: IdempotencyKey::new("cross-scope").expect("idempotency"),
@@ -488,6 +676,37 @@ async fn list_pending_returns_redacted_dto_without_no_exposure_sentinels() {
             "approval DTO leaked {forbidden}"
         );
     }
+}
+
+#[tokio::test]
+async fn list_pending_does_not_expose_invocation_fingerprint() {
+    let alpha_actor = actor("user-alpha");
+    let mut request = approval_request("send the email");
+    let fingerprint = InvocationFingerprint::for_dispatch(
+        &resource_scope(&alpha_actor),
+        &CapabilityId::new("demo.echo").expect("capability"),
+        &ResourceEstimate::default(),
+        &serde_json::json!({"message": "private"}),
+    )
+    .expect("fingerprint");
+    let fingerprint_token = fingerprint.as_str().to_string();
+    request.invocation_fingerprint = Some(fingerprint);
+    let (service, _, _, _, _) = service_fixture_for_request(request);
+
+    let response = service
+        .list_pending(ListPendingApprovalsRequest {
+            scope: scope(),
+            actor: alpha_actor,
+        })
+        .await
+        .expect("list pending");
+    let serialized = serde_json::to_string(&response).expect("serialize");
+
+    assert_eq!(response.approvals.len(), 1);
+    assert!(
+        !serialized.contains(&fingerprint_token),
+        "approval DTO leaked invocation fingerprint"
+    );
 }
 
 #[tokio::test]
@@ -570,7 +789,7 @@ async fn run_state_read_model_lists_canonical_pending_blocked_approvals() {
     let read_model = RunStateApprovalInteractionReadModel::new(run_state, approvals);
 
     let pending = read_model
-        .pending_approvals(&ApprovalInteractionScope::from_turn(&scope(), &alpha_actor))
+        .approval_gates(&ApprovalInteractionScope::from_turn(&scope(), &alpha_actor))
         .await
         .expect("pending approvals");
 
@@ -583,7 +802,7 @@ async fn run_state_read_model_lists_canonical_pending_blocked_approvals() {
     assert_eq!(pending[0].request().id, request.id);
 
     let other_user_pending = read_model
-        .pending_approvals(&ApprovalInteractionScope::from_turn(
+        .approval_gates(&ApprovalInteractionScope::from_turn(
             &scope(),
             &actor("user-beta"),
         ))

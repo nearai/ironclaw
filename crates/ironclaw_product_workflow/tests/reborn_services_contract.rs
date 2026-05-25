@@ -323,7 +323,7 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
         request: ResolveApprovalInteractionRequest,
     ) -> Result<ResolveApprovalInteractionResponse, ironclaw_product_workflow::ProductWorkflowError>
     {
-        let run_id = request.run_id;
+        let run_id = request.run_id.expect("webui passes run_id");
         self.resolutions.lock().expect("lock").push(request);
         Ok(ResolveApprovalInteractionResponse::Approved(
             ResumeTurnResponse {
@@ -2567,6 +2567,41 @@ async fn approved_gate_resolution_with_persistent_flag_is_rejected() {
         0,
         "resume_turn must NOT be called for unsupported persistent approval"
     );
+}
+
+#[tokio::test]
+async fn approval_gate_resolution_with_persistent_flag_is_rejected_without_approval_interaction() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let approval_interactions = Arc::new(RecordingApprovalInteractionService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    )
+    .with_approval_interactions(approval_interactions.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+    let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
+
+    let err = services
+        .resolve_gate(
+            caller(),
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "approval-gate-always",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string(),
+                "gate_ref": gate_ref.as_str(),
+                "resolution": "approved",
+                "always": true,
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("persistent approval must be rejected");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(err.kind, RebornServicesErrorKind::BlockedApproval);
+    assert_eq!(err.status_code, 503);
+    assert_eq!(approval_interactions.resolution_count(), 0);
+    assert_eq!(coordinator.resumption_count(), 0);
 }
 
 #[tokio::test]
