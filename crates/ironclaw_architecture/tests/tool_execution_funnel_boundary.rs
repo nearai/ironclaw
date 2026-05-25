@@ -90,6 +90,28 @@ const ALLOWLIST: &[AllowedSite] = &[
         file: "src/worker/container.rs",
         kind: AllowKind::Executor,
     },
+    // Tool-builder verification (#4019 step 5): runs a tool *during its own
+    // construction* — `execute_build_tool` resolves the just-built tool and
+    // runs it under a synthetic build `JobContext` with build-specific
+    // approval context, to verify it compiled and behaves. There is no real
+    // user/agent/channel/job behind this call — it is internal build
+    // machinery, not a user- or agent-initiated dispatch. An `ActionRecord`
+    // for "the build system test-ran the tool it is building" would be audit
+    // noise, not signal. Exempt for the same reason as the worker loops:
+    // a legitimate terminal executor, not a bypass to migrate.
+    AllowedSite {
+        file: "src/tools/builder/core.rs",
+        kind: AllowKind::Executor,
+    },
+    // Tool-builder test harness (#4019 step 5): runs a freshly built WASM tool
+    // against its declared test cases under a default `JobContext`. Same
+    // rationale as `builder/core.rs` above — executing a tool-under-construction
+    // against its own test suite is build machinery, not a user/agent dispatch,
+    // so it is a justified terminal executor rather than an un-migrated bypass.
+    AllowedSite {
+        file: "src/tools/builder/testing.rs",
+        kind: AllowKind::Executor,
+    },
     // --- Un-migrated bypasses: #4019 migration checklist ---
     // NOTE: src/agent/dispatcher.rs (interactive chat tool calls — the headline
     // bypass from #4017) was migrated in #4019 step 3: both the inline and
@@ -102,28 +124,26 @@ const ALLOWLIST: &[AllowedSite] = &[
     // entries were removed from this checklist. The scheduler correlates the
     // ActionRecord to its existing persisted job; the routine path additionally
     // gained the safety pipeline (param validation/redaction) it lacked before.
-    // Engine v2 effect bridge (Python orchestrator path).
-    // TODO(#4019): migrate through audited dispatch (step 5).
+    //
+    // #4019 step 5 resolved the remaining bypasses:
+    //   * The CLI `/restart` command (`src/agent/commands.rs`) — a
+    //     user-initiated, gateway-only control action — was MIGRATED through
+    //     the audited `execute_tool_audited` path (`DispatchSource::Channel`,
+    //     `existing_job_id = None`), so it now builds an ActionRecord; its
+    //     entry was removed from this checklist.
+    //   * The two tool-builder sites (`builder/core.rs`, `builder/testing.rs`)
+    //     were RECLASSIFIED to `Executor` above: they execute a
+    //     tool-under-construction as internal build machinery, not as a
+    //     user/agent dispatch, so an audit record would be noise.
+    //
+    // The only remaining bypass is the engine v2 effect bridge, deferred
+    // because it has no `Arc<dyn Database>` handle (it holds an engine-v2
+    // DocType `Store`, a different abstraction) and its sandbox-interception
+    // branch bypasses `execute_tool_with_safety` entirely — migrating it
+    // cleanly needs dedicated store plumbing and an interception-path audit
+    // decision. Tracked as #4019 follow-up.
     AllowedSite {
         file: "src/bridge/effect_adapter.rs",
-        kind: AllowKind::Bypass,
-    },
-    // CLI `/restart` command runs RestartTool directly.
-    // TODO(#4019): migrate through audited dispatch (step 5).
-    AllowedSite {
-        file: "src/agent/commands.rs",
-        kind: AllowKind::Bypass,
-    },
-    // Tool-builder verification: runs a freshly built tool during the build
-    // flow. // TODO(#4019): migrate through audited dispatch (step 5).
-    AllowedSite {
-        file: "src/tools/builder/core.rs",
-        kind: AllowKind::Bypass,
-    },
-    // Tool-builder test harness: runs a built WASM tool against its test
-    // cases. // TODO(#4019): migrate through audited dispatch (step 5).
-    AllowedSite {
-        file: "src/tools/builder/testing.rs",
         kind: AllowKind::Bypass,
     },
 ];
