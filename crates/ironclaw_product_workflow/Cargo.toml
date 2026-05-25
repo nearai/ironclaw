@@ -20,6 +20,8 @@ test-support = ["ironclaw_product_adapters/test-support"]
 [dependencies]
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
+ironclaw_common = { path = "../ironclaw_common", version = "0.4.1" }
+ironclaw_auth = { path = "../ironclaw_auth", version = "0.1.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_conversations = { path = "../ironclaw_conversations", version = "0.1.0" }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters", version = "0.1.0" }
@@ -28,6 +30,7 @@ ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+tokio = { version = "1", features = ["time"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 

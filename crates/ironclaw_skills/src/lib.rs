@@ -37,6 +37,7 @@
 //! controls tool access via capability leases.
 
 pub mod gating;
+pub mod management;
 mod parser;
 mod selector;
 pub mod types;
@@ -56,9 +57,15 @@ pub use types::{
 };
 
 pub use gating::{GatingResult, check_requirements, check_requirements_sync};
+pub use management::{
+    SkillInstallRequest, SkillInstallResult, SkillManagementContext, SkillManagementError,
+    SkillManagementErrorKind, SkillRemoveRequest, SkillRemoveResult,
+    SkillSource as ManagedSkillSource, SkillSummary, install_skill, list_skills, remove_skill,
+};
 pub use parser::{ParsedSkill, SkillParseError, parse_skill_md};
 pub use selector::{
     MAX_SKILL_CONTEXT_TOKENS, SelectionOutcome, extract_skill_mentions, prefilter_skills,
+    skill_token_cost,
 };
 pub use validation::{
     escape_skill_content, escape_xml_attr, normalize_line_endings, validate_credential_name,

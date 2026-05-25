@@ -1,6 +1,8 @@
-use ironclaw_extensions::{MANIFEST_SCHEMA_VERSION, ManifestSource};
+use ironclaw_extensions::{ExtensionManifestRecord, MANIFEST_SCHEMA_VERSION, ManifestSource};
 use ironclaw_host_api::HostPortCatalog;
-use ironclaw_product_adapter_registry::{ExtensionManifestRecord, ManifestHash, RegistryError};
+use ironclaw_product_adapter_registry::{
+    ManifestHash, RegistryError, parse_product_adapter_manifest_record, product_adapter_sections,
+};
 use ironclaw_product_adapters::{AuthRequirement, ProductCapabilityFlag, ProductSurfaceKind};
 
 fn manifest(extra: &str) -> String {
@@ -45,7 +47,7 @@ credential_handle = "telegram_bot_token"
 }
 
 fn parse(raw: &str) -> Result<ExtensionManifestRecord, RegistryError> {
-    ExtensionManifestRecord::from_toml(
+    parse_product_adapter_manifest_record(
         raw,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
@@ -58,8 +60,9 @@ fn parses_product_adapter_host_api_section_from_extension_manifest_v2() {
     let record = parse(&manifest("")).unwrap();
 
     assert_eq!(record.extension_id().as_str(), "telegram-v2");
-    assert_eq!(record.product_adapters().len(), 1);
-    let adapter = &record.product_adapters()[0];
+    let adapters = product_adapter_sections(&record).unwrap();
+    assert_eq!(adapters.len(), 1);
+    let adapter = &adapters[0];
     assert_eq!(adapter.adapter_id().as_str(), "telegram-v2/inbound");
     assert_eq!(adapter.surface_kind(), ProductSurfaceKind::ExternalChannel);
     assert!(matches!(
@@ -144,4 +147,45 @@ fn rejects_auth_header_injection_shape() {
             ..
         } | RegistryError::Manifest(_)
     ));
+}
+
+#[test]
+fn rejects_real_derived_adapter_id_that_exceeds_limit() {
+    let extension_id = "a".repeat(128);
+    let subsection = "b".repeat(128);
+    let section = format!("product_adapter.{subsection}");
+    let raw = format!(
+        r#"
+schema_version = "{schema}"
+id = "{extension_id}"
+name = "Long ProductAdapter"
+version = "0.1.0"
+description = "test"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "adapters/long.wasm"
+
+[[host_api]]
+id = "ironclaw.product_adapter/v1"
+section = "{section}"
+
+[{section}]
+surface_kind = "external_channel"
+
+[{section}.auth]
+kind = "bearer_token"
+
+[{section}.capabilities]
+flags = ["inbound_messages"]
+"#,
+        schema = MANIFEST_SCHEMA_VERSION,
+    );
+
+    let err = parse(&raw).unwrap_err();
+    assert!(
+        err.to_string().contains("invalid adapter_id"),
+        "expected adapter_id validation error, got {err:?}"
+    );
 }

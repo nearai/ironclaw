@@ -547,8 +547,8 @@ pub struct ProductLivePlannedRuntimeAdapterConfig {
     pub model_budget_accountant: Arc<dyn LoopModelBudgetAccountant>,
     /// Instruction-safety context passed into the planned runtime.
     pub safety_context: InstructionSafetyContext,
-    /// Optional sink for capability invocation milestones.
-    pub milestone_sink: Option<Arc<dyn LoopHostMilestoneSink>>,
+    /// Sink for capability invocation milestones.
+    pub milestone_sink: Arc<dyn LoopHostMilestoneSink>,
 }
 
 /// Adapter bundle consumed by `build_product_live_planned_runtime`.
@@ -619,7 +619,7 @@ struct ProductLiveLoopCapabilityPortFactory {
     authority_resolver: Arc<dyn ProductLiveCapabilityAuthorityResolver>,
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
-    milestone_sink: Option<Arc<dyn LoopHostMilestoneSink>>,
+    milestone_sink: Arc<dyn LoopHostMilestoneSink>,
 }
 
 impl ProductLiveLoopCapabilityPortFactory {
@@ -628,7 +628,7 @@ impl ProductLiveLoopCapabilityPortFactory {
         authority_resolver: Arc<dyn ProductLiveCapabilityAuthorityResolver>,
         input_resolver: Arc<dyn LoopCapabilityInputResolver>,
         result_writer: Arc<dyn LoopCapabilityResultWriter>,
-        milestone_sink: Option<Arc<dyn LoopHostMilestoneSink>>,
+        milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     ) -> Self {
         Self {
             runtime,
@@ -659,7 +659,7 @@ impl LoopCapabilityPortFactory for ProductLiveLoopCapabilityPortFactory {
             visible_request,
             Arc::clone(&self.input_resolver),
             Arc::clone(&self.result_writer),
-            self.milestone_sink.clone(),
+            Arc::clone(&self.milestone_sink),
         )
         .with_execution_mounts(execution_mounts);
         Ok(factory.for_run_context(run_context.clone()))
@@ -667,7 +667,14 @@ impl LoopCapabilityPortFactory for ProductLiveLoopCapabilityPortFactory {
 }
 
 fn adapter_error(error: ProductLivePlannedRuntimeAdapterError) -> AgentLoopHostError {
-    AgentLoopHostError::new(AgentLoopHostErrorKind::InvalidInvocation, error.to_string())
+    let safe_summary = error.to_string();
+    ironclaw_loop_support::raw_agent_loop_host_error(
+        "product_live_planned_runtime_adapter",
+        "build_capability_port",
+        AgentLoopHostErrorKind::InvalidInvocation,
+        safe_summary,
+        error,
+    )
 }
 
 struct StaticCapabilitySurfaceResolver {

@@ -269,6 +269,7 @@ impl ExtensionPackage {
                     parameters_schema: descriptor_schema_ref(capability),
                     effects: capability.effects.clone(),
                     default_permission: capability.default_permission,
+                    runtime_credentials: capability.runtime_credentials.clone(),
                     resource_profile: capability.resource_profile.clone(),
                 })
             })
@@ -327,6 +328,7 @@ impl ExtensionPackage {
 }
 
 pub mod host_api;
+mod installations;
 mod lifecycle;
 mod registry;
 pub mod v2;
@@ -344,6 +346,13 @@ pub use v2::{
 
 pub type CapabilityManifest = CapabilityDeclV2;
 
+pub use installations::{
+    ExtensionActivationState, ExtensionCredentialBinding, ExtensionCredentialHandle,
+    ExtensionHealthMessage, ExtensionHealthSnapshot, ExtensionHealthStatus, ExtensionInstallation,
+    ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
+    ExtensionManifestRecord, ExtensionManifestRef, InMemoryExtensionInstallationStore,
+    ManifestHash,
+};
 pub use lifecycle::{
     ExtensionLifecycleEvent, ExtensionLifecycleEventSink, ExtensionLifecycleService,
 };

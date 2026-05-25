@@ -227,6 +227,23 @@ pub(crate) fn map_executor_error(error: AgentLoopExecutorError) -> AgentLoopDriv
         AgentLoopExecutorError::HostUnavailable { stage } => AgentLoopDriverError::Unavailable {
             reason: format!("{}: unavailable", host_stage_name(stage)),
         },
+        AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+            stage,
+            kind,
+            safe_summary,
+            diagnostic_ref,
+        } => {
+            tracing::warn!(
+                stage = ?stage,
+                kind = ?kind,
+                diagnostic_ref = ?diagnostic_ref,
+                safe_summary = %safe_summary,
+                "planned driver host stage unavailable"
+            );
+            AgentLoopDriverError::Unavailable {
+                reason: format!("{}: {safe_summary}", host_stage_name(stage)),
+            }
+        }
         AgentLoopExecutorError::PlannerContract { detail } => AgentLoopDriverError::Failed {
             reason_kind: format!("driver_bug:{detail}"),
         },
@@ -315,8 +332,9 @@ mod tests {
             LoopDriverId, LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputPort,
             LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent,
             LoopProgressPort, LoopPromptBundle, LoopPromptBundleRequest, LoopPromptPort,
-            LoopRunContext, LoopRunInfoPort, LoopTranscriptPort, StageCheckpointPayloadRequest,
-            UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
+            LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort,
+            StageCheckpointPayloadRequest, UpdateAssistantDraft, VisibleCapabilityRequest,
+            VisibleCapabilitySurface,
         },
     };
     use std::sync::Mutex;
@@ -399,6 +417,23 @@ mod tests {
             mapped,
             AgentLoopDriverError::Failed {
                 reason_kind: "interrupted_unexpectedly".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn executor_host_diagnostics_map_to_actionable_unavailable_reason() {
+        let mapped = map_executor_error(AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+            stage: HostStage::Model,
+            kind: AgentLoopHostErrorKind::CredentialUnavailable,
+            safe_summary: LoopSafeSummary::new("model credentials are unavailable").expect("safe"),
+            diagnostic_ref: None,
+        });
+
+        assert_eq!(
+            mapped,
+            AgentLoopDriverError::Unavailable {
+                reason: "Model: model credentials are unavailable".to_string()
             }
         );
     }

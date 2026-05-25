@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use ironclaw_common::ExtensionName;
 use ironclaw_host_api::ThreadId;
 use ironclaw_product_adapters::{ProductOutboundEnvelope, ProjectionCursor};
 use ironclaw_threads::{SessionThreadRecord, SummaryArtifact, ThreadMessageRecord};
@@ -180,4 +181,28 @@ impl From<TurnRunState> for RebornGetRunStateResponse {
             failure: value.failure,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornListThreadsResponse {
+    pub threads: Vec<SessionThreadRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornSetupExtensionStatus {
+    /// Concrete extension lifecycle is not yet wired into the native
+    /// Reborn surface. v2 callers receive this so the route inventory
+    /// is complete without coupling to v1's onboarding controller.
+    NotImplemented,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornSetupExtensionResponse {
+    pub extension_name: ExtensionName,
+    pub status: RebornSetupExtensionStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<serde_json::Value>,
 }

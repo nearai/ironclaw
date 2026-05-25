@@ -8,7 +8,10 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{CapabilityId, NetworkMethod, NetworkPolicy, ResourceScope, RuntimeKind, SecretHandle};
+use crate::{
+    CapabilityId, HostApiError, NetworkMethod, NetworkPolicy, ResourceScope, RuntimeKind,
+    SecretHandle,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeHttpEgressRequest {
@@ -46,13 +49,12 @@ pub struct RuntimeHttpEgressRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeCredentialInjection {
     pub handle: SecretHandle,
-    #[serde(default)]
     pub source: RuntimeCredentialSource,
     pub target: RuntimeCredentialTarget,
     pub required: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum RuntimeCredentialSource {
     /// Lease and consume material directly from the scoped secret store.
@@ -60,7 +62,6 @@ pub enum RuntimeCredentialSource {
     /// This is the legacy/test compatibility path for host-derived credentials
     /// that are not backed by an already-satisfied authorization obligation.
     /// Production runtime tool egress must use [`Self::StagedObligation`].
-    #[default]
     SecretStoreLease,
     /// Consume material staged by an `InjectSecretOnce` obligation handler.
     ///
@@ -104,6 +105,98 @@ pub enum RuntimeCredentialTarget {
     },
 }
 
+pub fn valid_http_field_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
+}
+
+impl RuntimeCredentialTarget {
+    pub fn validate_declaration(&self) -> Result<(), HostApiError> {
+        match self {
+            Self::Header { name, prefix } => {
+                validate_runtime_credential_header_name(name)?;
+                if let Some(prefix) = prefix {
+                    validate_runtime_credential_fragment_no_control(
+                        "header_prefix",
+                        prefix,
+                        "must not contain NUL/control characters",
+                    )?;
+                }
+            }
+            Self::QueryParam { name } => {
+                validate_runtime_credential_fragment_non_empty_no_control(
+                    "query_param_name",
+                    name,
+                    "must not be empty or contain NUL/control characters",
+                )?;
+            }
+            Self::UrlPath { placeholder } => {
+                validate_runtime_credential_fragment_non_empty_no_control(
+                    "url_path_placeholder",
+                    placeholder,
+                    "must not be empty or contain NUL/control characters",
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_runtime_credential_header_name(name: &str) -> Result<(), HostApiError> {
+    if !valid_http_field_name(name) {
+        return Err(HostApiError::invalid_runtime_credential_target(
+            "header_name",
+            "must be an ASCII HTTP field-name token",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_runtime_credential_fragment_non_empty_no_control(
+    value_kind: &'static str,
+    value: &str,
+    reason: &'static str,
+) -> Result<(), HostApiError> {
+    if value.trim().is_empty() || value.contains('\0') || value.chars().any(char::is_control) {
+        return Err(HostApiError::invalid_runtime_credential_target(
+            value_kind, reason,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_runtime_credential_fragment_no_control(
+    value_kind: &'static str,
+    value: &str,
+    reason: &'static str,
+) -> Result<(), HostApiError> {
+    if value.contains('\0') || value.chars().any(char::is_control) {
+        return Err(HostApiError::invalid_runtime_credential_target(
+            value_kind, reason,
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeHttpEgressResponse {
     pub status: u16,
@@ -120,6 +213,7 @@ pub const RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED: &str = "response_bod
 pub enum RuntimeHttpEgressReasonCode {
     CredentialUnavailable,
     RequestDenied,
+    PolicyDenied,
     NetworkError,
     ResponseError,
     ResponseBodyLimitExceeded,
@@ -177,6 +271,9 @@ impl RuntimeHttpEgressError {
             {
                 RuntimeHttpEgressReasonCode::ResponseBodyLimitExceeded
             }
+            Self::Network { reason, .. } if reason == "policy_denied" => {
+                RuntimeHttpEgressReasonCode::PolicyDenied
+            }
             Self::Network { .. } => RuntimeHttpEgressReasonCode::NetworkError,
             Self::Response { .. } => RuntimeHttpEgressReasonCode::ResponseError,
         }
@@ -187,6 +284,7 @@ impl RuntimeHttpEgressError {
         match self.reason_code() {
             RuntimeHttpEgressReasonCode::CredentialUnavailable => "credential_unavailable",
             RuntimeHttpEgressReasonCode::RequestDenied => "request_denied",
+            RuntimeHttpEgressReasonCode::PolicyDenied => "policy_denied",
             RuntimeHttpEgressReasonCode::NetworkError => "network_error",
             RuntimeHttpEgressReasonCode::ResponseError => "response_error",
             RuntimeHttpEgressReasonCode::ResponseBodyLimitExceeded => {

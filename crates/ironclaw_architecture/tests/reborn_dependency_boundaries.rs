@@ -169,8 +169,10 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
             // list — that is the explicit architectural justification this
             // assertion asks for.
             "ironclaw_reborn_telegram_v2_host",
+            "ironclaw_reborn_traces",
+            "ironclaw_reborn_webui_ingress",
         ],
-        "ironclaw_reborn_cli should enter Reborn through ironclaw_reborn_composition, ironclaw_reborn_config, and per-channel host crates only; the composition root is the assembled-runtime facade and the boot-config contract crate. Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
+        "ironclaw_reborn_cli should enter Reborn through ironclaw_reborn_composition (assembled-runtime facade), ironclaw_reborn_config (boot-config contract), per-channel host crates (e.g. ironclaw_reborn_telegram_v2_host; future Slack/Discord/WeChat ports per #3577 follow the same pattern), ironclaw_reborn_traces (contributor-side TraceCommons client extracted from the legacy monolith), and ironclaw_reborn_webui_ingress (host-owned WebUI serve lifecycle) only. Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
     );
     assert_workspace_deps_exactly(
         &dependencies_all_kinds,
@@ -1012,31 +1014,31 @@ fn reborn_runtime_http_egress_has_single_network_boundary() {
 #[test]
 fn reborn_product_api_crates_do_not_bind_http_ingress() {
     let forbidden = [
-        ForbiddenRebornIngressUse {
+        ForbiddenUse {
             pattern: "tokio::net::TcpListener::bind",
             reason: "Reborn product/API crates must expose route descriptors, not bind listeners",
         },
-        ForbiddenRebornIngressUse {
+        ForbiddenUse {
             pattern: "std::net::TcpListener::bind",
             reason: "Reborn product/API crates must expose route descriptors, not bind listeners",
         },
-        ForbiddenRebornIngressUse {
+        ForbiddenUse {
             pattern: "TcpListener::bind",
             reason: "Reborn product/API crates must expose route descriptors, not bind listeners",
         },
-        ForbiddenRebornIngressUse {
+        ForbiddenUse {
             pattern: "axum::serve",
             reason: "Reborn product/API crates must not own server lifecycle",
         },
-        ForbiddenRebornIngressUse {
+        ForbiddenUse {
             pattern: "hyper::Server",
             reason: "Reborn product/API crates must not own server lifecycle",
         },
-        ForbiddenRebornIngressUse {
+        ForbiddenUse {
             pattern: "Server::bind",
             reason: "Reborn product/API crates must not own server lifecycle",
         },
-        ForbiddenRebornIngressUse {
+        ForbiddenUse {
             pattern: "axum_server::bind",
             reason: "Reborn product/API crates must not own server lifecycle",
         },
@@ -1074,7 +1076,7 @@ fn reborn_product_api_crates_do_not_bind_http_ingress() {
         if !dir.exists() {
             continue;
         }
-        collect_forbidden_reborn_ingress_uses(&dir, &root, &forbidden, &mut violations);
+        collect_forbidden_uses(&dir, &root, &forbidden, &mut violations);
     }
 
     assert!(
@@ -1084,12 +1086,100 @@ fn reborn_product_api_crates_do_not_bind_http_ingress() {
     );
 }
 
+#[test]
+fn reborn_product_auth_contract_stays_reborn_native() {
+    let forbidden = [
+        ForbiddenUse {
+            pattern: "ironclaw::",
+            reason: "Reborn product auth must not depend on the v1 root crate",
+        },
+        ForbiddenUse {
+            pattern: "src/extensions",
+            reason: "v1 extension paths are inventory only, not Reborn auth implementation",
+        },
+        ForbiddenUse {
+            pattern: "src/channels/web",
+            reason: "v1 web routes are inventory only, not Reborn auth implementation",
+        },
+        ForbiddenUse {
+            pattern: "ExtensionManager",
+            reason: "Reborn product auth must not call through the v1 extension manager",
+        },
+        ForbiddenUse {
+            pattern: "PendingOAuth",
+            reason: "Reborn product auth must not reuse v1 pending OAuth maps",
+        },
+        ForbiddenUse {
+            pattern: "PendingGate",
+            reason: "Reborn product auth must not reuse v1 pending gate maps",
+        },
+        ForbiddenUse {
+            pattern: "SecretsStore",
+            reason: "Reborn product auth must use opaque handles, not raw v1 secrets storage",
+        },
+        ForbiddenUse {
+            pattern: "get_decrypted",
+            reason: "Reborn product auth must not retrieve raw secret material directly",
+        },
+        ForbiddenUse {
+            pattern: "reqwest",
+            reason: "Reborn product auth must not own outbound HTTP transport",
+        },
+        ForbiddenUse {
+            pattern: "authorization_code: String",
+            reason: "raw OAuth codes must be one-shot non-serializable provider inputs",
+        },
+        ForbiddenUse {
+            pattern: "pkce_verifier: String",
+            reason: "raw PKCE verifiers must be one-shot non-serializable provider inputs",
+        },
+        ForbiddenUse {
+            pattern: "access_token: String",
+            reason: "raw provider tokens must not enter product auth contract records",
+        },
+        ForbiddenUse {
+            pattern: "refresh_token: String",
+            reason: "raw provider tokens must not enter product auth contract records",
+        },
+    ];
+
+    let root = workspace_root();
+    let manifest = std::fs::read_to_string(root.join("crates/ironclaw_auth/Cargo.toml"))
+        .expect("ironclaw_auth manifest must be readable");
+    assert!(
+        !manifest.contains("reqwest"),
+        "ironclaw_auth must not depend on reqwest directly; provider transport belongs behind Reborn-native composition"
+    );
+
+    let auth_src = root.join("crates/ironclaw_auth/src");
+    assert!(
+        auth_src.exists(),
+        "Reborn product auth contract crate must have a src directory at {}",
+        auth_src.display()
+    );
+
+    let mut violations = Vec::new();
+    collect_forbidden_uses(&auth_src, &root, &forbidden, &mut violations);
+    collect_forbidden_reborn_auth_file_uses(
+        &root.join("crates/ironclaw_reborn_composition/src/auth.rs"),
+        &root,
+        &forbidden,
+        &mut violations,
+    );
+
+    assert!(
+        violations.is_empty(),
+        "Reborn product auth can be behavior-compatible with v1, but implementation and composition code paths must not mingle with v1 routes, v1 extension/secrets managers, raw provider transport, or raw secret records:\n{}",
+        violations.join("\n")
+    );
+}
+
 struct ForbiddenRuntimeNetworkUse {
     pattern: &'static str,
     reason: &'static str,
 }
 
-struct ForbiddenRebornIngressUse {
+struct ForbiddenUse {
     pattern: &'static str,
     reason: &'static str,
 }
@@ -1170,6 +1260,57 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             ],
         },
         BoundaryRule {
+            // Product auth is a Reborn contract/facade vocabulary. It may
+            // describe behavior-compatible v1 inventory, but implementation
+            // code must not reach into v1 routes, extension managers, secret
+            // stores, runtimes, or channel-specific stacks.
+            crate_name: "ironclaw_auth",
+            forbidden: vec![
+                "ironclaw",
+                "ironclaw_approvals",
+                "ironclaw_authorization",
+                "ironclaw_capabilities",
+                "ironclaw_conversations",
+                "ironclaw_dispatcher",
+                "ironclaw_engine",
+                "ironclaw_event_projections",
+                "ironclaw_events",
+                "ironclaw_extensions",
+                "ironclaw_filesystem",
+                "ironclaw_gateway",
+                "ironclaw_host_runtime",
+                "ironclaw_llm",
+                "ironclaw_loop_support",
+                "ironclaw_mcp",
+                "ironclaw_memory",
+                "ironclaw_network",
+                "ironclaw_outbound",
+                "ironclaw_processes",
+                "ironclaw_product_adapters",
+                "ironclaw_product_adapter_registry",
+                "ironclaw_product_workflow",
+                "ironclaw_reborn",
+                "ironclaw_reborn_cli",
+                "ironclaw_reborn_composition",
+                "ironclaw_reborn_config",
+                "ironclaw_reborn_event_store",
+                "ironclaw_resources",
+                "ironclaw_run_state",
+                "ironclaw_runtime_policy",
+                "ironclaw_safety",
+                "ironclaw_scripts",
+                "ironclaw_secrets",
+                "ironclaw_skills",
+                "ironclaw_storage",
+                "ironclaw_threads",
+                "ironclaw_trust",
+                "ironclaw_tui",
+                "ironclaw_turns",
+                "ironclaw_wasm",
+                "ironclaw_wasm_product_adapters",
+            ],
+        },
+        BoundaryRule {
             // WebChat v2 route surface must only reach into Reborn through
             // the host-facing facade and the ingress vocabulary; anything
             // that lets a handler touch the dispatcher, runtime lane, run
@@ -1206,6 +1347,8 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_reborn_composition",
                 "ironclaw_reborn_config",
                 "ironclaw_reborn_event_store",
+                "ironclaw_first_party_extensions",
+                "ironclaw_first_party_extension_ports",
                 "ironclaw_resources",
                 "ironclaw_run_state",
                 "ironclaw_runtime_policy",
@@ -1224,10 +1367,10 @@ fn boundary_rules() -> Vec<BoundaryRule> {
         },
         BoundaryRule {
             // Registry projects ProductAdapter host-api sections from the single
-            // Extension Manifest v2 and owns activation state. Runtime/dispatcher/engine
-            // crates would invert ownership, secrets crates could expose raw
-            // material instead of opaque handles, and v1 WASM/channel crates
-            // would bypass the Reborn registry boundary.
+            // Extension Manifest v2 over extension-owned installation and activation
+            // state. Runtime/dispatcher/engine crates would invert ownership, secrets
+            // crates could expose raw material instead of opaque handles, and v1
+            // WASM/channel crates would bypass the Reborn registry boundary.
             crate_name: "ironclaw_product_adapter_registry",
             forbidden: vec![
                 "ironclaw",
@@ -1256,6 +1399,92 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_secrets",
                 "ironclaw_skills",
                 "ironclaw_threads",
+                "ironclaw_tui",
+                "ironclaw_wasm",
+                "ironclaw_wasm_product_adapters",
+            ],
+        },
+        BoundaryRule {
+            // First-party extensions are userland implementation packages.
+            // They may consume scoped storage and pure safety helpers, but
+            // must not receive ambient runtime authority or loop-facing
+            // runtime handles.
+            crate_name: "ironclaw_first_party_extensions",
+            forbidden: vec![
+                "ironclaw",
+                "ironclaw_approvals",
+                "ironclaw_authorization",
+                "ironclaw_capabilities",
+                "ironclaw_conversations",
+                "ironclaw_dispatcher",
+                "ironclaw_engine",
+                "ironclaw_events",
+                "ironclaw_extensions",
+                "ironclaw_first_party_extension_ports",
+                "ironclaw_gateway",
+                "ironclaw_host_runtime",
+                "ironclaw_llm",
+                "ironclaw_loop_support",
+                "ironclaw_mcp",
+                "ironclaw_memory",
+                "ironclaw_network",
+                "ironclaw_outbound",
+                "ironclaw_processes",
+                "ironclaw_product_adapters",
+                "ironclaw_product_workflow",
+                "ironclaw_product_adapter_registry",
+                "ironclaw_reborn",
+                "ironclaw_reborn_composition",
+                "ironclaw_reborn_config",
+                "ironclaw_reborn_event_store",
+                "ironclaw_resources",
+                "ironclaw_run_state",
+                "ironclaw_runtime_policy",
+                "ironclaw_scripts",
+                "ironclaw_secrets",
+                "ironclaw_threads",
+                "ironclaw_tui",
+                "ironclaw_wasm",
+                "ironclaw_wasm_product_adapters",
+            ],
+        },
+        BoundaryRule {
+            // First-party extension ports are adapter glue above concrete
+            // userland implementations. They may depend on loop/turn-facing
+            // contracts, but must not reach into host runtime authority or
+            // product composition.
+            crate_name: "ironclaw_first_party_extension_ports",
+            forbidden: vec![
+                "ironclaw",
+                "ironclaw_approvals",
+                "ironclaw_authorization",
+                "ironclaw_capabilities",
+                "ironclaw_conversations",
+                "ironclaw_dispatcher",
+                "ironclaw_engine",
+                "ironclaw_events",
+                "ironclaw_extensions",
+                "ironclaw_gateway",
+                "ironclaw_host_runtime",
+                "ironclaw_llm",
+                "ironclaw_mcp",
+                "ironclaw_memory",
+                "ironclaw_network",
+                "ironclaw_outbound",
+                "ironclaw_processes",
+                "ironclaw_product_adapters",
+                "ironclaw_product_workflow",
+                "ironclaw_product_adapter_registry",
+                "ironclaw_reborn",
+                "ironclaw_reborn_composition",
+                "ironclaw_reborn_config",
+                "ironclaw_reborn_event_store",
+                "ironclaw_resources",
+                "ironclaw_run_state",
+                "ironclaw_runtime_policy",
+                "ironclaw_safety",
+                "ironclaw_scripts",
+                "ironclaw_secrets",
                 "ironclaw_tui",
                 "ironclaw_wasm",
                 "ironclaw_wasm_product_adapters",
@@ -1320,6 +1549,56 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_threads",
                 "ironclaw_tui",
                 "ironclaw_turns",
+            ],
+        },
+        BoundaryRule {
+            // Host-owned WebUI ingress: binds the TCP listener and runs
+            // the axum serve loop for the composed v2 Router. Deliberately
+            // narrow: it must not pull product/API internals, lower
+            // substrate handles, or v1 surface code into the binary path.
+            // Reaches Reborn through ironclaw_reborn_composition's facade
+            // only (Router + WebuiAuthenticator trait + WebuiServeConfig).
+            crate_name: "ironclaw_reborn_webui_ingress",
+            forbidden: vec![
+                "ironclaw",
+                "ironclaw_authorization",
+                "ironclaw_capabilities",
+                "ironclaw_conversations",
+                "ironclaw_dispatcher",
+                "ironclaw_engine",
+                "ironclaw_events",
+                "ironclaw_extensions",
+                "ironclaw_filesystem",
+                "ironclaw_gateway",
+                "ironclaw_host_runtime",
+                "ironclaw_llm",
+                "ironclaw_loop_support",
+                "ironclaw_mcp",
+                "ironclaw_memory",
+                "ironclaw_network",
+                "ironclaw_outbound",
+                "ironclaw_processes",
+                "ironclaw_product_adapters",
+                "ironclaw_product_adapter_registry",
+                "ironclaw_product_workflow",
+                "ironclaw_reborn",
+                "ironclaw_reborn_cli",
+                "ironclaw_reborn_config",
+                "ironclaw_reborn_event_store",
+                "ironclaw_resources",
+                "ironclaw_run_state",
+                "ironclaw_runtime_policy",
+                "ironclaw_safety",
+                "ironclaw_scripts",
+                "ironclaw_secrets",
+                "ironclaw_skills",
+                "ironclaw_threads",
+                "ironclaw_trust",
+                "ironclaw_tui",
+                "ironclaw_turns",
+                "ironclaw_wasm",
+                "ironclaw_wasm_product_adapters",
+                "ironclaw_webui_v2",
             ],
         },
         BoundaryRule {
@@ -1414,6 +1693,8 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_capabilities",
                 "ironclaw_dispatcher",
                 "ironclaw_events",
+                "ironclaw_first_party_extensions",
+                "ironclaw_first_party_extension_ports",
                 "ironclaw_host_runtime",
                 "ironclaw_secrets",
                 "ironclaw_network",
@@ -1464,6 +1745,50 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_run_state",
                 "ironclaw_scripts",
                 "ironclaw_wasm",
+            ],
+        },
+        BoundaryRule {
+            crate_name: "ironclaw_event_streams",
+            forbidden: vec![
+                "ironclaw",
+                "ironclaw_authorization",
+                "ironclaw_approvals",
+                "ironclaw_capabilities",
+                "ironclaw_conversations",
+                "ironclaw_dispatcher",
+                "ironclaw_engine",
+                "ironclaw_events",
+                "ironclaw_extensions",
+                "ironclaw_filesystem",
+                "ironclaw_gateway",
+                "ironclaw_host_runtime",
+                "ironclaw_mcp",
+                "ironclaw_memory",
+                "ironclaw_network",
+                "ironclaw_processes",
+                "ironclaw_product_adapter_registry",
+                "ironclaw_product_adapters",
+                "ironclaw_product_workflow",
+                "ironclaw_product_workflow_storage",
+                "ironclaw_reborn_event_store",
+                "ironclaw_reborn",
+                "ironclaw_reborn_cli",
+                "ironclaw_reborn_composition",
+                "ironclaw_reborn_config",
+                "ironclaw_resources",
+                "ironclaw_run_state",
+                "ironclaw_runtime_policy",
+                "ironclaw_safety",
+                "ironclaw_scripts",
+                "ironclaw_secrets",
+                "ironclaw_skills",
+                "ironclaw_telegram_v2_adapter",
+                "ironclaw_threads",
+                "ironclaw_trust",
+                "ironclaw_tui",
+                "ironclaw_wasm",
+                "ironclaw_wasm_product_adapters",
+                "ironclaw_webui_v2",
             ],
         },
         BoundaryRule {
@@ -1656,7 +1981,9 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_processes",
                 "ironclaw_resources",
                 "ironclaw_run_state",
-                "ironclaw_safety",
+                // ironclaw_safety is permitted: thread/transcript storage
+                // validates provider-originated replay metadata before it can
+                // be persisted or exposed back to a model-visible context.
                 "ironclaw_scripts",
                 "ironclaw_secrets",
                 "ironclaw_skills",
@@ -1709,11 +2036,37 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 // routes turn-coordination persistence through ScopedFilesystem
                 // under the universal-fs-dispatch rework (plan
                 // 2026-05-14-universal-fs-dispatch).
+                "ironclaw_hooks",
                 "ironclaw_host_runtime",
                 "ironclaw_mcp",
                 "ironclaw_memory",
                 "ironclaw_network",
                 "ironclaw_processes",
+                "ironclaw_run_state",
+                "ironclaw_scripts",
+                "ironclaw_secrets",
+                "ironclaw_wasm",
+            ],
+        },
+        // The hooks framework depends on `ironclaw_turns` and host primitives
+        // but must not pull in runtime adapters or dispatcher concretions.
+        // This keeps the contract surface narrow and prevents the framework
+        // from acquiring authority it should not have.
+        BoundaryRule {
+            crate_name: "ironclaw_hooks",
+            forbidden: vec![
+                "ironclaw_approvals",
+                "ironclaw_authorization",
+                "ironclaw_capabilities",
+                "ironclaw_dispatcher",
+                "ironclaw_extensions",
+                "ironclaw_filesystem",
+                "ironclaw_host_runtime",
+                "ironclaw_mcp",
+                "ironclaw_memory",
+                "ironclaw_network",
+                "ironclaw_processes",
+                "ironclaw_reborn",
                 "ironclaw_run_state",
                 "ironclaw_scripts",
                 "ironclaw_secrets",
@@ -1975,10 +2328,10 @@ fn collect_forbidden_runtime_network_uses(
     }
 }
 
-fn collect_forbidden_reborn_ingress_uses(
+fn collect_forbidden_uses(
     dir: &std::path::Path,
     root: &std::path::Path,
-    forbidden: &[ForbiddenRebornIngressUse],
+    forbidden: &[ForbiddenUse],
     violations: &mut Vec<String>,
 ) {
     let entries = std::fs::read_dir(dir)
@@ -1987,7 +2340,7 @@ fn collect_forbidden_reborn_ingress_uses(
         let entry = entry.unwrap_or_else(|error| panic!("failed to read dir entry: {error}"));
         let path = entry.path();
         if path.is_dir() {
-            collect_forbidden_reborn_ingress_uses(&path, root, forbidden, violations);
+            collect_forbidden_uses(&path, root, forbidden, violations);
             continue;
         }
         if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
@@ -2010,4 +2363,65 @@ fn collect_forbidden_reborn_ingress_uses(
             }
         }
     }
+}
+
+fn collect_forbidden_reborn_auth_file_uses(
+    path: &std::path::Path,
+    root: &std::path::Path,
+    forbidden: &[ForbiddenUse],
+    violations: &mut Vec<String>,
+) {
+    let message = format!(
+        "failed to read Reborn product-auth boundary file {}",
+        path.display()
+    );
+    let contents = std::fs::read_to_string(path).expect(&message);
+    for rule in forbidden {
+        if contents.contains(rule.pattern) {
+            violations.push(format!(
+                "{} contains forbidden product-auth implementation pattern `{}`: {}",
+                path.strip_prefix(root).unwrap_or(path).display(),
+                rule.pattern,
+                rule.reason
+            ));
+        }
+    }
+}
+
+#[test]
+fn collect_forbidden_reborn_auth_file_uses_detects_violation() {
+    let root = std::env::temp_dir().join(format!(
+        "ironclaw-reborn-auth-boundary-test-{}",
+        std::process::id()
+    ));
+    let src = root.join("crates/ironclaw_reborn_composition/src");
+    std::fs::create_dir_all(&src).expect("test source directory must be created");
+    let auth_rs = src.join("auth.rs");
+    std::fs::write(&auth_rs, "fn forbidden() { let _ = \"reqwest\"; }\n")
+        .expect("test auth.rs must be written");
+
+    let mut violations = Vec::new();
+    collect_forbidden_reborn_auth_file_uses(
+        &auth_rs,
+        &root,
+        &[ForbiddenUse {
+            pattern: "reqwest",
+            reason: "provider transport must stay outside product auth composition",
+        }],
+        &mut violations,
+    );
+
+    std::fs::remove_dir_all(&root).expect("test source directory must be removed");
+
+    assert_eq!(violations.len(), 1);
+    assert!(
+        violations[0].contains("crates/ironclaw_reborn_composition/src/auth.rs"),
+        "violation should report the relative auth.rs path: {:?}",
+        violations
+    );
+    assert!(
+        violations[0].contains("provider transport must stay outside product auth composition"),
+        "violation should report the forbidden-use reason: {:?}",
+        violations
+    );
 }

@@ -32,21 +32,39 @@ root-llm-provider = ["ironclaw_reborn_composition/root-llm-provider"]
 telegram-v2 = ["dep:ironclaw_reborn_telegram_v2_host"]
 libsql = ["ironclaw_reborn_telegram_v2_host?/libsql"]
 postgres = ["ironclaw_reborn_telegram_v2_host?/postgres"]
+# Compile in the WebChat v2 beta HTTP gateway subcommand
+# (`ironclaw-reborn serve`). Off by default so a default binary build
+# does not link the auth/HTTP middleware stack at all — production
+# binaries that genuinely expose v2 over HTTP must opt in. Pulls in
+# `webui-v2-beta` on the composition crate plus the ingress crate
+# that owns the serve loop.
+webui-v2-beta = [
+    "ironclaw_reborn_composition/webui-v2-beta",
+    "dep:ironclaw_reborn_webui_ingress",
+]
 
 [dependencies]
 anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+hex = "0.4.3"
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4.5.0"
 ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", version = "0.1.0" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config", version = "0.1.0" }
 ironclaw_reborn_telegram_v2_host = { path = "../ironclaw_reborn_telegram_v2_host", version = "0.1.0", optional = true, default-features = false }
+ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces", version = "0.1.0" }
+ironclaw_reborn_webui_ingress = { path = "../ironclaw_reborn_webui_ingress", version = "0.1.0", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream"] }
 secrecy = "0.10"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "io-util", "io-std", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
 
 [[bin]]
 name = "ironclaw-reborn"

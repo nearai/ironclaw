@@ -35,6 +35,7 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 | `ironclaw_approvals` | `ironclaw_approvals` | Resolves durable approval requests and issues scoped authorization leases. It does not own prompting UI or runtime execution. |
 | `ironclaw_trust` | `ironclaw_trust` | Host-controlled trust-class policy engine. Use it for decisions about how much trust a runtime, extension, or input receives. |
 | `ironclaw_resources` | `ironclaw_resources` | Resource reservation governor. Owns budget/reservation mechanics, not runtime dispatch. |
+| `ironclaw_auth` | `ironclaw_auth` | Product-facing Reborn auth setup contracts: auth-flow records, secure manual-token interactions, credential accounts, provider exchange, continuations, cleanup, and fakes. |
 | `ironclaw_safety` | `safety_pipeline` | Prompt-injection defense, input validation, secret-leak detection, and safety policy enforcement. |
 | `ironclaw_secrets` | `ironclaw_secrets` | Tenant-scoped secret storage and leasing behind opaque `SecretHandle` values. It stores/leases material; other crates decide when leases are allowed and where to inject them. |
 | `ironclaw_network` | `ironclaw_network` | Network policy and HTTP egress boundary. Resolves DNS, rejects disallowed/private targets when configured, and owns host-mediated outbound HTTP. |

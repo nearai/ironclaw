@@ -142,14 +142,14 @@ pub trait TurnEventProjectionSource: Send + Sync {
 
 pub struct TurnEventProjectionService<S>
 where
-    S: TurnEventProjectionSource,
+    S: TurnEventProjectionSource + ?Sized,
 {
     source: Arc<S>,
 }
 
 impl<S> TurnEventProjectionService<S>
 where
-    S: TurnEventProjectionSource,
+    S: TurnEventProjectionSource + ?Sized,
 {
     pub fn new(source: Arc<S>) -> Self {
         Self { source }

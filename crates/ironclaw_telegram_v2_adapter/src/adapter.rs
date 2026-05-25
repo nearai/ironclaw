@@ -291,8 +291,10 @@ impl ProductAdapter for TelegramV2Adapter {
                 .await;
                 return Ok(ProductRenderOutcome::Deferred);
             }
-            ProductOutboundPayload::ProjectionSnapshot { .. }
-            | ProductOutboundPayload::ProjectionUpdate { .. } => {
+            ProductOutboundPayload::CapabilityActivity(_)
+            | ProductOutboundPayload::ProjectionSnapshot { .. }
+            | ProductOutboundPayload::ProjectionUpdate { .. }
+            | ProductOutboundPayload::KeepAlive => {
                 // Telegram never consumes projection subscriptions; the
                 // workflow should not route these to a Telegram installation.
                 record_status(
@@ -649,6 +651,47 @@ mod tests {
         assert!(egress.calls().is_empty());
         // …and the delivery sink records a Deferred for the attempt so
         // the host can dedupe by attempt id.
+        let statuses = sink.statuses();
+        assert_eq!(statuses.len(), 1);
+        assert!(matches!(statuses[0], DeliveryStatus::Deferred { .. }));
+    }
+
+    #[tokio::test]
+    async fn render_outbound_capability_activity_deferred_without_egress() {
+        let adapter = TelegramV2Adapter::new(config(false));
+        let egress = FakeProtocolHttpEgress::new(["api.telegram.org".to_string()]);
+        egress.allow_credential_handle("telegram_bot_token");
+        let sink = ironclaw_product_adapters::FakeOutboundDeliverySink::new();
+        let envelope = ProductOutboundEnvelope {
+            adapter_id: adapter.adapter_id().clone(),
+            installation_id: adapter.installation_id().clone(),
+            target: test_outbound_target_no_topic_no_reply(),
+            projection_cursor: test_projection_cursor(),
+            payload: ProductOutboundPayload::CapabilityActivity(
+                serde_json::from_value(serde_json::json!({
+                    "invocation_id": uuid::Uuid::new_v4(),
+                    "thread_id": "thread-activity",
+                    "capability_id": "script.echo",
+                    "status": "running",
+                    "provider": "script",
+                    "runtime": "script",
+                    "process_id": null,
+                    "output_bytes": null,
+                    "error_kind": null,
+                    "updated_at": chrono::Utc::now(),
+                }))
+                .expect("activity view"),
+            ),
+            delivery_attempt_id: uuid::Uuid::new_v4(),
+        };
+
+        let outcome = adapter
+            .render_outbound(envelope, &egress, &sink)
+            .await
+            .expect("ok");
+
+        assert_eq!(outcome, ProductRenderOutcome::Deferred);
+        assert!(egress.calls().is_empty());
         let statuses = sink.statuses();
         assert_eq!(statuses.len(), 1);
         assert!(matches!(statuses[0], DeliveryStatus::Deferred { .. }));

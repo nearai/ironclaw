@@ -36,6 +36,10 @@ fn help_mentions_reborn_commands() {
     assert!(stdout.contains("profile"), "stdout: {stdout}");
     assert!(stdout.contains("repl"), "stdout: {stdout}");
     assert!(stdout.contains("run"), "stdout: {stdout}");
+    // `serve` is gated behind the `webui-v2-beta` Cargo feature so a
+    // default binary build does not link the beta HTTP/auth gateway.
+    // The dedicated `serve_*` tests below also `#[cfg]` themselves.
+    #[cfg(feature = "webui-v2-beta")]
     assert!(stdout.contains("serve"), "stdout: {stdout}");
     assert!(stdout.contains("skills"), "stdout: {stdout}");
 }
@@ -60,6 +64,7 @@ fn profile_list_shows_supported_profiles_without_reborn_home() {
         "stdout: {stdout}"
     );
     assert!(stdout.contains("local-dev (default)"), "stdout: {stdout}");
+    assert!(stdout.contains("local-dev-yolo"), "stdout: {stdout}");
     assert!(stdout.contains("production"), "stdout: {stdout}");
     assert!(stdout.contains("migration-dry-run"), "stdout: {stdout}");
     assert!(
@@ -87,11 +92,16 @@ fn profile_list_json_is_stable_and_does_not_resolve_reborn_home() {
     let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
     assert_eq!(json["selector"], "IRONCLAW_REBORN_PROFILE");
     let profiles = json["profiles"].as_array().expect("profiles array");
-    assert_eq!(profiles.len(), 3);
+    assert_eq!(profiles.len(), 4);
     assert!(
         profiles
             .iter()
             .any(|profile| profile["name"] == "local-dev" && profile["default"] == true)
+    );
+    assert!(
+        profiles
+            .iter()
+            .any(|profile| profile["name"] == "local-dev-yolo" && profile["default"] == false)
     );
     assert!(
         profiles
@@ -487,6 +497,7 @@ fn completion_generates_bash_script_without_reborn_home() {
     assert!(stdout.contains("COMPREPLY"), "stdout: {stdout}");
 }
 
+#[cfg(feature = "webui-v2-beta")]
 #[test]
 fn serve_help_mentions_host_and_port() {
     let output = Command::new(reborn_bin())
@@ -506,83 +517,70 @@ fn serve_help_mentions_host_and_port() {
     assert!(stdout.contains("--port"), "stdout: {stdout}");
 }
 
+#[cfg(feature = "webui-v2-beta")]
 #[test]
-fn serve_resolves_context_and_fails_closed_until_webui_is_linked() {
+fn serve_fails_closed_when_env_bearer_token_var_is_unset() {
+    // The standalone CLI's env-bearer authenticator reads the token
+    // value out of the env var named by `[webui].env_token_var`
+    // (defaulting to IRONCLAW_REBORN_WEBUI_TOKEN). When that var is
+    // absent the CLI must exit non-zero before binding any listener —
+    // we never want a half-configured serve loop running with auth
+    // disabled.
     let temp = tempfile::tempdir().expect("tempdir");
-    let reborn_home = temp.path().join("reborn-home");
-    let v1_base_dir = temp.path().join("v1-state");
 
     let output = Command::new(reborn_bin())
         .arg("serve")
         .arg("--host")
         .arg("127.0.0.1")
         .arg("--port")
-        .arg("3000")
-        .env("IRONCLAW_REBORN_HOME", &reborn_home)
-        .env("IRONCLAW_BASE_DIR", &v1_base_dir)
+        .arg("0")
+        .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
         .env_remove("IRONCLAW_REBORN_PROFILE")
+        .env_remove("IRONCLAW_REBORN_WEBUI_TOKEN")
+        .env_remove("IRONCLAW_REBORN_WEBUI_USER_ID")
         .output()
         .expect("ironclaw-reborn serve should run");
 
     assert!(
         !output.status.success(),
-        "serve should fail closed until WebUI composition is linked"
+        "serve must fail closed when the bearer token env var is unset"
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("IronClaw Reborn WebUI service"),
-        "stdout: {stdout}"
-    );
-    assert!(
-        stdout.contains(reborn_home.to_str().expect("utf8 path")),
-        "stdout: {stdout}"
-    );
-    assert!(stdout.contains("profile: local-dev"), "stdout: {stdout}");
-    assert!(
-        stdout.contains("listen_url: http://127.0.0.1:3000"),
-        "stdout: {stdout}"
-    );
-    assert!(stdout.contains("v1_state: not-used"), "stdout: {stdout}");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("Reborn WebUI server composition is not linked yet"),
-        "stderr: {stderr}"
-    );
-    assert!(
-        !reborn_home.exists(),
-        "serve handoff stub should not create Reborn state directories"
-    );
-    assert!(
-        !v1_base_dir.exists(),
-        "serve handoff stub should not create explicit v1 base directories"
+        stderr.contains("IRONCLAW_REBORN_WEBUI_TOKEN must be set"),
+        "stderr should explain which env var is missing: {stderr}"
     );
 }
 
+#[cfg(feature = "webui-v2-beta")]
 #[test]
-fn serve_formats_ipv6_listen_url_with_socket_addr_brackets() {
+fn serve_fails_closed_when_env_user_id_var_is_unset() {
     let temp = tempfile::tempdir().expect("tempdir");
-
     let output = Command::new(reborn_bin())
         .arg("serve")
         .arg("--host")
-        .arg("::1")
+        .arg("127.0.0.1")
         .arg("--port")
-        .arg("3000")
+        .arg("0")
         .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
+        .env_remove("IRONCLAW_REBORN_PROFILE")
+        .env("IRONCLAW_REBORN_WEBUI_TOKEN", "any-non-empty-token")
+        .env_remove("IRONCLAW_REBORN_WEBUI_USER_ID")
         .output()
         .expect("ironclaw-reborn serve should run");
 
     assert!(
         !output.status.success(),
-        "serve should fail closed until WebUI composition is linked"
+        "serve must fail closed when the user-id env var is unset"
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stdout.contains("listen_url: http://[::1]:3000"),
-        "stdout: {stdout}"
+        stderr.contains("IRONCLAW_REBORN_WEBUI_USER_ID must be set"),
+        "stderr should name the missing user-id env var: {stderr}"
     );
 }
 
+#[cfg(feature = "webui-v2-beta")]
 #[test]
 fn serve_rejects_malformed_host_before_webui_handoff() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -603,25 +601,16 @@ fn serve_rejects_malformed_host_before_webui_handoff() {
     assert!(stderr.contains("invalid value"), "stderr: {stderr}");
 }
 
-#[test]
-fn serve_rejects_zero_port_before_webui_handoff() {
-    let temp = tempfile::tempdir().expect("tempdir");
-
-    let output = Command::new(reborn_bin())
-        .arg("serve")
-        .arg("--port")
-        .arg("0")
-        .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
-        .output()
-        .expect("ironclaw-reborn serve should run");
-
-    assert!(!output.status.success(), "serve should reject port 0");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("--port must be greater than 0"),
-        "stderr: {stderr}"
-    );
-}
+// Note: port `0` is intentionally accepted now — it lets the kernel
+// pick a free port, which is the path the caller-level serve test
+// uses to avoid hard-coding a port. The earlier zero-port rejection
+// belonged to the stub serve loop that never actually bound.
+//
+// Banner formatting (IPv6 / IPv4 / config readout) is exercised by
+// the caller-level test in
+// `ironclaw_reborn_webui_ingress::tests` rather than from the binary
+// smoke test, because the banner is printed AFTER env-token resolution
+// + runtime build, both of which require a configured environment.
 
 #[test]
 fn run_reports_runtime_readiness_snapshot_without_touching_v1_state() {

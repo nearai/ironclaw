@@ -37,6 +37,7 @@ mod error;
 mod in_memory;
 mod jsonl;
 mod runtime_event;
+mod security_audit;
 mod sink;
 
 pub use cursor::{EventCursor, EventLogEntry, EventReplay, EventStreamKey, ReadScope};
@@ -46,7 +47,12 @@ pub use in_memory::{
 };
 pub use jsonl::{parse_jsonl, replay_jsonl};
 pub use runtime_event::{
-    RuntimeEvent, RuntimeEventId, RuntimeEventKind, UNCLASSIFIED_ERROR_KIND, sanitize_error_kind,
+    RuntimeEvent, RuntimeEventId, RuntimeEventKind, UNCLASSIFIED_ERROR_KIND,
+    UNCLASSIFIED_HOOK_LABEL, sanitize_error_kind, sanitize_hook_id, sanitize_hook_label,
+};
+pub use security_audit::{
+    InMemorySecurityAuditSink, NoopSecurityAuditSink, SecurityAuditEvent, SecurityAuditSink,
+    SecurityBoundary, SecurityDecision, TracingSecurityAuditSink,
 };
 pub use sink::{
     AuditSink, DurableAuditLog, DurableAuditSink, DurableEventLog, DurableEventSink, EventSink,

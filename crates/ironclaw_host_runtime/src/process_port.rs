@@ -96,13 +96,91 @@ pub trait RuntimeProcessPort: Send + Sync {
     ) -> Result<CommandExecutionOutput, RuntimeProcessError>;
 }
 
+/// Transport for tenant-sandbox command execution.
+///
+/// This trait intentionally hides Docker/daemon details from host-runtime tool
+/// code. Product adapters can implement it with the V1 sandbox daemon JSON-RPC
+/// transport or another tenant-isolated runner.
+///
+/// Implementations must enforce `CommandExecutionRequest::timeout_secs` and
+/// clean up any remote process/container before returning
+/// `RuntimeProcessError::Timeout`.
+#[async_trait]
+pub trait SandboxCommandTransport: Send + Sync {
+    async fn run_command(
+        &self,
+        request: CommandExecutionRequest,
+    ) -> Result<CommandExecutionOutput, RuntimeProcessError>;
+}
+
+/// Tenant-isolated process port backed by a sandbox command transport.
+#[derive(Clone)]
+pub struct TenantSandboxProcessPort {
+    transport: std::sync::Arc<dyn SandboxCommandTransport>,
+}
+
+impl std::fmt::Debug for TenantSandboxProcessPort {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TenantSandboxProcessPort")
+            .field("transport", &"<sandbox command transport>")
+            .finish()
+    }
+}
+
+impl TenantSandboxProcessPort {
+    pub fn new(transport: std::sync::Arc<dyn SandboxCommandTransport>) -> Self {
+        Self { transport }
+    }
+}
+
+#[async_trait]
+impl RuntimeProcessPort for TenantSandboxProcessPort {
+    async fn run_command(
+        &self,
+        request: CommandExecutionRequest,
+    ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+        let timeout = request
+            .timeout_secs
+            .map(Duration::from_secs)
+            .unwrap_or(DEFAULT_COMMAND_TIMEOUT);
+        let mut request = request;
+        request.timeout_secs = Some(timeout.as_secs());
+        let mut output = self.transport.run_command(request).await?;
+        output.output = truncate_output(&output.output);
+        output.sandboxed = true;
+        Ok(output)
+    }
+}
+
+/// Local provider-host command environment handling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum LocalHostProcessEnvMode {
+    /// Clear the child environment, forward only `SAFE_ENV_VARS`, and rewrite
+    /// `HOME` to the command workdir.
+    #[default]
+    Scrubbed,
+    /// Inherit the host process environment and real `HOME`.
+    Inherited,
+}
+
 /// Local provider-host command implementation matching the existing shell path.
 #[derive(Debug, Clone, Default)]
-pub struct LocalHostProcessPort;
+pub struct LocalHostProcessPort {
+    env_mode: LocalHostProcessEnvMode,
+}
 
 impl LocalHostProcessPort {
     pub fn new() -> Self {
-        Self
+        Self {
+            env_mode: LocalHostProcessEnvMode::Scrubbed,
+        }
+    }
+
+    pub fn new_inherited_env() -> Self {
+        Self {
+            env_mode: LocalHostProcessEnvMode::Inherited,
+        }
     }
 }
 
@@ -127,9 +205,21 @@ impl RuntimeProcessPort for LocalHostProcessPort {
             .timeout_secs
             .map(Duration::from_secs)
             .unwrap_or(DEFAULT_COMMAND_TIMEOUT);
+        if self.env_mode == LocalHostProcessEnvMode::Inherited {
+            tracing::warn!(
+                host_access = "full-local",
+                "running local host command with inherited environment"
+            );
+        }
         let start = std::time::Instant::now();
-        let (output, exit_code) =
-            execute_local_command(&request.command, &cwd, timeout, &request.extra_env).await?;
+        let (output, exit_code) = execute_local_command(
+            &request.command,
+            &cwd,
+            timeout,
+            &request.extra_env,
+            self.env_mode,
+        )
+        .await?;
         Ok(CommandExecutionOutput {
             output,
             exit_code: i64::from(exit_code),
@@ -144,6 +234,7 @@ async fn execute_local_command(
     workdir: &PathBuf,
     timeout: Duration,
     extra_env: &HashMap<String, String>,
+    env_mode: LocalHostProcessEnvMode,
 ) -> Result<(String, i32), RuntimeProcessError> {
     let mut command = if cfg!(target_os = "windows") {
         let mut c = Command::new("cmd");
@@ -158,15 +249,20 @@ async fn execute_local_command(
     #[cfg(unix)]
     command.process_group(0);
 
-    command.env_clear();
-    for var in SAFE_ENV_VARS {
-        if let Ok(val) = std::env::var(var) {
-            command.env(var, val);
+    match env_mode {
+        LocalHostProcessEnvMode::Scrubbed => {
+            command.env_clear();
+            for var in SAFE_ENV_VARS {
+                if let Ok(val) = std::env::var(var) {
+                    command.env(var, val);
+                }
+            }
+            // Keep shell "~" expansion available without exposing the host user's home.
+            command.env("HOME", workdir);
         }
+        LocalHostProcessEnvMode::Inherited => {}
     }
     command.envs(extra_env);
-    // Keep shell "~" expansion available without exposing the host user's home.
-    command.env("HOME", workdir);
     command
         .current_dir(workdir)
         .stdin(Stdio::null())
@@ -261,7 +357,7 @@ fn truncate_output(s: &str) -> String {
         let tail_start = floor_char_boundary(s, s.len() - half);
         format!(
             "{}\n\n... [truncated {} bytes] ...\n\n{}",
-            &s[..head_end],
+            &s[..head_end], // safety: head_end was clamped to a UTF-8 character boundary.
             s.len() - COMMAND_MAX_OUTPUT_SIZE,
             &s[tail_start..]
         )
@@ -282,6 +378,176 @@ fn floor_char_boundary(s: &str, pos: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    #[derive(Debug)]
+    struct RecordingSandboxTransport {
+        requests: Mutex<Vec<CommandExecutionRequest>>,
+        output: String,
+    }
+
+    impl Default for RecordingSandboxTransport {
+        fn default() -> Self {
+            Self {
+                requests: Mutex::new(Vec::new()),
+                output: "echo sandbox".to_string(),
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct FailingSandboxTransport;
+
+    #[derive(Debug)]
+    struct TimeoutSandboxTransport;
+
+    #[async_trait]
+    impl SandboxCommandTransport for RecordingSandboxTransport {
+        async fn run_command(
+            &self,
+            request: CommandExecutionRequest,
+        ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+            self.requests.lock().unwrap().push(request);
+            Ok(CommandExecutionOutput {
+                output: self.output.clone(),
+                exit_code: 0,
+                sandboxed: false,
+                duration: Duration::from_millis(3),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl SandboxCommandTransport for FailingSandboxTransport {
+        async fn run_command(
+            &self,
+            _request: CommandExecutionRequest,
+        ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+            Err(RuntimeProcessError::ExecutionFailed(
+                "sandbox transport failed".to_string(),
+            ))
+        }
+    }
+
+    #[async_trait]
+    impl SandboxCommandTransport for TimeoutSandboxTransport {
+        async fn run_command(
+            &self,
+            request: CommandExecutionRequest,
+        ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+            Err(RuntimeProcessError::Timeout(Duration::from_secs(
+                request.timeout_secs.unwrap_or_default(),
+            )))
+        }
+    }
+
+    #[tokio::test]
+    async fn tenant_sandbox_process_port_marks_output_sandboxed() {
+        let transport = std::sync::Arc::new(RecordingSandboxTransport::default());
+        let port = TenantSandboxProcessPort::new(transport);
+
+        let output = port
+            .run_command(CommandExecutionRequest {
+                scope: ResourceScope::system(),
+                mounts: None,
+                command: "echo sandbox".to_string(),
+                workdir: None,
+                timeout_secs: None,
+                extra_env: HashMap::new(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(output.output, "echo sandbox");
+        assert!(output.sandboxed);
+    }
+
+    #[tokio::test]
+    async fn tenant_sandbox_process_port_sets_default_timeout_on_transport_request() {
+        let transport = std::sync::Arc::new(RecordingSandboxTransport::default());
+        let port = TenantSandboxProcessPort::new(transport.clone());
+
+        port.run_command(CommandExecutionRequest {
+            scope: ResourceScope::system(),
+            mounts: None,
+            command: "echo sandbox".to_string(),
+            workdir: None,
+            timeout_secs: None,
+            extra_env: HashMap::new(),
+        })
+        .await
+        .unwrap();
+
+        let requests = transport.requests.lock().unwrap();
+        assert_eq!(
+            requests[0].timeout_secs,
+            Some(DEFAULT_COMMAND_TIMEOUT.as_secs())
+        );
+    }
+
+    #[tokio::test]
+    async fn tenant_sandbox_process_port_propagates_transport_error() {
+        let port = TenantSandboxProcessPort::new(std::sync::Arc::new(FailingSandboxTransport));
+
+        let error = port
+            .run_command(CommandExecutionRequest {
+                scope: ResourceScope::system(),
+                mounts: None,
+                command: "echo sandbox".to_string(),
+                workdir: None,
+                timeout_secs: None,
+                extra_env: HashMap::new(),
+            })
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            RuntimeProcessError::ExecutionFailed("sandbox transport failed".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn tenant_sandbox_process_port_propagates_transport_timeout() {
+        let port = TenantSandboxProcessPort::new(std::sync::Arc::new(TimeoutSandboxTransport));
+
+        let error = port
+            .run_command(CommandExecutionRequest {
+                scope: ResourceScope::system(),
+                mounts: None,
+                command: "echo sandbox".to_string(),
+                workdir: None,
+                timeout_secs: Some(1),
+                extra_env: HashMap::new(),
+            })
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, RuntimeProcessError::Timeout(Duration::from_secs(1)));
+    }
+
+    #[tokio::test]
+    async fn tenant_sandbox_process_port_truncates_transport_output() {
+        let transport = std::sync::Arc::new(RecordingSandboxTransport {
+            requests: Mutex::new(Vec::new()),
+            output: "x".repeat(COMMAND_MAX_OUTPUT_SIZE + 1),
+        });
+        let port = TenantSandboxProcessPort::new(transport);
+
+        let output = port
+            .run_command(CommandExecutionRequest {
+                scope: ResourceScope::system(),
+                mounts: None,
+                command: "echo sandbox".to_string(),
+                workdir: None,
+                timeout_secs: None,
+                extra_env: HashMap::new(),
+            })
+            .await
+            .unwrap();
+
+        assert!(output.output.contains("... [truncated 1 bytes] ..."));
+    }
 
     #[test]
     fn truncate_output_preserves_exact_limit() {
@@ -327,12 +593,36 @@ mod tests {
             &workdir.path().to_path_buf(),
             Duration::from_secs(5),
             &HashMap::new(),
+            LocalHostProcessEnvMode::Scrubbed,
         )
         .await
         .expect("command succeeds");
 
         assert_eq!(exit_code, 0);
         assert_eq!(output, workdir.path().display().to_string());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn execute_local_command_inherited_env_preserves_home_and_host_env() {
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let home = std::env::var("HOME").expect("HOME set for inherited env test");
+
+        let (output, exit_code) = execute_local_command(
+            "printf '%s\\n%s' \"$HOME\" \"$IRONCLAW_REBORN_SENTINEL\"",
+            &workdir.path().to_path_buf(),
+            Duration::from_secs(5),
+            &HashMap::from([(
+                "IRONCLAW_REBORN_SENTINEL".to_string(),
+                "inherited".to_string(),
+            )]),
+            LocalHostProcessEnvMode::Inherited,
+        )
+        .await
+        .expect("command succeeds");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(output, format!("{home}\ninherited"));
     }
 
     #[cfg(windows)]
@@ -345,6 +635,7 @@ mod tests {
             &workdir.path().to_path_buf(),
             Duration::from_secs(5),
             &HashMap::new(),
+            LocalHostProcessEnvMode::Scrubbed,
         )
         .await
         .expect("command succeeds");

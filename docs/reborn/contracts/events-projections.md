@@ -94,6 +94,7 @@ Examples:
 
 - conversation sidebar
 - active run progress
+- capability/tool activity lifecycle metadata
 - job list
 - project/thread visibility
 - extension capability surface
@@ -105,6 +106,12 @@ Reducer rules:
 - deterministic for the same input state/events
 - side-effect free
 - rebuildable after restart
+- product-facing capability activity projections expose only metadata-safe
+  lifecycle facts; raw tool arguments, raw output, command strings, host paths,
+  and provider payloads stay outside the projection contract
+- transport adapters may bound activity fan-out per projection item; bounded
+  snapshots must prefer the most recently updated activity facts and keep
+  reconnect cursors resumable
 - may cache output, but cache is not source of truth
 - must tolerate unknown future event types by ignoring or preserving them according to version policy
 
@@ -122,19 +129,33 @@ client reconnects with last_event_id
 -> transport resumes live tail
 ```
 
-`EventStreamManager` is the transport-agnostic facade over domain projection
-services. It routes scoped runtime and audit replay requests through their
-owning projection services and preserves their domain-specific DTOs/cursors;
-it must not flatten runtime, audit, transcript, or future memory facts into a
-single generic event payload. Resume helpers return domain-specific updates
-when a cursor is valid, or an explicit snapshot/rebase response when retention
-has made replay impossible. A cursor minted under a different scope remains an
-authority failure and must not be silently converted into a snapshot.
+`ironclaw_event_projections::EventStreamManager` is the lower-level
+transport-agnostic facade over domain projection services. It routes scoped
+runtime and audit replay requests through their owning projection services and
+preserves their domain-specific DTOs/cursors. Resume helpers return
+domain-specific updates when a cursor is valid, or an explicit snapshot/rebase
+response when retention has made replay impossible. A cursor minted under a
+different scope remains an authority failure and must not be silently converted
+into a snapshot.
+
+`ironclaw_event_streams::EventStreamManager` is the product-facing stream
+manager slice. It composes projection snapshots/replay with actor+scope access
+policy, stream admission, bounded live update buffering, stream-boundary
+redaction validation, transport-neutral stream items (`Snapshot`, `Update`,
+`RebaseRequired`, `Lagged`, `KeepAlive`), and separate outbound push-candidate
+selection through `ironclaw_outbound`. It consumes projection DTOs and outbound
+policy ports only; it must not read durable event/audit stores directly, own
+reducers, render transport frames, or infer external push permission from
+subscription visibility.
 
 Rules:
 
 - event ids are scoped; a user cannot replay another user's stream
 - replay gaps produce an explicit snapshot/rebase, not silent data loss
+- truncated snapshot/replay pages produce an explicit lag signal before live tailing, not a cursor treated as complete
+- access policy runs before snapshot, replay, or live subscription
+- long-lived subscriptions pass admission policy and use bounded buffering
+- external push/fanout candidates are selected separately from subscribers and require projection access authorization for the actor/scope/target being fanned out
 - transport-specific reconnect details do not leak into core runtime services
 
 ---

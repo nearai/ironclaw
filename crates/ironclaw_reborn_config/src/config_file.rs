@@ -69,6 +69,16 @@ pub struct RebornConfigFile {
     /// becomes live when the planned driver lands. Operators are free
     /// to populate `mission` ahead of time.
     pub llm: Option<std::collections::BTreeMap<String, LlmSlotSelection>>,
+    /// WebChat v2 HTTP gateway settings. Consumed by
+    /// `ironclaw_reborn_webui_ingress` when the standalone CLI's
+    /// `serve` subcommand is invoked. Optional — sparse configs
+    /// fall back to compiled defaults documented on each field.
+    pub webui: Option<WebuiSection>,
+    /// Cost-based budgets. Composition seeds defaults on first reservation
+    /// for each user/project; per-account overrides happen through the
+    /// `budget_set` tool or CLI at runtime. Setting any limit to `0` means
+    /// "unlimited" for that dimension.
+    pub budget: Option<BudgetSection>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -76,7 +86,7 @@ pub struct RebornConfigFile {
 pub struct BootSection {
     /// Composition profile name. Stringly typed; composition validates
     /// against `RebornCompositionProfile`. Examples: `"local-dev"`,
-    /// `"production"`, `"migration-dry-run"`.
+    /// `"local-dev-yolo"`, `"production"`, `"migration-dry-run"`.
     pub profile: Option<String>,
 }
 
@@ -127,6 +137,105 @@ pub struct HarnessSection {
 pub struct RunnerSection {
     pub heartbeat_interval_secs: Option<u64>,
     pub poll_interval_ms: Option<u64>,
+}
+
+/// WebChat v2 HTTP gateway configuration.
+///
+/// Composition reads this section when wiring the `serve` subcommand.
+/// Stringly typed by design — the `ironclaw_reborn_config` crate stays
+/// free of workspace deps, so concrete validation (origin parsing,
+/// listen-address resolution) lives in the consuming ingress crate.
+///
+/// Secrets are env-only: `env_token_var` is the **NAME** of an
+/// environment variable, never a token value. The `secrets_guard`
+/// inline-secret check fires at parse time if an operator pastes a
+/// token-shaped string into either field documented as a name.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebuiSection {
+    /// IP address the WebChat v2 listener binds. Default `127.0.0.1`
+    /// (loopback only — operators MUST opt in to `0.0.0.0` or a
+    /// specific interface to expose the gateway).
+    pub listen_host: Option<String>,
+    /// TCP port the listener binds. Default `3000`. `0` is rejected
+    /// at composition time (`ironclaw-reborn serve` accepts `0` only
+    /// via an explicit `--port 0` CLI flag, intended for tests).
+    pub listen_port: Option<u16>,
+    /// Name of the environment variable holding the host-installation
+    /// bearer token (used by the env-bearer authenticator). Default
+    /// `IRONCLAW_REBORN_WEBUI_TOKEN`. The token VALUE never appears in
+    /// this config file — `secrets_guard` rejects inline secrets.
+    pub env_token_var: Option<String>,
+    /// Name of the environment variable holding the `UserId` that an
+    /// env-bearer-authenticated caller maps to. Default
+    /// `IRONCLAW_REBORN_WEBUI_USER_ID`. Stringly typed; composition
+    /// resolves to a real `UserId` and rejects malformed values.
+    pub env_user_id_var: Option<String>,
+    /// CORS allow-origin list (e.g.
+    /// `["http://localhost:3000", "https://app.example.com"]`).
+    /// Default empty — composition then fails-closed on every
+    /// cross-origin preflight, never echoing an attacker-supplied
+    /// `Origin` header. Operators MUST opt in to whichever origins
+    /// the host installation actually serves.
+    pub allowed_origins: Option<Vec<String>>,
+    /// Override the default Content-Security-Policy header. Default
+    /// `None` → composition applies its locked-down default
+    /// (`default-src 'self'; object-src 'none'; frame-ancestors 'none';
+    /// base-uri 'self'`). Operators serving a real SPA may need to
+    /// override.
+    pub csp_header_override: Option<String>,
+    /// Maximum per-request body bytes for paths that do NOT match a
+    /// declared v2 descriptor (i.e. the 404 fallback path). v2 routes
+    /// are individually capped from their `BodyLimitPolicy`
+    /// descriptor and are strictly tighter than this outer fallback.
+    /// Default `14 * 1024 * 1024` (14 MiB). `0` is rejected.
+    pub max_body_bytes_fallback: Option<u64>,
+    /// Canonical host this listener is reachable on (e.g.
+    /// `"app.example.com"` or `"127.0.0.1:3000"`). When set, the WS
+    /// same-origin middleware compares the request `Origin` against
+    /// this operator-trusted value instead of trusting the
+    /// client-supplied `Host` header. Critical when running behind a
+    /// reverse proxy that may forward an attacker-controlled Host —
+    /// without `canonical_host`, a forged Host + matching Origin
+    /// would pass `SameOriginRequired`. Format: `host` or
+    /// `host:port`; composition does not parse further. Default
+    /// `None` (fall back to Host-header compare + allowlist).
+    pub canonical_host: Option<String>,
+}
+
+/// `[budget]` section. All limits in USD. **0 = unlimited.**
+///
+/// Composition uses these as defaults when first seeding a user/project
+/// account. Runtime tools can install per-account overrides at any time.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BudgetSection {
+    /// Per-user daily ceiling. Default in composition is `5.00`.
+    pub user_daily_usd: Option<f64>,
+    /// Per-project daily ceiling. Default in composition is `2.00`.
+    pub project_daily_usd: Option<f64>,
+    /// Per-tick budget for background missions. Default `0.50`.
+    pub mission_per_tick_usd: Option<f64>,
+    /// Per-tick budget for heartbeat ticks. Default `0.05`.
+    pub heartbeat_per_tick_usd: Option<f64>,
+    /// Per-fire budget for lightweight routines. Default `0.02`.
+    pub routine_lightweight_usd: Option<f64>,
+    /// Per-fire budget for standard routines. Default `0.10`.
+    pub routine_standard_usd: Option<f64>,
+    /// Default per-job budget for one-shot container jobs. Default `1.00`.
+    pub background_job_default_usd: Option<f64>,
+    /// IANA timezone for calendar-period rollover (e.g. `"UTC"`,
+    /// `"America/Los_Angeles"`). Default `"UTC"`.
+    pub default_tz: Option<String>,
+    /// Warn threshold as a fraction in `[0.0, 1.0]`. Default `0.75`.
+    pub warn_at: Option<f64>,
+    /// Pause-with-approval threshold as a fraction in `[0.0, 1.0]`.
+    /// Must be `>= warn_at`. Default `0.90`.
+    pub pause_at: Option<f64>,
+    /// Multiplier applied to upfront cost estimates before reserving.
+    /// Default `1.20` (20% safety margin); reconcile releases the
+    /// overshoot.
+    pub overestimate_factor: Option<f64>,
 }
 
 /// One `[llm.<slot>]` entry. The slot name (typically `"default"` or
@@ -303,6 +412,91 @@ impl RebornConfigFile {
                 if let Some(model) = &selection.model {
                     check(llm_slot_field_label(slot, "model"), model)?;
                 }
+            }
+        }
+        if let Some(webui) = &self.webui {
+            if let Some(host) = &webui.listen_host {
+                check(Cow::Borrowed("webui.listen_host"), host)?;
+            }
+            if let Some(env_token_var) = &webui.env_token_var {
+                // Secrets guard: rejects token-shaped values pasted
+                // here instead of an env-var name.
+                check(Cow::Borrowed("webui.env_token_var"), env_token_var)?;
+            }
+            if let Some(env_user_id_var) = &webui.env_user_id_var {
+                check(Cow::Borrowed("webui.env_user_id_var"), env_user_id_var)?;
+            }
+            if let Some(allowed_origins) = &webui.allowed_origins {
+                for origin in allowed_origins {
+                    check(Cow::Borrowed("webui.allowed_origins"), origin)?;
+                }
+            }
+            if let Some(csp) = &webui.csp_header_override {
+                check(Cow::Borrowed("webui.csp_header_override"), csp)?;
+            }
+            if let Some(host) = &webui.canonical_host {
+                check(Cow::Borrowed("webui.canonical_host"), host)?;
+            }
+        }
+        if let Some(budget) = &self.budget {
+            if let Some(tz) = &budget.default_tz {
+                check(Cow::Borrowed("budget.default_tz"), tz)?;
+            }
+            // 0 is a legitimate sentinel for "unlimited". Negative values
+            // are rejected outright so a bad number doesn't masquerade as a
+            // disabled cap.
+            for (label, value) in [
+                ("budget.user_daily_usd", budget.user_daily_usd),
+                ("budget.project_daily_usd", budget.project_daily_usd),
+                ("budget.mission_per_tick_usd", budget.mission_per_tick_usd),
+                (
+                    "budget.heartbeat_per_tick_usd",
+                    budget.heartbeat_per_tick_usd,
+                ),
+                (
+                    "budget.routine_lightweight_usd",
+                    budget.routine_lightweight_usd,
+                ),
+                ("budget.routine_standard_usd", budget.routine_standard_usd),
+                (
+                    "budget.background_job_default_usd",
+                    budget.background_job_default_usd,
+                ),
+                ("budget.overestimate_factor", budget.overestimate_factor),
+            ] {
+                if let Some(v) = value
+                    && v.is_finite()
+                    && v < 0.0
+                {
+                    return Err(RebornConfigFileError::InvalidApiVersion {
+                        path: path_str(),
+                        found: format!("{label} = {v}"),
+                        reason: "must be >= 0 (use 0 for unlimited)".to_string(),
+                    });
+                }
+            }
+            for (label, value) in [
+                ("budget.warn_at", budget.warn_at),
+                ("budget.pause_at", budget.pause_at),
+            ] {
+                if let Some(v) = value
+                    && !(0.0..=1.0).contains(&v)
+                {
+                    return Err(RebornConfigFileError::InvalidApiVersion {
+                        path: path_str(),
+                        found: format!("{label} = {v}"),
+                        reason: "thresholds must be in [0.0, 1.0]".to_string(),
+                    });
+                }
+            }
+            if let (Some(w), Some(p)) = (budget.warn_at, budget.pause_at)
+                && p < w
+            {
+                return Err(RebornConfigFileError::InvalidApiVersion {
+                    path: path_str(),
+                    found: format!("warn_at={w}, pause_at={p}"),
+                    reason: "pause_at must be >= warn_at".to_string(),
+                });
             }
         }
         Ok(())
@@ -611,5 +805,89 @@ api_version = "ironclaw.runtime/v1.not-a-number"
             err,
             RebornConfigFileError::InvalidApiVersion { .. }
         ));
+    }
+
+    #[test]
+    fn parses_valid_budget_section() {
+        let toml = r#"
+[budget]
+user_daily_usd = 7.50
+project_daily_usd = 0.00
+mission_per_tick_usd = 0.25
+heartbeat_per_tick_usd = 0.05
+routine_lightweight_usd = 0.01
+routine_standard_usd = 0.20
+background_job_default_usd = 2.00
+default_tz = "America/Los_Angeles"
+warn_at = 0.60
+pause_at = 0.85
+overestimate_factor = 1.50
+"#;
+        let cfg = RebornConfigFile::parse_text(toml, &attributed())
+            .expect("valid budget section must parse");
+        let budget = cfg.budget.as_ref().expect("budget section present");
+        assert_eq!(budget.user_daily_usd, Some(7.50));
+        assert_eq!(budget.project_daily_usd, Some(0.00));
+        assert_eq!(budget.default_tz.as_deref(), Some("America/Los_Angeles"));
+        assert_eq!(budget.warn_at, Some(0.60));
+        assert_eq!(budget.pause_at, Some(0.85));
+        assert_eq!(budget.overestimate_factor, Some(1.50));
+    }
+
+    #[test]
+    fn rejects_negative_budget_usd_field() {
+        let toml = r#"
+[budget]
+user_daily_usd = -1.0
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("negative USD must be rejected");
+        assert!(matches!(
+            err,
+            RebornConfigFileError::InvalidApiVersion { .. }
+        ));
+        assert!(err.to_string().contains("user_daily_usd"));
+    }
+
+    #[test]
+    fn rejects_budget_threshold_out_of_range() {
+        let toml = r#"
+[budget]
+warn_at = 1.5
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("out-of-range threshold must be rejected");
+        assert!(matches!(
+            err,
+            RebornConfigFileError::InvalidApiVersion { .. }
+        ));
+        assert!(err.to_string().contains("warn_at"));
+    }
+
+    #[test]
+    fn rejects_budget_pause_below_warn() {
+        let toml = r#"
+[budget]
+warn_at = 0.90
+pause_at = 0.50
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("pause_at < warn_at must be rejected");
+        assert!(matches!(
+            err,
+            RebornConfigFileError::InvalidApiVersion { .. }
+        ));
+        assert!(err.to_string().contains("pause_at"));
+    }
+
+    #[test]
+    fn rejects_unknown_budget_section_key() {
+        let toml = r#"
+[budget]
+not_a_field = 1.0
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("deny_unknown_fields must catch typos in [budget]");
+        assert!(matches!(err, RebornConfigFileError::Toml { .. }));
     }
 }

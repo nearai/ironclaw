@@ -45,21 +45,25 @@ pub use host::{
     LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleGrant, LoopPromptBundleRef,
     LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopRunInfoPort, LoopSafeSummary,
     LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput, ProcessHandleSummary, PromptMode,
-    ProviderToolCall, ProviderToolCallReference, ProviderToolCallReplay, ProviderToolDefinition,
-    StageCheckpointPayloadRequest, UpdateAssistantDraft, VisibleCapabilityRequest,
-    VisibleCapabilitySurface, sanitize_model_visible_text, validate_model_route_component_value,
+    ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolCallReference,
+    ProviderToolCallReplay, ProviderToolDefinition, StageCheckpointPayloadRequest,
+    UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
+    sanitize_model_visible_text, validate_model_route_component_value,
 };
 pub use instruction_bundle::{
     InMemoryInstructionMaterializationStore, InstructionBundle, InstructionBundleBuilder,
     InstructionBundleFingerprint, InstructionBundleMaterializedMessage, InstructionBundleRequest,
     InstructionMaterializationStore, InstructionSafetyContext,
+    sort_instruction_snippets_for_prompt,
 };
 pub use memory_context::{
     EmptyMemoryPromptContextService, MemoryPromptContextRequest, MemoryPromptContextService,
 };
 pub use milestones::{
+    HookDecisionSummary, HookMilestoneSink, InMemoryHookMilestoneSink,
     InMemoryLoopHostMilestoneSink, LoopHostMilestone, LoopHostMilestoneEmitter,
     LoopHostMilestoneKind, LoopHostMilestoneSink, PromptSkillContextMetadata,
+    RunScopedHookMilestoneSink,
 };
 pub use model::{
     HostManagedLoopModelPort, LoopModelBudgetAccountant, LoopModelGateway, LoopModelGatewayError,

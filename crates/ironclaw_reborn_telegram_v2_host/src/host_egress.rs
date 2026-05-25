@@ -261,6 +261,7 @@ fn map_runtime_error(err: RuntimeHttpEgressError) -> ProtocolHttpEgressError {
         }
         RuntimeHttpEgressReasonCode::CredentialUnavailable
         | RuntimeHttpEgressReasonCode::RequestDenied
+        | RuntimeHttpEgressReasonCode::PolicyDenied
         | RuntimeHttpEgressReasonCode::ResponseError
         | RuntimeHttpEgressReasonCode::ResponseBodyLimitExceeded => {
             ProtocolHttpEgressError::PolicyDenied {

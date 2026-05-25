@@ -1,0 +1,40 @@
+use async_trait::async_trait;
+use ironclaw_host_api::ExtensionId;
+use serde::{Deserialize, Serialize};
+
+use crate::{AuthProductError, CredentialAccountId, scope::AuthProductScope};
+
+/// Lifecycle event that drives credential/session cleanup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretCleanupAction {
+    Deactivate,
+    Uninstall,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecretCleanupRequest {
+    pub scope: AuthProductScope,
+    pub extension_id: ExtensionId,
+    pub action: SecretCleanupAction,
+}
+
+/// Redacted cleanup report. It carries account ids only, never secret handles or
+/// backend diagnostic details.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecretCleanupReport {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revoked_accounts: Vec<CredentialAccountId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retained_accounts: Vec<CredentialAccountId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed_grants: Vec<CredentialAccountId>,
+}
+
+#[async_trait]
+pub trait SecretCleanupService: Send + Sync {
+    async fn cleanup_for_lifecycle(
+        &self,
+        request: SecretCleanupRequest,
+    ) -> Result<SecretCleanupReport, AuthProductError>;
+}

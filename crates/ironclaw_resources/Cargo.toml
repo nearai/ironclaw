@@ -17,6 +17,8 @@ libsql = ["dep:libsql"]
 postgres = ["dep:deadpool-postgres", "dep:tokio-postgres"]
 
 [dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = { version = "0.10", features = ["serde"] }
 deadpool-postgres = { version = "0.14", optional = true }
 fs2 = "0.4"
 ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
@@ -28,6 +30,8 @@ serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 tokio-postgres = { version = "0.7", optional = true }
+tracing = "0.1"
+uuid = { version = "1", features = ["v4", "serde"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }

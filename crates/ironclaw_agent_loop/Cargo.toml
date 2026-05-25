@@ -23,6 +23,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_jcs = "0.2"
 thiserror = "2"
+tracing = "0.1"
 
 [dev-dependencies]
 chrono = "0.4"

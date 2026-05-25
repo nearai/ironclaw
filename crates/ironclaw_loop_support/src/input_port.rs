@@ -132,6 +132,13 @@ fn validate_cursor_for_run(
 }
 
 fn host_queue_error_into_host_error(error: HostInputQueueError) -> AgentLoopHostError {
+    tracing::warn!(
+        component = "host_input_queue",
+        operation = "map_queue_error",
+        error = %error,
+        error_debug = ?error,
+        "host input queue error mapped to safe host error"
+    );
     match error {
         HostInputQueueError::Unavailable { reason } => {
             AgentLoopHostError::new(AgentLoopHostErrorKind::Unavailable, reason)

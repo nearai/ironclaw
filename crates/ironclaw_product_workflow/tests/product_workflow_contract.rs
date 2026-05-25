@@ -1,6 +1,7 @@
 //! Contract tests for the product workflow facade.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration as StdDuration;
 
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
@@ -453,6 +454,10 @@ async fn before_inbound_policy_rewrite_reaches_inbound_turn_service() {
         request.source_binding_key.as_str(),
         "space:0:;conversation:5:conv1;topic:0:;"
     );
+    assert_eq!(
+        request.rate_limit_key.as_str(),
+        "space:0:;conversation:5:conv1;topic:0:;"
+    );
     let accepted = inbound.accepted_envelopes();
     assert_eq!(accepted.len(), 1);
     let ProductInboundPayload::UserMessage(payload) = accepted[0].payload() else {
@@ -578,6 +583,14 @@ async fn before_inbound_policy_retryable_rejection_releases_fingerprint() {
     assert_eq!(inbound.accepted_count(), 0);
     assert_eq!(ledger.settled_count(), 0);
     assert_eq!(ledger.in_flight_count(), 0);
+    assert_eq!(ledger.released_count(), 1);
+    assert!(
+        ledger
+            .last_released_action()
+            .expect("released action")
+            .dispatch_kind
+            .is_none()
+    );
 
     // Re-submitting the same envelope must re-invoke the policy (no duplicate
     // replay caching), because retryable rejections release the fingerprint.
@@ -746,6 +759,42 @@ async fn before_inbound_policy_retryable_failure_releases_fingerprint() {
 }
 
 #[tokio::test]
+async fn before_inbound_policy_timeout_releases_fingerprint_for_retry() {
+    let (workflow, inbound, ledger, policy) = build_workflow_with_policy();
+    policy.delay_responses_by(StdDuration::from_millis(200));
+    let envelope = sample_envelope("policy-timeout-release");
+
+    let first = workflow
+        .accept_inbound(envelope.clone())
+        .await
+        .expect_err("timed-out policy should be retryable");
+    assert!(first.is_retryable());
+    assert_eq!(policy.request_count(), 1);
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(ledger.settled_count(), 0);
+    assert_eq!(ledger.in_flight_count(), 0);
+    assert_eq!(ledger.released_count(), 1);
+    assert!(
+        ledger
+            .last_released_action()
+            .expect("released action")
+            .dispatch_kind
+            .is_none()
+    );
+
+    let second = workflow
+        .accept_inbound(envelope)
+        .await
+        .expect_err("released fingerprint should retry timed-out policy");
+    assert!(second.is_retryable());
+    assert_eq!(policy.request_count(), 2);
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(ledger.settled_count(), 0);
+    assert_eq!(ledger.in_flight_count(), 0);
+    assert_eq!(ledger.released_count(), 2);
+}
+
+#[tokio::test]
 async fn before_inbound_policy_permanent_failure_settles_terminal_rejection() {
     let (workflow, inbound, ledger, policy) = build_workflow_with_policy();
     policy.force_failure(ProductWorkflowError::BeforeInboundPolicyFailed {
@@ -785,6 +834,55 @@ async fn before_inbound_policy_permanent_failure_settles_terminal_rejection() {
         rejection.disposition(),
         ProductRejectionDisposition::Permanent
     );
+    let rejection_debug = format!("{rejection:?}");
+    assert!(
+        !rejection_debug.contains("policy configuration is invalid"),
+        "durable rejection ack must not expose raw policy internals: {rejection_debug}"
+    );
+    assert!(
+        rejection_debug.contains("<redacted>"),
+        "durable rejection reason should remain redacted: {rejection_debug}"
+    );
+}
+
+#[tokio::test]
+async fn fake_before_inbound_policy_uses_programmed_outcomes_in_order() {
+    let policy = FakeBeforeInboundPolicy::new();
+    let envelope = sample_envelope("fake-policy-sequence");
+    let ProductInboundPayload::UserMessage(payload) = envelope.payload() else {
+        panic!("expected user message")
+    };
+    policy.program_outcomes([
+        Ok(BeforeInboundPolicyOutcome::RewriteUserMessage(
+            UserMessagePayload::new("first", vec![], ProductTriggerReason::DirectChat)
+                .expect("valid rewrite"),
+        )),
+        Ok(BeforeInboundPolicyOutcome::Reject(
+            ProductRejection::retryable(ProductRejectionKind::PolicyDenied, "try later"),
+        )),
+    ]);
+    policy.allow();
+
+    let first = policy
+        .check_user_message(BeforeInboundPolicyRequest::new(&envelope, payload).expect("request"))
+        .await
+        .expect("first policy result");
+    assert!(matches!(
+        first,
+        BeforeInboundPolicyOutcome::RewriteUserMessage(rewritten) if rewritten.text == "first"
+    ));
+
+    let second = policy
+        .check_user_message(BeforeInboundPolicyRequest::new(&envelope, payload).expect("request"))
+        .await
+        .expect("second policy result");
+    assert!(matches!(second, BeforeInboundPolicyOutcome::Reject(_)));
+
+    let third = policy
+        .check_user_message(BeforeInboundPolicyRequest::new(&envelope, payload).expect("request"))
+        .await
+        .expect("fallback policy result");
+    assert_eq!(third, BeforeInboundPolicyOutcome::Allow);
 }
 
 #[tokio::test]
@@ -1340,6 +1438,56 @@ async fn concrete_product_workflow_bot_mention_uses_shared_route() {
     assert_eq!(
         binding.route_kinds(),
         vec![ironclaw_product_workflow::ProductConversationRouteKind::Shared]
+    );
+}
+
+#[tokio::test]
+async fn concrete_product_workflow_reuses_prepared_binding_for_content_only_policy_rewrite() {
+    let binding = Arc::new(FakeConversationBindingService::new());
+    let coordinator = Arc::new(RecordingTurnCoordinator::default());
+    let inbound = Arc::new(DefaultInboundTurnService::new(
+        binding.clone(),
+        InMemorySessionThreadService::default(),
+        coordinator.clone(),
+    ));
+    let policy = Arc::new(FakeBeforeInboundPolicy::new());
+    policy.rewrite_user_message(
+        UserMessagePayload::new("rewritten direct", vec![], ProductTriggerReason::DirectChat)
+            .expect("message"),
+    );
+    let workflow = DefaultProductWorkflow::new(
+        inbound,
+        Arc::new(InMemoryIdempotencyLedger::new()),
+        binding.clone(),
+    )
+    .with_before_inbound_policy(policy);
+
+    workflow
+        .accept_inbound(sample_envelope_with_payload(
+            "policy-rewrite-direct-route",
+            ProductInboundPayload::UserMessage(
+                UserMessagePayload::new("hello direct", vec![], ProductTriggerReason::DirectChat)
+                    .expect("message"),
+            ),
+        ))
+        .await
+        .expect("policy-rewritten message accepted");
+
+    let submissions = coordinator.submissions();
+    assert_eq!(submissions.len(), 1);
+    assert_eq!(
+        submissions[0].scope.tenant_id.as_str(),
+        "tenant:install_alpha"
+    );
+    assert_eq!(submissions[0].actor.user_id.as_str(), "user:user1");
+    assert_eq!(
+        submissions[0].scope.agent_id.as_ref().map(AgentId::as_str),
+        Some("agent:fake")
+    );
+    assert_eq!(binding.resolve_count(), 1);
+    assert_eq!(
+        binding.route_kinds(),
+        vec![ironclaw_product_workflow::ProductConversationRouteKind::Direct]
     );
 }
 

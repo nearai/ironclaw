@@ -154,10 +154,7 @@ pub(crate) fn network_policy_allows(policy: &NetworkPolicy, target: &NetworkTarg
         .any(|pattern| target_matches_pattern(target, pattern))
 }
 
-pub(crate) fn target_matches_pattern(
-    target: &NetworkTarget,
-    pattern: &NetworkTargetPattern,
-) -> bool {
+pub fn target_matches_pattern(target: &NetworkTarget, pattern: &NetworkTargetPattern) -> bool {
     if let Some(scheme) = pattern.scheme
         && scheme != target.scheme
     {
@@ -168,12 +165,15 @@ pub(crate) fn target_matches_pattern(
     {
         return false;
     }
-    host_matches_pattern(&target.host.to_ascii_lowercase(), &pattern.host_pattern)
+    host_matches_pattern(&target.host, &pattern.host_pattern)
 }
 
-pub(crate) fn host_matches_pattern(host: &str, pattern: &str) -> bool {
+fn host_matches_pattern(host: &str, pattern: &str) -> bool {
     let host = host.to_ascii_lowercase();
     let pattern = pattern.to_ascii_lowercase();
+    if pattern == "*" {
+        return true;
+    }
     if let Some(suffix) = pattern.strip_prefix("*.") {
         let suffix_with_dot = format!(".{suffix}");
         let Some(prefix) = host.strip_suffix(&suffix_with_dot) else {

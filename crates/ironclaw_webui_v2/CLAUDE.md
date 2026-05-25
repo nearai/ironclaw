@@ -51,16 +51,78 @@ browser-reachable.
 | Route ID | Method | Pattern | Streaming | Effect path |
 |---|---|---|---|---|
 | `webui.v2.create_thread` | POST | `/api/webchat/v2/threads` | None | `ProductWorkflow` |
+| `webui.v2.list_threads` | GET | `/api/webchat/v2/threads` (optional `?limit=N&cursor=...`) | None | `ProjectionOnly` |
 | `webui.v2.send_message` | POST | `/api/webchat/v2/threads/{thread_id}/messages` | None | `TurnCoordinator` |
 | `webui.v2.get_timeline` | GET | `/api/webchat/v2/threads/{thread_id}/timeline` (optional `?limit=N&cursor=...`) | None | `ProjectionOnly` |
 | `webui.v2.stream_events` | GET | `/api/webchat/v2/threads/{thread_id}/events` | SSE | `ProjectionOnly` |
+| `webui.v2.stream_events_ws` | GET | `/api/webchat/v2/threads/{thread_id}/ws` | WebSocket | `ProjectionOnly` |
 | `webui.v2.cancel_run` | POST | `/api/webchat/v2/threads/{thread_id}/runs/{run_id}/cancel` | None | `TurnCoordinator` |
 | `webui.v2.resolve_gate` | POST | `/api/webchat/v2/threads/{thread_id}/runs/{run_id}/gates/{gate_ref}/resolve` | None | `TurnCoordinator` |
+| `webui.v2.setup_extension` | POST | `/api/webchat/v2/extensions/{extension_name}/setup` | None | `ProductWorkflow` |
 
-All six routes require `BearerToken` auth with `AuthenticatedCaller`
+All nine routes require `BearerToken` auth with `AuthenticatedCaller`
 scope source. The host's bearer middleware is responsible for
 constructing the `WebUiAuthenticatedCaller` and injecting it as an
 axum `Extension` before the handler runs.
+
+### List-threads
+
+`list_threads` is the v2 native counterpart to v1's
+`GET /api/chat/threads`. The facade scopes the enumeration to the
+caller's `(tenant, agent, project, owner_user_id)` triple — never
+the body, never a query parameter — so a caller cannot enumerate
+threads owned by other users in the same `(tenant, agent, project)`
+triple. Pagination uses the same `?limit=N&cursor=...` shape as
+`get_timeline`.
+
+The underlying backend port is
+`SessionThreadService::list_threads_for_scope`. The trait's default
+impl returns `SessionThreadError::Backend(...)` — backends that do
+not implement enumeration surface a retryable
+`service_unavailable` (HTTP 503) at the gateway rather than
+silently returning an empty list. The contract is locked by
+`list_threads_unimplemented_backend_returns_service_unavailable` in
+`crates/ironclaw_product_workflow/tests/reborn_services_contract.rs`.
+
+### Stream-events (WebSocket)
+
+`stream_events_ws` is the WebSocket transport variant of
+`stream_events`. It drains the same `RebornServicesApi::stream_events`
+facade and emits each `ProductOutboundEnvelope` as a JSON text frame.
+The descriptor declares
+`WebSocketOriginPolicy::SameOriginRequired`; host composition runs
+the same-origin check before the upgrade reaches this crate's
+handler.
+
+The same `(tenant, user)` `SseCapacity` pool gates both transports —
+WS and SSE share one budget. A caller cannot bypass the cap by
+opening `cap` SSE streams *and* `cap` WS streams in parallel. The
+pre-upgrade `try_acquire` returns `429 rate_limited` if the budget
+is exhausted; the regression is locked by
+`stream_events_ws_shares_capacity_with_sse_streams`.
+
+Every `socket.send` is bounded by the remaining
+`SSE_MAX_LIFETIME` budget via `ws_send_with_timeout`, so a TCP-
+backpressuring client cannot pin the slot past the configured
+stream lifetime.
+
+### Setup-extension (skeleton)
+
+`setup_extension` is the v2 entrypoint for extension onboarding.
+The native facade exposes the route surface but the underlying
+extension lifecycle is still v1-only — the default
+`RebornServices::setup_extension` returns
+`RebornSetupExtensionStatus::NotImplemented` until a v2-aware
+extension lifecycle lands. The route exists so the v2 inventory is
+complete and so future onboarding port work has a stable surface.
+
+The path segment is validated at the handler/facade boundary via
+`ExtensionName::new(...)`. A malformed identifier returns
+`400 invalid_request` with `field: "extension_name"` and
+`validation_code: "invalid_id"` before the facade is called; the
+typed value is threaded through the facade argument so the
+internal request/response contract never carries a raw `String`
+extension name (see `.claude/rules/types.md`).
 
 ## Boundary rules
 
@@ -74,14 +136,29 @@ boundary test enforces this.
 ## Streaming model
 
 `stream_events` is SSE. The facade is drain-only right now, so the
-handler drains, emits each event with its projection cursor as the SSE
-`id`, then polls again on a 1-second cadence. When
+handler drains, renders each `ProductOutboundEnvelope` into the
+browser-visible `WebChatV2EventFrame` schema with its projection cursor
+as the SSE `id`, then polls again on a 1-second cadence. The frame
+intentionally excludes adapter routing/delivery metadata. When
 `RebornServicesApi::stream_events` gains a true subscription API the
-handler can migrate without changing the descriptor.
+handler can migrate without changing the descriptor or browser event
+schema.
 
 The per-poll ownership probe goes through `SessionThreadService::read_thread`
 (metadata-only) rather than `list_thread_history`, so an active stream does
 not reload the full message transcript every second.
+
+`capability_activity` SSE frames are projection-derived lifecycle metadata for
+tool/capability execution. They expose only the safe activity DTO
+(`invocation_id`, `capability_id`, status, provider/runtime/process metadata,
+byte counts, sanitized error kind, timestamp) and must not carry raw tool
+arguments, raw results, command strings, host paths, or provider payloads.
+Snapshot/replay drains bound activity fan-out per projection item so every
+emitted SSE cursor remains resumable through `Last-Event-ID`; when the folded
+activity set is larger than the bound, the stream splits the overflow across
+resumable projection cursors. Partial cursors carry the runtime item watermark
+and delivered payload count, so reconnect drains continue from the same folded
+item when it is stable and restart that item when the folded head changes.
 
 The browser resumes via `Last-Event-ID` on auto-reconnect; the handler
 prefers that header over the `?after_cursor=` query parameter, falling

@@ -6,6 +6,8 @@
 //! submit/deferred handling behind that seam prevents adapter-specific binding
 //! code from owning the whole inbound turn pipeline.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::UserId;
@@ -17,10 +19,9 @@ use ironclaw_threads::{
     MessageStatus, ReplayAcceptedInboundMessageRequest, SessionThreadService, ThreadMessageId,
     ThreadScope,
 };
-use ironclaw_turns::{AcceptedMessageRef, TurnError, TurnRunId};
 use ironclaw_turns::{
-    IdempotencyKey, ReplyTargetBindingRef, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
-    TurnActor, TurnCoordinator, TurnScope,
+    AcceptedMessageRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator,
+    TurnError, TurnRunId, TurnScope,
 };
 use uuid::Uuid;
 
@@ -28,11 +29,41 @@ use crate::binding::{
     ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
     ResolvedBinding,
 };
+use crate::binding_ref::{
+    DEFAULT_BINDING_REF_RAW_MAX_BYTES, bounded_idempotency_key, bounded_reply_target_binding_ref,
+    bounded_source_binding_ref,
+};
 use crate::error::ProductWorkflowError;
 use crate::policy::{
     BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,
     NoopBeforeInboundPolicy,
 };
+
+#[cfg(not(any(test, feature = "test-support")))]
+const BEFORE_INBOUND_POLICY_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(any(test, feature = "test-support"))]
+const BEFORE_INBOUND_POLICY_TIMEOUT: Duration = Duration::from_millis(10);
+
+/// Run a before-inbound policy with the workflow-owned wall-clock budget.
+///
+/// The timeout keeps slow policy backends from holding an idempotency
+/// fingerprint in-flight indefinitely. A timed-out policy maps to a transient,
+/// non-permanent [`ProductWorkflowError::BeforeInboundPolicyFailed`] so the
+/// workflow releases the fingerprint and lets the same inbound action retry.
+pub(crate) async fn check_before_inbound_policy(
+    before_inbound_policy: &dyn BeforeInboundPolicy,
+    request: BeforeInboundPolicyRequest,
+) -> Result<BeforeInboundPolicyOutcome, ProductWorkflowError> {
+    tokio::time::timeout(
+        BEFORE_INBOUND_POLICY_TIMEOUT,
+        before_inbound_policy.check_user_message(request),
+    )
+    .await
+    .map_err(|_| ProductWorkflowError::BeforeInboundPolicyFailed {
+        reason: "before-inbound policy timed out".into(),
+        permanent: false,
+    })?
+}
 
 /// Result of the inbound turn submission flow.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,9 +199,11 @@ where
             .await?
         {
             InboundUserMessageDispatch::Accepted(outcome) => Ok(outcome),
-            InboundUserMessageDispatch::Rejected(_) => Err(ProductWorkflowError::Transient {
-                reason: "noop before-inbound policy unexpectedly rejected message".into(),
-            }),
+            InboundUserMessageDispatch::Rejected(_) => {
+                Err(ProductWorkflowError::TurnSubmissionRejected {
+                    reason: "noop before-inbound policy unexpectedly rejected message".into(),
+                })
+            }
         }
     }
 
@@ -184,6 +217,7 @@ where
                 kind: "non_user_message".into(),
             });
         };
+        let original_trigger = payload.trigger;
         let prepared = self.prepare_user_message(envelope).await?;
         if let Some(outcome) = self
             .replay_prepared_user_message(envelope, &prepared)
@@ -192,21 +226,28 @@ where
             return Ok(InboundUserMessageDispatch::Accepted(outcome));
         }
 
-        let policy_outcome = before_inbound_policy
-            .check_user_message(BeforeInboundPolicyRequest::new(envelope, payload)?)
-            .await?;
+        let policy_outcome = check_before_inbound_policy(
+            before_inbound_policy,
+            BeforeInboundPolicyRequest::new(envelope, payload)?,
+        )
+        .await?;
         let dispatch_envelope;
         let (prepared_for_turn, envelope_for_turn) = match policy_outcome {
             BeforeInboundPolicyOutcome::Allow => (prepared, envelope),
             BeforeInboundPolicyOutcome::RewriteUserMessage(payload) => {
+                let rewritten_trigger = payload.trigger;
                 dispatch_envelope =
                     envelope.with_rewritten_user_message(payload).map_err(|_| {
                         ProductWorkflowError::TurnSubmissionRejected {
                             reason: "invalid policy-rewritten user message".into(),
                         }
                     })?;
-                let rewritten_prepared = self.prepare_user_message(&dispatch_envelope).await?;
-                (rewritten_prepared, &dispatch_envelope)
+                let prepared_for_turn = if rewritten_trigger == original_trigger {
+                    prepared
+                } else {
+                    self.prepare_user_message(&dispatch_envelope).await?
+                };
+                (prepared_for_turn, &dispatch_envelope)
             }
             BeforeInboundPolicyOutcome::Reject(rejection) => {
                 return Ok(InboundUserMessageDispatch::Rejected(rejection));
@@ -508,11 +549,31 @@ impl AcceptedProductInboundTurn {
             binding.thread_id.clone(),
         );
         let actor = TurnActor::new(binding.user_id.clone());
-        let source_binding_ref = bounded_ref::<SourceBindingRef>("src", &source_binding_id)?;
+        let source_binding_ref = bounded_source_binding_ref(
+            "src",
+            &source_binding_id,
+            DEFAULT_BINDING_REF_RAW_MAX_BYTES,
+        )
+        .map_err(|e| ProductWorkflowError::TurnSubmissionRejected {
+            reason: format!("invalid src ref: {e}"),
+        })?;
         let accepted_message_ref = accepted_message_ref(message_id)?;
-        let reply_target_binding_ref =
-            bounded_ref::<ReplyTargetBindingRef>("reply", &reply_target_binding_id)?;
-        let idempotency_key = bounded_ref::<IdempotencyKey>("turn", &idempotency_key_raw)?;
+        let reply_target_binding_ref = bounded_reply_target_binding_ref(
+            "reply",
+            &reply_target_binding_id,
+            DEFAULT_BINDING_REF_RAW_MAX_BYTES,
+        )
+        .map_err(|e| ProductWorkflowError::TurnSubmissionRejected {
+            reason: format!("invalid reply ref: {e}"),
+        })?;
+        let idempotency_key = bounded_idempotency_key(
+            "turn",
+            &idempotency_key_raw,
+            DEFAULT_BINDING_REF_RAW_MAX_BYTES,
+        )
+        .map_err(|e| ProductWorkflowError::TurnSubmissionRejected {
+            reason: format!("invalid turn ref: {e}"),
+        })?;
 
         let request = SubmitTurnRequest {
             scope: turn_scope,
@@ -620,28 +681,6 @@ fn thread_scope_from_binding(
     })
 }
 
-trait RefFactory: Sized {
-    fn build(value: String) -> Result<Self, String>;
-}
-
-impl RefFactory for SourceBindingRef {
-    fn build(value: String) -> Result<Self, String> {
-        Self::new(value)
-    }
-}
-
-impl RefFactory for ReplyTargetBindingRef {
-    fn build(value: String) -> Result<Self, String> {
-        Self::new(value)
-    }
-}
-
-impl RefFactory for IdempotencyKey {
-    fn build(value: String) -> Result<Self, String> {
-        Self::new(value)
-    }
-}
-
 fn product_source_binding_id(
     envelope: &ProductInboundEnvelope,
     binding: &ResolvedBinding,
@@ -683,25 +722,59 @@ fn segment(name: &str, value: &str) -> String {
     format!("{name}:{}:{value};", value.len())
 }
 
-fn bounded_ref<T: RefFactory>(prefix: &str, raw: &str) -> Result<T, ProductWorkflowError> {
-    let value = if raw.len() <= 240 && !raw.chars().any(|c| c == '\0' || c.is_control()) {
-        format!("{prefix}:{raw}")
-    } else {
-        let id = Uuid::new_v5(&Uuid::NAMESPACE_OID, raw.as_bytes());
-        format!("{prefix}:{id}")
-    };
-    T::build(value).map_err(|e| ProductWorkflowError::TurnSubmissionRejected {
-        reason: format!("invalid {prefix} ref: {e}"),
-    })
-}
-
 #[cfg(test)]
 mod tests {
+    use std::future::pending;
+
+    use async_trait::async_trait;
     use chrono::TimeZone;
     use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
+    use ironclaw_product_adapters::{
+        AdapterInstallationId, ExternalActorRef, ExternalConversationRef, ProductAdapterId,
+        ProductTriggerReason, UserMessagePayload,
+    };
     use ironclaw_threads::ThreadScope;
 
+    use crate::action::SourceBindingKey;
+
     use super::*;
+
+    struct PendingBeforeInboundPolicy;
+
+    #[async_trait]
+    impl BeforeInboundPolicy for PendingBeforeInboundPolicy {
+        async fn check_user_message(
+            &self,
+            _request: BeforeInboundPolicyRequest,
+        ) -> Result<BeforeInboundPolicyOutcome, ProductWorkflowError> {
+            pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn check_before_inbound_policy_times_out_as_retryable_failure() {
+        let err = check_before_inbound_policy(&PendingBeforeInboundPolicy, policy_request())
+            .await
+            .expect_err("pending policy should time out");
+
+        assert!(matches!(
+            err,
+            ProductWorkflowError::BeforeInboundPolicyFailed {
+                permanent: false,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn noop_before_inbound_policy_allows_user_messages() {
+        let outcome = NoopBeforeInboundPolicy
+            .check_user_message(policy_request())
+            .await
+            .expect("noop policy should not fail");
+
+        assert_eq!(outcome, BeforeInboundPolicyOutcome::Allow);
+    }
 
     #[test]
     fn submitted_replay_becomes_already_submitted_handoff() {
@@ -760,6 +833,27 @@ mod tests {
         assert_eq!(submission.message_id, message_id);
         assert_eq!(submission.source_binding_id, "src:alpha");
         assert_eq!(submission.reply_target_binding_id, "reply:alpha");
+    }
+
+    fn policy_request() -> BeforeInboundPolicyRequest {
+        BeforeInboundPolicyRequest {
+            adapter_id: ProductAdapterId::new("test_adapter").expect("adapter"),
+            installation_id: AdapterInstallationId::new("install_alpha").expect("installation"),
+            external_actor_ref: ExternalActorRef::new("test", "user1", Option::<String>::None)
+                .expect("actor"),
+            external_conversation_ref: ExternalConversationRef::new(None, "conv1", None, None)
+                .expect("conversation"),
+            source_binding_key: SourceBindingKey::new("space:0:;conversation:5:conv1;topic:0:;")
+                .expect("source binding key"),
+            rate_limit_key: SourceBindingKey::new("space:0:;conversation:5:conv1;topic:0:;")
+                .expect("rate limit key"),
+            user_message: UserMessagePayload::new(
+                "hello",
+                vec![],
+                ProductTriggerReason::DirectChat,
+            )
+            .expect("message"),
+        }
     }
 
     fn replay(

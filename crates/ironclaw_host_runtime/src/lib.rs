@@ -33,6 +33,7 @@ use ironclaw_host_api::{
     RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
     RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
     is_sensitive_runtime_request_header, is_sensitive_runtime_response_header,
+    runtime_policy::{DeploymentMode, EffectiveRuntimePolicy, RuntimeProfile},
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse,
@@ -42,7 +43,7 @@ use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStoreError};
 use ironclaw_trust::TrustDecision;
 use secrecy::ExposeSecret;
 use serde_json::Value;
-use std::{collections::BTreeMap, fmt, sync::Arc};
+use std::{collections::BTreeMap, env, fmt, sync::Arc};
 use thiserror::Error;
 
 mod capability_catalog;
@@ -55,9 +56,11 @@ mod obligations;
 mod planner;
 mod process_port;
 mod production;
+mod sandbox_process;
 mod services;
 mod surface;
 mod turn_scheduler;
+mod wasm_credentials;
 
 pub use capability_catalog::{
     HotCapabilityCatalog, HotCapabilityRecord, MAX_HOT_PROMPT_BYTES, MAX_HOT_SCHEMA_BYTES,
@@ -76,23 +79,33 @@ pub use first_party_tools::{
     APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, BuiltinFirstPartyTools,
     ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID,
     JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
+    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
     TIME_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
     builtin_first_party_package,
 };
-pub use invocation_services::InvocationServices;
+pub use invocation_services::{
+    InvocationServices, InvocationServicesError, InvocationServicesResolutionRequest,
+    InvocationServicesResolver, LocalInvocationServicesResolver,
+};
 pub use obligations::{
-    BuiltinObligationHandler, BuiltinObligationServices, ProcessObligationLifecycleStore,
+    BuiltinObligationHandler, BuiltinObligationServices, LEAK_REDACT_FAILED_CODE,
+    ProcessObligationLifecycleStore,
 };
 use obligations::{NetworkObligationPolicyStore, RuntimeSecretInjectionStore};
 pub use planner::{ExecutionPlan, PlannerError, plan_capability};
 pub use process_port::{
     CommandExecutionOutput, CommandExecutionRequest, LocalHostProcessPort, RuntimeProcessError,
-    RuntimeProcessPort,
+    RuntimeProcessPort, SandboxCommandTransport, TenantSandboxProcessPort,
 };
 pub use production::DefaultHostRuntime;
+pub use sandbox_process::{
+    RebornSandboxConfig, RebornSandboxContainerIdentity, RebornSandboxScopeKey,
+    RebornSandboxWorkspaceMode, RebornScopedSandboxCommandTransport,
+};
 pub use services::{
-    HostRuntimeServices, ProductionWiringComponent, ProductionWiringConfig, ProductionWiringIssue,
-    ProductionWiringIssueKind, ProductionWiringReport, RegisteredRuntimeHealth,
+    HostRuntimeServices, ProductionEventStoreWiringError, ProductionWiringComponent,
+    ProductionWiringConfig, ProductionWiringIssue, ProductionWiringIssueKind,
+    ProductionWiringReport, RegisteredRuntimeHealth,
 };
 pub use surface::{CapabilitySurfacePolicy, VisibleCapability, VisibleCapabilityAccess};
 pub use turn_scheduler::{
@@ -541,6 +554,66 @@ pub enum RuntimeBlockedReason {
     ResourceUnavailable,
 }
 
+/// Opt-in local diagnostic switch for raw HTTP egress failures.
+///
+/// Raw transport errors can contain URLs, query strings, host paths, proxy
+/// details, or credential-shaped text. Keep this disabled unless debugging a
+/// trusted `LocalDev` or `LocalYolo` run. Hosted and enterprise deployments
+/// never enable raw diagnostics from this environment variable alone.
+pub(crate) const UNSAFE_RAW_HTTP_EGRESS_ERRORS_ENV: &str = "IRONCLAW_UNSAFE_RAW_HTTP_EGRESS_ERRORS";
+
+pub(crate) fn runtime_policy_allows_unsafe_raw_http_diagnostics(
+    policy: Option<&EffectiveRuntimePolicy>,
+) -> bool {
+    policy.is_some_and(|policy| {
+        local_runtime_allows_unsafe_raw_http_diagnostics(policy.deployment, policy.resolved_profile)
+    })
+}
+
+pub(crate) fn local_runtime_allows_unsafe_raw_http_diagnostics(
+    deployment: DeploymentMode,
+    profile: RuntimeProfile,
+) -> bool {
+    matches!(deployment, DeploymentMode::LocalSingleUser)
+        && matches!(
+            profile,
+            RuntimeProfile::LocalDev | RuntimeProfile::LocalYolo
+        )
+}
+
+pub(crate) fn unsafe_raw_http_diagnostics_enabled(runtime_allows_raw: bool) -> bool {
+    runtime_allows_raw && env::var(UNSAFE_RAW_HTTP_EGRESS_ERRORS_ENV).as_deref() == Ok("1")
+}
+
+#[cfg(test)]
+mod raw_http_diagnostic_policy_tests {
+    use super::*;
+
+    #[test]
+    fn raw_http_diagnostics_are_limited_to_local_dev_and_yolo_profiles() {
+        assert!(local_runtime_allows_unsafe_raw_http_diagnostics(
+            DeploymentMode::LocalSingleUser,
+            RuntimeProfile::LocalDev,
+        ));
+        assert!(local_runtime_allows_unsafe_raw_http_diagnostics(
+            DeploymentMode::LocalSingleUser,
+            RuntimeProfile::LocalYolo,
+        ));
+        assert!(!local_runtime_allows_unsafe_raw_http_diagnostics(
+            DeploymentMode::LocalSingleUser,
+            RuntimeProfile::LocalSafe,
+        ));
+        assert!(!local_runtime_allows_unsafe_raw_http_diagnostics(
+            DeploymentMode::HostedMultiTenant,
+            RuntimeProfile::HostedYoloTenantScoped,
+        ));
+        assert!(!local_runtime_allows_unsafe_raw_http_diagnostics(
+            DeploymentMode::EnterpriseDedicated,
+            RuntimeProfile::EnterpriseYoloDedicated,
+        ));
+    }
+}
+
 /// Stable, sanitized failure categories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -550,8 +623,10 @@ pub enum RuntimeFailureKind {
     Cancelled,
     Dispatcher,
     InvalidInput,
+    InvalidOutput,
     MissingRuntime,
     Network,
+    OperationFailed,
     OutputTooLarge,
     Process,
     Resource,
@@ -567,8 +642,10 @@ impl RuntimeFailureKind {
             Self::Cancelled => "cancelled",
             Self::Dispatcher => "dispatcher",
             Self::InvalidInput => "invalid_input",
+            Self::InvalidOutput => "invalid_output",
             Self::MissingRuntime => "missing_runtime",
             Self::Network => "network",
+            Self::OperationFailed => "operation_failed",
             Self::OutputTooLarge => "output_too_large",
             Self::Process => "process",
             Self::Resource => "resource",
@@ -743,6 +820,7 @@ pub struct HostHttpEgressService<N, S> {
     secret_injections: Option<Arc<RuntimeSecretInjectionStore>>,
     network_policy_store: Option<Arc<NetworkObligationPolicyStore>>,
     network_policy_source: NetworkPolicySource,
+    unsafe_raw_diagnostics_allowed: bool,
 }
 
 impl<N, S> HostHttpEgressService<N, S> {
@@ -759,6 +837,7 @@ impl<N, S> HostHttpEgressService<N, S> {
             secret_injections: None,
             network_policy_store: None,
             network_policy_source: NetworkPolicySource::StagedObligation,
+            unsafe_raw_diagnostics_allowed: false,
         }
     }
 
@@ -775,7 +854,13 @@ impl<N, S> HostHttpEgressService<N, S> {
             secret_injections: None,
             network_policy_store: None,
             network_policy_source: NetworkPolicySource::RequestPolicyFallback,
+            unsafe_raw_diagnostics_allowed: false,
         }
+    }
+
+    pub(crate) fn with_unsafe_raw_diagnostics_allowed(mut self, allowed: bool) -> Self {
+        self.unsafe_raw_diagnostics_allowed = allowed;
+        self
     }
 
     pub(crate) fn with_secret_injection_store(
@@ -950,7 +1035,7 @@ where
                 response_body_limit: request.response_body_limit,
                 timeout_ms: request.timeout_ms,
             })
-            .map_err(runtime_network_error)?;
+            .map_err(|error| runtime_network_error(self.unsafe_raw_diagnostics_allowed, error))?;
         let credentials_injected = !redaction_values.is_empty();
         let (response, response_redacted) = sanitize_runtime_response(response, &redaction_values)?;
         Ok(runtime_response(
@@ -1087,40 +1172,24 @@ where
     // request). Batching them inside a single async block keeps the
     // sync/async boundary intact while paying that overhead exactly
     // once per request.
-    let outcome = block_on_secret(async {
-        let metadata = secrets
-            .metadata(&request.scope, &injection.handle)
-            .await
-            .map_err(|error| RuntimeHttpEgressError::Credential {
-                reason: sanitized_secret_error(&error),
-            })?;
+    block_on_secret_store(async {
+        let metadata = secrets.metadata(&request.scope, &injection.handle).await?;
         if metadata.is_none() {
             return Ok(None);
         }
         let lease = secrets
             .lease_once(&request.scope, &injection.handle)
-            .await
-            .map_err(|error| RuntimeHttpEgressError::Credential {
-                reason: sanitized_secret_error(&error),
-            })?;
-        let material = secrets
-            .consume(&request.scope, lease.id)
-            .await
-            .map_err(|error| RuntimeHttpEgressError::Credential {
-                reason: sanitized_secret_error(&error),
-            })?;
-        Ok(Some(material))
-    })?;
-    if outcome.is_none() && injection.required {
-        return Err(RuntimeHttpEgressError::Credential {
-            reason: "required credential is unavailable".to_string(),
-        });
-    }
-    Ok(outcome)
+            .await?;
+        secrets.consume(&request.scope, lease.id).await.map(Some)
+    })?
+    .map_or_else(
+        || missing_runtime_credential(injection.required),
+        |material| Ok(Some(material)),
+    )
 }
 
-fn block_on_secret<T>(
-    future: impl std::future::Future<Output = Result<T, RuntimeHttpEgressError>> + Send,
+fn block_on_secret_store<T>(
+    future: impl std::future::Future<Output = Result<T, SecretStoreError>> + Send,
 ) -> Result<T, RuntimeHttpEgressError>
 where
     T: Send,
@@ -1134,7 +1203,11 @@ where
                     .map_err(|_| RuntimeHttpEgressError::Credential {
                         reason: "secret store runtime unavailable".to_string(),
                     })?;
-                runtime.block_on(future)
+                runtime
+                    .block_on(future)
+                    .map_err(|error| RuntimeHttpEgressError::Credential {
+                        reason: sanitized_secret_error(&error),
+                    })
             })
             .join()
     });
@@ -1166,13 +1239,13 @@ fn apply_credential_injection(
     target: &RuntimeCredentialTarget,
     value: &str,
 ) -> Result<(), RuntimeHttpEgressError> {
+    target
+        .validate_declaration()
+        .map_err(|_| RuntimeHttpEgressError::Credential {
+            reason: "credential injection target is invalid".to_string(),
+        })?;
     match target {
         RuntimeCredentialTarget::Header { name, prefix } => {
-            if !valid_injected_header_name(name) {
-                return Err(RuntimeHttpEgressError::Credential {
-                    reason: "credential injection header name is invalid".to_string(),
-                });
-            }
             let injected = match prefix {
                 Some(prefix) => format!("{prefix}{value}"),
                 None => value.to_string(),
@@ -1234,36 +1307,32 @@ fn apply_credential_injection(
     Ok(())
 }
 
-fn valid_injected_header_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric()
-                || matches!(
-                    byte,
-                    b'!' | b'#'
-                        | b'$'
-                        | b'%'
-                        | b'&'
-                        | b'\''
-                        | b'*'
-                        | b'+'
-                        | b'-'
-                        | b'.'
-                        | b'^'
-                        | b'_'
-                        | b'`'
-                        | b'|'
-                        | b'~'
-                )
-        })
-}
-
-fn runtime_network_error(error: NetworkHttpError) -> RuntimeHttpEgressError {
+fn runtime_network_error(
+    unsafe_raw_diagnostics_allowed: bool,
+    error: NetworkHttpError,
+) -> RuntimeHttpEgressError {
+    log_raw_network_http_error_for_local_diagnostics(unsafe_raw_diagnostics_allowed, &error);
     RuntimeHttpEgressError::Network {
         reason: error.stable_reason().to_string(),
         request_bytes: error.request_bytes(),
         response_bytes: error.response_bytes(),
     }
+}
+
+fn log_raw_network_http_error_for_local_diagnostics(
+    unsafe_raw_diagnostics_allowed: bool,
+    error: &NetworkHttpError,
+) {
+    if !unsafe_raw_http_diagnostics_enabled(unsafe_raw_diagnostics_allowed) {
+        return;
+    }
+
+    tracing::warn!(
+        network_error_kind = error.kind().as_str(),
+        raw_network_error = %error,
+        unsafe_raw_diagnostics = true,
+        "unsafe raw HTTP egress error diagnostic enabled"
+    );
 }
 
 fn validate_runtime_request(

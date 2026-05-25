@@ -5,7 +5,7 @@
 //! implementation is replay-derived over [`ironclaw_events::DurableEventLog`]
 //! so it stays independent of concrete JSONL/PostgreSQL/libSQL adapters.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -29,6 +29,11 @@ use ironclaw_memory::{
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+mod runtime_projection;
+use runtime_projection::{
+    RuntimeProjectionState, sort_capability_activities_for_projection, sort_runs_for_projection,
+};
 
 const STATE_REPLAY_PAGE_LIMIT: usize = 256;
 
@@ -147,6 +152,7 @@ pub struct ProjectionRequest {
 pub struct ProjectionSnapshot {
     pub timeline: ThreadTimeline,
     pub runs: Vec<RunStatusProjection>,
+    pub capability_activities: Vec<CapabilityActivityProjection>,
     pub next_cursor: ProjectionCursor,
     pub truncated: bool,
 }
@@ -155,6 +161,7 @@ pub struct ProjectionSnapshot {
 pub struct ProjectionReplay {
     pub updates: Vec<TimelineEntry>,
     pub runs: Vec<RunStatusProjection>,
+    pub capability_activities: Vec<CapabilityActivityProjection>,
     pub next_cursor: ProjectionCursor,
     pub truncated: bool,
 }
@@ -178,6 +185,24 @@ pub struct TimelineEntry {
     pub process_id: Option<ProcessId>,
     pub output_bytes: Option<u64>,
     pub error_kind: Option<String>,
+    /// Sanitized hook metadata. Populated only when `kind` is one of the
+    /// `Hook*` variants — for other kinds these fields are `None`.
+    /// Each field is a *closed-vocabulary* label (no free-form text), so
+    /// replay consumers can pattern-match on the actual hook that
+    /// fired/failed without burning audit budget on operator-supplied
+    /// reason strings (henrypark133 Concerning #6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_point: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_trust_class: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_decision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_failure_category: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_failure_disposition: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -192,11 +217,15 @@ pub enum TimelineEntryKind {
     ModelFailed,
     AssistantReplyFinalized,
     LoopCompleted,
+    LoopCancelled,
     LoopFailed,
     ProcessStarted,
     ProcessCompleted,
     ProcessFailed,
     ProcessKilled,
+    HookDispatched,
+    HookDecisionEmitted,
+    HookFailed,
 }
 
 impl From<RuntimeEventKind> for TimelineEntryKind {
@@ -211,11 +240,15 @@ impl From<RuntimeEventKind> for TimelineEntryKind {
             RuntimeEventKind::ModelFailed => Self::ModelFailed,
             RuntimeEventKind::AssistantReplyFinalized => Self::AssistantReplyFinalized,
             RuntimeEventKind::LoopCompleted => Self::LoopCompleted,
+            RuntimeEventKind::LoopCancelled => Self::LoopCancelled,
             RuntimeEventKind::LoopFailed => Self::LoopFailed,
             RuntimeEventKind::ProcessStarted => Self::ProcessStarted,
             RuntimeEventKind::ProcessCompleted => Self::ProcessCompleted,
             RuntimeEventKind::ProcessFailed => Self::ProcessFailed,
             RuntimeEventKind::ProcessKilled => Self::ProcessKilled,
+            RuntimeEventKind::HookDispatched => Self::HookDispatched,
+            RuntimeEventKind::HookDecisionEmitted => Self::HookDecisionEmitted,
+            RuntimeEventKind::HookFailed => Self::HookFailed,
         }
     }
 }
@@ -237,6 +270,32 @@ pub struct RunStatusProjection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunProjectionStatus {
+    Running,
+    Completed,
+    Cancelled,
+    Failed,
+    Killed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityActivityProjection {
+    pub invocation_id: InvocationId,
+    pub capability_id: CapabilityId,
+    pub thread_id: Option<ThreadId>,
+    pub status: CapabilityActivityStatus,
+    pub provider: Option<ExtensionId>,
+    pub runtime: Option<RuntimeKind>,
+    pub process_id: Option<ProcessId>,
+    pub output_bytes: Option<u64>,
+    pub error_kind: Option<String>,
+    pub last_cursor: EventCursor,
+    pub updated_at: Timestamp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityActivityStatus {
+    Started,
     Running,
     Completed,
     Failed,
@@ -1157,15 +1216,20 @@ impl ReplayEventProjectionService {
     /// consumers that use snapshots to rebase after a replay gap.
     ///
     /// The same bounded-memory contract applies: pages are folded
-    /// incrementally, allocation is `O(scoped runs)` regardless of stream
-    /// length, and scanning more than [`STATE_REPLAY_MAX_EVENTS`] events
-    /// surfaces [`ProjectionError::RebaseRequired`] instead of silently
-    /// returning a partial run-state view.
+    /// incrementally, allocation is `O(scoped invocations)` regardless of
+    /// stream length, and scanning more than [`STATE_REPLAY_MAX_EVENTS`]
+    /// events surfaces [`ProjectionError::RebaseRequired`] instead of
+    /// silently returning a partial run-state view. The requested limit is
+    /// applied only to the emitted activity window after the fold, so late
+    /// terminal events cannot be lost while compacting the output.
     async fn fold_runtime_to_head(
         &self,
         scope: &ProjectionScope,
-    ) -> Result<HashMap<InvocationId, RunStatusProjection>, ProjectionError> {
-        let mut runs = HashMap::<InvocationId, RunStatusProjection>::new();
+        capability_activity_output_limit: usize,
+    ) -> Result<RuntimeProjectionState, ProjectionError> {
+        let mut state = RuntimeProjectionState::with_capability_activity_output_limit(
+            capability_activity_output_limit,
+        );
         let mut after: Option<EventCursor> = None;
         let mut scanned: usize = 0;
         loop {
@@ -1195,7 +1259,7 @@ impl ReplayEventProjectionService {
                         )),
                     });
                 }
-                apply_run_event(&mut runs, entry);
+                state.apply(entry);
             }
             if after == Some(replay.next_cursor) {
                 // The durable log made no progress — stream exhausted.
@@ -1203,7 +1267,7 @@ impl ReplayEventProjectionService {
             }
             after = Some(replay.next_cursor);
         }
-        Ok(runs)
+        Ok(state)
     }
 
     /// Fold the runtime-event prefix `(origin, until]` for `scope` into the
@@ -1221,10 +1285,10 @@ impl ReplayEventProjectionService {
         scope: &ProjectionScope,
         until: EventCursor,
         touched: &HashSet<InvocationId>,
-    ) -> Result<HashMap<InvocationId, RunStatusProjection>, ProjectionError> {
-        let mut runs = HashMap::<InvocationId, RunStatusProjection>::new();
+    ) -> Result<RuntimeProjectionState, ProjectionError> {
+        let mut state = RuntimeProjectionState::default();
         if touched.is_empty() || until == EventCursor::origin() {
-            return Ok(runs);
+            return Ok(state);
         }
 
         let mut after = None;
@@ -1248,7 +1312,7 @@ impl ReplayEventProjectionService {
 
             for entry in &replay.entries {
                 if entry.cursor > until {
-                    return Ok(runs);
+                    return Ok(state);
                 }
                 scanned = scanned.saturating_add(1);
                 if scanned > STATE_REPLAY_MAX_EVENTS {
@@ -1261,10 +1325,10 @@ impl ReplayEventProjectionService {
                     });
                 }
                 if touched.contains(&entry.record.scope.invocation_id) {
-                    apply_run_event(&mut runs, entry);
+                    state.apply(entry);
                 }
                 if entry.cursor >= until {
-                    return Ok(runs);
+                    return Ok(state);
                 }
             }
 
@@ -1273,7 +1337,7 @@ impl ReplayEventProjectionService {
             }
             after = Some(replay.next_cursor);
         }
-        Ok(runs)
+        Ok(state)
     }
 }
 
@@ -1293,6 +1357,7 @@ impl EventProjectionService for ReplayEventProjectionService {
         request: ProjectionRequest,
     ) -> Result<ProjectionSnapshot, ProjectionError> {
         let scope = request.scope.clone();
+        let limit = request.limit;
         let page = self.read_runtime(request).await?;
         let timeline = project_timeline(&page.entries);
         // Snapshot's `runs` always reflect the current scoped stream head,
@@ -1300,12 +1365,14 @@ impl EventProjectionService for ReplayEventProjectionService {
         // page (or a `limit=1` request) would otherwise surface a stale
         // `Running` status for a run whose terminal event lives on the
         // next page — see PR #3212 review feedback (discussion_r3195454963).
-        let folded = self.fold_runtime_to_head(&scope).await?;
-        let mut runs: Vec<RunStatusProjection> = folded.into_values().collect();
+        let folded = self.fold_runtime_to_head(&scope, limit).await?;
+        let (mut runs, mut capability_activities) = folded.into_parts();
         sort_runs_for_projection(&mut runs);
+        sort_capability_activities_for_projection(&mut capability_activities);
         Ok(ProjectionSnapshot {
             timeline,
             runs,
+            capability_activities,
             next_cursor: page.next_cursor,
             truncated: page.truncated,
         })
@@ -1322,18 +1389,20 @@ impl EventProjectionService for ReplayEventProjectionService {
             .iter()
             .map(|entry| entry.record.scope.invocation_id)
             .collect::<HashSet<_>>();
-        let mut runs = if touched_runs.is_empty() {
-            Vec::new()
+        let (mut runs, mut capability_activities) = if touched_runs.is_empty() {
+            (Vec::new(), Vec::new())
         } else {
             let folded = self
                 .fold_runtime_prefix(&scope, page.next_cursor.runtime, &touched_runs)
                 .await?;
-            folded.into_values().collect::<Vec<_>>()
+            folded.into_parts()
         };
         sort_runs_for_projection(&mut runs);
+        sort_capability_activities_for_projection(&mut capability_activities);
         Ok(ProjectionReplay {
             updates: project_timeline(&page.entries).entries,
             runs,
+            capability_activities,
             next_cursor: page.next_cursor,
             truncated: page.truncated,
         })
@@ -1540,123 +1609,12 @@ fn project_timeline_entry(entry: &EventLogEntry<RuntimeEvent>) -> TimelineEntry 
         process_id: event.process_id,
         output_bytes: event.output_bytes,
         error_kind: event.error_kind.clone().map(sanitize_error_kind),
-    }
-}
-
-fn sort_runs_for_projection(runs: &mut [RunStatusProjection]) {
-    runs.sort_by(|left, right| {
-        right
-            .updated_at
-            .cmp(&left.updated_at)
-            .then_with(|| right.last_cursor.cmp(&left.last_cursor))
-            .then_with(|| {
-                left.invocation_id
-                    .as_uuid()
-                    .cmp(&right.invocation_id.as_uuid())
-            })
-    });
-}
-
-fn apply_run_event(
-    runs: &mut HashMap<InvocationId, RunStatusProjection>,
-    entry: &EventLogEntry<RuntimeEvent>,
-) {
-    let event = &entry.record;
-    let existing = runs.get(&event.scope.invocation_id);
-    let status = run_status_for_event(
-        event.kind,
-        existing.map(|run| run.status),
-        existing.and_then(|run| run.process_id).is_some(),
-    );
-    let sanitized_error_kind = event.error_kind.clone().map(sanitize_error_kind);
-    let run = runs
-        .entry(event.scope.invocation_id)
-        .or_insert_with(|| RunStatusProjection {
-            invocation_id: event.scope.invocation_id,
-            capability_id: event.capability_id.clone(),
-            thread_id: event.scope.thread_id.clone(),
-            status,
-            provider: event.provider.clone(),
-            runtime: event.runtime,
-            process_id: event.process_id,
-            error_kind: sanitized_error_kind.clone(),
-            last_cursor: entry.cursor,
-            updated_at: event.timestamp,
-        });
-
-    run.status = status;
-    // Reply-finalized and loop-terminal events are milestones for the same
-    // loop run; keep the primary run capability (`loop.model`) instead of
-    // reclassifying the run as assistant-reply or loop-run metadata.
-    if !matches!(
-        event.kind,
-        RuntimeEventKind::AssistantReplyFinalized
-            | RuntimeEventKind::LoopCompleted
-            | RuntimeEventKind::LoopFailed
-    ) {
-        run.capability_id = event.capability_id.clone();
-    }
-    run.thread_id = event.scope.thread_id.clone();
-    if event.provider.is_some() {
-        run.provider = event.provider.clone();
-    }
-    if event.runtime.is_some() {
-        run.runtime = event.runtime;
-    }
-    if event.process_id.is_some() {
-        run.process_id = event.process_id;
-    }
-    if matches!(
-        event.kind,
-        RuntimeEventKind::AssistantReplyFinalized | RuntimeEventKind::LoopCompleted
-    ) {
-        run.error_kind = None;
-    } else if sanitized_error_kind.is_some() {
-        run.error_kind = sanitized_error_kind;
-    }
-    run.last_cursor = entry.cursor;
-    run.updated_at = event.timestamp;
-}
-
-fn run_status_for_event(
-    kind: RuntimeEventKind,
-    current_status: Option<RunProjectionStatus>,
-    has_active_process: bool,
-) -> RunProjectionStatus {
-    match kind {
-        RuntimeEventKind::DispatchRequested
-        | RuntimeEventKind::RuntimeSelected
-        | RuntimeEventKind::ModelStarted
-        | RuntimeEventKind::ModelCompleted
-        | RuntimeEventKind::ModelFailed
-        | RuntimeEventKind::ProcessStarted => RunProjectionStatus::Running,
-        RuntimeEventKind::DispatchSucceeded
-            if has_active_process && current_status == Some(RunProjectionStatus::Running) =>
-        {
-            RunProjectionStatus::Running
-        }
-        // For process-backed runs, `DispatchSucceeded` may simply acknowledge
-        // that a background process was spawned. If the process trail has
-        // already terminated (`Failed` or `Killed`), a late `DispatchSucceeded`
-        // must NOT overwrite that terminal status — doing so would silently
-        // hide failures from product consumers.
-        RuntimeEventKind::DispatchSucceeded
-            if has_active_process
-                && matches!(
-                    current_status,
-                    Some(RunProjectionStatus::Failed) | Some(RunProjectionStatus::Killed)
-                ) =>
-        {
-            current_status.unwrap_or(RunProjectionStatus::Failed)
-        }
-        RuntimeEventKind::DispatchSucceeded
-        | RuntimeEventKind::AssistantReplyFinalized
-        | RuntimeEventKind::LoopCompleted
-        | RuntimeEventKind::ProcessCompleted => RunProjectionStatus::Completed,
-        RuntimeEventKind::DispatchFailed
-        | RuntimeEventKind::LoopFailed
-        | RuntimeEventKind::ProcessFailed => RunProjectionStatus::Failed,
-        RuntimeEventKind::ProcessKilled => RunProjectionStatus::Killed,
+        hook_id: event.hook_id.clone(),
+        hook_point: event.hook_point.clone(),
+        hook_trust_class: event.hook_trust_class.clone(),
+        hook_decision: event.hook_decision.clone(),
+        hook_failure_category: event.hook_failure_category.clone(),
+        hook_failure_disposition: event.hook_failure_disposition.clone(),
     }
 }
 
