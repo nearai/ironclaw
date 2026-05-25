@@ -148,11 +148,13 @@ pub async fn execute_tool_with_safety(
 /// **Store-optional.** When `store` is `None` (local/test setups that run
 /// without a database, exactly as chat tolerates today) the function is a
 /// pure pass-through to `execute_tool_with_safety` — no audit row, no behavior
-/// change. When `store` is `Some` but persistence fails, the failure is logged
-/// at `debug!` (never `warn!`/`info!`: this path is reachable from the
-/// interactive REPL/TUI where higher levels corrupt the terminal — see
-/// CLAUDE.md → Code Style → logging) and the tool result is returned
-/// unmasked, mirroring the dispatcher.
+/// change. When `store` is `Some`, the audit anchor (system job) is created
+/// *before* the tool runs and the call **fails** if that anchor cannot be
+/// created — a side-effecting tool never executes unaudited (mirrors
+/// `ToolDispatcher::dispatch`). Once the tool has run, a failure to persist the
+/// `ActionRecord` itself is non-fatal and logged at `debug!` (never
+/// `warn!`/`info!`: this path is reachable from the interactive REPL/TUI where
+/// higher levels corrupt the terminal — see CLAUDE.md → Code Style → logging).
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_tool_audited(
     tools: &ToolRegistry,
@@ -171,59 +173,71 @@ pub async fn execute_tool_audited(
 
     // Pre-compute the redacted params for the audit row *before* execution, so
     // the sensitive values reaching the tool itself never appear in the
-    // persisted record. `execute_tool_with_safety` redacts identically for its
-    // own logging; we recompute here only for the audit payload.
-    let redacted_input = tools
-        .get(tool_name)
-        .await
-        .map(|tool| {
+    // persisted record. When the tool resolves we redact its declared
+    // `sensitive_params`; when it does NOT (a hallucinated/renamed call) we have
+    // no metadata, so redact *every* top-level field — an unresolved tool call
+    // must never persist raw arguments, which can carry secrets (e.g. API keys).
+    let redacted_input = match tools.get(tool_name).await {
+        Some(tool) => {
             let normalized = prepare_tool_params(tool.as_ref(), &params);
             redact_params(&normalized, tool.sensitive_params())
-        })
-        .unwrap_or_else(|| params.clone());
+        }
+        None => {
+            let all_keys: Vec<&str> = params
+                .as_object()
+                .map(|m| m.keys().map(String::as_str).collect())
+                .unwrap_or_default();
+            redact_params(&params, &all_keys)
+        }
+    };
+
+    // Create the audit anchor *before* executing the tool, and fail the call if
+    // it cannot be created. A side-effecting chat tool must never run without a
+    // persisted `ActionRecord` — that reintroduces the unaudited-execution gap
+    // this funnel exists to close. Mirrors `ToolDispatcher::dispatch`, which
+    // creates the system job before execution and fails the call if that step
+    // fails. The base context's identity (user) drives ownership; its job_id is
+    // in-memory only.
+    let source_label = source.to_string();
+    let job_id = store
+        .create_system_job(&base_ctx.user_id, &source_label)
+        .await
+        .map_err(|e| crate::error::ToolError::ExecutionFailed {
+            name: tool_name.to_string(),
+            reason: format!("failed to create audit anchor: {e}"),
+        })?;
 
     let start = std::time::Instant::now();
     let result = execute_tool_with_safety(tools, safety, tool_name, params, base_ctx).await;
     let elapsed = start.elapsed();
 
-    // Build the audit record under a fresh system job. The base context's
-    // identity (user) drives ownership; its job_id is in-memory only.
-    let source_label = source.to_string();
-    match store
-        .create_system_job(&base_ctx.user_id, &source_label)
-        .await
-    {
-        Ok(job_id) => {
-            let action = ActionRecord::new(0, tool_name, redacted_input);
-            let action = match &result {
-                Ok(output) => {
-                    // `output` is already the pretty-printed tool result string.
-                    // Sanitize it for the audit payload (mirrors dispatch).
-                    let sanitized = safety.sanitize_tool_output(tool_name, output).content;
-                    action.succeed(
-                        Some(sanitized),
-                        serde_json::Value::String(output.clone()),
-                        elapsed,
-                    )
-                }
-                Err(e) => action.fail(e.to_string(), elapsed),
-            };
-            if let Err(e) = store.save_action(job_id, &action).await {
-                tracing::debug!(
-                    error = %e,
-                    tool = %tool_name,
-                    job_id = %job_id,
-                    "failed to persist chat tool ActionRecord"
-                );
-            }
+    let action = ActionRecord::new(0, tool_name, redacted_input);
+    let action = match &result {
+        Ok(output) => {
+            // `output` is the pretty-printed tool result string. Sanitize it for
+            // the audit payload (mirrors dispatch). Persist the *structured*
+            // output when the result is itself JSON (matching dispatch, which
+            // stores the typed `ToolOutput.result`); fall back to a JSON string
+            // for plain-text results.
+            let sanitized = safety.sanitize_tool_output(tool_name, output).content;
+            let structured = serde_json::from_str::<serde_json::Value>(output)
+                .unwrap_or_else(|_| serde_json::Value::String(output.clone()));
+            action.succeed(Some(sanitized), structured, elapsed)
         }
-        Err(e) => {
-            tracing::debug!(
-                error = %e,
-                tool = %tool_name,
-                "failed to create system job for chat tool audit record"
-            );
-        }
+        Err(e) => action.fail(e.to_string(), elapsed),
+    };
+    // Persisting the record is non-fatal (mirrors dispatch): the audit anchor
+    // already exists and the tool has already run, so a transient save error
+    // must not turn an executed call into a failure. `debug!` not `warn!`: this
+    // path is reachable from the interactive REPL/TUI where higher log levels
+    // corrupt the terminal UI (CLAUDE.md → Code Style → logging).
+    if let Err(e) = store.save_action(job_id, &action).await {
+        tracing::debug!(
+            error = %e,
+            tool = %tool_name,
+            job_id = %job_id,
+            "failed to persist chat tool ActionRecord"
+        );
     }
 
     result
@@ -898,6 +912,52 @@ mod audited_integration_tests {
                 ))
             ),
             "audited call must preserve NotFound: {audited:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn audited_unresolved_tool_redacts_params_in_failed_action() {
+        // Regression (#4023 P1): a hallucinated/renamed tool call still fails,
+        // but the failed ActionRecord it persists must NOT contain raw
+        // arguments — those can carry secrets (e.g. API keys). With no tool to
+        // consult for `sensitive_params`, every top-level field is redacted.
+        let (db, backend, _dir) = test_store().await;
+        let registry = ToolRegistry::new(); // empty: the tool will not resolve
+        let safety = safety();
+        let job_ctx = JobContext::with_user("chatter", "chat", "interactive");
+
+        let result = execute_tool_audited(
+            &registry,
+            &safety,
+            Some(&db),
+            "nonexistent_tool",
+            serde_json::json!({ "api_key": "secret-value", "prompt": "do x" }),
+            &job_ctx,
+            DispatchSource::Channel("web".into()),
+        )
+        .await;
+
+        assert!(result.is_err(), "unresolved tool call must fail");
+
+        let actions = fetch_system_actions(&backend, &db, "chatter").await;
+        let action = actions
+            .iter()
+            .find(|a| a.tool_name == "nonexistent_tool")
+            .expect("a failed ActionRecord must be persisted for the unresolved call");
+        assert!(!action.success, "unresolved call recorded as failure");
+        assert!(
+            !action.input.to_string().contains("secret-value"),
+            "raw arguments of an unresolved tool must never be persisted verbatim"
+        );
+        assert_eq!(
+            action.input.get("api_key").and_then(|v| v.as_str()),
+            Some("[REDACTED]"),
+            "every field of an unresolved tool call must be redacted"
+        );
+        assert_eq!(
+            action.input.get("prompt").and_then(|v| v.as_str()),
+            Some("[REDACTED]"),
+            "every field of an unresolved tool call must be redacted"
         );
     }
 }
