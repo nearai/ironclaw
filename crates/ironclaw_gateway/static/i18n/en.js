@@ -533,8 +533,19 @@ I18n.register('en', {
   'config.alreadySet': '(already set — leave empty to keep)',
   'config.alreadyConfigured': 'Already configured',
   'config.autoGenerate': 'Auto-generated if empty',
+  'config.optionalSection': 'Optional settings',
+  'config.optionalSectionSummary': 'Optional settings ({count})',
+  'config.requiredFieldMissing': '{name} is required.',
+  'config.invalidField': '{name} has an invalid format.',
+  'config.controlCharsNotAllowed': '{name} cannot contain control characters.',
+  'config.requiredPlaceholder': 'Required',
+  'config.optionalPlaceholder': 'Optional',
   'config.save': 'Save',
   'config.cancel': 'Cancel',
+
+  // Setup fields
+  'setup.secret.wecom_bot_id': 'Bot ID',
+  'setup.secret.wecom_bot_secret': 'Bot Secret',
 
   // Settings toolbar
   'settings.export': 'Export',

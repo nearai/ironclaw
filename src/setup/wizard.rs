@@ -2689,6 +2689,12 @@ impl SetupWizard {
 
         // Process selected WASM channels
         let mut enabled_wasm_channels = Vec::new();
+        let existing_runtime_overrides = self
+            .settings
+            .channels
+            .wasm_channel_runtime_overrides
+            .clone();
+        let mut enabled_runtime_overrides: HashMap<String, serde_json::Value> = HashMap::new();
         for channel_name in selected_wasm_channels {
             println!();
             if let Some(ref ctx) = secrets {
@@ -2703,6 +2709,7 @@ impl SetupWizard {
                         crate::setup::channels::WasmChannelSetupResult {
                             enabled: true,
                             channel_name: channel_name.clone(),
+                            config_overrides: HashMap::new(),
                         }
                     }
                 } else {
@@ -2714,7 +2721,19 @@ impl SetupWizard {
                 };
 
                 if result.enabled {
-                    enabled_wasm_channels.push(result.channel_name);
+                    let channel_name = result.channel_name;
+                    enabled_wasm_channels.push(channel_name.clone());
+                    let channel_overrides = merge_wasm_channel_runtime_overrides_for_channel(
+                        &existing_runtime_overrides,
+                        &channel_name,
+                        result.config_overrides,
+                    );
+                    for (config_key, value) in channel_overrides {
+                        enabled_runtime_overrides.insert(
+                            wasm_channel_runtime_override_key(&channel_name, &config_key),
+                            value,
+                        );
+                    }
                 }
             } else {
                 // No secrets context, just enable the channel
@@ -2723,10 +2742,21 @@ impl SetupWizard {
                     capitalize_first(&channel_name)
                 ));
                 enabled_wasm_channels.push(channel_name.clone());
+                let channel_overrides = collect_wasm_channel_runtime_overrides_for_channel(
+                    &existing_runtime_overrides,
+                    &channel_name,
+                );
+                for (config_key, value) in channel_overrides {
+                    enabled_runtime_overrides.insert(
+                        wasm_channel_runtime_override_key(&channel_name, &config_key),
+                        value,
+                    );
+                }
             }
         }
 
         self.settings.channels.wasm_channels = enabled_wasm_channels;
+        self.settings.channels.wasm_channel_runtime_overrides = enabled_runtime_overrides;
 
         Ok(())
     }
@@ -3712,6 +3742,36 @@ fn capitalize_first(s: &str) -> String {
     }
 }
 
+fn wasm_channel_runtime_override_key(channel_name: &str, config_key: &str) -> String {
+    format!("{}:{}", channel_name, config_key)
+}
+
+fn collect_wasm_channel_runtime_overrides_for_channel(
+    stored: &HashMap<String, serde_json::Value>,
+    channel_name: &str,
+) -> HashMap<String, serde_json::Value> {
+    let mut result = HashMap::new();
+    let prefix = format!("{channel_name}:");
+    for (key, value) in stored {
+        if let Some(config_key) = key.strip_prefix(&prefix)
+            && !config_key.trim().is_empty()
+        {
+            result.insert(config_key.to_string(), value.clone());
+        }
+    }
+    result
+}
+
+fn merge_wasm_channel_runtime_overrides_for_channel(
+    stored: &HashMap<String, serde_json::Value>,
+    channel_name: &str,
+    new_overrides: HashMap<String, serde_json::Value>,
+) -> HashMap<String, serde_json::Value> {
+    let mut result = collect_wasm_channel_runtime_overrides_for_channel(stored, channel_name);
+    result.extend(new_overrides);
+    result
+}
+
 #[cfg(test)]
 async fn install_missing_bundled_channels(
     channels_dir: &std::path::Path,
@@ -3895,7 +3955,7 @@ async fn install_selected_bundled_channels(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     #[cfg(unix)]
     use std::ffi::OsString;
 
@@ -4043,6 +4103,33 @@ mod tests {
             Some("local"),
             "selected_deployment_profile should be set"
         );
+    }
+
+    #[test]
+    fn wasm_channel_runtime_overrides_merge_existing_with_new_values() {
+        let stored = HashMap::from([
+            (
+                "wecom:allow_from".to_string(),
+                serde_json::json!(["ZhangSan"]),
+            ),
+            ("wecom:dm_policy".to_string(), serde_json::json!("pairing")),
+            ("telegram:dm_policy".to_string(), serde_json::json!("open")),
+        ]);
+        let new_overrides =
+            HashMap::from([("dm_policy".to_string(), serde_json::json!("allowlist"))]);
+
+        let merged =
+            merge_wasm_channel_runtime_overrides_for_channel(&stored, "wecom", new_overrides);
+
+        assert_eq!(
+            merged.get("allow_from"),
+            Some(&serde_json::json!(["ZhangSan"]))
+        );
+        assert_eq!(
+            merged.get("dm_policy"),
+            Some(&serde_json::json!("allowlist"))
+        );
+        assert!(!merged.contains_key("telegram:dm_policy"));
     }
 
     #[test]
