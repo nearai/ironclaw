@@ -106,6 +106,10 @@ async fn dispatch_list(
 async fn dispatch_install(
     request: &SkillManagementCapabilityRequest<'_>,
 ) -> Result<Value, SkillManagementCapabilityError> {
+    if request.input.get("url").is_some() {
+        tracing::debug!("skill management install received unresolved url input");
+        return Err(input_error());
+    }
     let content = request
         .input
         .get("content")

@@ -72,6 +72,19 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
     {
         assert_coding_manifest_contract(descriptor);
     }
+    let skill_install = package
+        .capabilities
+        .iter()
+        .find(|descriptor| descriptor.id.as_str() == SKILL_INSTALL_CAPABILITY_ID)
+        .expect("skill_install manifest");
+    assert_eq!(
+        skill_install.effects,
+        vec![
+            EffectKind::ReadFilesystem,
+            EffectKind::WriteFilesystem,
+            EffectKind::Network
+        ]
+    );
 
     let handlers = builtin_first_party_handlers().unwrap();
     for id in all_builtin_capability_ids() {
@@ -635,6 +648,110 @@ async fn builtin_http_invokes_through_host_runtime_egress() {
     assert_eq!(request.response_body_limit, Some(10 * 1024 * 1024));
     assert_eq!(request.timeout_ms, Some(2500));
     assert!(request.credential_injections.is_empty());
+}
+
+#[tokio::test]
+async fn builtin_skill_install_fetches_url_through_host_runtime_egress() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
+        b"---\nname: fetched-helper\ndescription: fetched skill\n---\nFetched prompt.\n".to_vec(),
+    ));
+    let runtime = runtime_with_filesystem_and_http_egress(filesystem, Arc::clone(&egress));
+    let context = execution_context_with_mounts_and_network(
+        [SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID],
+        mounts,
+        http_test_policy(),
+    );
+
+    let installed = invoke_with_context(
+        &runtime,
+        SKILL_INSTALL_CAPABILITY_ID,
+        json!({"url": "https://api.example.test/skills/fetched-helper/SKILL.md"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(installed["installed"], json!(true));
+    assert_eq!(installed["name"], json!("fetched-helper"));
+    assert_eq!(installed["path"], json!("/skills/fetched-helper/SKILL.md"));
+
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].runtime, RuntimeKind::FirstParty);
+    assert_eq!(
+        requests[0].capability_id,
+        capability_id(SKILL_INSTALL_CAPABILITY_ID)
+    );
+    assert_eq!(requests[0].method, NetworkMethod::Get);
+    assert_eq!(
+        requests[0].url,
+        "https://api.example.test/skills/fetched-helper/SKILL.md"
+    );
+    assert_eq!(requests[0].response_body_limit, Some(64 * 1024));
+    assert_eq!(requests[0].timeout_ms, Some(10_000));
+
+    let listed = invoke_with_context(&runtime, SKILL_LIST_CAPABILITY_ID, json!({}), context)
+        .await
+        .unwrap();
+    assert_eq!(listed["count"], json!(1));
+    assert_eq!(listed["skills"][0]["name"], json!("fetched-helper"));
+}
+
+#[tokio::test]
+async fn builtin_skill_install_rejects_ambiguous_content_and_url_before_fetch() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
+        b"---\nname: fetched-helper\n---\nFetched prompt.\n".to_vec(),
+    ));
+    let runtime = runtime_with_filesystem_and_http_egress(filesystem, Arc::clone(&egress));
+
+    let error = invoke_with_context(
+        &runtime,
+        SKILL_INSTALL_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/skills/fetched-helper/SKILL.md",
+            "content": "---\nname: pasted-helper\n---\nPasted prompt.\n"
+        }),
+        execution_context_with_mounts_and_network(
+            [SKILL_INSTALL_CAPABILITY_ID],
+            mounts,
+            http_test_policy(),
+        ),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert!(egress.requests().is_empty());
+}
+
+#[tokio::test]
+async fn builtin_skill_install_rejects_non_https_url_before_fetch() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
+        b"---\nname: fetched-helper\n---\nFetched prompt.\n".to_vec(),
+    ));
+    let runtime = runtime_with_filesystem_and_http_egress(filesystem, Arc::clone(&egress));
+
+    let error = invoke_with_context(
+        &runtime,
+        SKILL_INSTALL_CAPABILITY_ID,
+        json!({"url": "http://api.example.test/skills/fetched-helper/SKILL.md"}),
+        execution_context_with_mounts_and_network(
+            [SKILL_INSTALL_CAPABILITY_ID],
+            mounts,
+            http_test_policy(),
+        ),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert!(egress.requests().is_empty());
 }
 
 #[tokio::test]
@@ -2192,6 +2309,26 @@ where
     .host_runtime_for_local_testing()
 }
 
+fn runtime_with_filesystem_and_http_egress<F, T>(filesystem: F, egress: Arc<T>) -> impl HostRuntime
+where
+    F: RootFilesystem + 'static,
+    T: RuntimeHttpEgress + 'static,
+{
+    HostRuntimeServices::new(
+        Arc::new(registry()),
+        Arc::new(filesystem),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_runtime_http_egress(egress)
+    .with_runtime_policy(local_dev_policy())
+    .with_trust_policy(Arc::new(trust_policy()))
+    .host_runtime_for_local_testing()
+}
+
 fn runtime_with_process_port<T>(process_port: Arc<T>) -> impl HostRuntime
 where
     T: RuntimeProcessPort + 'static,
@@ -2414,6 +2551,23 @@ fn mounted_filesystem(path: &Path, permissions: MountPermissions) -> (LocalFiles
         MountAlias::new("/workspace").unwrap(),
         VirtualPath::new("/projects/coding-pack").unwrap(),
         permissions,
+    )])
+    .unwrap();
+    (filesystem, mounts)
+}
+
+fn mounted_skill_filesystem(path: &Path) -> (LocalFilesystem, MountView) {
+    let mut filesystem = LocalFilesystem::new();
+    filesystem
+        .mount_local(
+            VirtualPath::new("/projects/skills").unwrap(),
+            HostPath::from_path_buf(path.to_path_buf()),
+        )
+        .unwrap();
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/skills").unwrap(),
+        VirtualPath::new("/projects/skills").unwrap(),
+        MountPermissions::read_write_list_delete(),
     )])
     .unwrap();
     (filesystem, mounts)

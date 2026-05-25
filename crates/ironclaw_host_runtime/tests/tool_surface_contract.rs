@@ -447,6 +447,7 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
     assert_schema_has_property(&surface, "builtin.grep", "pattern");
     assert_schema_has_property(&surface, "builtin.skill_install", "content");
     assert_schema_has_property(&surface, "builtin.skill_install", "name");
+    assert_schema_has_property(&surface, "builtin.skill_install", "url");
 
     let skill_install_schema = &surface
         .capabilities
@@ -463,11 +464,25 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
             "content": "---\nname: pasted-skill\n---\n\nUse multiline Markdown.\n"
         }))
         .expect("skill_install should accept multiline SKILL.md content");
+    skill_install_validator
+        .validate(&json!({
+            "url": "https://example.test/SKILL.md"
+        }))
+        .expect("skill_install should accept a SKILL.md URL");
     assert!(
         skill_install_validator
             .validate(&json!({"name": "pasted-skill"}))
             .is_err(),
-        "skill_install content remains required"
+        "skill_install requires either content or url"
+    );
+    assert!(
+        skill_install_validator
+            .validate(&json!({
+                "url": "https://example.test/SKILL.md",
+                "content": "---\nname: pasted-skill\n---\n\nUse multiline Markdown.\n"
+            }))
+            .is_err(),
+        "skill_install should reject ambiguous content plus url input"
     );
 }
 
