@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/ironclaw_common", "crates/ironclaw_host_api", "crates/ironclaw_filesystem", "crates/ironclaw_memory", "crates/ironclaw_events", "crates/ironclaw_event_projections", "crates/ironclaw_event_streams", "crates/ironclaw_reborn_event_store", "crates/ironclaw_extensions", "crates/ironclaw_processes", "crates/ironclaw_dispatcher", "crates/ironclaw_scripts", "crates/ironclaw_mcp", "crates/ironclaw_wasm", "crates/ironclaw_wasm_sandbox_core", "crates/ironclaw_wasm_limiter", "crates/ironclaw_capabilities", "crates/ironclaw_secrets", "crates/ironclaw_network", "crates/ironclaw_host_runtime", "crates/ironclaw_runtime_policy", "crates/ironclaw_authorization", "crates/ironclaw_run_state", "crates/ironclaw_approvals", "crates/ironclaw_resources", "crates/ironclaw_auth", "crates/ironclaw_trust", "crates/ironclaw_turns", "crates/ironclaw_agent_loop", "crates/ironclaw_threads", "crates/ironclaw_prompt_envelope", "crates/ironclaw_hooks", "crates/ironclaw_loop_support", "crates/ironclaw_reborn", "crates/ironclaw_reborn_config", "crates/ironclaw_reborn_composition", "crates/ironclaw_first_party_extensions", "crates/ironclaw_reborn_cli", "crates/ironclaw_reborn_traces", "crates/ironclaw_reborn_webui_ingress", "crates/ironclaw_conversations", "crates/ironclaw_product_adapters", "crates/ironclaw_product_workflow", "crates/ironclaw_product_workflow_storage", "crates/ironclaw_product_adapter_registry", "crates/ironclaw_wasm_product_adapters", "crates/ironclaw_telegram_v2_adapter", "crates/ironclaw_outbound", "crates/ironclaw_architecture", "crates/ironclaw_safety", "crates/ironclaw_skills", "crates/ironclaw_llm", "crates/ironclaw_engine", "crates/ironclaw_gateway", "crates/ironclaw_tui", "crates/ironclaw_webui_v2"]
+members = [".", "crates/ironclaw_common", "crates/ironclaw_host_api", "crates/ironclaw_filesystem", "crates/ironclaw_memory", "crates/ironclaw_events", "crates/ironclaw_event_projections", "crates/ironclaw_event_streams", "crates/ironclaw_reborn_event_store", "crates/ironclaw_extensions", "crates/ironclaw_processes", "crates/ironclaw_dispatcher", "crates/ironclaw_scripts", "crates/ironclaw_mcp", "crates/ironclaw_wasm", "crates/ironclaw_wasm_sandbox_core", "crates/ironclaw_wasm_limiter", "crates/ironclaw_capabilities", "crates/ironclaw_secrets", "crates/ironclaw_network", "crates/ironclaw_host_runtime", "crates/ironclaw_runtime_policy", "crates/ironclaw_authorization", "crates/ironclaw_run_state", "crates/ironclaw_approvals", "crates/ironclaw_resources", "crates/ironclaw_auth", "crates/ironclaw_trust", "crates/ironclaw_turns", "crates/ironclaw_agent_loop", "crates/ironclaw_threads", "crates/ironclaw_prompt_envelope", "crates/ironclaw_hooks", "crates/ironclaw_loop_support", "crates/ironclaw_reborn", "crates/ironclaw_reborn_config", "crates/ironclaw_reborn_composition", "crates/ironclaw_first_party_extensions", "crates/ironclaw_reborn_cli", "crates/ironclaw_reborn_traces", "crates/ironclaw_reborn_webui_ingress", "crates/ironclaw_conversations", "crates/ironclaw_product_adapters", "crates/ironclaw_product_workflow", "crates/ironclaw_product_workflow_storage", "crates/ironclaw_product_adapter_registry", "crates/ironclaw_wasm_product_adapters", "crates/ironclaw_telegram_v2_adapter", "crates/ironclaw_reborn_telegram_v2_host", "crates/ironclaw_outbound", "crates/ironclaw_architecture", "crates/ironclaw_safety", "crates/ironclaw_skills", "crates/ironclaw_llm", "crates/ironclaw_engine", "crates/ironclaw_gateway", "crates/ironclaw_tui", "crates/ironclaw_webui_v2"]
 exclude = [
     "channels-src/discord",
     "channels-src/feishu",
@@ -147,6 +147,7 @@ ironclaw_reborn_traces = { path = "crates/ironclaw_reborn_traces", version = "0.
 ironclaw_safety = { path = "crates/ironclaw_safety", version = "0.2.2" }
 ironclaw_skills = { path = "crates/ironclaw_skills", version = "0.3.0" }
 ironclaw_tui = { path = "crates/ironclaw_tui", optional = true, version = "0.1.0" }
+
 regex = "1"
 aho-corasick = "1"
 
@@ -290,7 +291,9 @@ postgres = [
     "dep:pgvector",
     "rust_decimal/db-tokio-postgres",
 ]
-libsql = ["dep:libsql"]
+libsql = [
+    "dep:libsql",
+]
 # Opt-in feature for especially heavy integration-test targets that run in a
 # dedicated CI job instead of the default Rust test matrix.
 integration = []

@@ -28,6 +28,13 @@ impl ProductActionId {
     pub fn as_uuid(&self) -> Uuid {
         self.0
     }
+
+    /// Reconstruct an action id from its persisted UUID representation.
+    /// Used by durable ledger backends to rehydrate `ProductInboundAction`
+    /// rows on replay; do not use to mint new ids (use [`Self::new`] for that).
+    pub fn from_uuid(uuid: Uuid) -> Self {
+        Self(uuid)
+    }
 }
 
 impl Default for ProductActionId {

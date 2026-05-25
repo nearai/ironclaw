@@ -1,0 +1,90 @@
+[package]
+name = "ironclaw_reborn_telegram_v2_host"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Reborn Telegram v2 webhook host — receives Telegram webhooks, persists inbound actions + bindings via ProductWorkflow, stubs the reply path until the Reborn agent loop ships."
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Library-only crate. The serve loop ships inside the `ironclaw-reborn`
+# binary (in `ironclaw_reborn_cli`), wired up from its `run` subcommand
+# when Telegram v2 env is set. The v1 `ironclaw` agent has no compile-time
+# dependency on this crate. With the Reborn agent loop absent in src/
+# today, the reply path is intentionally stubbed: this layer stores webhook
+# deliveries durably (ledger + binding) and acks 200, then halts. Once the
+# Reborn loop ships, swap the stub for DefaultInboundTurnService +
+# TurnCoordinator without touching v1.
+
+[dependencies]
+# Reborn product-layer stack
+ironclaw_conversations = { path = "../ironclaw_conversations", version = "0.1.0" }
+ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
+ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+ironclaw_host_runtime = { path = "../ironclaw_host_runtime", version = "0.1.0" }
+ironclaw_network = { path = "../ironclaw_network", version = "0.1.0" }
+ironclaw_outbound = { path = "../ironclaw_outbound", version = "0.1.0" }
+ironclaw_product_adapters = { path = "../ironclaw_product_adapters", version = "0.1.0" }
+ironclaw_product_workflow = { path = "../ironclaw_product_workflow", version = "0.1.0" }
+ironclaw_product_workflow_storage = { path = "../ironclaw_product_workflow_storage", version = "0.1.0" }
+ironclaw_secrets = { path = "../ironclaw_secrets", version = "0.1.0" }
+ironclaw_telegram_v2_adapter = { path = "../ironclaw_telegram_v2_adapter", version = "0.1.0" }
+ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0" }
+ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
+ironclaw_wasm_product_adapters = { path = "../ironclaw_wasm_product_adapters", version = "0.1.0" }
+
+# Async runtime + transport
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+axum = "0.8"
+tower = "0.5"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Observability + errors
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+thiserror = "2"
+secrecy = "0.10"
+
+# Time + ids
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Storage backends — optional, feature-gated. At least one of `libsql` /
+# `postgres` must be enabled for the binary to build (compile_error guard in
+# the binary).
+libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
+deadpool-postgres = { version = "0.14", optional = true }
+tokio-postgres = { version = "0.7", optional = true, features = ["with-uuid-1", "with-chrono-0_4"] }
+rustls = { version = "0.23", optional = true }
+rustls-native-certs = { version = "0.8", optional = true }
+tokio-postgres-rustls = { version = "0.13", optional = true }
+webpki-roots = { version = "1", optional = true }
+
+[dev-dependencies]
+http-body-util = "0.1"
+futures = "0.3"
+tempfile = "3"
+ironclaw_product_adapters = { path = "../ironclaw_product_adapters", version = "0.1.0", features = ["test-support"] }
+
+[features]
+default = ["libsql"]
+libsql = [
+    "dep:libsql",
+    "ironclaw_filesystem/libsql",
+    "ironclaw_outbound/libsql",
+]
+postgres = [
+    "dep:deadpool-postgres",
+    "dep:tokio-postgres",
+    "dep:rustls",
+    "dep:rustls-native-certs",
+    "dep:tokio-postgres-rustls",
+    "dep:webpki-roots",
+    "ironclaw_filesystem/postgres",
+    "ironclaw_outbound/postgres",
+]

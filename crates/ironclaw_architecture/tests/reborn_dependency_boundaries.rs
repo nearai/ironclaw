@@ -162,10 +162,17 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
         [
             "ironclaw_reborn_composition",
             "ironclaw_reborn_config",
+            // Per-channel host crates are wired into `ironclaw-reborn run`
+            // behind per-channel Cargo features (default-on). Each new
+            // channel port (Slack, Discord, WeChat per #3577) ships as its
+            // own `ironclaw_reborn_<channel>_host` crate and joins this
+            // list — that is the explicit architectural justification this
+            // assertion asks for.
+            "ironclaw_reborn_telegram_v2_host",
             "ironclaw_reborn_traces",
             "ironclaw_reborn_webui_ingress",
         ],
-        "ironclaw_reborn_cli should enter Reborn through ironclaw_reborn_composition (assembled-runtime facade), ironclaw_reborn_config (boot-config contract), ironclaw_reborn_traces (contributor-side TraceCommons client extracted from the legacy monolith), and ironclaw_reborn_webui_ingress (host-owned WebUI serve lifecycle) only. Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
+        "ironclaw_reborn_cli should enter Reborn through ironclaw_reborn_composition (assembled-runtime facade), ironclaw_reborn_config (boot-config contract), per-channel host crates (e.g. ironclaw_reborn_telegram_v2_host; future Slack/Discord/WeChat ports per #3577 follow the same pattern), ironclaw_reborn_traces (contributor-side TraceCommons client extracted from the legacy monolith), and ironclaw_reborn_webui_ingress (host-owned WebUI serve lifecycle) only. Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
     );
     assert_workspace_deps_exactly(
         &dependencies_all_kinds,
@@ -1226,6 +1233,30 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_network",
                 "ironclaw_engine",
                 "ironclaw_gateway",
+            ],
+        },
+        BoundaryRule {
+            // Storage-layer impls (libSQL + Postgres) for the product
+            // workflow. Allowed to depend on backend drivers (libsql,
+            // tokio-postgres, reqwest for the egress shim), the workflow
+            // contract, the threads service, and the outbound state store —
+            // but NOT on host/dispatcher/network policy/secrets/etc.
+            crate_name: "ironclaw_product_workflow_storage",
+            forbidden: vec![
+                "ironclaw_dispatcher",
+                "ironclaw_extensions",
+                "ironclaw_host_runtime",
+                "ironclaw_mcp",
+                "ironclaw_wasm",
+                "ironclaw_scripts",
+                "ironclaw_network",
+                "ironclaw_engine",
+                "ironclaw_gateway",
+                "ironclaw_secrets",
+                "ironclaw_authorization",
+                "ironclaw_capabilities",
+                "ironclaw_reborn",
+                "ironclaw_reborn_cli",
             ],
         },
         BoundaryRule {

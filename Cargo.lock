@@ -4718,17 +4718,22 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
- "deadpool-postgres",
+ "hex",
  "ironclaw_filesystem",
  "ironclaw_host_api",
+ "ironclaw_outbound",
  "ironclaw_product_adapters",
  "ironclaw_product_workflow",
- "libsql",
+ "ironclaw_threads",
+ "ironclaw_turns",
+ "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
- "tokio-postgres",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -4788,6 +4793,7 @@ dependencies = [
  "hex",
  "ironclaw_reborn_composition",
  "ironclaw_reborn_config",
+ "ironclaw_reborn_telegram_v2_host",
  "ironclaw_reborn_traces",
  "ironclaw_reborn_webui_ingress",
  "reqwest",
@@ -4896,6 +4902,49 @@ dependencies = [
  "tracing",
  "urlencoding",
  "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "ironclaw_reborn_telegram_v2_host"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum 0.8.9",
+ "chrono",
+ "deadpool-postgres",
+ "futures",
+ "http-body-util",
+ "ironclaw_conversations",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_host_runtime",
+ "ironclaw_network",
+ "ironclaw_outbound",
+ "ironclaw_product_adapters",
+ "ironclaw_product_workflow",
+ "ironclaw_product_workflow_storage",
+ "ironclaw_secrets",
+ "ironclaw_telegram_v2_adapter",
+ "ironclaw_threads",
+ "ironclaw_turns",
+ "ironclaw_wasm_product_adapters",
+ "libsql",
+ "reqwest",
+ "rustls 0.23.40",
+ "rustls-native-certs 0.8.3",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-postgres",
+ "tokio-postgres-rustls",
+ "tower 0.5.3",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "webpki-roots 1.0.7",
 ]
 
 [[package]]
@@ -7880,6 +7929,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ef86cd5876211988985292b91c96a8f2d298df24e75989a43a3c73f2d4d8168b"
 dependencies = [
  "aws-lc-rs",
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",

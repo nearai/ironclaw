@@ -1,23 +1,38 @@
 # Telegram WASM v2 ProductAdapter
 
-**Status:** First-slice tracer-bullet for #3285 (default off).
-**Crate:** `ironclaw_telegram_v2_adapter`.
+**Status:** First-slice tracer-bullet for #3285. Runs inside the
+standalone `ironclaw-reborn` binary; the v1 agent has zero awareness
+it exists.
+**Adapter crate:** `ironclaw_telegram_v2_adapter` (parse + render only).
+**Storage crate:** `ironclaw_product_workflow_storage` (durable
+ledger + binding + outbound + egress shim, libSQL + Postgres).
+**Host crate:** `ironclaw_reborn_telegram_v2_host` (composition +
+webhook router + serve loop, library-only; wired into the
+`ironclaw-reborn` binary behind the `telegram-v2` Cargo feature).
 **Host runtime:** `ironclaw_wasm_product_adapters`.
 **Contract:** `ironclaw_product_adapters` (see `product-adapters.md`).
 
 ## Goals
 
 Prove the [`product-adapters.md`](product-adapters.md) contract end-to-end
-against recorded Telegram payloads and fake Reborn services. The first
-slice is intentionally narrow:
+against real Telegram webhooks, real durable storage, and a real
+NativeProductAdapterRunner — in a process the v1 agent does not boot.
+The first slice is intentionally narrow:
 
 - The adapter is implemented natively in Rust today; the wasmtime
   component-model build of the same logic lives in a follow-up landing
-  alongside the host runtime's full WIT bindings.
-- All Reborn services below the workflow facade are fakes
-  (`FakeProductWorkflow`, etc.).
-- Production traffic is gated behind `REBORN_TELEGRAM_V2_ENABLED`
-  (default off).
+  (PR #3583) alongside the host runtime's full WIT bindings.
+- Reply path is **stubbed** in this binary: inbound terminates at the
+  durable ledger / binding write, then acks 200. The Reborn agent loop
+  (PRs #3544 / #3550 / #3586) has now merged, but this slice is the
+  inbound tracer — the outbound reply path is a deliberate follow-up so
+  the inbound contract can soak in production before `sendMessage` is
+  wired. When the migration lands, the host's `StubInboundTurnService`
+  is replaced with `DefaultInboundTurnService` + `TurnCoordinator` and
+  the existing render path activates — no other piece of the contract
+  changes.
+- Production traffic enters a separate process — `cargo build --bin
+  ironclaw-reborn` then `ironclaw-reborn run` — not the v1 agent binary.
 
 ## Authentication
 
@@ -28,6 +43,16 @@ constant time using
 constructs a `ProtocolAuthEvidence::Verified` via
 `mark_shared_secret_header_verified`. Adapters refuse to parse a payload
 whose evidence is not `Verified`.
+
+The bot token used for outbound egress lives in `HostConfig` as a
+`secrecy::SecretString`. At boot the host `put`s the value into an
+`InMemorySecretStore` keyed by a `SecretHandle` (matching the
+`EgressCredentialHandle` an adapter declares); each outbound request
+leases the material one-shot via `SecretStoreCredentialResolver`
+(`SecretStore::lease_once` + `consume`), so the raw bytes never live in
+a long-lived `String`. The startup `getMe` path scrubs URLs from
+reqwest errors with `.without_url()` before tracing them so a DNS/TLS
+failure can't leak the token into logs.
 
 ## Reference normalization
 
@@ -88,16 +113,52 @@ Reply targets encode as `tg:<chat_id>:<topic_or_underscore>:<msg_or_underscore>`
 
 Egress targets only the declared `api.telegram.org` host. The bot token
 travels as an opaque `EgressCredentialHandle` (`telegram_bot_token`); the
-host resolves it at request time and never exposes the underlying secret
-to the adapter.
+host resolves it at request time via
+`SecretStoreCredentialResolver` (one-shot lease through
+`ironclaw_secrets::SecretStore`), never exposing the underlying secret to
+the adapter and never holding the raw bytes in a long-lived `String`.
+
+**Egress goes through `RuntimeHttpEgress`.** Every outbound Telegram
+call flows through the host-api egress contract
+(`ironclaw_host_api::RuntimeHttpEgress`) — network policy, byte
+accounting, response-body limits, and credential redaction are managed
+by one host-owned service (`HostHttpEgressService` over
+`PolicyNetworkHttpEgress<ReqwestNetworkTransport>`) rather than a
+per-adapter shim. Telegram's path-embedded bot token
+(`https://api.telegram.org/bot<TOKEN>/sendMessage`) is expressed as a
+`RuntimeCredentialTarget::UrlPath { placeholder }` injection — a
+variant added during PR #3590's audit pass specifically because
+`Header` and `QueryParam` cannot model a path-embedded credential. The
+adapter-facing shim
+(`HostMediatedTelegramEgress` in
+`crates/ironclaw_reborn_telegram_v2_host/src/host_egress.rs`)
+constructs the URL with a constant placeholder; the host substitutes
+the value one-shot from a `SecretStore` lease inside
+`apply_credential_injection` and adds the substituted token to its
+redaction-token set so it cannot leak via error reasons or response
+bodies.
 
 ## Idempotency
 
-Dedupe key = `(adapter_installation_id, source_binding_ref,
-external_event_id)`. The fake workflow returns
-`ProductInboundAck::Duplicate { prior }` on second delivery of the same
-`update_id`; the prior outcome is the one observed on first delivery.
-Webhook responses for duplicates remain 200 OK with no side effects.
+Dedupe key = `(adapter_id, installation_id, source_binding_key,
+external_event_id)`. The durable implementation
+(`FilesystemIdempotencyLedger`) is backend-agnostic — it writes through
+the universal-FS dispatch fabric, so the same code path serves libSQL,
+Postgres, in-memory, or HSM-decorated mounts:
+
+- Second delivery of the same `update_id` after settle → `Replay(prior)`.
+- Second delivery while still in-flight (within the recovery lease) →
+  `Transient` so the protocol layer retries.
+- Second delivery after the in-flight reservation has aged past
+  `DEFAULT_RECOVERY_LEASE` (300 s) without `settle`/`release` — e.g.
+  workflow timeout, panic, cancelled spawn — is atomically reclaimed by
+  `begin_or_replay` and surfaces as `New`. A stuck row therefore cannot
+  permanently wedge Telegram retries for the affected `update_id`.
+
+`begin_or_replay` uses `CasExpectation::Absent` on the fresh claim and
+`CasExpectation::Version` on every transition (reclaim, settle, release)
+to close the SELECT-then-INSERT TOCTOU window under
+concurrent webhook delivery.
 
 ## Capabilities
 
@@ -115,14 +176,21 @@ Webhook responses for duplicates remain 200 OK with no side effects.
 
 ## Default-off behavior
 
-`REBORN_TELEGRAM_V2_ENABLED=false` (default) keeps the legacy v1 Telegram
-WASM channel (`channels-src/telegram`) running unchanged through the v1
-channel manager.
+V2 lives in a separate binary (`ironclaw-reborn`), wired in from
+`ironclaw_reborn_telegram_v2_host` behind the `telegram-v2` Cargo
+feature on `ironclaw_reborn_cli`. The v1 agent binary has zero
+awareness of v2 — no compile-time dependency on any Reborn
+product-layer crate, no wiring code, no config field, no runtime flag.
+The two binaries coexist only at the operator level: an operator who
+wants both v1 and v2 Telegram channels needs to point them at
+*different* Telegram bot tokens / webhook URLs. There is no in-process
+exclusivity guard because there are no two paths in the same process
+to guard.
 
-`REBORN_TELEGRAM_V2_ENABLED=true` requires the legacy v1 Telegram channel
-to be inactive for the same installation. The host calls
-`ironclaw::config::validate_telegram_v1_v2_exclusivity` at startup and
-fails closed when both are active.
+The standalone host fails closed at startup if neither `DATABASE_URL`
+(Postgres) nor `LIBSQL_PATH` (libSQL) is set. Operators who want
+ephemeral in-memory storage for dev / tests opt in explicitly via
+`IRONCLAW_REBORN_ALLOW_EPHEMERAL=1`.
 
 ## Test coverage (issue #3285 acceptance criteria)
 

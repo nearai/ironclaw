@@ -750,6 +750,410 @@ fn host_http_egress_injects_leased_credentials_and_redacts_errors() {
     );
 }
 
+/// Regression for serrrfirat's PR #3590 architecture review (finding A3) —
+/// the URL-path credential injection variant supports protocols (Telegram,
+/// etc.) whose authentication scheme embeds the credential in the request
+/// path rather than a header or query parameter.
+#[test]
+fn host_http_egress_substitutes_url_path_placeholder() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{"ok":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let secrets = InMemorySecretStore::new();
+    let scope = sample_scope();
+    let handle = SecretHandle::new("bot-token").unwrap();
+    block_on_test(secrets.put(
+        scope.clone(),
+        handle.clone(),
+        SecretMaterial::from("SECRET-XYZ"),
+    ))
+    .unwrap();
+    let service = HostHttpEgressService::new_with_request_policy_for_tests(network, secrets);
+
+    service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope,
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/bot{credential}/sendMessage".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle,
+                source: RuntimeCredentialSource::SecretStoreLease,
+                target: RuntimeCredentialTarget::UrlPath {
+                    placeholder: "{credential}".to_string(),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            timeout_ms: None,
+        })
+        .expect("url-path injection should substitute the placeholder");
+
+    let requests = network_recorder.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].url,
+        "https://api.example.test/botSECRET-XYZ/sendMessage"
+    );
+}
+
+/// Defence-in-depth: when the network transport rejects a request and the
+/// rendered error embeds the URL (which now contains the credential after
+/// path substitution), the host's redaction-token machinery scrubs the
+/// secret so it does not leak to runtime/plugin callers.
+#[test]
+fn host_http_egress_url_path_redacts_substituted_token_in_errors() {
+    let network = RecordingNetwork::err(NetworkHttpError::Transport {
+        reason: "upstream rejected https://api.example.test/botSECRET-XYZ/sendMessage".to_string(),
+        request_bytes: 12,
+        response_bytes: 0,
+    });
+    let secrets = InMemorySecretStore::new();
+    let scope = sample_scope();
+    let handle = SecretHandle::new("bot-token").unwrap();
+    block_on_test(secrets.put(
+        scope.clone(),
+        handle.clone(),
+        SecretMaterial::from("SECRET-XYZ"),
+    ))
+    .unwrap();
+    let service = HostHttpEgressService::new_with_request_policy_for_tests(network, secrets);
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope,
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/bot{credential}/sendMessage".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle,
+                source: RuntimeCredentialSource::SecretStoreLease,
+                target: RuntimeCredentialTarget::UrlPath {
+                    placeholder: "{credential}".to_string(),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            timeout_ms: None,
+        })
+        .expect_err("transport error should propagate");
+
+    let rendered = error.to_string();
+    assert!(
+        !rendered.contains("SECRET-XYZ"),
+        "credential value leaked into rendered error: {rendered}"
+    );
+}
+
+/// Placeholder must appear in the URL. A misconfigured request that
+/// declares an injection without leaving room for the credential is a
+/// configuration error, not a silent no-op (which could send an
+/// unauthenticated request to a host that expects auth).
+#[test]
+fn host_http_egress_url_path_rejects_missing_placeholder() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: vec![],
+        usage: NetworkUsage {
+            request_bytes: 0,
+            response_bytes: 0,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let secrets = InMemorySecretStore::new();
+    let scope = sample_scope();
+    let handle = SecretHandle::new("bot-token").unwrap();
+    block_on_test(secrets.put(
+        scope.clone(),
+        handle.clone(),
+        SecretMaterial::from("SECRET-XYZ"),
+    ))
+    .unwrap();
+    let service = HostHttpEgressService::new_with_request_policy_for_tests(network, secrets);
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope,
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/no/placeholder/here".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle,
+                source: RuntimeCredentialSource::SecretStoreLease,
+                target: RuntimeCredentialTarget::UrlPath {
+                    placeholder: "{credential}".to_string(),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            timeout_ms: None,
+        })
+        .expect_err("missing placeholder must fail closed");
+
+    assert!(matches!(
+        error,
+        ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+    ));
+    assert!(network_recorder.lock().unwrap().is_empty());
+}
+
+/// Placeholder must be unique. A multi-match URL is ambiguous and could
+/// substitute every occurrence — including unrelated path segments that
+/// happen to collide with a short placeholder.
+#[test]
+fn host_http_egress_url_path_rejects_duplicate_placeholder() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: vec![],
+        usage: NetworkUsage {
+            request_bytes: 0,
+            response_bytes: 0,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let secrets = InMemorySecretStore::new();
+    let scope = sample_scope();
+    let handle = SecretHandle::new("bot-token").unwrap();
+    block_on_test(secrets.put(
+        scope.clone(),
+        handle.clone(),
+        SecretMaterial::from("SECRET-XYZ"),
+    ))
+    .unwrap();
+    let service = HostHttpEgressService::new_with_request_policy_for_tests(network, secrets);
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope,
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/bot{credential}/path/{credential}".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle,
+                source: RuntimeCredentialSource::SecretStoreLease,
+                target: RuntimeCredentialTarget::UrlPath {
+                    placeholder: "{credential}".to_string(),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            timeout_ms: None,
+        })
+        .expect_err("duplicate placeholder must fail closed");
+
+    assert!(matches!(
+        error,
+        ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+    ));
+    assert!(network_recorder.lock().unwrap().is_empty());
+}
+
+/// An empty `placeholder` is a configuration error: `str::replacen("", value, 1)`
+/// substitutes at position 0 — silently prepending the credential to the URL
+/// without the operator declaring where it should appear. Fail closed so the
+/// runtime cannot send an undeclared credential to a host that expects an
+/// explicit path-embedded token.
+#[test]
+fn host_http_egress_url_path_rejects_empty_placeholder() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: vec![],
+        usage: NetworkUsage {
+            request_bytes: 0,
+            response_bytes: 0,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let secrets = InMemorySecretStore::new();
+    let scope = sample_scope();
+    let handle = SecretHandle::new("bot-token").unwrap();
+    block_on_test(secrets.put(
+        scope.clone(),
+        handle.clone(),
+        SecretMaterial::from("SECRET-XYZ"),
+    ))
+    .unwrap();
+    let service = HostHttpEgressService::new_with_request_policy_for_tests(network, secrets);
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope,
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/bot{credential}/sendMessage".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle,
+                source: RuntimeCredentialSource::SecretStoreLease,
+                target: RuntimeCredentialTarget::UrlPath {
+                    placeholder: String::new(),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            timeout_ms: None,
+        })
+        .expect_err("empty placeholder must fail closed");
+
+    assert!(matches!(
+        error,
+        ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+    ));
+    assert!(network_recorder.lock().unwrap().is_empty());
+}
+
+/// A leased credential containing control characters cannot safely be
+/// substituted into a URL — at best the network transport rejects it
+/// downstream, at worst it lets an attacker who can influence the secret
+/// payload smuggle bytes (CR/LF, NUL) past the URL parser. Fail closed on
+/// the injection branch so the malformed credential never reaches the wire.
+#[test]
+fn host_http_egress_url_path_rejects_control_char_value() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: vec![],
+        usage: NetworkUsage {
+            request_bytes: 0,
+            response_bytes: 0,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let secrets = InMemorySecretStore::new();
+    let scope = sample_scope();
+    let handle = SecretHandle::new("bot-token").unwrap();
+    // Credential material containing a literal newline — passes the secret
+    // store's plain-bytes contract but must be refused by URL-path injection.
+    block_on_test(secrets.put(
+        scope.clone(),
+        handle.clone(),
+        SecretMaterial::from("SECRET\nINJECTED"),
+    ))
+    .unwrap();
+    let service = HostHttpEgressService::new_with_request_policy_for_tests(network, secrets);
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope,
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/bot{credential}/sendMessage".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle,
+                source: RuntimeCredentialSource::SecretStoreLease,
+                target: RuntimeCredentialTarget::UrlPath {
+                    placeholder: "{credential}".to_string(),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            timeout_ms: None,
+        })
+        .expect_err("control characters in the leased value must fail closed");
+
+    assert!(matches!(
+        error,
+        ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+    ));
+    assert!(network_recorder.lock().unwrap().is_empty());
+}
+
+/// Defence-in-depth: even after control-character filtering, the
+/// substituted URL is re-parsed and rejected if the credential value
+/// breaks URL syntax — here, a bare `[` injected where IPv6 brackets are
+/// structurally required, which the URL parser refuses because the bracket
+/// is never closed.
+#[test]
+fn host_http_egress_url_path_rejects_invalid_substituted_url() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: vec![],
+        usage: NetworkUsage {
+            request_bytes: 0,
+            response_bytes: 0,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let secrets = InMemorySecretStore::new();
+    let scope = sample_scope();
+    let handle = SecretHandle::new("bot-token").unwrap();
+    // `[` is not a control char, so it passes the control-char filter, but
+    // a URL with an unclosed `[` in the authority position fails to parse.
+    block_on_test(secrets.put(scope.clone(), handle.clone(), SecretMaterial::from("["))).unwrap();
+    let service = HostHttpEgressService::new_with_request_policy_for_tests(network, secrets);
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope,
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Post,
+            // Placeholder lives in the authority section so an unclosed `[`
+            // becomes a malformed IPv6 literal.
+            url: "https://{credential}host.example.test/sendMessage".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle,
+                source: RuntimeCredentialSource::SecretStoreLease,
+                target: RuntimeCredentialTarget::UrlPath {
+                    placeholder: "{credential}".to_string(),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            timeout_ms: None,
+        })
+        .expect_err("substituted URL that fails to parse must fail closed");
+
+    assert!(matches!(
+        error,
+        ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+    ));
+    assert!(network_recorder.lock().unwrap().is_empty());
+}
+
 #[test]
 fn request_policy_fallback_accepts_secret_store_lease_for_legacy_tests() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {

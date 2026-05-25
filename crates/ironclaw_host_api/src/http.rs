@@ -81,6 +81,28 @@ pub enum RuntimeCredentialTarget {
     QueryParam {
         name: String,
     },
+    /// Substitute `placeholder` (which must appear exactly once in
+    /// `RuntimeHttpEgressRequest::url`) with the leased credential value.
+    ///
+    /// This variant exists for protocols whose authentication scheme embeds
+    /// the credential in the request **path**, not in a header or query
+    /// parameter. The Telegram Bot API
+    /// (`https://api.telegram.org/bot<TOKEN>/sendMessage`) is the
+    /// motivating case; other protocols with similar conventions can reuse
+    /// the same shape rather than building bespoke egress paths outside
+    /// the host-mediated `RuntimeHttpEgress` surface.
+    ///
+    /// Placeholder must be non-empty. The host validates that it appears
+    /// exactly once in the URL; a missing or duplicated placeholder is a
+    /// configuration error that surfaces as
+    /// [`RuntimeHttpEgressError::Credential`] before any network call.
+    ///
+    /// Like the other injection variants, the substituted value is added
+    /// to the host's redaction-token set so it cannot reach response
+    /// bodies or runtime-visible error reasons in plaintext form.
+    UrlPath {
+        placeholder: String,
+    },
 }
 
 pub fn valid_http_field_name(name: &str) -> bool {
@@ -124,6 +146,13 @@ impl RuntimeCredentialTarget {
                 validate_runtime_credential_fragment_non_empty_no_control(
                     "query_param_name",
                     name,
+                    "must not be empty or contain NUL/control characters",
+                )?;
+            }
+            Self::UrlPath { placeholder } => {
+                validate_runtime_credential_fragment_non_empty_no_control(
+                    "url_path_placeholder",
+                    placeholder,
                     "must not be empty or contain NUL/control characters",
                 )?;
             }

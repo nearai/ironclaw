@@ -633,6 +633,9 @@ fn run_reports_runtime_readiness_snapshot_without_touching_v1_state() {
         .env("IRONCLAW_BASE_DIR", &v1_base_dir)
         .env_remove("USERPROFILE")
         .env_remove("IRONCLAW_REBORN_PROFILE")
+        // Inherited TELEGRAM_BOT_TOKEN would push `run` into the Telegram
+        // v2 serve loop, which is not what this test exercises.
+        .env_remove("TELEGRAM_BOT_TOKEN")
         .output()
         .expect("ironclaw-reborn run should run");
 
@@ -671,6 +674,53 @@ fn run_reports_runtime_readiness_snapshot_without_touching_v1_state() {
     assert!(
         !v1_base_dir.exists(),
         "minimal runtime shell should not create explicit v1 base directories"
+    );
+}
+
+/// Regression: when `TELEGRAM_BOT_TOKEN` is set, `run` must enter the
+/// Telegram v2 serve path — *not* fall through to the runtime-shell
+/// snapshot. We exercise this by setting the token but withholding the
+/// webhook secret, which forces `HostConfig::from_env` to fail before
+/// any bind happens. The error proves we crossed into the host crate;
+/// the absence of the runtime-shell banner proves the fallback didn't
+/// fire. Caller-level coverage per `.claude/rules/testing.md` —
+/// `telegram_v2_configured_in_env` gates a side-effecting boot, and a
+/// unit test on the helper alone wouldn't catch a missing wire-up in
+/// `commands/run.rs`.
+#[test]
+#[cfg(feature = "telegram-v2")]
+fn run_enters_telegram_v2_path_when_bot_token_is_set() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home_dir = temp.path().join("home");
+
+    let output = Command::new(reborn_bin())
+        .arg("run")
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("HOME", &home_dir)
+        .env_remove("USERPROFILE")
+        .env_remove("IRONCLAW_REBORN_PROFILE")
+        .env("TELEGRAM_BOT_TOKEN", "fake-token-for-test")
+        .env_remove("TELEGRAM_WEBHOOK_SECRET")
+        .env_remove("LIBSQL_PATH")
+        .env_remove("DATABASE_URL")
+        .env_remove("IRONCLAW_REBORN_ALLOW_EPHEMERAL")
+        .output()
+        .expect("ironclaw-reborn run should run");
+
+    assert!(
+        !output.status.success(),
+        "expected non-zero exit when Telegram v2 env is incomplete"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("TELEGRAM_WEBHOOK_SECRET") || stderr.contains("configuration error"),
+        "stderr should report Telegram v2 config failure, got: {stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("IronClaw Reborn runtime shell"),
+        "runtime-shell fallback must not fire once Telegram v2 path is taken; stdout: {stdout}"
     );
 }
 

@@ -266,6 +266,28 @@ See `.env.example` for all environment variables. LLM backends (`nearai`, `opena
 3. Add config in `src/config/channels.rs`
 4. Wire up in `src/app.rs` channel setup section
 
+## Reborn lives in a separate binary
+
+Reborn product-layer channels (Telegram v2, future Slack/Discord/WeChat
+ports) do not run inside this agent binary. They run inside the
+standalone `ironclaw-reborn` binary, which is built from
+`crates/ironclaw_reborn_cli/`. The v1 agent has zero awareness: no
+Reborn crate dependencies, no wiring code, no shared in-process state.
+
+Each channel ships as its own workspace crate (Telegram v2 lives in
+`crates/ironclaw_reborn_telegram_v2_host/`) and the CLI pulls them in
+behind per-channel Cargo features (`telegram-v2`, future `slack-v2`,
+etc., default-on). The `ironclaw-reborn run` subcommand env-detects
+which channels are configured and serves them long-lived; future
+channels slot into the same `run` verb without new top-level
+subcommands, matching how `ironclaw run` boots all configured v1
+channels in one process.
+
+Build with `cargo build --bin ironclaw-reborn`. The runtime entry point
+is `ironclaw-reborn run`; the remaining subcommands (`channels`,
+`models`, `doctor`, `hooks`, `logs`, `profile`, `skills`, `config`,
+`completion`) are inspection verbs.
+
 ## Everything Goes Through Tools
 
 **Core principle**: all actions originating from gateway handlers, CLI

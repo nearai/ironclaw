@@ -157,24 +157,38 @@ The production host egress path:
 
 ## Default-off + cutover
 
-Telegram v2 (and any other future v2 product adapter) is enabled by an
-explicit feature flag (`REBORN_TELEGRAM_V2_ENABLED=true` for Telegram).
-Default is off; legacy v1 Telegram (`channels-src/telegram`) runs
-unchanged. The host fails closed at startup when v1 and v2 are both
-configured for the same installation; see
-`ironclaw::config::validate_telegram_v1_v2_exclusivity`.
+V2 product adapters run in a **separate binary** from the v1 agent —
+the `ironclaw-reborn` bin target in `crates/ironclaw_reborn_cli/`,
+which pulls in each channel's host crate (e.g.
+`crates/ironclaw_reborn_telegram_v2_host/`) behind a per-channel Cargo
+feature (`telegram-v2`, future `slack-v2`, ...). The v1 agent binary
+has no compile-time dependency on any Reborn product-layer crate. There
+is no in-process feature flag, no v1/v2 exclusivity guard, and no
+config-level cutover, because the two paths simply cannot coexist in
+the same process. An operator running both v1 Telegram and v2 Telegram
+must point them at distinct bot tokens / webhook URLs (operator-level
+concern, not a code concern).
+
+Future v2 product adapters (Slack, Discord, etc.) are expected to follow
+the same pattern: their host crate lives next to
+`ironclaw_reborn_telegram_v2_host`, links the same storage / adapter /
+runner crates, exposes a library `serve_from_env` entry point, and
+slots into `ironclaw-reborn run` behind its own Cargo feature on
+`ironclaw_reborn_cli`.
 
 ## Status
 
 | Item | Status |
 |------|--------|
 | Contract types | `[implemented slice]` (`ironclaw_product_adapters`) |
-| In-memory fakes | `[implemented slice]` (`FakeProductWorkflow`, `FakeProtocolHttpEgress`, `FakeOutboundDeliverySink`, `FakeProjectionStream`) |
+| Durable storage (libSQL + Postgres) | `[implemented slice]` (`ironclaw_product_workflow_storage`) — ledger with TOCTOU-safe insert + recovery-lease reclaim, conversation binding upsert, outbound delivery sink, Telegram HTTP egress shim |
+| In-memory fakes (test-only) | `[implemented slice]` (`FakeProductWorkflow`, `FakeProtocolHttpEgress`, `FakeOutboundDeliverySink`, `FakeProjectionStream`) |
 | Boundary / redaction tests | `[implemented slice]` |
 | Webhook auth verifiers (HMAC, shared-secret-header) | `[implemented slice]` |
 | Egress policy enforcement | `[implemented slice]` |
 | `NativeProductAdapterRunner` | `[implemented slice]` |
 | Telegram v2 native adapter | `[implemented slice]` (`ironclaw_telegram_v2_adapter`) |
+| Telegram v2 production host | `[implemented slice, stub reply]` (`ironclaw_reborn_telegram_v2_host`, wired into the `ironclaw-reborn` binary behind the `telegram-v2` feature) — full inbound contract end-to-end; reply path stubbed pending outbound migration to `DefaultInboundTurnService` + `TurnCoordinator` (Reborn agent loop PRs #3544 / #3550 / #3586 have merged; the reply migration is a focused follow-up) |
 | wasmtime component-model glue | `[implemented slice]` (`ProductAdapterComponentRuntime` loads `crates/ironclaw_wasm_product_adapters/wit/product_adapter.wit`; parse/render-only, component `http-egress` import fails closed until production egress wiring lands) |
 | Web / Slack / Discord / WhatsApp / Feishu / Signal v2 adapters | `[not implemented]` |
 | Production wiring of v2 webhook route | `[not implemented]` (default-off flag exists; route registration is a follow-up) |

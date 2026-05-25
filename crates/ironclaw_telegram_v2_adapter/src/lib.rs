@@ -30,4 +30,6 @@ pub use payload::{
     GroupTriggerPolicy, PayloadParseError, TELEGRAM_API_HOST, TELEGRAM_FILE_API_HOST,
     TELEGRAM_USER_ACTOR_KIND, parse_telegram_update,
 };
-pub use render::{TelegramRenderError, render_final_reply, render_progress_typing};
+pub use render::{
+    TelegramRenderError, build_reply_target_binding, render_final_reply, render_progress_typing,
+};

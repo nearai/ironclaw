@@ -1166,6 +1166,12 @@ fn lease_secret_for_injection<S>(
 where
     S: SecretStore,
 {
+    // The three secret-store ops (metadata, lease, consume) must run on
+    // a tokio runtime. We previously spawned a fresh OS thread + built
+    // a brand-new current-thread runtime once per op (3× per egress
+    // request). Batching them inside a single async block keeps the
+    // sync/async boundary intact while paying that overhead exactly
+    // once per request.
     block_on_secret_store(async {
         let metadata = secrets.metadata(&request.scope, &injection.handle).await?;
         if metadata.is_none() {
@@ -1258,6 +1264,44 @@ fn apply_credential_injection(
                 })?;
             url.query_pairs_mut().append_pair(name, value);
             request.url = url.to_string();
+        }
+        RuntimeCredentialTarget::UrlPath { placeholder } => {
+            if placeholder.is_empty() {
+                return Err(RuntimeHttpEgressError::Credential {
+                    reason: "credential injection placeholder must be non-empty".to_string(),
+                });
+            }
+            let occurrences = request.url.matches(placeholder.as_str()).count();
+            if occurrences == 0 {
+                return Err(RuntimeHttpEgressError::Credential {
+                    reason: "credential injection placeholder not found in URL".to_string(),
+                });
+            }
+            if occurrences > 1 {
+                // Ambiguous: a credential should occupy exactly one path
+                // segment. Multiple matches would silently substitute every
+                // occurrence, which could expose the secret across unrelated
+                // path components if the placeholder string is short enough
+                // to collide with literal URL bytes.
+                return Err(RuntimeHttpEgressError::Credential {
+                    reason: "credential injection placeholder appears more than once in URL"
+                        .to_string(),
+                });
+            }
+            if value.chars().any(char::is_control) {
+                return Err(RuntimeHttpEgressError::Credential {
+                    reason: "credential injection path value is invalid".to_string(),
+                });
+            }
+            let substituted = request.url.replacen(placeholder.as_str(), value, 1);
+            // Re-parse the substituted URL to refuse credential material that
+            // would break URL syntax (control characters, unencoded
+            // delimiters, etc.). Failing here keeps a malformed URL from
+            // reaching the network transport.
+            url::Url::parse(&substituted).map_err(|_| RuntimeHttpEgressError::Credential {
+                reason: "credential injection produced an invalid URL".to_string(),
+            })?;
+            request.url = substituted;
         }
     }
     Ok(())

@@ -3,7 +3,7 @@ name = "ironclaw_product_workflow_storage"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.92"
-description = "Durable storage adapters for IronClaw Reborn product workflow"
+description = "Durable libSQL/Postgres storage for the Reborn product workflow (idempotency ledger + conversation bindings) over the universal RootFilesystem dispatch fabric"
 authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/nearai/ironclaw"
@@ -12,23 +12,35 @@ publish = false
 
 [features]
 default = []
-libsql = ["ironclaw_filesystem/libsql"]
-postgres = ["ironclaw_filesystem/postgres"]
+# Exposes test-only helpers to downstream test crates. Off by default so
+# production builds cannot accidentally redirect storage paths or relax
+# CAS invariants. Internal `#[cfg(test)]` code uses such helpers
+# unconditionally; this feature is for external test crates (`tests/`,
+# sibling integration suites) that want the same helpers.
+test-support = []
 
 [dependencies]
 async-trait = "0.1"
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+hex = "0.4"
 ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+ironclaw_outbound = { path = "../ironclaw_outbound", version = "0.1.0" }
+ironclaw_product_adapters = { path = "../ironclaw_product_adapters", version = "0.1.0" }
 ironclaw_product_workflow = { path = "../ironclaw_product_workflow", version = "0.1.0" }
+ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0" }
+ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["sync"] }
 tracing = "0.1"
+uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
-deadpool-postgres = "0.14"
-ironclaw_filesystem = { path = "../ironclaw_filesystem", features = ["libsql", "postgres"] }
-ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
-libsql = { version = "0.6", default-features = false, features = ["core", "replication", "remote", "tls"] }
+ironclaw_product_adapters = { path = "../ironclaw_product_adapters", features = ["test-support"] }
+ironclaw_turns = { path = "../ironclaw_turns" }
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
-tokio-postgres = "0.7"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+uuid = { version = "1", features = ["v4"] }

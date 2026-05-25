@@ -87,6 +87,7 @@ const VIRTUAL_ROOTS: &[&str] = &[
     "/resources",
     "/tenant-shared",
     "/tenants",
+    "/ledger",
 ];
 
 /// Common raw host-path prefixes rejected before scoped-path normalization.
