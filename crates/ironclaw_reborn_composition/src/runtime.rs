@@ -31,7 +31,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use ironclaw_events::{DurableEventLog, InMemoryDurableEventLog, RuntimeEvent};
+use ironclaw_events::{DurableEventLog, InMemoryAuditSink, InMemoryDurableEventLog, RuntimeEvent};
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_first_party_extension_ports::{
     FirstPartySkillsExtension, FirstPartySkillsExtensionHandles, SelectableSkillContextSource,
@@ -47,7 +47,8 @@ use ironclaw_loop_support::{
 };
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
-    ApprovalInteractionService, ApprovalResolverPort, DefaultApprovalInteractionService,
+    ApprovalBlockedTurnRun, ApprovalInteractionScope, ApprovalInteractionService,
+    ApprovalResolverPort, ApprovalTurnRunLocator, DefaultApprovalInteractionService,
     RunStateApprovalInteractionReadModel,
 };
 use ironclaw_reborn::loop_exit_applier::ThreadCheckpointLoopExitEvidencePort;
@@ -65,9 +66,9 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey,
-    ReplyTargetBindingRef, RunProfileResolutionRequest, SanitizedCancelReason, SourceBindingRef,
-    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
-    TurnEventProjectionSource, TurnRunId, TurnScope, TurnStatus,
+    InMemoryTurnStateStore, ReplyTargetBindingRef, RunProfileResolutionRequest,
+    SanitizedCancelReason, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
+    TurnCoordinator, TurnError, TurnEventProjectionSource, TurnRunId, TurnScope, TurnStatus,
     run_profile::{LoopHostMilestoneSink, LoopRunContext, PromptMode},
 };
 
@@ -178,6 +179,8 @@ pub struct RebornRuntime {
     reply_target_binding_ref: ReplyTargetBindingRef,
     projection_services: RebornProjectionServices,
     approval_interaction_service: Arc<dyn ApprovalInteractionService>,
+    #[cfg(test)]
+    approval_audit_sink: Arc<InMemoryAuditSink>,
     webui_event_log: Arc<dyn DurableEventLog>,
     default_run_profile_id: String,
     wake_sender: TurnRunnerWakeSender,
@@ -190,6 +193,51 @@ pub(crate) type LocalDevSelectableSkillContextSource =
     SelectableSkillContextSource<FilesystemSkillBundleSource<LocalFilesystem>>;
 type LocalDevSkillExecutionAdapter =
     SkillExecutionAdapter<FilesystemSkillBundleSource<LocalFilesystem>>;
+
+struct InMemoryApprovalTurnRunLocator {
+    turn_state: Arc<InMemoryTurnStateStore>,
+}
+
+impl InMemoryApprovalTurnRunLocator {
+    fn new(turn_state: Arc<InMemoryTurnStateStore>) -> Self {
+        Self { turn_state }
+    }
+}
+
+#[async_trait::async_trait]
+impl ApprovalTurnRunLocator for InMemoryApprovalTurnRunLocator {
+    async fn blocked_approval_runs(
+        &self,
+        scope: &ApprovalInteractionScope,
+    ) -> Result<Vec<ApprovalBlockedTurnRun>, ironclaw_product_workflow::ProductWorkflowError> {
+        let snapshot = self.turn_state.persistence_snapshot();
+        let turn_actors = snapshot
+            .turns
+            .into_iter()
+            .map(|turn| (turn.turn_id, turn.actor.user_id))
+            .collect::<HashMap<_, _>>();
+        Ok(snapshot
+            .runs
+            .into_iter()
+            .filter(|run| {
+                run.status == TurnStatus::BlockedApproval
+                    && run.scope.tenant_id == scope.tenant_id
+                    && run.scope.agent_id == scope.agent_id
+                    && run.scope.project_id == scope.project_id
+                    && run.scope.thread_id == scope.thread_id
+                    && turn_actors
+                        .get(&run.turn_id)
+                        .is_some_and(|user_id| user_id == &scope.user_id)
+            })
+            .filter_map(|run| {
+                run.gate_ref.map(|gate_ref| ApprovalBlockedTurnRun {
+                    run_id: run.run_id,
+                    gate_ref,
+                })
+            })
+            .collect())
+    }
+}
 
 impl RebornRuntime {
     /// Snapshot of the substrate facades produced by `build_reborn_services`.
@@ -217,6 +265,11 @@ impl RebornRuntime {
 
     pub(crate) fn webui_approval_interaction_service(&self) -> Arc<dyn ApprovalInteractionService> {
         self.approval_interaction_service.clone()
+    }
+
+    #[cfg(test)]
+    fn webui_approval_audit_sink(&self) -> Arc<InMemoryAuditSink> {
+        self.approval_audit_sink.clone()
     }
 
     pub(crate) fn webui_skill_activation_source(
@@ -859,14 +912,21 @@ pub async fn build_reborn_runtime(
         })?;
     let default_run_profile_id = default_resolved_run_profile.profile_id.as_str().to_string();
     let planned_turn_coordinator: Arc<dyn TurnCoordinator> = composition.coordinator.clone();
+    let approval_turn_runs = Arc::new(InMemoryApprovalTurnRunLocator::new(Arc::clone(
+        &turn_state_store,
+    )));
     let approval_read_model = Arc::new(RunStateApprovalInteractionReadModel::new(
-        local_runtime.run_state.clone(),
         local_runtime.approval_requests.clone(),
+        approval_turn_runs,
     ));
-    let approval_resolver = Arc::new(ApprovalResolverPort::new(
-        local_runtime.approval_requests.clone(),
-        local_runtime.capability_leases.clone(),
-    ));
+    let approval_audit_sink = Arc::new(InMemoryAuditSink::new());
+    let approval_resolver = Arc::new(
+        ApprovalResolverPort::new(
+            local_runtime.approval_requests.clone(),
+            local_runtime.capability_leases.clone(),
+        )
+        .with_audit_sink(approval_audit_sink.clone()),
+    );
     let approval_interaction_service: Arc<dyn ApprovalInteractionService> =
         Arc::new(DefaultApprovalInteractionService::new(
             approval_read_model,
@@ -907,6 +967,8 @@ pub async fn build_reborn_runtime(
         reply_target_binding_ref: validated_identity.reply_target_binding_ref,
         projection_services,
         approval_interaction_service,
+        #[cfg(test)]
+        approval_audit_sink,
         webui_event_log: event_log,
         default_run_profile_id,
         wake_sender,
@@ -1108,7 +1170,9 @@ mod tests {
 
     use async_trait::async_trait;
     use ironclaw_host_api::{
-        AgentId, ApprovalRequestId, CapabilityId, TenantId, UserId,
+        Action, AgentId, ApprovalRequest, ApprovalRequestId, CapabilityId, CorrelationId,
+        InvocationFingerprint, InvocationId, Principal, ResourceEstimate, ResourceScope, TenantId,
+        UserId,
         runtime_policy::{
             ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy,
             FilesystemBackendKind, NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -1125,17 +1189,21 @@ mod tests {
         RebornSubmitTurnResponse, WebUiAuthenticatedCaller, WebUiCreateThreadRequest,
         WebUiResolveGateRequest, WebUiSendMessageRequest, approval_gate_ref,
     };
+    use ironclaw_run_state::ApprovalRequestStore;
     use ironclaw_skills::SkillTrust;
     use ironclaw_threads::{
         LoadContextMessagesRequest, MessageKind, SessionThreadService, ThreadHistoryRequest,
     };
     use ironclaw_turns::{
-        TurnActor, TurnId, TurnRunId, TurnStatus,
+        AcceptedMessageRef, BlockedReason, IdempotencyKey, ReplyTargetBindingRef, SourceBindingRef,
+        SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnId, TurnLeaseToken,
+        TurnRunId, TurnRunnerId, TurnStatus,
         run_profile::{
-            InMemoryRunProfileResolver, LoopCapabilityPort, LoopRunContext, ProviderToolCall,
-            RunProfileResolutionRequest, RunProfileResolver, SkillVisibility,
+            InMemoryRunProfileResolver, LoopCapabilityPort, LoopCheckpointStateRef, LoopRunContext,
+            ProviderToolCall, RunProfileResolutionRequest, RunProfileResolver, SkillVisibility,
             VisibleCapabilityRequest,
         },
+        runner::{BlockRunRequest, ClaimRunRequest, TurnRunTransitionPort},
     };
 
     use crate::RebornReadinessState;
@@ -2549,6 +2617,167 @@ mod tests {
         assert_eq!(err.code, RebornServicesErrorCode::NotFound);
         assert_eq!(err.kind, RebornServicesErrorKind::NotFound);
         assert_eq!(err.status_code, 404);
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn local_dev_webui_approval_resolution_emits_redacted_audit_event() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "unused".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-webui-audit-owner", root.path().join("local-dev"))
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-webui-audit-tenant".to_string(),
+            agent_id: "runtime-webui-audit-agent".to_string(),
+            source_binding_id: "runtime-webui-audit-source".to_string(),
+            reply_target_binding_id: "runtime-webui-audit-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+        let caller = WebUiAuthenticatedCaller::new(
+            TenantId::new("runtime-webui-audit-tenant").unwrap(),
+            UserId::new("runtime-webui-audit-owner").unwrap(),
+            Some(AgentId::new("runtime-webui-audit-agent").unwrap()),
+            None,
+        );
+        let created = bundle
+            .api
+            .create_thread(
+                caller.clone(),
+                WebUiCreateThreadRequest {
+                    client_action_id: Some("create-webui-audit-thread".to_string()),
+                    requested_thread_id: None,
+                },
+            )
+            .await
+            .expect("create thread");
+        let scope = caller.turn_scope(created.thread.thread_id.clone());
+        let actor = caller.actor();
+        let submitted = runtime
+            .turn_coordinator
+            .submit_turn(SubmitTurnRequest {
+                scope: scope.clone(),
+                actor: actor.clone(),
+                accepted_message_ref: AcceptedMessageRef::new("msg:audit").unwrap(),
+                source_binding_ref: SourceBindingRef::new("src:audit").unwrap(),
+                reply_target_binding_ref: ReplyTargetBindingRef::new("reply:audit").unwrap(),
+                requested_run_profile: None,
+                idempotency_key: IdempotencyKey::new("submit-audit").unwrap(),
+                received_at: chrono::Utc::now(),
+            })
+            .await
+            .expect("submit turn");
+        let run_id = match submitted {
+            SubmitTurnResponse::Accepted { run_id, .. } => run_id,
+        };
+        let local_runtime = runtime
+            .services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime services");
+        let runner_id = TurnRunnerId::new();
+        let lease_token = TurnLeaseToken::new();
+        let claimed = local_runtime
+            .turn_state
+            .claim_next_run(ClaimRunRequest {
+                runner_id,
+                lease_token,
+                scope_filter: Some(scope.clone()),
+            })
+            .await
+            .expect("claim run")
+            .expect("claimed run");
+        assert_eq!(claimed.state.run_id, run_id);
+        let request_id = ApprovalRequestId::new();
+        let gate_ref = approval_gate_ref(request_id).expect("approval gate");
+        local_runtime
+            .turn_state
+            .block_run(BlockRunRequest {
+                run_id,
+                runner_id,
+                lease_token,
+                checkpoint_id: TurnCheckpointId::new(),
+                state_ref: LoopCheckpointStateRef::new("checkpoint:audit").unwrap(),
+                reason: BlockedReason::Approval {
+                    gate_ref: gate_ref.clone(),
+                },
+            })
+            .await
+            .expect("block approval");
+        let resource_scope = ResourceScope {
+            tenant_id: scope.tenant_id.clone(),
+            user_id: actor.user_id.clone(),
+            agent_id: scope.agent_id.clone(),
+            project_id: scope.project_id.clone(),
+            mission_id: None,
+            thread_id: Some(scope.thread_id.clone()),
+            invocation_id: InvocationId::new(),
+        };
+        let capability = CapabilityId::new("demo.echo").expect("capability");
+        let mut approval = ApprovalRequest {
+            id: request_id,
+            correlation_id: CorrelationId::new(),
+            requested_by: Principal::User(actor.user_id.clone()),
+            action: Box::new(Action::Dispatch {
+                capability: capability.clone(),
+                estimated_resources: ResourceEstimate::default(),
+            }),
+            invocation_fingerprint: None,
+            reason: "raw /Users/alice/private token sk-live".to_string(),
+            reusable_scope: None,
+        };
+        approval.invocation_fingerprint = Some(
+            InvocationFingerprint::for_dispatch(
+                &resource_scope,
+                &capability,
+                &ResourceEstimate::default(),
+                &serde_json::json!({"secret": "hidden"}),
+            )
+            .expect("fingerprint"),
+        );
+        local_runtime
+            .approval_requests
+            .save_pending(resource_scope, approval)
+            .await
+            .expect("save approval");
+
+        bundle
+            .api
+            .resolve_gate(
+                caller,
+                WebUiResolveGateRequest {
+                    client_action_id: Some("resolve-webui-audit-gate".to_string()),
+                    thread_id: Some(scope.thread_id.to_string()),
+                    run_id: Some(run_id.to_string()),
+                    gate_ref: Some(gate_ref.as_str().to_string()),
+                    resolution: Some("approved".to_string()),
+                    always: None,
+                    credential_ref: None,
+                },
+            )
+            .await
+            .expect("resolve approval gate");
+
+        let records = runtime.webui_approval_audit_sink().records();
+        assert_eq!(records.len(), 1);
+        let serialized = serde_json::to_string(&records[0]).expect("serialize audit");
+        for forbidden in ["/Users/alice/private", "sk-live", "hidden", "sha256:"] {
+            assert!(
+                !serialized.contains(forbidden),
+                "approval audit leaked {forbidden}: {serialized}"
+            );
+        }
         runtime.shutdown().await.expect("runtime shutdown");
     }
 

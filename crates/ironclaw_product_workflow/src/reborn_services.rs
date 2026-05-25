@@ -32,6 +32,7 @@ use crate::{
     WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundCommand, WebUiInboundValidationCode,
     WebUiInboundValidationError, WebUiListThreadsRequest, WebUiResolveGateRequest,
     WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    approval_interaction::RejectingApprovalInteractionService,
     binding_ref::{
         DEFAULT_BINDING_REF_RAW_MAX_BYTES, bounded_reply_target_binding_ref,
         bounded_source_binding_ref,
@@ -141,7 +142,7 @@ pub struct RebornServices {
     thread_service: Arc<dyn SessionThreadService>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
     event_stream: Option<Arc<dyn ProjectionStream>>,
-    approval_interactions: Option<Arc<dyn ApprovalInteractionService>>,
+    approval_interactions: Arc<dyn ApprovalInteractionService>,
     skill_activation_recorder: Option<Arc<SkillActivationRecorder>>,
     skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
 }
@@ -155,7 +156,7 @@ impl RebornServices {
             thread_service,
             turn_coordinator,
             event_stream: None,
-            approval_interactions: None,
+            approval_interactions: Arc::new(RejectingApprovalInteractionService),
             skill_activation_recorder: None,
             skill_activation_clearer: None,
         }
@@ -170,7 +171,7 @@ impl RebornServices {
         mut self,
         approval_interactions: Arc<dyn ApprovalInteractionService>,
     ) -> Self {
-        self.approval_interactions = Some(approval_interactions);
+        self.approval_interactions = approval_interactions;
         self
     }
 
@@ -566,14 +567,6 @@ impl RebornServicesApi for RebornServices {
         self.resolve_webui_thread_metadata(scope.clone(), &actor)
             .await?;
         if is_approval_gate_ref(&gate_ref) {
-            let Some(approval_interactions) = &self.approval_interactions else {
-                return Err(RebornServicesError::from_status_kind(
-                    RebornServicesErrorCode::Unavailable,
-                    RebornServicesErrorKind::BlockedApproval,
-                    503,
-                    false,
-                ));
-            };
             let decision = match resolution {
                 WebUiGateResolution::Approved { always } => {
                     // `always: true` requests a *persistent* approval but this
@@ -597,7 +590,8 @@ impl RebornServicesApi for RebornServices {
                     ));
                 }
             };
-            let response = approval_interactions
+            let response = self
+                .approval_interactions
                 .resolve(ResolveApprovalInteractionRequest {
                     scope,
                     actor,

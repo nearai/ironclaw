@@ -51,7 +51,6 @@ pub struct RebornServices {
 }
 
 pub(crate) struct RebornLocalRuntimeServices {
-    pub(crate) run_state: Arc<InMemoryRunStateStore>,
     pub(crate) approval_requests: Arc<InMemoryApprovalRequestStore>,
     pub(crate) capability_leases: Arc<InMemoryCapabilityLeaseStore>,
     pub(crate) turn_state: Arc<InMemoryTurnStateStore>,
@@ -200,7 +199,6 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
     let turn_state = Arc::new(InMemoryTurnStateStore::default());
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
-        run_state: Arc::clone(&run_state),
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
         turn_state: Arc::clone(&turn_state),

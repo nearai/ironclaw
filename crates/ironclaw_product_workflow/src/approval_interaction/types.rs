@@ -1,7 +1,6 @@
 use ironclaw_host_api::{Action, ApprovalRequest, ApprovalRequestId, CapabilityId, ResourceScope};
 use ironclaw_product_adapters::ProductWorkflowRejectionKind;
 use ironclaw_run_state::ApprovalStatus;
-use ironclaw_turns::run_profile::LoopSafeSummary;
 use ironclaw_turns::{
     CancelRunResponse, GateRef, IdempotencyKey, ResumeTurnResponse, TurnActor, TurnRunId, TurnScope,
 };
@@ -11,7 +10,6 @@ use super::{approval_gate_ref, approval_rejected};
 use crate::error::ProductWorkflowError;
 
 const FALLBACK_APPROVAL_SUMMARY: &str = "Approval required";
-const NO_EXPOSURE_SENTINELS: &[&str] = &["raw_prompt_sentinel", "raw_credential_sentinel"];
 
 /// Stable reject reasons for product approval interactions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,7 +223,7 @@ impl ApprovalGateRecord {
             run_id: self.run_id,
             gate_ref: self.gate_ref.clone(),
             approval_request_id: self.request.id,
-            summary: display_safe_summary(&self.request.reason),
+            summary: display_safe_summary(),
             action: ApprovalInteractionActionView::from_action(self.request.action.as_ref()),
         }
     }
@@ -265,19 +263,6 @@ pub enum ResolveApprovalInteractionResponse {
     Denied(CancelRunResponse),
 }
 
-fn display_safe_summary(reason: &str) -> String {
-    let summary = reason.trim();
-    if summary.is_empty() {
-        return FALLBACK_APPROVAL_SUMMARY.to_string();
-    }
-    let lower = summary.to_ascii_lowercase();
-    if NO_EXPOSURE_SENTINELS
-        .iter()
-        .any(|sentinel| lower.contains(sentinel))
-    {
-        return FALLBACK_APPROVAL_SUMMARY.to_string();
-    }
-    LoopSafeSummary::new(summary)
-        .map(|safe_summary| safe_summary.to_string())
-        .unwrap_or_else(|_| FALLBACK_APPROVAL_SUMMARY.to_string())
+fn display_safe_summary() -> String {
+    FALLBACK_APPROVAL_SUMMARY.to_string()
 }

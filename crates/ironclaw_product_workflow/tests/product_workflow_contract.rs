@@ -536,6 +536,36 @@ async fn approval_resolution_payload_routes_through_approval_interaction_service
 }
 
 #[tokio::test]
+async fn approval_resolution_deny_routes_through_approval_interaction_service() {
+    let inbound = Arc::new(FakeInboundTurnService::new());
+    let ledger = Arc::new(FakeIdempotencyLedger::new());
+    let binding = Arc::new(FakeConversationBindingService::new());
+    let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
+    let approval_service = Arc::new(RecordingApprovalInteractionService::new(
+        gate_ref.clone(),
+        TurnRunId::new(),
+    ));
+    let workflow = DefaultProductWorkflow::new(inbound, ledger, binding)
+        .with_approval_interaction_service(approval_service.clone());
+    let envelope = sample_envelope_with_payload(
+        "approval-deny",
+        ProductInboundPayload::ApprovalResolution(
+            ApprovalResolutionPayload::new(gate_ref.as_str(), ApprovalDecision::Deny)
+                .expect("approval payload"),
+        ),
+    );
+
+    let ack = workflow.accept_inbound(envelope).await.expect("accept");
+
+    assert_eq!(ack, ProductInboundAck::NoOp);
+    let resolutions = approval_service.resolutions();
+    assert_eq!(resolutions.len(), 1);
+    assert_eq!(resolutions[0].gate_ref, gate_ref);
+    assert_eq!(resolutions[0].run_id_hint, None);
+    assert_eq!(resolutions[0].decision, ApprovalInteractionDecision::Deny);
+}
+
+#[tokio::test]
 async fn approval_resolution_always_allow_is_rejected_without_approval_interaction() {
     let inbound = Arc::new(FakeInboundTurnService::new());
     let ledger = Arc::new(FakeIdempotencyLedger::new());

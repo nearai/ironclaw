@@ -9,9 +9,7 @@ use ironclaw_turns::{
     SanitizedCancelReason, TurnCoordinator, TurnError, TurnErrorCategory, TurnRunId, TurnStatus,
 };
 
-use super::gate_ref::{
-    approval_reply_binding_ref, approval_request_id_from_gate_ref, approval_source_binding_ref,
-};
+use super::gate_ref::{approval_reply_binding_ref, approval_source_binding_ref};
 use super::{
     ApprovalGateRecord, ApprovalInteractionDecision, ApprovalInteractionReadModel,
     ApprovalInteractionRejectionKind, ApprovalInteractionScope, ApprovalLeaseTermsProvider,
@@ -103,17 +101,9 @@ impl DefaultApprovalInteractionService {
         run_id_hint: Option<TurnRunId>,
         gate_ref: &GateRef,
     ) -> Result<ApprovalGateRecord, ProductWorkflowError> {
-        let approval_request_id = approval_request_id_from_gate_ref(gate_ref)?;
         self.read_model
-            .approval_gates(scope)
+            .approval_gate(scope, run_id_hint, gate_ref)
             .await?
-            .into_iter()
-            .find(|gate| {
-                run_id_hint.is_none_or(|run_id| gate.run_id() == run_id)
-                    && gate.gate_ref() == gate_ref
-                    && gate.request().id == approval_request_id
-                    && gate.scope() == scope
-            })
             .ok_or_else(|| approval_rejected(ApprovalInteractionRejectionKind::MissingGate))
     }
 

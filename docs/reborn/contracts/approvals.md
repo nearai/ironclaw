@@ -148,7 +148,7 @@ Expiration is enforced during authorization, claim, and consumption using `Grant
 
 `ApprovalResolver` only resolves `Pending` records. Attempts to approve or deny an already-approved, denied, or expired record fail without changing that record.
 
-`ApprovalResolver` turns a pending dispatch approval into a lease:
+`ApprovalResolver` turns a pending dispatch or spawn approval into a lease:
 
 ```rust
 let lease = resolver
@@ -176,6 +176,14 @@ grant.constraints.expires_at = LeaseApproval.expires_at
 grant.constraints.max_invocations = LeaseApproval.max_invocations
 lease.invocation_fingerprint = ApprovalRequest.invocation_fingerprint
 ```
+
+For spawn approvals, `approve_spawn` applies the same lease fields but
+requires `ApprovalRequest.action = Action::SpawnCapability` and uses that
+capability id as `grant.capability`. The product/WebUI approval interaction
+service resumes the parked approval gate only after the spawn lease is issued;
+if a retry observes an already-approved spawn request while the turn is still
+parked on the same gate, it calls `retry_lease_issue_for_spawn` before resuming
+so a prior resolver-success/coordinator-failure remains recoverable.
 
 Denying a request only transitions the approval record and records the resolver actor:
 
@@ -240,11 +248,10 @@ The dispatcher remains auth-blind and state-blind. It never resolves approvals o
 
 This slice intentionally keeps approval resolution narrow:
 
-- no UI/user prompt implementation
+- no reusable approval-scope expansion yet; V1 leases are exact-invocation only
 - no single-store ACID transaction across approval status update and lease issuance yet; resolver ordering and rollback provide fail-closed semantics across separate async stores
 - no approval support for non-dispatch actions yet
-- no `Action::SpawnCapability`/long-running task approval workflow yet; spawn start authorization exists, but approval/resume for spawn is a later slice
-- no reusable approval-scope expansion yet; V1 leases are exact-invocation only
+- spawn approvals are supported only for one-shot `Action::SpawnCapability` requests through the approval interaction boundary; there is no reusable or persistent long-running-task approval policy in this slice
 
 Before a durable/user-facing approval resume UI ships, the host should revisit whether approval records, lease writes, and run-state transitions should share one transactional persistence boundary.
 

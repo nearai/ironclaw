@@ -10,11 +10,11 @@ use ironclaw_product_adapters::{
     ProjectionStream, ProjectionSubscriptionRequest, ProtocolAuthFailure, RedactedString,
 };
 use ironclaw_product_workflow::{
-    ApprovalInteractionService, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
-    RebornGetRunStateRequest, RebornResolveGateResponse, RebornServices, RebornServicesApi,
-    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ApprovalInteractionDecision, ApprovalInteractionService, ListPendingApprovalsRequest,
+    ListPendingApprovalsResponse, RebornGetRunStateRequest, RebornResolveGateResponse,
+    RebornServices, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    RebornTimelineRequest, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiInboundValidationCode, WebUiListThreadsRequest, WebUiResolveGateRequest,
     WebUiSendMessageRequest, approval_gate_ref,
@@ -324,14 +324,25 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
     ) -> Result<ResolveApprovalInteractionResponse, ironclaw_product_workflow::ProductWorkflowError>
     {
         let run_id = request.run_id_hint.expect("webui passes run_id");
+        let decision = request.decision;
         self.resolutions.lock().expect("lock").push(request);
-        Ok(ResolveApprovalInteractionResponse::Approved(
-            ResumeTurnResponse {
-                run_id,
-                status: TurnStatus::Queued,
-                event_cursor: EventCursor(19),
-            },
-        ))
+        Ok(match decision {
+            ApprovalInteractionDecision::ApproveOnce => {
+                ResolveApprovalInteractionResponse::Approved(ResumeTurnResponse {
+                    run_id,
+                    status: TurnStatus::Queued,
+                    event_cursor: EventCursor(19),
+                })
+            }
+            ApprovalInteractionDecision::Deny => {
+                ResolveApprovalInteractionResponse::Denied(CancelRunResponse {
+                    run_id,
+                    status: TurnStatus::Cancelled,
+                    event_cursor: EventCursor(23),
+                    already_terminal: false,
+                })
+            }
+        })
     }
 }
 
@@ -2216,6 +2227,45 @@ async fn approval_gate_resolution_uses_approval_interaction_service() {
             .expect("resolution")
             .gate_ref,
         gate_ref
+    );
+}
+
+#[tokio::test]
+async fn approval_gate_denial_uses_approval_interaction_service_and_returns_cancelled() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let approval_interactions = Arc::new(RecordingApprovalInteractionService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    )
+    .with_approval_interactions(approval_interactions.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+    let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
+
+    let response = services
+        .resolve_gate(
+            caller(),
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "approval-gate-deny",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string(),
+                "gate_ref": gate_ref.as_str(),
+                "resolution": "denied"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("approval gate denial succeeds");
+
+    assert!(matches!(response, RebornResolveGateResponse::Cancelled(_)));
+    assert_eq!(approval_interactions.resolution_count(), 1);
+    assert_eq!(coordinator.cancellation_count(), 0);
+    assert_eq!(
+        approval_interactions
+            .last_resolution()
+            .expect("resolution")
+            .decision,
+        ApprovalInteractionDecision::Deny
     );
 }
 

@@ -11,17 +11,14 @@ use ironclaw_host_api::{
     ResourceScope, TenantId, ThreadId, UserId,
 };
 use ironclaw_product_workflow::{
-    ApprovalGateRecord, ApprovalInteractionDecision, ApprovalInteractionReadModel,
-    ApprovalInteractionRejectionKind, ApprovalInteractionScope, ApprovalInteractionService,
-    ApprovalLeaseTermsProvider, ApprovalResolutionPort, ApprovalResolverPort,
-    DefaultApprovalInteractionService, ListPendingApprovalsRequest,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    RunStateApprovalInteractionReadModel, approval_gate_ref,
+    ApprovalBlockedTurnRun, ApprovalGateRecord, ApprovalInteractionDecision,
+    ApprovalInteractionReadModel, ApprovalInteractionRejectionKind, ApprovalInteractionScope,
+    ApprovalInteractionService, ApprovalLeaseTermsProvider, ApprovalResolutionPort,
+    ApprovalResolverPort, ApprovalTurnRunLocator, DefaultApprovalInteractionService,
+    ListPendingApprovalsRequest, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse, RunStateApprovalInteractionReadModel, approval_gate_ref,
 };
-use ironclaw_run_state::{
-    ApprovalRequestStore, ApprovalStatus, InMemoryApprovalRequestStore, InMemoryRunStateStore,
-    RunStart, RunStateStore,
-};
+use ironclaw_run_state::{ApprovalRequestStore, ApprovalStatus, InMemoryApprovalRequestStore};
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
     GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef, ResumeTurnPrecondition,
@@ -41,6 +38,35 @@ impl FakeReadModel {
             gates: Mutex::new(vec![gate]),
         }
     }
+
+    fn with_gates(gates: Vec<ApprovalGateRecord>) -> Self {
+        Self {
+            gates: Mutex::new(gates),
+        }
+    }
+}
+
+#[derive(Default)]
+struct FakeTurnRunLocator {
+    runs: Mutex<Vec<ApprovalBlockedTurnRun>>,
+}
+
+impl FakeTurnRunLocator {
+    fn with_run(run_id: TurnRunId, gate_ref: GateRef) -> Self {
+        Self {
+            runs: Mutex::new(vec![ApprovalBlockedTurnRun { run_id, gate_ref }]),
+        }
+    }
+}
+
+#[async_trait]
+impl ApprovalTurnRunLocator for FakeTurnRunLocator {
+    async fn blocked_approval_runs(
+        &self,
+        _scope: &ApprovalInteractionScope,
+    ) -> Result<Vec<ApprovalBlockedTurnRun>, ironclaw_product_workflow::ProductWorkflowError> {
+        Ok(self.runs.lock().expect("lock").clone())
+    }
 }
 
 #[async_trait]
@@ -57,6 +83,25 @@ impl ApprovalInteractionReadModel for FakeReadModel {
             .filter(|gate| gate.scope() == scope)
             .cloned()
             .collect())
+    }
+
+    async fn approval_gate(
+        &self,
+        scope: &ApprovalInteractionScope,
+        run_id_hint: Option<TurnRunId>,
+        gate_ref: &GateRef,
+    ) -> Result<Option<ApprovalGateRecord>, ironclaw_product_workflow::ProductWorkflowError> {
+        Ok(self
+            .gates
+            .lock()
+            .expect("lock")
+            .iter()
+            .find(|gate| {
+                gate.scope() == scope
+                    && gate.gate_ref() == gate_ref
+                    && run_id_hint.is_none_or(|run_id| gate.run_id() == run_id)
+            })
+            .cloned())
     }
 }
 
@@ -248,6 +293,14 @@ impl FakeTurnCoordinator {
             .last()
             .map(|request| request.precondition)
     }
+
+    fn last_resumption_run_id(&self) -> Option<TurnRunId> {
+        self.resumptions
+            .lock()
+            .expect("lock")
+            .last()
+            .map(|request| request.run_id)
+    }
 }
 
 #[async_trait]
@@ -362,14 +415,6 @@ fn unsupported_approval_request(reason: &str) -> ApprovalRequest {
     request
 }
 
-fn run_start(scope: ResourceScope, capability_id: CapabilityId) -> RunStart {
-    RunStart {
-        invocation_id: scope.invocation_id,
-        capability_id,
-        scope,
-    }
-}
-
 fn service_fixture(
     reason: &str,
 ) -> (
@@ -466,6 +511,24 @@ async fn approve_resolves_pending_gate_then_resumes_blocked_approval() {
         coordinator.last_resumption_precondition(),
         Some(ResumeTurnPrecondition::BlockedApprovalGate)
     );
+}
+
+#[tokio::test]
+async fn approve_without_run_id_hint_uses_parked_turn_run_id() {
+    let (service, _resolver, coordinator, run_id, gate_ref) = service_fixture("send the email");
+    service
+        .resolve(ResolveApprovalInteractionRequest {
+            scope: scope(),
+            actor: actor("user-alpha"),
+            run_id_hint: None,
+            gate_ref,
+            decision: ApprovalInteractionDecision::ApproveOnce,
+            idempotency_key: IdempotencyKey::new("approve-no-hint").expect("idempotency"),
+        })
+        .await
+        .expect("approve without hint");
+
+    assert_eq!(coordinator.last_resumption_run_id(), Some(run_id));
 }
 
 #[tokio::test]
@@ -757,8 +820,9 @@ async fn list_pending_does_not_expose_invocation_fingerprint() {
 }
 
 #[tokio::test]
-async fn list_pending_uses_loop_safe_summary_boundary_for_display_reasons() {
+async fn list_pending_never_derives_summary_from_raw_approval_reason() {
     for unsafe_reason in [
+        "send the email",
         "/etc/passwd",
         "password: hunter2",
         "raw tool_input includes private arguments",
@@ -774,6 +838,96 @@ async fn list_pending_uses_loop_safe_summary_boundary_for_display_reasons() {
 
         assert_eq!(response.approvals[0].summary, "Approval required");
     }
+}
+
+#[tokio::test]
+async fn list_pending_filters_non_pending_gates_and_sorts_stably() {
+    let alpha_actor = actor("user-alpha");
+    let pending_late = approval_request("second");
+    let pending_early = approval_request("first");
+    let approved = approval_request("already approved");
+    let denied = approval_request("already denied");
+    let gates = vec![
+        ApprovalGateRecord::with_status(
+            resource_scope(&alpha_actor),
+            TurnRunId::new(),
+            approval_gate_ref(pending_late.id).expect("late gate"),
+            pending_late.clone(),
+            ApprovalStatus::Pending,
+        )
+        .expect("late pending"),
+        ApprovalGateRecord::with_status(
+            resource_scope(&alpha_actor),
+            TurnRunId::new(),
+            approval_gate_ref(approved.id).expect("approved gate"),
+            approved,
+            ApprovalStatus::Approved,
+        )
+        .expect("approved gate"),
+        ApprovalGateRecord::with_status(
+            resource_scope(&alpha_actor),
+            TurnRunId::new(),
+            approval_gate_ref(denied.id).expect("denied gate"),
+            denied,
+            ApprovalStatus::Denied,
+        )
+        .expect("denied gate"),
+        ApprovalGateRecord::with_status(
+            resource_scope(&alpha_actor),
+            TurnRunId::new(),
+            approval_gate_ref(pending_early.id).expect("early gate"),
+            pending_early.clone(),
+            ApprovalStatus::Pending,
+        )
+        .expect("early pending"),
+    ];
+    let resolver = Arc::new(RecordingApprovalResolver::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::blocked(
+        alpha_actor.clone(),
+        approval_gate_ref(pending_late.id).expect("gate ref"),
+    ));
+    let service = DefaultApprovalInteractionService::new(
+        Arc::new(FakeReadModel::with_gates(gates)),
+        Arc::new(FixedLeaseTermsProvider),
+        resolver,
+        coordinator,
+    );
+
+    let response = service
+        .list_pending(ListPendingApprovalsRequest {
+            scope: scope(),
+            actor: alpha_actor,
+        })
+        .await
+        .expect("list pending");
+
+    assert_eq!(response.approvals.len(), 2);
+    let mut expected = response
+        .approvals
+        .iter()
+        .map(|approval| (approval.run_id, approval.gate_ref.clone()))
+        .collect::<Vec<_>>();
+    expected.sort_by(|left, right| {
+        left.0
+            .as_uuid()
+            .cmp(&right.0.as_uuid())
+            .then_with(|| left.1.as_str().cmp(right.1.as_str()))
+    });
+    assert_eq!(
+        response
+            .approvals
+            .iter()
+            .map(|approval| (approval.run_id, approval.gate_ref.clone()))
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert!(
+        response
+            .approvals
+            .iter()
+            .all(|approval| approval.approval_request_id == pending_late.id
+                || approval.approval_request_id == pending_early.id)
+    );
 }
 
 #[tokio::test]
@@ -845,6 +999,47 @@ async fn approval_resolver_port_retries_missing_lease_for_approved_request() {
 }
 
 #[tokio::test]
+async fn approval_resolver_port_retries_missing_spawn_lease_for_approved_request() {
+    let alpha_actor = actor("user-alpha");
+    let resource_scope = resource_scope(&alpha_actor);
+    let mut request = spawn_approval_request("approval required");
+    let capability = match request.action.as_ref() {
+        Action::SpawnCapability { capability, .. } => capability.clone(),
+        _ => panic!("test request should be spawn"),
+    };
+    request.invocation_fingerprint = Some(
+        InvocationFingerprint::for_spawn(
+            &resource_scope,
+            &capability,
+            &ResourceEstimate::default(),
+            &serde_json::json!({"process": "approved"}),
+        )
+        .expect("fingerprint"),
+    );
+    let request_id = request.id;
+    let approvals = Arc::new(InMemoryApprovalRequestStore::new());
+    approvals
+        .save_pending(resource_scope.clone(), request)
+        .await
+        .expect("save approval");
+    approvals
+        .approve(&resource_scope, request_id)
+        .await
+        .expect("mark approved");
+    let leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let resolver = ApprovalResolverPort::new(approvals, leases.clone());
+    let mut approval = dispatch_lease_approval(Principal::User(alpha_actor.user_id));
+    approval.allowed_effects.push(EffectKind::SpawnProcess);
+
+    resolver
+        .ensure_spawn_lease(&resource_scope, request_id, approval)
+        .await
+        .expect("retry missing spawn lease");
+
+    assert_eq!(leases.leases_for_scope(&resource_scope).await.len(), 1);
+}
+
+#[tokio::test]
 async fn approval_resolver_port_does_not_duplicate_existing_lease_for_approved_request() {
     let alpha_actor = actor("user-alpha");
     let resource_scope = resource_scope(&alpha_actor);
@@ -881,34 +1076,29 @@ async fn approval_resolver_port_does_not_duplicate_existing_lease_for_approved_r
 }
 
 #[tokio::test]
-async fn run_state_read_model_lists_canonical_pending_blocked_approvals() {
+async fn run_state_read_model_uses_parked_turn_run_id_for_pending_approvals() {
     let alpha_actor = actor("user-alpha");
     let resource_scope = resource_scope(&alpha_actor);
     let request = approval_request("send the email");
-    let capability_id = match request.action.as_ref() {
-        Action::Dispatch { capability, .. } => capability.clone(),
-        _ => panic!("test request should be dispatch"),
-    };
-    let run_id = TurnRunId::from_uuid(resource_scope.invocation_id.as_uuid());
-    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let invocation_derived_run_id = TurnRunId::from_uuid(resource_scope.invocation_id.as_uuid());
+    let parked_turn_run_id = TurnRunId::new();
+    assert_ne!(
+        parked_turn_run_id, invocation_derived_run_id,
+        "test must prove capability invocation ids are not turn run ids"
+    );
     let approvals = Arc::new(InMemoryApprovalRequestStore::new());
-    run_state
-        .start(run_start(resource_scope.clone(), capability_id))
-        .await
-        .expect("start run");
     approvals
         .save_pending(resource_scope.clone(), request.clone())
         .await
         .expect("save approval");
-    run_state
-        .block_approval(
-            &resource_scope,
-            resource_scope.invocation_id,
-            request.clone(),
-        )
-        .await
-        .expect("block approval");
-    let read_model = RunStateApprovalInteractionReadModel::new(run_state, approvals);
+    let gate_ref = approval_gate_ref(request.id).expect("approval gate");
+    let read_model = RunStateApprovalInteractionReadModel::new(
+        approvals,
+        Arc::new(FakeTurnRunLocator::with_run(
+            parked_turn_run_id,
+            gate_ref.clone(),
+        )),
+    );
 
     let pending = read_model
         .approval_gates(&ApprovalInteractionScope::from_turn(&scope(), &alpha_actor))
@@ -916,12 +1106,20 @@ async fn run_state_read_model_lists_canonical_pending_blocked_approvals() {
         .expect("pending approvals");
 
     assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].run_id(), run_id);
-    assert_eq!(
-        pending[0].gate_ref(),
-        &approval_gate_ref(request.id).expect("approval gate")
-    );
+    assert_eq!(pending[0].run_id(), parked_turn_run_id);
+    assert_eq!(pending[0].gate_ref(), &gate_ref);
     assert_eq!(pending[0].request().id, request.id);
+
+    let targeted = read_model
+        .approval_gate(
+            &ApprovalInteractionScope::from_turn(&scope(), &alpha_actor),
+            None,
+            &gate_ref,
+        )
+        .await
+        .expect("targeted approval")
+        .expect("gate exists");
+    assert_eq!(targeted.run_id(), parked_turn_run_id);
 
     let other_user_pending = read_model
         .approval_gates(&ApprovalInteractionScope::from_turn(
