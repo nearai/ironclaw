@@ -71,7 +71,7 @@ use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;
 use ironclaw_hooks::predicate_state::{
     InvocationKey, MAX_KEYS_PER_TENANT, MAX_SAMPLES_PER_KEY, PredicateBackendError,
-    PredicateEventId, PredicateStateBackend, ValueKey,
+    PredicateEventId, PredicateStateBackend, ValueKey, window_cutoff,
 };
 use rust_decimal::Decimal;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -163,14 +163,14 @@ impl PostgresPredicateStateBackend {
         self.pool.get().await.map_err(map_pool)
     }
 
-    /// Compute the wall-clock cutoff `now - window`, saturating to `now`
-    /// for windows beyond chrono's range (nothing trimmed — conservative
-    /// for a rate/value cap). Mirrors `predicate_state::window_cutoff`.
+    /// Compute the wall-clock cutoff `now - window`. Delegates to the
+    /// **canonical** [`ironclaw_hooks::predicate_state::window_cutoff`] (the
+    /// same function the libSQL backend uses) rather than reimplementing the
+    /// `Duration → cutoff` math, so the overflow/boundary behaviour — saturate
+    /// to `now` for windows beyond chrono's range, trim `occurred_at < cutoff`
+    /// strictly — is byte-for-byte identical across backends and can't drift.
     fn cutoff(now: DateTime<Utc>, window: Duration) -> DateTime<Utc> {
-        match chrono::Duration::from_std(window) {
-            Ok(d) => now.checked_sub_signed(d).unwrap_or(now),
-            Err(_) => now,
-        }
+        window_cutoff(now, window)
     }
 
     /// Shared transaction body for both record paths. The trim / dedup / cap

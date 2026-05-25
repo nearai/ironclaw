@@ -1,62 +1,33 @@
-//! Hash derivation for predicate-state keys.
+//! Predicate bucket-identity hashing for the libSQL backend.
 //!
-//! Two digests are derived per bucket, matching the canonical cross-backend
-//! schema (see `crate::schema`):
+//! The hash derivation lives in the shared crate
+//! ([`ironclaw_hooks::predicate_hash`]) so the durable DB identity contract has
+//! a single source of truth across backends (it previously diverged: this
+//! crate used an 8-byte little-endian `u64` length prefix while Postgres used
+//! 4-byte big-endian `u32`). The wrappers below adapt the canonical 32-byte
+//! [`Digest`] to the `Vec<u8>` the `BLOB` columns and libSQL params take, and
+//! keep the libSQL-specific epoch/window-cutoff projection alongside it.
 //!
-//! - `scope_hash` = blake3 of the length-prefixed `tenant_id`. This is the
-//!   tenant trust boundary and the grain at which the per-tenant LRU quota is
-//!   enforced (`COUNT(DISTINCT key_hash) WHERE scope_hash = ?`). It replaces
-//!   the earlier raw `tenant_id` TEXT column.
-//! - `key_hash` = blake3 of the length-prefixed *whole* bucket identity,
-//!   including a one-byte map discriminant so an invocation key and a value
-//!   key that share `(hook, tenant, capability)` never collide. This is the
-//!   dedup + count/sum grain and the table PRIMARY KEY (with `event_id`).
-//!
-//! Components are length-prefixed so distinct splits can't alias
-//! (`("a","bc")` vs `("ab","c")`).
+//! [`Digest`]: ironclaw_hooks::predicate_hash::Digest
 
 use chrono::{DateTime, Utc};
+use ironclaw_hooks::predicate_hash;
 use ironclaw_hooks::predicate_state::{InvocationKey, ValueKey, window_cutoff};
 
-/// Map discriminants folded into `key_hash` so the invocation and value tables
-/// never produce the same `key_hash` for a shared `(hook, tenant, capability)`.
-const KIND_INVOCATION: u8 = b'i';
-const KIND_VALUE: u8 = b'v';
-
 /// `scope_hash` for a tenant — the trust boundary and per-tenant LRU-quota
-/// grain. blake3 of the length-prefixed `tenant_id`.
+/// grain (`COUNT(DISTINCT key_hash) WHERE scope_hash = ?`).
 pub(crate) fn tenant_scope_hash(tenant_id: &str) -> Vec<u8> {
-    let mut hasher = blake3::Hasher::new();
-    hash_component(&mut hasher, tenant_id.as_bytes());
-    hasher.finalize().as_bytes().to_vec()
+    predicate_hash::scope_hash(tenant_id).to_vec()
 }
 
-/// `key_hash` for an invocation-counter bucket. Length-prefixed so distinct
-/// component splits can't alias; map discriminant keeps it disjoint from the
-/// value table's key space.
+/// `key_hash` for an invocation-counter bucket.
 pub(crate) fn invocation_key_hash(key: &InvocationKey) -> Vec<u8> {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&[KIND_INVOCATION]);
-    hash_component(&mut hasher, key.hook_id.as_bytes());
-    hash_component(&mut hasher, key.tenant_id.as_str().as_bytes());
-    hash_component(&mut hasher, key.capability.as_bytes());
-    hasher.finalize().as_bytes().to_vec()
+    predicate_hash::invocation_key_hash(key).to_vec()
 }
 
-/// `key_hash` for a numeric-value-sum bucket (invocation components + field).
+/// `key_hash` for a numeric-value-sum bucket.
 pub(crate) fn value_key_hash(key: &ValueKey) -> Vec<u8> {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&[KIND_VALUE]);
-    hash_component(&mut hasher, key.hook_id.as_bytes());
-    hash_component(&mut hasher, key.tenant_id.as_str().as_bytes());
-    hash_component(&mut hasher, key.capability.as_bytes());
-    hash_component(&mut hasher, key.field.as_bytes());
-    hasher.finalize().as_bytes().to_vec()
-}
-
-fn hash_component(hasher: &mut blake3::Hasher, bytes: &[u8]) {
-    hasher.update(&(bytes.len() as u64).to_le_bytes());
-    hasher.update(bytes);
+    predicate_hash::value_key_hash(key).to_vec()
 }
 
 /// Epoch milliseconds for the canonical host clock. `timestamp_millis`
