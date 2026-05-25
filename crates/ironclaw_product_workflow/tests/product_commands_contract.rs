@@ -266,6 +266,30 @@ fn lifecycle_command_parser_rejects_invalid_skill_install_name() {
 }
 
 #[test]
+fn lifecycle_command_parser_preserves_skill_install_content() {
+    let content = "---\nname: review-helper\n---\nUse review helper.\n";
+    let payload = InboundCommandPayload {
+        command: "skill_install".to_string(),
+        arguments: serde_json::json!({
+            "name": "review-helper",
+            "content": content,
+        })
+        .to_string(),
+        trigger: ProductTriggerReason::BotCommand,
+    };
+
+    assert_eq!(
+        ProductCommand::from_payload(&payload),
+        ProductCommand::Lifecycle {
+            action: LifecycleProductAction::SkillInstall {
+                name: Some(LifecyclePackageId::new("review-helper").unwrap()),
+                content: content.to_string(),
+            },
+        }
+    );
+}
+
+#[test]
 fn command_registry_declares_model_without_source_policy() {
     let model = product_command_descriptors()
         .find(|descriptor| descriptor.name == "model")

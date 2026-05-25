@@ -341,7 +341,23 @@ pub(crate) fn validate_lifecycle_string(
     label: &'static str,
     max_bytes: usize,
 ) -> Result<String, ProductWorkflowError> {
-    validate_lifecycle_value(value, label, max_bytes, true)
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(ProductWorkflowError::InvalidBindingRequest {
+            reason: format!("{label} must not be empty"),
+        });
+    }
+    if value.len() > max_bytes {
+        return Err(ProductWorkflowError::InvalidBindingRequest {
+            reason: format!("{label} must be at most {max_bytes} bytes"),
+        });
+    }
+    if trimmed.chars().any(|c| c == '\0' || c.is_control()) {
+        return Err(ProductWorkflowError::InvalidBindingRequest {
+            reason: format!("{label} must not contain NUL/control characters"),
+        });
+    }
+    Ok(trimmed.to_string())
 }
 
 /// Validates free-form lifecycle text that may contain control characters
@@ -351,40 +367,22 @@ pub(crate) fn validate_lifecycle_text(
     label: &'static str,
     max_bytes: usize,
 ) -> Result<String, ProductWorkflowError> {
-    validate_lifecycle_value(value, label, max_bytes, false)
-}
-
-fn validate_lifecycle_value(
-    value: String,
-    label: &'static str,
-    max_bytes: usize,
-    reject_control: bool,
-) -> Result<String, ProductWorkflowError> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
+    if value.trim().is_empty() {
         return Err(ProductWorkflowError::InvalidBindingRequest {
             reason: format!("{label} must not be empty"),
         });
     }
-    if trimmed.len() > max_bytes {
+    if value.len() > max_bytes {
         return Err(ProductWorkflowError::InvalidBindingRequest {
             reason: format!("{label} must be at most {max_bytes} bytes"),
         });
     }
-    let has_bad_char = if reject_control {
-        trimmed.chars().any(|c| c == '\0' || c.is_control())
-    } else {
-        trimmed.chars().any(|c| c == '\0')
-    };
-    if has_bad_char {
+    if value.chars().any(|c| c == '\0') {
         return Err(ProductWorkflowError::InvalidBindingRequest {
-            reason: format!(
-                "{label} must not contain NUL{} characters",
-                if reject_control { "/control" } else { "" }
-            ),
+            reason: format!("{label} must not contain NUL characters"),
         });
     }
-    Ok(trimmed.to_string())
+    Ok(value)
 }
 
 fn validate_optional_ref(
