@@ -1,15 +1,21 @@
 export const defaultRoute = "/chat";
 
+// `hidden: true` keeps the route registered (direct URL access and
+// breadcrumb/title resolution still work) but suppresses it from
+// sidebar navigation. Routes whose page-level API libs are entirely
+// TODO stubs against missing v2 endpoints are hidden here until the
+// matching `/api/webchat/v2/*` contracts land. Remove the flag once
+// the page's `lib/*-api.js` calls real endpoints.
 export const primaryRoutes = [
   { id: "chat", path: "/chat", labelKey: "nav.chat" },
-  { id: "workspace", path: "/workspace", labelKey: "nav.workspace" },
-  { id: "projects", path: "/projects", labelKey: "nav.projects" },
-  { id: "jobs", path: "/jobs", labelKey: "nav.jobs" },
-  { id: "routines", path: "/routines", labelKey: "nav.routines" },
-  { id: "missions", path: "/missions", labelKey: "nav.missions" },
+  { id: "workspace", path: "/workspace", labelKey: "nav.workspace", hidden: true },
+  { id: "projects", path: "/projects", labelKey: "nav.projects", hidden: true },
+  { id: "jobs", path: "/jobs", labelKey: "nav.jobs", hidden: true },
+  { id: "routines", path: "/routines", labelKey: "nav.routines", hidden: true },
+  { id: "missions", path: "/missions", labelKey: "nav.missions", hidden: true },
   { id: "extensions", path: "/extensions", labelKey: "nav.extensions" },
-  { id: "settings", path: "/settings", labelKey: "nav.settings" },
-  { id: "admin", path: "/admin", labelKey: "nav.admin" },
+  { id: "settings", path: "/settings", labelKey: "nav.settings", hidden: true },
+  { id: "admin", path: "/admin", labelKey: "nav.admin", hidden: true },
 ];
 
 export const routeSectionDefs = [

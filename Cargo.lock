@@ -4780,6 +4780,7 @@ dependencies = [
  "chrono",
  "clap",
  "clap_complete",
+ "dotenvy",
  "hex",
  "ironclaw_reborn_composition",
  "ironclaw_reborn_config",

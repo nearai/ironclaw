@@ -40,6 +40,7 @@ chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4.3"
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4.5.0"
+dotenvy = "0.15"
 ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", version = "0.1.0" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config", version = "0.1.0" }
 ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces", version = "0.1.0" }
