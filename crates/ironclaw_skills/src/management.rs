@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{path::Component, sync::Arc};
 
 use crate::{MAX_PROMPT_FILE_SIZE, normalize_line_endings, parse_skill_md, validate_skill_name};
 use async_trait::async_trait;
@@ -11,6 +11,9 @@ use ironclaw_host_api::{HostApiError, MountView, ResourceScope, ScopedPath, Virt
 const USER_SKILLS_ROOT: &str = "/skills";
 const SYSTEM_SKILLS_ROOT: &str = "/system/skills";
 const SKILL_FILE_NAME: &str = "SKILL.md";
+const MAX_INSTALL_BUNDLE_FILES: usize = 256;
+const MAX_INSTALL_BUNDLE_FILE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_INSTALL_BUNDLE_TOTAL_BYTES: usize = 20 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkillManagementErrorKind {
@@ -129,6 +132,13 @@ impl SkillSource {
 pub struct SkillInstallRequest<'a> {
     pub name: Option<&'a str>,
     pub content: &'a str,
+    pub files: &'a [SkillInstallFile<'a>],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SkillInstallFile<'a> {
+    pub relative_path: &'a str,
+    pub contents: &'a [u8],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,6 +208,7 @@ pub async fn install_skill(
             SkillManagementErrorKind::InvalidInput,
         ));
     }
+    validate_install_bundle_files(request.files)?;
 
     let skill_name = parsed.manifest.name;
     let skill_dir = skill_root_scoped_path(USER_SKILLS_ROOT, &skill_name)?;
@@ -243,9 +254,49 @@ pub async fn install_skill(
             log_skill_filesystem_phase("write_file_failed", &skill_name, &skill_path);
             filesystem_error(error)
         })?;
+    for file in request.files {
+        let relative_path = normalize_install_relative_path(file.relative_path)?;
+        let file_path =
+            skill_bundle_file_scoped_path(USER_SKILLS_ROOT, &skill_name, &relative_path)?;
+        if let Some(parent) = scoped_parent(&file_path)? {
+            log_skill_filesystem_phase("create_bundle_parent", &skill_name, &parent);
+            context
+                .filesystem
+                .create_dir_all(&context.scope, &parent)
+                .await
+                .or_else(|error| match error {
+                    FilesystemError::Unsupported {
+                        operation: FilesystemOperation::CreateDirAll,
+                        ..
+                    } => {
+                        log_skill_filesystem_phase(
+                            "create_bundle_parent_unsupported",
+                            &skill_name,
+                            &parent,
+                        );
+                        Ok(())
+                    }
+                    other => Err(other),
+                })
+                .map_err(|error| {
+                    log_skill_filesystem_phase("create_bundle_parent_failed", &skill_name, &parent);
+                    filesystem_error(error)
+                })?;
+        }
+        log_skill_filesystem_phase("write_bundle_file", &skill_name, &file_path);
+        context
+            .filesystem
+            .write_file(&context.scope, &file_path, file.contents)
+            .await
+            .map_err(|error| {
+                log_skill_filesystem_phase("write_bundle_file_failed", &skill_name, &file_path);
+                filesystem_error(error)
+            })?;
+    }
     tracing::debug!(
         skill_name = %skill_name,
         scoped_path = %skill_path,
+        bundle_file_count = request.files.len(),
         "skill install completed"
     );
 
@@ -411,6 +462,109 @@ fn skill_scoped_path(
         .map_err(|_| SkillManagementError::new(SkillManagementErrorKind::InvalidInput))
 }
 
+fn skill_bundle_file_scoped_path(
+    root: &str,
+    name: &str,
+    relative_path: &str,
+) -> Result<ScopedPath, SkillManagementError> {
+    if !validate_skill_name(name) {
+        return Err(SkillManagementError::new(
+            SkillManagementErrorKind::InvalidInput,
+        ));
+    }
+    ScopedPath::new(format!(
+        "{}/{}/{}",
+        root.trim_end_matches('/'),
+        name,
+        relative_path
+    ))
+    .map_err(|_| SkillManagementError::new(SkillManagementErrorKind::InvalidInput))
+}
+
+fn validate_install_bundle_files(
+    files: &[SkillInstallFile<'_>],
+) -> Result<(), SkillManagementError> {
+    if files.len() > MAX_INSTALL_BUNDLE_FILES {
+        return Err(SkillManagementError::new(
+            SkillManagementErrorKind::Resource,
+        ));
+    }
+    let mut total_bytes = 0usize;
+    for file in files {
+        if file.contents.len() > MAX_INSTALL_BUNDLE_FILE_BYTES {
+            return Err(SkillManagementError::new(
+                SkillManagementErrorKind::Resource,
+            ));
+        }
+        total_bytes = total_bytes
+            .checked_add(file.contents.len())
+            .ok_or_else(|| SkillManagementError::new(SkillManagementErrorKind::Resource))?;
+        if total_bytes > MAX_INSTALL_BUNDLE_TOTAL_BYTES {
+            return Err(SkillManagementError::new(
+                SkillManagementErrorKind::Resource,
+            ));
+        }
+        normalize_install_relative_path(file.relative_path)?;
+    }
+    Ok(())
+}
+
+fn normalize_install_relative_path(path: &str) -> Result<String, SkillManagementError> {
+    if path.is_empty()
+        || path.starts_with('/')
+        || path.contains('\\')
+        || path.contains('\0')
+        || path.chars().any(char::is_control)
+        || path.contains("://")
+    {
+        return Err(SkillManagementError::new(
+            SkillManagementErrorKind::InvalidInput,
+        ));
+    }
+
+    let mut parts = Vec::new();
+    for component in std::path::Path::new(path).components() {
+        match component {
+            Component::Normal(part) => {
+                let part = part.to_str().ok_or_else(|| {
+                    SkillManagementError::new(SkillManagementErrorKind::InvalidInput)
+                })?;
+                if part.is_empty() {
+                    return Err(SkillManagementError::new(
+                        SkillManagementErrorKind::InvalidInput,
+                    ));
+                }
+                parts.push(part);
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(SkillManagementError::new(
+                    SkillManagementErrorKind::InvalidInput,
+                ));
+            }
+        }
+    }
+
+    if parts.is_empty() || parts == [SKILL_FILE_NAME] {
+        return Err(SkillManagementError::new(
+            SkillManagementErrorKind::InvalidInput,
+        ));
+    }
+    Ok(parts.join("/"))
+}
+
+fn scoped_parent(path: &ScopedPath) -> Result<Option<ScopedPath>, SkillManagementError> {
+    let Some((parent, _)) = path.as_str().rsplit_once('/') else {
+        return Ok(None);
+    };
+    if parent.is_empty() || parent == USER_SKILLS_ROOT {
+        return Ok(None);
+    }
+    ScopedPath::new(parent.to_string())
+        .map(Some)
+        .map_err(|_| SkillManagementError::new(SkillManagementErrorKind::InvalidInput))
+}
+
 async fn stat_optional(
     context: &SkillManagementContext,
     path: &ScopedPath,
@@ -533,6 +687,7 @@ mod tests {
                     "local skill description",
                     "LOCAL_SKILL_PROMPT",
                 ),
+                files: &[],
             },
         )
         .await
@@ -578,6 +733,7 @@ mod tests {
             SkillInstallRequest {
                 name: Some("expected"),
                 content: &skill_md("actual", "description", "PROMPT"),
+                files: &[],
             },
         )
         .await

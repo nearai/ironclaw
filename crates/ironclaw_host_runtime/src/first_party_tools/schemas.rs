@@ -185,7 +185,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 },
                 "url": {
                     "type": "string",
-                    "description": "HTTPS URL to a SKILL.md document to fetch and install"
+                    "description": "HTTPS URL to a SKILL.md document, ZIP bundle, or GitHub skill repository/tree to fetch and install"
                 }
             },
             "required": ["url"],

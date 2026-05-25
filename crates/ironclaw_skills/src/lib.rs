@@ -58,8 +58,8 @@ pub use types::{
 
 pub use gating::{GatingResult, check_requirements, check_requirements_sync};
 pub use management::{
-    SkillInstallRequest, SkillInstallResult, SkillManagementContext, SkillManagementError,
-    SkillManagementErrorKind, SkillRemoveRequest, SkillRemoveResult,
+    SkillInstallFile, SkillInstallRequest, SkillInstallResult, SkillManagementContext,
+    SkillManagementError, SkillManagementErrorKind, SkillRemoveRequest, SkillRemoveResult,
     SkillSource as ManagedSkillSource, SkillSummary, install_skill, list_skills, remove_skill,
 };
 pub use parser::{ParsedSkill, SkillParseError, parse_skill_md};

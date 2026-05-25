@@ -42,6 +42,7 @@ ironclaw_runtime_policy = { path = "../ironclaw_runtime_policy" }
 ironclaw_safety = { path = "../ironclaw_safety" }
 ironclaw_scripts = { path = "../ironclaw_scripts" }
 ironclaw_secrets = { path = "../ironclaw_secrets" }
+ironclaw_skills = { path = "../ironclaw_skills" }
 ironclaw_trust = { path = "../ironclaw_trust" }
 ironclaw_turns = { path = "../ironclaw_turns" }
 ironclaw_wasm = { path = "../ironclaw_wasm" }
@@ -57,6 +58,7 @@ tokio = { version = "1", features = ["io-util", "macros", "process", "rt", "sync
 tracing = "0.1"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 ironclaw_event_projections = { path = "../ironclaw_event_projections" }

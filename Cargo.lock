@@ -4472,6 +4472,7 @@ dependencies = [
  "ironclaw_safety",
  "ironclaw_scripts",
  "ironclaw_secrets",
+ "ironclaw_skills",
  "ironclaw_trust",
  "ironclaw_turns",
  "ironclaw_wasm",
@@ -4492,6 +4493,7 @@ dependencies = [
  "wat",
  "wit-component 0.245.1",
  "wit-parser 0.245.1",
+ "zip",
 ]
 
 [[package]]

@@ -75,6 +75,13 @@ Supporting files are data by default. `scripts/` files do not become executable
 just because they live in a skill bundle. Executing a script requires a separate
 kernel-mediated capability lease and sandbox/runtime decision.
 
+URL installs preserve the same bundle boundary as filesystem installs. A direct
+raw `SKILL.md` URL installs only that document, while ZIP archives and supported
+GitHub repository/tree URLs install the selected skill directory including
+supporting files such as `references/`, `templates/`, `scripts/`, and `assets/`.
+Supporting file paths must remain relative to the skill directory and pass the
+same scoped-path containment checks before write.
+
 ---
 
 ## 4. Contract surfaces

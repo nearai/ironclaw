@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    io::Write,
     net::{IpAddr, Ipv4Addr},
     path::Path,
     sync::{Arc, LazyLock},
@@ -730,7 +731,7 @@ async fn builtin_skill_install_url_fetches_through_host_runtime_egress() {
         requests[0].url,
         "https://api.example.test/skills/fetched-helper/SKILL.md"
     );
-    assert_eq!(requests[0].response_body_limit, Some(64 * 1024));
+    assert_eq!(requests[0].response_body_limit, Some(10 * 1024 * 1024));
     assert_eq!(requests[0].timeout_ms, Some(10_000));
 
     let listed = invoke_with_context(&runtime, SKILL_LIST_CAPABILITY_ID, json!({}), context)
@@ -738,6 +739,109 @@ async fn builtin_skill_install_url_fetches_through_host_runtime_egress() {
         .unwrap();
     assert_eq!(listed["count"], json!(1));
     assert_eq!(listed["skills"][0]["name"], json!("fetched-helper"));
+}
+
+#[tokio::test]
+async fn builtin_skill_install_url_installs_zip_bundle_supporting_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(skill_bundle_zip(&[
+        (
+            "bundle-main/zip-helper/SKILL.md",
+            b"---\nname: zip-helper\ndescription: bundled skill\n---\nZip prompt.\n",
+        ),
+        (
+            "bundle-main/zip-helper/references/guide.md",
+            b"# Guide\nUse carefully.\n",
+        ),
+        ("bundle-main/zip-helper/scripts/run.py", b"print('ok')\n"),
+    ])));
+    let runtime = runtime_with_filesystem_and_http_egress(filesystem, Arc::clone(&egress));
+
+    let installed = invoke_with_context(
+        &runtime,
+        SKILL_INSTALL_URL_CAPABILITY_ID,
+        json!({"url": "https://api.example.test/skills/zip-helper.zip"}),
+        execution_context_with_mounts_and_network(
+            [SKILL_INSTALL_URL_CAPABILITY_ID],
+            mounts,
+            http_test_policy(),
+        ),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(installed["installed"], json!(true));
+    assert_eq!(installed["name"], json!("zip-helper"));
+    assert_eq!(installed["files_installed"], json!(2));
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("zip-helper/references/guide.md")).unwrap(),
+        "# Guide\nUse carefully.\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("zip-helper/scripts/run.py")).unwrap(),
+        "print('ok')\n"
+    );
+}
+
+#[tokio::test]
+async fn builtin_skill_install_url_installs_github_repo_bundle_supporting_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
+    let archive = skill_bundle_zip(&[
+        (
+            "Pika-Skills-main/pikastream-video-meeting/SKILL.md",
+            b"---\nname: pikastream-video-meeting\ndescription: repo skill\n---\nRepo prompt.\n",
+        ),
+        (
+            "Pika-Skills-main/pikastream-video-meeting/scripts/run.py",
+            b"print('repo')\n",
+        ),
+    ]);
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_url_bodies(BTreeMap::from([
+        (
+            "https://api.github.com/repos/Pika-Labs/Pika-Skills".to_string(),
+            (
+                200,
+                br#"{"default_branch":"main"}"#.to_vec(),
+            ),
+        ),
+        (
+            "https://api.github.com/repos/Pika-Labs/Pika-Skills/commits?sha=main&per_page=1"
+                .to_string(),
+            (
+                200,
+                br#"[{"sha":"abcdef0123456789abcdef0123456789abcdef01"}]"#.to_vec(),
+            ),
+        ),
+        (
+            "https://codeload.github.com/Pika-Labs/Pika-Skills/legacy.zip/abcdef0123456789abcdef0123456789abcdef01".to_string(),
+            (200, archive),
+        ),
+    ])));
+    let runtime = runtime_with_filesystem_and_http_egress(filesystem, Arc::clone(&egress));
+
+    let installed = invoke_with_context(
+        &runtime,
+        SKILL_INSTALL_URL_CAPABILITY_ID,
+        json!({"url": "https://github.com/Pika-Labs/Pika-Skills"}),
+        execution_context_with_mounts_and_network(
+            [SKILL_INSTALL_URL_CAPABILITY_ID],
+            mounts,
+            http_test_policy(),
+        ),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(installed["name"], json!("pikastream-video-meeting"));
+    assert_eq!(installed["files_installed"], json!(1));
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("pikastream-video-meeting/scripts/run.py"))
+            .unwrap(),
+        "print('repo')\n"
+    );
+    assert_eq!(egress.requests().len(), 3);
 }
 
 #[tokio::test]
@@ -2811,6 +2915,17 @@ fn mounted_skill_filesystem(path: &Path) -> (LocalFilesystem, MountView) {
     (filesystem, mounts)
 }
 
+fn skill_bundle_zip(files: &[(&str, &[u8])]) -> Vec<u8> {
+    let cursor = std::io::Cursor::new(Vec::new());
+    let mut writer = zip::ZipWriter::new(cursor);
+    let options = zip::write::SimpleFileOptions::default();
+    for (path, content) in files {
+        writer.start_file(*path, options).unwrap();
+        writer.write_all(content).unwrap();
+    }
+    writer.finish().unwrap().into_inner()
+}
+
 #[derive(Debug, Default)]
 struct RecordingProcessPort {
     requests: std::sync::Mutex<Vec<CommandExecutionRequest>>,
@@ -2859,6 +2974,7 @@ struct RecordingRuntimeHttpEgress {
     status: u16,
     body: Vec<u8>,
     error: Option<RuntimeHttpEgressError>,
+    responses: Option<BTreeMap<String, (u16, Vec<u8>)>>,
 }
 
 impl RecordingRuntimeHttpEgress {
@@ -2868,6 +2984,7 @@ impl RecordingRuntimeHttpEgress {
             status: 200,
             body,
             error: None,
+            responses: None,
         }
     }
 
@@ -2877,6 +2994,7 @@ impl RecordingRuntimeHttpEgress {
             status,
             body,
             error: None,
+            responses: None,
         }
     }
 
@@ -2886,6 +3004,17 @@ impl RecordingRuntimeHttpEgress {
             status: 200,
             body: Vec::new(),
             error: Some(error),
+            responses: None,
+        }
+    }
+
+    fn with_url_bodies(responses: BTreeMap<String, (u16, Vec<u8>)>) -> Self {
+        Self {
+            requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+            status: 200,
+            body: Vec::new(),
+            error: None,
+            responses: Some(responses),
         }
     }
 
@@ -2903,12 +3032,22 @@ impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
         if let Some(error) = &self.error {
             return Err(error.clone());
         }
+        let (status, body) = self
+            .responses
+            .as_ref()
+            .and_then(|responses| responses.get(&request.url).cloned())
+            .unwrap_or_else(|| {
+                (
+                    if self.status == 0 { 200 } else { self.status },
+                    self.body.clone(),
+                )
+            });
         Ok(RuntimeHttpEgressResponse {
-            status: if self.status == 0 { 200 } else { self.status },
+            status,
             headers: vec![("content-type".to_string(), "application/json".to_string())],
-            body: self.body.clone(),
+            body: body.clone(),
             request_bytes: request.body.len() as u64,
-            response_bytes: self.body.len() as u64,
+            response_bytes: body.len() as u64,
             redaction_applied: false,
         })
     }
