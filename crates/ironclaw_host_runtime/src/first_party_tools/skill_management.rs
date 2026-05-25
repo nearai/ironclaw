@@ -138,7 +138,7 @@ async fn skill_install_input(
             RuntimeDispatchErrorKind::InputEncode,
         ));
     };
-    let has_content = object.get("content").and_then(Value::as_str).is_some();
+    let has_content = object.contains_key("content");
     let url = object
         .get("url")
         .and_then(Value::as_str)

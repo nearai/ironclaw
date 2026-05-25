@@ -6,6 +6,7 @@ use ironclaw_host_api::{ResourceScope, ScopedPath, TenantId};
 use ironclaw_skills::{MAX_PROMPT_FILE_SIZE, SkillTrust, parse_skill_md};
 use ironclaw_turns::run_profile::{LoopRunContext, SkillVisibility};
 use parking_lot::Mutex;
+use serde::Deserialize;
 use tracing::debug;
 
 use crate::{
@@ -15,6 +16,13 @@ use crate::{
 
 const DEFAULT_MAX_BUNDLE_FILE_BYTES: usize = 256 * 1024;
 const DEFAULT_MAX_BUNDLES_PER_ROOT: usize = 100;
+const INSTALL_METADATA_FILE_NAME: &str = ".ironclaw-install.json";
+const MAX_INSTALL_METADATA_BYTES: usize = 4096;
+
+#[derive(Debug, Deserialize)]
+struct InstallMetadata {
+    source: Option<String>,
+}
 
 /// One scoped filesystem root that can contain portable skill bundle folders.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -226,14 +234,11 @@ where
                 Err(error) => return Err(error),
             }
             self.validated_manifests.lock().insert(skill_md_path);
+            let trust = self.bundle_trust(scope, root, &bundle_id).await?;
 
             descriptors.push(
-                SkillBundleDescriptor::new(
-                    bundle_id,
-                    root.trust().cloned(),
-                    root.visibility().copied(),
-                )
-                .with_provenance(SkillBundleProvenance::new(root.source_kind())),
+                SkillBundleDescriptor::new(bundle_id, trust, root.visibility().copied())
+                    .with_provenance(SkillBundleProvenance::new(root.source_kind())),
             );
         }
 
@@ -257,6 +262,40 @@ where
             return Err(SkillBundleSourceError::InvalidSkillBundle);
         }
         Ok(())
+    }
+
+    async fn bundle_trust(
+        &self,
+        scope: &ResourceScope,
+        root: &FilesystemSkillBundleRoot,
+        bundle_id: &SkillBundleId,
+    ) -> Result<Option<SkillTrust>, SkillBundleSourceError> {
+        let default_trust = root.trust().cloned();
+        if default_trust != Some(SkillTrust::Trusted) {
+            return Ok(default_trust);
+        }
+        let metadata_path = bundle_scoped_path(
+            root.root(),
+            bundle_id,
+            &SkillFilePath::new(INSTALL_METADATA_FILE_NAME)?,
+        )?;
+        let bytes = match self
+            .filesystem
+            .read_bytes_bounded(scope, &metadata_path, MAX_INSTALL_METADATA_BYTES)
+            .await
+        {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return Ok(Some(SkillTrust::Installed)),
+            Err(error) if is_not_found(&error) => return Ok(default_trust),
+            Err(error) => return Err(map_file_read_error(error)),
+        };
+        let Ok(metadata) = serde_json::from_slice::<InstallMetadata>(&bytes) else {
+            return Ok(Some(SkillTrust::Installed));
+        };
+        match metadata.source.as_deref() {
+            Some("installed_url") => Ok(Some(SkillTrust::Installed)),
+            Some(_) | None => Ok(Some(SkillTrust::Installed)),
+        }
     }
 
     async fn read_bounded(
@@ -605,6 +644,58 @@ mod tests {
         assert_eq!(descriptors[0].trust(), Some(&SkillTrust::Trusted));
         assert_eq!(descriptors[1].trust(), Some(&SkillTrust::Trusted));
         assert_eq!(descriptors[0].visibility(), Some(&SkillVisibility::Visible));
+    }
+
+    #[tokio::test]
+    async fn filesystem_source_downgrades_url_installed_user_bundle_metadata() {
+        let (root, source) = mounted_source();
+        write_root(
+            &root,
+            "/tenants/tenant-a/users/user-a/skills/remote-review/SKILL.md",
+            skill_md("remote-review", "Remote review"),
+        )
+        .await;
+        write_root(
+            &root,
+            "/tenants/tenant-a/users/user-a/skills/remote-review/.ironclaw-install.json",
+            br#"{"source":"installed_url","source_url":"https://example.test/SKILL.md"}"#.to_vec(),
+        )
+        .await;
+
+        let descriptors = source
+            .list_skill_bundles(&run_context().await)
+            .await
+            .unwrap();
+
+        assert_eq!(descriptors.len(), 1);
+        assert_eq!(descriptors[0].id().name(), "remote-review");
+        assert_eq!(descriptors[0].trust(), Some(&SkillTrust::Installed));
+    }
+
+    #[tokio::test]
+    async fn filesystem_source_fails_closed_on_malformed_install_metadata() {
+        let (root, source) = mounted_source();
+        write_root(
+            &root,
+            "/tenants/tenant-a/users/user-a/skills/remote-review/SKILL.md",
+            skill_md("remote-review", "Remote review"),
+        )
+        .await;
+        write_root(
+            &root,
+            "/tenants/tenant-a/users/user-a/skills/remote-review/.ironclaw-install.json",
+            "not json",
+        )
+        .await;
+
+        let descriptors = source
+            .list_skill_bundles(&run_context().await)
+            .await
+            .unwrap();
+
+        assert_eq!(descriptors.len(), 1);
+        assert_eq!(descriptors[0].id().name(), "remote-review");
+        assert_eq!(descriptors[0].trust(), Some(&SkillTrust::Installed));
     }
 
     #[tokio::test]

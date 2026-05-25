@@ -631,12 +631,11 @@ async fn skill_source_with_install_metadata(
         Err(error) => return Err(filesystem_error(error)),
     };
     let Ok(metadata) = serde_json::from_slice::<InstallMetadata>(&bytes) else {
-        return Ok(default_source);
+        return Ok(SkillSource::Installed);
     };
-    if metadata.source.as_deref() == Some("installed_url") {
-        Ok(SkillSource::Installed)
-    } else {
-        Ok(default_source)
+    match metadata.source.as_deref() {
+        Some("installed_url") => Ok(SkillSource::Installed),
+        Some(_) | None => Ok(SkillSource::Installed),
     }
 }
 
@@ -948,6 +947,7 @@ mod tests {
         let inner = Arc::new(InMemoryBackend::default());
         let filesystem = Arc::new(FailingBundleWriteFilesystem {
             inner: inner.clone(),
+            fail_suffix: "/scripts/run.py",
         });
         let context = skill_management_context_with_root(filesystem, skill_mounts());
 
@@ -981,6 +981,70 @@ mod tests {
             ),
             Err(error) => panic!("unexpected filesystem error: {error:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn install_metadata_write_failure_does_not_publish_skill_md() {
+        let inner = Arc::new(InMemoryBackend::default());
+        let filesystem = Arc::new(FailingBundleWriteFilesystem {
+            inner: inner.clone(),
+            fail_suffix: "/.ironclaw-install.json",
+        });
+        let context = skill_management_context_with_root(filesystem, skill_mounts());
+
+        let error = install_skill(
+            &context,
+            SkillInstallRequest {
+                name: None,
+                content: &skill_md("metadata-helper", "description", "PROMPT"),
+                files: &[],
+                source: SkillInstallSource::InstalledUrl,
+                source_url: Some("https://example.test/SKILL.md"),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind(), SkillManagementErrorKind::InvalidSkill);
+
+        match inner
+            .read_file_bounded(
+                &VirtualPath::new("/projects/skills/metadata-helper/SKILL.md").unwrap(),
+                1024,
+            )
+            .await
+        {
+            Ok(None) | Err(FilesystemError::NotFound { .. }) => {}
+            Ok(Some(_)) => panic!(
+                "SKILL.md should be written last so failed metadata writes do not publish a partial skill"
+            ),
+            Err(error) => panic!("unexpected filesystem error: {error:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_treats_malformed_install_metadata_as_installed() {
+        let filesystem = Arc::new(InMemoryBackend::default());
+        write_file(
+            filesystem.as_ref(),
+            "/projects/skills/metadata-helper/SKILL.md",
+            skill_md("metadata-helper", "local skill description", "PROMPT"),
+        )
+        .await;
+        filesystem
+            .write_file(
+                &VirtualPath::new("/projects/skills/metadata-helper/.ironclaw-install.json")
+                    .unwrap(),
+                b"not json",
+            )
+            .await
+            .unwrap();
+        let context = skill_management_context(filesystem, skill_mounts());
+
+        let listed = list_skills(&context).await.unwrap();
+
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "metadata-helper");
+        assert_eq!(listed[0].source, SkillSource::Installed);
     }
 
     #[tokio::test]
@@ -1033,6 +1097,7 @@ mod tests {
     #[derive(Clone)]
     struct FailingBundleWriteFilesystem {
         inner: Arc<InMemoryBackend>,
+        fail_suffix: &'static str,
     }
 
     #[async_trait]
@@ -1062,7 +1127,7 @@ mod tests {
             path: &VirtualPath,
             bytes: &[u8],
         ) -> Result<(), FilesystemError> {
-            if path.as_str().ends_with("/scripts/run.py") {
+            if path.as_str().ends_with(self.fail_suffix) {
                 return Err(FilesystemError::Backend {
                     operation: FilesystemOperation::WriteFile,
                     path: path.clone(),

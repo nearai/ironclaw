@@ -56,5 +56,5 @@ compatibility.
 - `skill_list` -- List all discovered skills with trust level and status
 - `skill_search` -- Search ClawHub registry for available skills
 - `skill_install` -- Install a skill from raw SKILL.md content or ClawHub
-- `skill_install_url` -- Fetch and install a skill from an HTTPS SKILL.md URL
+- `skill_install_url` -- Fetch and install a skill from an HTTPS raw SKILL.md, ZIP bundle, or supported GitHub repository/tree URL
 - `skill_remove` -- Remove an installed skill

@@ -1,4 +1,5 @@
 use std::{
+    collections::{HashSet, VecDeque},
     io::Read,
     path::{Component, Path, PathBuf},
 };
@@ -15,7 +16,8 @@ const SKILL_URL_RESPONSE_BODY_LIMIT_BYTES: u64 = 10 * 1024 * 1024;
 const SKILL_URL_FETCH_TIMEOUT_MS: u32 = 10_000;
 const MAX_ZIP_ENTRY_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_TOTAL_UNZIPPED_BYTES: u64 = 20 * 1024 * 1024;
-const MAX_GITHUB_PATH_SEGMENTS: usize = 32;
+const MAX_GITHUB_PATH_SEGMENTS: usize = 8;
+const MAX_GITHUB_CONTENT_DIRS: usize = ironclaw_skills::MAX_INSTALL_BUNDLE_FILES * 4;
 const MAX_ZIP_FILE_ENTRIES: usize = ironclaw_skills::MAX_INSTALL_BUNDLE_FILES * 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -312,6 +314,30 @@ fn build_github_contents_url(
     Ok(url)
 }
 
+fn build_github_matching_refs_url(
+    owner: &str,
+    repo: &str,
+    namespace: &str,
+    prefix: &str,
+) -> Result<url::Url, FirstPartyCapabilityError> {
+    if !matches!(namespace, "heads" | "tags") || !is_safe_github_component(prefix) {
+        return Err(FirstPartyCapabilityError::new(
+            RuntimeDispatchErrorKind::InputEncode,
+        ));
+    }
+    let mut url = build_github_api_base_url(owner, repo)?;
+    {
+        let mut segments = url.path_segments_mut().map_err(|_| {
+            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+        })?;
+        segments.push("git");
+        segments.push("matching-refs");
+        segments.push(namespace);
+        segments.push(prefix);
+    }
+    Ok(url)
+}
+
 fn github_api_headers() -> Vec<(String, String)> {
     vec![
         (
@@ -387,24 +413,55 @@ async fn resolve_github_ref_commit_sha(
     Ok(sha.to_string())
 }
 
-async fn github_ref_path_exists(
+async fn resolve_github_ref_from_segments(
     request: &FirstPartyCapabilityRequest,
     owner: &str,
     repo: &str,
-    git_ref: &str,
-    path: Option<&str>,
+    segments: &[String],
     usage: &mut ResourceUsage,
-) -> Result<bool, FirstPartyCapabilityError> {
-    let contents_url = build_github_contents_url(owner, repo, path, git_ref)?;
-    let response = fetch_url_response(request, &contents_url, usage, github_api_headers()).await?;
-    match response.status {
-        200..=299 => Ok(true),
-        404 => Ok(false),
-        _ => Err(
-            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
-                .with_usage(usage.clone()),
-        ),
+) -> Result<(String, Vec<String>), FirstPartyCapabilityError> {
+    if segments.is_empty() || segments.len() > MAX_GITHUB_PATH_SEGMENTS {
+        return Err(FirstPartyCapabilityError::new(
+            RuntimeDispatchErrorKind::InputEncode,
+        ));
     }
+    for namespace in ["heads", "tags"] {
+        let mut candidates = Vec::new();
+        let refs_url = build_github_matching_refs_url(owner, repo, namespace, &segments[0])?;
+        let refs = fetch_github_api_value(request, &refs_url, usage).await?;
+        let refs = refs.as_array().ok_or_else(|| {
+            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+        })?;
+        let prefix = format!("refs/{namespace}/");
+        for item in refs {
+            let Some(git_ref) = item
+                .get("ref")
+                .and_then(Value::as_str)
+                .and_then(|value| value.strip_prefix(&prefix))
+            else {
+                continue;
+            };
+            let ref_segments = git_ref.split('/').collect::<Vec<_>>();
+            if ref_segments.len() > segments.len() {
+                continue;
+            }
+            if ref_segments
+                .iter()
+                .zip(segments.iter())
+                .all(|(left, right)| *left == right)
+            {
+                candidates.push((git_ref.to_string(), ref_segments.len()));
+            }
+        }
+        if let Some((git_ref, consumed)) =
+            candidates.into_iter().max_by_key(|(_, consumed)| *consumed)
+        {
+            return Ok((git_ref, segments[consumed..].to_vec()));
+        }
+    }
+    Err(FirstPartyCapabilityError::new(
+        RuntimeDispatchErrorKind::OperationFailed,
+    ))
 }
 
 async fn resolve_github_tree_request(
@@ -415,36 +472,21 @@ async fn resolve_github_tree_request(
     validate_github_repo_components(&repo.owner, &repo.repo)?;
     let branch = match repo.tree_segments {
         Some(segments) => {
-            if segments.is_empty() || segments.len() > MAX_GITHUB_PATH_SEGMENTS {
-                return Err(FirstPartyCapabilityError::new(
-                    RuntimeDispatchErrorKind::InputEncode,
-                ));
-            }
-            for split in (1..=segments.len()).rev() {
-                let candidate_ref = segments[..split].join("/");
-                let candidate_subdir =
-                    (split < segments.len()).then(|| segments[split..].join("/"));
-                if github_ref_path_exists(
-                    request,
-                    &repo.owner,
-                    &repo.repo,
-                    &candidate_ref,
-                    candidate_subdir.as_deref(),
-                    usage,
-                )
-                .await?
-                {
-                    return Ok(GitHubRepoRef {
-                        owner: repo.owner,
-                        repo: repo.repo,
-                        branch: candidate_ref,
-                        subdir: candidate_subdir,
-                    });
-                }
-            }
-            return Err(FirstPartyCapabilityError::new(
-                RuntimeDispatchErrorKind::OperationFailed,
-            ));
+            let (candidate_ref, remaining) = resolve_github_ref_from_segments(
+                request,
+                &repo.owner,
+                &repo.repo,
+                &segments,
+                usage,
+            )
+            .await?;
+            let candidate_subdir = (!remaining.is_empty()).then(|| remaining.join("/"));
+            return Ok(GitHubRepoRef {
+                owner: repo.owner,
+                repo: repo.repo,
+                branch: candidate_ref,
+                subdir: candidate_subdir,
+            });
         }
         None => resolve_github_default_branch(request, &repo.owner, &repo.repo, usage).await?,
     };
@@ -468,43 +510,38 @@ async fn resolve_github_blob_download_url(
             RuntimeDispatchErrorKind::InputEncode,
         ));
     }
-    for split in (1..blob.blob_segments.len()).rev() {
-        let candidate_ref = blob.blob_segments[..split].join("/");
-        let candidate_path = blob.blob_segments[split..].join("/");
-        let contents_url = build_github_contents_url(
-            &blob.owner,
-            &blob.repo,
-            Some(&candidate_path),
-            &candidate_ref,
-        )?;
-        let response =
-            fetch_url_response(request, &contents_url, usage, github_api_headers()).await?;
-        if response.status == 404 {
-            continue;
-        }
-        if !(200..300).contains(&response.status) {
-            return Err(
-                FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
-                    .with_usage(usage.clone()),
-            );
-        }
-        let metadata: Value = serde_json::from_slice(&response.body).map_err(|_| {
-            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
-                .with_usage(usage.clone())
-        })?;
-        if metadata.get("type").and_then(Value::as_str) != Some("file") {
-            continue;
-        }
-        let Some(download_url) = metadata.get("download_url").and_then(Value::as_str) else {
-            return Err(FirstPartyCapabilityError::new(
-                RuntimeDispatchErrorKind::OperationFailed,
-            ));
-        };
-        return validate_derived_fetch_url(download_url);
+    let (candidate_ref, remaining) = resolve_github_ref_from_segments(
+        request,
+        &blob.owner,
+        &blob.repo,
+        &blob.blob_segments,
+        usage,
+    )
+    .await?;
+    if remaining.is_empty() {
+        return Err(FirstPartyCapabilityError::new(
+            RuntimeDispatchErrorKind::InputEncode,
+        ));
     }
-    Err(FirstPartyCapabilityError::new(
-        RuntimeDispatchErrorKind::OperationFailed,
-    ))
+    let candidate_path = remaining.join("/");
+    let contents_url = build_github_contents_url(
+        &blob.owner,
+        &blob.repo,
+        Some(&candidate_path),
+        &candidate_ref,
+    )?;
+    let metadata = fetch_github_api_value(request, &contents_url, usage).await?;
+    if metadata.get("type").and_then(Value::as_str) != Some("file") {
+        return Err(FirstPartyCapabilityError::new(
+            RuntimeDispatchErrorKind::OperationFailed,
+        ));
+    }
+    let Some(download_url) = metadata.get("download_url").and_then(Value::as_str) else {
+        return Err(FirstPartyCapabilityError::new(
+            RuntimeDispatchErrorKind::OperationFailed,
+        ));
+    };
+    validate_derived_fetch_url(download_url)
 }
 
 async fn fetch_github_repo_payload(
@@ -514,6 +551,9 @@ async fn fetch_github_repo_payload(
     usage: &mut ResourceUsage,
 ) -> Result<SkillUrlPayload, FirstPartyCapabilityError> {
     let repo = resolve_github_tree_request(request, repo_request, usage).await?;
+    if repo.subdir.is_some() {
+        return fetch_github_contents_bundle_payload(request, source_url, repo, usage).await;
+    }
     let commit_sha =
         resolve_github_ref_commit_sha(request, &repo.owner, &repo.repo, &repo.branch, usage)
             .await?;
@@ -533,6 +573,119 @@ async fn fetch_github_repo_payload(
         content: bundle.skill_md,
         files: bundle.files,
     })
+}
+
+async fn fetch_github_contents_bundle_payload(
+    request: &FirstPartyCapabilityRequest,
+    source_url: &str,
+    repo: GitHubRepoRef,
+    usage: &mut ResourceUsage,
+) -> Result<SkillUrlPayload, FirstPartyCapabilityError> {
+    let root_subdir = repo
+        .subdir
+        .as_deref()
+        .ok_or_else(|| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed))?;
+    let root_path = normalize_archive_path(Path::new(root_subdir))?;
+    let mut directories = VecDeque::from([root_subdir.to_string()]);
+    let mut visited_directories = 0usize;
+    let mut seen_files = HashSet::<PathBuf>::new();
+    let mut skill_md = None;
+    let mut files = Vec::new();
+    let mut total_bytes = 0u64;
+
+    while let Some(directory) = directories.pop_front() {
+        visited_directories += 1;
+        if visited_directories > MAX_GITHUB_CONTENT_DIRS {
+            return Err(FirstPartyCapabilityError::new(
+                RuntimeDispatchErrorKind::OutputTooLarge,
+            ));
+        }
+        let contents_url =
+            build_github_contents_url(&repo.owner, &repo.repo, Some(&directory), &repo.branch)?;
+        let value = fetch_github_api_value(request, &contents_url, usage).await?;
+        let entries = value.as_array().ok_or_else(|| {
+            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+        })?;
+        for entry in entries {
+            let entry_type = entry.get("type").and_then(Value::as_str);
+            let entry_path = entry.get("path").and_then(Value::as_str).ok_or_else(|| {
+                FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+            })?;
+            match entry_type {
+                Some("dir") => directories.push_back(entry_path.to_string()),
+                Some("file") => {
+                    let path = normalize_archive_path(Path::new(entry_path))?;
+                    let relative = path.strip_prefix(&root_path).map_err(|_| {
+                        FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+                    })?;
+                    if relative.as_os_str().is_empty() {
+                        continue;
+                    }
+                    if !seen_files.insert(relative.to_path_buf()) {
+                        return Err(FirstPartyCapabilityError::new(
+                            RuntimeDispatchErrorKind::InputEncode,
+                        ));
+                    }
+                    let download_url = entry
+                        .get("download_url")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            FirstPartyCapabilityError::new(
+                                RuntimeDispatchErrorKind::OperationFailed,
+                            )
+                        })?;
+                    let download_url = validate_derived_fetch_url(download_url)?;
+                    let bytes = fetch_url_bytes(request, &download_url, usage).await?;
+                    if bytes.len() as u64 > MAX_ZIP_ENTRY_BYTES {
+                        return Err(FirstPartyCapabilityError::new(
+                            RuntimeDispatchErrorKind::OutputTooLarge,
+                        ));
+                    }
+                    total_bytes = total_bytes.checked_add(bytes.len() as u64).ok_or_else(|| {
+                        FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OutputTooLarge)
+                    })?;
+                    if total_bytes > MAX_TOTAL_UNZIPPED_BYTES {
+                        return Err(FirstPartyCapabilityError::new(
+                            RuntimeDispatchErrorKind::OutputTooLarge,
+                        ));
+                    }
+                    if relative == Path::new("SKILL.md") {
+                        if bytes.len() as u64 > ironclaw_skills::MAX_PROMPT_FILE_SIZE {
+                            return Err(FirstPartyCapabilityError::new(
+                                RuntimeDispatchErrorKind::OutputTooLarge,
+                            ));
+                        }
+                        skill_md = Some(String::from_utf8(bytes).map_err(|_| {
+                            FirstPartyCapabilityError::new(
+                                RuntimeDispatchErrorKind::OperationFailed,
+                            )
+                        })?);
+                    } else {
+                        files.push(SkillUrlPayloadFile {
+                            path: relative.to_path_buf(),
+                            contents: bytes,
+                        });
+                        if files.len() > ironclaw_skills::MAX_INSTALL_BUNDLE_FILES {
+                            return Err(FirstPartyCapabilityError::new(
+                                RuntimeDispatchErrorKind::OutputTooLarge,
+                            ));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let content = skill_md
+        .ok_or_else(|| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed))?;
+    tracing::debug!(
+        source_url,
+        source_subdir = root_subdir,
+        bundle_file_count = files.len(),
+        "skill URL install fetched GitHub contents bundle"
+    );
+    Ok(SkillUrlPayload { content, files })
 }
 
 async fn extract_skill_bundle_from_zip_blocking(
