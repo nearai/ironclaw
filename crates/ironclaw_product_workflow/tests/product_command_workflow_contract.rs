@@ -8,7 +8,7 @@ use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
     ExternalEventId, InboundCommandPayload, ProductAdapterId, ProductInboundAck,
     ProductInboundEnvelope, ProductInboundPayload, ProductTriggerReason, ProductWorkflow,
-    ProtocolAuthEvidence, TrustedInboundContext,
+    ProtocolAuthEvidence, RoutedCommandName, TrustedInboundContext,
 };
 use ironclaw_product_workflow::{
     ActionDispatchKind, DefaultProductWorkflow, FakeConversationBindingService,
@@ -17,6 +17,12 @@ use ironclaw_product_workflow::{
     ProductModelCommand, ProductWorkflowError,
 };
 use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
+
+fn routed_command_ack(command: &str) -> ProductInboundAck {
+    ProductInboundAck::CommandRouted {
+        command: RoutedCommandName::new(command).expect("valid routed command"),
+    }
+}
 
 fn sample_command_envelope(
     event_suffix: &str,
@@ -138,7 +144,7 @@ async fn command_payload_dispatches_through_command_service_not_inbound_turn_ser
     let binding = Arc::new(FakeConversationBindingService::new());
     let admission_service = Arc::new(RecordingProductCommandAdmissionService::allowing());
     let command_service = Arc::new(RecordingProductCommandService::with_ack(
-        ProductInboundAck::NoOp,
+        routed_command_ack("model"),
     ));
     let workflow = DefaultProductWorkflow::new(inbound.clone(), ledger.clone(), binding)
         .with_product_command_admission_service(admission_service)
@@ -148,7 +154,10 @@ async fn command_payload_dispatches_through_command_service_not_inbound_turn_ser
 
     let ack = workflow.accept_inbound(envelope).await.expect("accept");
 
-    assert!(matches!(ack, ProductInboundAck::NoOp));
+    assert!(matches!(
+        ack,
+        ProductInboundAck::CommandRouted { command } if command.as_str() == "model"
+    ));
     assert_eq!(inbound.accepted_count(), 0);
     assert_eq!(inbound.attempt_count(), 0);
     assert_eq!(inbound.replay_attempt_count(), 0);
@@ -163,8 +172,8 @@ async fn command_payload_dispatches_through_command_service_not_inbound_turn_ser
     let settled = ledger.settled_actions();
     assert_eq!(settled.len(), 1);
     assert!(matches!(
-        settled[0].dispatch_kind,
-        Some(ActionDispatchKind::Command { .. })
+        &settled[0].dispatch_kind,
+        Some(ActionDispatchKind::Command { command }) if command.as_str() == "model"
     ));
 }
 
@@ -199,7 +208,7 @@ async fn command_admission_receives_authority_context_and_action_metadata() {
     let binding = Arc::new(FakeConversationBindingService::new());
     let admission_service = Arc::new(RecordingProductCommandAdmissionService::allowing());
     let command_service = Arc::new(RecordingProductCommandService::with_ack(
-        ProductInboundAck::NoOp,
+        routed_command_ack("status"),
     ));
     let workflow = DefaultProductWorkflow::new(inbound.clone(), ledger.clone(), binding)
         .with_product_command_admission_service(admission_service.clone())
@@ -214,7 +223,10 @@ async fn command_admission_receives_authority_context_and_action_metadata() {
 
     let ack = workflow.accept_inbound(envelope).await.expect("accept");
 
-    assert!(matches!(ack, ProductInboundAck::NoOp));
+    assert!(matches!(
+        ack,
+        ProductInboundAck::CommandRouted { command } if command.as_str() == "status"
+    ));
     let records = admission_service.records();
     assert_eq!(records.len(), 1);
     let (context, command) = &records[0];

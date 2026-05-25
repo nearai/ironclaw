@@ -144,6 +144,37 @@ pub struct InboundCommandPayload {
     pub trigger: ProductTriggerReason,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RoutedCommandName(String);
+
+impl RoutedCommandName {
+    pub fn new(value: impl Into<String>) -> Result<Self, ProductAdapterError> {
+        let value = value.into();
+        validate_command_name(&value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<RoutedCommandName> for String {
+    fn from(value: RoutedCommandName) -> Self {
+        value.0
+    }
+}
+
+impl<'de> Deserialize<'de> for RoutedCommandName {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
 impl InboundCommandPayload {
     pub fn new(
         command: impl Into<String>,
@@ -631,6 +662,9 @@ pub enum ProductInboundAck {
         accepted_message_ref: AcceptedMessageRef,
         active_run_id: TurnRunId,
     },
+    CommandRouted {
+        command: RoutedCommandName,
+    },
     Rejected(ProductRejection),
     Duplicate {
         prior: Box<ProductInboundAck>,
@@ -643,6 +677,7 @@ impl ProductInboundAck {
         match self {
             Self::Accepted { .. }
             | Self::DeferredBusy { .. }
+            | Self::CommandRouted { .. }
             | Self::Duplicate { .. }
             | Self::NoOp => true,
             Self::Rejected(rejection) => {

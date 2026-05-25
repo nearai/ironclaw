@@ -47,7 +47,7 @@ pub use inbound::{
     ParsedProductInbound, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
     ProductRejection, ProductRejectionDisposition, ProductRejectionKind,
     ProductSlashCommandParseError, ProductTriggerReason, ProjectionSubscriptionPayload,
-    TrustedInboundContext, UserMessagePayload, parse_product_slash_command,
+    RoutedCommandName, TrustedInboundContext, UserMessagePayload, parse_product_slash_command,
 };
 pub use outbound::{
     AuthPromptView, CapabilityActivityStatusView, CapabilityActivityView,

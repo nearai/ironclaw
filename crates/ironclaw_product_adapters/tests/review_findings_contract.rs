@@ -10,7 +10,8 @@ use ironclaw_product_adapters::{
     ProductRejectionKind, ProductSurfaceKind, ProductTriggerReason, ProductWorkflow,
     ProjectionCursor, ProjectionStream, ProjectionSubscriptionPayload,
     ProjectionSubscriptionRequest, ProtocolAuthEvidence, ProtocolHttpEgress,
-    ProtocolHttpEgressError, RedactedString, TrustedInboundContext, UserMessagePayload,
+    ProtocolHttpEgressError, RedactedString, RoutedCommandName, TrustedInboundContext,
+    UserMessagePayload,
 };
 use ironclaw_turns::{AcceptedMessageRef, ReplyTargetBindingRef, TurnRunId};
 
@@ -552,6 +553,12 @@ fn ack_and_rejection_types_are_unambiguous_and_typed() {
             ProductRejectionKind::PolicyDenied,
             "policy denied",
         ))
+        .is_durable_outcome()
+    );
+    assert!(
+        ProductInboundAck::CommandRouted {
+            command: RoutedCommandName::new("status").expect("valid command"),
+        }
         .is_durable_outcome()
     );
     assert!(ironclaw_product_adapters::fakes::ensure_durable_outcome(
