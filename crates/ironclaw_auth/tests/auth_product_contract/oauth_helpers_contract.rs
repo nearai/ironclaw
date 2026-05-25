@@ -144,6 +144,26 @@ fn google_authorization_url_includes_google_offline_consent_defaults() {
 }
 
 #[test]
+fn google_authorization_url_omits_hd_when_hosted_domain_is_none() {
+    let verifier = PkceVerifierSecret::new(secret("raw-pkce-verifier")).unwrap();
+    let challenge = pkce_s256_challenge(&verifier);
+    let scopes = provider_scopes(&[GOOGLE_GMAIL_SEND_SCOPE]);
+
+    let url = build_google_authorization_url(
+        "client-id.apps.googleusercontent.com",
+        "http://127.0.0.1:5555/oauth/callback/google",
+        "opaque-state",
+        &challenge,
+        &scopes,
+        None,
+    )
+    .unwrap();
+    let parsed = url::Url::parse(url.as_str()).unwrap();
+
+    assert!(!parsed.query_pairs().any(|(name, _)| name == "hd"));
+}
+
+#[test]
 fn token_response_projects_scopes_and_redacts_debug() {
     let response = OAuthTokenResponse::new(
         secret("access-token"),
@@ -329,6 +349,17 @@ fn validate_authorize_fragment_rejects_control_chars() {
 }
 
 #[test]
+fn authorization_url_builder_rejects_control_characters() {
+    let challenge = verifier_challenge();
+    let scopes = valid_scopes();
+
+    assert_invalid_request(build_authorization_url(OAuthAuthorizeUrlRequest {
+        state: "opaque\nstate",
+        ..valid_authorization_request(&challenge, &scopes, &[])
+    }));
+}
+
+#[test]
 fn build_authorization_url_rejects_reserved_extra_param_name() {
     let challenge = verifier_challenge();
     let scopes = valid_scopes();
@@ -361,6 +392,11 @@ fn authorization_url_builder_handles_empty_scopes_and_extra_params() {
             .any(|(name, value)| name == "scope" && value.is_empty())
     );
     assert!(!query.iter().any(|(name, _)| name == "access_type"));
+}
+
+#[test]
+fn scope_text_returns_empty_string_for_empty_scopes() {
+    assert!(scope_text(&[]).is_empty());
 }
 
 #[test]

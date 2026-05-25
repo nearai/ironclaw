@@ -247,13 +247,7 @@ pub fn scope_text(scopes: &[ProviderScope]) -> String {
 fn sha256_hex(value: &str) -> String {
     // Digest newtypes expose constant-time comparison for callback/state checks;
     // this helper only constructs the canonical 64-character lowercase hex text.
-    let digest = Sha256::digest(value.as_bytes());
-    let mut output = String::with_capacity(64);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(output, "{byte:02x}");
-    }
-    output
+    hex::encode(Sha256::digest(value.as_bytes()))
 }
 
 fn validate_authorize_fragment(label: &'static str, value: &str) -> Result<(), AuthProductError> {
