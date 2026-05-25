@@ -1839,6 +1839,13 @@ fn is_legacy_text_only_driver_key(key: &LoopDriverRegistryKey) -> bool {
 }
 
 fn model_route_error_to_host_error(error: ModelRouteError) -> RebornLoopDriverHostError {
+    tracing::warn!(
+        component = "model_route",
+        operation = "resolve_route",
+        error = %error,
+        error_debug = ?error,
+        "model route error mapped to safe host error"
+    );
     RebornLoopDriverHostError::InvalidRequest {
         reason: format!("model route resolution failed: {}", error.kind().as_str()),
     }
@@ -1847,6 +1854,13 @@ fn model_route_error_to_host_error(error: ModelRouteError) -> RebornLoopDriverHo
 fn capability_resolve_error_to_host_error(
     error: CapabilityResolveError,
 ) -> RebornLoopDriverHostError {
+    tracing::warn!(
+        component = "capability_surface_profile",
+        operation = "resolve_profile",
+        error = %error,
+        error_debug = ?error,
+        "capability surface resolution error mapped to safe host error"
+    );
     let reason = match error {
         CapabilityResolveError::Unavailable { .. } => "capability surface profile is unavailable",
         CapabilityResolveError::Internal { .. } => {
@@ -1901,39 +1915,65 @@ fn validate_thread_scope(
 }
 
 fn turn_error_to_host_error(error: TurnError) -> AgentLoopHostError {
-    match error {
-        TurnError::Unauthorized => AgentLoopHostError::new(
+    match &error {
+        TurnError::Unauthorized => ironclaw_loop_support::raw_agent_loop_host_error(
+            "checkpoint_state",
+            "access",
             AgentLoopHostErrorKind::Unauthorized,
             "checkpoint state access was unauthorized",
+            &error,
         ),
-        TurnError::InvalidRequest { .. } => AgentLoopHostError::new(
+        TurnError::InvalidRequest { .. } => ironclaw_loop_support::raw_agent_loop_host_error(
+            "checkpoint_state",
+            "request",
             AgentLoopHostErrorKind::InvalidInvocation,
             "checkpoint state request is invalid",
+            &error,
         ),
-        TurnError::Unavailable { .. } => AgentLoopHostError::new(
+        TurnError::Unavailable { .. } => ironclaw_loop_support::raw_agent_loop_host_error(
+            "checkpoint_state",
+            "store",
             AgentLoopHostErrorKind::Unavailable,
             "checkpoint state store is unavailable",
+            &error,
         ),
-        TurnError::ScopeNotFound => AgentLoopHostError::new(
+        TurnError::ScopeNotFound => ironclaw_loop_support::raw_agent_loop_host_error(
+            "checkpoint_state",
+            "scope_lookup",
             AgentLoopHostErrorKind::CheckpointRejected,
             "checkpoint state scope was not found for this loop run",
+            &error,
         ),
-        TurnError::Conflict { .. } => AgentLoopHostError::new(
+        TurnError::Conflict { .. } => ironclaw_loop_support::raw_agent_loop_host_error(
+            "checkpoint_state",
+            "write",
             AgentLoopHostErrorKind::CheckpointRejected,
             "checkpoint state write conflicted with current turn state",
+            &error,
         ),
-        TurnError::InvalidTransition { .. } => AgentLoopHostError::new(
+        TurnError::InvalidTransition { .. } => ironclaw_loop_support::raw_agent_loop_host_error(
+            "checkpoint_state",
+            "write",
             AgentLoopHostErrorKind::CheckpointRejected,
             "checkpoint state write was invalid for current turn state",
+            &error,
         ),
-        TurnError::LeaseMismatch => AgentLoopHostError::new(
+        TurnError::LeaseMismatch => ironclaw_loop_support::raw_agent_loop_host_error(
+            "checkpoint_state",
+            "write",
             AgentLoopHostErrorKind::CheckpointRejected,
             "checkpoint state write lease no longer matches current run",
+            &error,
         ),
-        TurnError::ThreadBusy(_) | TurnError::AdmissionRejected(_) => AgentLoopHostError::new(
-            AgentLoopHostErrorKind::Unavailable,
-            "checkpoint state store returned unsupported turn admission status",
-        ),
+        TurnError::ThreadBusy(_) | TurnError::AdmissionRejected(_) => {
+            ironclaw_loop_support::raw_agent_loop_host_error(
+                "checkpoint_state",
+                "admission",
+                AgentLoopHostErrorKind::Unavailable,
+                "checkpoint state store returned unsupported turn admission status",
+                &error,
+            )
+        }
     }
 }
 

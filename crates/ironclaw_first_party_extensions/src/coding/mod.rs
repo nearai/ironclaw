@@ -111,8 +111,8 @@ fn input_error() -> CodingCapabilityError {
     CodingCapabilityError::new(RuntimeDispatchErrorKind::InputEncode)
 }
 
-fn guest_error() -> CodingCapabilityError {
-    CodingCapabilityError::new(RuntimeDispatchErrorKind::Guest)
+fn operation_error() -> CodingCapabilityError {
+    CodingCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
 }
 
 #[cfg(test)]

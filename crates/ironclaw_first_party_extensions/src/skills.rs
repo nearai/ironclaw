@@ -202,7 +202,7 @@ fn capability_error(error: SkillManagementError) -> SkillManagementCapabilityErr
         SkillManagementErrorKind::FilesystemDenied => RuntimeDispatchErrorKind::FilesystemDenied,
         SkillManagementErrorKind::NotFound
         | SkillManagementErrorKind::Conflict
-        | SkillManagementErrorKind::InvalidSkill => RuntimeDispatchErrorKind::Guest,
+        | SkillManagementErrorKind::InvalidSkill => RuntimeDispatchErrorKind::OperationFailed,
         SkillManagementErrorKind::Resource => RuntimeDispatchErrorKind::Resource,
     };
     tracing::debug!(

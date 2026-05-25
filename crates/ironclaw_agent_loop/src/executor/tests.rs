@@ -1146,33 +1146,38 @@ async fn checkpoint_payload_rehydrates_with_written_marker() {
 
 #[tokio::test]
 async fn retry_uses_single_call_invocation() {
-    let host = MockHost::new(vec![calls_response()])
-        .with_batch_outcomes(vec![ironclaw_turns::run_profile::CapabilityBatchOutcome {
-            outcomes: vec![CapabilityOutcome::Failed(
-                ironclaw_turns::run_profile::CapabilityFailure {
-                    error_kind: CapabilityFailureKind::Transient,
-                    safe_summary: "temporary failure".to_string(),
+    for error_kind in [
+        CapabilityFailureKind::Transient,
+        CapabilityFailureKind::Network,
+    ] {
+        let host = MockHost::new(vec![calls_response()])
+            .with_batch_outcomes(vec![ironclaw_turns::run_profile::CapabilityBatchOutcome {
+                outcomes: vec![CapabilityOutcome::Failed(
+                    ironclaw_turns::run_profile::CapabilityFailure {
+                        error_kind,
+                        safe_summary: "temporary failure".to_string(),
+                    },
+                )],
+                stopped_on_suspension: false,
+            }])
+            .with_single_outcomes(vec![CapabilityOutcome::Completed(
+                CapabilityResultMessage {
+                    result_ref: LoopResultRef::new("result:retry").expect("valid"),
+                    safe_summary: "retry completed".to_string(),
+                    terminate_hint: true,
                 },
-            )],
-            stopped_on_suspension: false,
-        }])
-        .with_single_outcomes(vec![CapabilityOutcome::Completed(
-            CapabilityResultMessage {
-                result_ref: LoopResultRef::new("result:retry").expect("valid"),
-                safe_summary: "retry completed".to_string(),
-                terminate_hint: true,
-            },
-        )]);
-    let executor = CanonicalAgentLoopExecutor;
-    let state = LoopExecutionState::initial_for_run(host.run_context());
+            )]);
+        let executor = CanonicalAgentLoopExecutor;
+        let state = LoopExecutionState::initial_for_run(host.run_context());
 
-    let exit = executor
-        .execute_family(&crate::families::default(), &host, state)
-        .await
-        .expect("execute");
+        let exit = executor
+            .execute_family(&crate::families::default(), &host, state)
+            .await
+            .expect("execute");
 
-    assert!(matches!(exit, LoopExit::Completed(_)));
-    assert_eq!(final_staged_state(&host).recovery_state, Default::default());
+        assert!(matches!(exit, LoopExit::Completed(_)));
+        assert_eq!(final_staged_state(&host).recovery_state, Default::default());
+    }
 }
 
 #[tokio::test]
@@ -1318,7 +1323,10 @@ async fn denied_provider_call_appends_failure_tool_result_for_replay() {
     assert_eq!(appended.len(), 2);
     assert_eq!(appended[0].result_ref, result_ref);
     assert_eq!(appended[0].safe_summary, "provider call completed");
-    assert_eq!(appended[1].safe_summary, "provider call denied");
+    assert_eq!(
+        appended[1].safe_summary,
+        "capability denied with empty_surface: provider call denied"
+    );
     assert!(
         appended[1]
             .result_ref
@@ -1344,5 +1352,99 @@ async fn denied_provider_call_appends_failure_tool_result_for_replay() {
     assert_eq!(
         final_staged_state(&host).result_refs,
         vec![result_ref, appended[1].result_ref.clone()]
+    );
+}
+
+#[tokio::test]
+async fn model_visible_provider_tool_failures_append_failure_tool_result_for_replay() {
+    for (error_kind, safe_summary, expected_summary) in [
+        (
+            CapabilityFailureKind::InvalidInput,
+            "invalid input",
+            "capability failed with invalid_input: invalid input",
+        ),
+        (
+            CapabilityFailureKind::OperationFailed,
+            "operation failed",
+            "capability failed with operation_failed: operation failed",
+        ),
+        (
+            CapabilityFailureKind::OutputTooLarge,
+            "response body exceeded limit 10000000",
+            "capability failed with output_too_large: response body exceeded limit 10000000",
+        ),
+    ] {
+        let host = MockHost::new(vec![provider_calls_response(), reply_response()])
+            .with_batch_outcomes(vec![ironclaw_turns::run_profile::CapabilityBatchOutcome {
+                outcomes: vec![CapabilityOutcome::Failed(
+                    ironclaw_turns::run_profile::CapabilityFailure {
+                        error_kind,
+                        safe_summary: safe_summary.to_string(),
+                    },
+                )],
+                stopped_on_suspension: false,
+            }]);
+        let executor = CanonicalAgentLoopExecutor;
+        let state = LoopExecutionState::initial_for_run(host.run_context());
+
+        let exit = executor
+            .execute_family(&crate::families::default(), &host, state)
+            .await
+            .expect("execute");
+
+        let appended = host.appended_result_refs();
+        assert_eq!(appended.len(), 1);
+        assert_eq!(appended[0].safe_summary, expected_summary);
+        assert!(
+            appended[0]
+                .result_ref
+                .as_str()
+                .starts_with("result:provider-error-turn_1-call_1")
+        );
+        let provider_call = appended[0]
+            .provider_call
+            .as_ref()
+            .expect("provider replay metadata");
+        assert_eq!(provider_call.provider_turn_id, "turn_1");
+        assert_eq!(provider_call.provider_call_id, "call_1");
+        assert_eq!(provider_call.provider_tool_name, "demo__echo");
+        match exit {
+            LoopExit::Completed(completed) => {
+                assert_eq!(completed.result_refs, vec![appended[0].result_ref.clone()]);
+            }
+            other => panic!("expected completed, got {other:?}"),
+        }
+        assert_eq!(
+            final_staged_state(&host).result_refs,
+            vec![appended[0].result_ref.clone()]
+        );
+    }
+
+    let long_summary = "a".repeat(512);
+    let host = MockHost::new(vec![provider_calls_response(), reply_response()])
+        .with_batch_outcomes(vec![ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Failed(
+                ironclaw_turns::run_profile::CapabilityFailure {
+                    error_kind: CapabilityFailureKind::OutputTooLarge,
+                    safe_summary: long_summary,
+                },
+            )],
+            stopped_on_suspension: false,
+        }]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    let appended = host.appended_result_refs();
+    assert_eq!(appended.len(), 1);
+    assert!(appended[0].safe_summary.len() <= 512);
+    assert!(
+        appended[0]
+            .safe_summary
+            .starts_with("capability failed with output_too_large: ")
     );
 }

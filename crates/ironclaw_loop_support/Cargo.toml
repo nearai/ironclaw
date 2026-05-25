@@ -15,6 +15,7 @@ async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 dashmap = "6"
 futures = "0.3"
+hex = "0.4.3"
 parking_lot = "0.12"
 tracing = "0.1"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
@@ -35,5 +36,6 @@ thiserror = "2"
 [dev-dependencies]
 ironclaw_trust = { path = "../ironclaw_trust", version = "0.1.0" }
 rust_decimal_macros = "1"
+tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt"] }
 tracing-test = { version = "0.2", features = ["no-env-filter"] }

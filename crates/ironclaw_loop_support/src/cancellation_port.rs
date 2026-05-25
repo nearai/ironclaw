@@ -392,10 +392,13 @@ impl TurnRunWakeNotifier for TurnStateRunCancellationFactory {
     }
 }
 
-fn turn_state_error_to_host_error(_error: ironclaw_turns::TurnError) -> AgentLoopHostError {
-    AgentLoopHostError::new(
+fn turn_state_error_to_host_error(error: ironclaw_turns::TurnError) -> AgentLoopHostError {
+    crate::raw_agent_loop_host_error(
+        "turn_state_cancellation",
+        "build_cancellation_handle",
         AgentLoopHostErrorKind::Unavailable,
         "turn state was unavailable while building cancellation handle",
+        error,
     )
 }
 

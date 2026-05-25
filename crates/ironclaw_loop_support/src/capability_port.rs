@@ -1401,7 +1401,14 @@ fn provider_tool_call_input_ref(
         )
     })?;
     let arguments = serde_json::to_string(&tool_call.arguments).map_err(|error| {
-        AgentLoopHostError::new(AgentLoopHostErrorKind::InvalidInvocation, error.to_string())
+        let safe_summary = error.to_string();
+        crate::raw_agent_loop_host_error(
+            "capability_provider_tool_call",
+            "serialize_arguments",
+            AgentLoopHostErrorKind::InvalidInvocation,
+            safe_summary,
+            error,
+        )
     })?;
     let payload = format!(
         "provider-tool-input\nrun={}\nprovider={}\nmodel={}\nturn={}\ncall={}\ntool={}\narguments={}",
@@ -1520,8 +1527,10 @@ fn runtime_failure_kind_to_loop(
         RuntimeFailureKind::Cancelled => CapabilityFailureKind::Cancelled,
         RuntimeFailureKind::Dispatcher => CapabilityFailureKind::Dispatcher,
         RuntimeFailureKind::InvalidInput => CapabilityFailureKind::InvalidInput,
+        RuntimeFailureKind::InvalidOutput => CapabilityFailureKind::InvalidOutput,
         RuntimeFailureKind::MissingRuntime => CapabilityFailureKind::MissingRuntime,
         RuntimeFailureKind::Network => CapabilityFailureKind::Network,
+        RuntimeFailureKind::OperationFailed => CapabilityFailureKind::OperationFailed,
         RuntimeFailureKind::OutputTooLarge => CapabilityFailureKind::OutputTooLarge,
         RuntimeFailureKind::Process => CapabilityFailureKind::Process,
         RuntimeFailureKind::Resource => CapabilityFailureKind::Resource,
@@ -1601,16 +1610,25 @@ fn blocked_summary(reason: RuntimeBlockedReason) -> &'static str {
 
 fn host_runtime_error(error: HostRuntimeError) -> AgentLoopHostError {
     match error {
-        HostRuntimeError::InvalidRequest { reason } => AgentLoopHostError::new(
+        HostRuntimeError::InvalidRequest { reason } => crate::raw_agent_loop_host_error(
+            "host_runtime_capability",
+            "invoke",
             AgentLoopHostErrorKind::InvalidInvocation,
-            runtime_safe_summary(Some(reason), "host runtime rejected capability request"),
+            runtime_safe_summary(
+                Some(reason.clone()),
+                "host runtime rejected capability request",
+            ),
+            reason,
         ),
-        HostRuntimeError::Unavailable { reason } => AgentLoopHostError::new(
+        HostRuntimeError::Unavailable { reason } => crate::raw_agent_loop_host_error(
+            "host_runtime_capability",
+            "invoke",
             AgentLoopHostErrorKind::Unavailable,
             runtime_safe_summary(
-                Some(reason),
+                Some(reason.clone()),
                 "host runtime capability service is unavailable",
             ),
+            reason,
         ),
     }
 }
@@ -1704,10 +1722,18 @@ mod tests {
                 CapabilityFailureKind::InvalidInput,
             ),
             (
+                RuntimeFailureKind::InvalidOutput,
+                CapabilityFailureKind::InvalidOutput,
+            ),
+            (
                 RuntimeFailureKind::MissingRuntime,
                 CapabilityFailureKind::MissingRuntime,
             ),
             (RuntimeFailureKind::Network, CapabilityFailureKind::Network),
+            (
+                RuntimeFailureKind::OperationFailed,
+                CapabilityFailureKind::OperationFailed,
+            ),
             (
                 RuntimeFailureKind::OutputTooLarge,
                 CapabilityFailureKind::OutputTooLarge,

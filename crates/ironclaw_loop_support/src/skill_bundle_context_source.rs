@@ -122,6 +122,13 @@ where
 fn skill_bundle_source_error_to_context_error(
     error: SkillBundleSourceError,
 ) -> HostSkillContextBuildError {
+    tracing::warn!(
+        component = "skill_bundle_context_source",
+        operation = "map_source_error",
+        error = %error,
+        error_debug = ?error,
+        "skill bundle source error mapped to safe skill context error"
+    );
     // Collapse bundle-source internals into the public-safe context error taxonomy:
     // unavailable, parse/policy failure, budget exhaustion, or internal bug.
     match error {

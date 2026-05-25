@@ -51,10 +51,11 @@ use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextMessage, ContextMessages,
     ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest, LoadContextMessagesRequest,
-    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
-    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
-    SessionThreadService, SummaryArtifact, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
-    ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
+    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
+    ProviderToolCallReferenceEnvelope, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
+    SessionThreadError, SessionThreadRecord, SessionThreadService, SummaryArtifact, ThreadHistory,
+    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
+    ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
 };
 
 /// Bound on the CAS retry loop. Mirrors the run-state / authorization
@@ -70,6 +71,29 @@ struct StoredThreadRecord {
     #[serde(flatten)]
     record: SessionThreadRecord,
     next_sequence: u64,
+}
+
+/// On-disk transcript message record.
+///
+/// `ThreadMessageRecord` deliberately skips provider replay metadata when it is
+/// serialized for product-facing transcript surfaces. The filesystem service is
+/// the private backend for model context, so it stores that metadata explicitly
+/// while history reads continue to scrub it before returning records.
+#[derive(Serialize)]
+struct StoredThreadMessageRecord<'a> {
+    #[serde(flatten)]
+    record: &'a ThreadMessageRecord,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_result_provider_call: &'a Option<ProviderToolCallReferenceEnvelope>,
+}
+
+impl<'a> From<&'a ThreadMessageRecord> for StoredThreadMessageRecord<'a> {
+    fn from(record: &'a ThreadMessageRecord) -> Self {
+        Self {
+            record,
+            tool_result_provider_call: &record.tool_result_provider_call,
+        }
+    }
 }
 
 /// On-disk inbound idempotency record. Includes the originating scope so
@@ -118,7 +142,7 @@ where
     }
 
     fn message_entry(record: &ThreadMessageRecord) -> Result<Entry, SessionThreadError> {
-        let body = serialize_pretty(record)?;
+        let body = serialize_pretty(&StoredThreadMessageRecord::from(record))?;
         Ok(Entry::bytes(body).with_content_type(ContentType::json()))
     }
 

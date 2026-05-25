@@ -55,6 +55,7 @@ mod obligations;
 mod planner;
 mod process_port;
 mod production;
+mod sandbox_process;
 mod services;
 mod surface;
 mod turn_scheduler;
@@ -96,6 +97,10 @@ pub use process_port::{
     RuntimeProcessPort, SandboxCommandTransport, TenantSandboxProcessPort,
 };
 pub use production::DefaultHostRuntime;
+pub use sandbox_process::{
+    RebornSandboxConfig, RebornSandboxContainerIdentity, RebornSandboxScopeKey,
+    RebornSandboxWorkspaceMode, RebornScopedSandboxCommandTransport,
+};
 pub use services::{
     HostRuntimeServices, ProductionEventStoreWiringError, ProductionWiringComponent,
     ProductionWiringConfig, ProductionWiringIssue, ProductionWiringIssueKind,
@@ -557,8 +562,10 @@ pub enum RuntimeFailureKind {
     Cancelled,
     Dispatcher,
     InvalidInput,
+    InvalidOutput,
     MissingRuntime,
     Network,
+    OperationFailed,
     OutputTooLarge,
     Process,
     Resource,
@@ -574,8 +581,10 @@ impl RuntimeFailureKind {
             Self::Cancelled => "cancelled",
             Self::Dispatcher => "dispatcher",
             Self::InvalidInput => "invalid_input",
+            Self::InvalidOutput => "invalid_output",
             Self::MissingRuntime => "missing_runtime",
             Self::Network => "network",
+            Self::OperationFailed => "operation_failed",
             Self::OutputTooLarge => "output_too_large",
             Self::Process => "process",
             Self::Resource => "resource",

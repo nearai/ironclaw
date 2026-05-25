@@ -1,9 +1,10 @@
 use chrono::Utc;
-use ironclaw_host_api::ThreadId;
+use ironclaw_host_api::{CapabilityId, ExtensionId, InvocationId, RuntimeKind, ThreadId};
 use ironclaw_product_workflow::{
-    AuthPromptView, FinalReplyView, GatePromptView, ProductOutboundPayload, ProductProjectionItem,
-    ProductProjectionState, ProgressKind, ProgressUpdateView, ProjectionCursor,
-    RebornCancelRunResponse, RebornGetRunStateResponse, RebornSubmitTurnResponse,
+    AuthPromptView, CapabilityActivityStatusView, CapabilityActivityView, FinalReplyView,
+    GatePromptView, ProductOutboundPayload, ProductProjectionItem, ProductProjectionState,
+    ProgressKind, ProgressUpdateView, ProjectionCursor, RebornCancelRunResponse,
+    RebornGetRunStateResponse, RebornSubmitTurnResponse,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, EventCursor, RunProfileId, RunProfileVersion, SanitizedFailure, TurnRunId,
@@ -25,6 +26,21 @@ fn progress(kind: ProgressKind) -> ProgressUpdateView {
         turn_run_id: run_id(),
         kind,
         generated_at: Utc::now(),
+    }
+}
+
+fn capability_activity() -> CapabilityActivityView {
+    CapabilityActivityView {
+        invocation_id: InvocationId::new(),
+        thread_id: Some(ThreadId::new("thread-alpha").expect("thread")),
+        capability_id: CapabilityId::new("script.echo").expect("capability"),
+        status: CapabilityActivityStatusView::Running,
+        provider: Some(ExtensionId::new("script").expect("provider")),
+        runtime: Some(RuntimeKind::Script),
+        process_id: None,
+        output_bytes: None,
+        error_kind: None,
+        updated_at: Utc::now(),
     }
 }
 
@@ -131,6 +147,12 @@ fn webchat_v2_event_schema_has_stable_wire_names() {
             "capability_progress",
         ),
         (
+            WebChatV2Event::CapabilityActivity {
+                activity: capability_activity(),
+            },
+            "capability_activity",
+        ),
+        (
             WebChatV2Event::Gate {
                 prompt: gate_prompt(),
             },
@@ -202,6 +224,10 @@ fn outbound_payload_mapping_covers_every_browser_event_variant() {
         (
             ProductOutboundPayload::Progress(progress(ProgressKind::ToolRunning)),
             "capability_progress",
+        ),
+        (
+            ProductOutboundPayload::CapabilityActivity(capability_activity()),
+            "capability_activity",
         ),
         (ProductOutboundPayload::GatePrompt(gate_prompt()), "gate"),
         (
