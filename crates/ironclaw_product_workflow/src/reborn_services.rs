@@ -20,9 +20,9 @@ use ironclaw_threads::{
     ThreadHistoryRequest, ThreadMessageId, ThreadScope,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, GateRef, GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef,
-    ResumeTurnRequest, SanitizedCancelReason, SourceBindingRef, SubmitTurnRequest,
-    SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnScope,
+    AcceptedMessageRef, GateRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
+    ResumeTurnRequest, SanitizedCancelReason, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
+    TurnCoordinator, TurnError, TurnRunId, TurnScope,
 };
 use uuid::Uuid;
 
@@ -31,6 +31,10 @@ use crate::{
     WebUiInboundCommand, WebUiInboundValidationCode, WebUiInboundValidationError,
     WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
     WebUiSetupExtensionRequest,
+    binding_ref::{
+        DEFAULT_BINDING_REF_RAW_MAX_BYTES, bounded_reply_target_binding_ref,
+        bounded_source_binding_ref,
+    },
 };
 
 mod error;
@@ -364,9 +368,11 @@ impl RebornServicesApi for RebornServices {
 
         let accepted_message_ref = accepted_message_ref(handoff.message_id.to_string())?;
         let source_binding_ref =
-            bounded_ref::<SourceBindingRef>("webui-src", &handoff.source_binding_id)?;
-        let reply_target_binding_ref =
-            bounded_ref::<ReplyTargetBindingRef>("webui-reply", &handoff.reply_target_binding_id)?;
+            webui_source_binding_ref_from_raw("webui-src", &handoff.source_binding_id)?;
+        let reply_target_binding_ref = webui_reply_target_binding_ref_from_raw(
+            "webui-reply",
+            &handoff.reply_target_binding_id,
+        )?;
         let submit = SubmitTurnRequest {
             scope: scope.clone(),
             actor,
@@ -568,11 +574,12 @@ impl RebornServicesApi for RebornServices {
                         actor,
                         run_id,
                         gate_resolution_ref: gate_ref,
-                        source_binding_ref: bounded_ref::<SourceBindingRef>(
+                        precondition: ResumeTurnPrecondition::AnyBlockedGate,
+                        source_binding_ref: webui_source_binding_ref_from_raw(
                             "webui-gate-src",
                             &binding_id,
                         )?,
-                        reply_target_binding_ref: bounded_ref::<ReplyTargetBindingRef>(
+                        reply_target_binding_ref: webui_reply_target_binding_ref_from_raw(
                             "webui-gate-reply",
                             &binding_id,
                         )?,
@@ -990,30 +997,20 @@ fn parse_replay_run_id(value: Option<String>) -> Result<TurnRunId, RebornService
         })
 }
 
-trait RefFactory: Sized {
-    fn build(value: String) -> Result<Self, String>;
+fn webui_source_binding_ref_from_raw(
+    prefix: &str,
+    raw: &str,
+) -> Result<ironclaw_turns::SourceBindingRef, RebornServicesError> {
+    bounded_source_binding_ref(prefix, raw, DEFAULT_BINDING_REF_RAW_MAX_BYTES).map_err(|_| {
+        RebornServicesError::from_status(RebornServicesErrorCode::Internal, 500, false)
+    })
 }
 
-impl RefFactory for SourceBindingRef {
-    fn build(value: String) -> Result<Self, String> {
-        Self::new(value)
-    }
-}
-
-impl RefFactory for ReplyTargetBindingRef {
-    fn build(value: String) -> Result<Self, String> {
-        Self::new(value)
-    }
-}
-
-fn bounded_ref<T: RefFactory>(prefix: &str, raw: &str) -> Result<T, RebornServicesError> {
-    let value = if raw.len() <= 240 && !raw.chars().any(|c| c == '\0' || c.is_control()) {
-        format!("{prefix}:{raw}")
-    } else {
-        let id = Uuid::new_v5(&Uuid::NAMESPACE_OID, raw.as_bytes());
-        format!("{prefix}:{id}")
-    };
-    T::build(value).map_err(|_| {
+fn webui_reply_target_binding_ref_from_raw(
+    prefix: &str,
+    raw: &str,
+) -> Result<ironclaw_turns::ReplyTargetBindingRef, RebornServicesError> {
+    bounded_reply_target_binding_ref(prefix, raw, DEFAULT_BINDING_REF_RAW_MAX_BYTES).map_err(|_| {
         RebornServicesError::from_status(RebornServicesErrorCode::Internal, 500, false)
     })
 }

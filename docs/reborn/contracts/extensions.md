@@ -114,7 +114,6 @@ default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/echo/say.input.v1.json"
 output_schema_ref = "schemas/echo/say.output.v1.json"
-prompt_doc_ref = "prompts/echo/say.md"
 ```
 
 Legacy host-bundled script/CLI manifest:
@@ -142,7 +141,6 @@ default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/project-tools/pytest.input.v1.json"
 output_schema_ref = "schemas/project-tools/pytest.output.v1.json"
-prompt_doc_ref = "prompts/project-tools/pytest.md"
 ```
 
 Legacy host-bundled MCP adapter manifest:
@@ -170,6 +168,24 @@ visibility = "model"
 input_schema_ref = "schemas/github-mcp/search_issues.input.v1.json"
 output_schema_ref = "schemas/github-mcp/search_issues.output.v1.json"
 prompt_doc_ref = "prompts/github-mcp/search_issues.md"
+```
+
+Host-mediated runtime credential manifest excerpt:
+
+```toml
+[[capability_provider.tools.capabilities]]
+id = "github.search_issues"
+description = "Search GitHub issues and pull requests."
+effects = ["network", "use_secret"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/search_issues.input.v1.json"
+output_schema_ref = "schemas/github/search_issues.output.v1.json"
+prompt_doc_ref = "prompts/github/search_issues.md"
+required_host_ports = ["host.runtime.http_egress"]
+runtime_credentials = [
+  { handle = "github_token", audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
 ```
 
 ### Host API contracts
@@ -217,8 +233,8 @@ Rules:
 - `ironclaw_extensions` parses the envelope, validates host API refs, and dispatches to a composition-wired host API contract registry.
 - Domain contract handlers own section pattern validation, cardinality, typed section schema validation, and catalog/read-model projection.
 - Domain contract handlers must not treat manifest `trust` / `descriptor_trust_default` as effective runtime authority. Effective trust and grants come from composition-owned trust policy evaluation, not self-declared manifest metadata.
-- Model-visible capability-provider sections must carry enough cold metadata to project an LLM-facing tool descriptor: stable capability ID, human description, input schema ref, output schema ref, prompt docs ref, effects, permission default, and visibility.
-- The LLM consumes the projected hot capability surface, not the raw manifest section. Catalog publication resolves schema/doc refs into compact per-turn tool descriptors.
+- Model-visible capability-provider sections must carry enough cold metadata to project an LLM-facing tool descriptor: stable capability ID, human description, input schema ref, output schema ref, effects, permission default, and visibility. `prompt_doc_ref` is optional lazy help metadata, not part of the mandatory per-turn surface.
+- The LLM consumes the projected hot capability surface, not the raw manifest section. Catalog publication resolves schema refs into compact per-turn tool descriptors and resolves `prompt_doc_ref` only when one is declared.
 - Unknown `host_api.id` values fail closed.
 - Repeating the same `host_api.id` is allowed only when that contract declares multi-instance support.
 - Every `[[host_api]]` must reference an existing explicit `section` path.
@@ -274,9 +290,14 @@ Rules:
   `descriptor_trust_default`, not from effective runtime trust.
 - effects must parse as `EffectKind`.
 - default permission must parse as `PermissionMode`.
+- `runtime_credentials` declares host-owned credential injection metadata for
+  runtime HTTP egress. Each entry names a secret handle, HTTPS-only audience
+  `NetworkTargetPattern`, injection target (`header` or `query_param`), and
+  optional `required` flag. The field is only valid when the capability declares
+  `use_secret`; duplicate handles within one capability are invalid. The
+  manifest never contains raw secret material.
 - top-level legacy capabilities must provide `input_schema_ref` and
-  `output_schema_ref`; model-visible capabilities must also provide
-  `prompt_doc_ref`.
+  `output_schema_ref`; `prompt_doc_ref` is optional lazy help metadata.
 - during this cutover, `CapabilityDescriptor.parameters_schema` is a projection
   placeholder of the form `{ "$ref": input_schema_ref }`. Catalog publication is
   responsible for resolving schema/doc refs into hot per-turn tool descriptors.

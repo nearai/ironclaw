@@ -25,7 +25,11 @@
 #![forbid(unsafe_code)]
 
 mod action;
+mod auth_continuation;
 mod binding;
+mod binding_ref;
+mod command_dispatch;
+mod commands;
 mod conversation_binding;
 mod error;
 #[cfg(any(test, feature = "test-support"))]
@@ -42,15 +46,25 @@ pub use action::{
     ActionDispatchKind, ActionFingerprintKey, ActionPhase, AuthRequestRef, LinkedThreadActionId,
     ProductActionId, ProductCommandName, ProductInboundAction, SourceBindingKey,
 };
+/// Concrete turn-gate resume dispatcher used by the Reborn composition crate to
+/// bridge product-auth continuations into the workflow-owned turn boundary.
+pub use auth_continuation::ProductAuthTurnGateResumeDispatcher;
 pub use binding::{
     ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
     ResolvedBinding,
+};
+pub use command_dispatch::{
+    ProductCommandAdmission, ProductCommandAdmissionService, ProductCommandContext,
+    ProductCommandService, RejectingProductCommandAdmissionService, RejectingProductCommandService,
+};
+pub use commands::{
+    ProductCommand, ProductCommandDescriptor, ProductModelCommand, product_command_descriptors,
 };
 pub use conversation_binding::{
     ProductConversationBindingService, ProductInstallationKey, ProductInstallationScope,
     StaticProductInstallationResolver,
 };
-pub use error::ProductWorkflowError;
+pub use error::{AuthContinuationRejectionKind, ProductWorkflowError};
 #[cfg(any(test, feature = "test-support"))]
 pub use fakes::{
     FakeBeforeInboundPolicy, FakeConversationBindingService, FakeIdempotencyLedger,

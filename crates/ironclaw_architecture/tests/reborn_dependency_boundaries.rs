@@ -1317,6 +1317,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_reborn_config",
                 "ironclaw_reborn_event_store",
                 "ironclaw_first_party_extensions",
+                "ironclaw_first_party_extension_ports",
                 "ironclaw_resources",
                 "ironclaw_run_state",
                 "ironclaw_runtime_policy",
@@ -1373,10 +1374,55 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             ],
         },
         BoundaryRule {
-            // First-party extensions are userland packages. They may
-            // consume scoped storage and loop-facing DTO adapters, but must not
-            // receive ambient runtime authority or lower substrate handles.
+            // First-party extensions are userland implementation packages.
+            // They may consume scoped storage and pure safety helpers, but
+            // must not receive ambient runtime authority or loop-facing
+            // runtime handles.
             crate_name: "ironclaw_first_party_extensions",
+            forbidden: vec![
+                "ironclaw",
+                "ironclaw_approvals",
+                "ironclaw_authorization",
+                "ironclaw_capabilities",
+                "ironclaw_conversations",
+                "ironclaw_dispatcher",
+                "ironclaw_engine",
+                "ironclaw_events",
+                "ironclaw_extensions",
+                "ironclaw_first_party_extension_ports",
+                "ironclaw_gateway",
+                "ironclaw_host_runtime",
+                "ironclaw_llm",
+                "ironclaw_loop_support",
+                "ironclaw_mcp",
+                "ironclaw_memory",
+                "ironclaw_network",
+                "ironclaw_outbound",
+                "ironclaw_processes",
+                "ironclaw_product_adapters",
+                "ironclaw_product_workflow",
+                "ironclaw_product_adapter_registry",
+                "ironclaw_reborn",
+                "ironclaw_reborn_composition",
+                "ironclaw_reborn_config",
+                "ironclaw_reborn_event_store",
+                "ironclaw_resources",
+                "ironclaw_run_state",
+                "ironclaw_runtime_policy",
+                "ironclaw_scripts",
+                "ironclaw_secrets",
+                "ironclaw_threads",
+                "ironclaw_tui",
+                "ironclaw_wasm",
+                "ironclaw_wasm_product_adapters",
+            ],
+        },
+        BoundaryRule {
+            // First-party extension ports are adapter glue above concrete
+            // userland implementations. They may depend on loop/turn-facing
+            // contracts, but must not reach into host runtime authority or
+            // product composition.
+            crate_name: "ironclaw_first_party_extension_ports",
             forbidden: vec![
                 "ironclaw",
                 "ironclaw_approvals",
@@ -1408,7 +1454,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_safety",
                 "ironclaw_scripts",
                 "ironclaw_secrets",
-                "ironclaw_threads",
                 "ironclaw_tui",
                 "ironclaw_wasm",
                 "ironclaw_wasm_product_adapters",
@@ -1618,6 +1663,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_dispatcher",
                 "ironclaw_events",
                 "ironclaw_first_party_extensions",
+                "ironclaw_first_party_extension_ports",
                 "ironclaw_host_runtime",
                 "ironclaw_secrets",
                 "ironclaw_network",
@@ -1904,7 +1950,9 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_processes",
                 "ironclaw_resources",
                 "ironclaw_run_state",
-                "ironclaw_safety",
+                // ironclaw_safety is permitted: thread/transcript storage
+                // validates provider-originated replay metadata before it can
+                // be persisted or exposed back to a model-visible context.
                 "ironclaw_scripts",
                 "ironclaw_secrets",
                 "ironclaw_skills",

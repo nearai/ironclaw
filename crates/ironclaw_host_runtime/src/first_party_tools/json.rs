@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 
 use crate::FirstPartyCapabilityError;
 
-use super::{first_party_capability_manifest, guest_error, input_error, resource_profile};
+use super::{first_party_capability_manifest, input_error, operation_error, resource_profile};
 
 pub const JSON_CAPABILITY_ID: &str = "builtin.json";
 
@@ -41,7 +41,7 @@ pub(super) fn dispatch(input: &Value) -> Result<Value, FirstPartyCapabilityError
             };
             serde_json::to_string_pretty(&value)
                 .map(Value::String)
-                .map_err(|_| guest_error())
+                .map_err(|_| operation_error())
         }
         "query" => {
             let data = input.get("data").ok_or_else(input_error)?;

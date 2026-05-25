@@ -59,6 +59,7 @@ mod sandbox_process;
 mod services;
 mod surface;
 mod turn_scheduler;
+mod wasm_credentials;
 
 pub use capability_catalog::{
     HotCapabilityCatalog, HotCapabilityRecord, MAX_HOT_PROMPT_BYTES, MAX_HOT_SCHEMA_BYTES,
@@ -77,6 +78,7 @@ pub use first_party_tools::{
     APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, BuiltinFirstPartyTools,
     ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID,
     JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
+    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
     TIME_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
     builtin_first_party_package,
 };
@@ -100,8 +102,9 @@ pub use sandbox_process::{
     RebornSandboxWorkspaceMode, RebornScopedSandboxCommandTransport,
 };
 pub use services::{
-    HostRuntimeServices, ProductionWiringComponent, ProductionWiringConfig, ProductionWiringIssue,
-    ProductionWiringIssueKind, ProductionWiringReport, RegisteredRuntimeHealth,
+    HostRuntimeServices, ProductionEventStoreWiringError, ProductionWiringComponent,
+    ProductionWiringConfig, ProductionWiringIssue, ProductionWiringIssueKind,
+    ProductionWiringReport, RegisteredRuntimeHealth,
 };
 pub use surface::{CapabilitySurfacePolicy, VisibleCapability, VisibleCapabilityAccess};
 pub use turn_scheduler::{
@@ -559,8 +562,10 @@ pub enum RuntimeFailureKind {
     Cancelled,
     Dispatcher,
     InvalidInput,
+    InvalidOutput,
     MissingRuntime,
     Network,
+    OperationFailed,
     OutputTooLarge,
     Process,
     Resource,
@@ -576,8 +581,10 @@ impl RuntimeFailureKind {
             Self::Cancelled => "cancelled",
             Self::Dispatcher => "dispatcher",
             Self::InvalidInput => "invalid_input",
+            Self::InvalidOutput => "invalid_output",
             Self::MissingRuntime => "missing_runtime",
             Self::Network => "network",
+            Self::OperationFailed => "operation_failed",
             Self::OutputTooLarge => "output_too_large",
             Self::Process => "process",
             Self::Resource => "resource",
@@ -1090,21 +1097,23 @@ fn lease_secret_for_injection<S>(
 where
     S: SecretStore,
 {
-    let metadata = block_on_secret(secrets.metadata(&request.scope, &injection.handle))?;
-    if metadata.is_none() {
-        if injection.required {
-            return Err(RuntimeHttpEgressError::Credential {
-                reason: "required credential is unavailable".to_string(),
-            });
+    block_on_secret_store(async {
+        let metadata = secrets.metadata(&request.scope, &injection.handle).await?;
+        if metadata.is_none() {
+            return Ok(None);
         }
-        return Ok(None);
-    }
-    let lease = block_on_secret(secrets.lease_once(&request.scope, &injection.handle))?;
-    let material = block_on_secret(secrets.consume(&request.scope, lease.id))?;
-    Ok(Some(material))
+        let lease = secrets
+            .lease_once(&request.scope, &injection.handle)
+            .await?;
+        secrets.consume(&request.scope, lease.id).await.map(Some)
+    })?
+    .map_or_else(
+        || missing_runtime_credential(injection.required),
+        |material| Ok(Some(material)),
+    )
 }
 
-fn block_on_secret<T>(
+fn block_on_secret_store<T>(
     future: impl std::future::Future<Output = Result<T, SecretStoreError>> + Send,
 ) -> Result<T, RuntimeHttpEgressError>
 where
@@ -1155,13 +1164,13 @@ fn apply_credential_injection(
     target: &RuntimeCredentialTarget,
     value: &str,
 ) -> Result<(), RuntimeHttpEgressError> {
+    target
+        .validate_declaration()
+        .map_err(|_| RuntimeHttpEgressError::Credential {
+            reason: "credential injection target is invalid".to_string(),
+        })?;
     match target {
         RuntimeCredentialTarget::Header { name, prefix } => {
-            if !valid_injected_header_name(name) {
-                return Err(RuntimeHttpEgressError::Credential {
-                    reason: "credential injection header name is invalid".to_string(),
-                });
-            }
             let injected = match prefix {
                 Some(prefix) => format!("{prefix}{value}"),
                 None => value.to_string(),
@@ -1183,30 +1192,6 @@ fn apply_credential_injection(
         }
     }
     Ok(())
-}
-
-fn valid_injected_header_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric()
-                || matches!(
-                    byte,
-                    b'!' | b'#'
-                        | b'$'
-                        | b'%'
-                        | b'&'
-                        | b'\''
-                        | b'*'
-                        | b'+'
-                        | b'-'
-                        | b'.'
-                        | b'^'
-                        | b'_'
-                        | b'`'
-                        | b'|'
-                        | b'~'
-                )
-        })
 }
 
 fn runtime_network_error(error: NetworkHttpError) -> RuntimeHttpEgressError {

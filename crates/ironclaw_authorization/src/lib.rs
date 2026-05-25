@@ -1154,7 +1154,20 @@ fn obligations_for_grant(
         });
     }
 
-    if descriptor.effects.contains(&EffectKind::UseSecret) {
+    if !descriptor.runtime_credentials.is_empty() {
+        if !descriptor.effects.contains(&EffectKind::UseSecret) {
+            return None;
+        }
+        for credential in &descriptor.runtime_credentials {
+            if grant.constraints.secrets.contains(&credential.handle) {
+                obligations.push(Obligation::InjectSecretOnce {
+                    handle: credential.handle.clone(),
+                });
+            } else if credential.required {
+                return None;
+            }
+        }
+    } else if descriptor.effects.contains(&EffectKind::UseSecret) {
         match grant.constraints.secrets.as_slice() {
             [handle] => obligations.push(Obligation::InjectSecretOnce {
                 handle: handle.clone(),

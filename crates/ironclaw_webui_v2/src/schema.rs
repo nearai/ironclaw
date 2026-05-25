@@ -117,6 +117,7 @@ impl From<ProductOutboundPayload> for WebChatV2Event {
                 Self::ProjectionSnapshot { state }
             }
             ProductOutboundPayload::ProjectionUpdate { state } => Self::ProjectionUpdate { state },
+            ProductOutboundPayload::KeepAlive => Self::KeepAlive,
         }
     }
 }

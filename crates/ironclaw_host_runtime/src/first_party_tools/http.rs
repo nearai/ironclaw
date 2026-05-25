@@ -4,6 +4,7 @@ use ironclaw_host_api::{
     EffectKind, NetworkMethod, NetworkPolicy, PermissionMode, ResourceCeiling, ResourceEstimate,
     ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind, RuntimeHttpEgressError,
     RuntimeHttpEgressReasonCode, RuntimeHttpEgressRequest, RuntimeKind, SandboxQuota,
+    valid_http_field_name,
 };
 use serde_json::{Map, Value, json};
 
@@ -180,7 +181,7 @@ fn headers(input: &Value) -> Result<Vec<(String, String)>, FirstPartyCapabilityE
 }
 
 fn header_pair(name: &str, value: &str) -> Result<(String, String), FirstPartyCapabilityError> {
-    if !valid_header_name(name)
+    if !valid_http_field_name(name)
         || name.len() > MAX_HTTP_HEADER_NAME_BYTES
         || value.len() > MAX_HTTP_HEADER_VALUE_BYTES
         || value
@@ -190,33 +191,6 @@ fn header_pair(name: &str, value: &str) -> Result<(String, String), FirstPartyCa
         return Err(input_error());
     }
     Ok((name.to_string(), value.to_string()))
-}
-
-fn valid_header_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.bytes().all(|byte| {
-            matches!(
-                byte,
-                b'0'..=b'9'
-                    | b'A'..=b'Z'
-                    | b'a'..=b'z'
-                    | b'!'
-                    | b'#'
-                    | b'$'
-                    | b'%'
-                    | b'&'
-                    | b'\''
-                    | b'*'
-                    | b'+'
-                    | b'-'
-                    | b'.'
-                    | b'^'
-                    | b'_'
-                    | b'`'
-                    | b'|'
-                    | b'~'
-            )
-        })
 }
 
 fn body(input: &Value) -> Result<Vec<u8>, FirstPartyCapabilityError> {
@@ -316,7 +290,7 @@ fn http_error(error: RuntimeHttpEgressError) -> FirstPartyCapabilityError {
         RuntimeHttpEgressReasonCode::CredentialUnavailable => RuntimeDispatchErrorKind::Client,
         RuntimeHttpEgressReasonCode::RequestDenied => RuntimeDispatchErrorKind::InputEncode,
         RuntimeHttpEgressReasonCode::NetworkError => RuntimeDispatchErrorKind::NetworkDenied,
-        RuntimeHttpEgressReasonCode::ResponseError => RuntimeDispatchErrorKind::OutputDecode,
+        RuntimeHttpEgressReasonCode::ResponseError => RuntimeDispatchErrorKind::OperationFailed,
         RuntimeHttpEgressReasonCode::ResponseBodyLimitExceeded => {
             RuntimeDispatchErrorKind::OutputTooLarge
         }

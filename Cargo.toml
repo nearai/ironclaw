@@ -22,6 +22,22 @@ exclude = [
     "crates/ironclaw_safety/fuzz",
 ]
 
+# Maintainability guardrails against dead/speculative public API
+# (the "Theme 1" anti-pattern from the maintainability audit: accessors,
+# `_dyn` variants, and getters with zero callers that needlessly expand the
+# stable surface). These are `warn`, not `deny`, and are *opted into*
+# per-crate via `[lints] workspace = true` so they do not flood the build
+# with pre-existing noise across the whole workspace. Currently scoped to the
+# hook/reborn crates.
+#
+# - `unreachable_pub`: flags `pub` items that are not reachable outside their
+#   crate — the classic "this should be `pub(crate)`" smell.
+# - `dead_code`: warn on never-used items (this is the rustc default, declared
+#   here so it survives any future `#![allow(dead_code)]` creep at the crate root).
+[workspace.lints.rust]
+unreachable_pub = "warn"
+dead_code = "warn"
+
 [package]
 name = "ironclaw"
 version = "0.28.0"
@@ -252,6 +268,7 @@ ironclaw_host_runtime = { path = "crates/ironclaw_host_runtime", version = "0.1.
 ironclaw_network = { path = "crates/ironclaw_network", version = "0.1.0" }
 ironclaw_processes = { path = "crates/ironclaw_processes", version = "0.1.0" }
 ironclaw_resources = { path = "crates/ironclaw_resources", version = "0.1.0" }
+ironclaw_secrets = { path = "crates/ironclaw_secrets", version = "0.1.0" }
 ironclaw_product_adapters = { path = "crates/ironclaw_product_adapters", version = "0.1.0", features = ["test-support"] }
 ironclaw_product_workflow = { path = "crates/ironclaw_product_workflow", version = "0.1.0", features = ["test-support"] }
 ironclaw_reborn = { path = "crates/ironclaw_reborn", version = "0.1.0" }

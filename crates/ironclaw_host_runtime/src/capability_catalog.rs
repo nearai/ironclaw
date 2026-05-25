@@ -36,7 +36,7 @@ pub struct HotCapabilityRecord {
     pub descriptor: CapabilityDescriptor,
     /// Resolved output schema retained adjacent to the descriptor.
     pub output_schema: Value,
-    /// Resolved prompt document. Required for model-visible capabilities.
+    /// Optional lazy help document. Not part of the always-visible model surface.
     pub prompt_doc: Option<String>,
 }
 
@@ -101,12 +101,6 @@ where
         .await?;
         let prompt_doc = match &declaration.prompt_doc_ref {
             Some(prompt_ref) => Some(read_text_ref(fs, &package.root, prompt_ref).await?),
-            None if declaration.visibility == CapabilityVisibility::Model => {
-                return Err(HostRuntimeError::invalid_request(format!(
-                    "model-visible capability {} is missing prompt_doc_ref",
-                    declaration.id
-                )));
-            }
             None => None,
         };
 

@@ -96,6 +96,9 @@ pub(crate) enum CapabilityErrorClass {
     Permanent,
     /// Host rejected malformed capability input.
     InputInvalid,
+    /// Capability implementation ran but could not complete the requested
+    /// operation in a model-visible way.
+    OperationFailed,
     /// Host policy denied the capability call.
     PolicyDenied,
     /// Capability provider or backing service is unavailable.
@@ -135,7 +138,8 @@ pub(crate) enum ModelErrorClass {
 /// - `Retry` — re-issue (the executor decides whether call-level or
 ///   iteration-level retry from `scope`; `alter` carries the strategy's
 ///   prompt/model hint).
-/// - `SkipResult` — drop this result and continue the batch.
+/// - `ToolErrorResult` — append a model-visible tool error result and continue
+///   the capability batch.
 /// - `Abort` — return `LoopExit::Failed { reason_kind: failure_kind }`.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -146,7 +150,7 @@ pub(crate) enum RecoveryOutcome {
         scope: RetryScope,
         alter: Option<RetryAlteration>,
     },
-    SkipResult {
+    ToolErrorResult {
         recovery: RecoveryStrategyState,
     },
     Abort {
@@ -170,9 +174,9 @@ pub(crate) enum RetryScope {
 /// exponential backoff.
 ///
 /// This strategy:
-/// - Skips `PolicyDenied` so the model can try another authorized tool without
-///   consuming retry budget.
-/// - Aborts immediately on `Permanent`, `InputInvalid`, and `ContentFiltered`.
+/// - Turns `PolicyDenied`, `InputInvalid`, and `OperationFailed` into
+///   model-visible tool error results without consuming retry budget.
+/// - Aborts immediately on `Permanent` and `ContentFiltered`.
 /// - Retries capability/model transient, unavailable, and internal errors up
 ///   to [`Self::max_attempts_per_class`] times with `Backoff`.
 /// - Retries `ContextOverflow` at iteration scope with `ShrinkContext`.
@@ -199,15 +203,15 @@ impl RecoveryStrategy for DefaultRecoveryStrategy {
     ) -> RecoveryOutcome {
         let kind = capability_error_to_failure_kind(err.class);
         match err.class {
-            CapabilityErrorClass::PolicyDenied => RecoveryOutcome::SkipResult {
-                recovery: state.recovery_state.cleared_attempts(),
-            },
-            CapabilityErrorClass::Permanent | CapabilityErrorClass::InputInvalid => {
-                RecoveryOutcome::Abort {
+            class if capability_error_is_model_visible_tool_failure(class) => {
+                RecoveryOutcome::ToolErrorResult {
                     recovery: state.recovery_state.cleared_attempts(),
-                    failure_kind: kind,
                 }
             }
+            CapabilityErrorClass::Permanent => RecoveryOutcome::Abort {
+                recovery: state.recovery_state.cleared_attempts(),
+                failure_kind: kind,
+            },
             CapabilityErrorClass::Transient
             | CapabilityErrorClass::Unavailable
             | CapabilityErrorClass::Internal => {
@@ -230,6 +234,10 @@ impl RecoveryStrategy for DefaultRecoveryStrategy {
                     },
                 )
             }
+            _ => RecoveryOutcome::Abort {
+                recovery: state.recovery_state.cleared_attempts(),
+                failure_kind: LoopFailureKind::DriverBug,
+            },
         }
     }
 
@@ -286,6 +294,15 @@ impl RecoveryStrategy for DefaultRecoveryStrategy {
     }
 }
 
+fn capability_error_is_model_visible_tool_failure(class: CapabilityErrorClass) -> bool {
+    matches!(
+        class,
+        CapabilityErrorClass::PolicyDenied
+            | CapabilityErrorClass::InputInvalid
+            | CapabilityErrorClass::OperationFailed
+    )
+}
+
 fn retry_or_abort(
     state: &LoopExecutionState,
     attempt_class: RecoveryAttemptClass,
@@ -319,6 +336,7 @@ fn capability_retry_attempt_class(class: CapabilityErrorClass) -> Option<Recover
         CapabilityErrorClass::Internal => Some(RecoveryAttemptClass::CapabilityInternal),
         CapabilityErrorClass::Permanent
         | CapabilityErrorClass::InputInvalid
+        | CapabilityErrorClass::OperationFailed
         | CapabilityErrorClass::PolicyDenied => None,
     }
 }
@@ -341,6 +359,7 @@ fn capability_error_to_failure_kind(class: CapabilityErrorClass) -> LoopFailureK
         CapabilityErrorClass::Transient
         | CapabilityErrorClass::Permanent
         | CapabilityErrorClass::InputInvalid
+        | CapabilityErrorClass::OperationFailed
         | CapabilityErrorClass::Unavailable
         | CapabilityErrorClass::Internal => LoopFailureKind::CapabilityProtocolError,
     }
@@ -476,6 +495,7 @@ mod tests {
             (CapabilityErrorClass::Transient, "transient"),
             (CapabilityErrorClass::Permanent, "permanent"),
             (CapabilityErrorClass::InputInvalid, "input_invalid"),
+            (CapabilityErrorClass::OperationFailed, "operation_failed"),
             (CapabilityErrorClass::PolicyDenied, "policy_denied"),
             (CapabilityErrorClass::Unavailable, "unavailable"),
             (CapabilityErrorClass::Internal, "internal"),
@@ -636,15 +656,15 @@ mod tests {
     }
 
     #[test]
-    fn recovery_outcome_skip_result_carries_recovery_slot() {
-        let outcome = RecoveryOutcome::SkipResult {
+    fn recovery_outcome_tool_error_result_carries_recovery_slot() {
+        let outcome = RecoveryOutcome::ToolErrorResult {
             recovery: sample_recovery(),
         };
         let value = serde_json::to_value(&outcome).expect("serialize");
         let restored: RecoveryOutcome = serde_json::from_value(value).expect("deserialize");
         assert_eq!(restored, outcome);
         match restored {
-            RecoveryOutcome::SkipResult { recovery } => {
+            RecoveryOutcome::ToolErrorResult { recovery } => {
                 assert_eq!(recovery, sample_recovery())
             }
             other => panic!("unexpected variant: {other:?}"),
@@ -828,7 +848,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn capability_input_invalid_aborts_immediately() {
+        async fn capability_input_invalid_becomes_tool_error_result() {
             let strategy = DefaultRecoveryStrategy::default();
             let state = state_with_no_attempts();
 
@@ -836,11 +856,33 @@ mod tests {
                 .on_capability_error(&state, &cap_err(CapabilityErrorClass::InputInvalid))
                 .await;
 
-            assert!(matches!(outcome, RecoveryOutcome::Abort { .. }));
+            match outcome {
+                RecoveryOutcome::ToolErrorResult { recovery } => {
+                    assert_eq!(recovery, RecoveryStrategyState::default());
+                }
+                other => panic!("expected ToolErrorResult, got {other:?}"),
+            }
         }
 
         #[tokio::test]
-        async fn capability_policy_denied_skips_result() {
+        async fn capability_operation_failed_becomes_tool_error_result() {
+            let strategy = DefaultRecoveryStrategy::default();
+            let state = state_with_no_attempts();
+
+            let outcome = strategy
+                .on_capability_error(&state, &cap_err(CapabilityErrorClass::OperationFailed))
+                .await;
+
+            match outcome {
+                RecoveryOutcome::ToolErrorResult { recovery } => {
+                    assert_eq!(recovery, RecoveryStrategyState::default());
+                }
+                other => panic!("expected ToolErrorResult, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn capability_policy_denied_becomes_tool_error_result() {
             let strategy = DefaultRecoveryStrategy::default();
             let state = state_with_no_attempts();
 
@@ -849,10 +891,10 @@ mod tests {
                 .await;
 
             match outcome {
-                RecoveryOutcome::SkipResult { recovery } => {
+                RecoveryOutcome::ToolErrorResult { recovery } => {
                     assert_eq!(recovery, RecoveryStrategyState::default());
                 }
-                other => panic!("expected SkipResult, got {other:?}"),
+                other => panic!("expected ToolErrorResult, got {other:?}"),
             }
         }
 
@@ -1002,8 +1044,8 @@ mod tests {
             let outcome = strategy
                 .on_capability_error(&state, &cap_err(CapabilityErrorClass::PolicyDenied))
                 .await;
-            let RecoveryOutcome::SkipResult { recovery } = outcome else {
-                panic!("expected policy denied skip");
+            let RecoveryOutcome::ToolErrorResult { recovery } = outcome else {
+                panic!("expected policy denied tool error result");
             };
 
             let mut next = LoopExecutionState::initial_for_run(&test_run_context());

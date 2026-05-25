@@ -128,6 +128,8 @@ fn command_payload_is_bounded_and_serde_validated() {
     assert!(
         InboundCommandPayload::new("h".repeat(257), "", ProductTriggerReason::BotCommand).is_err()
     );
+    assert!(InboundCommandPayload::new("bad name", "", ProductTriggerReason::BotCommand).is_err());
+    assert!(InboundCommandPayload::new("bad/name", "", ProductTriggerReason::BotCommand).is_err());
     assert!(
         InboundCommandPayload::new(
             "help",

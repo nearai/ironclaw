@@ -453,6 +453,37 @@ fn auth_scope(user: &str) -> ironclaw_auth::AuthProductScope {
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
+async fn local_dev_runtime_policy_exposes_http_capability() {
+    let dir = tempfile::tempdir().unwrap();
+    let services = build_reborn_services(
+        RebornBuildInput::local_dev("test-owner", dir.path().to_path_buf())
+            .with_runtime_policy(local_only_runtime_policy()),
+    )
+    .await
+    .unwrap();
+    let runtime = services
+        .host_runtime
+        .expect("local dev exposes host runtime");
+
+    let surface = runtime
+        .visible_capabilities(local_dev_builtin_visible_request())
+        .await
+        .unwrap();
+    let visible_ids = surface
+        .capabilities
+        .iter()
+        .map(|capability| capability.descriptor.id.as_str())
+        .collect::<Vec<_>>();
+
+    assert!(visible_ids.contains(&"builtin.echo"));
+    assert!(
+        visible_ids.contains(&"builtin.http"),
+        "local-dev facade should expose host HTTP when the runtime policy allows network"
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
 async fn local_dev_runtime_policy_hides_http_capability() {
     let dir = tempfile::tempdir().unwrap();
     let services = build_reborn_services(

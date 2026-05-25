@@ -1,0 +1,58 @@
+schema_version = "reborn.extension_manifest.v2"
+id = "github"
+name = "GitHub"
+version = "0.2.5"
+description = "GitHub issue lookup and issue comment capabilities."
+trust = "first_party_requested"
+
+[runtime]
+kind = "wasm"
+module = "wasm/github_tool.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "github.search_issues"
+description = "Search GitHub issues and pull requests with the GitHub search query syntax."
+effects = ["network", "use_secret"]
+runtime_credentials = [
+  { handle = "github_token", audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/search_issues.input.v1.json"
+output_schema_ref = "schemas/github/search_issues.output.v1.json"
+prompt_doc_ref = "prompts/github/search_issues.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
+id = "github.get_issue"
+description = "Fetch one GitHub issue or pull request by repository and issue number."
+effects = ["network", "use_secret"]
+runtime_credentials = [
+  { handle = "github_token", audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/get_issue.input.v1.json"
+output_schema_ref = "schemas/github/get_issue.output.v1.json"
+prompt_doc_ref = "prompts/github/get_issue.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capability_provider.tools.capabilities]]
+id = "github.comment_issue"
+description = "Add a comment to a GitHub issue or pull request."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "github_token", audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/comment_issue.input.v1.json"
+output_schema_ref = "schemas/github/comment_issue.output.v1.json"
+prompt_doc_ref = "prompts/github/comment_issue.md"
+required_host_ports = ["host.runtime.http_egress"]

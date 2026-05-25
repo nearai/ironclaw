@@ -1538,6 +1538,7 @@ async fn turn_runner_blocks_on_approval_then_coordinator_resume_completes_same_r
             actor: TurnActor::new(UserId::new("user-text-host").unwrap()),
             run_id,
             gate_resolution_ref: gate_ref.clone(),
+            precondition: ironclaw_turns::ResumeTurnPrecondition::AnyBlockedGate,
             source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
             idempotency_key: IdempotencyKey::new("resume-approval-once").unwrap(),
@@ -5621,6 +5622,7 @@ fn capability_descriptor(id: &str) -> CapabilityDescriptor {
         parameters_schema: json!({"type": "object"}),
         effects: vec![EffectKind::DispatchCapability],
         default_permission: PermissionMode::Allow,
+        runtime_credentials: Vec::new(),
         resource_profile: None,
     }
 }
@@ -6596,6 +6598,7 @@ impl RecordingGateway {
                     surface_version: CapabilitySurfaceVersion::new("empty:v1").unwrap(),
                     capability_id: CapabilityId::new("demo.echo").unwrap(),
                     input_ref: CapabilityInputRef::new("input:opaque-tool-call").unwrap(),
+                    effective_capability_ids: vec![CapabilityId::new("demo.echo").unwrap()],
                     provider_replay: None,
                 },
             ]),

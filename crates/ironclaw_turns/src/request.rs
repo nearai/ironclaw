@@ -3,10 +3,37 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AcceptedMessageRef, GateRef, IdempotencyKey, ReplyTargetBindingRef, RunProfileRequest,
-    SanitizedCancelReason, SourceBindingRef, TurnActor, TurnRunId, TurnScope,
+    SanitizedCancelReason, SourceBindingRef, TurnActor, TurnRunId, TurnScope, TurnStatus,
 };
 
 pub type TurnTimestamp = DateTime<Utc>;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResumeTurnPrecondition {
+    // Default preserves the historical WebUI resume behavior. Auth
+    // continuations opt into BlockedAuthGate explicitly.
+    #[default]
+    AnyBlockedGate,
+    BlockedApprovalGate,
+    BlockedAuthGate,
+    BlockedResourceGate,
+}
+
+impl ResumeTurnPrecondition {
+    pub fn is_default(&self) -> bool {
+        matches!(self, Self::AnyBlockedGate)
+    }
+
+    pub fn required_status(&self) -> Option<TurnStatus> {
+        match self {
+            Self::AnyBlockedGate => None,
+            Self::BlockedApprovalGate => Some(TurnStatus::BlockedApproval),
+            Self::BlockedAuthGate => Some(TurnStatus::BlockedAuth),
+            Self::BlockedResourceGate => Some(TurnStatus::BlockedResource),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubmitTurnRequest {
@@ -29,6 +56,8 @@ pub struct ResumeTurnRequest {
     pub source_binding_ref: SourceBindingRef,
     pub reply_target_binding_ref: ReplyTargetBindingRef,
     pub idempotency_key: IdempotencyKey,
+    #[serde(default, skip_serializing_if = "ResumeTurnPrecondition::is_default")]
+    pub precondition: ResumeTurnPrecondition,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

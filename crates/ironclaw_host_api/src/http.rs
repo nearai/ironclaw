@@ -8,7 +8,10 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{CapabilityId, NetworkMethod, NetworkPolicy, ResourceScope, RuntimeKind, SecretHandle};
+use crate::{
+    CapabilityId, HostApiError, NetworkMethod, NetworkPolicy, ResourceScope, RuntimeKind,
+    SecretHandle,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeHttpEgressRequest {
@@ -78,6 +81,91 @@ pub enum RuntimeCredentialTarget {
     QueryParam {
         name: String,
     },
+}
+
+pub fn valid_http_field_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
+}
+
+impl RuntimeCredentialTarget {
+    pub fn validate_declaration(&self) -> Result<(), HostApiError> {
+        match self {
+            Self::Header { name, prefix } => {
+                validate_runtime_credential_header_name(name)?;
+                if let Some(prefix) = prefix {
+                    validate_runtime_credential_fragment_no_control(
+                        "header_prefix",
+                        prefix,
+                        "must not contain NUL/control characters",
+                    )?;
+                }
+            }
+            Self::QueryParam { name } => {
+                validate_runtime_credential_fragment_non_empty_no_control(
+                    "query_param_name",
+                    name,
+                    "must not be empty or contain NUL/control characters",
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_runtime_credential_header_name(name: &str) -> Result<(), HostApiError> {
+    if !valid_http_field_name(name) {
+        return Err(HostApiError::invalid_runtime_credential_target(
+            "header_name",
+            "must be an ASCII HTTP field-name token",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_runtime_credential_fragment_non_empty_no_control(
+    value_kind: &'static str,
+    value: &str,
+    reason: &'static str,
+) -> Result<(), HostApiError> {
+    if value.trim().is_empty() || value.contains('\0') || value.chars().any(char::is_control) {
+        return Err(HostApiError::invalid_runtime_credential_target(
+            value_kind, reason,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_runtime_credential_fragment_no_control(
+    value_kind: &'static str,
+    value: &str,
+    reason: &'static str,
+) -> Result<(), HostApiError> {
+    if value.contains('\0') || value.chars().any(char::is_control) {
+        return Err(HostApiError::invalid_runtime_credential_target(
+            value_kind, reason,
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

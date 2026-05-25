@@ -219,6 +219,7 @@ pub enum ProductOutboundPayload {
     AuthPrompt(AuthPromptView),
     ProjectionSnapshot { state: ProductProjectionState },
     ProjectionUpdate { state: ProductProjectionState },
+    KeepAlive,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

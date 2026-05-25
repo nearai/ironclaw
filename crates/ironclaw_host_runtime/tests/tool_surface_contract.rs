@@ -25,7 +25,7 @@ use ironclaw_host_runtime::{
     CapabilitySurfacePolicy, CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime,
     MAX_HOT_PROMPT_BYTES, MAX_HOT_SCHEMA_BYTES, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
     RuntimeFailureKind, SurfaceKind, VisibleCapabilityAccess, VisibleCapabilityRequest,
-    VisibleCapabilitySurface, publish_hot_capability_catalog,
+    VisibleCapabilitySurface, builtin_first_party_package, publish_hot_capability_catalog,
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
@@ -195,7 +195,7 @@ async fn hot_capability_catalog_fails_closed_for_missing_prompt_doc_file() {
 }
 
 #[tokio::test]
-async fn hot_capability_catalog_fails_closed_for_model_visible_capability_without_prompt_doc_ref() {
+async fn hot_capability_catalog_allows_model_visible_capability_without_prompt_doc_ref() {
     let (_storage, fs, registry) = hot_catalog_fixture_with_manifest(
         Some(r#"{"type":"object"}"#),
         r#"{"type":"object"}"#,
@@ -203,15 +203,12 @@ async fn hot_capability_catalog_fails_closed_for_model_visible_capability_withou
         manifest_without_prompt_doc_ref(),
     );
 
-    let err = publish_hot_capability_catalog(&fs, &registry)
+    let catalog = publish_hot_capability_catalog(&fs, &registry)
         .await
-        .unwrap_err();
+        .unwrap();
 
-    assert!(
-        matches!(err, ironclaw_host_runtime::HostRuntimeError::InvalidRequest { ref reason }
-            if reason.contains("model-visible capability echo.say is missing prompt_doc_ref")),
-        "unexpected error: {err:?}"
-    );
+    let record = catalog.get(&capability_id("echo.say")).unwrap();
+    assert!(record.prompt_doc.is_none());
 }
 
 #[tokio::test]
@@ -395,6 +392,83 @@ async fn visible_surface_uses_caller_provider_trust_not_host_trust_policy() {
         .unwrap();
 
     assert_eq!(visible_ids(&surface), vec![capability_id("echo.say")]);
+}
+
+#[tokio::test]
+async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
+    let package = builtin_first_party_package().unwrap();
+    assert!(
+        package
+            .capabilities
+            .iter()
+            .all(|descriptor| descriptor.parameters_schema.get("$ref").is_some())
+    );
+
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(package.clone()).unwrap();
+    let runtime = runtime_with(registry, Arc::new(GrantAuthorizer));
+    let context = context_with_grant_entries(
+        package
+            .capabilities
+            .iter()
+            .map(|descriptor| (descriptor.id.clone(), descriptor.effects.clone())),
+    );
+
+    let surface = runtime
+        .visible_capabilities(request_with_provider_trust(
+            context,
+            [("builtin", combined_descriptor_effects(&package))],
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(surface.capabilities.len(), package.capabilities.len());
+    for capability in &surface.capabilities {
+        jsonschema::validator_for(&capability.descriptor.parameters_schema).unwrap_or_else(
+            |error| {
+                panic!(
+                    "{} should expose a valid JSON schema: {error}",
+                    capability.descriptor.id
+                )
+            },
+        );
+        assert!(
+            capability
+                .descriptor
+                .parameters_schema
+                .get("$ref")
+                .is_none(),
+            "{} should expose a concrete input schema, got {:?}",
+            capability.descriptor.id,
+            capability.descriptor.parameters_schema
+        );
+    }
+    assert_schema_has_property(&surface, "builtin.glob", "pattern");
+    assert_schema_has_property(&surface, "builtin.grep", "pattern");
+    assert_schema_has_property(&surface, "builtin.skill_install", "content");
+    assert_schema_has_property(&surface, "builtin.skill_install", "name");
+
+    let skill_install_schema = &surface
+        .capabilities
+        .iter()
+        .find(|capability| capability.descriptor.id == capability_id("builtin.skill_install"))
+        .expect("builtin.skill_install should be visible")
+        .descriptor
+        .parameters_schema;
+    let skill_install_validator =
+        jsonschema::validator_for(skill_install_schema).expect("skill_install schema is valid");
+
+    skill_install_validator
+        .validate(&json!({
+            "content": "---\nname: pasted-skill\n---\n\nUse multiline Markdown.\n"
+        }))
+        .expect("skill_install should accept multiline SKILL.md content");
+    assert!(
+        skill_install_validator
+            .validate(&json!({"name": "pasted-skill"}))
+            .is_err(),
+        "skill_install content remains required"
+    );
 }
 
 #[tokio::test]
@@ -1280,6 +1354,39 @@ fn trust_decision_for(allowed_effects: Vec<EffectKind>) -> TrustDecision {
     }
 }
 
+fn combined_descriptor_effects(package: &ExtensionPackage) -> Vec<EffectKind> {
+    let mut effects = Vec::new();
+    for descriptor in &package.capabilities {
+        for effect in &descriptor.effects {
+            if !effects.contains(effect) {
+                effects.push(*effect);
+            }
+        }
+    }
+    effects
+}
+
+fn assert_schema_has_property(
+    surface: &VisibleCapabilitySurface,
+    capability: &str,
+    property: &str,
+) {
+    let schema = &surface
+        .capabilities
+        .iter()
+        .find(|entry| entry.descriptor.id == capability_id(capability))
+        .unwrap_or_else(|| panic!("{capability} should be visible"))
+        .descriptor
+        .parameters_schema;
+    assert!(
+        schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|properties| properties.contains_key(property)),
+        "{capability} schema should expose property {property}, got {schema:?}"
+    );
+}
+
 fn visible_ids(surface: &VisibleCapabilitySurface) -> Vec<CapabilityId> {
     surface
         .capabilities
@@ -1516,6 +1623,12 @@ fn trust_policy_for<const N: usize>(
 
 fn context_with_grants<const N: usize>(
     grants: [(CapabilityId, Vec<EffectKind>); N],
+) -> ExecutionContext {
+    context_with_grant_entries(grants)
+}
+
+fn context_with_grant_entries(
+    grants: impl IntoIterator<Item = (CapabilityId, Vec<EffectKind>)>,
 ) -> ExecutionContext {
     let grants = CapabilitySet {
         grants: grants

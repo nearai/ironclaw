@@ -7,7 +7,7 @@ use ironclaw_host_api::runtime_policy::ProcessBackendKind;
 use ironclaw_host_runtime::{SchedulerTurnRunWakeNotifier, TenantSandboxProcessPort};
 use ironclaw_trust::HostTrustPolicy;
 
-use crate::{RebornCompositionProfile, RebornProductAuthServices};
+use crate::{RebornCompositionProfile, RebornProductAuthServicePorts};
 
 #[derive(Clone, Debug, Default)]
 pub enum RebornRuntimeProcessBinding {
@@ -83,7 +83,7 @@ pub struct RebornBuildInput {
     pub(crate) required_runtime_backends: Vec<ironclaw_host_api::RuntimeKind>,
     pub(crate) require_runtime_http_egress: bool,
     pub(crate) require_wasm_credentials: bool,
-    pub(crate) product_auth_services: Option<Arc<RebornProductAuthServices>>,
+    pub(crate) product_auth_ports: Option<RebornProductAuthServicePorts>,
 }
 
 pub(crate) enum RebornStorageInput {
@@ -128,8 +128,20 @@ impl RebornBuildInput {
     }
 
     pub fn local_dev(owner_id: impl Into<String>, root: PathBuf) -> Self {
+        Self::local_dev_with_profile(RebornCompositionProfile::LocalDev, owner_id, root)
+    }
+
+    pub(crate) fn local_dev_with_profile(
+        profile: RebornCompositionProfile,
+        owner_id: impl Into<String>,
+        root: PathBuf,
+    ) -> Self {
+        debug_assert!(matches!(
+            profile,
+            RebornCompositionProfile::LocalDev | RebornCompositionProfile::LocalDevYolo
+        ));
         Self::new(
-            RebornCompositionProfile::LocalDev,
+            profile,
             owner_id,
             RebornStorageInput::LocalDev {
                 root,
@@ -234,13 +246,14 @@ impl RebornBuildInput {
         self
     }
 
-    /// Inject a Reborn-native product-auth composition bundle.
+    /// Inject Reborn-native product-auth service ports.
     ///
-    /// Production callers should provide durable implementations here once the
-    /// auth-flow and credential-account storage substrate is available. The
-    /// composition root never falls back to V1 route state or V1 secret stores.
-    pub fn with_product_auth_services(mut self, services: Arc<RebornProductAuthServices>) -> Self {
-        self.product_auth_services = Some(services);
+    /// Production callers should provide durable implementations here. The
+    /// composition root attaches the turn-continuation dispatcher after it has
+    /// composed the profile's [`ironclaw_turns::TurnCoordinator`], so OAuth
+    /// continuations cannot accidentally bypass the active coordinator.
+    pub fn with_product_auth_ports(mut self, ports: RebornProductAuthServicePorts) -> Self {
+        self.product_auth_ports = Some(ports);
         self
     }
 
@@ -260,7 +273,7 @@ impl RebornBuildInput {
             required_runtime_backends: Vec::new(),
             require_runtime_http_egress: false,
             require_wasm_credentials: false,
-            product_auth_services: None,
+            product_auth_ports: None,
         }
     }
 }
@@ -274,20 +287,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn with_product_auth_services_records_injected_bundle() {
-        let product_auth = Arc::new(RebornProductAuthServices::from_shared(Arc::new(
+    fn with_product_auth_ports_records_injected_ports() {
+        let product_auth = RebornProductAuthServicePorts::from_shared(Arc::new(
             InMemoryAuthProductServices::new(),
-        )));
-
-        let input = RebornBuildInput::disabled("test-owner")
-            .with_product_auth_services(Arc::clone(&product_auth));
-
-        assert!(Arc::ptr_eq(
-            input
-                .product_auth_services
-                .as_ref()
-                .expect("builder should retain injected product auth services"),
-            &product_auth
         ));
+
+        let input =
+            RebornBuildInput::disabled("test-owner").with_product_auth_ports(product_auth.clone());
+
+        assert!(input.product_auth_ports.is_some());
     }
 }

@@ -1,4 +1,4 @@
-use ironclaw_first_party_extensions::{
+use ironclaw_first_party_extension_ports::{
     SkillActivationMode as FirstPartySkillActivationMode, SkillActivationPlan,
     SkillActivationRequest as FirstPartySkillActivationRequest,
     SkillBundleAsset as FirstPartySkillBundleAsset, SkillBundleAssetReadError, SkillExecutionPlan,

@@ -1,42 +1,50 @@
 use ironclaw_host_api::{NetworkScheme, NetworkTarget};
+use thiserror::Error;
 
 use crate::error::NetworkHttpError;
 
-pub(crate) fn network_target_for_url(
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum NetworkTargetUrlError {
+    #[error("invalid URL: {0}")]
+    Parse(String),
+    #[error("URL userinfo is not allowed")]
+    UserinfoDenied,
+    #[error("unsupported URL scheme {0}")]
+    UnsupportedScheme(String),
+    #[error("URL host is required")]
+    MissingHost,
+}
+
+pub fn network_target_for_url(raw: &str) -> Result<NetworkTarget, NetworkTargetUrlError> {
+    network_target_for_url_inner(raw)
+}
+
+pub(crate) fn network_target_for_http_url(
     raw: &str,
     request_bytes: u64,
 ) -> Result<NetworkTarget, NetworkHttpError> {
-    let url = url::Url::parse(raw).map_err(|error| NetworkHttpError::InvalidUrl {
+    network_target_for_url_inner(raw).map_err(|error| NetworkHttpError::InvalidUrl {
         reason: error.to_string(),
         request_bytes,
         response_bytes: 0,
-    })?;
+    })
+}
+
+fn network_target_for_url_inner(raw: &str) -> Result<NetworkTarget, NetworkTargetUrlError> {
+    let url =
+        url::Url::parse(raw).map_err(|error| NetworkTargetUrlError::Parse(error.to_string()))?;
     if !url.username().is_empty() || url.password().is_some() {
-        return Err(NetworkHttpError::InvalidUrl {
-            reason: "URL userinfo is not allowed".to_string(),
-            request_bytes,
-            response_bytes: 0,
-        });
+        return Err(NetworkTargetUrlError::UserinfoDenied);
     }
     let scheme = match url.scheme() {
         "http" => NetworkScheme::Http,
         "https" => NetworkScheme::Https,
-        other => {
-            return Err(NetworkHttpError::InvalidUrl {
-                reason: format!("unsupported URL scheme {other}"),
-                request_bytes,
-                response_bytes: 0,
-            });
-        }
+        other => return Err(NetworkTargetUrlError::UnsupportedScheme(other.to_string())),
     };
     let host = url
         .host_str()
         .filter(|host| !host.trim().is_empty())
-        .ok_or_else(|| NetworkHttpError::InvalidUrl {
-            reason: "URL host is required".to_string(),
-            request_bytes,
-            response_bytes: 0,
-        })?
+        .ok_or(NetworkTargetUrlError::MissingHost)?
         .to_ascii_lowercase();
     Ok(NetworkTarget {
         scheme,

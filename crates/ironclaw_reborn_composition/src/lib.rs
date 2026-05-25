@@ -24,6 +24,7 @@ mod factory;
 mod input;
 #[cfg(feature = "root-llm-provider")]
 mod llm_catalog;
+mod local_runtime_profile;
 mod product_live_adapters;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 mod production_runtime_policy;
@@ -44,11 +45,10 @@ mod webui_serve;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_ws_origin;
 
-use ironclaw_runtime_policy::{EffectiveRuntimePolicy as ResolvedRuntimePolicy, ResolveError};
-
 pub use auth::{
     RebornAuthContinuationDispatcher, RebornOAuthCallbackError, RebornOAuthCallbackOutcome,
-    RebornOAuthCallbackRequest, RebornOAuthCallbackResponse, RebornProductAuthServices,
+    RebornOAuthCallbackRequest, RebornOAuthCallbackResponse, RebornProductAuthServicePorts,
+    RebornProductAuthServices,
 };
 pub use error::RebornBuildError;
 pub use factory::{RebornServices, build_reborn_services};
@@ -57,6 +57,10 @@ pub use input::{RebornBuildInput, RebornRuntimeProcessBinding};
 pub use llm_catalog::{
     RebornLlmCatalogError, resolve_against_registry, resolve_llm_selection_against_catalog,
     resolve_reborn_runtime_llm,
+};
+pub use local_runtime_profile::{
+    RebornLocalRuntimeProfileError, local_dev_runtime_policy, local_dev_yolo_runtime_policy,
+    local_runtime_build_input,
 };
 pub use product_live_adapters::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
@@ -106,16 +110,6 @@ pub fn reborn_model_slot_names() -> Vec<&'static str> {
         .iter()
         .map(|slot| slot.as_str())
         .collect()
-}
-
-/// Resolved policy for the standalone local development runtime profile.
-pub fn local_dev_runtime_policy() -> Result<ResolvedRuntimePolicy, ResolveError> {
-    use ironclaw_host_api::runtime_policy::{DeploymentMode, RuntimeProfile};
-
-    ironclaw_runtime_policy::resolve(ironclaw_runtime_policy::ResolveRequest::new(
-        DeploymentMode::LocalSingleUser,
-        RuntimeProfile::LocalDev,
-    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,7 +192,8 @@ use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::ProcessBackendKind;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{
-    MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, SecretHandle, VirtualPath,
+    MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, SYSTEM_RESERVED_ID,
+    SecretHandle, VirtualPath,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_runtime::{CapabilitySurfaceVersion, HostRuntimeServices};
@@ -258,6 +253,7 @@ const PER_USER_ALIASES: &[&str] = &[
     "/threads",
     "/conversations",
     "/turns",
+    "/checkpoint-state",
     "/resources",
     "/engine",
     "/skills",
@@ -275,18 +271,33 @@ const PER_USER_ALIASES: &[&str] = &[
 ///
 /// The system sentinel scope (see
 /// [`ironclaw_host_api::ResourceScope::system`]) routes records under
-/// `/tenants/__SYSTEM__/users/__SYSTEM__/<alias>`. Production code uses
+/// `/tenants/__system__/users/__system__/<alias>`. Production code uses
 /// it for process-global records whose paths already encode per-tenant
 /// identity (event-log stream keys, conversation singleton state).
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub fn invocation_mount_view(
     scope: &ResourceScope,
 ) -> Result<MountView, ironclaw_host_api::HostApiError> {
-    let (tenant_id, user_id) = if scope.is_system() {
-        ("__SYSTEM__", "__SYSTEM__")
+    invocation_mount_view_for_segments(
+        resource_scope_path_segment(scope.tenant_id.as_str()),
+        resource_scope_path_segment(scope.user_id.as_str()),
+    )
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn resource_scope_path_segment(value: &str) -> &str {
+    if value == SYSTEM_RESERVED_ID {
+        "__system__"
     } else {
-        (scope.tenant_id.as_str(), scope.user_id.as_str())
-    };
+        value
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn invocation_mount_view_for_segments(
+    tenant_id: &str,
+    user_id: &str,
+) -> Result<MountView, ironclaw_host_api::HostApiError> {
     let tenant_user_prefix = format!("/tenants/{tenant_id}/users/{user_id}");
     let mut grants = Vec::with_capacity(PER_USER_ALIASES.len() + 2);
     for alias in PER_USER_ALIASES {
@@ -360,12 +371,6 @@ where
 pub enum RebornCompositionError {
     #[error("reborn production composition requires explicit secret master key")]
     MissingSecretMasterKey,
-    #[error("reborn production runtime policy uses tenant sandbox without a verified process port")]
-    MissingTenantSandboxProcessPort,
-    #[error(
-        "reborn production runtime policy uses {process_backend:?} but a tenant sandbox process port was supplied"
-    )]
-    UnexpectedTenantSandboxProcessPort { process_backend: ProcessBackendKind },
     #[error("reborn mount view construction failed: {0}")]
     Mount(#[from] ironclaw_host_api::HostApiError),
     #[error("reborn filesystem substrate failed: {0}")]
@@ -384,6 +389,10 @@ pub enum RebornCompositionError {
     Turn(#[from] TurnError),
     #[error("reborn run-profile resolver substrate failed: {0}")]
     RunProfile(#[from] ironclaw_turns::run_profile::RunProfileRegistryError),
+    #[error("tenant-sandbox process backend requires explicit tenant sandbox process port")]
+    MissingTenantSandboxProcessPort,
+    #[error("tenant sandbox process port was supplied for runtime backend {process_backend:?}")]
+    UnexpectedTenantSandboxProcessPort { process_backend: ProcessBackendKind },
 }
 
 /// Build production-wired host-runtime services over libSQL-backed substrates.
@@ -419,6 +428,7 @@ where
     let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
         &scoped_filesystem,
     )));
+
     let (runtime_policy, process_binding) = config.runtime_policy.into_parts();
 
     let services = HostRuntimeServices::new(
@@ -438,12 +448,11 @@ where
     .with_filesystem_turn_state_store(Arc::clone(&scoped_filesystem))
     .with_run_profile_resolver(Arc::new(
         ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver()?,
-    ));
+    ))
+    .with_reborn_event_store_config(RebornProfile::Production, config.event_store)
+    .await?;
     let services =
         crate::factory::apply_production_runtime_process_binding(services, process_binding);
-    let services = services
-        .with_reborn_event_store_config(RebornProfile::Production, config.event_store)
-        .await?;
 
     // safety: `with_secret_store` is called unconditionally above on the same
     // builder chain, so `try_with_host_http_egress` can only return a
@@ -488,6 +497,7 @@ where
     let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
         &scoped_filesystem,
     )));
+
     let (runtime_policy, process_binding) = config.runtime_policy.into_parts();
 
     let services = HostRuntimeServices::new(
@@ -507,12 +517,11 @@ where
     .with_filesystem_turn_state_store(Arc::clone(&scoped_filesystem))
     .with_run_profile_resolver(Arc::new(
         ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver()?,
-    ));
+    ))
+    .with_reborn_event_store_config(RebornProfile::Production, config.event_store)
+    .await?;
     let services =
         crate::factory::apply_production_runtime_process_binding(services, process_binding);
-    let services = services
-        .with_reborn_event_store_config(RebornProfile::Production, config.event_store)
-        .await?;
 
     // safety: `with_secret_store` is called unconditionally above on the same
     // builder chain, so `try_with_host_http_egress` can only return a
@@ -679,21 +688,6 @@ mod mount_view_tests {
     }
 
     #[test]
-    fn invocation_mount_view_routes_system_scope_to_valid_sentinel_paths() {
-        let scope = ResourceScope::system();
-        let view = invocation_mount_view(&scope).unwrap();
-
-        let resolved = view
-            .resolve(&ScopedPath::new("/turns/state.json").unwrap())
-            .unwrap();
-
-        assert_eq!(
-            resolved.as_str(),
-            "/tenants/__SYSTEM__/users/__SYSTEM__/turns/state.json"
-        );
-    }
-
-    #[test]
     fn invocation_mount_view_isolates_tenants_with_same_user() {
         let view_a = invocation_mount_view(&sample_scope()).unwrap();
         let view_b = invocation_mount_view(&other_tenant_scope()).unwrap();
@@ -715,6 +709,18 @@ mod mount_view_tests {
         assert_eq!(
             resolved.as_str(),
             &format!("/tenants/{}/shared/foo", scope.tenant_id.as_str())
+        );
+    }
+
+    #[test]
+    fn invocation_mount_view_sanitizes_system_scope_segments() {
+        let view = invocation_mount_view(&ResourceScope::system()).unwrap();
+        let resolved = view
+            .resolve(&ScopedPath::new("/turns/state.json").unwrap())
+            .unwrap();
+        assert_eq!(
+            resolved.as_str(),
+            "/tenants/__system__/users/__system__/turns/state.json"
         );
     }
 

@@ -67,7 +67,7 @@ impl Default for RebornRuntimeIdentity {
 /// composition-owned types so callers (the CLI) never name `ironclaw_llm`
 /// directly.
 #[cfg(feature = "root-llm-provider")]
-pub const DEFAULT_LLM_REQUEST_TIMEOUT_SECS: u64 = 120;
+pub(crate) const DEFAULT_LLM_REQUEST_TIMEOUT_SECS: u64 = 120;
 
 pub const DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 pub const DEFAULT_TURN_RUNNER_POLL_INTERVAL: Duration = Duration::from_millis(200);

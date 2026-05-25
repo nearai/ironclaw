@@ -25,7 +25,8 @@ use ironclaw_host_runtime::{
     GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HostRuntime, HostRuntimeServices, JSON_CAPABILITY_ID,
     LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityOutcome,
     RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeProcessError, RuntimeProcessPort,
-    SHELL_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind, TIME_CAPABILITY_ID,
+    SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
+    SKILL_REMOVE_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind, TIME_CAPABILITY_ID,
     TenantSandboxProcessPort, VisibleCapabilityAccess, VisibleCapabilityRequest,
     WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers, builtin_first_party_package,
 };
@@ -53,11 +54,64 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
         .map(|descriptor| descriptor.id.as_str())
         .collect::<Vec<_>>();
     assert_eq!(ids, all_builtin_capability_ids().to_vec());
+    for descriptor in &package.capabilities {
+        let expected_permission = match descriptor.id.as_str() {
+            HTTP_CAPABILITY_ID
+            | SHELL_CAPABILITY_ID
+            | SKILL_INSTALL_CAPABILITY_ID
+            | SKILL_REMOVE_CAPABILITY_ID => PermissionMode::Ask,
+            _ => PermissionMode::Allow,
+        };
+        assert_eq!(descriptor.default_permission, expected_permission);
+    }
+
+    for descriptor in package
+        .capabilities
+        .iter()
+        .filter(|descriptor| is_coding_capability_id(descriptor.id.as_str()))
+    {
+        assert_coding_manifest_contract(descriptor);
+    }
 
     let handlers = builtin_first_party_handlers().unwrap();
     for id in all_builtin_capability_ids() {
         assert!(handlers.contains_handler(&capability_id(id)));
     }
+}
+
+fn assert_coding_manifest_contract(descriptor: &CapabilityDescriptor) {
+    let expected_effects = match descriptor.id.as_str() {
+        WRITE_FILE_CAPABILITY_ID => vec![EffectKind::WriteFilesystem],
+        APPLY_PATCH_CAPABILITY_ID => vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
+        _ => vec![EffectKind::ReadFilesystem],
+    };
+    assert_eq!(descriptor.effects, expected_effects);
+    assert_eq!(descriptor.default_permission, PermissionMode::Allow);
+}
+
+fn is_coding_capability_id(id: &str) -> bool {
+    matches!(
+        id,
+        READ_FILE_CAPABILITY_ID
+            | WRITE_FILE_CAPABILITY_ID
+            | LIST_DIR_CAPABILITY_ID
+            | GLOB_CAPABILITY_ID
+            | GREP_CAPABILITY_ID
+            | APPLY_PATCH_CAPABILITY_ID
+    )
+}
+
+#[tokio::test]
+async fn builtin_first_party_package_omits_prompt_doc_refs() {
+    let package = builtin_first_party_package().unwrap();
+
+    assert!(
+        package
+            .manifest
+            .capabilities
+            .iter()
+            .all(|capability| capability.prompt_doc_ref.is_none())
+    );
 }
 
 #[tokio::test]
@@ -895,7 +949,7 @@ async fn builtin_http_maps_runtime_egress_errors_by_source() {
                 request_bytes: 4,
                 response_bytes: 1024,
             },
-            RuntimeFailureKind::InvalidInput,
+            RuntimeFailureKind::OperationFailed,
         ),
     ];
 
@@ -1596,6 +1650,44 @@ async fn builtin_coding_grep_multiline_reports_matched_lines_and_count() {
 }
 
 #[tokio::test]
+async fn builtin_coding_grep_respects_multiline_false_for_line_anchors() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("doc.txt"), "alpha\nbeta\n").unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    let single_line_regex = invoke_with_context(
+        &runtime,
+        GREP_CAPABILITY_ID,
+        json!({
+            "path": "/workspace",
+            "pattern": "^beta",
+            "multiline": false
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(single_line_regex["files"], json!([]));
+
+    let multiline_regex = invoke_with_context(
+        &runtime,
+        GREP_CAPABILITY_ID,
+        json!({
+            "path": "/workspace",
+            "pattern": "^beta",
+            "multiline": true
+        }),
+        context,
+    )
+    .await
+    .unwrap();
+    assert_eq!(multiline_regex["files"], json!(["doc.txt"]));
+}
+
+#[tokio::test]
 async fn builtin_coding_write_allows_v1_sized_payloads_past_default_input_cap() {
     let temp = tempfile::tempdir().unwrap();
     let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
@@ -1705,6 +1797,36 @@ async fn builtin_coding_grep_requires_read_permission_but_glob_only_requires_lis
 }
 
 #[tokio::test]
+async fn builtin_coding_grep_denies_directory_without_list_grant() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join("src")).unwrap();
+    std::fs::write(temp.path().join("src/lib.rs"), "needle\n").unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(
+        temp.path(),
+        MountPermissions {
+            read: true,
+            write: false,
+            delete: false,
+            list: false,
+            execute: false,
+        },
+    );
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    let error = invoke_with_context(
+        &runtime,
+        GREP_CAPABILITY_ID,
+        json!({"path": "/workspace", "pattern": "needle"}),
+        context,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error, RuntimeFailureKind::Authorization);
+}
+
+#[tokio::test]
 async fn builtin_coding_list_and_glob_require_list_permission() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(temp.path().join("README.md"), "alpha\n").unwrap();
@@ -1792,6 +1914,25 @@ async fn builtin_coding_read_rejects_files_larger_than_v1_limit_before_loading_c
 }
 
 #[tokio::test]
+async fn builtin_coding_read_rejects_non_file_paths() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join("src")).unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem(filesystem);
+    let error = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/src"}),
+        execution_context_with_mounts(all_builtin_capability_ids(), mounts),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::Resource);
+}
+
+#[tokio::test]
 async fn builtin_apply_patch_matches_v1_exact_unique_and_replace_all_behavior() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(temp.path().join("code.rs"), "old\nold\nunique\n").unwrap();
@@ -1817,7 +1958,7 @@ async fn builtin_apply_patch_matches_v1_exact_unique_and_replace_all_behavior() 
     )
     .await
     .unwrap_err();
-    assert_eq!(duplicate, RuntimeFailureKind::Backend);
+    assert_eq!(duplicate, RuntimeFailureKind::OperationFailed);
 
     let replaced = invoke_with_context(
         &runtime,
@@ -1867,7 +2008,7 @@ async fn builtin_apply_patch_requires_full_fresh_read_like_v1() {
     )
     .await
     .unwrap_err();
-    assert_eq!(unread, RuntimeFailureKind::Backend);
+    assert_eq!(unread, RuntimeFailureKind::OperationFailed);
 
     invoke_with_context(
         &runtime,
@@ -1885,7 +2026,7 @@ async fn builtin_apply_patch_requires_full_fresh_read_like_v1() {
     )
     .await
     .unwrap_err();
-    assert_eq!(partial, RuntimeFailureKind::Backend);
+    assert_eq!(partial, RuntimeFailureKind::OperationFailed);
 }
 
 #[tokio::test]
@@ -1915,7 +2056,7 @@ async fn builtin_apply_patch_rejects_same_second_content_changes_after_read() {
     )
     .await
     .unwrap_err();
-    assert_eq!(stale, RuntimeFailureKind::Backend);
+    assert_eq!(stale, RuntimeFailureKind::OperationFailed);
 }
 
 #[tokio::test]
@@ -2220,7 +2361,7 @@ fn provider_id() -> ExtensionId {
     ExtensionId::new("builtin").unwrap()
 }
 
-fn all_builtin_capability_ids() -> [&'static str; 11] {
+fn all_builtin_capability_ids() -> [&'static str; 14] {
     [
         ECHO_CAPABILITY_ID,
         TIME_CAPABILITY_ID,
@@ -2233,6 +2374,9 @@ fn all_builtin_capability_ids() -> [&'static str; 11] {
         GLOB_CAPABILITY_ID,
         GREP_CAPABILITY_ID,
         APPLY_PATCH_CAPABILITY_ID,
+        SKILL_LIST_CAPABILITY_ID,
+        SKILL_INSTALL_CAPABILITY_ID,
+        SKILL_REMOVE_CAPABILITY_ID,
     ]
 }
 
