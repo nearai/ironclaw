@@ -813,7 +813,7 @@ async fn builtin_http_rejects_request_bodies_over_network_egress_cap() {
 async fn builtin_http_accounts_request_bytes_when_output_is_too_large() {
     let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(vec![
         b'\\';
-        6 * 1024 * 1024
+        8 * 1024 * 1024
     ]));
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let runtime = runtime_with_http_egress_and_governor(Arc::clone(&egress), Arc::clone(&governor));
@@ -947,7 +947,7 @@ async fn builtin_http_maps_runtime_egress_errors_by_source() {
                 request_bytes: 0,
                 response_bytes: 0,
             },
-            RuntimeFailureKind::Authorization,
+            RuntimeFailureKind::PolicyDenied,
         ),
         (
             RuntimeHttpEgressError::Network {
@@ -1045,7 +1045,7 @@ async fn builtin_http_exercises_real_policy_private_ip_rejection() {
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::Authorization);
+    assert_eq!(error, RuntimeFailureKind::PolicyDenied);
     assert!(requests.lock().unwrap().is_empty());
 }
 

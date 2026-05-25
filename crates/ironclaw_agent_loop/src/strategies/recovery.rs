@@ -180,8 +180,11 @@ pub(crate) enum RetryScope {
 ///   network errors and output-size limits so the model can explain the
 ///   failure or choose a different approach.
 /// - Aborts immediately on `Permanent` and `ContentFiltered`.
-/// - Retries capability/model transient, unavailable, and internal errors up
-///   to [`Self::max_attempts_per_class`] times with `Backoff`.
+/// - Retries capability transient, unavailable, and internal errors up to
+///   [`Self::max_attempts_per_class`] times with `Backoff`, then returns a
+///   model-visible tool error result.
+/// - Retries model transient, unavailable, and internal errors up to the same
+///   budget, then aborts the run.
 /// - Retries `ContextOverflow` at iteration scope with `ShrinkContext`.
 #[derive(Debug, Clone, Copy)]
 pub struct DefaultRecoveryStrategy {
@@ -224,11 +227,10 @@ impl RecoveryStrategy for DefaultRecoveryStrategy {
                         failure_kind: LoopFailureKind::DriverBug,
                     };
                 };
-                retry_or_abort(
+                retry_or_capability_tool_error(
                     state,
                     attempt_class,
                     self.max_attempts_per_class,
-                    kind,
                     RetryScope::Call,
                     |attempts| {
                         Some(RetryAlteration::Backoff {
@@ -322,6 +324,30 @@ fn retry_or_abort(
         RecoveryOutcome::Abort {
             recovery: next,
             failure_kind,
+        }
+    } else {
+        RecoveryOutcome::Retry {
+            recovery: next,
+            scope,
+            alter: alteration(attempts),
+        }
+    }
+}
+
+fn retry_or_capability_tool_error(
+    state: &LoopExecutionState,
+    attempt_class: RecoveryAttemptClass,
+    max_attempts_per_class: u32,
+    scope: RetryScope,
+    alteration: impl FnOnce(u32) -> Option<RetryAlteration>,
+) -> RecoveryOutcome {
+    let attempts = state.recovery_state.attempts_for(attempt_class);
+    let next = state
+        .recovery_state
+        .with_incremented_attempts_for(attempt_class);
+    if attempts >= max_attempts_per_class {
+        RecoveryOutcome::ToolErrorResult {
+            recovery: next.cleared_attempts(),
         }
     } else {
         RecoveryOutcome::Retry {
@@ -902,7 +928,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn capability_transient_retries_then_aborts_at_budget() {
+        async fn capability_transient_retries_then_becomes_tool_error_at_budget() {
             let strategy = DefaultRecoveryStrategy::default();
 
             for attempts in 0..2 {
@@ -927,13 +953,30 @@ mod tests {
             let outcome = strategy
                 .on_capability_error(&state, &cap_err(CapabilityErrorClass::Transient))
                 .await;
-            assert!(matches!(
-                outcome,
-                RecoveryOutcome::Abort {
-                    failure_kind: LoopFailureKind::CapabilityProtocolError,
-                    ..
-                }
-            ));
+            assert!(matches!(outcome, RecoveryOutcome::ToolErrorResult { .. }));
+        }
+
+        #[tokio::test]
+        async fn capability_unavailable_and_internal_become_tool_errors_at_budget() {
+            let strategy = DefaultRecoveryStrategy::default();
+
+            for (class, attempt_class) in [
+                (
+                    CapabilityErrorClass::Unavailable,
+                    RecoveryAttemptClass::CapabilityUnavailable,
+                ),
+                (
+                    CapabilityErrorClass::Internal,
+                    RecoveryAttemptClass::CapabilityInternal,
+                ),
+            ] {
+                let state = state_with_attempts_for(2, attempt_class);
+                let outcome = strategy.on_capability_error(&state, &cap_err(class)).await;
+                assert!(
+                    matches!(outcome, RecoveryOutcome::ToolErrorResult { .. }),
+                    "{class:?} at retry budget should become a tool error, got {outcome:?}"
+                );
+            }
         }
 
         #[tokio::test]
@@ -1012,7 +1055,7 @@ mod tests {
                 .on_capability_error(&state, &cap_err(CapabilityErrorClass::Transient))
                 .await;
 
-            assert!(matches!(outcome, RecoveryOutcome::Abort { .. }));
+            assert!(matches!(outcome, RecoveryOutcome::ToolErrorResult { .. }));
         }
 
         #[tokio::test]

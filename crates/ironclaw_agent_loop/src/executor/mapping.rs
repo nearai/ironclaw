@@ -118,23 +118,22 @@ pub(super) fn capability_error_class(kind: &CapabilityFailureKind) -> Capability
         CapabilityFailureKind::Network | CapabilityFailureKind::Transient => {
             CapabilityErrorClass::Transient
         }
-        CapabilityFailureKind::Backend
-        | CapabilityFailureKind::MissingRuntime
-        | CapabilityFailureKind::Unavailable => CapabilityErrorClass::Unavailable,
-        CapabilityFailureKind::InvalidInput => CapabilityErrorClass::InputInvalid,
-        CapabilityFailureKind::OperationFailed | CapabilityFailureKind::OutputTooLarge => {
-            CapabilityErrorClass::OperationFailed
+        CapabilityFailureKind::Backend | CapabilityFailureKind::Unavailable => {
+            CapabilityErrorClass::Unavailable
         }
+        CapabilityFailureKind::InvalidInput => CapabilityErrorClass::InputInvalid,
+        CapabilityFailureKind::MissingRuntime
+        | CapabilityFailureKind::OperationFailed
+        | CapabilityFailureKind::OutputTooLarge
+        | CapabilityFailureKind::Process
+        | CapabilityFailureKind::Resource => CapabilityErrorClass::OperationFailed,
         CapabilityFailureKind::Authorization | CapabilityFailureKind::PolicyDenied => {
             CapabilityErrorClass::PolicyDenied
         }
-        CapabilityFailureKind::Dispatcher | CapabilityFailureKind::Internal => {
-            CapabilityErrorClass::Internal
-        }
+        CapabilityFailureKind::Internal => CapabilityErrorClass::Internal,
+        CapabilityFailureKind::Dispatcher => CapabilityErrorClass::Permanent,
         CapabilityFailureKind::Cancelled => CapabilityErrorClass::Permanent,
         CapabilityFailureKind::InvalidOutput
-        | CapabilityFailureKind::Process
-        | CapabilityFailureKind::Resource
         | CapabilityFailureKind::Permanent
         | CapabilityFailureKind::Unknown(_) => CapabilityErrorClass::Permanent,
         // CapabilityFailureKind is #[non_exhaustive]; treat unrecognised future variants as

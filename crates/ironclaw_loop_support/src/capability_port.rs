@@ -9,7 +9,8 @@ use ironclaw_host_api::{
     InvocationId, MountView, Principal, sha256_digest_token,
 };
 use ironclaw_host_runtime::{
-    HostRuntime, HostRuntimeError, IdempotencyKey, RuntimeBlockedReason, RuntimeCapabilityOutcome,
+    CapabilityFailureDisposition, HostRuntime, HostRuntimeError, IdempotencyKey,
+    RuntimeBlockedReason, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
     RuntimeCapabilityRequest, RuntimeFailureKind,
 };
 use ironclaw_turns::{
@@ -1487,25 +1488,7 @@ async fn runtime_outcome_to_loop(
                 safe_summary: "capability spawned background work".to_string(),
             })
         }
-        RuntimeCapabilityOutcome::Failed(failure) => {
-            if failure.kind == RuntimeFailureKind::Authorization {
-                CapabilityOutcome::Denied(CapabilityDenied {
-                    reason_kind: capability_denied_reason_kind(failure.kind.as_str())?,
-                    safe_summary: runtime_safe_summary(
-                        failure.message,
-                        "capability authorization denied",
-                    ),
-                })
-            } else {
-                CapabilityOutcome::Failed(CapabilityFailure {
-                    error_kind: runtime_failure_kind_to_loop(failure.kind)?,
-                    safe_summary: runtime_safe_summary(
-                        failure.message,
-                        "capability invocation failed",
-                    ),
-                })
-            }
-        }
+        RuntimeCapabilityOutcome::Failed(failure) => runtime_failure_to_loop(failure)?,
         RuntimeCapabilityOutcome::Unknown(unknown) => {
             CapabilityOutcome::Failed(CapabilityFailure {
                 error_kind: capability_failure_kind(unknown.kind)?,
@@ -1518,6 +1501,53 @@ async fn runtime_outcome_to_loop(
     })
 }
 
+fn runtime_failure_to_loop(
+    failure: RuntimeCapabilityFailure,
+) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    match failure.disposition() {
+        CapabilityFailureDisposition::ModelVisibleToolError => {
+            runtime_model_visible_failure_to_loop(failure)
+        }
+        CapabilityFailureDisposition::RetrySameCall => {
+            Ok(CapabilityOutcome::Failed(CapabilityFailure {
+                error_kind: runtime_failure_kind_to_loop(failure.kind)?,
+                safe_summary: runtime_failure_safe_summary(
+                    &failure,
+                    "capability invocation failed",
+                ),
+            }))
+        }
+        CapabilityFailureDisposition::RecoverableRunFailure => {
+            Ok(CapabilityOutcome::Failed(CapabilityFailure {
+                error_kind: recoverable_runtime_failure_kind_to_loop(failure.kind)?,
+                safe_summary: runtime_failure_safe_summary(
+                    &failure,
+                    "capability invocation could not safely continue",
+                ),
+            }))
+        }
+    }
+}
+
+fn runtime_model_visible_failure_to_loop(
+    failure: RuntimeCapabilityFailure,
+) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    if matches!(
+        failure.kind,
+        RuntimeFailureKind::Authorization | RuntimeFailureKind::PolicyDenied
+    ) {
+        return Ok(CapabilityOutcome::Denied(CapabilityDenied {
+            reason_kind: capability_denied_reason_kind(failure.kind.as_str())?,
+            safe_summary: runtime_failure_safe_summary(&failure, "capability authorization denied"),
+        }));
+    }
+
+    Ok(CapabilityOutcome::Failed(CapabilityFailure {
+        error_kind: model_visible_runtime_failure_kind_to_loop(failure.kind),
+        safe_summary: runtime_failure_safe_summary(&failure, "capability invocation failed"),
+    }))
+}
+
 fn runtime_failure_kind_to_loop(
     kind: RuntimeFailureKind,
 ) -> Result<CapabilityFailureKind, AgentLoopHostError> {
@@ -1526,16 +1556,40 @@ fn runtime_failure_kind_to_loop(
         RuntimeFailureKind::Backend => CapabilityFailureKind::Backend,
         RuntimeFailureKind::Cancelled => CapabilityFailureKind::Cancelled,
         RuntimeFailureKind::Dispatcher => CapabilityFailureKind::Dispatcher,
+        RuntimeFailureKind::Internal => CapabilityFailureKind::Internal,
         RuntimeFailureKind::InvalidInput => CapabilityFailureKind::InvalidInput,
         RuntimeFailureKind::InvalidOutput => CapabilityFailureKind::InvalidOutput,
         RuntimeFailureKind::MissingRuntime => CapabilityFailureKind::MissingRuntime,
         RuntimeFailureKind::Network => CapabilityFailureKind::Network,
         RuntimeFailureKind::OperationFailed => CapabilityFailureKind::OperationFailed,
         RuntimeFailureKind::OutputTooLarge => CapabilityFailureKind::OutputTooLarge,
+        RuntimeFailureKind::PolicyDenied => CapabilityFailureKind::PolicyDenied,
         RuntimeFailureKind::Process => CapabilityFailureKind::Process,
         RuntimeFailureKind::Resource => CapabilityFailureKind::Resource,
+        RuntimeFailureKind::Transient => CapabilityFailureKind::Transient,
+        RuntimeFailureKind::Unavailable => CapabilityFailureKind::Unavailable,
         RuntimeFailureKind::Unknown => capability_failure_kind("unknown")?,
         _ => capability_failure_kind(kind.as_str())?,
+    })
+}
+
+fn model_visible_runtime_failure_kind_to_loop(kind: RuntimeFailureKind) -> CapabilityFailureKind {
+    match kind {
+        RuntimeFailureKind::InvalidInput => CapabilityFailureKind::InvalidInput,
+        RuntimeFailureKind::OperationFailed => CapabilityFailureKind::OperationFailed,
+        RuntimeFailureKind::OutputTooLarge => CapabilityFailureKind::OutputTooLarge,
+        _ => CapabilityFailureKind::OperationFailed,
+    }
+}
+
+fn recoverable_runtime_failure_kind_to_loop(
+    kind: RuntimeFailureKind,
+) -> Result<CapabilityFailureKind, AgentLoopHostError> {
+    Ok(match kind {
+        RuntimeFailureKind::InvalidOutput => CapabilityFailureKind::InvalidOutput,
+        RuntimeFailureKind::Dispatcher => CapabilityFailureKind::Dispatcher,
+        RuntimeFailureKind::Unknown => capability_failure_kind("unknown")?,
+        _ => CapabilityFailureKind::Permanent,
     })
 }
 
@@ -1585,6 +1639,17 @@ fn capability_failure_kind(
 
 fn runtime_safe_summary(message: Option<String>, fallback: &'static str) -> String {
     message
+        .and_then(|summary| LoopSafeSummary::new(summary).ok())
+        .map(|summary| summary.to_string())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn runtime_failure_safe_summary(
+    failure: &RuntimeCapabilityFailure,
+    fallback: &'static str,
+) -> String {
+    failure
+        .safe_summary()
         .and_then(|summary| LoopSafeSummary::new(summary).ok())
         .map(|summary| summary.to_string())
         .unwrap_or_else(|| fallback.to_string())
@@ -1718,6 +1783,10 @@ mod tests {
                 CapabilityFailureKind::Dispatcher,
             ),
             (
+                RuntimeFailureKind::Internal,
+                CapabilityFailureKind::Internal,
+            ),
+            (
                 RuntimeFailureKind::InvalidInput,
                 CapabilityFailureKind::InvalidInput,
             ),
@@ -1738,10 +1807,22 @@ mod tests {
                 RuntimeFailureKind::OutputTooLarge,
                 CapabilityFailureKind::OutputTooLarge,
             ),
+            (
+                RuntimeFailureKind::PolicyDenied,
+                CapabilityFailureKind::PolicyDenied,
+            ),
             (RuntimeFailureKind::Process, CapabilityFailureKind::Process),
             (
                 RuntimeFailureKind::Resource,
                 CapabilityFailureKind::Resource,
+            ),
+            (
+                RuntimeFailureKind::Transient,
+                CapabilityFailureKind::Transient,
+            ),
+            (
+                RuntimeFailureKind::Unavailable,
+                CapabilityFailureKind::Unavailable,
             ),
         ];
 
@@ -1759,6 +1840,102 @@ mod tests {
                 .as_str(),
             "unknown"
         );
+    }
+
+    #[test]
+    fn runtime_failure_to_loop_honors_model_visible_disposition() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let denied = runtime_failure_to_loop(RuntimeCapabilityFailure::new(
+            capability_id.clone(),
+            RuntimeFailureKind::PolicyDenied,
+            Some("policy denied request".to_string()),
+        ))
+        .expect("convert policy denial");
+        assert!(matches!(
+            denied,
+            CapabilityOutcome::Denied(denied)
+                if denied.reason_kind.as_str() == "policy_denied"
+                    && denied.safe_summary == "policy denied request"
+        ));
+
+        let missing_runtime = runtime_failure_to_loop(RuntimeCapabilityFailure::new(
+            capability_id,
+            RuntimeFailureKind::MissingRuntime,
+            Some("tool runtime is missing".to_string()),
+        ))
+        .expect("convert missing runtime");
+        assert!(matches!(
+            missing_runtime,
+            CapabilityOutcome::Failed(failure)
+                if failure.error_kind == CapabilityFailureKind::OperationFailed
+                    && failure.safe_summary == "tool runtime is missing"
+        ));
+    }
+
+    #[test]
+    fn runtime_failure_to_loop_distinguishes_retry_and_retry_exhaustion() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let retry = runtime_failure_to_loop(RuntimeCapabilityFailure::new(
+            capability_id.clone(),
+            RuntimeFailureKind::Transient,
+            Some("temporary outage".to_string()),
+        ))
+        .expect("convert retryable failure");
+        assert!(matches!(
+            retry,
+            CapabilityOutcome::Failed(failure)
+                if failure.error_kind == CapabilityFailureKind::Transient
+                    && failure.safe_summary == "temporary outage"
+        ));
+
+        let exhausted = runtime_failure_to_loop(
+            RuntimeCapabilityFailure::new(
+                capability_id,
+                RuntimeFailureKind::Transient,
+                Some("temporary outage".to_string()),
+            )
+            .with_retry_exhausted(true),
+        )
+        .expect("convert exhausted retryable failure");
+        assert!(matches!(
+            exhausted,
+            CapabilityOutcome::Failed(failure)
+                if failure.error_kind == CapabilityFailureKind::OperationFailed
+                    && failure.safe_summary == "temporary outage"
+        ));
+    }
+
+    #[test]
+    fn runtime_failure_to_loop_keeps_recoverable_failures_out_of_tool_error_path() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let invalid_output = runtime_failure_to_loop(RuntimeCapabilityFailure::new(
+            capability_id.clone(),
+            RuntimeFailureKind::InvalidOutput,
+            Some("runtime returned malformed output".to_string()),
+        ))
+        .expect("convert invalid output");
+        assert!(matches!(
+            invalid_output,
+            CapabilityOutcome::Failed(failure)
+                if failure.error_kind == CapabilityFailureKind::InvalidOutput
+                    && failure.safe_summary == "runtime returned malformed output"
+        ));
+
+        let uncertain = runtime_failure_to_loop(
+            RuntimeCapabilityFailure::new(
+                capability_id,
+                RuntimeFailureKind::OperationFailed,
+                Some("side effects uncertain".to_string()),
+            )
+            .with_side_effects_uncertain(true),
+        )
+        .expect("convert uncertain side-effect failure");
+        assert!(matches!(
+            uncertain,
+            CapabilityOutcome::Failed(failure)
+                if failure.error_kind == CapabilityFailureKind::Permanent
+                    && failure.safe_summary == "side effects uncertain"
+        ));
     }
 
     #[test]
