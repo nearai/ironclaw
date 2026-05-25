@@ -75,6 +75,12 @@ pub(crate) type LocalDevRootFilesystem = CompositeRootFilesystem;
 #[cfg(not(feature = "libsql"))]
 pub(crate) type LocalDevRootFilesystem = LocalFilesystem;
 
+type LocalDevWorkspaceFilesystems = (
+    Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
+    Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
+    MountView,
+);
+
 #[cfg(feature = "libsql")]
 pub(crate) type LocalDevTurnStateStore = FilesystemTurnStateStore<LocalDevRootFilesystem>;
 #[cfg(not(feature = "libsql"))]
@@ -668,14 +674,7 @@ impl LocalDevHostHomeRoot {
 fn build_workspace_filesystems(
     filesystem: Arc<LocalDevRootFilesystem>,
     host_home_root: Option<&LocalDevHostHomeRoot>,
-) -> Result<
-    (
-        Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
-        Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
-        MountView,
-    ),
-    RebornBuildError,
-> {
+) -> Result<LocalDevWorkspaceFilesystems, RebornBuildError> {
     let read_only_workspace_mounts = workspace_mount_view(MountPermissions::read_only(), &[])
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: error.to_string(),
