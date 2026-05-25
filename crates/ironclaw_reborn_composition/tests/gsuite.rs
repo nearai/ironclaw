@@ -6,8 +6,9 @@ use ironclaw_auth::{
     InMemoryAuthProductServices, NewCredentialAccount, ProviderScope,
 };
 use ironclaw_extensions::{ExtensionRuntime, ManifestSource};
-use ironclaw_first_party_extensions::gsuite::{
+use ironclaw_first_party_extensions::{
     CALENDAR_LIST_CALENDARS_CAPABILITY_ID, GMAIL_SEND_MESSAGE_CAPABILITY_ID, google_provider_id,
+    gsuite_package_specs,
 };
 use ironclaw_host_api::{
     CapabilityId, InvocationId, ResourceScope, RuntimeDispatchErrorKind, RuntimeHttpEgress,
@@ -132,6 +133,29 @@ async fn bundled_gsuite_handlers_register_and_forward_runtime_egress() {
     assert_eq!(requests[0].capability_id, capability_id);
     assert_eq!(requests[0].scope, scope);
     assert!(requests[0].url.ends_with("/users/me/messages/send"));
+}
+
+#[tokio::test]
+async fn bundled_gsuite_handlers_register_all_gsuite_capabilities() {
+    let scope = scope();
+    let auth = auth_with_google_account(&scope).await;
+    let registry = bundled_gsuite_first_party_handlers(auth).unwrap();
+    let expected_capability_ids = gsuite_package_specs()
+        .iter()
+        .flat_map(|package| {
+            package.capabilities.iter().map(move |capability| {
+                format!("{}.{}", package.extension_id, capability.short_name)
+            })
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(expected_capability_ids.len(), 15);
+    for capability_id in expected_capability_ids {
+        assert!(
+            registry.contains_handler(&cap_id(&capability_id)),
+            "missing handler for {capability_id}"
+        );
+    }
 }
 
 #[tokio::test]

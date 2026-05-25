@@ -11,6 +11,7 @@ repository = "https://github.com/nearai/ironclaw"
 publish = false
 
 [dependencies]
+async-trait = "0.1"
 blake3 = "1"
 glob = "0.3"
 ironclaw_auth = { path = "../ironclaw_auth" }

@@ -4368,6 +4368,7 @@ dependencies = [
 name = "ironclaw_first_party_extensions"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "blake3",
  "glob",
  "ironclaw_auth",

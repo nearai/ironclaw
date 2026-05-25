@@ -9,7 +9,7 @@ use ironclaw_auth::{
     GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_GMAIL_MODIFY_SCOPE, GOOGLE_GMAIL_READONLY_SCOPE,
     GOOGLE_GMAIL_SEND_SCOPE, InMemoryAuthProductServices, NewCredentialAccount, ProviderScope,
 };
-use ironclaw_first_party_extensions::gsuite::{
+use ironclaw_first_party_extensions::{
     CALENDAR_ADD_ATTENDEES_CAPABILITY_ID, CALENDAR_CREATE_EVENT_CAPABILITY_ID,
     CALENDAR_DELETE_EVENT_CAPABILITY_ID, CALENDAR_FIND_FREE_SLOTS_CAPABILITY_ID,
     CALENDAR_GET_EVENT_CAPABILITY_ID, CALENDAR_LIST_CALENDARS_CAPABILITY_ID,
@@ -231,6 +231,90 @@ fn gsuite_packages_declare_calendar_and_gmail_capabilities() {
         .map(|package| package.capabilities.len())
         .sum::<usize>();
     assert_eq!(capability_count, 15);
+}
+
+#[test]
+fn google_provider_id_returns_valid_provider() {
+    assert_eq!(google_provider_id().unwrap().as_str(), "google");
+}
+
+#[tokio::test]
+async fn calendar_handler_integration_tests() {
+    let scope = scope();
+    let auth = auth_with_google_account(
+        &scope,
+        vec![
+            provider_scope(GOOGLE_CALENDAR_READONLY_SCOPE),
+            provider_scope(ironclaw_auth::GOOGLE_CALENDAR_EVENTS_SCOPE),
+        ],
+    )
+    .await;
+    let egress = Arc::new(RecordingEgress::default());
+
+    dispatch_ok(
+        auth.clone(),
+        scope.clone(),
+        CALENDAR_LIST_EVENTS_CAPABILITY_ID,
+        json!({"calendar_id":"primary","time_min":"2026-05-21T00:00:00Z"}),
+        egress.clone(),
+    )
+    .await;
+    dispatch_ok(
+        auth,
+        scope,
+        CALENDAR_CREATE_EVENT_CAPABILITY_ID,
+        json!({"calendar_id":"primary","event":{"summary":"Review"}}),
+        egress.clone(),
+    )
+    .await;
+
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].method, NetworkMethod::Get);
+    assert!(requests[0].url.contains("/calendars/primary/events"));
+    assert_eq!(requests[1].method, NetworkMethod::Post);
+    assert!(requests[1].url.contains("/calendars/primary/events"));
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&requests[1].body).unwrap()["summary"],
+        "Review"
+    );
+}
+
+#[tokio::test]
+async fn gmail_handler_integration_tests() {
+    let scope = scope();
+    let auth =
+        auth_with_google_account(&scope, vec![provider_scope(GOOGLE_GMAIL_READONLY_SCOPE)]).await;
+    let egress = Arc::new(RecordingEgress::default());
+
+    dispatch_ok(
+        auth.clone(),
+        scope.clone(),
+        GMAIL_LIST_MESSAGES_CAPABILITY_ID,
+        json!({"query":"is:unread","max_results":10}),
+        egress.clone(),
+    )
+    .await;
+    dispatch_ok(
+        auth,
+        scope,
+        GMAIL_GET_MESSAGE_CAPABILITY_ID,
+        json!({"message_id":"msg-1"}),
+        egress.clone(),
+    )
+    .await;
+
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].method, NetworkMethod::Get);
+    assert!(requests[0].url.contains("/users/me/messages"));
+    assert!(requests[0].url.contains("q=is%3Aunread"));
+    assert_eq!(requests[1].method, NetworkMethod::Get);
+    assert!(
+        requests[1]
+            .url
+            .ends_with("/users/me/messages/msg-1?format=full")
+    );
 }
 
 #[tokio::test]
@@ -572,9 +656,7 @@ async fn gsuite_handler_maps_runtime_egress_errors() {
         assert_eq!(error.kind(), expected_kind);
         if request_bytes > 0 {
             assert_eq!(
-                error
-                    .usage()
-                    .and_then(|usage| Some(usage.network_egress_bytes)),
+                error.usage().map(|usage| usage.network_egress_bytes),
                 Some(request_bytes)
             );
         }
@@ -794,12 +876,10 @@ async fn gsuite_handlers_build_expected_requests_for_each_capability() {
 #[test]
 fn gsuite_resource_profile_allows_wrapped_response_headroom() {
     let profile = gsuite_resource_profile();
+    let output_limit = profile.default_estimate.output_bytes.unwrap_or_default();
 
-    assert!(GSUITE_OUTPUT_BYTES_LIMIT > GSUITE_RESPONSE_BODY_LIMIT);
-    assert_eq!(
-        profile.default_estimate.output_bytes,
-        Some(GSUITE_OUTPUT_BYTES_LIMIT)
-    );
+    assert!(output_limit > GSUITE_RESPONSE_BODY_LIMIT);
+    assert_eq!(output_limit, GSUITE_OUTPUT_BYTES_LIMIT);
     assert_eq!(
         profile
             .hard_ceiling

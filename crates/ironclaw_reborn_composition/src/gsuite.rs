@@ -6,9 +6,9 @@ use ironclaw_extensions::{
     CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionManifest, ExtensionPackage,
     ExtensionRuntime, MANIFEST_SCHEMA_VERSION, ManifestSource,
 };
-use ironclaw_first_party_extensions::gsuite::{
-    GsuiteDispatchError, GsuiteDispatchRequest, GsuiteExecutor, GsuitePackageSpec,
-    gsuite_package_specs, gsuite_resource_profile,
+use ironclaw_first_party_extensions::{
+    GsuiteCapabilitySpec, GsuiteDispatchError, GsuiteDispatchRequest, GsuiteExecutor,
+    GsuitePackageSpec, gsuite_package_specs, gsuite_resource_profile,
 };
 use ironclaw_host_api::{
     CapabilityId, CapabilityProfileSchemaRef, ExtensionId, HostApiError, RequestedTrustClass,
@@ -116,7 +116,7 @@ fn package_from_spec(spec: &GsuitePackageSpec) -> Result<ExtensionPackage, Exten
 
 fn capability_manifest(
     package: &GsuitePackageSpec,
-    capability: &ironclaw_first_party_extensions::gsuite::GsuiteCapabilitySpec,
+    capability: &GsuiteCapabilitySpec,
 ) -> Result<CapabilityManifest, ExtensionError> {
     Ok(CapabilityManifest {
         id: CapabilityId::new(format!(

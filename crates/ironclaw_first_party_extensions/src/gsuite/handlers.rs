@@ -305,89 +305,171 @@ impl GsuiteCapability {
         request: &GsuiteDispatchRequest<'_>,
         access_secret: ironclaw_host_api::SecretHandle,
     ) -> Result<RuntimeHttpEgressRequest, GsuiteDispatchError> {
-        let (method, url, body) = match self {
-            Self::CalendarListCalendars => (
-                NetworkMethod::Get,
-                format!("{CALENDAR_API_BASE}/users/me/calendarList"),
-                Vec::new(),
-            ),
-            Self::CalendarListEvents => (
-                NetworkMethod::Get,
-                calendar_events_url(request.input, None)?,
-                Vec::new(),
-            ),
-            Self::CalendarGetEvent => (
-                NetworkMethod::Get,
-                calendar_event_url(request.input)?,
-                Vec::new(),
-            ),
-            Self::CalendarFindFreeSlots => (
-                NetworkMethod::Post,
-                format!("{CALENDAR_API_BASE}/freeBusy"),
-                json_body(request.input)?,
-            ),
-            Self::CalendarCreateEvent => (
-                NetworkMethod::Post,
-                calendar_events_url(request.input, None)?,
-                json_body(required_object(request.input, "event")?)?,
-            ),
-            Self::CalendarUpdateEvent => (
-                NetworkMethod::Patch,
-                calendar_event_url(request.input)?,
-                json_body(required_object(request.input, "event")?)?,
-            ),
-            Self::CalendarDeleteEvent => (
-                NetworkMethod::Delete,
-                calendar_event_url(request.input)?,
-                Vec::new(),
-            ),
-            Self::CalendarAddAttendees => {
-                return Err(GsuiteDispatchError::new(RuntimeDispatchErrorKind::Backend));
-            }
-            Self::CalendarSetReminder => (
-                NetworkMethod::Patch,
-                calendar_event_url(request.input)?,
-                json_body(&json!({ "reminders": required_object(request.input, "reminders")? }))?,
-            ),
-            Self::GmailListMessages => (
-                NetworkMethod::Get,
-                gmail_messages_url(request.input)?,
-                Vec::new(),
-            ),
-            Self::GmailGetMessage => (
-                NetworkMethod::Get,
-                format!(
-                    "{GMAIL_API_BASE}/users/me/messages/{}?format=full",
-                    encode_segment(required_str(request.input, "message_id")?)
-                ),
-                Vec::new(),
-            ),
-            Self::GmailSendMessage => (
-                NetworkMethod::Post,
-                format!("{GMAIL_API_BASE}/users/me/messages/send"),
-                json_body(required_object(request.input, "message")?)?,
-            ),
-            Self::GmailCreateDraft => (
-                NetworkMethod::Post,
-                format!("{GMAIL_API_BASE}/users/me/drafts"),
-                json_body(required_object(request.input, "draft")?)?,
-            ),
-            Self::GmailReplyToMessage => (
-                NetworkMethod::Post,
-                format!("{GMAIL_API_BASE}/users/me/messages/send"),
-                json_body(required_object(request.input, "message")?)?,
-            ),
-            Self::GmailTrashMessage => (
-                NetworkMethod::Post,
-                format!(
-                    "{GMAIL_API_BASE}/users/me/messages/{}/trash",
-                    encode_segment(required_str(request.input, "message_id")?)
-                ),
-                Vec::new(),
-            ),
-        };
+        let (method, url, body) = self.request_parts(request.input)?;
         Ok(runtime_request(request, access_secret, method, url, body))
     }
+
+    fn request_parts(
+        self,
+        input: &Value,
+    ) -> Result<(NetworkMethod, String, Vec<u8>), GsuiteDispatchError> {
+        match self {
+            Self::CalendarListCalendars => calendar_list_calendars_request(),
+            Self::CalendarListEvents => calendar_list_events_request(input),
+            Self::CalendarGetEvent => calendar_get_event_request(input),
+            Self::CalendarFindFreeSlots => calendar_find_free_slots_request(input),
+            Self::CalendarCreateEvent => calendar_create_event_request(input),
+            Self::CalendarUpdateEvent => calendar_update_event_request(input),
+            Self::CalendarDeleteEvent => calendar_delete_event_request(input),
+            Self::CalendarAddAttendees => {
+                Err(GsuiteDispatchError::new(RuntimeDispatchErrorKind::Backend))
+            }
+            Self::CalendarSetReminder => calendar_set_reminder_request(input),
+            Self::GmailListMessages => gmail_list_messages_request(input),
+            Self::GmailGetMessage => gmail_get_message_request(input),
+            Self::GmailSendMessage => gmail_send_message_request(input),
+            Self::GmailCreateDraft => gmail_create_draft_request(input),
+            Self::GmailReplyToMessage => gmail_reply_to_message_request(input),
+            Self::GmailTrashMessage => gmail_trash_message_request(input),
+        }
+    }
+}
+
+fn calendar_list_calendars_request() -> Result<(NetworkMethod, String, Vec<u8>), GsuiteDispatchError>
+{
+    Ok((
+        NetworkMethod::Get,
+        format!("{CALENDAR_API_BASE}/users/me/calendarList"),
+        Vec::new(),
+    ))
+}
+
+fn calendar_list_events_request(
+    input: &Value,
+) -> Result<(NetworkMethod, String, Vec<u8>), GsuiteDispatchError> {
+    Ok((
+        NetworkMethod::Get,
+        calendar_events_url(input, None)?,
+        Vec::new(),
+    ))
+}
+
+fn calendar_get_event_request(
+    input: &Value,
+) -> Result<(NetworkMethod, String, Vec<u8>), GsuiteDispatchError> {
+    Ok((NetworkMethod::Get, calendar_event_url(input)?, Vec::new()))
+}
+
+fn calendar_find_free_slots_request(
+    input: &Value,
+) -> Result<(NetworkMethod, String, Vec<u8>), GsuiteDispatchError> {
+    Ok((
+        NetworkMethod::Post,
+        format!("{CALENDAR_API_BASE}/freeBusy"),
+        json_body(input)?,
+    ))
+}
+
+fn calendar_create_event_request(
+    input: &Value,
+) -> Result<(NetworkMethod, String, Vec<u8>), GsuiteDispatchError> {
+    Ok((
+        NetworkMethod::Post,
+        calendar_events_url(input, None)?,
+        json_body(required_object(input, "event")?)?,
+    ))
+}
+
+fn calendar_update_event_request(
+    input: &Value,
+) -> Result<(NetworkMethod, String, Vec<u8>), GsuiteDispatchError> {
+    Ok((
+        NetworkMethod::Patch,
+        calendar_event_url(input)?,
+        json_body(required_object(input, "event")?)?,
+    ))
+}
+
+fn calendar_delete_event_request(
+    input: &Value,
+) -> Result<(NetworkMethod, String, Vec<u8>), GsuiteDispatchError> {
+    Ok((
+        NetworkMethod::Delete,
+        calendar_event_url(input)?,
+        Vec::new(),
+    ))
+}
+
+fn calendar_set_reminder_request(
+    input: &Value,
+) -> Result<(NetworkMethod, String, Vec<u8>), GsuiteDispatchError> {
+    Ok((
+        NetworkMethod::Patch,
+        calendar_event_url(input)?,
+        json_body(&json!({ "reminders": required_object(input, "reminders")? }))?,
+    ))
+}
+
+fn gmail_list_messages_request(
+    input: &Value,
+) -> Result<(NetworkMethod, String, Vec<u8>), GsuiteDispatchError> {
+    Ok((NetworkMethod::Get, gmail_messages_url(input)?, Vec::new()))
+}
+
+fn gmail_get_message_request(
+    input: &Value,
+) -> Result<(NetworkMethod, String, Vec<u8>), GsuiteDispatchError> {
+    Ok((
+        NetworkMethod::Get,
+        format!(
+            "{GMAIL_API_BASE}/users/me/messages/{}?format=full",
+            encode_segment(required_str(input, "message_id")?)
+        ),
+        Vec::new(),
+    ))
+}
+
+fn gmail_send_message_request(
+    input: &Value,
+) -> Result<(NetworkMethod, String, Vec<u8>), GsuiteDispatchError> {
+    Ok((
+        NetworkMethod::Post,
+        format!("{GMAIL_API_BASE}/users/me/messages/send"),
+        json_body(required_object(input, "message")?)?,
+    ))
+}
+
+fn gmail_create_draft_request(
+    input: &Value,
+) -> Result<(NetworkMethod, String, Vec<u8>), GsuiteDispatchError> {
+    Ok((
+        NetworkMethod::Post,
+        format!("{GMAIL_API_BASE}/users/me/drafts"),
+        json_body(required_object(input, "draft")?)?,
+    ))
+}
+
+fn gmail_reply_to_message_request(
+    input: &Value,
+) -> Result<(NetworkMethod, String, Vec<u8>), GsuiteDispatchError> {
+    Ok((
+        NetworkMethod::Post,
+        format!("{GMAIL_API_BASE}/users/me/messages/send"),
+        json_body(required_object(input, "message")?)?,
+    ))
+}
+
+fn gmail_trash_message_request(
+    input: &Value,
+) -> Result<(NetworkMethod, String, Vec<u8>), GsuiteDispatchError> {
+    Ok((
+        NetworkMethod::Post,
+        format!(
+            "{GMAIL_API_BASE}/users/me/messages/{}/trash",
+            encode_segment(required_str(input, "message_id")?)
+        ),
+        Vec::new(),
+    ))
 }
 
 fn runtime_request(
@@ -632,4 +714,164 @@ fn encode_percent(value: &str) -> String {
         }
     }
     encoded
+}
+
+#[cfg(test)]
+mod tests {
+    use ironclaw_host_api::HostApiError;
+
+    use super::*;
+
+    #[test]
+    fn map_credential_error_tests() {
+        for error in [
+            GoogleCredentialError::Missing,
+            GoogleCredentialError::AccountSelectionRequired,
+            GoogleCredentialError::NotConfigured,
+            GoogleCredentialError::MissingAccessSecret,
+            GoogleCredentialError::MissingScopes,
+        ] {
+            assert_eq!(
+                map_credential_error(error).kind(),
+                RuntimeDispatchErrorKind::Client
+            );
+        }
+
+        assert_eq!(
+            map_credential_error(GoogleCredentialError::Auth(
+                ironclaw_auth::AuthProductError::BackendUnavailable,
+            ))
+            .kind(),
+            RuntimeDispatchErrorKind::Backend
+        );
+        assert_eq!(
+            map_credential_error(GoogleCredentialError::HostApi(
+                HostApiError::InvariantViolation {
+                    reason: "bad contract".to_string(),
+                },
+            ))
+            .kind(),
+            RuntimeDispatchErrorKind::Backend
+        );
+    }
+
+    #[test]
+    fn map_egress_error_tests() {
+        let cases = [
+            (
+                RuntimeHttpEgressError::Credential {
+                    reason: "missing".to_string(),
+                },
+                RuntimeDispatchErrorKind::Client,
+                0,
+            ),
+            (
+                RuntimeHttpEgressError::Request {
+                    reason: "denied".to_string(),
+                    request_bytes: 11,
+                    response_bytes: 0,
+                },
+                RuntimeDispatchErrorKind::InputEncode,
+                11,
+            ),
+            (
+                RuntimeHttpEgressError::Network {
+                    reason: "offline".to_string(),
+                    request_bytes: 12,
+                    response_bytes: 0,
+                },
+                RuntimeDispatchErrorKind::NetworkDenied,
+                12,
+            ),
+            (
+                RuntimeHttpEgressError::Response {
+                    reason: "bad response".to_string(),
+                    request_bytes: 13,
+                    response_bytes: 1,
+                },
+                RuntimeDispatchErrorKind::OutputDecode,
+                13,
+            ),
+            (
+                RuntimeHttpEgressError::Network {
+                    reason: ironclaw_host_api::RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED
+                        .to_string(),
+                    request_bytes: 14,
+                    response_bytes: 1024,
+                },
+                RuntimeDispatchErrorKind::OutputTooLarge,
+                14,
+            ),
+        ];
+
+        for (error, expected_kind, expected_request_bytes) in cases {
+            let mapped = map_egress_error(error);
+            assert_eq!(mapped.kind(), expected_kind);
+            assert_eq!(
+                mapped
+                    .usage()
+                    .map(|usage| usage.network_egress_bytes)
+                    .unwrap_or_default(),
+                expected_request_bytes
+            );
+        }
+    }
+
+    #[test]
+    fn input_validation_tests() {
+        let input = json!({
+            "string": "value",
+            "object": {"nested": true},
+            "array": [1],
+        });
+
+        assert_eq!(required_str(&input, "string").unwrap(), "value");
+        assert!(matches!(
+            required_str(&input, "missing").unwrap_err().kind(),
+            RuntimeDispatchErrorKind::InputEncode
+        ));
+        assert!(matches!(
+            required_str(&input, "object").unwrap_err().kind(),
+            RuntimeDispatchErrorKind::InputEncode
+        ));
+        assert!(required_object(&input, "object").is_ok());
+        assert!(required_object(&input, "array").is_err());
+        assert!(required_array(&input, "array").is_ok());
+        assert!(required_array(&input, "object").is_err());
+        assert!(json_body(&input).is_ok());
+    }
+
+    #[test]
+    fn url_building_tests() {
+        assert_eq!(encode_percent("a b/c?d=e&f"), "a%20b%2Fc%3Fd%3De%26f");
+
+        let calendar_events = calendar_events_url(
+            &json!({
+                "calendar_id": "team calendar",
+                "time_min": "2026-05-21T00:00:00Z",
+                "max_results": 10,
+            }),
+            None,
+        )
+        .unwrap();
+        assert!(calendar_events.contains("/calendars/team%20calendar/events"));
+        assert!(calendar_events.contains("timeMin=2026-05-21T00%3A00%3A00Z"));
+        assert!(calendar_events.contains("maxResults=10"));
+
+        let calendar_event = calendar_event_url(&json!({
+            "calendar_id": "primary",
+            "event_id": "evt/needs encoding",
+        }))
+        .unwrap();
+        assert!(calendar_event.ends_with("/events/evt%2Fneeds%20encoding"));
+
+        let gmail_messages = gmail_messages_url(&json!({
+            "query": "is:unread from:ada",
+            "label_ids": ["INBOX", "Team Label"],
+        }))
+        .unwrap();
+        assert!(gmail_messages.contains("q=is%3Aunread%20from%3Aada"));
+        assert!(gmail_messages.contains("labelIds=INBOX"));
+        assert!(gmail_messages.contains("labelIds=Team%20Label"));
+    }
 }

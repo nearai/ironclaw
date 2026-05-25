@@ -102,3 +102,134 @@ fn map_selection_error(error: AuthProductError) -> GoogleCredentialError {
         other => GoogleCredentialError::Auth(other),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use async_trait::async_trait;
+    use ironclaw_auth::{
+        CredentialAccount, CredentialAccountLabel, CredentialAccountListPage,
+        CredentialAccountListRequest, CredentialAccountProjection, CredentialOwnership,
+        InMemoryAuthProductServices, NewCredentialAccount,
+    };
+    use ironclaw_host_api::{InvocationId, UserId};
+
+    use super::*;
+
+    #[test]
+    fn google_provider_id_returns_valid_provider() {
+        assert_eq!(google_provider_id().unwrap().as_str(), GOOGLE_PROVIDER_ID);
+    }
+
+    #[test]
+    fn map_selection_error_tests() {
+        assert!(matches!(
+            map_selection_error(AuthProductError::CredentialMissing),
+            GoogleCredentialError::Missing
+        ));
+        assert!(matches!(
+            map_selection_error(AuthProductError::AccountSelectionRequired),
+            GoogleCredentialError::AccountSelectionRequired
+        ));
+        assert!(matches!(
+            map_selection_error(AuthProductError::BackendUnavailable),
+            GoogleCredentialError::Auth(AuthProductError::BackendUnavailable)
+        ));
+    }
+
+    #[tokio::test]
+    async fn resolve_returns_not_configured_when_account_status_unconfigured() {
+        let scope =
+            ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
+                .unwrap();
+        let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+        let auth = InMemoryAuthProductServices::new();
+        let mut account = auth
+            .create_account(new_credential_account(
+                auth_scope.clone(),
+                CredentialAccountStatus::Configured,
+            ))
+            .await
+            .unwrap();
+        account.status = CredentialAccountStatus::PendingSetup;
+        let resolver = GoogleCredentialResolver::new(Arc::new(FakeCredentialAccountService {
+            account: account.clone(),
+        }));
+
+        let error = resolver
+            .resolve(
+                &scope,
+                &ExtensionId::new("gmail").unwrap(),
+                &[ProviderScope::new("https://www.googleapis.com/auth/gmail.send").unwrap()],
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, GoogleCredentialError::NotConfigured));
+    }
+
+    fn new_credential_account(
+        scope: AuthProductScope,
+        status: CredentialAccountStatus,
+    ) -> NewCredentialAccount {
+        NewCredentialAccount {
+            scope,
+            provider: google_provider_id().unwrap(),
+            label: CredentialAccountLabel::new("work google").unwrap(),
+            status,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("google-access-token").unwrap()),
+            refresh_secret: None,
+            scopes: vec![ProviderScope::new("https://www.googleapis.com/auth/gmail.send").unwrap()],
+        }
+    }
+
+    struct FakeCredentialAccountService {
+        account: CredentialAccount,
+    }
+
+    #[async_trait]
+    impl CredentialAccountService for FakeCredentialAccountService {
+        async fn create_account(
+            &self,
+            _request: NewCredentialAccount,
+        ) -> Result<CredentialAccount, AuthProductError> {
+            Ok(self.account.clone())
+        }
+
+        async fn get_account(
+            &self,
+            _scope: &AuthProductScope,
+            account_id: CredentialAccountId,
+        ) -> Result<Option<CredentialAccount>, AuthProductError> {
+            Ok((account_id == self.account.id).then(|| self.account.clone()))
+        }
+
+        async fn list_accounts(
+            &self,
+            _request: CredentialAccountListRequest,
+        ) -> Result<CredentialAccountListPage, AuthProductError> {
+            Ok(CredentialAccountListPage {
+                accounts: vec![self.account.projection()],
+                next_cursor: None,
+            })
+        }
+
+        async fn update_status(
+            &self,
+            _scope: &AuthProductScope,
+            _account_id: CredentialAccountId,
+            _status: CredentialAccountStatus,
+        ) -> Result<CredentialAccount, AuthProductError> {
+            Ok(self.account.clone())
+        }
+
+        async fn select_unique_configured_account(
+            &self,
+            _request: CredentialAccountSelectionRequest,
+        ) -> Result<CredentialAccountProjection, AuthProductError> {
+            Ok(self.account.projection())
+        }
+    }
+}
