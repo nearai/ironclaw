@@ -221,6 +221,21 @@ pub struct SubagentSpawnCapabilityPort {
     spawned_this_turn: AtomicU32,
 }
 
+struct SpawnContext {
+    flavor: SubagentFlavorPolicy,
+    child_scope: ThreadScope,
+    child_run_id: TurnRunId,
+    tree_root: TurnRunId,
+    child_depth: u32,
+}
+
+#[derive(Default)]
+struct SpawnCompensationState {
+    goal_written: bool,
+    gate_written: Option<GateRef>,
+    result_written: Option<LoopResultRef>,
+}
+
 impl SubagentSpawnCapabilityPort {
     pub fn new(
         inner: Arc<dyn LoopCapabilityPort>,
@@ -382,39 +397,33 @@ impl SubagentSpawnCapabilityPort {
                 self.release_spawn_slot();
                 map_reservation_error(error)
             })?;
-        let mut goal_written = false;
-        let mut gate_written: Option<GateRef> = None;
-        let mut result_written: Option<LoopResultRef> = None;
+        let mut compensation = SpawnCompensationState::default();
+        let spawn_ctx = SpawnContext {
+            flavor,
+            child_scope,
+            child_run_id,
+            tree_root,
+            child_depth,
+        };
 
         let result = self
-            .finish_spawn(
-                args,
-                flavor,
-                child_scope,
-                child_run_id,
-                tree_root,
-                child_depth,
-                actor,
-                &mut goal_written,
-                &mut gate_written,
-                &mut result_written,
-            )
+            .finish_spawn(args, spawn_ctx, actor, &mut compensation)
             .await;
         match result {
             Ok(outcome) => Ok(outcome),
             Err(error) => {
                 self.release_spawn_slot();
-                if let Some(gate_ref) = gate_written.as_ref() {
+                if let Some(gate_ref) = compensation.gate_written.as_ref() {
                     let _ = self.deps.gate_store.delete_awaited_child(gate_ref).await;
                 }
-                if goal_written {
+                if compensation.goal_written {
                     let _ = self
                         .deps
                         .goal_store
                         .delete_goal(&child_turn_scope, child_run_id)
                         .await;
                 }
-                if let Some(result_ref) = result_written.as_ref() {
+                if let Some(result_ref) = compensation.result_written.as_ref() {
                     let _ = self
                         .deps
                         .result_writer
@@ -483,24 +492,20 @@ impl SubagentSpawnCapabilityPort {
         Ok(())
     }
 
-    // arch-exempt: too_many_args, finish_spawn threads three compensation
-    // out-params (goal_written/gate_written/result_written) plus the
-    // resolved spawn context across a single async path; collapsing into a
-    // SpawnCompensationState struct is tracked as a follow-up refactor.
-    #[allow(clippy::too_many_arguments)]
     async fn finish_spawn(
         &self,
         args: SpawnSubagentArgs,
-        flavor: SubagentFlavorPolicy,
-        child_scope: ThreadScope,
-        child_run_id: TurnRunId,
-        tree_root: TurnRunId,
-        child_depth: u32,
+        ctx: SpawnContext,
         actor: TurnActor,
-        goal_written: &mut bool,
-        gate_written: &mut Option<GateRef>,
-        result_written: &mut Option<LoopResultRef>,
+        compensation: &mut SpawnCompensationState,
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        let SpawnContext {
+            flavor,
+            child_scope,
+            child_run_id,
+            tree_root,
+            child_depth,
+        } = ctx;
         let child_thread_id =
             ThreadId::new(format!("subagent-{}", child_run_id.as_uuid().simple()))
                 .map_err(invalid_static_ref)?;
@@ -523,7 +528,7 @@ impl SubagentSpawnCapabilityPort {
             .result_writer
             .write_capability_result(&self.run_context, &self.spawn_id, payload)
             .await?;
-        *result_written = Some(result_ref.clone());
+        compensation.result_written = Some(result_ref.clone());
         let child_thread = self
             .deps
             .thread_service
@@ -563,7 +568,7 @@ impl SubagentSpawnCapabilityPort {
                 },
             )
             .await?;
-        *goal_written = true;
+        compensation.goal_written = true;
 
         self.deps
             .gate_store
@@ -587,7 +592,7 @@ impl SubagentSpawnCapabilityPort {
                 mode,
             })
             .await?;
-        *gate_written = Some(gate_ref.clone());
+        compensation.gate_written = Some(gate_ref.clone());
 
         let accepted = self
             .deps
