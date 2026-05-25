@@ -13,10 +13,11 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, CapabilitySurfacePolicy, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID,
-    GREP_CAPABILITY_ID, HostRuntime, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID,
-    READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
-    SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SurfaceKind, TIME_CAPABILITY_ID,
-    VisibleCapabilityRequest as HostVisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID,
+    GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HostRuntime, JSON_CAPABILITY_ID,
+    LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
+    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SurfaceKind,
+    TIME_CAPABILITY_ID, VisibleCapabilityRequest as HostVisibleCapabilityRequest,
+    WRITE_FILE_CAPABILITY_ID,
 };
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
@@ -241,10 +242,13 @@ impl StagedValueStore {
 fn staged_value_bytes(value: &serde_json::Value) -> Result<usize, AgentLoopHostError> {
     serde_json::to_vec(value)
         .map(|bytes| bytes.len())
-        .map_err(|_| {
-            AgentLoopHostError::new(
+        .map_err(|error| {
+            ironclaw_loop_support::raw_agent_loop_host_error(
+                "local_dev_capability_io",
+                "measure_payload",
                 AgentLoopHostErrorKind::InvalidInvocation,
                 "capability payload could not be measured",
+                error,
             )
         })
 }
@@ -369,10 +373,13 @@ fn hydrate_tool_result_messages(
             continue;
         }
         let mut envelope: ToolResultReferenceEnvelope = serde_json::from_str(&message.content)
-            .map_err(|_| {
-                HostManagedModelError::safe(
+            .map_err(|error| {
+                ironclaw_loop_support::raw_host_managed_model_error(
+                    "local_dev_model_replay",
+                    "decode_tool_result_envelope",
                     HostManagedModelErrorKind::InvalidRequest,
                     "tool result reference transcript content is invalid",
+                    error,
                 )
             })?;
         let output = capability_io
@@ -382,16 +389,23 @@ fn hydrate_tool_result_messages(
             continue;
         };
         envelope.safe_summary = ToolResultSafeSummary::new(model_visible_tool_output(&output))
-            .map_err(|_| {
-                HostManagedModelError::safe(
+            .map_err(|error| {
+                ironclaw_loop_support::raw_host_managed_model_error(
+                    "local_dev_model_replay",
+                    "sanitize_tool_result",
                     HostManagedModelErrorKind::InvalidRequest,
                     "tool result output could not be represented safely for model replay",
+                    error,
                 )
             })?;
         message.content = serde_json::to_string(&envelope).map_err(|error| {
-            HostManagedModelError::safe(
+            let safe_summary = error.to_string();
+            ironclaw_loop_support::raw_host_managed_model_error(
+                "local_dev_model_replay",
+                "encode_tool_result_envelope",
                 HostManagedModelErrorKind::InvalidRequest,
-                error.to_string(),
+                safe_summary,
+                error,
             )
         })?;
     }
@@ -538,12 +552,15 @@ fn local_dev_builtin_grants(
 enum LocalDevCapabilityKind {
     Workspace,
     AmbientShell,
+    Network,
     SkillManagement,
 }
 
 fn local_dev_capability_kind(capability_id: &str) -> LocalDevCapabilityKind {
     if capability_id == SHELL_CAPABILITY_ID {
         LocalDevCapabilityKind::AmbientShell
+    } else if capability_id == HTTP_CAPABILITY_ID {
+        LocalDevCapabilityKind::Network
     } else if capability_id == SKILL_LIST_CAPABILITY_ID
         || capability_id == SKILL_INSTALL_CAPABILITY_ID
         || capability_id == SKILL_REMOVE_CAPABILITY_ID
@@ -583,6 +600,15 @@ fn local_dev_grant_constraints(
             expires_at: None,
             max_invocations: None,
         },
+        LocalDevCapabilityKind::Network => GrantConstraints {
+            allowed_effects: local_dev_network_allowed_effects(),
+            mounts: MountView::default(),
+            network: local_dev_shell_network_policy(),
+            secrets: Vec::new(),
+            resource_ceiling: None,
+            expires_at: None,
+            max_invocations: None,
+        },
         LocalDevCapabilityKind::Workspace => GrantConstraints {
             allowed_effects: local_dev_allowed_effects(),
             mounts: workspace_mounts.clone(),
@@ -604,11 +630,12 @@ fn local_dev_grant_constraints(
     }
 }
 
-fn local_dev_builtin_capability_ids() -> [&'static str; 13] {
+fn local_dev_builtin_capability_ids() -> [&'static str; 14] {
     [
         ECHO_CAPABILITY_ID,
         TIME_CAPABILITY_ID,
         JSON_CAPABILITY_ID,
+        HTTP_CAPABILITY_ID,
         SHELL_CAPABILITY_ID,
         READ_FILE_CAPABILITY_ID,
         WRITE_FILE_CAPABILITY_ID,
@@ -620,6 +647,10 @@ fn local_dev_builtin_capability_ids() -> [&'static str; 13] {
         SKILL_INSTALL_CAPABILITY_ID,
         SKILL_REMOVE_CAPABILITY_ID,
     ]
+}
+
+fn local_dev_network_allowed_effects() -> Vec<EffectKind> {
+    vec![EffectKind::DispatchCapability, EffectKind::Network]
 }
 
 fn local_dev_allowed_effects() -> Vec<EffectKind> {
@@ -683,8 +714,17 @@ fn capability_io_error() -> AgentLoopHostError {
     )
 }
 
-fn host_api_agent_loop_error(error: impl std::fmt::Display) -> AgentLoopHostError {
-    AgentLoopHostError::new(AgentLoopHostErrorKind::InvalidInvocation, error.to_string())
+fn host_api_agent_loop_error(
+    error: impl std::fmt::Debug + std::fmt::Display,
+) -> AgentLoopHostError {
+    let safe_summary = error.to_string();
+    ironclaw_loop_support::raw_agent_loop_host_error(
+        "local_dev_host_api",
+        "validate_local_dev_runtime_input",
+        AgentLoopHostErrorKind::InvalidInvocation,
+        safe_summary,
+        format!("{error:?}"),
+    )
 }
 
 #[cfg(test)]
@@ -808,7 +848,7 @@ mod tests {
     }
 
     #[test]
-    fn local_dev_builtin_surface_grants_shell_as_ambient_escape_hatch() {
+    fn local_dev_builtin_surface_grants_capability_classes() {
         let capability_ids = local_dev_builtin_capability_ids();
 
         assert!(capability_ids.contains(&WRITE_FILE_CAPABILITY_ID));
@@ -817,6 +857,7 @@ mod tests {
         assert!(capability_ids.contains(&SKILL_INSTALL_CAPABILITY_ID));
         assert!(capability_ids.contains(&SKILL_REMOVE_CAPABILITY_ID));
         assert!(capability_ids.contains(&SHELL_CAPABILITY_ID));
+        assert!(capability_ids.contains(&HTTP_CAPABILITY_ID));
         assert_eq!(
             local_dev_allowed_effects(),
             vec![
@@ -889,6 +930,17 @@ mod tests {
         assert!(shell_grant.constraints.mounts.mounts.is_empty());
         assert_eq!(
             shell_grant.constraints.network,
+            local_dev_shell_network_policy()
+        );
+
+        let http_grant = grant_for(HTTP_CAPABILITY_ID);
+        assert_eq!(
+            http_grant.constraints.allowed_effects,
+            vec![EffectKind::DispatchCapability, EffectKind::Network]
+        );
+        assert!(http_grant.constraints.mounts.mounts.is_empty());
+        assert_eq!(
+            http_grant.constraints.network,
             local_dev_shell_network_policy()
         );
 

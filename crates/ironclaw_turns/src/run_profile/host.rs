@@ -66,6 +66,21 @@ fn validate_prefixed_loop_ref(
     Ok(value)
 }
 
+fn validate_prefixed_path_safe_loop_ref(
+    label: &'static str,
+    prefix: &'static str,
+    max_bytes: usize,
+    value: String,
+) -> Result<String, String> {
+    let value = validate_prefixed_loop_ref(label, prefix, max_bytes, value)?;
+    if value.contains('/') || value.contains('\\') || value.contains("..") {
+        return Err(format!(
+            "{label} must not contain path separators or parent-directory markers"
+        ));
+    }
+    Ok(value)
+}
+
 fn validate_loop_opaque_token(
     value: String,
     label: &'static str,
@@ -215,12 +230,6 @@ macro_rules! bounded_loop_ref {
 
 bounded_loop_ref!(CapabilityInputRef, "capability input ref", "input:", 256);
 bounded_loop_ref!(
-    LoopCheckpointStateRef,
-    "loop checkpoint state ref",
-    "checkpoint:",
-    256
-);
-bounded_loop_ref!(
     LoopInputCursorToken,
     "loop input cursor token",
     "input-cursor:",
@@ -228,6 +237,48 @@ bounded_loop_ref!(
 );
 bounded_loop_ref!(LoopInputAckToken, "loop input ack token", "input-ack:", 256);
 bounded_loop_ref!(LoopProcessRef, "loop process ref", "process:", 256);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct LoopCheckpointStateRef(String);
+
+impl LoopCheckpointStateRef {
+    pub fn new(value: impl Into<String>) -> Result<Self, String> {
+        validate_prefixed_path_safe_loop_ref(
+            "loop checkpoint state ref",
+            "checkpoint:",
+            256,
+            value.into(),
+        )
+        .map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for LoopCheckpointStateRef {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for LoopCheckpointStateRef {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for LoopCheckpointStateRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
 
 impl LoopCheckpointStateRef {
     pub(crate) fn legacy_unknown() -> Self {
@@ -1403,8 +1454,10 @@ pub enum CapabilityFailureKind {
     Cancelled,
     Dispatcher,
     InvalidInput,
+    InvalidOutput,
     MissingRuntime,
     Network,
+    OperationFailed,
     OutputTooLarge,
     PolicyDenied,
     Process,
@@ -1441,8 +1494,10 @@ impl CapabilityFailureKind {
             Self::Cancelled => "cancelled",
             Self::Dispatcher => "dispatcher",
             Self::InvalidInput => "invalid_input",
+            Self::InvalidOutput => "invalid_output",
             Self::MissingRuntime => "missing_runtime",
             Self::Network => "network",
+            Self::OperationFailed => "operation_failed",
             Self::OutputTooLarge => "output_too_large",
             Self::PolicyDenied => "policy_denied",
             Self::Process => "process",
@@ -1483,8 +1538,10 @@ impl<'de> Deserialize<'de> for CapabilityFailureKind {
             "cancelled" => Ok(Self::Cancelled),
             "dispatcher" => Ok(Self::Dispatcher),
             "invalid_input" => Ok(Self::InvalidInput),
+            "invalid_output" => Ok(Self::InvalidOutput),
             "missing_runtime" => Ok(Self::MissingRuntime),
             "network" => Ok(Self::Network),
+            "operation_failed" => Ok(Self::OperationFailed),
             "output_too_large" => Ok(Self::OutputTooLarge),
             "policy_denied" => Ok(Self::PolicyDenied),
             "process" => Ok(Self::Process),

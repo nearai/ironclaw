@@ -33,6 +33,7 @@ use ironclaw_host_api::{
     RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
     RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
     is_sensitive_runtime_request_header, is_sensitive_runtime_response_header,
+    runtime_policy::{DeploymentMode, EffectiveRuntimePolicy, RuntimeProfile},
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse,
@@ -42,7 +43,7 @@ use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStoreError};
 use ironclaw_trust::TrustDecision;
 use secrecy::ExposeSecret;
 use serde_json::Value;
-use std::{collections::BTreeMap, fmt, sync::Arc};
+use std::{collections::BTreeMap, env, fmt, sync::Arc};
 use thiserror::Error;
 
 mod capability_catalog;
@@ -55,6 +56,7 @@ mod obligations;
 mod planner;
 mod process_port;
 mod production;
+mod sandbox_process;
 mod services;
 mod surface;
 mod turn_scheduler;
@@ -96,6 +98,10 @@ pub use process_port::{
     RuntimeProcessPort, SandboxCommandTransport, TenantSandboxProcessPort,
 };
 pub use production::DefaultHostRuntime;
+pub use sandbox_process::{
+    RebornSandboxConfig, RebornSandboxContainerIdentity, RebornSandboxScopeKey,
+    RebornSandboxWorkspaceMode, RebornScopedSandboxCommandTransport,
+};
 pub use services::{
     HostRuntimeServices, ProductionEventStoreWiringError, ProductionWiringComponent,
     ProductionWiringConfig, ProductionWiringIssue, ProductionWiringIssueKind,
@@ -548,6 +554,66 @@ pub enum RuntimeBlockedReason {
     ResourceUnavailable,
 }
 
+/// Opt-in local diagnostic switch for raw HTTP egress failures.
+///
+/// Raw transport errors can contain URLs, query strings, host paths, proxy
+/// details, or credential-shaped text. Keep this disabled unless debugging a
+/// trusted `LocalDev` or `LocalYolo` run. Hosted and enterprise deployments
+/// never enable raw diagnostics from this environment variable alone.
+pub(crate) const UNSAFE_RAW_HTTP_EGRESS_ERRORS_ENV: &str = "IRONCLAW_UNSAFE_RAW_HTTP_EGRESS_ERRORS";
+
+pub(crate) fn runtime_policy_allows_unsafe_raw_http_diagnostics(
+    policy: Option<&EffectiveRuntimePolicy>,
+) -> bool {
+    policy.is_some_and(|policy| {
+        local_runtime_allows_unsafe_raw_http_diagnostics(policy.deployment, policy.resolved_profile)
+    })
+}
+
+pub(crate) fn local_runtime_allows_unsafe_raw_http_diagnostics(
+    deployment: DeploymentMode,
+    profile: RuntimeProfile,
+) -> bool {
+    matches!(deployment, DeploymentMode::LocalSingleUser)
+        && matches!(
+            profile,
+            RuntimeProfile::LocalDev | RuntimeProfile::LocalYolo
+        )
+}
+
+pub(crate) fn unsafe_raw_http_diagnostics_enabled(runtime_allows_raw: bool) -> bool {
+    runtime_allows_raw && env::var(UNSAFE_RAW_HTTP_EGRESS_ERRORS_ENV).as_deref() == Ok("1")
+}
+
+#[cfg(test)]
+mod raw_http_diagnostic_policy_tests {
+    use super::*;
+
+    #[test]
+    fn raw_http_diagnostics_are_limited_to_local_dev_and_yolo_profiles() {
+        assert!(local_runtime_allows_unsafe_raw_http_diagnostics(
+            DeploymentMode::LocalSingleUser,
+            RuntimeProfile::LocalDev,
+        ));
+        assert!(local_runtime_allows_unsafe_raw_http_diagnostics(
+            DeploymentMode::LocalSingleUser,
+            RuntimeProfile::LocalYolo,
+        ));
+        assert!(!local_runtime_allows_unsafe_raw_http_diagnostics(
+            DeploymentMode::LocalSingleUser,
+            RuntimeProfile::LocalSafe,
+        ));
+        assert!(!local_runtime_allows_unsafe_raw_http_diagnostics(
+            DeploymentMode::HostedMultiTenant,
+            RuntimeProfile::HostedYoloTenantScoped,
+        ));
+        assert!(!local_runtime_allows_unsafe_raw_http_diagnostics(
+            DeploymentMode::EnterpriseDedicated,
+            RuntimeProfile::EnterpriseYoloDedicated,
+        ));
+    }
+}
+
 /// Stable, sanitized failure categories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -557,8 +623,10 @@ pub enum RuntimeFailureKind {
     Cancelled,
     Dispatcher,
     InvalidInput,
+    InvalidOutput,
     MissingRuntime,
     Network,
+    OperationFailed,
     OutputTooLarge,
     Process,
     Resource,
@@ -574,8 +642,10 @@ impl RuntimeFailureKind {
             Self::Cancelled => "cancelled",
             Self::Dispatcher => "dispatcher",
             Self::InvalidInput => "invalid_input",
+            Self::InvalidOutput => "invalid_output",
             Self::MissingRuntime => "missing_runtime",
             Self::Network => "network",
+            Self::OperationFailed => "operation_failed",
             Self::OutputTooLarge => "output_too_large",
             Self::Process => "process",
             Self::Resource => "resource",
@@ -750,6 +820,7 @@ pub struct HostHttpEgressService<N, S> {
     secret_injections: Option<Arc<RuntimeSecretInjectionStore>>,
     network_policy_store: Option<Arc<NetworkObligationPolicyStore>>,
     network_policy_source: NetworkPolicySource,
+    unsafe_raw_diagnostics_allowed: bool,
 }
 
 impl<N, S> HostHttpEgressService<N, S> {
@@ -766,6 +837,7 @@ impl<N, S> HostHttpEgressService<N, S> {
             secret_injections: None,
             network_policy_store: None,
             network_policy_source: NetworkPolicySource::StagedObligation,
+            unsafe_raw_diagnostics_allowed: false,
         }
     }
 
@@ -782,7 +854,13 @@ impl<N, S> HostHttpEgressService<N, S> {
             secret_injections: None,
             network_policy_store: None,
             network_policy_source: NetworkPolicySource::RequestPolicyFallback,
+            unsafe_raw_diagnostics_allowed: false,
         }
+    }
+
+    pub(crate) fn with_unsafe_raw_diagnostics_allowed(mut self, allowed: bool) -> Self {
+        self.unsafe_raw_diagnostics_allowed = allowed;
+        self
     }
 
     pub(crate) fn with_secret_injection_store(
@@ -957,7 +1035,7 @@ where
                 response_body_limit: request.response_body_limit,
                 timeout_ms: request.timeout_ms,
             })
-            .map_err(runtime_network_error)?;
+            .map_err(|error| runtime_network_error(self.unsafe_raw_diagnostics_allowed, error))?;
         let credentials_injected = !redaction_values.is_empty();
         let (response, response_redacted) = sanitize_runtime_response(response, &redaction_values)?;
         Ok(runtime_response(
@@ -1185,12 +1263,32 @@ fn apply_credential_injection(
     Ok(())
 }
 
-fn runtime_network_error(error: NetworkHttpError) -> RuntimeHttpEgressError {
+fn runtime_network_error(
+    unsafe_raw_diagnostics_allowed: bool,
+    error: NetworkHttpError,
+) -> RuntimeHttpEgressError {
+    log_raw_network_http_error_for_local_diagnostics(unsafe_raw_diagnostics_allowed, &error);
     RuntimeHttpEgressError::Network {
         reason: error.stable_reason().to_string(),
         request_bytes: error.request_bytes(),
         response_bytes: error.response_bytes(),
     }
+}
+
+fn log_raw_network_http_error_for_local_diagnostics(
+    unsafe_raw_diagnostics_allowed: bool,
+    error: &NetworkHttpError,
+) {
+    if !unsafe_raw_http_diagnostics_enabled(unsafe_raw_diagnostics_allowed) {
+        return;
+    }
+
+    tracing::warn!(
+        network_error_kind = error.kind().as_str(),
+        raw_network_error = %error,
+        unsafe_raw_diagnostics = true,
+        "unsafe raw HTTP egress error diagnostic enabled"
+    );
 }
 
 fn validate_runtime_request(

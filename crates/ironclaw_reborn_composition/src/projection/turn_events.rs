@@ -222,6 +222,13 @@ fn turn_status_wire(status: TurnStatus) -> &'static str {
 }
 
 fn map_turn_event_projection_error(error: TurnEventProjectionError) -> ProductAdapterError {
+    tracing::warn!(
+        component = "turn_event_projection",
+        operation = "map_projection_error",
+        error = %error,
+        error_debug = ?error,
+        "turn event projection error mapped to product adapter error"
+    );
     match error {
         TurnEventProjectionError::InvalidRequest { reason } => {
             ProductAdapterError::InvalidIdentifier {

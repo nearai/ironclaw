@@ -14,8 +14,9 @@ use super::{
         DEFAULT_LINE_LIMIT, MAX_DIR_ENTRIES, MAX_PATCH_SIZE, MAX_READ_SIZE, MAX_VISITED_ENTRIES,
         MAX_WRITE_SIZE,
     },
-    guest_error, input_error,
+    input_error,
     inputs::{optional_usize, required_str},
+    operation_error,
     paths::{
         create_parent_dir_unless_sensitive, deny_sensitive_existing_path, filesystem_error,
         is_excluded_name, is_sensitive_scoped_path, is_workspace_path, operation_allowed,
@@ -308,10 +309,10 @@ pub(super) async fn apply_patch(
     let (content, encoding, line_ending) = decode_text(&bytes)?;
     let (match_count, match_method) = count_matches(&content, old_string);
     if match_count == 0 {
-        return Err(guest_error());
+        return Err(operation_error());
     }
     if !replace_all && match_count > 1 {
-        return Err(guest_error());
+        return Err(operation_error());
     }
 
     let (new_content, replacements) =

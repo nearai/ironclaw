@@ -1,0 +1,49 @@
+# Implementation phase DAG. Render: d2 phase-dag.d2 phase-dag.svg
+direction: down
+
+title: "Implementation phases — P0 prerequisite, Phase 1 & 2 parallel, Phase 3 wires" {
+  near: top-center
+  shape: text
+  style.font-size: 22
+  style.bold: true
+}
+
+phase0: "PHASE 0 — PREREQUISITE (general, not subagent-specific)" {
+  style.fill: "#fce4ec"
+  p0: "P0  PendingGateStore projection over TurnLifecycleEvent\nfixes block_run → UI gap for every blocked turn\n(replayable from cursor, single source log)"
+}
+
+phase1: "PHASE 1 — Contracts & isolated units" {
+  style.fill: "#e8f5e9"
+  p1a: "P1.A  ironclaw_turns\ncontract additions\n(land first — gate kind names)"
+  p1b: "P1.B  ironclaw_agent_loop\nsubagent family + gate kind\n(needs P1.A's variant names)"
+  p1c: "P1.C  ironclaw_reborn data\ndirection .md · DB goal store ·\nflavor table · reservation rows\n(independent)"
+  p1a -> p1b: "variant names"
+}
+
+phase2: "PHASE 2 — Mechanisms  (4 parallel workstreams)" {
+  style.fill: "#e3f2fd"
+  p2a: "P2.A  loop_support\nspawn handling"
+  p2b: "P2.B  loop_support\nprompt + attenuation"
+  p2c: "P2.C  ironclaw_reborn\nsubagent PlannedDriver"
+  p2d: "P2.D  ironclaw_reborn\ncompletion observer"
+}
+
+phase3: "PHASE 3 — Integration\nruntime.rs wiring · spawn_subagent surface · end-to-end tests · quality gate" {
+  style.fill: "#fff3e0"
+}
+
+phase1.p1a -> phase2.p2a
+phase1.p1c -> phase2.p2a
+phase1.p1a -> phase2.p2b
+phase1.p1c -> phase2.p2b
+phase1.p1b -> phase2.p2c
+phase1.p1a -> phase2.p2d
+phase1.p1c -> phase2.p2d
+
+phase2.p2a -> phase3
+phase2.p2b -> phase3
+phase2.p2c -> phase3
+phase2.p2d -> phase3
+
+phase0.p0 -> phase3: "approvals usable in prod"

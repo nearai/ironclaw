@@ -502,11 +502,18 @@ fn validate_product_thread_payload(
         runs.iter()
             .all(|run| run.thread_id.as_ref() == Some(thread_id))
     };
+    let all_capability_activities_match =
+        |activities: &[ironclaw_event_projections::CapabilityActivityProjection]| {
+            activities
+                .iter()
+                .all(|activity| activity.thread_id.as_ref() == Some(thread_id))
+        };
 
     match envelope {
         ProductProjectionEnvelope::ThreadSnapshot(snapshot) => {
             if all_thread_entries_match(&snapshot.timeline.entries)
                 && all_run_statuses_match(&snapshot.runs)
+                && all_capability_activities_match(&snapshot.capability_activities)
             {
                 Ok(())
             } else {
@@ -514,7 +521,10 @@ fn validate_product_thread_payload(
             }
         }
         ProductProjectionEnvelope::ThreadUpdates(replay) => {
-            if all_thread_entries_match(&replay.updates) && all_run_statuses_match(&replay.runs) {
+            if all_thread_entries_match(&replay.updates)
+                && all_run_statuses_match(&replay.runs)
+                && all_capability_activities_match(&replay.capability_activities)
+            {
                 Ok(())
             } else {
                 Err(ProjectionStreamError::AccessDenied)
@@ -586,8 +596,16 @@ fn map_projection_error(error: ProjectionError) -> ProjectionStreamError {
         ProjectionError::InvalidRequest { reason } => {
             ProjectionStreamError::InvalidRequest { reason }
         }
+        ProjectionError::MissingProjectionMetadata { .. } => {
+            ProjectionStreamError::InvalidRequest {
+                reason: "projection metadata missing on lifecycle event",
+            }
+        }
         ProjectionError::RebaseRequired { .. } => ProjectionStreamError::InvalidRequest {
             reason: "projection rebase required outside subscribe flow",
+        },
+        ProjectionError::TurnEventRebaseRequired { .. } => ProjectionStreamError::InvalidRequest {
+            reason: "turn event projection rebase required outside subscribe flow",
         },
         ProjectionError::Source { .. } => ProjectionStreamError::Source,
     }

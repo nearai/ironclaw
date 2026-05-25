@@ -90,9 +90,9 @@ use ironclaw_turns::{
 };
 use ironclaw_turns::{NoopTurnRunWakeNotifier, TurnRunWake, TurnRunWakeNotifier};
 use ironclaw_wasm::{
-    RecordingWasmHostHttp, WasmHostError, WasmHostHttp, WasmHttpRequest, WasmHttpResponse,
-    WasmRuntimeCredentialProvider, WasmRuntimeCredentialRequest, WasmStagedRuntimeCredential,
-    WasmStagedRuntimeCredentials, WitToolHost, WitToolRuntimeConfig,
+    RecordingWasmHostHttp, WasmHostError, WasmHttpResponse, WasmRuntimeCredentialProvider,
+    WasmRuntimeCredentialRequest, WasmStagedRuntimeCredential, WasmStagedRuntimeCredentials,
+    WitToolHost, WitToolRuntimeConfig,
 };
 use serde_json::json;
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
@@ -1215,6 +1215,35 @@ fn production_wiring_validation_tracks_tenant_sandbox_process_port_for_builtin_s
             ProductionWiringIssueKind::UnverifiedProductionImplementation
         ),
         "configured tenant sandbox process port should clear missing but remain unverified: {report:?}"
+    );
+
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_builtin_first_party_package()),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_runtime_policy(hosted_dev_runtime_policy())
+    .with_production_tenant_sandbox_process_port(Arc::new(TenantSandboxProcessPort::new(
+        Arc::new(ProductionCandidateSandboxTransport),
+    )));
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([RuntimeKind::FirstParty]))
+        .expect_err("test service graph still uses local-only backing stores");
+
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::RuntimeProcessPort,
+            ProductionWiringIssueKind::Missing
+        ) && !report.contains(
+            ProductionWiringComponent::RuntimeProcessPort,
+            ProductionWiringIssueKind::UnverifiedProductionImplementation
+        ),
+        "verified tenant sandbox process port should satisfy the process-port gate: {report:?}"
     );
 }
 
@@ -4650,12 +4679,12 @@ async fn spawned_obligation_lifecycle_abort_cleans_up_when_process_start_fails()
 }
 
 #[tokio::test]
-async fn host_runtime_services_wasm_guest_error_reconciles_usage_after_host_effect() {
-    let wat = http_then_guest_error_wat();
+async fn host_runtime_services_wasm_operation_failed_reconciles_usage_after_host_effect() {
+    let wat = http_then_operation_failed_wat();
     let runtime = wasm_runtime_for_component(
-        WASM_GUEST_ERROR_MANIFEST,
-        "wasm-accounting.guest_error",
-        "wasm/guest-error.wasm",
+        WASM_OPERATION_FAILED_MANIFEST,
+        "wasm-accounting.operation_failed",
+        "wasm/operation-failed.wasm",
         &wat,
     )
     .await;
@@ -4664,20 +4693,20 @@ async fn host_runtime_services_wasm_guest_error_reconciles_usage_after_host_effe
         .runtime
         .invoke_capability(wasm_runtime_request(
             runtime.capability_id,
-            json!({"call": "guest-error"}),
+            json!({"call": "operation-failed"}),
         ))
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::Backend);
-    assert_eq!(runtime.http.requests().unwrap().len(), 1);
+    assert_failed_outcome(outcome, RuntimeFailureKind::OperationFailed);
+    assert_eq!(runtime.http.requests().len(), 1);
     assert_eq!(
         runtime
             .governor
             .usage_for(&sample_account())
             .network_egress_bytes,
         5,
-        "host-mediated HTTP request bytes must be reconciled even when the guest returns an error response"
+        "host-mediated HTTP request bytes must be reconciled even when the capability returns an operation failure"
     );
     assert_eq!(
         runtime
@@ -4708,15 +4737,15 @@ async fn host_runtime_services_wasm_invalid_output_reconciles_usage_after_host_e
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::InvalidInput);
-    assert_eq!(runtime.http.requests().unwrap().len(), 1);
+    assert_failed_outcome(outcome, RuntimeFailureKind::InvalidOutput);
+    assert_eq!(runtime.http.requests().len(), 1);
     assert_eq!(
         runtime
             .governor
             .usage_for(&sample_account())
             .network_egress_bytes,
         5,
-        "host-mediated HTTP request bytes must be reconciled even when the guest returns malformed output"
+        "host-mediated HTTP request bytes must be reconciled even when the capability returns malformed output"
     );
     assert_eq!(
         runtime
@@ -4728,8 +4757,8 @@ async fn host_runtime_services_wasm_invalid_output_reconciles_usage_after_host_e
 }
 
 #[tokio::test]
-async fn host_runtime_services_wasm_guest_error_reconciles_wall_clock_after_host_effect() {
-    let wat = http_without_body_then_guest_error_wat();
+async fn host_runtime_services_wasm_operation_failed_reconciles_wall_clock_after_host_effect() {
+    let wat = http_without_body_then_operation_failed_wat();
     let runtime = wasm_runtime_for_component_with_slow_zero_body_http(
         WASM_WALL_CLOCK_FAILURE_MANIFEST,
         "wasm-accounting.wall_clock_failure",
@@ -4747,12 +4776,12 @@ async fn host_runtime_services_wasm_guest_error_reconciles_wall_clock_after_host
         .await
         .unwrap();
 
-    assert_failed_outcome(outcome, RuntimeFailureKind::Backend);
-    assert_eq!(runtime.http.requests().unwrap().len(), 1);
+    assert_failed_outcome(outcome, RuntimeFailureKind::OperationFailed);
+    assert_eq!(runtime.http.requests().len(), 1);
     let usage = runtime.governor.usage_for(&sample_account());
     assert!(
         usage.wall_clock_ms > 0,
-        "wall-clock usage must be reconciled even when a failed guest has no byte/token/process usage"
+        "wall-clock usage must be reconciled even when an operation failure has no byte/token/process usage"
     );
     assert_eq!(usage.network_egress_bytes, 0);
     assert_eq!(
@@ -5368,12 +5397,36 @@ impl WasmRuntimeCredentialProvider for SecretStoreLeaseCredentials {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct RecordingRuntimeHttpEgress {
     requests: Arc<std::sync::Mutex<Vec<RuntimeHttpEgressRequest>>>,
+    delay: Duration,
+    response_status: u16,
+}
+
+impl Default for RecordingRuntimeHttpEgress {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RecordingRuntimeHttpEgress {
+    fn new() -> Self {
+        Self {
+            requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+            delay: Duration::ZERO,
+            response_status: 200,
+        }
+    }
+
+    fn with_delay(delay: Duration) -> Self {
+        Self {
+            delay,
+            response_status: 204,
+            ..Self::new()
+        }
+    }
+
     fn requests(&self) -> Vec<RuntimeHttpEgressRequest> {
         self.requests.lock().unwrap().clone()
     }
@@ -5384,9 +5437,12 @@ impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
         &self,
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        if !self.delay.is_zero() {
+            thread::sleep(self.delay);
+        }
         self.requests.lock().unwrap().push(request.clone());
         Ok(RuntimeHttpEgressResponse {
-            status: 200,
+            status: self.response_status,
             headers: Vec::new(),
             body: Vec::new(),
             request_bytes: request.body.len() as u64,
@@ -6325,52 +6381,15 @@ fn mcp_capability_id() -> CapabilityId {
 struct WasmRuntimeFixture {
     runtime: DefaultHostRuntime,
     governor: Arc<InMemoryResourceGovernor>,
-    http: Arc<RecordingWasmHostHttp>,
+    http: Arc<RecordingRuntimeHttpEgress>,
     capability_id: CapabilityId,
 }
 
 struct WasmWallClockRuntimeFixture {
     runtime: DefaultHostRuntime,
     governor: Arc<InMemoryResourceGovernor>,
-    http: Arc<SlowZeroBodyWasmHostHttp>,
+    http: Arc<RecordingRuntimeHttpEgress>,
     capability_id: CapabilityId,
-}
-
-#[derive(Debug)]
-struct SlowZeroBodyWasmHostHttp {
-    requests: std::sync::Mutex<Vec<WasmHttpRequest>>,
-    delay: Duration,
-}
-
-impl SlowZeroBodyWasmHostHttp {
-    fn new(delay: Duration) -> Self {
-        Self {
-            requests: std::sync::Mutex::new(Vec::new()),
-            delay,
-        }
-    }
-
-    fn requests(&self) -> Result<Vec<WasmHttpRequest>, WasmHostError> {
-        self.requests
-            .lock()
-            .map(|requests| requests.clone())
-            .map_err(|_| WasmHostError::Failed("slow HTTP request log is poisoned".into()))
-    }
-}
-
-impl WasmHostHttp for SlowZeroBodyWasmHostHttp {
-    fn request(&self, request: WasmHttpRequest) -> Result<WasmHttpResponse, WasmHostError> {
-        self.requests
-            .lock()
-            .map_err(|_| WasmHostError::Failed("slow HTTP request log is poisoned".into()))?
-            .push(request);
-        thread::sleep(self.delay);
-        Ok(WasmHttpResponse {
-            status: 204,
-            headers_json: "{}".to_string(),
-            body: Vec::new(),
-        })
-    }
 }
 
 async fn wasm_runtime_for_component(
@@ -6385,13 +6404,12 @@ async fn wasm_runtime_for_component(
         filesystem_with_wasm_component(parsed_manifest.id.as_str(), module_path, &component).await,
     );
     let governor = Arc::new(governor_with_default_limit(sample_account()));
+    let policy = wasm_http_policy();
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
-        Arc::new(AllowAllDispatchAuthorizer);
-    let http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
-        status: 200,
-        headers_json: "{}".to_string(),
-        body: Vec::new(),
-    }));
+        Arc::new(ObligatingAuthorizer::new(vec![
+            Obligation::ApplyNetworkPolicy { policy },
+        ]));
+    let http = Arc::new(RecordingRuntimeHttpEgress::new());
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(manifest)),
         filesystem,
@@ -6400,10 +6418,8 @@ async fn wasm_runtime_for_component(
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .try_with_wasm_runtime(
-        WitToolRuntimeConfig::for_testing(),
-        WitToolHost::deny_all().with_http(Arc::clone(&http)),
-    )
+    .with_runtime_http_egress(Arc::clone(&http))
+    .try_with_wasm_runtime(WitToolRuntimeConfig::for_testing(), WitToolHost::deny_all())
     .unwrap();
 
     WasmRuntimeFixture {
@@ -6426,9 +6442,14 @@ async fn wasm_runtime_for_component_with_slow_zero_body_http(
         filesystem_with_wasm_component(parsed_manifest.id.as_str(), module_path, &component).await,
     );
     let governor = Arc::new(governor_with_default_limit(sample_account()));
+    let policy = wasm_http_policy();
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
-        Arc::new(AllowAllDispatchAuthorizer);
-    let http = Arc::new(SlowZeroBodyWasmHostHttp::new(Duration::from_millis(25)));
+        Arc::new(ObligatingAuthorizer::new(vec![
+            Obligation::ApplyNetworkPolicy { policy },
+        ]));
+    let http = Arc::new(RecordingRuntimeHttpEgress::with_delay(
+        Duration::from_millis(25),
+    ));
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(manifest)),
         filesystem,
@@ -6437,10 +6458,8 @@ async fn wasm_runtime_for_component_with_slow_zero_body_http(
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .try_with_wasm_runtime(
-        WitToolRuntimeConfig::for_testing(),
-        WitToolHost::deny_all().with_http(Arc::clone(&http)),
-    )
+    .with_runtime_http_egress(Arc::clone(&http))
+    .try_with_wasm_runtime(WitToolRuntimeConfig::for_testing(), WitToolHost::deny_all())
     .unwrap();
 
     WasmWallClockRuntimeFixture {
@@ -6557,7 +6576,7 @@ fn tool_component(wat_src: &str) -> Vec<u8> {
     encoder.encode().unwrap()
 }
 
-fn http_then_guest_error_wat() -> String {
+fn http_then_operation_failed_wat() -> String {
     HTTP_TOOL_WAT.replace(
         "i32.const 48\n    i32.const 1\n    i32.store\n    i32.const 52\n    i32.const 3072\n    i32.store\n    i32.const 56\n    i32.const 1\n    i32.store\n    i32.const 60\n    i32.const 0\n    i32.store\n    i32.const 48",
         "i32.const 48\n    i32.const 0\n    i32.store\n    i32.const 52\n    i32.const 0\n    i32.store\n    i32.const 56\n    i32.const 0\n    i32.store\n    i32.const 60\n    i32.const 1\n    i32.store\n    i32.const 64\n    i32.const 3072\n    i32.store\n    i32.const 68\n    i32.const 11\n    i32.store\n    i32.const 48",
@@ -6576,8 +6595,8 @@ fn http_then_invalid_output_wat() -> String {
         )
 }
 
-fn http_without_body_then_guest_error_wat() -> String {
-    http_then_guest_error_wat().replace(
+fn http_without_body_then_operation_failed_wat() -> String {
+    http_then_operation_failed_wat().replace(
         "i32.const 1\n    i32.const 256\n    i32.const 5",
         "i32.const 0\n    i32.const 0\n    i32.const 0",
     )
@@ -6702,20 +6721,20 @@ default_permission = "allow"
 parameters_schema = { type = "object" }
 "#;
 
-const WASM_GUEST_ERROR_MANIFEST: &str = r#"
+const WASM_OPERATION_FAILED_MANIFEST: &str = r#"
 id = "wasm-accounting"
-name = "WASM Accounting Guest Error"
+name = "WASM Accounting Operation Failed"
 version = "0.1.0"
 description = "WASM accounting extension"
 trust = "untrusted"
 
 [runtime]
 kind = "wasm"
-module = "wasm/guest-error.wasm"
+module = "wasm/operation-failed.wasm"
 
 [[capabilities]]
-id = "wasm-accounting.guest_error"
-description = "Call host HTTP then return guest error"
+id = "wasm-accounting.operation_failed"
+description = "Call host HTTP then return an operation failure"
 effects = ["dispatch_capability", "network"]
 default_permission = "allow"
 parameters_schema = { type = "object" }
@@ -6753,7 +6772,7 @@ module = "wasm/wall-clock-failure.wasm"
 
 [[capabilities]]
 id = "wasm-accounting.wall_clock_failure"
-description = "Spend wall-clock time through host HTTP then return a guest error"
+description = "Spend wall-clock time through host HTTP then return an operation failure"
 effects = ["dispatch_capability", "network"]
 default_permission = "allow"
 parameters_schema = { type = "object" }

@@ -1,0 +1,63 @@
+# Blocking subagent — parent suspension & child lifecycle. Render: d2 --layout elk blocking-lifecycle.d2 blocking-lifecycle.svg
+direction: down
+
+classes: {
+  run: {
+    shape: oval
+    style.font-size: 18
+  }
+  pause: {
+    shape: oval
+    style.fill: "#ffcc80"
+    style.font-size: 18
+  }
+  ok: {
+    shape: oval
+    style.fill: "#a5d6a7"
+    style.font-size: 18
+  }
+}
+
+title: "Blocking subagent — parent suspension and child run lifecycle" {
+  near: top-center
+  shape: text
+  style.font-size: 24
+  style.bold: true
+}
+
+parent: "Parent run" {
+  style.fill: "#e3f2fd"
+  style.font-size: 20
+  p_run: "Running" {class: run}
+  p_block: "Blocked\nAwaitDependentRun\n(worker released,\nlock kept)" {class: pause}
+  p_resume: "Running\n(resumed)" {class: run}
+  p_done: "Completed" {class: ok}
+
+  p_run -> p_block: "emit N blocking spawns"
+  p_block -> p_resume: "last child terminal"
+  p_resume -> p_done
+}
+
+child: "Child run  (x N, concurrent)" {
+  style.fill: "#f3e5f5"
+  style.font-size: 20
+  c_pending: "Pending" {class: run}
+  c_running: "Running\n(subagent family,\nattenuated, empty authority)" {class: run}
+  c_term: "Completed /\nFailed / Cancelled" {class: ok}
+
+  c_pending -> c_running: "claimed"
+  c_running -> c_term
+}
+
+parent.p_run -> child.c_pending: "submit_turn\n(fresh thread_id)" {
+  style.font-size: 16
+}
+child.c_term -> parent.p_block: "terminal event —\nobserver marks awaited set" {
+  style.stroke: "#6a1b9a"
+  style.font-size: 16
+}
+parent.p_block -> child.c_running: "parent cancel —\nrecursive subtree cancel" {
+  style.stroke: "#c62828"
+  style.stroke-dash: 4
+  style.font-size: 16
+}

@@ -85,9 +85,9 @@ pub use policy::{
 // a direct dependency on `ironclaw_product_adapters` — the single-facade
 // boundary is enforced by `ironclaw_architecture`.
 pub use ironclaw_product_adapters::{
-    AuthPromptView, FinalReplyView, GatePromptView, ProductOutboundEnvelope,
-    ProductOutboundPayload, ProductProjectionItem, ProductProjectionState, ProgressKind,
-    ProgressUpdateView, ProjectionCursor,
+    AuthPromptView, CapabilityActivityStatusView, CapabilityActivityView, FinalReplyView,
+    GatePromptView, ProductOutboundEnvelope, ProductOutboundPayload, ProductProjectionItem,
+    ProductProjectionState, ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
 // Re-exported so the WebUI v2 handler crate can validate the
 // `extension_name` path segment at the handler/facade boundary

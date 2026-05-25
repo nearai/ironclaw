@@ -1137,6 +1137,9 @@ fn dispatch_kind_to_failure(kind: DispatchFailureKind) -> RuntimeFailureKind {
         DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied) => {
             RuntimeFailureKind::Network
         }
+        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::PolicyDenied) => {
+            RuntimeFailureKind::Authorization
+        }
         DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OutputTooLarge) => {
             RuntimeFailureKind::OutputTooLarge
         }
@@ -1149,10 +1152,15 @@ fn dispatch_kind_to_failure(kind: DispatchFailureKind) -> RuntimeFailureKind {
         DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::ExitFailure) => {
             RuntimeFailureKind::Process
         }
-        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InputEncode)
-        | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OutputDecode)
-        | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InvalidResult) => {
+        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InputEncode) => {
             RuntimeFailureKind::InvalidInput
+        }
+        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OutputDecode)
+        | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InvalidResult) => {
+            RuntimeFailureKind::InvalidOutput
+        }
+        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed) => {
+            RuntimeFailureKind::OperationFailed
         }
         DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend)
         | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Client)
@@ -1231,7 +1239,7 @@ mod tests {
             ),
             (
                 RuntimeDispatchErrorKind::InvalidResult,
-                RuntimeFailureKind::InvalidInput,
+                RuntimeFailureKind::InvalidOutput,
             ),
             (
                 RuntimeDispatchErrorKind::Manifest,
@@ -1250,12 +1258,20 @@ mod tests {
                 RuntimeFailureKind::Network,
             ),
             (
+                RuntimeDispatchErrorKind::OperationFailed,
+                RuntimeFailureKind::OperationFailed,
+            ),
+            (
                 RuntimeDispatchErrorKind::OutputDecode,
-                RuntimeFailureKind::InvalidInput,
+                RuntimeFailureKind::InvalidOutput,
             ),
             (
                 RuntimeDispatchErrorKind::OutputTooLarge,
                 RuntimeFailureKind::OutputTooLarge,
+            ),
+            (
+                RuntimeDispatchErrorKind::PolicyDenied,
+                RuntimeFailureKind::Authorization,
             ),
             (
                 RuntimeDispatchErrorKind::Resource,
@@ -1353,11 +1369,16 @@ mod tests {
         assert_eq!(RuntimeFailureKind::Cancelled.as_str(), "cancelled");
         assert_eq!(RuntimeFailureKind::Dispatcher.as_str(), "dispatcher");
         assert_eq!(RuntimeFailureKind::InvalidInput.as_str(), "invalid_input");
+        assert_eq!(RuntimeFailureKind::InvalidOutput.as_str(), "invalid_output");
         assert_eq!(
             RuntimeFailureKind::MissingRuntime.as_str(),
             "missing_runtime"
         );
         assert_eq!(RuntimeFailureKind::Network.as_str(), "network");
+        assert_eq!(
+            RuntimeFailureKind::OperationFailed.as_str(),
+            "operation_failed"
+        );
         assert_eq!(
             RuntimeFailureKind::OutputTooLarge.as_str(),
             "output_too_large"

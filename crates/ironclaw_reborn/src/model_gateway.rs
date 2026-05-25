@@ -1073,10 +1073,13 @@ fn validate_provider_replay_identity(
     provider_call: &ProviderToolCallReferenceEnvelope,
     expected: &ProviderReplayIdentity,
 ) -> Result<(), HostManagedModelError> {
-    provider_call.validate().map_err(|_| {
-        HostManagedModelError::safe(
+    provider_call.validate().map_err(|error| {
+        ironclaw_loop_support::raw_host_managed_model_error(
+            "provider_tool_replay",
+            "validate_provider_call",
             HostManagedModelErrorKind::InvalidRequest,
             "provider tool-call replay metadata is invalid",
+            error,
         )
     })?;
     if provider_call.provider_id != expected.provider_id
@@ -1099,10 +1102,13 @@ fn tool_result_replay_message(
     message: &HostManagedModelMessage,
 ) -> Result<ToolResultReplayMessage, HostManagedModelError> {
     let envelope: ToolResultReferenceEnvelope =
-        serde_json::from_str(&message.content).map_err(|_| {
-            HostManagedModelError::safe(
+        serde_json::from_str(&message.content).map_err(|error| {
+            ironclaw_loop_support::raw_host_managed_model_error(
+                "tool_result_replay",
+                "decode_transcript_envelope",
                 HostManagedModelErrorKind::InvalidRequest,
                 "tool result reference transcript content is invalid",
+                error,
             )
         })?;
     Ok(ToolResultReplayMessage {
@@ -1153,6 +1159,13 @@ fn provider_tool_call_from_reference(
 }
 
 fn map_provider_error(error: LlmError) -> HostManagedModelError {
+    tracing::warn!(
+        component = "model_provider",
+        operation = "complete",
+        error = %error,
+        error_debug = ?error,
+        "reborn model provider error mapped to safe summary"
+    );
     match error {
         LlmError::ContextLengthExceeded { .. } => HostManagedModelError::safe(
             HostManagedModelErrorKind::BudgetExceeded,

@@ -122,6 +122,9 @@ pub(super) fn capability_error_class(kind: &CapabilityFailureKind) -> Capability
         | CapabilityFailureKind::MissingRuntime
         | CapabilityFailureKind::Unavailable => CapabilityErrorClass::Unavailable,
         CapabilityFailureKind::InvalidInput => CapabilityErrorClass::InputInvalid,
+        CapabilityFailureKind::OperationFailed | CapabilityFailureKind::OutputTooLarge => {
+            CapabilityErrorClass::OperationFailed
+        }
         CapabilityFailureKind::Authorization | CapabilityFailureKind::PolicyDenied => {
             CapabilityErrorClass::PolicyDenied
         }
@@ -129,7 +132,7 @@ pub(super) fn capability_error_class(kind: &CapabilityFailureKind) -> Capability
             CapabilityErrorClass::Internal
         }
         CapabilityFailureKind::Cancelled => CapabilityErrorClass::Permanent,
-        CapabilityFailureKind::OutputTooLarge
+        CapabilityFailureKind::InvalidOutput
         | CapabilityFailureKind::Process
         | CapabilityFailureKind::Resource
         | CapabilityFailureKind::Permanent

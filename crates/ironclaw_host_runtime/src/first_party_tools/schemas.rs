@@ -56,8 +56,20 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 },
                 "body": { "description": "String or JSON request body" },
                 "body_base64": { "type": "string", "description": "Base64-encoded request body" },
-                "response_body_limit": { "type": "integer", "minimum": 1 },
-                "timeout_ms": { "type": "integer", "minimum": 1 }
+                "response_body_limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10485760,
+                    "default": 10485760,
+                    "description": "Maximum response body bytes. Defaults to 10 MiB; smaller values are raised to 10 MiB."
+                },
+                "timeout_ms": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 30000,
+                    "default": 10000,
+                    "description": "Request timeout in milliseconds. Defaults to 10s and is capped at 30s."
+                }
             },
             "required": ["url"],
             "additionalProperties": false

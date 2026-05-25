@@ -29,17 +29,20 @@ pub use admission::{
     TurnAdmissionLimitProvider, TurnAdmissionLimitUnavailable, TurnAdmissionReservationRecord,
 };
 pub use checkpoint_state::{
-    CheckpointStateRecord, CheckpointStateStore, GetCheckpointStateRequest,
-    GetLoopCheckpointRequest, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
-    LoopCheckpointRecord, LoopCheckpointStore, MAX_CHECKPOINT_STATE_PAYLOAD_BYTES,
-    PutCheckpointStateRequest, PutLoopCheckpointRequest, RedactedCheckpointPayload,
+    CheckpointStateMatchMetadata, CheckpointStateRecord, CheckpointStateStore,
+    GetCheckpointStateRequest, GetLoopCheckpointRequest, InMemoryCheckpointStateStore,
+    InMemoryLoopCheckpointStore, LoopCheckpointRecord, LoopCheckpointStore,
+    MAX_CHECKPOINT_STATE_PAYLOAD_BYTES, PutCheckpointStateRequest, PutLoopCheckpointRequest,
+    RedactedCheckpointPayload, checkpoint_state_metadata_matches_request,
+    checkpoint_state_record_matches_request, new_checkpoint_state_ref,
 };
 pub use coordinator::{
     AllowAllTurnAdmissionPolicy, DefaultTurnCoordinator, NoopTurnRunWakeNotifier,
     TurnAdmissionPolicy, TurnCoordinator, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError,
 };
 pub use events::{
-    EventCursor, InMemoryTurnEventSink, TurnEventKind, TurnEventPage, TurnEventProjectionCursor,
+    EventCursor, InMemoryTurnEventSink, MAX_TURN_EVENT_PROJECTION_LIMIT, TurnBlockedGateKind,
+    TurnBlockedGateMetadata, TurnEventKind, TurnEventPage, TurnEventProjectionCursor,
     TurnEventProjectionError, TurnEventProjectionRequest, TurnEventProjectionService,
     TurnEventProjectionSnapshot, TurnEventProjectionSource, TurnEventSink, TurnLifecycleEvent,
 };
