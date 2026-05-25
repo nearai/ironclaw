@@ -52,14 +52,14 @@ async fn runtime_capability_invocation_emits_dispatch_lifecycle_milestones() {
     assert!(matches!(
         &milestones[0].kind,
         ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityInvoked {
-            invocation_id: _,
+            activity_id: _,
             capability_id: actual
         } if actual == &capability_id
     ));
     assert!(matches!(
         &milestones[1].kind,
         ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityCompleted {
-            invocation_id: _,
+            activity_id: _,
             capability_id: actual,
             provider,
             runtime: RuntimeKind::FirstParty,
@@ -112,7 +112,7 @@ async fn runtime_capability_emits_completion_after_result_write_retry_succeeds()
     assert!(matches!(
         &milestones[1].kind,
         ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityCompleted {
-            invocation_id: _,
+            activity_id: _,
             capability_id: actual,
             provider,
             runtime: RuntimeKind::FirstParty,
@@ -165,7 +165,7 @@ async fn runtime_capability_terminal_milestone_failure_is_retryable_without_rewr
     assert!(matches!(
         &milestones[1].kind,
         ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityCompleted {
-            invocation_id: _,
+            activity_id: _,
             capability_id: actual,
             provider,
             runtime: RuntimeKind::FirstParty,
@@ -228,7 +228,7 @@ async fn runtime_capability_failed_and_unknown_outcomes_emit_failure_milestones(
         assert!(matches!(
             &milestones[1].kind,
             ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityFailed {
-                invocation_id: _,
+                activity_id: _,
                 capability_id: actual,
                 provider: Some(provider),
                 runtime: Some(RuntimeKind::FirstParty),
@@ -277,7 +277,7 @@ async fn runtime_capability_mismatched_outcome_does_not_emit_terminal_milestone(
     assert!(matches!(
         &milestones[0].kind,
         ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityInvoked {
-            invocation_id: _,
+            activity_id: _,
             capability_id: actual
         } if actual == &capability_id
     ));
@@ -339,7 +339,7 @@ async fn runtime_capability_suspension_outcomes_do_not_emit_terminal_lifecycle_m
         assert!(matches!(
             &milestones[0].kind,
             ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityInvoked {
-                invocation_id: _,
+                activity_id: _,
                 capability_id: actual
             } if actual == &capability_id
         ));
@@ -384,7 +384,7 @@ async fn runtime_capability_unknown_outcome_with_invalid_kind_does_not_emit_fail
     assert!(matches!(
         &milestones[0].kind,
         ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityInvoked {
-            invocation_id: _,
+            activity_id: _,
             capability_id: actual
         } if actual == &capability_id
     ));
@@ -434,7 +434,7 @@ async fn runtime_capability_host_error_emits_failure_milestone() {
         assert!(matches!(
             &milestones[1].kind,
             ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityFailed {
-                invocation_id: _,
+                activity_id: _,
                 capability_id: actual,
                 provider: Some(provider),
                 runtime: Some(RuntimeKind::FirstParty),

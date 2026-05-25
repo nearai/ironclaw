@@ -14,7 +14,7 @@ use ironclaw_host_runtime::{
     RuntimeCapabilityRequest, RuntimeFailureKind,
 };
 use ironclaw_turns::{
-    LoopGateRef, LoopResultRef,
+    CapabilityActivityId, LoopGateRef, LoopResultRef,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
         CapabilityBatchOutcome, CapabilityDenied, CapabilityDeniedReasonKind,
@@ -630,9 +630,9 @@ impl HostRuntimeLoopCapabilityPort {
             self.record_loop_completed(key, result.clone())?;
             return result;
         }
-        let invocation_id = capability_activity_invocation_id(key);
+        let activity_id = capability_activity_invocation_id(key);
         let terminal_milestone =
-            match runtime_terminal_milestone(invocation_id, provider, runtime, &outcome) {
+            match runtime_terminal_milestone(activity_id, provider, runtime, &outcome) {
                 Ok(milestone) => milestone,
                 Err(error) => {
                     let result = Err(error);
@@ -968,7 +968,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
         let runtime = capability.runtime;
         let capability_activity_id = capability_activity_invocation_id(&idempotency_key);
         self.emit_capability_milestone(LoopHostMilestoneKind::CapabilityInvoked {
-            invocation_id: capability_activity_id,
+            activity_id: capability_activity_id,
             capability_id: request.capability_id.clone(),
         })
         .await?;
@@ -998,7 +998,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             Err(error) => {
                 let host_error = host_runtime_error(error);
                 let terminal_milestone = LoopHostMilestoneKind::CapabilityFailed {
-                    invocation_id: capability_activity_id,
+                    activity_id: capability_activity_id,
                     capability_id: requested_capability_id.clone(),
                     provider: Some(provider),
                     runtime: Some(runtime),
@@ -1332,11 +1332,11 @@ fn should_retry_result_write(
 const CAPABILITY_ACTIVITY_INVOCATION_NAMESPACE: uuid::Uuid =
     uuid::uuid!("4e42ab0b-7d09-5f1c-8c87-73436fb53a61");
 
-fn capability_activity_invocation_id(key: &IdempotencyKey) -> InvocationId {
+fn capability_activity_invocation_id(key: &IdempotencyKey) -> CapabilityActivityId {
     // `invocation_idempotency_key` includes the loop run id, surface version,
     // requested capability id, and input ref, so each logical capability call
     // gets a stable activity id without colliding with sibling calls in a run.
-    InvocationId::from_uuid(uuid::Uuid::new_v5(
+    CapabilityActivityId::from_uuid(uuid::Uuid::new_v5(
         &CAPABILITY_ACTIVITY_INVOCATION_NAMESPACE,
         key.as_str().as_bytes(),
     ))
@@ -1638,7 +1638,7 @@ async fn runtime_outcome_to_loop(
 }
 
 fn runtime_terminal_milestone(
-    invocation_id: InvocationId,
+    activity_id: CapabilityActivityId,
     provider: ExtensionId,
     runtime: RuntimeKind,
     outcome: &RuntimeCapabilityOutcome,
@@ -1646,7 +1646,7 @@ fn runtime_terminal_milestone(
     Ok(match outcome {
         RuntimeCapabilityOutcome::Completed(completed) => {
             Some(LoopHostMilestoneKind::CapabilityCompleted {
-                invocation_id,
+                activity_id,
                 capability_id: completed.capability_id.clone(),
                 provider,
                 runtime,
@@ -1655,7 +1655,7 @@ fn runtime_terminal_milestone(
         }
         RuntimeCapabilityOutcome::Failed(failure) => {
             Some(LoopHostMilestoneKind::CapabilityFailed {
-                invocation_id,
+                activity_id,
                 capability_id: failure.capability_id.clone(),
                 provider: Some(provider),
                 runtime: Some(runtime),
@@ -1664,7 +1664,7 @@ fn runtime_terminal_milestone(
         }
         RuntimeCapabilityOutcome::Unknown(unknown) => {
             Some(LoopHostMilestoneKind::CapabilityFailed {
-                invocation_id,
+                activity_id,
                 capability_id: unknown.capability_id.clone(),
                 provider: Some(provider),
                 runtime: Some(runtime),

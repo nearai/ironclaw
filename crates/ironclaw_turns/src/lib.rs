@@ -48,10 +48,10 @@ pub use events::{
 };
 pub use filesystem_store::FilesystemTurnStateStore;
 pub use ids::{
-    AcceptedMessageRef, GateRef, IdempotencyKey, LoopDiagnosticRef, LoopExitId, LoopGateRef,
-    LoopMessageRef, LoopResultRef, LoopUsageSummaryRef, ReplyTargetBindingRef, RunProfileId,
-    RunProfileRequest, RunProfileVersion, SourceBindingRef, TurnCheckpointId, TurnId,
-    TurnLeaseToken, TurnRunId, TurnRunnerId,
+    AcceptedMessageRef, CapabilityActivityId, GateRef, IdempotencyKey, LoopDiagnosticRef,
+    LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef, LoopUsageSummaryRef,
+    ReplyTargetBindingRef, RunProfileId, RunProfileRequest, RunProfileVersion, SourceBindingRef,
+    TurnCheckpointId, TurnId, TurnLeaseToken, TurnRunId, TurnRunnerId,
 };
 pub use loop_exit::{
     BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
