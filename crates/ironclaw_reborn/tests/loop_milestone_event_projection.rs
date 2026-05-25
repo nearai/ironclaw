@@ -14,7 +14,10 @@ use ironclaw_events::{
     DurableAuditLog, DurableEventLog, EventStreamKey, InMemoryDurableAuditLog,
     InMemoryDurableEventLog, ReadScope,
 };
-use ironclaw_host_api::{AgentId, CapabilityId, MissionId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{
+    AgentId, CapabilityId, ExtensionId, MissionId, ProjectId, RuntimeKind, TenantId, ThreadId,
+    UserId,
+};
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelRequest, HostManagedModelResponse,
@@ -42,8 +45,8 @@ use ironclaw_turns::{
     TurnCheckpointId, TurnError, TurnId, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId,
     TurnScope, TurnStateStore, TurnStatus,
     run_profile::{
-        AgentLoopHostErrorKind, BatchPolicyKind, FinalizeAssistantMessage, HookDecisionSummary,
-        LoopCheckpointKind, LoopDriverId, LoopGateKind, LoopHostMilestone,
+        AgentLoopHostErrorKind, BatchPolicyKind, CapabilityFailureKind, FinalizeAssistantMessage,
+        HookDecisionSummary, LoopCheckpointKind, LoopDriverId, LoopGateKind, LoopHostMilestone,
         LoopHostMilestoneEmitter, LoopHostMilestoneKind, LoopHostMilestoneSink, LoopModelPort,
         LoopModelRequest, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
         LoopTranscriptPort, ParentLoopOutput, PromptMode,
@@ -936,6 +939,88 @@ fn hook_milestone_for(
         loop_driver_id: LoopDriverId::new("hook-projection-driver").unwrap(),
         kind,
     }
+}
+
+#[tokio::test]
+async fn publish_loop_milestone_projects_capability_lifecycle_to_runtime_events() {
+    let events: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let thread_id = ThreadId::new("thread-capability-publish-lifecycle").unwrap();
+    let run_id = TurnRunId::new();
+    let capability_id = CapabilityId::new("demo.echo").unwrap();
+    let provider_id = ExtensionId::new("demo").unwrap();
+    let sink = DurableLoopHostMilestoneSink::new(
+        Arc::clone(&events),
+        DurableLoopHostMilestoneScope::from_thread_scope_for_run(
+            &hook_thread_scope(),
+            thread_id.clone(),
+            run_id,
+        )
+        .unwrap(),
+    );
+    let scope = TurnScope::new(
+        tenant_id(),
+        Some(agent_id()),
+        Some(project_id()),
+        thread_id.clone(),
+    );
+
+    for kind in [
+        LoopHostMilestoneKind::CapabilityInvoked {
+            capability_id: capability_id.clone(),
+        },
+        LoopHostMilestoneKind::CapabilityCompleted {
+            capability_id: capability_id.clone(),
+            provider: provider_id.clone(),
+            runtime: RuntimeKind::FirstParty,
+            output_bytes: 64,
+        },
+        LoopHostMilestoneKind::CapabilityFailed {
+            capability_id: capability_id.clone(),
+            provider: Some(provider_id.clone()),
+            runtime: Some(RuntimeKind::FirstParty),
+            reason_kind: CapabilityFailureKind::OperationFailed,
+        },
+    ] {
+        sink.publish_loop_milestone(hook_milestone_for(scope.clone(), run_id, kind))
+            .await
+            .unwrap();
+    }
+
+    let manager = event_stream_manager(events, Arc::new(InMemoryDurableAuditLog::new()));
+    let snapshot = manager
+        .runtime_snapshot(ProjectionRequest {
+            scope: projection_scope_for_thread(thread_id),
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(snapshot.timeline.entries.len(), 3);
+    let kinds = snapshot
+        .timeline
+        .entries
+        .iter()
+        .map(|entry| entry.kind)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        vec![
+            TimelineEntryKind::DispatchRequested,
+            TimelineEntryKind::DispatchSucceeded,
+            TimelineEntryKind::DispatchFailed,
+        ]
+    );
+    let completed = &snapshot.timeline.entries[1];
+    assert_eq!(completed.capability_id, capability_id);
+    assert_eq!(completed.provider.as_ref(), Some(&provider_id));
+    assert_eq!(completed.runtime, Some(RuntimeKind::FirstParty));
+    assert_eq!(completed.output_bytes, Some(64));
+    let failed = &snapshot.timeline.entries[2];
+    assert_eq!(failed.capability_id, capability_id);
+    assert_eq!(failed.provider.as_ref(), Some(&provider_id));
+    assert_eq!(failed.runtime, Some(RuntimeKind::FirstParty));
+    assert_eq!(failed.error_kind.as_deref(), Some("operation_failed"));
 }
 
 #[tokio::test]
