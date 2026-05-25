@@ -321,11 +321,7 @@ async fn replay_recovers_when_crash_happens_after_row_write_before_cursor_advanc
     ]);
 
     sink.upsert_pending_gate(
-        row_from_blocked_event(
-            &blocked_event(1, scope.clone(), run_id),
-            TurnBlockedGateKind::Approval,
-        )
-        .unwrap(),
+        row_from_blocked_event(&blocked_event(1, scope.clone(), run_id)).unwrap(),
     )
     .await
     .unwrap();
@@ -499,7 +495,7 @@ fn pending_gate_row_keeps_gate_ref_strongly_typed() {
         gate_ref.as_str(),
     );
 
-    let row = row_from_blocked_event(&event, TurnBlockedGateKind::Approval).unwrap();
+    let row = row_from_blocked_event(&event).unwrap();
 
     assert_eq!(row.gate_ref, gate_ref);
 }

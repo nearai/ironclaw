@@ -5,7 +5,7 @@ use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserI
 use ironclaw_turns::{
     EventCursor as TurnEventCursor, GateRef, MAX_TURN_EVENT_PROJECTION_LIMIT, TurnBlockedGateKind,
     TurnEventKind, TurnEventProjectionSource, TurnEventSink, TurnLifecycleEvent, TurnRunId,
-    TurnScope,
+    TurnScope, TurnStatus,
 };
 use serde::{Deserialize, Serialize};
 
@@ -225,11 +225,20 @@ impl PendingGateProjection {
     async fn project_event(&self, event: TurnLifecycleEvent) -> Result<(), ProjectionError> {
         match event.kind {
             TurnEventKind::Blocked => {
-                let Some(gate_kind) = TurnBlockedGateKind::from_status(event.status) else {
+                // Defensive status guard for malformed legacy rows where
+                // `kind == Blocked` but `status` is non-blocked. `gate_kind`
+                // itself is read straight from `event.blocked_gate.gate_kind`
+                // — no parallel derivation.
+                if !matches!(
+                    event.status,
+                    TurnStatus::BlockedApproval
+                        | TurnStatus::BlockedAuth
+                        | TurnStatus::BlockedResource
+                ) {
                     return Ok(());
-                };
+                }
                 self.sink
-                    .upsert_pending_gate(row_from_blocked_event(&event, gate_kind)?)
+                    .upsert_pending_gate(row_from_blocked_event(&event)?)
                     .await?;
             }
             TurnEventKind::Completed
@@ -318,7 +327,6 @@ impl TurnEventSink for PendingGateProjection {
 
 fn row_from_blocked_event(
     event: &TurnLifecycleEvent,
-    gate_kind: TurnBlockedGateKind,
 ) -> Result<PendingGateProjectionRow, ProjectionError> {
     let blocked_gate =
         event
@@ -336,7 +344,7 @@ fn row_from_blocked_event(
     Ok(PendingGateProjectionRow {
         key: key_from_lifecycle_event(event)?,
         source_cursor: event.cursor,
-        gate_kind: gate_kind.into(),
+        gate_kind: blocked_gate.gate_kind.into(),
         gate_ref: blocked_gate.gate_ref.clone(),
         blocked_at,
     })
