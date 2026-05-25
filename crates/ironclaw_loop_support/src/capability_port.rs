@@ -19,8 +19,8 @@ use ironclaw_turns::{
         CapabilityBatchOutcome, CapabilityDenied, CapabilityDeniedReasonKind,
         CapabilityDescriptorView, CapabilityFailure, CapabilityFailureKind, CapabilityInputRef,
         CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, ConcurrencyHint,
-        LoopCapabilityPort, LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopProcessRef,
-        LoopRunContext, LoopSafeSummary, ProcessHandleSummary, ProviderToolCall,
+        LoopCapabilityPort, LoopHostMilestone, LoopHostMilestoneKind, LoopHostMilestoneSink,
+        LoopProcessRef, LoopRunContext, LoopSafeSummary, ProcessHandleSummary, ProviderToolCall,
         ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
         VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
@@ -223,27 +223,9 @@ enum DispatchRecord {
     },
     TerminalMilestonePending {
         result: Result<CapabilityOutcome, AgentLoopHostError>,
-        milestone: RuntimeTerminalMilestone,
+        milestone: LoopHostMilestoneKind,
     },
     LoopCompleted(Result<CapabilityOutcome, AgentLoopHostError>),
-}
-
-#[derive(Clone)]
-enum RuntimeTerminalMilestone {
-    Completed {
-        invocation_id: InvocationId,
-        capability_id: CapabilityId,
-        provider: ExtensionId,
-        runtime: RuntimeKind,
-        output_bytes: u64,
-    },
-    Failed {
-        invocation_id: InvocationId,
-        capability_id: CapabilityId,
-        provider: Option<ExtensionId>,
-        runtime: Option<RuntimeKind>,
-        reason_kind: CapabilityFailureKind,
-    },
 }
 
 #[derive(Default)]
@@ -360,7 +342,7 @@ enum DispatchReservation {
     },
     TerminalMilestonePending {
         result: Result<CapabilityOutcome, AgentLoopHostError>,
-        milestone: RuntimeTerminalMilestone,
+        milestone: LoopHostMilestoneKind,
     },
     LoopCompleted(Result<CapabilityOutcome, AgentLoopHostError>),
 }
@@ -543,7 +525,7 @@ impl HostRuntimeLoopCapabilityPort {
         &self,
         key: &IdempotencyKey,
         result: Result<CapabilityOutcome, AgentLoopHostError>,
-        milestone: RuntimeTerminalMilestone,
+        milestone: LoopHostMilestoneKind,
     ) -> Result<(), AgentLoopHostError> {
         let notify = lock_mut(&self.dispatch_records, "capability dispatch record store")?.record(
             key,
@@ -665,10 +647,10 @@ impl HostRuntimeLoopCapabilityPort {
         &self,
         key: &IdempotencyKey,
         result: Result<CapabilityOutcome, AgentLoopHostError>,
-        terminal_milestone: Option<RuntimeTerminalMilestone>,
+        terminal_milestone: Option<LoopHostMilestoneKind>,
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
         if let Some(milestone) = terminal_milestone {
-            if let Err(error) = self.emit_terminal_milestone(&milestone).await {
+            if let Err(error) = self.emit_capability_milestone(milestone.clone()).await {
                 self.record_terminal_milestone_pending(key, result.clone(), milestone)?;
                 return Err(error);
             }
@@ -690,60 +672,19 @@ impl HostRuntimeLoopCapabilityPort {
         Ok(())
     }
 
-    async fn emit_capability_invoked(
+    async fn emit_capability_milestone(
         &self,
-        invocation_id: InvocationId,
-        capability_id: CapabilityId,
+        kind: LoopHostMilestoneKind,
     ) -> Result<(), AgentLoopHostError> {
-        self.milestone_emitter()
-            .capability_invoked(invocation_id, capability_id)
+        self.milestone_sink
+            .publish_loop_milestone(LoopHostMilestone {
+                scope: self.run_context.scope.clone(),
+                turn_id: self.run_context.turn_id,
+                run_id: self.run_context.run_id,
+                loop_driver_id: self.run_context.loop_driver_id.clone(),
+                kind,
+            })
             .await
-    }
-
-    fn milestone_emitter(&self) -> LoopHostMilestoneEmitter<dyn LoopHostMilestoneSink> {
-        LoopHostMilestoneEmitter::new(self.run_context.clone(), Arc::clone(&self.milestone_sink))
-    }
-
-    async fn emit_terminal_milestone(
-        &self,
-        milestone: &RuntimeTerminalMilestone,
-    ) -> Result<(), AgentLoopHostError> {
-        match milestone {
-            RuntimeTerminalMilestone::Completed {
-                invocation_id,
-                capability_id,
-                provider,
-                runtime,
-                output_bytes,
-            } => {
-                self.milestone_emitter()
-                    .capability_completed(
-                        *invocation_id,
-                        capability_id.clone(),
-                        provider.clone(),
-                        *runtime,
-                        *output_bytes,
-                    )
-                    .await
-            }
-            RuntimeTerminalMilestone::Failed {
-                invocation_id,
-                capability_id,
-                provider,
-                runtime,
-                reason_kind,
-            } => {
-                self.milestone_emitter()
-                    .capability_failed(
-                        *invocation_id,
-                        capability_id.clone(),
-                        provider.clone(),
-                        *runtime,
-                        reason_kind.clone(),
-                    )
-                    .await
-            }
-        }
     }
 
     async fn invoke_synthetic_capability(
@@ -1025,8 +966,11 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
         let provider = capability.provider.clone();
         let runtime = capability.runtime;
         let capability_activity_id = capability_activity_invocation_id(&idempotency_key);
-        self.emit_capability_invoked(capability_activity_id, request.capability_id.clone())
-            .await?;
+        self.emit_capability_milestone(LoopHostMilestoneKind::CapabilityInvoked {
+            invocation_id: capability_activity_id,
+            capability_id: request.capability_id.clone(),
+        })
+        .await?;
         let outcome = match self
             .runtime
             .invoke_capability(
@@ -1052,7 +996,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             Ok(outcome) => outcome,
             Err(error) => {
                 let host_error = host_runtime_error(error);
-                let terminal_milestone = RuntimeTerminalMilestone::Failed {
+                let terminal_milestone = LoopHostMilestoneKind::CapabilityFailed {
                     invocation_id: capability_activity_id,
                     capability_id: requested_capability_id.clone(),
                     provider: Some(provider),
@@ -1712,10 +1656,10 @@ fn runtime_terminal_milestone(
     provider: ExtensionId,
     runtime: RuntimeKind,
     outcome: &RuntimeCapabilityOutcome,
-) -> Result<Option<RuntimeTerminalMilestone>, AgentLoopHostError> {
+) -> Result<Option<LoopHostMilestoneKind>, AgentLoopHostError> {
     Ok(match outcome {
         RuntimeCapabilityOutcome::Completed(completed) => {
-            Some(RuntimeTerminalMilestone::Completed {
+            Some(LoopHostMilestoneKind::CapabilityCompleted {
                 invocation_id,
                 capability_id: completed.capability_id.clone(),
                 provider,
@@ -1723,20 +1667,24 @@ fn runtime_terminal_milestone(
                 output_bytes: completed.usage.output_bytes,
             })
         }
-        RuntimeCapabilityOutcome::Failed(failure) => Some(RuntimeTerminalMilestone::Failed {
-            invocation_id,
-            capability_id: failure.capability_id.clone(),
-            provider: Some(provider),
-            runtime: Some(runtime),
-            reason_kind: runtime_failure_kind_to_loop(failure.kind)?,
-        }),
-        RuntimeCapabilityOutcome::Unknown(unknown) => Some(RuntimeTerminalMilestone::Failed {
-            invocation_id,
-            capability_id: unknown.capability_id.clone(),
-            provider: Some(provider),
-            runtime: Some(runtime),
-            reason_kind: capability_failure_kind(unknown.kind.clone())?,
-        }),
+        RuntimeCapabilityOutcome::Failed(failure) => {
+            Some(LoopHostMilestoneKind::CapabilityFailed {
+                invocation_id,
+                capability_id: failure.capability_id.clone(),
+                provider: Some(provider),
+                runtime: Some(runtime),
+                reason_kind: runtime_failure_kind_to_loop(failure.kind)?,
+            })
+        }
+        RuntimeCapabilityOutcome::Unknown(unknown) => {
+            Some(LoopHostMilestoneKind::CapabilityFailed {
+                invocation_id,
+                capability_id: unknown.capability_id.clone(),
+                provider: Some(provider),
+                runtime: Some(runtime),
+                reason_kind: capability_failure_kind(unknown.kind.clone())?,
+            })
+        }
         RuntimeCapabilityOutcome::ApprovalRequired(_)
         | RuntimeCapabilityOutcome::AuthRequired(_)
         | RuntimeCapabilityOutcome::ResourceBlocked(_)
