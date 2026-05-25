@@ -368,4 +368,24 @@ mod tests {
         assert!(hex_to_bytes("abc").is_err()); // Odd length
         assert!(hex_to_bytes("gg").is_err()); // Invalid chars
     }
+
+    // Regression: under a test build the real OS keychain must never be
+    // consulted — touching it pops a macOS Keychain auth dialog / blocks on a
+    // locked Linux Secret Service and derails `cargo test`. `cfg!(test)` is
+    // unconditionally true here, so the guard short-circuits before any
+    // platform keychain call (no env manipulation needed — keeps this test
+    // race-free under parallel execution).
+    #[tokio::test]
+    async fn os_keychain_access_is_suppressed_under_test_build() {
+        assert!(
+            os_keychain_suppressed(),
+            "cfg!(test) must suppress OS keychain access"
+        );
+        // Reads behave as "no key present"; writes fail closed — without
+        // reaching the platform keychain (which would prompt).
+        assert!(get_master_key().await.is_err());
+        assert!(!has_master_key().await);
+        assert!(store_master_key(&[0u8; 32]).await.is_err());
+        assert!(delete_master_key().await.is_err());
+    }
 }
