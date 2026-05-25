@@ -205,7 +205,7 @@ fn authorization_url_request_debug_redacts_sensitive_fields() {
 }
 
 #[test]
-fn authorization_url_builder_rejects_missing_core_fields() {
+fn build_authorization_url_rejects_empty_client_id() {
     let challenge = verifier_challenge();
     let scopes = valid_scopes();
 
@@ -213,10 +213,24 @@ fn authorization_url_builder_rejects_missing_core_fields() {
         client_id: "",
         ..valid_authorization_request(&challenge, &scopes, &[])
     }));
+}
+
+#[test]
+fn build_authorization_url_rejects_empty_redirect_uri() {
+    let challenge = verifier_challenge();
+    let scopes = valid_scopes();
+
     assert_invalid_request(build_authorization_url(OAuthAuthorizeUrlRequest {
         redirect_uri: "",
         ..valid_authorization_request(&challenge, &scopes, &[])
     }));
+}
+
+#[test]
+fn build_authorization_url_rejects_empty_state() {
+    let challenge = verifier_challenge();
+    let scopes = valid_scopes();
+
     assert_invalid_request(build_authorization_url(OAuthAuthorizeUrlRequest {
         state: "",
         ..valid_authorization_request(&challenge, &scopes, &[])
@@ -224,7 +238,7 @@ fn authorization_url_builder_rejects_missing_core_fields() {
 }
 
 #[test]
-fn authorization_url_builder_rejects_bad_endpoint_urls() {
+fn build_authorization_url_rejects_invalid_endpoint() {
     let challenge = verifier_challenge();
     let scopes = valid_scopes();
 
@@ -232,14 +246,46 @@ fn authorization_url_builder_rejects_bad_endpoint_urls() {
         authorization_endpoint: "not a url",
         ..valid_authorization_request(&challenge, &scopes, &[])
     }));
+}
+
+#[test]
+fn build_authorization_url_rejects_http_endpoint() {
+    let challenge = verifier_challenge();
+    let scopes = valid_scopes();
+
     assert_invalid_request(build_authorization_url(OAuthAuthorizeUrlRequest {
         authorization_endpoint: "http://accounts.google.com/o/oauth2/v2/auth",
         ..valid_authorization_request(&challenge, &scopes, &[])
     }));
+}
+
+#[test]
+fn build_authorization_url_rejects_missing_host() {
+    let challenge = verifier_challenge();
+    let scopes = valid_scopes();
+
+    assert_invalid_request(build_authorization_url(OAuthAuthorizeUrlRequest {
+        authorization_endpoint: "https://",
+        ..valid_authorization_request(&challenge, &scopes, &[])
+    }));
+}
+
+#[test]
+fn build_authorization_url_rejects_userinfo_endpoint() {
+    let challenge = verifier_challenge();
+    let scopes = valid_scopes();
+
     assert_invalid_request(build_authorization_url(OAuthAuthorizeUrlRequest {
         authorization_endpoint: "https://user:pass@accounts.google.com/o/oauth2/v2/auth",
         ..valid_authorization_request(&challenge, &scopes, &[])
     }));
+}
+
+#[test]
+fn build_authorization_url_rejects_reserved_endpoint_query_param() {
+    let challenge = verifier_challenge();
+    let scopes = valid_scopes();
+
     assert_invalid_request(build_authorization_url(OAuthAuthorizeUrlRequest {
         authorization_endpoint: "https://accounts.google.com/o/oauth2/v2/auth?state=predefined",
         ..valid_authorization_request(&challenge, &scopes, &[])
@@ -247,7 +293,7 @@ fn authorization_url_builder_rejects_bad_endpoint_urls() {
 }
 
 #[test]
-fn authorization_url_builder_rejects_bad_extra_params() {
+fn build_authorization_url_rejects_empty_param_name() {
     let challenge = verifier_challenge();
     let scopes = valid_scopes();
 
@@ -256,16 +302,37 @@ fn authorization_url_builder_rejects_bad_extra_params() {
         &scopes,
         &[("", "value")],
     )));
+}
+
+#[test]
+fn build_authorization_url_rejects_empty_param_value() {
+    let challenge = verifier_challenge();
+    let scopes = valid_scopes();
+
     assert_invalid_request(build_authorization_url(valid_authorization_request(
         &challenge,
         &scopes,
         &[("login_hint", "")],
     )));
+}
+
+#[test]
+fn validate_authorize_fragment_rejects_control_chars() {
+    let challenge = verifier_challenge();
+    let scopes = valid_scopes();
+
     assert_invalid_request(build_authorization_url(valid_authorization_request(
         &challenge,
         &scopes,
         &[("login_hint", "bad\u{0000}value")],
     )));
+}
+
+#[test]
+fn build_authorization_url_rejects_reserved_extra_param_name() {
+    let challenge = verifier_challenge();
+    let scopes = valid_scopes();
+
     assert_invalid_request(build_authorization_url(valid_authorization_request(
         &challenge,
         &scopes,
