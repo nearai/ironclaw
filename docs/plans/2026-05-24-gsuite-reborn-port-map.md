@@ -10,7 +10,9 @@ extension boundaries.
 - `crates/ironclaw_auth` owns product auth flows, callback claim/fail/complete,
   credential accounts, provider exchange contracts, and in-memory fakes.
 - `crates/ironclaw_first_party_extensions` owns concrete first-party userland
-  extension code and narrow ports.
+  extension behavior, package descriptors, and host-bundled handlers.
+- `crates/ironclaw_first_party_extension_ports` owns loop-facing adapter and
+  port contracts for first-party extension activation/execution surfaces.
 - `crates/ironclaw_reborn_composition` wires built-in first-party packages,
   handler registries, product auth ports, secret stores, and runtime HTTP
   egress.
@@ -49,12 +51,15 @@ extension boundaries.
 
 ## Deferred Issue Hooks
 
-- Composition wiring should reference #3939, #3944, #3955, #3904, and #3949.
-- Shim/live harness should reference #3944, #3955, and #3903.
-- Closeout should reference old GSuite PRs #3893-#3898.
+- Composition wiring should reference #3967 and blocking PRs #3939, #3944,
+  #3955, #3904, and #3949.
+- Shim/live harness should reference #3968 and blocking PRs #3944, #3955, and
+  #3903.
+- Closeout should reference #3969 and old GSuite PRs #3893-#3898.
 
 ## Target Verification
 
 - Phase 2: `cargo test -p ironclaw_auth`
 - Phase 3/4: `cargo test -p ironclaw_first_party_extensions`
+- Port contract changes: `cargo test -p ironclaw_first_party_extension_ports`
 - Dependency changes: `cargo test -p ironclaw_architecture reborn_crate_dependency_boundaries_hold`
