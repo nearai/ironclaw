@@ -1,8 +1,15 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_filesystem::LocalFilesystem;
-use ironclaw_host_api::{InvocationId, MountView, ResourceScope, UserId};
+use ironclaw_extensions::{
+    ExtensionActivationState, ExtensionInstallation, ExtensionInstallationId,
+    ExtensionInstallationStore, ExtensionLifecycleService, ExtensionManifestRecord,
+    ExtensionManifestRef, ManifestHash, ManifestSource, SharedExtensionRegistry,
+};
+use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
+use ironclaw_host_api::{
+    ExtensionId, InvocationId, MountView, ResourceScope, UserId, VirtualPath, sha256_digest_token,
+};
 use ironclaw_product_workflow::{
     LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
     LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
@@ -13,6 +20,11 @@ use ironclaw_skills::{
     SkillRemoveRequest, SkillSearchRequest, install_skill, remove_skill, search_skills,
 };
 use serde_json::{Value, json};
+use tokio::sync::Mutex;
+
+use crate::available_extensions::{
+    AvailableExtensionCatalog, materialize_available_extension, visible_capability_ids,
+};
 
 const SKILL_SEARCH_RESULT_LIMIT: usize = 50;
 
@@ -86,13 +98,213 @@ fn invalid_skill_context(error: impl std::fmt::Display) -> ProductWorkflowError 
 }
 
 #[derive(Clone)]
+pub(crate) struct RebornLocalExtensionManagementPort {
+    filesystem: Arc<LocalFilesystem>,
+    catalog: AvailableExtensionCatalog,
+    installation_store: Arc<dyn ExtensionInstallationStore>,
+    lifecycle_service: Arc<Mutex<ExtensionLifecycleService>>,
+    active_registry: Arc<SharedExtensionRegistry>,
+}
+
+impl RebornLocalExtensionManagementPort {
+    pub(crate) fn new(
+        filesystem: Arc<LocalFilesystem>,
+        catalog: AvailableExtensionCatalog,
+        installation_store: Arc<dyn ExtensionInstallationStore>,
+        lifecycle_service: Arc<Mutex<ExtensionLifecycleService>>,
+        active_registry: Arc<SharedExtensionRegistry>,
+    ) -> Self {
+        Self {
+            filesystem,
+            catalog,
+            installation_store,
+            lifecycle_service,
+            active_registry,
+        }
+    }
+
+    async fn search(&self, query: &str) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        let extensions = self.catalog.search(query)?;
+        let summaries = extensions
+            .iter()
+            .map(|extension| extension.summary_json())
+            .collect::<Vec<_>>();
+        Ok(response_with_payload(
+            None,
+            LifecyclePhase::Discovered,
+            json!({
+                "extensions": summaries,
+                "count": summaries.len(),
+            }),
+        ))
+    }
+
+    async fn install(
+        &self,
+        package_ref: LifecyclePackageRef,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        let available = self.catalog.resolve(&package_ref)?;
+        materialize_available_extension(self.filesystem.as_ref(), &available).await?;
+        let manifest_hash =
+            ManifestHash::new(sha256_digest_token(available.manifest_toml.as_bytes()))
+                .map_err(map_extension_installation_error)?;
+        let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
+            ProductWorkflowError::InvalidBindingRequest {
+                reason: format!("host port catalog rejected extension install: {error}"),
+            }
+        })?;
+        let contracts =
+            ironclaw_host_runtime::default_host_api_contract_registry().map_err(|error| {
+                ProductWorkflowError::InvalidBindingRequest {
+                    reason: format!(
+                        "host API contract registry rejected extension install: {error}"
+                    ),
+                }
+            })?;
+        let manifest_record = ExtensionManifestRecord::from_toml_with_contracts(
+            available.manifest_toml,
+            ManifestSource::HostBundled,
+            &host_ports,
+            Some(manifest_hash.clone()),
+            &contracts,
+        )
+        .map_err(map_extension_installation_error)?;
+        self.installation_store
+            .upsert_manifest(manifest_record)
+            .await
+            .map_err(map_extension_installation_error)?;
+        let installation = ExtensionInstallation::new(
+            ExtensionInstallationId::new(available.package.id.as_str().to_string())
+                .map_err(map_extension_installation_error)?,
+            available.package.id.clone(),
+            ExtensionActivationState::Installed,
+            ExtensionManifestRef::new(available.package.id.clone(), Some(manifest_hash)),
+            Vec::new(),
+            chrono::Utc::now(),
+        )
+        .map_err(map_extension_installation_error)?;
+        self.installation_store
+            .upsert_installation(installation)
+            .await
+            .map_err(map_extension_installation_error)?;
+        let mut lifecycle = self.lifecycle_service.lock().await;
+        if lifecycle
+            .registry()
+            .get_extension(&available.package.id)
+            .is_some()
+        {
+            lifecycle
+                .update(available.package.clone())
+                .await
+                .map_err(map_extension_error)?;
+        } else {
+            lifecycle
+                .install(available.package.clone())
+                .await
+                .map_err(map_extension_error)?;
+        }
+        Ok(response_with_payload(
+            Some(package_ref),
+            LifecyclePhase::Installed,
+            json!({
+                "installed": true,
+                "visible_capability_ids": visible_capability_ids(&available).iter().map(|id| id.as_str()).collect::<Vec<_>>(),
+            }),
+        ))
+    }
+
+    async fn activate(
+        &self,
+        package_ref: LifecyclePackageRef,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        let (extension_id, installation_id) = extension_ids_from_package_ref(&package_ref)?;
+        self.installation_store
+            .set_activation_state(&installation_id, ExtensionActivationState::Enabled)
+            .await
+            .map_err(map_extension_installation_error)?;
+        let mut lifecycle = self.lifecycle_service.lock().await;
+        lifecycle
+            .enable(&extension_id)
+            .await
+            .map_err(map_extension_error)?;
+        let package = lifecycle
+            .registry()
+            .get_extension(&extension_id)
+            .cloned()
+            .ok_or_else(|| ProductWorkflowError::InvalidBindingRequest {
+                reason: format!("extension {} is not installed", extension_id.as_str()),
+            })?;
+        replace_active_extension(&self.active_registry, package)?;
+        Ok(response_with_payload(
+            Some(package_ref),
+            LifecyclePhase::Active,
+            json!({ "activated": true }),
+        ))
+    }
+
+    async fn remove(
+        &self,
+        package_ref: LifecyclePackageRef,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        let (extension_id, installation_id) = extension_ids_from_package_ref(&package_ref)?;
+        self.installation_store
+            .set_activation_state(&installation_id, ExtensionActivationState::Disabled)
+            .await
+            .map_err(map_extension_installation_error)?;
+        self.installation_store
+            .delete_installation(&installation_id)
+            .await
+            .map_err(map_extension_installation_error)?;
+        self.installation_store
+            .delete_manifest(&extension_id)
+            .await
+            .map_err(map_extension_installation_error)?;
+        let mut lifecycle = self.lifecycle_service.lock().await;
+        lifecycle
+            .remove(&extension_id)
+            .await
+            .map_err(map_extension_error)?;
+        remove_active_extension(&self.active_registry, &extension_id);
+        let extension_root =
+            VirtualPath::new(format!("/system/extensions/{}", extension_id.as_str())).map_err(
+                |error| ProductWorkflowError::InvalidBindingRequest {
+                    reason: error.to_string(),
+                },
+            )?;
+        self.filesystem
+            .delete(&extension_root)
+            .await
+            .map_err(|error| ProductWorkflowError::Transient {
+                reason: format!("failed to remove extension files: {error}"),
+            })?;
+        Ok(response_with_payload(
+            Some(package_ref),
+            LifecyclePhase::Removed,
+            json!({ "removed": true }),
+        ))
+    }
+}
+
+#[derive(Clone)]
 pub(crate) struct RebornLocalLifecycleFacade {
     skill_management: Arc<RebornLocalSkillManagementPort>,
+    extension_management: Option<Arc<RebornLocalExtensionManagementPort>>,
 }
 
 impl RebornLocalLifecycleFacade {
     pub(crate) fn new(skill_management: Arc<RebornLocalSkillManagementPort>) -> Self {
-        Self { skill_management }
+        Self {
+            skill_management,
+            extension_management: None,
+        }
+    }
+
+    pub(crate) fn with_extension_management(
+        mut self,
+        extension_management: Arc<RebornLocalExtensionManagementPort>,
+    ) -> Self {
+        self.extension_management = Some(extension_management);
+        self
     }
 
     async fn execute_action(
@@ -148,12 +360,32 @@ impl RebornLocalLifecycleFacade {
                     }),
                 ))
             }
-            LifecycleProductAction::ExtensionSearch { .. } => unsupported_projection(None),
-            LifecycleProductAction::ExtensionInstall { package_ref }
-            | LifecycleProductAction::ExtensionAuth { package_ref }
-            | LifecycleProductAction::ExtensionActivate { package_ref }
-            | LifecycleProductAction::ExtensionConfigure { package_ref, .. }
-            | LifecycleProductAction::ExtensionRemove { package_ref } => {
+            LifecycleProductAction::ExtensionSearch { query } => {
+                let Some(extension_management) = &self.extension_management else {
+                    return unsupported_projection(None);
+                };
+                extension_management.search(&query).await
+            }
+            LifecycleProductAction::ExtensionInstall { package_ref } => {
+                let Some(extension_management) = &self.extension_management else {
+                    return unsupported_projection(Some(package_ref));
+                };
+                extension_management.install(package_ref).await
+            }
+            LifecycleProductAction::ExtensionActivate { package_ref } => {
+                let Some(extension_management) = &self.extension_management else {
+                    return unsupported_projection(Some(package_ref));
+                };
+                extension_management.activate(package_ref).await
+            }
+            LifecycleProductAction::ExtensionRemove { package_ref } => {
+                let Some(extension_management) = &self.extension_management else {
+                    return unsupported_projection(Some(package_ref));
+                };
+                extension_management.remove(package_ref).await
+            }
+            LifecycleProductAction::ExtensionAuth { package_ref }
+            | LifecycleProductAction::ExtensionConfigure { package_ref, .. } => {
                 unsupported_projection(Some(package_ref.clone()))
             }
         }
@@ -221,6 +453,45 @@ fn unsupported_projection(
     ))
 }
 
+fn extension_ids_from_package_ref(
+    package_ref: &LifecyclePackageRef,
+) -> Result<(ExtensionId, ExtensionInstallationId), ProductWorkflowError> {
+    package_ref.require_kind(LifecyclePackageKind::Extension)?;
+    let extension_id = ExtensionId::new(package_ref.id.as_str().to_string()).map_err(|error| {
+        ProductWorkflowError::InvalidBindingRequest {
+            reason: error.to_string(),
+        }
+    })?;
+    let installation_id = ExtensionInstallationId::new(extension_id.as_str().to_string())
+        .map_err(map_extension_installation_error)?;
+    Ok((extension_id, installation_id))
+}
+
+fn replace_active_extension(
+    active_registry: &SharedExtensionRegistry,
+    package: ironclaw_extensions::ExtensionPackage,
+) -> Result<(), ProductWorkflowError> {
+    active_registry.upsert(package).map_err(map_extension_error)
+}
+
+fn remove_active_extension(active_registry: &SharedExtensionRegistry, extension_id: &ExtensionId) {
+    active_registry.remove(extension_id);
+}
+
+fn map_extension_error(error: ironclaw_extensions::ExtensionError) -> ProductWorkflowError {
+    ProductWorkflowError::InvalidBindingRequest {
+        reason: error.to_string(),
+    }
+}
+
+fn map_extension_installation_error(
+    error: ironclaw_extensions::ExtensionInstallationError,
+) -> ProductWorkflowError {
+    ProductWorkflowError::InvalidBindingRequest {
+        reason: error.to_string(),
+    }
+}
+
 fn map_skill_error(error: SkillManagementError) -> ProductWorkflowError {
     match error.kind() {
         SkillManagementErrorKind::InvalidInput
@@ -239,7 +510,13 @@ fn map_skill_error(error: SkillManagementError) -> ProductWorkflowError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::{HostPath, MountAlias, MountGrant, MountPermissions, VirtualPath};
+    use ironclaw_extensions::{ExtensionManifest, ExtensionPackage};
+    use ironclaw_host_api::{
+        HostPath, HostPortCatalog, MountAlias, MountGrant, MountPermissions, TenantId, VirtualPath,
+    };
+
+    use crate::available_extensions::{AvailableExtensionAsset, AvailableExtensionPackage};
+    use ironclaw_product_workflow::LifecycleProductSurfaceContext;
 
     #[tokio::test]
     async fn skill_lifecycle_facade_installs_lists_and_removes_via_skill_management() {
@@ -393,6 +670,121 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn extension_lifecycle_installs_activates_and_removes_catalog_package() {
+        let (_dir, storage_root, facade, active_registry) = extension_lifecycle_fixture();
+
+        let search = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionSearch {
+                    query: "fixture".to_string(),
+                },
+            )
+            .await
+            .expect("search extensions");
+        assert_eq!(search.phase, LifecyclePhase::Discovered);
+        let extensions = search
+            .payload
+            .as_ref()
+            .and_then(|payload| payload.get("extensions"))
+            .and_then(Value::as_array)
+            .expect("extension summaries");
+        assert_eq!(extensions.len(), 1);
+        let visible_ids = extensions[0]
+            .get("visible_read_only_capability_ids")
+            .and_then(Value::as_array)
+            .expect("visible read-only ids");
+        assert_eq!(
+            visible_ids
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>(),
+            vec!["fixture.search"]
+        );
+
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
+            .expect("valid ref");
+        let install = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionInstall {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("install extension");
+        assert_eq!(install.phase, LifecyclePhase::Installed);
+        assert!(
+            storage_root
+                .join("system/extensions/fixture/manifest.toml")
+                .exists()
+        );
+        assert!(
+            storage_root
+                .join("system/extensions/fixture/wasm/fixture.wasm")
+                .exists()
+        );
+        assert!(
+            active_registry
+                .snapshot()
+                .get_extension(&ExtensionId::new("fixture").unwrap())
+                .is_none()
+        );
+
+        let activate = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionActivate {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("activate extension");
+        assert_eq!(activate.phase, LifecyclePhase::Active);
+        let active = active_registry.snapshot();
+        assert!(
+            active
+                .get_extension(&ExtensionId::new("fixture").unwrap())
+                .is_some()
+        );
+        assert!(
+            active
+                .get_capability(&ironclaw_host_api::CapabilityId::new("fixture.search").unwrap())
+                .is_some()
+        );
+        assert!(
+            active
+                .get_capability(&ironclaw_host_api::CapabilityId::new("fixture.write").unwrap())
+                .is_some()
+        );
+
+        let remove = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionRemove { package_ref },
+            )
+            .await
+            .expect("remove extension");
+        assert_eq!(remove.phase, LifecyclePhase::Removed);
+        assert!(
+            active_registry
+                .snapshot()
+                .get_extension(&ExtensionId::new("fixture").unwrap())
+                .is_none()
+        );
+        assert!(
+            !storage_root
+                .join("system/extensions/fixture/manifest.toml")
+                .exists()
+        );
+        assert!(
+            !storage_root
+                .join("system/extensions/fixture/wasm/fixture.wasm")
+                .exists()
+        );
+    }
+
+    #[tokio::test]
     async fn skill_lifecycle_facade_maps_skill_management_errors() {
         let (_dir, _storage_root, facade) = lifecycle_fixture();
 
@@ -419,6 +811,123 @@ mod tests {
             missing_remove,
             ProductWorkflowError::InvalidBindingRequest { .. }
         ));
+    }
+
+    fn lifecycle_surface_context() -> LifecycleProductContext {
+        LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
+            tenant_id: TenantId::new("lifecycle-tenant").expect("valid tenant"),
+            user_id: UserId::new("lifecycle-owner").expect("valid user"),
+            agent_id: None,
+            project_id: None,
+        })
+    }
+
+    fn fixture_extension_package() -> AvailableExtensionPackage {
+        static MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "fixture"
+name = "Fixture Extension"
+version = "0.1.0"
+description = "Lifecycle fixture extension"
+trust = "first_party_requested"
+
+[runtime]
+kind = "wasm"
+module = "wasm/fixture.wasm"
+
+[[capabilities]]
+id = "fixture.search"
+description = "Search fixture data"
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/search.input.json"
+output_schema_ref = "schemas/search.output.json"
+
+[[capabilities]]
+id = "fixture.write"
+description = "Write fixture data"
+effects = ["network", "external_write"]
+default_permission = "ask"
+visibility = "host_internal"
+input_schema_ref = "schemas/write.input.json"
+output_schema_ref = "schemas/write.output.json"
+"#;
+        let manifest = ExtensionManifest::parse(
+            MANIFEST,
+            ManifestSource::HostBundled,
+            &HostPortCatalog::empty(),
+        )
+        .expect("fixture manifest");
+        let root = VirtualPath::new("/system/extensions/fixture").expect("extension root");
+        let package = ExtensionPackage::from_manifest(manifest, root).expect("fixture package");
+        AvailableExtensionPackage {
+            package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
+                .expect("fixture package ref"),
+            manifest_toml: MANIFEST,
+            package,
+            assets: vec![
+                AvailableExtensionAsset {
+                    path: "manifest.toml",
+                    bytes: MANIFEST.as_bytes(),
+                },
+                AvailableExtensionAsset {
+                    path: "wasm/fixture.wasm",
+                    bytes: b"\0asm\x01\0\0\0",
+                },
+            ],
+        }
+    }
+
+    fn extension_lifecycle_fixture() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        RebornLocalLifecycleFacade,
+        Arc<SharedExtensionRegistry>,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
+
+        let mut filesystem = LocalFilesystem::new();
+        filesystem
+            .mount_local(
+                VirtualPath::new("/projects").expect("valid virtual path"),
+                HostPath::from_path_buf(storage_root.clone()),
+            )
+            .expect("mount storage root");
+        filesystem
+            .mount_local(
+                VirtualPath::new("/system/extensions").expect("valid virtual path"),
+                HostPath::from_path_buf(storage_root.join("system/extensions")),
+            )
+            .expect("mount system extensions");
+        let filesystem = Arc::new(filesystem);
+        let skill_management = Arc::new(RebornLocalSkillManagementPort::new(
+            UserId::new("lifecycle-owner").expect("valid user"),
+            Arc::clone(&filesystem),
+            MountView::new(vec![MountGrant::new(
+                MountAlias::new("/skills").expect("valid alias"),
+                VirtualPath::new("/projects/skills").expect("valid path"),
+                MountPermissions::read_write_list_delete(),
+            )])
+            .expect("valid mount view"),
+        ));
+        let active_registry = Arc::new(SharedExtensionRegistry::new(
+            ironclaw_extensions::ExtensionRegistry::new(),
+        ));
+        let extension_management = Arc::new(RebornLocalExtensionManagementPort::new(
+            Arc::clone(&filesystem),
+            AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]),
+            Arc::new(ironclaw_extensions::InMemoryExtensionInstallationStore::default()),
+            Arc::new(Mutex::new(ExtensionLifecycleService::new(
+                ironclaw_extensions::ExtensionRegistry::new(),
+            ))),
+            Arc::clone(&active_registry),
+        ));
+        let facade = RebornLocalLifecycleFacade::new(skill_management)
+            .with_extension_management(extension_management);
+        (dir, storage_root, facade, active_registry)
     }
 
     fn lifecycle_fixture() -> (

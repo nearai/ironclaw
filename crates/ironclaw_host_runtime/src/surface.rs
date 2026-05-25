@@ -1,5 +1,5 @@
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
-use ironclaw_extensions::ExtensionRegistry;
+use ironclaw_extensions::{CapabilityVisibility, ExtensionRegistry};
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityGrant, Decision, EffectKind, ResourceEstimate, RuntimeKind,
     canonical_json_v1, runtime_policy::EffectiveRuntimePolicy, sha256_digest_token,
@@ -150,7 +150,8 @@ impl<'a> CapabilityCatalog<'a> {
             if capabilities.len() >= max_capabilities {
                 break;
             }
-            if !request.policy.allows_runtime(descriptor.runtime)
+            if !self.is_model_visible(descriptor)
+                || !request.policy.allows_runtime(descriptor.runtime)
                 || !request.policy.allows_effects(&descriptor.effects)
             {
                 continue;
@@ -197,6 +198,10 @@ impl<'a> CapabilityCatalog<'a> {
             version,
             capabilities,
         })
+    }
+
+    fn is_model_visible(&self, descriptor: &CapabilityDescriptor) -> bool {
+        self.registry.capability_visibility(&descriptor.id) == Some(CapabilityVisibility::Model)
     }
 }
 

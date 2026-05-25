@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use ironclaw_extensions::ExtensionRegistry;
+use ironclaw_extensions::{ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_host_api::{
     CapabilityId, NetworkTargetPattern, RuntimeCredentialInjection, RuntimeCredentialSource,
     RuntimeCredentialTarget, RuntimeKind, SecretHandle,
@@ -44,8 +44,30 @@ impl HostWasmRuntimeCredentials {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn credentials(&self) -> &[HostWasmRuntimeCredential] {
         &self.credentials
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SharedHostWasmRuntimeCredentials {
+    registry: SharedExtensionRegistry,
+}
+
+impl SharedHostWasmRuntimeCredentials {
+    pub(crate) fn new(registry: SharedExtensionRegistry) -> Self {
+        Self { registry }
+    }
+}
+
+impl WasmRuntimeCredentialProvider for SharedHostWasmRuntimeCredentials {
+    fn credential_injections(
+        &self,
+        request: &WasmRuntimeCredentialRequest,
+    ) -> Result<Vec<RuntimeCredentialInjection>, WasmHostError> {
+        wasm_runtime_credentials_from_registry(&self.registry.snapshot())
+            .credential_injections(request)
     }
 }
 

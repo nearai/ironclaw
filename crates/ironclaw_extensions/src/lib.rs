@@ -356,7 +356,7 @@ pub use installations::{
 pub use lifecycle::{
     ExtensionLifecycleEvent, ExtensionLifecycleEventSink, ExtensionLifecycleService,
 };
-pub use registry::ExtensionRegistry;
+pub use registry::{ExtensionRegistry, SharedExtensionRegistry};
 
 /// Filesystem-backed extension discovery.
 pub struct ExtensionDiscovery;

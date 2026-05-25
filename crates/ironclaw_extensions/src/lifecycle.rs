@@ -124,7 +124,7 @@ impl ExtensionLifecycleService {
             !package.capabilities.is_empty(),
         ))
         .await?;
-        self.registry.remove_validated(id);
+        self.registry.remove(id);
         self.disabled_extensions.remove(id);
         Ok(())
     }

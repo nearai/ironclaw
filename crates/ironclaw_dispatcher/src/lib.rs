@@ -9,7 +9,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_events::{EventSink, RuntimeEvent};
-use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry};
+use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, ExtensionId, MountView, ResourceEstimate, ResourceReceipt,
@@ -103,7 +103,7 @@ where
     F: RootFilesystem,
     G: ResourceGovernor,
 {
-    registry: ServiceHandle<'a, ExtensionRegistry>,
+    registry: SharedExtensionRegistry,
     filesystem: ServiceHandle<'a, F>,
     governor: ServiceHandle<'a, G>,
     runtime_policy: EffectiveRuntimePolicy,
@@ -118,7 +118,7 @@ where
 {
     pub fn new(registry: &'a ExtensionRegistry, filesystem: &'a F, governor: &'a G) -> Self {
         Self {
-            registry: ServiceHandle::Borrowed(registry),
+            registry: SharedExtensionRegistry::new(registry.clone()),
             filesystem: ServiceHandle::Borrowed(filesystem),
             governor: ServiceHandle::Borrowed(governor),
             runtime_policy: default_runtime_policy(),
@@ -136,8 +136,24 @@ where
         F: 'static,
         G: 'static,
     {
+        Self::from_shared_registry(
+            Arc::new(SharedExtensionRegistry::new((*registry).clone())),
+            filesystem,
+            governor,
+        )
+    }
+
+    pub fn from_shared_registry(
+        registry: Arc<SharedExtensionRegistry>,
+        filesystem: Arc<F>,
+        governor: Arc<G>,
+    ) -> RuntimeDispatcher<'static, F, G>
+    where
+        F: 'static,
+        G: 'static,
+    {
         RuntimeDispatcher {
-            registry: ServiceHandle::Shared(registry),
+            registry: (*registry).clone(),
             filesystem: ServiceHandle::Shared(filesystem),
             governor: ServiceHandle::Shared(governor),
             runtime_policy: default_runtime_policy(),
@@ -207,11 +223,8 @@ where
         ))
         .await?;
 
-        let descriptor = match self
-            .registry
-            .as_ref()
-            .get_capability(&request.capability_id)
-        {
+        let registry = self.registry.snapshot();
+        let descriptor = match registry.get_capability(&request.capability_id).cloned() {
             Some(descriptor) => descriptor,
             None => {
                 let error = DispatchError::UnknownCapability {
@@ -223,7 +236,7 @@ where
                 return Err(error);
             }
         };
-        let package = match self.registry.as_ref().get_extension(&descriptor.provider) {
+        let package = match registry.get_extension(&descriptor.provider).cloned() {
             Some(package) => package,
             None => {
                 let error = DispatchError::UnknownProvider {
@@ -287,8 +300,8 @@ where
         let execution = match adapter
             .as_ref()
             .dispatch_json(RuntimeAdapterRequest {
-                package,
-                descriptor,
+                package: &package,
+                descriptor: &descriptor,
                 filesystem: self.filesystem.as_ref(),
                 governor: self.governor.as_ref(),
                 runtime_policy: &self.runtime_policy,

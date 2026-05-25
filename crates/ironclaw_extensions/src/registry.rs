@@ -1,14 +1,18 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, RwLock},
+};
 
 use ironclaw_host_api::{CapabilityDescriptor, CapabilityId, ExtensionId};
 
-use crate::{ExtensionError, ExtensionPackage};
+use crate::{CapabilityVisibility, ExtensionError, ExtensionPackage};
 
 /// Registry of validated extension packages and declared capabilities.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ExtensionRegistry {
     packages: HashMap<ExtensionId, ExtensionPackage>,
     capabilities: HashMap<CapabilityId, CapabilityDescriptor>,
+    capability_visibility: HashMap<CapabilityId, CapabilityVisibility>,
     extension_order: Vec<ExtensionId>,
     capability_order: Vec<CapabilityId>,
 }
@@ -99,6 +103,15 @@ impl ExtensionRegistry {
             self.capability_order.push(descriptor.id.clone());
             self.capabilities
                 .insert(descriptor.id.clone(), descriptor.clone());
+            if let Some(capability) = package
+                .manifest
+                .capabilities
+                .iter()
+                .find(|capability| capability.id == descriptor.id)
+            {
+                self.capability_visibility
+                    .insert(descriptor.id.clone(), capability.visibility);
+            }
         }
         self.extension_order.push(package.id.clone());
         self.packages.insert(package.id.clone(), package);
@@ -126,6 +139,7 @@ impl ExtensionRegistry {
 
         for capability_id in &current_capability_ids {
             self.capabilities.remove(capability_id);
+            self.capability_visibility.remove(capability_id);
         }
         self.capability_order
             .retain(|capability_id| !current_capability_ids.contains(capability_id));
@@ -134,6 +148,15 @@ impl ExtensionRegistry {
                 .insert(capability_insert_index + offset, descriptor.id.clone());
             self.capabilities
                 .insert(descriptor.id.clone(), descriptor.clone());
+            if let Some(capability) = package
+                .manifest
+                .capabilities
+                .iter()
+                .find(|capability| capability.id == descriptor.id)
+            {
+                self.capability_visibility
+                    .insert(descriptor.id.clone(), capability.visibility);
+            }
         }
         if let Some(index) = extension_index {
             self.extension_order[index] = id.clone();
@@ -143,12 +166,19 @@ impl ExtensionRegistry {
         self.packages.insert(id, package);
     }
 
-    pub(crate) fn remove_validated(&mut self, id: &ExtensionId) -> Option<ExtensionPackage> {
+    pub fn update(&mut self, package: ExtensionPackage) -> Result<(), ExtensionError> {
+        self.validate_replacement(&package)?;
+        self.replace_validated(package);
+        Ok(())
+    }
+
+    pub fn remove(&mut self, id: &ExtensionId) -> Option<ExtensionPackage> {
         let package = self.packages.remove(id)?;
         self.extension_order
             .retain(|extension_id| extension_id != id);
         for descriptor in &package.capabilities {
             self.capabilities.remove(&descriptor.id);
+            self.capability_visibility.remove(&descriptor.id);
             self.capability_order
                 .retain(|capability_id| capability_id != &descriptor.id);
         }
@@ -163,6 +193,10 @@ impl ExtensionRegistry {
         self.capabilities.get(id)
     }
 
+    pub fn capability_visibility(&self, id: &CapabilityId) -> Option<CapabilityVisibility> {
+        self.capability_visibility.get(id).copied()
+    }
+
     pub fn extensions(&self) -> impl Iterator<Item = &ExtensionPackage> {
         self.extension_order
             .iter()
@@ -173,6 +207,75 @@ impl ExtensionRegistry {
         self.capability_order
             .iter()
             .filter_map(|id| self.capabilities.get(id))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SharedExtensionRegistry {
+    inner: Arc<RwLock<Arc<ExtensionRegistry>>>,
+}
+
+impl SharedExtensionRegistry {
+    pub fn new(registry: ExtensionRegistry) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(Arc::new(registry))),
+        }
+    }
+
+    pub fn snapshot(&self) -> Arc<ExtensionRegistry> {
+        match self.inner.read() {
+            Ok(guard) => Arc::clone(&guard),
+            Err(poisoned) => Arc::clone(&poisoned.into_inner()),
+        }
+    }
+
+    pub fn snapshot_owned(&self) -> ExtensionRegistry {
+        self.snapshot().as_ref().clone()
+    }
+
+    pub fn insert(&self, package: ExtensionPackage) -> Result<(), ExtensionError> {
+        self.with_mut(|registry| registry.insert(package))
+    }
+
+    pub fn update(&self, package: ExtensionPackage) -> Result<(), ExtensionError> {
+        self.with_mut(|registry| registry.update(package))
+    }
+
+    pub fn upsert(&self, package: ExtensionPackage) -> Result<(), ExtensionError> {
+        self.with_mut(|registry| {
+            if registry.get_extension(&package.id).is_some() {
+                registry.update(package)
+            } else {
+                registry.insert(package)
+            }
+        })
+    }
+
+    pub fn remove(&self, id: &ExtensionId) -> Option<ExtensionPackage> {
+        self.with_mut(|registry| registry.remove(id))
+    }
+
+    fn with_mut<R>(&self, f: impl FnOnce(&mut ExtensionRegistry) -> R) -> R {
+        match self.inner.write() {
+            Ok(mut guard) => f(Arc::make_mut(&mut guard)),
+            Err(poisoned) => {
+                let mut guard = poisoned.into_inner();
+                f(Arc::make_mut(&mut guard))
+            }
+        }
+    }
+
+    pub fn replace(&self, registry: ExtensionRegistry) {
+        match self.inner.write() {
+            Ok(mut guard) => *guard = Arc::new(registry),
+            Err(poisoned) => *poisoned.into_inner() = Arc::new(registry),
+        }
+    }
+}
+
+impl Default for SharedExtensionRegistry {
+    fn default() -> Self {
+        Self::new(ExtensionRegistry::default())
     }
 }
 

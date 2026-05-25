@@ -395,6 +395,99 @@ async fn visible_surface_uses_caller_provider_trust_not_host_trust_policy() {
 }
 
 #[tokio::test]
+async fn visible_surface_hides_host_internal_capabilities() {
+    let manifest = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "github"
+name = "GitHub"
+version = "0.1.0"
+description = "GitHub test"
+trust = "first_party_requested"
+
+[runtime]
+kind = "wasm"
+module = "wasm/github.wasm"
+
+[[capabilities]]
+id = "github.search_issues"
+description = "search"
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/search.input.json"
+output_schema_ref = "schemas/github/search.output.json"
+
+[[capabilities]]
+id = "github.get_issue"
+description = "get"
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/get.input.json"
+output_schema_ref = "schemas/github/get.output.json"
+
+[[capabilities]]
+id = "github.comment_issue"
+description = "comment"
+effects = ["network", "external_write"]
+default_permission = "ask"
+visibility = "host_internal"
+input_schema_ref = "schemas/github/comment.input.json"
+output_schema_ref = "schemas/github/comment.output.json"
+"#;
+    let manifest = ExtensionManifest::parse(
+        manifest,
+        ManifestSource::HostBundled,
+        &HostPortCatalog::empty(),
+    )
+    .unwrap();
+    let package = ExtensionPackage::from_manifest(
+        manifest,
+        VirtualPath::new("/system/extensions/github").unwrap(),
+    )
+    .unwrap();
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(package).unwrap();
+    let runtime = runtime_with(registry, Arc::new(GrantAuthorizer)).with_trust_policy(Arc::new(
+        trust_policy_for([(
+            "github",
+            "/system/extensions/github/manifest.toml",
+            vec![EffectKind::Network, EffectKind::ExternalWrite],
+        )]),
+    ));
+    let context = context_with_grants([
+        (
+            capability_id("github.search_issues"),
+            vec![EffectKind::Network],
+        ),
+        (capability_id("github.get_issue"), vec![EffectKind::Network]),
+        (
+            capability_id("github.comment_issue"),
+            vec![EffectKind::Network, EffectKind::ExternalWrite],
+        ),
+    ]);
+
+    let surface = runtime
+        .visible_capabilities(request_with_provider_trust(
+            context,
+            [(
+                "github",
+                vec![EffectKind::Network, EffectKind::ExternalWrite],
+            )],
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        visible_ids(&surface),
+        vec![
+            capability_id("github.search_issues"),
+            capability_id("github.get_issue"),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
     let package = builtin_first_party_package().unwrap();
     assert!(

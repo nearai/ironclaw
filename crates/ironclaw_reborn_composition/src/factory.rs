@@ -6,7 +6,9 @@ use std::{
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_authorization::FilesystemCapabilityLeaseStore;
 use ironclaw_authorization::GrantAuthorizer;
-use ironclaw_extensions::ExtensionRegistry;
+use ironclaw_extensions::{
+    ExtensionLifecycleService, ExtensionRegistry, InMemoryExtensionInstallationStore,
+};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
@@ -39,7 +41,11 @@ use crate::{
     RebornFacadeReadiness, RebornProductAuthServicePorts, RebornProductAuthServices,
     RebornReadiness, RebornReadinessState,
 };
-use crate::{input::RebornStorageInput, lifecycle::RebornLocalSkillManagementPort};
+use crate::{
+    available_extensions::AvailableExtensionCatalog,
+    input::RebornStorageInput,
+    lifecycle::{RebornLocalExtensionManagementPort, RebornLocalSkillManagementPort},
+};
 
 pub struct RebornServices {
     pub host_runtime: Option<Arc<dyn ironclaw_host_runtime::HostRuntime>>,
@@ -57,6 +63,7 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) skill_management: Arc<RebornLocalSkillManagementPort>,
     pub(crate) skill_filesystem: Arc<ScopedFilesystem<LocalFilesystem>>,
     pub(crate) workspace_filesystem: Arc<ScopedFilesystem<LocalFilesystem>>,
+    pub(crate) extension_management: Arc<RebornLocalExtensionManagementPort>,
 }
 
 impl std::fmt::Debug for RebornServices {
@@ -200,19 +207,10 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
     let turn_state = Arc::new(InMemoryTurnStateStore::default());
-    let local_runtime = Arc::new(RebornLocalRuntimeServices {
-        turn_state: Arc::clone(&turn_state),
-        checkpoint_state_store: Arc::new(InMemoryCheckpointStateStore::default()),
-        loop_checkpoint_store: Arc::new(InMemoryLoopCheckpointStore::default()),
-        thread_service: Arc::new(InMemorySessionThreadService::default()),
-        skill_management,
-        skill_filesystem,
-        workspace_filesystem,
-    });
 
     let mut services = HostRuntimeServices::new(
         Arc::new(builtin_extension_registry()?),
-        filesystem,
+        Arc::clone(&filesystem),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ProcessServices::in_memory(),
@@ -232,6 +230,26 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     }
     // TODO(process-port): local runtime policies intentionally use the
     // LocalHostProcessPort until a non-local process backend is composed.
+
+    let extension_management = Arc::new(RebornLocalExtensionManagementPort::new(
+        Arc::clone(&filesystem),
+        AvailableExtensionCatalog::empty(),
+        Arc::new(InMemoryExtensionInstallationStore::default()),
+        Arc::new(tokio::sync::Mutex::new(ExtensionLifecycleService::new(
+            services.shared_extension_registry().snapshot_owned(),
+        ))),
+        services.shared_extension_registry(),
+    ));
+    let local_runtime = Arc::new(RebornLocalRuntimeServices {
+        turn_state: Arc::clone(&turn_state),
+        checkpoint_state_store: Arc::new(InMemoryCheckpointStateStore::default()),
+        loop_checkpoint_store: Arc::new(InMemoryLoopCheckpointStore::default()),
+        thread_service: Arc::new(InMemorySessionThreadService::default()),
+        skill_management,
+        skill_filesystem,
+        workspace_filesystem,
+        extension_management,
+    });
 
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
         Arc::new(services.host_runtime_for_local_testing());

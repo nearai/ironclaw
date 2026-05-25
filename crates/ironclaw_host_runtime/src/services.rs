@@ -20,7 +20,7 @@ use ironclaw_events::{
     AuditSink, DurableAuditLog, DurableAuditSink, DurableEventLog, DurableEventSink, EventSink,
     InMemoryAuditSink, InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink,
 };
-use ironclaw_extensions::{ExtensionRegistry, ExtensionRuntime};
+use ironclaw_extensions::{ExtensionRegistry, ExtensionRuntime, SharedExtensionRegistry};
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
 #[cfg(feature = "postgres")]
@@ -115,7 +115,7 @@ where
     S: ProcessStore + 'static,
     R: ProcessResultStore + 'static,
 {
-    registry: Arc<ExtensionRegistry>,
+    registry: Arc<SharedExtensionRegistry>,
     trust_policy: Arc<dyn TrustPolicy>,
     trust_policy_configured: bool,
     filesystem: Arc<F>,
@@ -175,7 +175,7 @@ where
             governor.clone(),
         ));
         Self {
-            registry,
+            registry: Arc::new(SharedExtensionRegistry::new((*registry).clone())),
             trust_policy: Arc::new(HostTrustPolicy::fail_closed()),
             trust_policy_configured: false,
             filesystem,
@@ -242,7 +242,7 @@ where
 
     /// Builds a runtime dispatcher with every configured runtime adapter.
     fn runtime_dispatcher(&self) -> RuntimeDispatcher<'static, F, G> {
-        let mut dispatcher = RuntimeDispatcher::from_arcs(
+        let mut dispatcher = RuntimeDispatcher::from_shared_registry(
             Arc::clone(&self.registry),
             Arc::clone(&self.filesystem),
             Arc::clone(&self.governor),
@@ -309,6 +309,10 @@ where
     }
 
     /// Builds the upper facade without production validation.
+    pub fn shared_extension_registry(&self) -> Arc<SharedExtensionRegistry> {
+        Arc::clone(&self.registry)
+    }
+
     #[doc(hidden)]
     pub fn host_runtime_for_local_testing(&self) -> DefaultHostRuntime {
         self.build_host_runtime()
@@ -366,7 +370,7 @@ where
             .clone()
             .unwrap_or_else(local_testing_runtime_policy);
 
-        let mut runtime = DefaultHostRuntime::new(
+        let mut runtime = DefaultHostRuntime::from_shared_registry(
             Arc::clone(&self.registry),
             dispatcher,
             Arc::clone(&self.authorizer),
@@ -449,8 +453,8 @@ where
         let Some(first_party_runtime) = &self.first_party_runtime else {
             return false;
         };
-        let mut declared = self
-            .registry
+        let registry = self.registry.snapshot();
+        let mut declared = registry
             .capabilities()
             .filter(|descriptor| descriptor.runtime == RuntimeKind::FirstParty)
             .peekable();
@@ -464,7 +468,7 @@ where
         let Some(first_party_runtime) = &self.first_party_runtime else {
             return false;
         };
-        self.registry.capabilities().any(|descriptor| {
+        self.registry.snapshot().capabilities().any(|descriptor| {
             descriptor.runtime == RuntimeKind::FirstParty
                 && descriptor.id.as_str() == crate::SHELL_CAPABILITY_ID
                 && first_party_runtime.contains_handler(&descriptor.id)

@@ -478,6 +478,16 @@ pub trait ExtensionInstallationStore: Send + Sync {
         state: ExtensionActivationState,
     ) -> Result<(), ExtensionInstallationError>;
 
+    async fn delete_installation(
+        &self,
+        installation_id: &ExtensionInstallationId,
+    ) -> Result<(), ExtensionInstallationError>;
+
+    async fn delete_manifest(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<(), ExtensionInstallationError>;
+
     async fn update_health(
         &self,
         installation_id: &ExtensionInstallationId,
@@ -542,6 +552,20 @@ where
         state: ExtensionActivationState,
     ) -> Result<(), ExtensionInstallationError> {
         (**self).set_activation_state(installation_id, state).await
+    }
+
+    async fn delete_installation(
+        &self,
+        installation_id: &ExtensionInstallationId,
+    ) -> Result<(), ExtensionInstallationError> {
+        (**self).delete_installation(installation_id).await
+    }
+
+    async fn delete_manifest(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<(), ExtensionInstallationError> {
+        (**self).delete_manifest(extension_id).await
     }
 
     async fn update_health(
@@ -678,6 +702,44 @@ impl ExtensionInstallationStore for InMemoryExtensionInstallationStore {
         Ok(())
     }
 
+    async fn delete_installation(
+        &self,
+        installation_id: &ExtensionInstallationId,
+    ) -> Result<(), ExtensionInstallationError> {
+        self.inner
+            .write()
+            .await
+            .installations
+            .remove(installation_id)
+            .map(|_| ())
+            .ok_or_else(|| ExtensionInstallationError::InstallationNotFound {
+                installation_id: installation_id.clone(),
+            })
+    }
+
+    async fn delete_manifest(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<(), ExtensionInstallationError> {
+        let mut inner = self.inner.write().await;
+        if inner
+            .installations
+            .values()
+            .any(|installation| installation.extension_id() == extension_id)
+        {
+            return Err(ExtensionInstallationError::InvalidInstallation {
+                reason: format!("extension {extension_id} still has installations"),
+            });
+        }
+        inner
+            .manifests
+            .remove(extension_id)
+            .map(|_| ())
+            .ok_or_else(|| ExtensionInstallationError::ManifestNotFound {
+                extension_id: extension_id.clone(),
+            })
+    }
+
     async fn update_health(
         &self,
         installation_id: &ExtensionInstallationId,
@@ -719,6 +781,10 @@ pub enum ExtensionInstallationError {
     InstallationNotFound {
         installation_id: ExtensionInstallationId,
     },
+    #[error("extension manifest {extension_id} was not found")]
+    ManifestNotFound { extension_id: ExtensionId },
+    #[error("invalid installation: {reason}")]
+    InvalidInstallation { reason: String },
     #[error("duplicate credential binding {handle}")]
     DuplicateCredentialBinding { handle: ExtensionCredentialHandle },
 }

@@ -19,6 +19,7 @@
 //! Gateway`, etc.
 
 mod auth;
+mod available_extensions;
 mod error;
 mod factory;
 mod input;
