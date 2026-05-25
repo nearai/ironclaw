@@ -38,6 +38,9 @@ pub enum RuntimeEventKind {
     RuntimeSelected,
     DispatchSucceeded,
     DispatchFailed,
+    CapabilityActivityRequested,
+    CapabilityActivitySucceeded,
+    CapabilityActivityFailed,
     ModelStarted,
     ModelCompleted,
     ModelFailed,
@@ -503,6 +506,42 @@ impl RuntimeEvent {
             hook_decision: payload.hook_decision,
             hook_failure_category: payload.hook_failure_category,
             hook_failure_disposition: payload.hook_failure_disposition,
+        }
+    }
+
+    pub fn capability_activity_requested(
+        scope: ResourceScope,
+        capability_id: CapabilityId,
+    ) -> Self {
+        Self {
+            kind: RuntimeEventKind::CapabilityActivityRequested,
+            ..Self::dispatch_requested(scope, capability_id)
+        }
+    }
+
+    pub fn capability_activity_succeeded(
+        scope: ResourceScope,
+        capability_id: CapabilityId,
+        provider: ExtensionId,
+        runtime: RuntimeKind,
+        output_bytes: u64,
+    ) -> Self {
+        Self {
+            kind: RuntimeEventKind::CapabilityActivitySucceeded,
+            ..Self::dispatch_succeeded(scope, capability_id, provider, runtime, output_bytes)
+        }
+    }
+
+    pub fn capability_activity_failed(
+        scope: ResourceScope,
+        capability_id: CapabilityId,
+        provider: Option<ExtensionId>,
+        runtime: Option<RuntimeKind>,
+        error_kind: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind: RuntimeEventKind::CapabilityActivityFailed,
+            ..Self::dispatch_failed(scope, capability_id, provider, runtime, error_kind)
         }
     }
 

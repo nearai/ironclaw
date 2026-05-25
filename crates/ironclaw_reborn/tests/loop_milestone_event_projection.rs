@@ -15,8 +15,8 @@ use ironclaw_events::{
     InMemoryDurableEventLog, ReadScope,
 };
 use ironclaw_host_api::{
-    AgentId, CapabilityId, ExtensionId, MissionId, ProjectId, RuntimeKind, TenantId, ThreadId,
-    UserId,
+    AgentId, CapabilityId, ExtensionId, InvocationId, MissionId, ProjectId, RuntimeKind, TenantId,
+    ThreadId, UserId,
 };
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
@@ -946,7 +946,10 @@ async fn publish_loop_milestone_projects_capability_lifecycle_to_runtime_events(
     let events: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
     let thread_id = ThreadId::new("thread-capability-publish-lifecycle").unwrap();
     let run_id = TurnRunId::new();
-    let capability_id = CapabilityId::new("demo.echo").unwrap();
+    let first_invocation_id = InvocationId::new();
+    let second_invocation_id = InvocationId::new();
+    let first_capability_id = CapabilityId::new("demo.echo").unwrap();
+    let second_capability_id = CapabilityId::new("demo.search").unwrap();
     let provider_id = ExtensionId::new("demo").unwrap();
     let sink = DurableLoopHostMilestoneSink::new(
         Arc::clone(&events),
@@ -964,18 +967,35 @@ async fn publish_loop_milestone_projects_capability_lifecycle_to_runtime_events(
         thread_id.clone(),
     );
 
+    sink.publish_loop_milestone(milestone_for(
+        scope.clone(),
+        run_id,
+        LoopHostMilestoneKind::ModelStarted {
+            requested_model_profile_id: None,
+        },
+    ))
+    .await
+    .unwrap();
+
     for kind in [
         LoopHostMilestoneKind::CapabilityInvoked {
-            capability_id: capability_id.clone(),
+            invocation_id: first_invocation_id,
+            capability_id: first_capability_id.clone(),
         },
         LoopHostMilestoneKind::CapabilityCompleted {
-            capability_id: capability_id.clone(),
+            invocation_id: first_invocation_id,
+            capability_id: first_capability_id.clone(),
             provider: provider_id.clone(),
             runtime: RuntimeKind::FirstParty,
             output_bytes: 64,
         },
+        LoopHostMilestoneKind::CapabilityInvoked {
+            invocation_id: second_invocation_id,
+            capability_id: second_capability_id.clone(),
+        },
         LoopHostMilestoneKind::CapabilityFailed {
-            capability_id: capability_id.clone(),
+            invocation_id: second_invocation_id,
+            capability_id: second_capability_id.clone(),
             provider: Some(provider_id.clone()),
             runtime: Some(RuntimeKind::FirstParty),
             reason_kind: CapabilityFailureKind::OperationFailed,
@@ -996,7 +1016,7 @@ async fn publish_loop_milestone_projects_capability_lifecycle_to_runtime_events(
         .await
         .unwrap();
 
-    assert_eq!(snapshot.timeline.entries.len(), 3);
+    assert_eq!(snapshot.timeline.entries.len(), 5);
     let kinds = snapshot
         .timeline
         .entries
@@ -1006,18 +1026,31 @@ async fn publish_loop_milestone_projects_capability_lifecycle_to_runtime_events(
     assert_eq!(
         kinds,
         vec![
+            TimelineEntryKind::ModelStarted,
             TimelineEntryKind::DispatchRequested,
             TimelineEntryKind::DispatchSucceeded,
+            TimelineEntryKind::DispatchRequested,
             TimelineEntryKind::DispatchFailed,
         ]
     );
-    let completed = &snapshot.timeline.entries[1];
-    assert_eq!(completed.capability_id, capability_id);
+    assert_eq!(snapshot.runs.len(), 1);
+    assert_eq!(snapshot.runs[0].status, RunProjectionStatus::Running);
+    assert_eq!(snapshot.capability_activities.len(), 2);
+    let completed = snapshot
+        .capability_activities
+        .iter()
+        .find(|activity| activity.invocation_id == first_invocation_id)
+        .expect("first capability activity projected");
+    assert_eq!(completed.capability_id, first_capability_id);
     assert_eq!(completed.provider.as_ref(), Some(&provider_id));
     assert_eq!(completed.runtime, Some(RuntimeKind::FirstParty));
     assert_eq!(completed.output_bytes, Some(64));
-    let failed = &snapshot.timeline.entries[2];
-    assert_eq!(failed.capability_id, capability_id);
+    let failed = snapshot
+        .capability_activities
+        .iter()
+        .find(|activity| activity.invocation_id == second_invocation_id)
+        .expect("second capability activity projected");
+    assert_eq!(failed.capability_id, second_capability_id);
     assert_eq!(failed.provider.as_ref(), Some(&provider_id));
     assert_eq!(failed.runtime, Some(RuntimeKind::FirstParty));
     assert_eq!(failed.error_kind.as_deref(), Some("operation_failed"));
