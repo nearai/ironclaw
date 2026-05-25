@@ -12,7 +12,7 @@ use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_product_adapters::{
     InboundCommandPayload, ProductInboundAck, ProductRejection, ProductRejectionKind,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::Value;
 
 use crate::{ProductCommand, ProductCommandContext, ProductCommandService, ProductWorkflowError};
@@ -22,8 +22,7 @@ const LIFECYCLE_REF_MAX_BYTES: usize = 512;
 
 macro_rules! bounded_lifecycle_string {
     ($name:ident, $label:literal, $max:expr) => {
-        #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-        #[serde(transparent)]
+        #[derive(Debug, Clone, PartialEq, Eq)]
         pub struct $name(String);
 
         impl $name {
@@ -34,18 +33,14 @@ macro_rules! bounded_lifecycle_string {
             pub fn as_str(&self) -> &str {
                 &self.0
             }
+
+            pub fn into_inner(self) -> String {
+                self.0
+            }
         }
 
         impl AsRef<str> for $name {
             fn as_ref(&self) -> &str {
-                self.as_str()
-            }
-        }
-
-        impl std::ops::Deref for $name {
-            type Target = str;
-
-            fn deref(&self) -> &Self::Target {
                 self.as_str()
             }
         }
@@ -55,10 +50,33 @@ macro_rules! bounded_lifecycle_string {
                 f.write_str(self.as_str())
             }
         }
+
+        impl Serialize for $name {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                serializer.serialize_str(self.as_str())
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                let value = String::deserialize(deserializer)?;
+                Self::new(value).map_err(de::Error::custom)
+            }
+        }
     };
 }
 
-bounded_lifecycle_string!(LifecyclePackageId, "lifecycle package id", LIFECYCLE_ID_MAX_BYTES);
+bounded_lifecycle_string!(
+    LifecyclePackageId,
+    "lifecycle package id",
+    LIFECYCLE_ID_MAX_BYTES
+);
 bounded_lifecycle_string!(
     LifecycleBlockerRef,
     "lifecycle blocker ref",
@@ -202,9 +220,9 @@ impl LifecycleProductAction {
             | Self::ExtensionConfigure { package_ref, .. }
             | Self::ExtensionRemove { package_ref }
             | Self::SkillRemove { package_ref } => Some(package_ref),
-            Self::ExtensionSearch { .. }
-            | Self::SkillSearch { .. }
-            | Self::SkillInstall { .. } => None,
+            Self::ExtensionSearch { .. } | Self::SkillSearch { .. } | Self::SkillInstall { .. } => {
+                None
+            }
         }
     }
 }
@@ -262,6 +280,16 @@ pub trait LifecycleProductFacade: Send + Sync {
         context: LifecycleProductContext,
         action: LifecycleProductAction,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError>;
+
+    async fn project_package(
+        &self,
+        _context: LifecycleProductContext,
+        package_ref: LifecyclePackageRef,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        Err(ProductWorkflowError::UnsupportedActionKind {
+            kind: format!("lifecycle_project_package:{:?}", package_ref.kind),
+        })
+    }
 }
 
 pub struct LifecycleProductCommandService {
@@ -315,12 +343,12 @@ impl UnsupportedLifecycleProductFacade {
         })
     }
 
-    fn projection_for(
+    fn unsupported_projection(
         &self,
-        action: &LifecycleProductAction,
+        package_ref: Option<LifecyclePackageRef>,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         Ok(LifecycleProductResponse::projection(
-            action.package_ref().cloned(),
+            package_ref,
             LifecyclePhase::UnsupportedOrLegacy,
             vec![LifecycleReadinessBlocker::runtime(Some(
                 self.runtime_ref.clone(),
@@ -336,7 +364,15 @@ impl LifecycleProductFacade for UnsupportedLifecycleProductFacade {
         _context: LifecycleProductContext,
         action: LifecycleProductAction,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        self.projection_for(&action)
+        self.unsupported_projection(action.package_ref().cloned())
+    }
+
+    async fn project_package(
+        &self,
+        _context: LifecycleProductContext,
+        package_ref: LifecyclePackageRef,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        self.unsupported_projection(Some(package_ref))
     }
 }
 
@@ -409,10 +445,13 @@ fn parse_skill_install_command(payload: &InboundCommandPayload) -> ProductComman
         Err(_) => return unknown_lifecycle_command(payload),
     };
     let name = match json.get("name").and_then(Value::as_str) {
-        Some(name) => match validate_lifecycle_string(name.to_string(), "skill name", LIFECYCLE_ID_MAX_BYTES) {
-            Ok(name) => Some(name),
-            Err(_) => return unknown_lifecycle_command(payload),
-        },
+        Some(name) => {
+            match validate_lifecycle_string(name.to_string(), "skill name", LIFECYCLE_ID_MAX_BYTES)
+            {
+                Ok(name) => Some(name),
+                Err(_) => return unknown_lifecycle_command(payload),
+            }
+        }
         None => None,
     };
     ProductCommand::Lifecycle {

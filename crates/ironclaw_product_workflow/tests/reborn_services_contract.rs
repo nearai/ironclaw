@@ -158,11 +158,11 @@ struct FakeTurnCoordinator {
 
 #[derive(Default)]
 struct RecordingSetupLifecycleFacade {
-    setup_calls: Mutex<Vec<(LifecycleProductContext, LifecycleProductAction)>>,
+    setup_calls: Mutex<Vec<(LifecycleProductContext, LifecyclePackageRef)>>,
 }
 
 impl RecordingSetupLifecycleFacade {
-    fn setup_calls(&self) -> Vec<(LifecycleProductContext, LifecycleProductAction)> {
+    fn setup_calls(&self) -> Vec<(LifecycleProductContext, LifecyclePackageRef)> {
         self.setup_calls.lock().expect("lock").clone()
     }
 }
@@ -171,21 +171,23 @@ impl RecordingSetupLifecycleFacade {
 impl LifecycleProductFacade for RecordingSetupLifecycleFacade {
     async fn execute(
         &self,
-        context: LifecycleProductContext,
+        _context: LifecycleProductContext,
         action: LifecycleProductAction,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        Err(ProductWorkflowError::UnsupportedActionKind {
+            kind: action.command_name().to_string(),
+        })
+    }
+
+    async fn project_package(
+        &self,
+        context: LifecycleProductContext,
+        package_ref: LifecyclePackageRef,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         self.setup_calls
             .lock()
             .expect("lock")
-            .push((context, action.clone()));
-        let package_ref = match &action {
-            LifecycleProductAction::ExtensionConfigure { package_ref, .. } => package_ref.clone(),
-            _ => {
-                return Err(ProductWorkflowError::UnsupportedActionKind {
-                    kind: action.command_name().to_string(),
-                });
-            }
-        };
+            .push((context, package_ref.clone()));
         Ok(LifecycleProductResponse::projection(
             Some(package_ref),
             LifecyclePhase::Configured,
@@ -206,6 +208,14 @@ impl LifecycleProductFacade for FailingSetupLifecycleFacade {
         &self,
         _context: LifecycleProductContext,
         _action: LifecycleProductAction,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        Err(self.error.clone())
+    }
+
+    async fn project_package(
+        &self,
+        _context: LifecycleProductContext,
+        _package_ref: LifecyclePackageRef,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         Err(self.error.clone())
     }
@@ -391,14 +401,7 @@ async fn setup_extension_returns_lifecycle_projection_from_facade() {
     assert_eq!(context.user_id, caller.user_id);
     assert_eq!(
         calls[0].1,
-        LifecycleProductAction::ExtensionConfigure {
-            package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
-                .unwrap(),
-            payload: Some(json!({
-                "action": request.action,
-                "payload": request.payload,
-            })),
-        }
+        LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").unwrap()
     );
 }
 

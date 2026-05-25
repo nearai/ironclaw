@@ -313,7 +313,11 @@ fn local_dev_skill_mount_grants(
 ) -> Result<Vec<MountGrant>, RebornBuildError> {
     Ok(vec![
         mount_grant("/skills", "/projects/skills", skill_permissions)?,
-        mount_grant("/system/skills", "/projects/system/skills", MountPermissions::read_only())?,
+        mount_grant(
+            "/system/skills",
+            "/projects/system/skills",
+            MountPermissions::read_only(),
+        )?,
     ])
 }
 

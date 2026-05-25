@@ -10,10 +10,9 @@ use ironclaw_product_workflow::{
 };
 use ironclaw_skills::{
     SkillInstallRequest, SkillManagementContext, SkillManagementError, SkillManagementErrorKind,
-    SkillRemoveRequest, install_skill, list_skills, remove_skill,
+    SkillRemoveRequest, SkillSearchRequest, install_skill, remove_skill, search_skills,
 };
 use serde_json::{Value, json};
-use tokio::sync::Mutex;
 
 const SKILL_SEARCH_RESULT_LIMIT: usize = 50;
 
@@ -22,7 +21,6 @@ pub(crate) struct RebornLocalSkillManagementPort {
     owner_user_id: UserId,
     filesystem: Arc<LocalFilesystem>,
     skill_management_mounts: MountView,
-    skill_writes: Arc<Mutex<()>>,
 }
 
 impl RebornLocalSkillManagementPort {
@@ -35,7 +33,6 @@ impl RebornLocalSkillManagementPort {
             owner_user_id,
             filesystem,
             skill_management_mounts,
-            skill_writes: Arc::new(Mutex::new(())),
         }
     }
 
@@ -49,9 +46,15 @@ impl RebornLocalSkillManagementPort {
         ))
     }
 
-    async fn list(&self) -> Result<Vec<ironclaw_skills::SkillSummary>, ProductWorkflowError> {
+    async fn search(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<ironclaw_skills::SkillSearchResult, ProductWorkflowError> {
         let context = self.skill_context()?;
-        list_skills(&context).await.map_err(map_skill_error)
+        search_skills(&context, SkillSearchRequest { query, limit })
+            .await
+            .map_err(map_skill_error)
     }
 
     async fn install(
@@ -59,7 +62,6 @@ impl RebornLocalSkillManagementPort {
         name: Option<&str>,
         content: &str,
     ) -> Result<ironclaw_skills::SkillInstallResult, ProductWorkflowError> {
-        let _guard = self.skill_writes.lock().await;
         let context = self.skill_context()?;
         install_skill(&context, SkillInstallRequest { name, content })
             .await
@@ -70,7 +72,6 @@ impl RebornLocalSkillManagementPort {
         &self,
         name: &str,
     ) -> Result<ironclaw_skills::SkillRemoveResult, ProductWorkflowError> {
-        let _guard = self.skill_writes.lock().await;
         let context = self.skill_context()?;
         remove_skill(&context, SkillRemoveRequest { name })
             .await
@@ -100,30 +101,12 @@ impl RebornLocalLifecycleFacade {
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         match action {
             LifecycleProductAction::SkillSearch { query } => {
-                let skills = self.skill_management.list().await?;
-                let normalized_query = query.trim().to_lowercase();
-                let mut matched_skills = Vec::new();
-                let mut truncated = false;
-                for skill in skills {
-                    if normalized_query.is_empty()
-                        || skill.name.to_lowercase().contains(&normalized_query)
-                        || skill.description.to_lowercase().contains(&normalized_query)
-                    {
-                        if matched_skills.len() == SKILL_SEARCH_RESULT_LIMIT {
-                            truncated = true;
-                            break;
-                        }
-                        matched_skills.push(json!({
-                            "name": skill.name,
-                            "version": skill.version,
-                            "description": skill.description,
-                            "source": skill.source.as_str(),
-                            "keywords": skill.keywords,
-                            "tags": skill.tags,
-                            "requires_skills": skill.requires_skills,
-                        }));
-                    }
-                }
+                let result = self
+                    .skill_management
+                    .search(&query, SKILL_SEARCH_RESULT_LIMIT)
+                    .await?;
+                let matched_skills: Vec<Value> =
+                    result.skills.into_iter().map(skill_json).collect();
                 let count = matched_skills.len();
                 Ok(response_with_payload(
                     None,
@@ -132,7 +115,7 @@ impl RebornLocalLifecycleFacade {
                         "skills": matched_skills,
                         "count": count,
                         "limit": SKILL_SEARCH_RESULT_LIMIT,
-                        "truncated": truncated,
+                        "truncated": result.truncated,
                     }),
                 ))
             }
@@ -186,6 +169,14 @@ impl LifecycleProductFacade for RebornLocalLifecycleFacade {
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         self.execute_action(action).await
     }
+
+    async fn project_package(
+        &self,
+        _context: LifecycleProductContext,
+        package_ref: LifecyclePackageRef,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        unsupported_projection(Some(package_ref))
+    }
 }
 
 fn skill_package_ref(name: &str) -> Result<LifecyclePackageRef, ProductWorkflowError> {
@@ -204,6 +195,18 @@ fn response_with_payload(
         message: None,
         payload: Some(payload),
     }
+}
+
+fn skill_json(skill: ironclaw_skills::SkillSummary) -> Value {
+    json!({
+        "name": skill.name,
+        "version": skill.version,
+        "description": skill.description,
+        "source": skill.source.as_str(),
+        "keywords": skill.keywords,
+        "tags": skill.tags,
+        "requires_skills": skill.requires_skills,
+    })
 }
 
 fn unsupported_projection(
@@ -240,35 +243,7 @@ mod tests {
 
     #[tokio::test]
     async fn skill_lifecycle_facade_installs_lists_and_removes_via_skill_management() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let storage_root = dir.path().join("local-dev");
-        std::fs::create_dir_all(&storage_root).expect("storage root");
-
-        let mut filesystem = LocalFilesystem::new();
-        filesystem
-            .mount_local(
-                VirtualPath::new("/projects").expect("valid virtual path"),
-                HostPath::from_path_buf(storage_root.clone()),
-            )
-            .expect("mount storage root");
-        let skill_management = Arc::new(RebornLocalSkillManagementPort::new(
-            UserId::new("lifecycle-owner").expect("valid user"),
-            Arc::new(filesystem),
-            MountView::new(vec![
-                MountGrant::new(
-                    MountAlias::new("/skills").expect("valid alias"),
-                    VirtualPath::new("/projects/skills").expect("valid path"),
-                    MountPermissions::read_write_list_delete(),
-                ),
-                MountGrant::new(
-                    MountAlias::new("/system/skills").expect("valid alias"),
-                    VirtualPath::new("/projects/system/skills").expect("valid path"),
-                    MountPermissions::read_only(),
-                ),
-            ])
-            .expect("valid mount view"),
-        ));
-        let facade = RebornLocalLifecycleFacade::new(skill_management);
+        let (_dir, storage_root, facade) = lifecycle_fixture();
 
         let install = facade
             .execute_action(LifecycleProductAction::SkillInstall {
@@ -377,5 +352,110 @@ mod tests {
                 .join("skills/lifecycle-skill/SKILL.md")
                 .exists()
         );
+    }
+
+    #[tokio::test]
+    async fn skill_lifecycle_facade_serializes_concurrent_install_and_remove() {
+        let (_dir, storage_root, facade) = lifecycle_fixture();
+
+        let facade_a = facade.clone();
+        let facade_b = facade.clone();
+        let install_a = facade_a.execute_action(LifecycleProductAction::SkillInstall {
+            name: Some("concurrent-a".to_string()),
+            content: skill_content("concurrent-a"),
+        });
+        let install_b = facade_b.execute_action(LifecycleProductAction::SkillInstall {
+            name: Some("concurrent-b".to_string()),
+            content: skill_content("concurrent-b"),
+        });
+        let (installed_a, installed_b) = tokio::join!(install_a, install_b);
+        installed_a.expect("install concurrent-a");
+        installed_b.expect("install concurrent-b");
+
+        let facade_a = facade.clone();
+        let remove_a = facade_a.execute_action(LifecycleProductAction::SkillRemove {
+            package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Skill, "concurrent-a")
+                .expect("valid skill ref"),
+        });
+        let remove_b = facade.execute_action(LifecycleProductAction::SkillRemove {
+            package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Skill, "concurrent-b")
+                .expect("valid skill ref"),
+        });
+        let (removed_a, removed_b) = tokio::join!(remove_a, remove_b);
+        removed_a.expect("remove concurrent-a");
+        removed_b.expect("remove concurrent-b");
+
+        assert!(!storage_root.join("skills/concurrent-a/SKILL.md").exists());
+        assert!(!storage_root.join("skills/concurrent-b/SKILL.md").exists());
+    }
+
+    #[tokio::test]
+    async fn skill_lifecycle_facade_maps_skill_management_errors() {
+        let (_dir, _storage_root, facade) = lifecycle_fixture();
+
+        let invalid_install = facade
+            .execute_action(LifecycleProductAction::SkillInstall {
+                name: Some("broken-skill".to_string()),
+                content: "not a skill manifest".to_string(),
+            })
+            .await
+            .expect_err("invalid skill content should fail");
+        assert!(matches!(
+            invalid_install,
+            ProductWorkflowError::InvalidBindingRequest { .. }
+        ));
+
+        let missing_remove = facade
+            .execute_action(LifecycleProductAction::SkillRemove {
+                package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Skill, "missing-skill")
+                    .expect("valid skill ref"),
+            })
+            .await
+            .expect_err("missing skill remove should fail");
+        assert!(matches!(
+            missing_remove,
+            ProductWorkflowError::InvalidBindingRequest { .. }
+        ));
+    }
+
+    fn lifecycle_fixture() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        RebornLocalLifecycleFacade,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        std::fs::create_dir_all(&storage_root).expect("storage root");
+
+        let mut filesystem = LocalFilesystem::new();
+        filesystem
+            .mount_local(
+                VirtualPath::new("/projects").expect("valid virtual path"),
+                HostPath::from_path_buf(storage_root.clone()),
+            )
+            .expect("mount storage root");
+        let skill_management = Arc::new(RebornLocalSkillManagementPort::new(
+            UserId::new("lifecycle-owner").expect("valid user"),
+            Arc::new(filesystem),
+            MountView::new(vec![
+                MountGrant::new(
+                    MountAlias::new("/skills").expect("valid alias"),
+                    VirtualPath::new("/projects/skills").expect("valid path"),
+                    MountPermissions::read_write_list_delete(),
+                ),
+                MountGrant::new(
+                    MountAlias::new("/system/skills").expect("valid alias"),
+                    VirtualPath::new("/projects/system/skills").expect("valid path"),
+                    MountPermissions::read_only(),
+                ),
+            ])
+            .expect("valid mount view"),
+        ));
+        let facade = RebornLocalLifecycleFacade::new(skill_management);
+        (dir, storage_root, facade)
+    }
+
+    fn skill_content(name: &str) -> String {
+        format!("---\nname: {name}\ndescription: lifecycle test\n---\nUse lifecycle.\n")
     }
 }

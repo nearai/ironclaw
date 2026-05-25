@@ -2,8 +2,8 @@
 
 use ironclaw_product_adapters::{InboundCommandPayload, ProductTriggerReason};
 use ironclaw_product_workflow::{
-    LifecyclePackageKind, LifecycleProductAction, ProductCommand, ProductModelCommand,
-    product_command_descriptors,
+    LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, ProductCommand,
+    ProductModelCommand, product_command_descriptors,
 };
 
 #[test]
@@ -147,6 +147,10 @@ fn lifecycle_command_parser_handles_json_forms_and_rejects_malformed_refs() {
         ("extension_install", r#"{"id":"git\nhub"}"#),
         (
             "skill_install",
+            r#"{"content":"---\nname: nul-skill\n---\nNo\u0000pe."}"#,
+        ),
+        (
+            "skill_install",
             &format!(r#"{{"content":"{}"}}"#, "x".repeat(64 * 1024 + 1)),
         ),
     ] {
@@ -159,6 +163,90 @@ fn lifecycle_command_parser_handles_json_forms_and_rejects_malformed_refs() {
             ProductCommand::from_payload(&payload),
             ProductCommand::Unknown { .. }
         ));
+    }
+}
+
+#[test]
+fn lifecycle_command_parser_maps_every_lifecycle_command_variant() {
+    let cases = [
+        (
+            "extension_search",
+            "git",
+            ProductCommand::Lifecycle {
+                action: LifecycleProductAction::ExtensionSearch {
+                    query: "git".to_string(),
+                },
+            },
+        ),
+        (
+            "extension_auth",
+            "github",
+            ProductCommand::Lifecycle {
+                action: LifecycleProductAction::ExtensionAuth {
+                    package_ref: LifecyclePackageRef::new(
+                        LifecyclePackageKind::Extension,
+                        "github",
+                    )
+                    .unwrap(),
+                },
+            },
+        ),
+        (
+            "extension_activate",
+            "github",
+            ProductCommand::Lifecycle {
+                action: LifecycleProductAction::ExtensionActivate {
+                    package_ref: LifecyclePackageRef::new(
+                        LifecyclePackageKind::Extension,
+                        "github",
+                    )
+                    .unwrap(),
+                },
+            },
+        ),
+        (
+            "extension_remove",
+            r#"{"id":"github"}"#,
+            ProductCommand::Lifecycle {
+                action: LifecycleProductAction::ExtensionRemove {
+                    package_ref: LifecyclePackageRef::new(
+                        LifecyclePackageKind::Extension,
+                        "github",
+                    )
+                    .unwrap(),
+                },
+            },
+        ),
+        (
+            "skill_search",
+            "review",
+            ProductCommand::Lifecycle {
+                action: LifecycleProductAction::SkillSearch {
+                    query: "review".to_string(),
+                },
+            },
+        ),
+    ];
+
+    for (command, arguments, expected) in cases {
+        let payload =
+            InboundCommandPayload::new(command, arguments, ProductTriggerReason::BotCommand)
+                .expect("valid command payload");
+
+        assert_eq!(ProductCommand::from_payload(&payload), expected);
+    }
+}
+
+#[test]
+fn lifecycle_refs_validate_during_deserialization() {
+    for json in [
+        r#"{"kind":"extension","id":""}"#,
+        r#"{"kind":"extension","id":"git\nhub"}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<LifecyclePackageRef>(json).is_err(),
+            "invalid lifecycle ref should reject: {json}"
+        );
     }
 }
 
