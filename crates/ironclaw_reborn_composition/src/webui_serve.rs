@@ -49,6 +49,9 @@ use tower_http::cors::{AllowHeaders, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
 
+use crate::product_auth_serve::{
+    ProductAuthRouteState, product_auth_route_descriptors, product_auth_routers,
+};
 use crate::webui::RebornWebuiBundle;
 use crate::webui_body_limit::{build_body_limit_state, enforce_body_limit};
 use crate::webui_rate_limit::{build_rate_limit_state, enforce_rate_limit};
@@ -258,14 +261,16 @@ pub enum WebuiServeError {
 /// - CORS allow-origin list
 /// - outer global request body limit (defense in depth for unmatched paths)
 /// - per-route body limit, resolved from the
-///   `ironclaw_webui_v2::webui_v2_routes()` descriptors (16 KiB for
-///   create_thread, 1 MiB for send_message, 4 KiB for cancel_run /
-///   resolve_gate, NoBody for timeline / SSE)
+///   WebUI v2 descriptors plus product-auth descriptors when mounted
+///   (16 KiB for create_thread/product-auth start, 1 MiB for
+///   send_message, 4 KiB for cancel_run / resolve_gate, NoBody for
+///   timeline / SSE / product-auth callback)
 /// - bearer auth (+ `?token=` on the v2 SSE path) → injects
 ///   [`WebUiAuthenticatedCaller`]
 /// - per-route rate limit, resolved from the
-///   `ironclaw_webui_v2::webui_v2_routes()` descriptors (mutation
-///   60/60, read 120/60, stream 12/60 per `(tenant, user)` today)
+///   WebUI v2 descriptors plus product-auth descriptors when mounted
+///   (authenticated WebUI routes are per caller; the public OAuth
+///   callback is per route)
 /// - WebChat v2 route set from `ironclaw_webui_v2::webui_v2_router`
 ///
 /// The returned [`Router`] is the seam between this composition crate
@@ -307,7 +312,16 @@ pub fn webui_v2_app(
         authenticator: config.authenticator.clone(),
     };
 
-    let descriptors = ironclaw_webui_v2::webui_v2_routes();
+    let mut descriptors = ironclaw_webui_v2::webui_v2_routes();
+    let product_auth_state = bundle.product_auth.clone().map(|product_auth| {
+        descriptors.extend(product_auth_route_descriptors());
+        ProductAuthRouteState::new(
+            product_auth,
+            config.tenant_id.clone(),
+            config.default_agent_id.clone(),
+            config.default_project_id.clone(),
+        )
+    });
     let rate_limit_state = build_rate_limit_state(&descriptors)?;
     let body_limit_state = build_body_limit_state(&descriptors);
     let ws_origin_state = build_websocket_origin_state(
@@ -322,6 +336,14 @@ pub fn webui_v2_app(
     let v2_inner: Router<()> =
         webui_v2_router(WebUiV2State::new(bundle.api.clone())).with_state(());
 
+    let mut protected_inner = Router::new().merge(v2_inner);
+    let mut public_inner = None;
+    if let Some(product_auth_state) = product_auth_state {
+        let product_auth = product_auth_routers(product_auth_state);
+        protected_inner = protected_inner.merge(product_auth.protected);
+        public_inner = Some(product_auth.public);
+    }
+
     // Layer order matters. `route_layer` stacks inside-out from the
     // bottom of the chain up — the LAST `.route_layer(...)` call is
     // the outermost layer and runs FIRST on inbound. That gives:
@@ -333,10 +355,9 @@ pub fn webui_v2_app(
     // validation. Auth runs before rate-limit so the limiter has a
     // real caller key and an unauthenticated request never burns a
     // rate-limit slot.
-    let app = Router::new()
-        .merge(v2_inner)
+    let protected = protected_inner
         .route_layer(middleware::from_fn_with_state(
-            rate_limit_state,
+            rate_limit_state.clone(),
             enforce_rate_limit,
         ))
         .route_layer(middleware::from_fn_with_state(
@@ -344,7 +365,7 @@ pub fn webui_v2_app(
             authenticate_request,
         ))
         .route_layer(middleware::from_fn_with_state(
-            body_limit_state,
+            body_limit_state.clone(),
             enforce_body_limit,
         ))
         // WS upgrades skip CORS pre-flight, so origin enforcement runs
@@ -355,7 +376,23 @@ pub fn webui_v2_app(
         .route_layer(middleware::from_fn_with_state(
             ws_origin_state,
             enforce_websocket_origin,
-        ))
+        ));
+
+    let mut app = Router::new().merge(protected);
+    if let Some(public_inner) = public_inner {
+        let public = public_inner
+            .route_layer(middleware::from_fn_with_state(
+                rate_limit_state,
+                enforce_rate_limit,
+            ))
+            .route_layer(middleware::from_fn_with_state(
+                body_limit_state,
+                enforce_body_limit,
+            ));
+        app = app.merge(public);
+    }
+
+    let app = app
         // Outer global cap: applies to unmatched paths (e.g. 404 fallback)
         // as defense in depth. v2 routes are tighter via the per-route
         // body-limit middleware above.

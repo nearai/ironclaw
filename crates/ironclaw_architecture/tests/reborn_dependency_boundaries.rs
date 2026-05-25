@@ -1159,6 +1159,12 @@ fn reborn_product_auth_contract_stays_reborn_native() {
         &forbidden,
         &mut violations,
     );
+    collect_forbidden_reborn_auth_file_uses(
+        &root.join("crates/ironclaw_reborn_composition/src/product_auth_serve.rs"),
+        &root,
+        &forbidden,
+        &mut violations,
+    );
 
     assert!(
         violations.is_empty(),

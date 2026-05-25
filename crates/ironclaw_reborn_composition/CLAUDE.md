@@ -31,8 +31,8 @@ middleware with v1's `src/channels/web/`.
 
 | Symbol | Role |
 |---|---|
-| `RebornWebuiBundle` (in [`src/webui.rs`](src/webui.rs)) | `{ api: Arc<dyn RebornServicesApi>, readiness }` — the v2 facade plus readiness snapshot |
-| `build_webui_services(runtime, event_stream)` | Compose a `RebornWebuiBundle` from an already-built `RebornRuntime`; reuses the runtime's thread service / turn coordinator and attaches the runtime-owned `EventStreamManager` projection stream unless a caller supplies a custom stream |
+| `RebornWebuiBundle` (in [`src/webui.rs`](src/webui.rs)) | `{ api: Arc<dyn RebornServicesApi>, product_auth: Option<Arc<RebornProductAuthServices>>, readiness }` — the v2 facade, optional product-auth route service, plus readiness snapshot |
+| `build_webui_services(runtime, event_stream)` | Compose a `RebornWebuiBundle` from an already-built `RebornRuntime`; reuses the runtime's thread service / turn coordinator, product-auth services, and runtime-owned `EventStreamManager` projection stream unless a caller supplies a custom stream |
 | `RebornProjectionServices` (in `src/projection.rs`) | Runtime-owned projection/event-stream composition; owns the single local-dev `EventStreamManager` and creates product-specific `ProjectionStream` adapters over it |
 | `WebuiAuthenticator` trait | Host-supplied bearer-token verifier; returns `Option<UserId>` |
 | `WebuiServeConfig { tenant_id, authenticator, max_body_bytes, allowed_origins, csp_header }` | Required config for `webui_v2_app`; no defaults that silently disable security |
@@ -53,11 +53,13 @@ Inbound order (outer → inner → handler):
    capped, strictly tighter, by the per-route limit below.
 5. **Descriptor-driven per-route body limit**
    (`webui_body_limit::enforce_body_limit`) — reads each route's
-   `BodyLimitPolicy` from `ironclaw_webui_v2::webui_v2_routes()` at
-   composition time and enforces it before auth runs (so an oversized
-   payload never spends a bearer-validation step). Today:
-   `create_thread` 16 KiB, `send_message` 1 MiB, `cancel_run` and
-   `resolve_gate` 4 KiB, `get_timeline` and `stream_events` `NoBody`.
+   `BodyLimitPolicy` from `ironclaw_webui_v2::webui_v2_routes()` and,
+   when present, product-auth route descriptors at composition time and
+   enforces it before auth runs (so an oversized payload never spends a
+   bearer-validation step). Today: `create_thread` and product-auth
+   OAuth start 16 KiB, `send_message` 1 MiB, `cancel_run` and
+   `resolve_gate` 4 KiB, `get_timeline`, `stream_events`, and
+   product-auth OAuth callback `NoBody`.
    `BodyLimitPolicy` is an exhaustive `match`, so a new variant added
    upstream fails the build rather than silently disabling
    enforcement.
@@ -79,15 +81,43 @@ Inbound order (outer → inner → handler):
    `config.tenant_id` plus the authenticator's `UserId`.
 8. **Descriptor-driven per-route rate limit**
    (`webui_rate_limit::enforce_rate_limit`) — reads
-   `ironclaw_webui_v2::webui_v2_routes()` at composition time and
-   enforces the declared `RateLimitPolicy` per `(route, caller)` with a
-   sliding window. Today every v2 descriptor declares
-   `RateLimitScope::PerCaller`; composition fails closed if a future
-   descriptor declares an unsupported scope.
+   `ironclaw_webui_v2::webui_v2_routes()` plus mounted product-auth
+   descriptors at composition time and enforces the declared
+   `RateLimitPolicy` with a sliding window. Authenticated WebUI/product
+   auth start routes use `RateLimitScope::PerCaller`; the public OAuth
+   callback uses `RateLimitScope::PerRoute`. Composition fails closed if
+   a future descriptor declares an unsupported scope.
 9. `webui_v2_router(WebUiV2State::new(bundle.api))` — the nine v2
    handlers from `ironclaw_webui_v2` (create-thread, list-threads,
    send-message, get-timeline, stream-events SSE, stream-events WS,
    cancel-run, resolve-gate, setup-extension).
+
+### Product-auth OAuth routes
+
+When `bundle.product_auth` is present, `webui_v2_app` also mounts the
+Reborn-native product-auth OAuth surface:
+
+- `POST /api/reborn/product-auth/oauth/start` is inside the existing
+  bearer-auth layer. It derives `AuthProductScope` from the
+  `WebUiAuthenticatedCaller` inserted by host composition, hashes raw
+  state/PKCE once, and creates an `AuthFlowRecord` through
+  `AuthFlowManager::create_flow`. The route has a 16 KiB JSON body cap
+  and per-caller rate limit in addition to the gateway-wide fallback
+  cap. The browser cannot choose `AuthFlowKind` or
+  `AuthContinuationRef`; this first route creates integration-credential
+  setup flows with `AuthContinuationRef::SetupOnly`.
+- `GET /api/reborn/product-auth/oauth/callback/{flow_id}` is a hosted
+  callback route and is intentionally not behind WebUI bearer auth. It
+  reconstructs the scoped callback owner from host/callback metadata,
+  hashes raw state/code/PKCE verifier material, and calls
+  `RebornProductAuthServices::handle_oauth_callback`. The route never
+  exchanges provider tokens, activates extensions, resumes turns, or
+  writes secrets directly. Its descriptor declares `NoBody` and a
+  per-route public callback rate limit.
+- Raw `state`, OAuth authorization codes, PKCE verifiers, provider
+  token handles, provider bodies, and host paths must not be logged or
+  serialized by the route. Responses use the sanitized product-auth
+  success/error DTOs only.
 
 `webui_route_match` is the shared matcher both the body-limit and
 rate-limit middlewares consume so the two enforcers cannot drift on

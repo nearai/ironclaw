@@ -25,6 +25,8 @@ mod input;
 #[cfg(feature = "root-llm-provider")]
 mod llm_catalog;
 mod local_runtime_profile;
+#[cfg(feature = "webui-v2-beta")]
+mod product_auth_serve;
 mod product_live_adapters;
 mod profile;
 mod projection;
