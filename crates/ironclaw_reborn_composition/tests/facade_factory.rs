@@ -31,7 +31,7 @@ use ironclaw_reborn::planned_driver_factory::PLANNED_DEFAULT_PROFILE_ID;
 #[cfg(all(feature = "postgres", not(feature = "libsql")))]
 use ironclaw_reborn_composition::RebornCompositionProfile;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_reborn_composition::RebornHostRuntimePorts;
+use ironclaw_reborn_composition::RebornRuntimeProcessBinding;
 #[cfg(feature = "libsql")]
 use ironclaw_reborn_composition::{RebornBuildError, RebornCompositionProfile};
 use ironclaw_reborn_composition::{RebornBuildInput, RebornReadinessState, build_reborn_services};
@@ -338,12 +338,11 @@ async fn local_dev_builds_facades_without_production_claim() {
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-fn test_verified_sandbox_process_ports() -> RebornHostRuntimePorts {
-    let process_port =
-        ironclaw_host_runtime::VerifiedTenantSandboxProcessPort::assume_verified_transport(
-            Arc::new(ProductionReadySandboxTransport),
-        );
-    RebornHostRuntimePorts::new().with_verified_tenant_sandbox_process_port(process_port)
+fn test_sandbox_process_binding() -> RebornRuntimeProcessBinding {
+    let process_port = Arc::new(ironclaw_host_runtime::TenantSandboxProcessPort::new(
+        Arc::new(ProductionReadySandboxTransport),
+    ));
+    RebornRuntimeProcessBinding::tenant_sandbox(process_port)
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -681,7 +680,7 @@ async fn production_libsql_services_wire_first_party_runtime_http_egress() {
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier)
-        .with_host_runtime_ports(test_verified_sandbox_process_ports())
+        .with_runtime_process_binding(test_sandbox_process_binding())
         .with_required_runtime_backends([RuntimeKind::FirstParty])
         .require_runtime_http_egress(),
     )
@@ -727,7 +726,7 @@ async fn production_postgres_services_wire_first_party_runtime_http_egress() {
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier)
-        .with_host_runtime_ports(test_verified_sandbox_process_ports())
+        .with_runtime_process_binding(test_sandbox_process_binding())
         .with_required_runtime_backends([RuntimeKind::FirstParty])
         .require_runtime_http_egress(),
     )
@@ -774,7 +773,7 @@ async fn migration_dry_run_validates_libsql_shape() {
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier)
-        .with_host_runtime_ports(test_verified_sandbox_process_ports()),
+        .with_runtime_process_binding(test_sandbox_process_binding()),
     )
     .await
     .unwrap();
@@ -824,7 +823,7 @@ async fn migration_dry_run_validates_postgres_planned_turn_profile() {
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier)
-        .with_host_runtime_ports(test_verified_sandbox_process_ports()),
+        .with_runtime_process_binding(test_sandbox_process_binding()),
     )
     .await
     .unwrap();

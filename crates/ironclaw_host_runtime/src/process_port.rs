@@ -134,40 +134,6 @@ impl TenantSandboxProcessPort {
     }
 }
 
-/// Tenant sandbox process port that a composition root has explicitly accepted
-/// as production-suitable for the active runtime policy.
-#[derive(Clone)]
-pub struct VerifiedTenantSandboxProcessPort {
-    process_port: std::sync::Arc<TenantSandboxProcessPort>,
-}
-
-impl std::fmt::Debug for VerifiedTenantSandboxProcessPort {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("VerifiedTenantSandboxProcessPort")
-            .field("process_port", &self.process_port)
-            .finish()
-    }
-}
-
-impl VerifiedTenantSandboxProcessPort {
-    pub fn assume_verified(process_port: std::sync::Arc<TenantSandboxProcessPort>) -> Self {
-        Self { process_port }
-    }
-
-    pub fn assume_verified_transport(
-        transport: std::sync::Arc<dyn SandboxCommandTransport>,
-    ) -> Self {
-        Self::assume_verified(std::sync::Arc::new(TenantSandboxProcessPort::new(
-            transport,
-        )))
-    }
-
-    pub fn into_inner(self) -> std::sync::Arc<TenantSandboxProcessPort> {
-        self.process_port
-    }
-}
-
 #[async_trait]
 impl RuntimeProcessPort for TenantSandboxProcessPort {
     async fn run_command(

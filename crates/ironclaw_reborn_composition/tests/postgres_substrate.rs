@@ -11,7 +11,6 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, CommandExecutionOutput, CommandExecutionRequest,
     ProductionWiringConfig, RuntimeProcessError, SandboxCommandTransport,
-    VerifiedTenantSandboxProcessPort,
 };
 use ironclaw_reborn_composition::{
     PostgresProductionSubstrateConfig, RebornCompositionError, RebornProductionRuntimePolicy,
@@ -37,7 +36,7 @@ async fn postgres_substrate_builder_wires_production_components_without_local_on
             trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
             runtime_policy: RebornProductionRuntimePolicy::with_tenant_sandbox_process_port(
                 production_runtime_policy(),
-                verified_sandbox_process_port(),
+                sandbox_process_port(),
             )
             .unwrap(),
             turn_run_wake_notifier: Arc::new(RecordingSchedulerWakeNotifier),
@@ -68,7 +67,7 @@ async fn postgres_substrate_builder_rejects_missing_secret_master_key() {
             trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
             runtime_policy: RebornProductionRuntimePolicy::with_tenant_sandbox_process_port(
                 production_runtime_policy(),
-                verified_sandbox_process_port(),
+                sandbox_process_port(),
             )
             .unwrap(),
             turn_run_wake_notifier: Arc::new(RecordingSchedulerWakeNotifier),
@@ -96,8 +95,10 @@ fn production_runtime_policy() -> EffectiveRuntimePolicy {
     }
 }
 
-fn verified_sandbox_process_port() -> VerifiedTenantSandboxProcessPort {
-    VerifiedTenantSandboxProcessPort::assume_verified_transport(Arc::new(RecordingSandboxTransport))
+fn sandbox_process_port() -> Arc<ironclaw_host_runtime::TenantSandboxProcessPort> {
+    Arc::new(ironclaw_host_runtime::TenantSandboxProcessPort::new(
+        Arc::new(RecordingSandboxTransport),
+    ))
 }
 
 #[derive(Debug)]

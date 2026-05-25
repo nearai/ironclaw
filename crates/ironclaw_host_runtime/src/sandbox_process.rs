@@ -21,17 +21,18 @@ use bollard::{
     },
     models::HostConfig,
 };
-use futures::StreamExt;
+use futures_util::StreamExt;
 use ironclaw_host_api::ResourceScope;
-use ironclaw_host_runtime::{
+
+use crate::{
     CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
-    TenantSandboxProcessPort, VerifiedTenantSandboxProcessPort,
+    TenantSandboxProcessPort,
 };
 
 mod container_identity;
 mod scope_key;
 
-pub use container_identity::RebornSandboxContainerIdentity;
+pub use container_identity::{RebornSandboxContainerIdentity, RebornSandboxWorkspaceMode};
 pub use scope_key::RebornSandboxScopeKey;
 
 const DEFAULT_IMAGE: &str = "ironclaw-worker:latest";
@@ -40,6 +41,30 @@ const DEFAULT_MEMORY_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const DEFAULT_CPU_SHARES: u32 = 1024;
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 64 * 1024;
 const CONTAINER_WORKSPACE_ROOT: &str = "/workspace";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContainerWorkdir(String);
+
+impl ContainerWorkdir {
+    fn workspace_root() -> Self {
+        Self(CONTAINER_WORKSPACE_ROOT.to_string())
+    }
+
+    fn from_relative(relative: impl AsRef<Path>) -> Result<Self, RuntimeProcessError> {
+        let relative = relative.as_ref().to_string_lossy();
+        if relative.is_empty() || relative == "." {
+            return Ok(Self::workspace_root());
+        }
+        Ok(Self(format!(
+            "{CONTAINER_WORKSPACE_ROOT}/{}",
+            relative.trim_start_matches('/')
+        )))
+    }
+
+    fn into_string(self) -> String {
+        self.0
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct RebornSandboxConfig {
@@ -89,7 +114,11 @@ impl RebornSandboxConfig {
         self
     }
 
-    pub fn with_container_user(mut self, user: impl Into<String>, workspace_mode: u32) -> Self {
+    pub fn with_container_user(
+        mut self,
+        user: impl Into<String>,
+        workspace_mode: RebornSandboxWorkspaceMode,
+    ) -> Self {
         self.container_identity =
             RebornSandboxContainerIdentity::configured_user(user, workspace_mode);
         self
@@ -128,10 +157,6 @@ impl RebornScopedSandboxCommandTransport {
         TenantSandboxProcessPort::new(Arc::new(self))
     }
 
-    pub fn into_verified_process_port(self) -> VerifiedTenantSandboxProcessPort {
-        VerifiedTenantSandboxProcessPort::assume_verified(Arc::new(self.into_process_port()))
-    }
-
     fn prepare_workspace(&self, scope: &ResourceScope) -> Result<PathBuf, RuntimeProcessError> {
         let key = RebornSandboxScopeKey::from_scope(scope);
         let workspace = key.workspace_path(&self.config.workspace_root);
@@ -163,47 +188,39 @@ impl RebornScopedSandboxCommandTransport {
     fn resolve_container_workdir(
         workspace: &Path,
         workdir: Option<&str>,
-    ) -> Result<String, RuntimeProcessError> {
+    ) -> Result<ContainerWorkdir, RuntimeProcessError> {
         let Some(workdir) = workdir.map(str::trim).filter(|value| !value.is_empty()) else {
-            return Ok(CONTAINER_WORKSPACE_ROOT.to_string());
+            return Ok(ContainerWorkdir::workspace_root());
         };
         reject_nul("sandbox working directory", workdir)?;
         if workdir == CONTAINER_WORKSPACE_ROOT {
-            return Ok(CONTAINER_WORKSPACE_ROOT.to_string());
+            return Ok(ContainerWorkdir::workspace_root());
         }
         if let Some(relative) = workdir.strip_prefix("/workspace/") {
             validate_relative_workdir(Path::new(relative))?;
-            return Ok(format!("{CONTAINER_WORKSPACE_ROOT}/{relative}"));
+            return ContainerWorkdir::from_relative(relative);
         }
 
         let requested = Path::new(workdir);
-        let relative = if requested.is_absolute() {
-            let requested = requested.canonicalize().map_err(|error| {
-                RuntimeProcessError::ExecutionFailed(format!(
-                    "sandbox working directory is unavailable: {error}"
-                ))
-            })?;
-            requested
-                .strip_prefix(workspace)
-                .map_err(|_| {
-                    RuntimeProcessError::ExecutionFailed(
-                        "sandbox working directory must stay inside the scoped workspace"
-                            .to_string(),
-                    )
-                })?
-                .to_path_buf()
+        if requested.is_absolute() {
+            Err(RuntimeProcessError::ExecutionFailed(
+                "sandbox working directory must be workspace-relative or under /workspace"
+                    .to_string(),
+            ))
         } else {
             validate_relative_workdir(requested)?;
-            requested.to_path_buf()
-        };
-        let relative = relative.to_string_lossy();
-        if relative.is_empty() {
-            Ok(CONTAINER_WORKSPACE_ROOT.to_string())
-        } else {
-            Ok(format!(
-                "{CONTAINER_WORKSPACE_ROOT}/{}",
-                relative.trim_start_matches('/')
-            ))
+            let canonical_workspace = workspace.canonicalize().map_err(|error| {
+                RuntimeProcessError::ExecutionFailed(format!(
+                    "sandbox workspace could not be resolved: {error}"
+                ))
+            })?;
+            let candidate = canonical_workspace.join(requested);
+            if !candidate.starts_with(&canonical_workspace) {
+                return Err(RuntimeProcessError::ExecutionFailed(
+                    "sandbox working directory must stay inside the scoped workspace".to_string(),
+                ));
+            }
+            ContainerWorkdir::from_relative(requested)
         }
     }
 
@@ -211,7 +228,7 @@ impl RebornScopedSandboxCommandTransport {
         &self,
         request: CommandExecutionRequest,
         workspace: &Path,
-        workdir: String,
+        workdir: ContainerWorkdir,
         timeout: Duration,
     ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
         let scope_key = RebornSandboxScopeKey::from_scope(&request.scope);
@@ -245,7 +262,7 @@ impl RebornScopedSandboxCommandTransport {
         let container_config = Config {
             image: Some(self.config.image.clone()),
             cmd: Some(vec!["sh".to_string(), "-c".to_string(), request.command]),
-            working_dir: Some(workdir),
+            working_dir: Some(workdir.into_string()),
             env: Some(env),
             host_config: Some(host_config),
             user: container_user,
@@ -516,5 +533,40 @@ mod tests {
                 .unwrap_err();
 
         assert!(format!("{error}").contains("scoped workspace"));
+    }
+
+    #[test]
+    fn container_workdir_rejects_host_absolute_paths() {
+        let workspace = Path::new("/tmp/reborn-sandbox/tenant/user");
+        let error = RebornScopedSandboxCommandTransport::resolve_container_workdir(
+            workspace,
+            Some("/tmp/reborn-sandbox/tenant/user/app"),
+        )
+        .unwrap_err();
+
+        assert!(format!("{error}").contains("workspace-relative"));
+    }
+
+    #[test]
+    fn container_workdir_accepts_typed_container_paths() {
+        let workspace = Path::new("/tmp/reborn-sandbox/tenant/user");
+        let workdir = RebornScopedSandboxCommandTransport::resolve_container_workdir(
+            workspace,
+            Some("/workspace/app"),
+        )
+        .unwrap();
+
+        assert_eq!(workdir.into_string(), "/workspace/app");
+    }
+
+    #[test]
+    fn configured_workspace_modes_are_explicit_shapes() {
+        let private = RebornSandboxConfig::new("/tmp/reborn-sandbox")
+            .with_container_user("1000:1000", RebornSandboxWorkspaceMode::Private);
+        let group_shared = RebornSandboxConfig::new("/tmp/reborn-sandbox")
+            .with_container_user("1000:1000", RebornSandboxWorkspaceMode::GroupShared);
+
+        assert_eq!(private.container_identity.workspace_mode(), 0o700);
+        assert_eq!(group_shared.container_identity.workspace_mode(), 0o770);
     }
 }

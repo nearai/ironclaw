@@ -32,7 +32,6 @@ mod projection;
 mod readiness;
 mod runtime;
 mod runtime_input;
-mod sandbox_process;
 mod webui;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_body_limit;
@@ -53,7 +52,7 @@ pub use auth::{
 };
 pub use error::RebornBuildError;
 pub use factory::{RebornServices, build_reborn_services};
-pub use input::{RebornBuildInput, RebornHostRuntimePorts};
+pub use input::{RebornBuildInput, RebornRuntimeProcessBinding};
 #[cfg(feature = "root-llm-provider")]
 pub use llm_catalog::{
     RebornLlmCatalogError, resolve_against_registry, resolve_llm_selection_against_catalog,
@@ -80,10 +79,6 @@ pub use runtime_input::{
 };
 #[cfg(feature = "root-llm-provider")]
 pub use runtime_input::{RebornLlmConfig, ResolvedRebornLlm};
-pub use sandbox_process::{
-    RebornSandboxConfig, RebornSandboxContainerIdentity, RebornSandboxScopeKey,
-    RebornScopedSandboxCommandTransport,
-};
 pub use webui::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]
 pub use webui_rate_limit::RateLimitConfigError;
@@ -445,7 +440,7 @@ where
         ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver()?,
     ));
     if let Some(process_port) = tenant_sandbox_process_port {
-        services = services.with_verified_tenant_sandbox_process_port(process_port);
+        services = services.with_production_tenant_sandbox_process_port(process_port);
     }
     let services = services
         .with_reborn_event_store_config(RebornProfile::Production, config.event_store)
@@ -515,7 +510,7 @@ where
         ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver()?,
     ));
     if let Some(process_port) = tenant_sandbox_process_port {
-        services = services.with_verified_tenant_sandbox_process_port(process_port);
+        services = services.with_production_tenant_sandbox_process_port(process_port);
     }
     let services = services
         .with_reborn_event_store_config(RebornProfile::Production, config.event_store)

@@ -47,8 +47,8 @@ use ironclaw_host_runtime::{
     ProductionWiringComponent, ProductionWiringConfig, ProductionWiringIssueKind,
     RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
     RuntimeFailureKind, RuntimeProcessError, RuntimeProcessPort, RuntimeStatusRequest,
-    RuntimeWorkId, SandboxCommandTransport, TenantSandboxProcessPort,
-    VerifiedTenantSandboxProcessPort, builtin_first_party_handlers, builtin_first_party_package,
+    RuntimeWorkId, SandboxCommandTransport, TenantSandboxProcessPort, builtin_first_party_handlers,
+    builtin_first_party_package,
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutionResult, McpExecutor};
 use ironclaw_network::{
@@ -1223,11 +1223,9 @@ fn production_wiring_validation_tracks_tenant_sandbox_process_port_for_builtin_s
     )
     .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
     .with_runtime_policy(hosted_dev_runtime_policy())
-    .with_verified_tenant_sandbox_process_port(
-        VerifiedTenantSandboxProcessPort::assume_verified_transport(Arc::new(
-            ProductionCandidateSandboxTransport,
-        )),
-    );
+    .with_production_tenant_sandbox_process_port(Arc::new(TenantSandboxProcessPort::new(
+        Arc::new(ProductionCandidateSandboxTransport),
+    )));
 
     let report = services
         .validate_production_wiring(&ProductionWiringConfig::new([RuntimeKind::FirstParty]))

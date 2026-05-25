@@ -1,22 +1,25 @@
-use ironclaw_host_runtime::RuntimeProcessError;
+use crate::RuntimeProcessError;
 
 use super::reject_nul;
 
 #[derive(Debug, Clone)]
 pub struct RebornSandboxContainerIdentity {
     user: Option<String>,
-    workspace_mode: u32,
+    workspace_mode: RebornSandboxWorkspaceMode,
 }
 
 impl RebornSandboxContainerIdentity {
     pub fn image_default() -> Self {
         Self {
             user: None,
-            workspace_mode: 0o700,
+            workspace_mode: RebornSandboxWorkspaceMode::Private,
         }
     }
 
-    pub fn configured_user(user: impl Into<String>, workspace_mode: u32) -> Self {
+    pub fn configured_user(
+        user: impl Into<String>,
+        workspace_mode: RebornSandboxWorkspaceMode,
+    ) -> Self {
         Self {
             user: Some(user.into()),
             workspace_mode,
@@ -31,7 +34,22 @@ impl RebornSandboxContainerIdentity {
     }
 
     pub fn workspace_mode(&self) -> u32 {
-        self.workspace_mode
+        self.workspace_mode.as_unix_mode()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RebornSandboxWorkspaceMode {
+    Private,
+    GroupShared,
+}
+
+impl RebornSandboxWorkspaceMode {
+    pub fn as_unix_mode(self) -> u32 {
+        match self {
+            Self::Private => 0o700,
+            Self::GroupShared => 0o770,
+        }
     }
 }
 

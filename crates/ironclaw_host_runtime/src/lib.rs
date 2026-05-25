@@ -55,6 +55,7 @@ mod obligations;
 mod planner;
 mod process_port;
 mod production;
+mod sandbox_process;
 mod services;
 mod surface;
 mod turn_scheduler;
@@ -92,9 +93,12 @@ pub use planner::{ExecutionPlan, PlannerError, plan_capability};
 pub use process_port::{
     CommandExecutionOutput, CommandExecutionRequest, LocalHostProcessPort, RuntimeProcessError,
     RuntimeProcessPort, SandboxCommandTransport, TenantSandboxProcessPort,
-    VerifiedTenantSandboxProcessPort,
 };
 pub use production::DefaultHostRuntime;
+pub use sandbox_process::{
+    RebornSandboxConfig, RebornSandboxContainerIdentity, RebornSandboxScopeKey,
+    RebornSandboxWorkspaceMode, RebornScopedSandboxCommandTransport,
+};
 pub use services::{
     HostRuntimeServices, ProductionWiringComponent, ProductionWiringConfig, ProductionWiringIssue,
     ProductionWiringIssueKind, ProductionWiringReport, RegisteredRuntimeHealth,

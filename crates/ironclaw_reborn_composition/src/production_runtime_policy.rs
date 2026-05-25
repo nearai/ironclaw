@@ -1,5 +1,7 @@
+use std::sync::Arc;
+
 use ironclaw_host_api::runtime_policy::{EffectiveRuntimePolicy, ProcessBackendKind};
-use ironclaw_host_runtime::VerifiedTenantSandboxProcessPort;
+use ironclaw_host_runtime::TenantSandboxProcessPort;
 
 use crate::RebornCompositionError;
 
@@ -8,7 +10,7 @@ use crate::RebornCompositionError;
 #[derive(Clone, Debug)]
 pub struct RebornProductionRuntimePolicy {
     runtime_policy: EffectiveRuntimePolicy,
-    tenant_sandbox_process_port: Option<VerifiedTenantSandboxProcessPort>,
+    tenant_sandbox_process_port: Option<Arc<TenantSandboxProcessPort>>,
 }
 
 impl RebornProductionRuntimePolicy {
@@ -26,7 +28,7 @@ impl RebornProductionRuntimePolicy {
 
     pub fn with_tenant_sandbox_process_port(
         runtime_policy: EffectiveRuntimePolicy,
-        process_port: VerifiedTenantSandboxProcessPort,
+        process_port: Arc<TenantSandboxProcessPort>,
     ) -> Result<Self, RebornCompositionError> {
         if runtime_policy.process_backend != ProcessBackendKind::TenantSandbox {
             return Err(RebornCompositionError::UnexpectedTenantSandboxProcessPort {
@@ -43,7 +45,7 @@ impl RebornProductionRuntimePolicy {
         self,
     ) -> (
         EffectiveRuntimePolicy,
-        Option<VerifiedTenantSandboxProcessPort>,
+        Option<Arc<TenantSandboxProcessPort>>,
     ) {
         (self.runtime_policy, self.tenant_sandbox_process_port)
     }

@@ -4,7 +4,7 @@ use std::{
 };
 
 use ironclaw_reborn_composition::{
-    RebornBuildInput, RebornHostRuntimePorts, build_reborn_services,
+    RebornBuildInput, RebornRuntimeProcessBinding, build_reborn_services,
 };
 
 #[tokio::test]
@@ -17,9 +17,9 @@ async fn local_dev_composes_injected_tenant_sandbox_process_port() {
     let services = build_reborn_services(
         RebornBuildInput::local_dev("sandbox-port-owner", dir.path().join("local-dev"))
             .with_runtime_policy(tenant_sandbox_process_policy())
-            .with_host_runtime_ports(
-                RebornHostRuntimePorts::new().with_tenant_sandbox_process_port(process_port),
-            ),
+            .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(
+                process_port,
+            )),
     )
     .await
     .expect("local-dev services build");
