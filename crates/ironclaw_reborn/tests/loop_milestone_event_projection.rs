@@ -917,7 +917,7 @@ fn user_id() -> UserId {
 
 const HOOK_HEX_ID: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-fn hook_thread_scope() -> ThreadScope {
+fn milestone_thread_scope() -> ThreadScope {
     ThreadScope {
         tenant_id: tenant_id(),
         agent_id: agent_id(),
@@ -927,7 +927,7 @@ fn hook_thread_scope() -> ThreadScope {
     }
 }
 
-fn hook_milestone_for(
+fn milestone_for(
     scope: TurnScope,
     run_id: TurnRunId,
     kind: LoopHostMilestoneKind,
@@ -936,7 +936,7 @@ fn hook_milestone_for(
         scope,
         turn_id: TurnId::new(),
         run_id,
-        loop_driver_id: LoopDriverId::new("hook-projection-driver").unwrap(),
+        loop_driver_id: LoopDriverId::new("milestone-projection-driver").unwrap(),
         kind,
     }
 }
@@ -951,7 +951,7 @@ async fn publish_loop_milestone_projects_capability_lifecycle_to_runtime_events(
     let sink = DurableLoopHostMilestoneSink::new(
         Arc::clone(&events),
         DurableLoopHostMilestoneScope::from_thread_scope_for_run(
-            &hook_thread_scope(),
+            &milestone_thread_scope(),
             thread_id.clone(),
             run_id,
         )
@@ -981,7 +981,7 @@ async fn publish_loop_milestone_projects_capability_lifecycle_to_runtime_events(
             reason_kind: CapabilityFailureKind::OperationFailed,
         },
     ] {
-        sink.publish_loop_milestone(hook_milestone_for(scope.clone(), run_id, kind))
+        sink.publish_loop_milestone(milestone_for(scope.clone(), run_id, kind))
             .await
             .unwrap();
     }
@@ -1031,7 +1031,7 @@ async fn publish_loop_milestone_projects_hook_dispatched_to_runtime_event() {
     let sink = DurableLoopHostMilestoneSink::new(
         Arc::clone(&events),
         DurableLoopHostMilestoneScope::from_thread_scope_for_run(
-            &hook_thread_scope(),
+            &milestone_thread_scope(),
             thread_id.clone(),
             run_id,
         )
@@ -1044,7 +1044,7 @@ async fn publish_loop_milestone_projects_hook_dispatched_to_runtime_event() {
         thread_id.clone(),
     );
 
-    sink.publish_loop_milestone(hook_milestone_for(
+    sink.publish_loop_milestone(milestone_for(
         scope,
         run_id,
         LoopHostMilestoneKind::HookDispatched {
@@ -1088,7 +1088,7 @@ async fn publish_loop_milestone_projects_hook_decision_with_closed_vocabulary_on
     let sink = DurableLoopHostMilestoneSink::new(
         Arc::clone(&events),
         DurableLoopHostMilestoneScope::from_thread_scope_for_run(
-            &hook_thread_scope(),
+            &milestone_thread_scope(),
             thread_id.clone(),
             run_id,
         )
@@ -1104,7 +1104,7 @@ async fn publish_loop_milestone_projects_hook_decision_with_closed_vocabulary_on
     // The raw `reason` must NOT cross into the durable event — only the
     // closed-vocabulary `kind_name()` (here, "deny") may flow through.
     const RAW_DECISION_REASON: &str = "RAW_DECISION_REASON_SENTINEL sk-leak";
-    sink.publish_loop_milestone(hook_milestone_for(
+    sink.publish_loop_milestone(milestone_for(
         scope,
         run_id,
         LoopHostMilestoneKind::HookDecisionEmitted {
@@ -1151,7 +1151,7 @@ async fn publish_loop_milestone_projects_hook_failed_with_disposition() {
     let sink = DurableLoopHostMilestoneSink::new(
         Arc::clone(&events),
         DurableLoopHostMilestoneScope::from_thread_scope_for_run(
-            &hook_thread_scope(),
+            &milestone_thread_scope(),
             thread_id.clone(),
             run_id,
         )
@@ -1164,7 +1164,7 @@ async fn publish_loop_milestone_projects_hook_failed_with_disposition() {
         thread_id.clone(),
     );
 
-    sink.publish_loop_milestone(hook_milestone_for(
+    sink.publish_loop_milestone(milestone_for(
         scope,
         run_id,
         LoopHostMilestoneKind::HookFailed {
