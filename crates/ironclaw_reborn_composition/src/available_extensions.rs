@@ -9,6 +9,11 @@ use ironclaw_product_workflow::{
     ProductWorkflowError,
 };
 
+const GITHUB_MANIFEST: &str =
+    include_str!("../../ironclaw_first_party_extensions/assets/github/manifest.toml");
+const GITHUB_WASM_MODULE: &[u8] =
+    include_bytes!("../../ironclaw_first_party_extensions/assets/github/wasm/github_tool.wasm");
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct AvailableExtensionAsset {
     pub(crate) path: String,
@@ -53,6 +58,14 @@ pub(crate) struct AvailableExtensionCatalog {
 impl AvailableExtensionCatalog {
     pub(crate) fn from_packages(packages: Vec<AvailableExtensionPackage>) -> Self {
         Self { packages }
+    }
+
+    pub(crate) fn from_first_party_assets() -> Result<Self, ProductWorkflowError> {
+        Ok(Self::from_packages(vec![github_package()?]))
+    }
+
+    pub(crate) fn extend(&mut self, other: Self) {
+        self.packages.extend(other.packages);
     }
 
     pub(crate) async fn from_filesystem_root<F>(
@@ -106,6 +119,110 @@ impl AvailableExtensionCatalog {
             .ok_or_else(|| ProductWorkflowError::InvalidBindingRequest {
                 reason: "available extension was not found".to_string(),
             })
+    }
+}
+
+fn github_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
+    let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")?;
+    let root = VirtualPath::new("/system/extensions/github").map_err(map_binding_error)?;
+    let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
+        ProductWorkflowError::InvalidBindingRequest {
+            reason: format!("host port catalog rejected bundled GitHub extension: {error}"),
+        }
+    })?;
+    let contracts =
+        ironclaw_host_runtime::default_host_api_contract_registry().map_err(|error| {
+            ProductWorkflowError::InvalidBindingRequest {
+                reason: format!("host API contracts rejected bundled GitHub extension: {error}"),
+            }
+        })?;
+    let manifest = ExtensionManifest::parse_with_optional_host_api_contracts(
+        GITHUB_MANIFEST,
+        ManifestSource::HostBundled,
+        &host_ports,
+        &contracts,
+    )
+    .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
+        reason: format!("bundled GitHub extension manifest is invalid: {error}"),
+    })?;
+    let package = ExtensionPackage::from_manifest(manifest, root).map_err(|error| {
+        ProductWorkflowError::InvalidBindingRequest {
+            reason: format!("bundled GitHub extension package is invalid: {error}"),
+        }
+    })?;
+    Ok(AvailableExtensionPackage {
+        package_ref,
+        manifest_toml: GITHUB_MANIFEST.to_string(),
+        package,
+        assets: github_assets(),
+    })
+}
+
+fn github_assets() -> Vec<AvailableExtensionAsset> {
+    vec![
+        bytes_asset("manifest.toml", GITHUB_MANIFEST.as_bytes()),
+        bytes_asset(
+            "schemas/github/search_issues.input.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/github/schemas/github/search_issues.input.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/github/search_issues.output.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/github/schemas/github/search_issues.output.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/github/get_issue.input.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/github/schemas/github/get_issue.input.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/github/get_issue.output.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/github/schemas/github/get_issue.output.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/github/comment_issue.input.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/github/schemas/github/comment_issue.input.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/github/comment_issue.output.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/github/schemas/github/comment_issue.output.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "prompts/github/search_issues.md",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/github/prompts/github/search_issues.md"
+            ),
+        ),
+        bytes_asset(
+            "prompts/github/get_issue.md",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/github/prompts/github/get_issue.md"
+            ),
+        ),
+        bytes_asset(
+            "prompts/github/comment_issue.md",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/github/prompts/github/comment_issue.md"
+            ),
+        ),
+        bytes_asset("wasm/github_tool.wasm", GITHUB_WASM_MODULE),
+    ]
+}
+
+fn bytes_asset(path: &str, bytes: &[u8]) -> AvailableExtensionAsset {
+    AvailableExtensionAsset {
+        path: path.to_string(),
+        content: AvailableExtensionAssetContent::Bytes(bytes.to_vec()),
     }
 }
 

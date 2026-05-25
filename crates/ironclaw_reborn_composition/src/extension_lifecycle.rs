@@ -639,6 +639,118 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn extension_lifecycle_installs_activates_and_removes_github() {
+        let (_dir, storage_root, facade, active_registry, _installation_store) =
+            github_extension_lifecycle_fixture();
+
+        let search = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionSearch {
+                    query: "github".to_string(),
+                },
+            )
+            .await
+            .expect("search extensions");
+        assert_eq!(search.phase, LifecyclePhase::Discovered);
+        let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) =
+            search.payload.as_ref()
+        else {
+            panic!("expected extension search payload");
+        };
+        assert_eq!(extensions.len(), 1);
+        assert_eq!(
+            extensions[0].visible_read_only_capability_ids,
+            vec!["github.search_issues", "github.get_issue"]
+        );
+
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").expect("valid ref");
+        let install = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionInstall {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("install extension");
+        assert_eq!(install.phase, LifecyclePhase::Installed);
+        assert!(
+            storage_root
+                .join("system/extensions/github/manifest.toml")
+                .exists()
+        );
+        assert!(
+            storage_root
+                .join("system/extensions/github/wasm/github_tool.wasm")
+                .exists()
+        );
+        assert!(
+            active_registry
+                .snapshot()
+                .get_extension(&ExtensionId::new("github").unwrap())
+                .is_none()
+        );
+
+        let activate = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionActivate {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("activate extension");
+        assert_eq!(activate.phase, LifecyclePhase::Active);
+        let active = active_registry.snapshot();
+        assert!(
+            active
+                .get_extension(&ExtensionId::new("github").unwrap())
+                .is_some()
+        );
+        assert!(
+            active
+                .get_capability(
+                    &ironclaw_host_api::CapabilityId::new("github.search_issues").unwrap()
+                )
+                .is_some()
+        );
+        assert!(
+            active
+                .get_capability(
+                    &ironclaw_host_api::CapabilityId::new("github.comment_issue").unwrap()
+                )
+                .is_some()
+        );
+
+        let remove = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionRemove { package_ref },
+            )
+            .await
+            .expect("remove extension");
+        assert_eq!(remove.phase, LifecyclePhase::Removed);
+        assert!(
+            active_registry
+                .snapshot()
+                .get_extension(&ExtensionId::new("github").unwrap())
+                .is_none()
+        );
+        assert!(
+            !storage_root
+                .join("system/extensions/github/manifest.toml")
+                .exists()
+        );
+        assert!(
+            !storage_root
+                .join("system/extensions/github/wasm/github_tool.wasm")
+                .exists()
+        );
+    }
+
+    #[tokio::test]
     async fn extension_install_rejects_skill_package_ref() {
         let (_dir, _storage_root, facade, _active_registry, _installation_store) =
             extension_lifecycle_fixture();
@@ -899,12 +1011,43 @@ mod tests {
         Arc<SharedExtensionRegistry>,
         Arc<InMemoryExtensionInstallationStore>,
     ) {
-        extension_lifecycle_fixture_with_service(ExtensionLifecycleService::new(
-            ExtensionRegistry::new(),
-        ))
+        extension_lifecycle_fixture_with_catalog_and_service(
+            AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]),
+            ExtensionLifecycleService::new(ExtensionRegistry::new()),
+        )
     }
 
     fn extension_lifecycle_fixture_with_service(
+        lifecycle_service: ExtensionLifecycleService,
+    ) -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        crate::lifecycle::RebornLocalLifecycleFacade,
+        Arc<SharedExtensionRegistry>,
+        Arc<InMemoryExtensionInstallationStore>,
+    ) {
+        extension_lifecycle_fixture_with_catalog_and_service(
+            AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]),
+            lifecycle_service,
+        )
+    }
+
+    fn github_extension_lifecycle_fixture() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        crate::lifecycle::RebornLocalLifecycleFacade,
+        Arc<SharedExtensionRegistry>,
+        Arc<InMemoryExtensionInstallationStore>,
+    ) {
+        extension_lifecycle_fixture_with_catalog_and_service(
+            AvailableExtensionCatalog::from_first_party_assets()
+                .expect("first-party GitHub catalog"),
+            ExtensionLifecycleService::new(ExtensionRegistry::new()),
+        )
+    }
+
+    fn extension_lifecycle_fixture_with_catalog_and_service(
+        catalog: AvailableExtensionCatalog,
         lifecycle_service: ExtensionLifecycleService,
     ) -> (
         tempfile::TempDir,
@@ -946,7 +1089,7 @@ mod tests {
         let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
         let extension_management = Arc::new(RebornLocalExtensionManagementPort::new(
             root_filesystem,
-            AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]),
+            catalog,
             installation_store.clone(),
             Arc::new(Mutex::new(lifecycle_service)),
             Arc::clone(&active_registry),

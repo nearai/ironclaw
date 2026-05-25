@@ -373,7 +373,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         services = services.with_runtime_policy(runtime_policy);
     }
     services = apply_runtime_process_binding(services, runtime_process_binding);
-    let available_extensions = AvailableExtensionCatalog::from_filesystem_root(
+    let mut available_extensions = AvailableExtensionCatalog::from_filesystem_root(
         filesystem.as_ref(),
         &VirtualPath::new("/system/extensions")?,
     )
@@ -381,6 +381,13 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("available extension catalog could not be loaded: {error}"),
     })?;
+    available_extensions.extend(
+        AvailableExtensionCatalog::from_first_party_assets().map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: format!("first-party extension catalog could not be loaded: {error}"),
+            }
+        })?,
+    );
     let extension_management = Arc::new(RebornLocalExtensionManagementPort::new(
         filesystem,
         available_extensions,
