@@ -114,6 +114,12 @@ impl DurableLoopHostMilestoneScope {
             }
             _ => {}
         }
+        let invocation_id = match &milestone.kind {
+            LoopHostMilestoneKind::CapabilityInvoked { invocation_id, .. }
+            | LoopHostMilestoneKind::CapabilityCompleted { invocation_id, .. }
+            | LoopHostMilestoneKind::CapabilityFailed { invocation_id, .. } => *invocation_id,
+            _ => InvocationId::from_uuid(milestone.run_id.as_uuid()),
+        };
         Ok(ResourceScope {
             tenant_id: self.tenant_id.clone(),
             user_id: self.user_id.clone(),
@@ -121,7 +127,7 @@ impl DurableLoopHostMilestoneScope {
             project_id: self.project_id.clone(),
             mission_id: self.mission_id.clone(),
             thread_id: Some(milestone.scope.thread_id.clone()),
-            invocation_id: InvocationId::from_uuid(milestone.run_id.as_uuid()),
+            invocation_id,
         })
     }
 }
@@ -202,7 +208,7 @@ impl DurableLoopHostMilestoneSink {
                 capability_id(MODEL_CAPABILITY_ID)?,
                 reason_kind.as_str(),
             ),
-            LoopHostMilestoneKind::CapabilityInvoked { capability_id } => {
+            LoopHostMilestoneKind::CapabilityInvoked { capability_id, .. } => {
                 RuntimeEvent::dispatch_requested(scope, capability_id.clone())
             }
             LoopHostMilestoneKind::CapabilityCompleted {
@@ -210,6 +216,7 @@ impl DurableLoopHostMilestoneSink {
                 provider,
                 runtime,
                 output_bytes,
+                ..
             } => RuntimeEvent::dispatch_succeeded(
                 scope,
                 capability_id.clone(),
@@ -222,6 +229,7 @@ impl DurableLoopHostMilestoneSink {
                 provider,
                 runtime,
                 reason_kind,
+                ..
             } => RuntimeEvent::dispatch_failed(
                 scope,
                 capability_id.clone(),
@@ -428,8 +436,10 @@ mod tests {
     #[test]
     fn capability_invoked_milestone_projects_to_dispatch_requested() {
         let capability_id = CapabilityId::new("demo.echo").unwrap();
+        let invocation_id = InvocationId::new();
         let (milestone, thread_id, run_id) =
             fixture_milestone(LoopHostMilestoneKind::CapabilityInvoked {
+                invocation_id,
                 capability_id: capability_id.clone(),
             });
 
@@ -449,8 +459,10 @@ mod tests {
     fn capability_completed_milestone_projects_to_dispatch_succeeded() {
         let capability_id = CapabilityId::new("demo.echo").unwrap();
         let provider = ExtensionId::new("demo").unwrap();
+        let invocation_id = InvocationId::new();
         let (milestone, thread_id, run_id) =
             fixture_milestone(LoopHostMilestoneKind::CapabilityCompleted {
+                invocation_id,
                 capability_id: capability_id.clone(),
                 provider: provider.clone(),
                 runtime: RuntimeKind::Wasm,
@@ -474,8 +486,10 @@ mod tests {
     fn capability_failed_milestone_projects_to_dispatch_failed() {
         let capability_id = CapabilityId::new("demo.echo").unwrap();
         let provider = ExtensionId::new("demo").unwrap();
+        let invocation_id = InvocationId::new();
         let (milestone, thread_id, run_id) =
             fixture_milestone(LoopHostMilestoneKind::CapabilityFailed {
+                invocation_id,
                 capability_id: capability_id.clone(),
                 provider: Some(provider.clone()),
                 runtime: Some(RuntimeKind::Script),

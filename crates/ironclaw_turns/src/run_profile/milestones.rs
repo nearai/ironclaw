@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{CapabilityId, ExtensionId, RuntimeKind};
+use ironclaw_host_api::{CapabilityId, ExtensionId, InvocationId, RuntimeKind};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -77,15 +77,18 @@ pub enum LoopHostMilestoneKind {
         reason_kind: AgentLoopHostErrorKind,
     },
     CapabilityInvoked {
+        invocation_id: InvocationId,
         capability_id: CapabilityId,
     },
     CapabilityCompleted {
+        invocation_id: InvocationId,
         capability_id: CapabilityId,
         provider: ExtensionId,
         runtime: RuntimeKind,
         output_bytes: u64,
     },
     CapabilityFailed {
+        invocation_id: InvocationId,
         capability_id: CapabilityId,
         provider: Option<ExtensionId>,
         runtime: Option<RuntimeKind>,
@@ -418,20 +421,26 @@ where
 
     pub async fn capability_invoked(
         &self,
+        invocation_id: InvocationId,
         capability_id: CapabilityId,
     ) -> Result<(), AgentLoopHostError> {
-        self.publish(LoopHostMilestoneKind::CapabilityInvoked { capability_id })
-            .await
+        self.publish(LoopHostMilestoneKind::CapabilityInvoked {
+            invocation_id,
+            capability_id,
+        })
+        .await
     }
 
     pub async fn capability_completed(
         &self,
+        invocation_id: InvocationId,
         capability_id: CapabilityId,
         provider: ExtensionId,
         runtime: RuntimeKind,
         output_bytes: u64,
     ) -> Result<(), AgentLoopHostError> {
         self.publish(LoopHostMilestoneKind::CapabilityCompleted {
+            invocation_id,
             capability_id,
             provider,
             runtime,
@@ -442,12 +451,14 @@ where
 
     pub async fn capability_failed(
         &self,
+        invocation_id: InvocationId,
         capability_id: CapabilityId,
         provider: Option<ExtensionId>,
         runtime: Option<RuntimeKind>,
         reason_kind: CapabilityFailureKind,
     ) -> Result<(), AgentLoopHostError> {
         self.publish(LoopHostMilestoneKind::CapabilityFailed {
+            invocation_id,
             capability_id,
             provider,
             runtime,

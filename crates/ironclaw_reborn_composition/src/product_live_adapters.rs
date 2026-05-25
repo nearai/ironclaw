@@ -14,8 +14,8 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use ironclaw_host_api::{
-    CapabilityId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId, MountView, RuntimeKind,
-    TrustClass, UserId,
+    CapabilityId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId, InvocationId,
+    MountView, RuntimeKind, TrustClass, UserId,
 };
 use ironclaw_host_runtime::{
     CapabilitySurfacePolicy, HostRuntime, SurfaceKind, VisibleCapabilityRequest,
@@ -226,6 +226,7 @@ impl LoopCapabilityResultWriter for ProductLiveCapabilityIo {
     async fn write_capability_result(
         &self,
         run_context: &LoopRunContext,
+        invocation_id: InvocationId,
         _capability_id: &CapabilityId,
         output: serde_json::Value,
     ) -> Result<LoopResultRef, AgentLoopHostError> {
@@ -258,6 +259,7 @@ impl LoopCapabilityResultWriter for ProductLiveCapabilityIo {
         );
         self.display_previews.record_result(
             &run_context.run_id.to_string(),
+            invocation_id,
             _capability_id,
             result_ref.as_str(),
             &output,
@@ -737,7 +739,7 @@ pub fn capability_allowlist(ids: impl IntoIterator<Item = CapabilityId>) -> Capa
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::{AgentId, TenantId, ThreadId};
+    use ironclaw_host_api::{AgentId, InvocationId, TenantId, ThreadId};
     use ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver;
     use ironclaw_turns::{
         RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
@@ -761,8 +763,10 @@ mod tests {
         io.register_provider_tool_call_input(&run_context, &tool_call)
             .await
             .expect("input staged");
+        let invocation_id = InvocationId::new();
         io.write_capability_result(
             &run_context,
+            invocation_id,
             &CapabilityId::new("builtin.read_file").unwrap(),
             serde_json::json!({"content": "fn main() {}"}),
         )
@@ -771,7 +775,7 @@ mod tests {
 
         let record = io
             .display_previews
-            .record_for_run(&run_context.run_id.to_string())
+            .record_for_invocation(invocation_id)
             .expect("preview recorded");
         assert_eq!(record.title, "read_file");
         assert_eq!(record.subtitle.as_deref(), Some("src/main.rs"));
@@ -791,8 +795,10 @@ mod tests {
     async fn capability_io_prunes_display_preview_with_run() {
         let io = ProductLiveCapabilityIo::default();
         let run_context = loop_run_context().await;
+        let invocation_id = InvocationId::new();
         io.write_capability_result(
             &run_context,
+            invocation_id,
             &CapabilityId::new("demo.echo").unwrap(),
             serde_json::json!({"reply": "ok"}),
         )
@@ -800,14 +806,14 @@ mod tests {
         .expect("result staged");
         assert!(
             io.display_previews
-                .record_for_run(&run_context.run_id.to_string())
+                .record_for_invocation(invocation_id)
                 .is_some()
         );
 
         io.prune_run(&run_context).expect("run pruned");
         assert!(
             io.display_previews
-                .record_for_run(&run_context.run_id.to_string())
+                .record_for_invocation(invocation_id)
                 .is_none()
         );
     }

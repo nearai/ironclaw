@@ -103,7 +103,7 @@ async fn webui_event_stream_enriches_activity_with_display_preview_from_store() 
     let agent_id = AgentId::new("webui-preview-agent").unwrap();
     let thread_id = ThreadId::new("webui-preview-thread").unwrap();
     let invocation_id = InvocationId::new();
-    let run_id = TurnRunId::from_uuid(invocation_id.as_uuid());
+    let run_id = TurnRunId::new();
     let capability = CapabilityId::new("builtin.read_file").unwrap();
     let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
     display_previews.record_input(
@@ -117,6 +117,7 @@ async fn webui_event_stream_enriches_activity_with_display_preview_from_store() 
     );
     display_previews.record_result(
         &run_id.to_string(),
+        invocation_id,
         &capability,
         "result:preview-output",
         &serde_json::json!({"content": "fn main() {}"}),
@@ -187,6 +188,7 @@ async fn capability_display_preview_store_redacts_unsafe_paths_and_secrets() {
     );
     store.record_result(
         &run_id.to_string(),
+        InvocationId::from_uuid(run_id.as_uuid()),
         &capability,
         "result:redacted-preview",
         &serde_json::json!({"content": "{\"path\":\"/Users/alice/out.txt\", token:\"sk-secret\"}"}),
@@ -215,6 +217,111 @@ async fn capability_display_preview_store_redacts_unsafe_paths_and_secrets() {
     assert!(!rendered.contains("sk-secret"));
     assert!(!rendered.contains("/Users/alice"));
     assert!(rendered.contains("[redacted]"));
+}
+
+#[tokio::test]
+async fn capability_display_preview_store_keys_completed_results_by_invocation() {
+    let run_id = TurnRunId::new();
+    let first_invocation = InvocationId::new();
+    let second_invocation = InvocationId::new();
+    let first_capability = CapabilityId::new("script.first").unwrap();
+    let second_capability = CapabilityId::new("script.second").unwrap();
+    let store = CapabilityDisplayPreviewStore::default();
+    store.record_input(
+        &run_id.to_string(),
+        "first",
+        &serde_json::json!({"path": "src/first.rs"}),
+    );
+    store.record_input(
+        &run_id.to_string(),
+        "second",
+        &serde_json::json!({"path": "src/second.rs"}),
+    );
+    store.record_result(
+        &run_id.to_string(),
+        first_invocation,
+        &first_capability,
+        "result:first",
+        &serde_json::json!({"content": "first output"}),
+        12,
+    );
+    store.record_result(
+        &run_id.to_string(),
+        second_invocation,
+        &second_capability,
+        "result:second",
+        &serde_json::json!({"content": "second output"}),
+        13,
+    );
+
+    let first_preview = store
+        .preview(&CapabilityActivityProjection {
+            invocation_id: first_invocation,
+            capability_id: first_capability,
+            thread_id: Some(ThreadId::new("webui-preview-thread").unwrap()),
+            status: ironclaw_event_projections::CapabilityActivityStatus::Completed,
+            provider: None,
+            runtime: None,
+            process_id: None,
+            output_bytes: Some(12),
+            error_kind: None,
+            last_cursor: ironclaw_events::EventCursor::new(1),
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let second_preview = store
+        .preview(&CapabilityActivityProjection {
+            invocation_id: second_invocation,
+            capability_id: second_capability,
+            thread_id: Some(ThreadId::new("webui-preview-thread").unwrap()),
+            status: ironclaw_event_projections::CapabilityActivityStatus::Completed,
+            provider: None,
+            runtime: None,
+            process_id: None,
+            output_bytes: Some(13),
+            error_kind: None,
+            last_cursor: ironclaw_events::EventCursor::new(2),
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(first_preview.result_ref.as_deref(), Some("result:first"));
+    assert_eq!(
+        first_preview.output_preview.as_deref(),
+        Some("first output")
+    );
+    assert_eq!(second_preview.result_ref.as_deref(), Some("result:second"));
+    assert_eq!(
+        second_preview.output_preview.as_deref(),
+        Some("second output")
+    );
+}
+
+#[test]
+fn display_preview_sanitizer_does_not_redact_common_sk_substrings() {
+    let sanitized = sanitize_text("mask disk risk sk-live");
+
+    assert!(sanitized.contains("mask disk risk"));
+    assert!(!sanitized.contains("sk-live"));
+    assert!(sanitized.contains("[redacted]"));
+}
+
+#[test]
+fn display_preview_json_sanitizer_bounds_nested_values() {
+    let mut value = serde_json::json!("leaf");
+    for _ in 0..(SANITIZE_JSON_MAX_DEPTH + 4) {
+        value = serde_json::json!([value]);
+    }
+
+    let sanitized = sanitize_json_value(&value);
+    let rendered = serde_json::to_string(&sanitized).unwrap();
+
+    assert!(rendered.contains("[truncated]"));
+    assert!(!rendered.contains("leaf"));
 }
 
 #[tokio::test]
@@ -257,6 +364,7 @@ async fn capability_display_preview_store_truncates_long_output_by_lines() {
     let store = CapabilityDisplayPreviewStore::default();
     store.record_result(
         &run_id.to_string(),
+        InvocationId::from_uuid(run_id.as_uuid()),
         &capability,
         "result:long-preview",
         &serde_json::Value::String(
@@ -546,7 +654,7 @@ async fn webui_projection_snapshot_resumes_preview_payload() {
     let cursor =
         EventProjectionCursor::for_scope(projection_scope, ironclaw_events::EventCursor::new(1));
     let display_previews = CapabilityDisplayPreviewStore::default();
-    let run_id = TurnRunId::from_uuid(invocation_id.as_uuid());
+    let run_id = TurnRunId::new();
     display_previews.record_input(
         &run_id.to_string(),
         "read_file",
@@ -554,6 +662,7 @@ async fn webui_projection_snapshot_resumes_preview_payload() {
     );
     display_previews.record_result(
         &run_id.to_string(),
+        invocation_id,
         &capability,
         "result:preview-resume",
         &serde_json::json!({"content": "fn main() {}"}),

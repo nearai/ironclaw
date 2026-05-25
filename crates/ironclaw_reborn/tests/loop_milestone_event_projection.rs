@@ -15,8 +15,8 @@ use ironclaw_events::{
     InMemoryDurableEventLog, ReadScope,
 };
 use ironclaw_host_api::{
-    AgentId, CapabilityId, ExtensionId, MissionId, ProjectId, RuntimeKind, TenantId, ThreadId,
-    UserId,
+    AgentId, CapabilityId, ExtensionId, InvocationId, MissionId, ProjectId, RuntimeKind, TenantId,
+    ThreadId, UserId,
 };
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
@@ -966,15 +966,18 @@ async fn publish_loop_milestone_projects_capability_lifecycle_to_runtime_events(
 
     for kind in [
         LoopHostMilestoneKind::CapabilityInvoked {
+            invocation_id: InvocationId::new(),
             capability_id: capability_id.clone(),
         },
         LoopHostMilestoneKind::CapabilityCompleted {
+            invocation_id: InvocationId::new(),
             capability_id: capability_id.clone(),
             provider: provider_id.clone(),
             runtime: RuntimeKind::FirstParty,
             output_bytes: 64,
         },
         LoopHostMilestoneKind::CapabilityFailed {
+            invocation_id: InvocationId::new(),
             capability_id: capability_id.clone(),
             provider: Some(provider_id.clone()),
             runtime: Some(RuntimeKind::FirstParty),

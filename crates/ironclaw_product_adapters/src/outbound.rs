@@ -113,7 +113,11 @@ fn validate_display_preview(value: Option<&str>) -> Result<(), ProductAdapterErr
         value,
         CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES,
     )?;
-    if value.lines().count() > CAPABILITY_DISPLAY_PREVIEW_MAX_LINES {
+    if value
+        .lines()
+        .nth(CAPABILITY_DISPLAY_PREVIEW_MAX_LINES)
+        .is_some()
+    {
         return Err(invalid(
             "capability_display_output_preview",
             format!("must be at most {CAPABILITY_DISPLAY_PREVIEW_MAX_LINES} lines"),

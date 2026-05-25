@@ -8,8 +8,9 @@ use uuid::Uuid;
 
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind, ExecutionContext,
-    ExtensionId, GrantConstraints, MountAlias, MountGrant, MountPermissions, MountView,
-    NetworkPolicy, NetworkTargetPattern, Principal, RuntimeKind, TrustClass, UserId, VirtualPath,
+    ExtensionId, GrantConstraints, InvocationId, MountAlias, MountGrant, MountPermissions,
+    MountView, NetworkPolicy, NetworkTargetPattern, Principal, RuntimeKind, TrustClass, UserId,
+    VirtualPath,
 };
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, CapabilitySurfacePolicy, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID,
@@ -307,6 +308,7 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
     async fn write_capability_result(
         &self,
         run_context: &LoopRunContext,
+        invocation_id: InvocationId,
         _capability_id: &CapabilityId,
         output: serde_json::Value,
     ) -> Result<LoopResultRef, AgentLoopHostError> {
@@ -323,6 +325,7 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
         results.insert_with_oldest_eviction(result_ref.as_str().to_string(), output.clone())?;
         self.display_previews.record_result(
             &run_context.run_id.to_string(),
+            invocation_id,
             _capability_id,
             result_ref.as_str(),
             &output,

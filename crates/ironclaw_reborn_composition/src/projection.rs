@@ -17,7 +17,7 @@ use ironclaw_event_streams::{
     ProjectionSubscribeRequest, ProjectionTarget, ProjectionViewClass, SubscriberCapabilities,
 };
 use ironclaw_events::{DurableEventLog, EventCursor, EventStreamKey, ReadScope};
-use ironclaw_host_api::CapabilityId;
+use ironclaw_host_api::{CapabilityId, InvocationId};
 use ironclaw_outbound::InMemoryOutboundStateStore;
 use ironclaw_product_adapters::{
     AdapterInstallationId, CapabilityActivityStatusView, CapabilityActivityView,
@@ -40,6 +40,7 @@ const WEBUI_PROJECTION_PAGE_LIMIT: usize = 256;
 const WEBUI_RUNTIME_ITEM_MAX_PAYLOADS: usize = WEBUI_PROJECTION_PAGE_LIMIT + 1;
 const WEBUI_PROJECTION_ADAPTER_ID: &str = "webui_v2";
 const WEBUI_PROJECTION_INSTALLATION_ID: &str = "webui_v2.local";
+const SANITIZE_JSON_MAX_DEPTH: usize = 32;
 
 #[derive(Clone)]
 pub(crate) struct RebornProjectionServices {
@@ -73,6 +74,7 @@ impl CapabilityDisplayPreviewSource for NoopCapabilityDisplayPreviewSource {
 pub(crate) struct CapabilityDisplayPreviewStore {
     pending_inputs: Mutex<HashMap<String, VecDeque<CapabilityDisplayInputPreview>>>,
     completed: Mutex<HashMap<String, CapabilityDisplayPreviewRecord>>,
+    completed_by_run: Mutex<HashMap<String, Vec<String>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -123,6 +125,7 @@ impl CapabilityDisplayPreviewStore {
     pub(crate) fn record_result(
         &self,
         run_id: &str,
+        invocation_id: InvocationId,
         capability_id: &CapabilityId,
         result_ref: &str,
         output: &serde_json::Value,
@@ -150,7 +153,14 @@ impl CapabilityDisplayPreviewStore {
             truncated: input.as_ref().is_some_and(|input| input.truncated) || output.truncated,
         };
         if let Ok(mut completed) = self.completed.lock() {
-            completed.insert(run_id.to_string(), record);
+            let invocation_id = invocation_id.to_string();
+            completed.insert(invocation_id.clone(), record);
+            if let Ok(mut completed_by_run) = self.completed_by_run.lock() {
+                completed_by_run
+                    .entry(run_id.to_string())
+                    .or_default()
+                    .push(invocation_id);
+            }
         }
     }
 
@@ -158,16 +168,28 @@ impl CapabilityDisplayPreviewStore {
         if let Ok(mut pending) = self.pending_inputs.lock() {
             pending.remove(run_id);
         }
+        let completed_invocations = self
+            .completed_by_run
+            .lock()
+            .ok()
+            .and_then(|mut completed_by_run| completed_by_run.remove(run_id));
         if let Ok(mut completed) = self.completed.lock() {
-            completed.remove(run_id);
+            if let Some(invocation_ids) = completed_invocations {
+                for invocation_id in invocation_ids {
+                    completed.remove(&invocation_id);
+                }
+            }
         }
     }
 
-    pub(crate) fn record_for_run(&self, run_id: &str) -> Option<CapabilityDisplayPreviewRecord> {
+    pub(crate) fn record_for_invocation(
+        &self,
+        invocation_id: InvocationId,
+    ) -> Option<CapabilityDisplayPreviewRecord> {
         self.completed
             .lock()
             .ok()
-            .and_then(|completed| completed.get(run_id).cloned())
+            .and_then(|completed| completed.get(&invocation_id.to_string()).cloned())
     }
 }
 
@@ -824,8 +846,7 @@ fn capability_display_preview_from_store(
     ) {
         return Ok(None);
     }
-    let run_id = TurnRunId::from_uuid(activity.invocation_id.as_uuid()).to_string();
-    let Some(record) = store.record_for_run(&run_id) else {
+    let Some(record) = store.record_for_invocation(activity.invocation_id) else {
         return failed_capability_display_preview(activity);
     };
     CapabilityDisplayPreviewView::new(CapabilityDisplayPreviewViewInput {
@@ -977,6 +998,16 @@ fn safe_display_path(path: &str) -> Option<String> {
 }
 
 fn sanitize_json_value(value: &serde_json::Value) -> serde_json::Value {
+    sanitize_json_value_at_depth(value, SANITIZE_JSON_MAX_DEPTH)
+}
+
+fn sanitize_json_value_at_depth(
+    value: &serde_json::Value,
+    remaining_depth: usize,
+) -> serde_json::Value {
+    if remaining_depth == 0 {
+        return serde_json::Value::String("[truncated]".to_string());
+    }
     match value {
         serde_json::Value::Object(map) => serde_json::Value::Object(
             map.iter()
@@ -984,15 +1015,18 @@ fn sanitize_json_value(value: &serde_json::Value) -> serde_json::Value {
                     let sanitized = if is_sensitive_key(key) {
                         serde_json::Value::String("[redacted]".to_string())
                     } else {
-                        sanitize_json_value(value)
+                        sanitize_json_value_at_depth(value, remaining_depth - 1)
                     };
                     (key.clone(), sanitized)
                 })
                 .collect(),
         ),
-        serde_json::Value::Array(values) => {
-            serde_json::Value::Array(values.iter().map(sanitize_json_value).collect())
-        }
+        serde_json::Value::Array(values) => serde_json::Value::Array(
+            values
+                .iter()
+                .map(|value| sanitize_json_value_at_depth(value, remaining_depth - 1))
+                .collect(),
+        ),
         serde_json::Value::String(value) => serde_json::Value::String(sanitize_text(value)),
         other => other.clone(),
     }
@@ -1062,14 +1096,20 @@ fn sanitize_text(text: &str) -> String {
         let suffix = &token[trimmed.len()..];
         if is_secret_like(trimmed) || is_unsafe_path_like(trimmed) {
             out.push_str("[redacted]");
-            out.push_str(suffix);
+            push_safe_text(&mut out, suffix);
         } else {
-            out.push_str(token);
+            push_safe_text(&mut out, token);
         }
     }
-    out.chars()
-        .filter(|character| *character == '\n' || *character == '\t' || !character.is_control())
-        .collect()
+    out
+}
+
+fn push_safe_text(out: &mut String, text: &str) {
+    out.extend(
+        text.chars().filter(|character| {
+            *character == '\n' || *character == '\t' || !character.is_control()
+        }),
+    );
 }
 
 fn is_secret_like(token: &str) -> bool {
@@ -1077,7 +1117,6 @@ fn is_secret_like(token: &str) -> bool {
         .trim_matches(token_boundary_punctuation)
         .to_ascii_lowercase();
     lower.starts_with("sk-")
-        || lower.contains("sk-")
         || lower.contains("api_key=")
         || lower.contains("api_key:")
         || lower.contains("access_token=")

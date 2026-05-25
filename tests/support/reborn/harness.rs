@@ -29,11 +29,11 @@ use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     AgentId, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
-    ExtensionId, GrantConstraints, HostPath, MountAlias, MountGrant, MountPermissions, MountView,
-    NetworkPolicy, NetworkScheme, NetworkTargetPattern, PackageId, Principal, ProjectId,
-    ResourceScope, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
-    RuntimeHttpEgressResponse, RuntimeKind, SecretHandle, TenantId, ThreadId, TrustClass, UserId,
-    VirtualPath,
+    ExtensionId, GrantConstraints, HostPath, InvocationId, MountAlias, MountGrant,
+    MountPermissions, MountView, NetworkPolicy, NetworkScheme, NetworkTargetPattern, PackageId,
+    Principal, ProjectId, ResourceScope, RuntimeHttpEgress, RuntimeHttpEgressError,
+    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind, SecretHandle, TenantId,
+    ThreadId, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, CapabilitySurfacePolicy,
@@ -1846,12 +1846,13 @@ impl LoopCapabilityResultWriter for RecordingCapabilityResultWriter {
     async fn write_capability_result(
         &self,
         run_context: &LoopRunContext,
+        invocation_id: InvocationId,
         capability_id: &CapabilityId,
         output: serde_json::Value,
     ) -> Result<LoopResultRef, AgentLoopHostError> {
         let result_ref = self
             .inner
-            .write_capability_result(run_context, capability_id, output.clone())
+            .write_capability_result(run_context, invocation_id, capability_id, output.clone())
             .await?;
         self.results.lock().unwrap().push(RecordedCapabilityResult {
             capability_id: capability_id.clone(),

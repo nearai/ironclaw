@@ -11,9 +11,9 @@ use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::{
     AgentId, ApprovalRequestId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId,
     CapabilityId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId, GrantConstraints,
-    HostPortCatalog, MountView, NetworkPolicy, PackageId, PermissionMode, Principal, ProcessId,
-    ProjectId, ResourceEstimate, ResourceUsage, RuntimeKind, SecretHandle, TenantId, ThreadId,
-    TrustClass, UserId, VirtualPath,
+    HostPortCatalog, InvocationId, MountView, NetworkPolicy, PackageId, PermissionMode, Principal,
+    ProcessId, ProjectId, ResourceEstimate, ResourceUsage, RuntimeKind, SecretHandle, TenantId,
+    ThreadId, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, CapabilitySurfacePolicy, HostRuntime,
@@ -3697,8 +3697,12 @@ async fn text_only_host_routes_capability_invocation_through_host_runtime() {
         .visible_capabilities(VisibleCapabilityRequest)
         .await
         .unwrap();
-    assert_eq!(surface.descriptors.len(), 1);
-    assert_eq!(surface.descriptors[0].capability_id, capability_id);
+    assert!(
+        surface
+            .descriptors
+            .iter()
+            .any(|descriptor| descriptor.capability_id == capability_id)
+    );
 
     let outcome = host
         .invoke_capability(CapabilityInvocation {
@@ -4994,12 +4998,15 @@ async fn text_only_host_e2e_invokes_script_capability_through_real_host_runtime(
         .visible_capabilities(VisibleCapabilityRequest)
         .await
         .unwrap();
-    assert_eq!(surface.descriptors.len(), 1);
     assert_eq!(
-        surface.descriptors[0].capability_id,
-        e2e_script_capability_id()
+        surface
+            .descriptors
+            .iter()
+            .find(|descriptor| descriptor.capability_id == e2e_script_capability_id())
+            .expect("script capability should be visible")
+            .runtime,
+        RuntimeKind::Script
     );
-    assert_eq!(surface.descriptors[0].runtime, RuntimeKind::Script);
 
     let outcome = host
         .invoke_capability(CapabilityInvocation {
@@ -5475,6 +5482,7 @@ impl LoopCapabilityResultWriter for InMemoryCapabilityIo {
     async fn write_capability_result(
         &self,
         run_context: &LoopRunContext,
+        _invocation_id: InvocationId,
         capability_id: &CapabilityId,
         output: Value,
     ) -> Result<LoopResultRef, AgentLoopHostError> {

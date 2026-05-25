@@ -6,9 +6,9 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, CapabilitySet, ExecutionContext, ExtensionId, MountAlias,
-    MountGrant, MountPermissions, MountView, PermissionMode, ResourceEstimate, ResourceUsage,
-    RuntimeKind, ThreadId, TrustClass, UserId, VirtualPath,
+    CapabilityDescriptor, CapabilityId, CapabilitySet, ExecutionContext, ExtensionId, InvocationId,
+    MountAlias, MountGrant, MountPermissions, MountView, PermissionMode, ResourceEstimate,
+    ResourceUsage, RuntimeKind, ThreadId, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, CapabilitySurfaceVersion, HostRuntime,
@@ -411,6 +411,7 @@ impl LoopCapabilityResultWriter for UnusedResultWriter {
     async fn write_capability_result(
         &self,
         _run_context: &LoopRunContext,
+        _invocation_id: InvocationId,
         _capability_id: &CapabilityId,
         _output: serde_json::Value,
     ) -> Result<LoopResultRef, AgentLoopHostError> {
