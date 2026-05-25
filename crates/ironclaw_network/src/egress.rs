@@ -6,7 +6,7 @@ use crate::{
     resolver::{NetworkResolver, SystemNetworkResolver, resolve_public_ips},
     transport::reject_caller_host_header,
     types::{NetworkHttpRequest, NetworkHttpResponse, NetworkRequest, NetworkTransportRequest},
-    url_target::network_target_for_url,
+    url_target::network_target_for_http_url,
 };
 
 pub trait NetworkHttpEgress: Send + Sync {
@@ -65,7 +65,7 @@ where
             &request.body,
         );
         reject_caller_host_header(&request.headers)?;
-        let target = network_target_for_url(&request.url, estimated_request_bytes)?;
+        let target = network_target_for_http_url(&request.url, estimated_request_bytes)?;
         let permit = StaticNetworkPolicyEnforcer::new(request.policy.clone())
             .authorize_blocking(NetworkRequest {
                 scope: request.scope,

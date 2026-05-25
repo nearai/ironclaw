@@ -61,8 +61,8 @@ use ironclaw_threads::{
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey,
     ReplyTargetBindingRef, RunProfileResolutionRequest, SanitizedCancelReason, SourceBindingRef,
-    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId,
-    TurnScope, TurnStatus,
+    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
+    TurnEventProjectionSource, TurnRunId, TurnScope, TurnStatus,
     run_profile::{LoopHostMilestoneSink, LoopRunContext, PromptMode},
 };
 
@@ -656,12 +656,12 @@ impl RebornRuntime {
 /// On return, the turn-runner worker is already running in the background and
 /// the returned `RebornRuntime` is ready to accept `send_user_message` calls.
 ///
-/// **Currently supported profiles:** only `RebornCompositionProfile::LocalDev`
-/// is wired end-to-end here; production profiles will follow in a later slice
-/// (they currently return their substrate-only `RebornServices` and need
-/// durable thread/checkpoint stores wired before being driven). Passing a
-/// production profile returns a "not yet wired" error rather than partially
-/// starting an agent.
+/// **Currently supported profiles:** `RebornCompositionProfile::LocalDev` and
+/// `RebornCompositionProfile::LocalDevYolo` are wired end-to-end here;
+/// production profiles will follow in a later slice (they currently return
+/// their substrate-only `RebornServices` and need durable thread/checkpoint
+/// stores wired before being driven). Passing a production profile returns a
+/// "not yet wired" error rather than partially starting an agent.
 pub async fn build_reborn_runtime(
     input: RebornRuntimeInput,
 ) -> Result<RebornRuntime, RebornRuntimeError> {
@@ -682,11 +682,14 @@ pub async fn build_reborn_runtime(
     })?;
 
     let profile = services_input.profile();
-    if !matches!(profile, RebornCompositionProfile::LocalDev) {
+    if !matches!(
+        profile,
+        RebornCompositionProfile::LocalDev | RebornCompositionProfile::LocalDevYolo
+    ) {
         return Err(RebornRuntimeError::InvalidArgument {
             reason: format!(
                 "profile={profile} is not yet wired end-to-end by build_reborn_runtime; \
-                 only local-dev is supported in this slice"
+                 only local-dev and local-dev-yolo are supported in this slice"
             ),
         });
     }
@@ -784,10 +787,6 @@ pub async fn build_reborn_runtime(
         thread_scope.clone(),
     ));
     let event_log = Arc::clone(&local_runtime.event_log);
-    let projection_services = build_reborn_projection_services(
-        Arc::clone(&event_log),
-        validated_identity.reply_target_binding_ref.clone(),
-    );
     let milestone_thread_scope = ThreadScope {
         owner_user_id: Some(actor_user_id.clone()),
         ..thread_scope.clone()
@@ -848,6 +847,12 @@ pub async fn build_reborn_runtime(
         })?;
     let default_run_profile_id = default_resolved_run_profile.profile_id.as_str().to_string();
     let planned_turn_coordinator: Arc<dyn TurnCoordinator> = composition.coordinator.clone();
+    let turn_event_source: Arc<dyn TurnEventProjectionSource> = turn_state_store.clone();
+    let projection_services = build_reborn_projection_services(
+        Arc::clone(&event_log),
+        validated_identity.reply_target_binding_ref.clone(),
+    )
+    .with_turn_events(turn_event_source, Arc::clone(&planned_turn_coordinator));
     services.turn_coordinator = Some(Arc::clone(&planned_turn_coordinator));
 
     let worker_cancel = CancellationToken::new();
@@ -1362,7 +1367,8 @@ mod tests {
     }
 
     fn model_capability_error(error: impl std::fmt::Display) -> HostManagedModelError {
-        HostManagedModelError::safe(HostManagedModelErrorKind::Unavailable, error.to_string())
+        let safe_summary = error.to_string();
+        HostManagedModelError::safe(HostManagedModelErrorKind::Unavailable, safe_summary)
     }
 
     fn skill_md(name: &str, description: &str, prompt: &str) -> String {

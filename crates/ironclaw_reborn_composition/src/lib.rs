@@ -24,6 +24,7 @@ mod factory;
 mod input;
 #[cfg(feature = "root-llm-provider")]
 mod llm_catalog;
+mod local_runtime_profile;
 mod product_live_adapters;
 mod profile;
 mod projection;
@@ -42,8 +43,6 @@ mod webui_serve;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_ws_origin;
 
-use ironclaw_runtime_policy::{EffectiveRuntimePolicy as ResolvedRuntimePolicy, ResolveError};
-
 pub use auth::{
     RebornAuthContinuationDispatcher, RebornOAuthCallbackError, RebornOAuthCallbackOutcome,
     RebornOAuthCallbackRequest, RebornOAuthCallbackResponse, RebornProductAuthServicePorts,
@@ -56,6 +55,10 @@ pub use input::RebornBuildInput;
 pub use llm_catalog::{
     RebornLlmCatalogError, resolve_against_registry, resolve_llm_selection_against_catalog,
     resolve_reborn_runtime_llm,
+};
+pub use local_runtime_profile::{
+    RebornLocalRuntimeProfileError, local_dev_runtime_policy, local_dev_yolo_runtime_policy,
+    local_runtime_build_input,
 };
 pub use product_live_adapters::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
@@ -103,16 +106,6 @@ pub fn reborn_model_slot_names() -> Vec<&'static str> {
         .iter()
         .map(|slot| slot.as_str())
         .collect()
-}
-
-/// Resolved policy for the standalone local development runtime profile.
-pub fn local_dev_runtime_policy() -> Result<ResolvedRuntimePolicy, ResolveError> {
-    use ironclaw_host_api::runtime_policy::{DeploymentMode, RuntimeProfile};
-
-    ironclaw_runtime_policy::resolve(ironclaw_runtime_policy::ResolveRequest::new(
-        DeploymentMode::LocalSingleUser,
-        RuntimeProfile::LocalDev,
-    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

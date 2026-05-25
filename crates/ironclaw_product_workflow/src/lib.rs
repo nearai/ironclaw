@@ -28,6 +28,8 @@ mod action;
 mod auth_continuation;
 mod binding;
 mod binding_ref;
+mod command_dispatch;
+mod commands;
 mod conversation_binding;
 mod error;
 #[cfg(any(test, feature = "test-support"))]
@@ -50,6 +52,13 @@ pub use auth_continuation::ProductAuthTurnGateResumeDispatcher;
 pub use binding::{
     ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
     ResolvedBinding,
+};
+pub use command_dispatch::{
+    ProductCommandAdmission, ProductCommandAdmissionService, ProductCommandContext,
+    ProductCommandService, RejectingProductCommandAdmissionService, RejectingProductCommandService,
+};
+pub use commands::{
+    ProductCommand, ProductCommandDescriptor, ProductModelCommand, product_command_descriptors,
 };
 pub use conversation_binding::{
     ProductConversationBindingService, ProductInstallationKey, ProductInstallationScope,

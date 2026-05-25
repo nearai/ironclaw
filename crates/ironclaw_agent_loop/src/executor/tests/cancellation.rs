@@ -434,6 +434,27 @@ async fn model_cancelled_returns_cancelled_without_retry() {
 }
 
 #[tokio::test]
+async fn cancellation_after_retry_prompt_rebuild_skips_second_model_call() {
+    let host = MockHost::new(vec![reply_response()])
+        .with_model_errors(vec![AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "model unavailable",
+        )])
+        .cancel_after_prompt_bundle(2);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Cancelled(_)));
+    assert_eq!(host.prompt_requests().len(), 2);
+    assert_eq!(host.model_requests().len(), 1);
+}
+
+#[tokio::test]
 async fn capability_cancelled_returns_cancelled_exit_without_retry() {
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
         ironclaw_turns::run_profile::CapabilityBatchOutcome {

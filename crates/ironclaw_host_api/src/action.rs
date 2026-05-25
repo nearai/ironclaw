@@ -78,6 +78,43 @@ pub struct NetworkTargetPattern {
     pub port: Option<u16>,
 }
 
+impl NetworkTargetPattern {
+    pub fn validate_declaration(&self) -> Result<(), crate::HostApiError> {
+        validate_network_host_pattern(&self.host_pattern)?;
+        Ok(())
+    }
+}
+
+fn validate_network_host_pattern(pattern: &str) -> Result<(), crate::HostApiError> {
+    if pattern.is_empty() || pattern.len() > 253 {
+        return Err(crate::HostApiError::invalid_network_target(
+            pattern,
+            "host pattern must be non-empty and at most 253 bytes",
+        ));
+    }
+    if pattern.contains('\0') || pattern.chars().any(char::is_control) {
+        return Err(crate::HostApiError::invalid_network_target(
+            pattern,
+            "host pattern must not contain NUL/control characters",
+        ));
+    }
+    let host = pattern.strip_prefix("*.").unwrap_or(pattern);
+    if host.is_empty()
+        || host.starts_with('.')
+        || host.ends_with('.')
+        || host.contains("..")
+        || !host
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+    {
+        return Err(crate::HostApiError::invalid_network_target(
+            pattern,
+            "host pattern must contain only ASCII host-label characters",
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetworkPolicy {
     pub allowed_targets: Vec<NetworkTargetPattern>,

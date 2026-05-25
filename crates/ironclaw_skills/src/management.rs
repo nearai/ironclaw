@@ -147,31 +147,53 @@ pub struct SkillRemoveResult {
     pub name: String,
 }
 
+#[tracing::instrument(level = "debug", skip(context))]
 pub async fn list_skills(
     context: &SkillManagementContext,
 ) -> Result<Vec<SkillSummary>, SkillManagementError> {
     let mut skills = Vec::new();
     skills.extend(list_skill_root(context, SYSTEM_SKILLS_ROOT, SkillSource::System).await?);
     skills.extend(list_skill_root(context, USER_SKILLS_ROOT, SkillSource::User).await?);
+    tracing::debug!(skill_count = skills.len(), "skill management listed skills");
     Ok(skills)
 }
 
+#[tracing::instrument(
+    level = "debug",
+    skip(context, request),
+    fields(
+        requested_name = request.name.unwrap_or("<none>"),
+        content_bytes = request.content.len(),
+    )
+)]
 pub async fn install_skill(
     context: &SkillManagementContext,
     request: SkillInstallRequest<'_>,
 ) -> Result<SkillInstallResult, SkillManagementError> {
+    tracing::debug!("skill install started");
     if request.content.len() as u64 > MAX_PROMPT_FILE_SIZE {
+        tracing::debug!(
+            max_bytes = MAX_PROMPT_FILE_SIZE,
+            "skill install rejected oversized content"
+        );
         return Err(SkillManagementError::new(
             SkillManagementErrorKind::Resource,
         ));
     }
 
     let normalized = normalize_line_endings(request.content);
-    let parsed = parse_skill_md(&normalized)
-        .map_err(|_| SkillManagementError::new(SkillManagementErrorKind::InvalidInput))?;
+    let parsed = parse_skill_md(&normalized).map_err(|_| {
+        tracing::debug!("skill install failed to parse SKILL.md content");
+        SkillManagementError::new(SkillManagementErrorKind::InvalidInput)
+    })?;
     if let Some(requested_name) = request.name
         && requested_name != parsed.manifest.name
     {
+        tracing::debug!(
+            requested_name,
+            parsed_name = %parsed.manifest.name,
+            "skill install rejected name mismatch"
+        );
         return Err(SkillManagementError::new(
             SkillManagementErrorKind::InvalidInput,
         ));
@@ -181,12 +203,19 @@ pub async fn install_skill(
     let skill_dir = skill_root_scoped_path(USER_SKILLS_ROOT, &skill_name)?;
     let skill_path = skill_scoped_path(USER_SKILLS_ROOT, &skill_name, SKILL_FILE_NAME)?;
 
+    log_skill_filesystem_phase("stat_existing", &skill_name, &skill_path);
     if stat_optional(context, &skill_path).await?.is_some() {
+        tracing::debug!(
+            skill_name = %skill_name,
+            scoped_path = %skill_path,
+            "skill install rejected existing skill"
+        );
         return Err(SkillManagementError::new(
             SkillManagementErrorKind::Conflict,
         ));
     }
 
+    log_skill_filesystem_phase("create_dir_all", &skill_name, &skill_dir);
     context
         .filesystem
         .create_dir_all(&context.scope, &skill_dir)
@@ -195,15 +224,30 @@ pub async fn install_skill(
             FilesystemError::Unsupported {
                 operation: FilesystemOperation::CreateDirAll,
                 ..
-            } => Ok(()),
+            } => {
+                log_skill_filesystem_phase("create_dir_all_unsupported", &skill_name, &skill_dir);
+                Ok(())
+            }
             other => Err(other),
         })
-        .map_err(filesystem_error)?;
+        .map_err(|error| {
+            log_skill_filesystem_phase("create_dir_all_failed", &skill_name, &skill_dir);
+            filesystem_error(error)
+        })?;
+    log_skill_filesystem_phase("write_file", &skill_name, &skill_path);
     context
         .filesystem
         .write_file(&context.scope, &skill_path, normalized.as_bytes())
         .await
-        .map_err(filesystem_error)?;
+        .map_err(|error| {
+            log_skill_filesystem_phase("write_file_failed", &skill_name, &skill_path);
+            filesystem_error(error)
+        })?;
+    tracing::debug!(
+        skill_name = %skill_name,
+        scoped_path = %skill_path,
+        "skill install completed"
+    );
 
     Ok(SkillInstallResult {
         name: skill_name.clone(),
@@ -211,44 +255,76 @@ pub async fn install_skill(
     })
 }
 
+#[tracing::instrument(
+    level = "debug",
+    skip(context, request),
+    fields(skill_name = %request.name)
+)]
 pub async fn remove_skill(
     context: &SkillManagementContext,
     request: SkillRemoveRequest<'_>,
 ) -> Result<SkillRemoveResult, SkillManagementError> {
+    tracing::debug!("skill remove started");
     if !validate_skill_name(request.name) {
+        tracing::debug!("skill remove rejected invalid name");
         return Err(SkillManagementError::new(
             SkillManagementErrorKind::InvalidInput,
         ));
     }
     let skill_dir = skill_root_scoped_path(USER_SKILLS_ROOT, request.name)?;
     let skill_path = skill_scoped_path(USER_SKILLS_ROOT, request.name, SKILL_FILE_NAME)?;
+    log_skill_filesystem_phase("stat_existing", request.name, &skill_path);
     if stat_optional(context, &skill_path).await?.is_none() {
+        tracing::debug!(
+            scoped_path = %skill_path,
+            "skill remove could not find installed skill"
+        );
         return Err(SkillManagementError::new(
             SkillManagementErrorKind::NotFound,
         ));
     }
+    log_skill_filesystem_phase("delete_dir", request.name, &skill_dir);
     context
         .filesystem
         .delete(&context.scope, &skill_dir)
         .await
-        .map_err(filesystem_error)?;
+        .map_err(|error| {
+            log_skill_filesystem_phase("delete_dir_failed", request.name, &skill_dir);
+            filesystem_error(error)
+        })?;
+    tracing::debug!("skill remove completed");
     Ok(SkillRemoveResult {
         name: request.name.to_string(),
     })
 }
 
+#[tracing::instrument(
+    level = "debug",
+    skip(context),
+    fields(scoped_root = %scoped_root, source = source.as_str())
+)]
 async fn list_skill_root(
     context: &SkillManagementContext,
     scoped_root: &str,
     source: SkillSource,
 ) -> Result<Vec<SkillSummary>, SkillManagementError> {
+    tracing::debug!("skill management listing skill root");
     let root = ScopedPath::new(scoped_root)
         .map_err(|_| SkillManagementError::new(SkillManagementErrorKind::InvalidInput))?;
     let entries = match context.filesystem.list_dir(&context.scope, &root).await {
         Ok(entries) => entries,
-        Err(FilesystemError::NotFound { .. }) => return Ok(Vec::new()),
-        Err(FilesystemError::PermissionDenied { .. }) => return Ok(Vec::new()),
-        Err(error) if is_unmounted_scoped_root(&error) => return Ok(Vec::new()),
+        Err(FilesystemError::NotFound { .. }) => {
+            tracing::debug!("skill management skill root not found");
+            return Ok(Vec::new());
+        }
+        Err(FilesystemError::PermissionDenied { .. }) => {
+            tracing::debug!("skill management skill root permission denied");
+            return Ok(Vec::new());
+        }
+        Err(error) if is_unmounted_scoped_root(&error) => {
+            tracing::debug!("skill management skill root is not mounted");
+            return Ok(Vec::new());
+        }
         Err(error) => return Err(filesystem_error(error)),
     };
 
@@ -266,6 +342,10 @@ async fn list_skill_root(
             skills.push(skill);
         }
     }
+    tracing::debug!(
+        skill_count = skills.len(),
+        "skill management listed skill root"
+    );
     Ok(skills)
 }
 
@@ -277,8 +357,18 @@ async fn read_skill_summary(
     let Some(content) = read_skill_file(context, path).await? else {
         return Ok(None);
     };
-    let parsed = parse_skill_md(&content)
-        .map_err(|_| SkillManagementError::new(SkillManagementErrorKind::InvalidSkill))?;
+    let parsed = parse_skill_md(&content).map_err(|_| {
+        tracing::debug!(
+            scoped_path = %path,
+            "skill management failed to parse skill summary"
+        );
+        SkillManagementError::new(SkillManagementErrorKind::InvalidSkill)
+    })?;
+    tracing::debug!(
+        scoped_path = %path,
+        skill_name = %parsed.manifest.name,
+        "skill management parsed skill summary"
+    );
     Ok(Some(SkillSummary {
         name: parsed.manifest.name,
         version: parsed.manifest.version,
@@ -328,7 +418,10 @@ async fn stat_optional(
     match context.filesystem.stat(&context.scope, path).await {
         Ok(stat) => Ok(Some(stat)),
         Err(FilesystemError::NotFound { .. }) => Ok(None),
-        Err(error) => Err(filesystem_error(error)),
+        Err(error) => {
+            tracing::debug!(scoped_path = %path, "skill management stat failed");
+            Err(filesystem_error(error))
+        }
     }
 }
 
@@ -341,21 +434,46 @@ async fn read_skill_file(
         None => return Ok(None),
     };
     if stat.file_type != FileType::File || stat.sensitive {
+        tracing::debug!(
+            scoped_path = %path,
+            file_type = ?stat.file_type,
+            sensitive = stat.sensitive,
+            "skill management skipped non-readable skill file"
+        );
         return Ok(None);
     }
     let Some(bytes) = context
         .filesystem
         .read_bytes_bounded(&context.scope, path, MAX_PROMPT_FILE_SIZE as usize)
         .await
-        .map_err(filesystem_error)?
+        .map_err(|error| {
+            tracing::debug!(scoped_path = %path, "skill management failed to read skill file");
+            filesystem_error(error)
+        })?
     else {
+        tracing::debug!(
+            scoped_path = %path,
+            max_bytes = MAX_PROMPT_FILE_SIZE,
+            "skill management skill file exceeded read bound"
+        );
         return Err(SkillManagementError::new(
             SkillManagementErrorKind::Resource,
         ));
     };
-    String::from_utf8(bytes)
-        .map(Some)
-        .map_err(|_| SkillManagementError::new(SkillManagementErrorKind::InvalidSkill))
+    let content = String::from_utf8(bytes).map_err(|_| {
+        tracing::debug!(scoped_path = %path, "skill management skill file is not UTF-8");
+        SkillManagementError::new(SkillManagementErrorKind::InvalidSkill)
+    })?;
+    Ok(Some(content))
+}
+
+fn log_skill_filesystem_phase(phase: &'static str, skill_name: &str, scoped_path: &ScopedPath) {
+    tracing::debug!(
+        phase,
+        skill_name = %skill_name,
+        scoped_path = %scoped_path,
+        "skill management filesystem phase"
+    );
 }
 
 fn filesystem_error(error: FilesystemError) -> SkillManagementError {

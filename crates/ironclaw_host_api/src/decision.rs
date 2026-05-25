@@ -8,6 +8,7 @@
 //! scoped mounts.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 use crate::ApprovalRequest;
 use crate::{
@@ -120,6 +121,25 @@ impl Obligations {
                 .iter()
                 .filter(|obligation| obligation.kind() == *kind);
             if let Some(first) = matching.next() {
+                if *kind == ObligationKind::InjectSecretOnce {
+                    let mut seen_handles = HashSet::new();
+                    if let Obligation::InjectSecretOnce { handle } = first {
+                        seen_handles.insert(handle.clone());
+                    }
+                    normalized.push(first.clone());
+                    for obligation in matching {
+                        let Obligation::InjectSecretOnce { handle } = obligation else {
+                            unreachable!("filtered by InjectSecretOnce kind");
+                        };
+                        if !seen_handles.insert(handle.clone()) {
+                            return Err(HostApiError::invariant(
+                                "duplicate InjectSecretOnce obligations for the same handle are not allowed",
+                            ));
+                        }
+                        normalized.push(obligation.clone());
+                    }
+                    continue;
+                }
                 if matching.next().is_some() {
                     return Err(HostApiError::invariant(format!(
                         "duplicate or conflicting {kind:?} obligations are not allowed"

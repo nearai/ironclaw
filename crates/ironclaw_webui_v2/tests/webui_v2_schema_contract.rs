@@ -220,6 +220,7 @@ fn outbound_payload_mapping_covers_every_browser_event_variant() {
             },
             "projection_update",
         ),
+        (ProductOutboundPayload::KeepAlive, "keep_alive"),
     ];
 
     for (payload, expected_type) in cases {

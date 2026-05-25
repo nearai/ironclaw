@@ -153,13 +153,34 @@ impl RuntimeProcessPort for TenantSandboxProcessPort {
     }
 }
 
+/// Local provider-host command environment handling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum LocalHostProcessEnvMode {
+    /// Clear the child environment, forward only `SAFE_ENV_VARS`, and rewrite
+    /// `HOME` to the command workdir.
+    #[default]
+    Scrubbed,
+    /// Inherit the host process environment and real `HOME`.
+    Inherited,
+}
+
 /// Local provider-host command implementation matching the existing shell path.
 #[derive(Debug, Clone, Default)]
-pub struct LocalHostProcessPort;
+pub struct LocalHostProcessPort {
+    env_mode: LocalHostProcessEnvMode,
+}
 
 impl LocalHostProcessPort {
     pub fn new() -> Self {
-        Self
+        Self {
+            env_mode: LocalHostProcessEnvMode::Scrubbed,
+        }
+    }
+
+    pub fn new_inherited_env() -> Self {
+        Self {
+            env_mode: LocalHostProcessEnvMode::Inherited,
+        }
     }
 }
 
@@ -184,9 +205,21 @@ impl RuntimeProcessPort for LocalHostProcessPort {
             .timeout_secs
             .map(Duration::from_secs)
             .unwrap_or(DEFAULT_COMMAND_TIMEOUT);
+        if self.env_mode == LocalHostProcessEnvMode::Inherited {
+            tracing::warn!(
+                host_access = "full-local",
+                "running local host command with inherited environment"
+            );
+        }
         let start = std::time::Instant::now();
-        let (output, exit_code) =
-            execute_local_command(&request.command, &cwd, timeout, &request.extra_env).await?;
+        let (output, exit_code) = execute_local_command(
+            &request.command,
+            &cwd,
+            timeout,
+            &request.extra_env,
+            self.env_mode,
+        )
+        .await?;
         Ok(CommandExecutionOutput {
             output,
             exit_code: i64::from(exit_code),
@@ -201,6 +234,7 @@ async fn execute_local_command(
     workdir: &PathBuf,
     timeout: Duration,
     extra_env: &HashMap<String, String>,
+    env_mode: LocalHostProcessEnvMode,
 ) -> Result<(String, i32), RuntimeProcessError> {
     let mut command = if cfg!(target_os = "windows") {
         let mut c = Command::new("cmd");
@@ -215,15 +249,20 @@ async fn execute_local_command(
     #[cfg(unix)]
     command.process_group(0);
 
-    command.env_clear();
-    for var in SAFE_ENV_VARS {
-        if let Ok(val) = std::env::var(var) {
-            command.env(var, val);
+    match env_mode {
+        LocalHostProcessEnvMode::Scrubbed => {
+            command.env_clear();
+            for var in SAFE_ENV_VARS {
+                if let Ok(val) = std::env::var(var) {
+                    command.env(var, val);
+                }
+            }
+            // Keep shell "~" expansion available without exposing the host user's home.
+            command.env("HOME", workdir);
         }
+        LocalHostProcessEnvMode::Inherited => {}
     }
     command.envs(extra_env);
-    // Keep shell "~" expansion available without exposing the host user's home.
-    command.env("HOME", workdir);
     command
         .current_dir(workdir)
         .stdin(Stdio::null())
@@ -554,12 +593,36 @@ mod tests {
             &workdir.path().to_path_buf(),
             Duration::from_secs(5),
             &HashMap::new(),
+            LocalHostProcessEnvMode::Scrubbed,
         )
         .await
         .expect("command succeeds");
 
         assert_eq!(exit_code, 0);
         assert_eq!(output, workdir.path().display().to_string());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn execute_local_command_inherited_env_preserves_home_and_host_env() {
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let home = std::env::var("HOME").expect("HOME set for inherited env test");
+
+        let (output, exit_code) = execute_local_command(
+            "printf '%s\\n%s' \"$HOME\" \"$IRONCLAW_REBORN_SENTINEL\"",
+            &workdir.path().to_path_buf(),
+            Duration::from_secs(5),
+            &HashMap::from([(
+                "IRONCLAW_REBORN_SENTINEL".to_string(),
+                "inherited".to_string(),
+            )]),
+            LocalHostProcessEnvMode::Inherited,
+        )
+        .await
+        .expect("command succeeds");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(output, format!("{home}\ninherited"));
     }
 
     #[cfg(windows)]
@@ -572,6 +635,7 @@ mod tests {
             &workdir.path().to_path_buf(),
             Duration::from_secs(5),
             &HashMap::new(),
+            LocalHostProcessEnvMode::Scrubbed,
         )
         .await
         .expect("command succeeds");

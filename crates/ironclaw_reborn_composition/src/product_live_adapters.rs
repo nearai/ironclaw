@@ -667,7 +667,14 @@ impl LoopCapabilityPortFactory for ProductLiveLoopCapabilityPortFactory {
 }
 
 fn adapter_error(error: ProductLivePlannedRuntimeAdapterError) -> AgentLoopHostError {
-    AgentLoopHostError::new(AgentLoopHostErrorKind::InvalidInvocation, error.to_string())
+    let safe_summary = error.to_string();
+    ironclaw_loop_support::raw_agent_loop_host_error(
+        "product_live_planned_runtime_adapter",
+        "build_capability_port",
+        AgentLoopHostErrorKind::InvalidInvocation,
+        safe_summary,
+        error,
+    )
 }
 
 struct StaticCapabilitySurfaceResolver {

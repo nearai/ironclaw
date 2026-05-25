@@ -166,7 +166,9 @@ pub async fn build_reborn_services(
     );
     match input.profile {
         RebornCompositionProfile::Disabled => Ok(RebornServices::disabled()),
-        RebornCompositionProfile::LocalDev => build_local_dev(input).await,
+        RebornCompositionProfile::LocalDev | RebornCompositionProfile::LocalDevYolo => {
+            build_local_dev(input).await
+        }
         RebornCompositionProfile::Production | RebornCompositionProfile::MigrationDryRun => {
             build_production_shaped(input).await
         }
@@ -268,7 +270,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     if let Some(runtime_policy) = runtime_policy {
         services = services.with_runtime_policy(runtime_policy);
     }
-    // TODO(process-port): local-dev intentionally uses the default
+    // TODO(process-port): local runtime policies intentionally use the
     // LocalHostProcessPort until a non-local process backend is composed.
 
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
@@ -934,7 +936,9 @@ fn readiness_for(
 ) -> RebornReadiness {
     let state = match profile {
         RebornCompositionProfile::Disabled => RebornReadinessState::Disabled,
-        RebornCompositionProfile::LocalDev => RebornReadinessState::DevOnly,
+        RebornCompositionProfile::LocalDev | RebornCompositionProfile::LocalDevYolo => {
+            RebornReadinessState::DevOnly
+        }
         RebornCompositionProfile::Production => RebornReadinessState::ProductionValidated,
         RebornCompositionProfile::MigrationDryRun => RebornReadinessState::MigrationDryRunValidated,
     };

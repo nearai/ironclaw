@@ -62,8 +62,20 @@ impl RebornBuildInput {
     }
 
     pub fn local_dev(owner_id: impl Into<String>, root: PathBuf) -> Self {
+        Self::local_dev_with_profile(RebornCompositionProfile::LocalDev, owner_id, root)
+    }
+
+    pub(crate) fn local_dev_with_profile(
+        profile: RebornCompositionProfile,
+        owner_id: impl Into<String>,
+        root: PathBuf,
+    ) -> Self {
+        debug_assert!(matches!(
+            profile,
+            RebornCompositionProfile::LocalDev | RebornCompositionProfile::LocalDevYolo
+        ));
         Self::new(
-            RebornCompositionProfile::LocalDev,
+            profile,
             owner_id,
             RebornStorageInput::LocalDev {
                 root,

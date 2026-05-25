@@ -7,8 +7,9 @@ use super::{CodingCapabilityError, CodingCapabilityRequest};
 
 use super::{
     config::{DEFAULT_EXCLUDED_DIRS, DEFAULT_SCOPED_ROOT, WORKSPACE_FILES},
-    guest_error, input_error,
+    input_error,
     inputs::required_str,
+    operation_error,
     types::ResolvedPath,
 };
 
@@ -220,8 +221,10 @@ pub(super) fn filesystem_error(error: FilesystemError) -> CodingCapabilityError 
         | FilesystemError::MountConflict { .. } => {
             CodingCapabilityError::new(RuntimeDispatchErrorKind::FilesystemDenied)
         }
-        FilesystemError::NotFound { .. } => guest_error(),
-        FilesystemError::Backend { .. } => guest_error(),
+        FilesystemError::NotFound { .. } => operation_error(),
+        FilesystemError::Backend { .. } | FilesystemError::BackendInfrastructure { .. } => {
+            CodingCapabilityError::new(RuntimeDispatchErrorKind::Backend)
+        }
         // The unified record/index/CAS variants are surfaced when a backend
         // declines a typed op. Coding tools only exercise bytes, so reaching
         // here means the underlying mount is misconfigured for this caller —

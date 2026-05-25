@@ -95,10 +95,6 @@ pub enum ProductWorkflowError {
         prior_outcome: ironclaw_product_adapters::ProductInboundAck,
     },
 
-    /// Command routing is not yet implemented.
-    #[error("command routing unavailable: {command}")]
-    CommandRoutingUnavailable { command: String },
-
     /// The requested action kind is not supported by this workflow version.
     #[error("unsupported action kind: {kind}")]
     UnsupportedActionKind { kind: String },
@@ -209,11 +205,6 @@ impl From<ProductWorkflowError> for ProductAdapterError {
             ProductWorkflowError::DuplicateAction { .. } => ProductAdapterError::Internal {
                 detail: RedactedString::new("duplicate action escaped workflow layer"),
             },
-            ProductWorkflowError::CommandRoutingUnavailable { command } => {
-                ProductAdapterError::Internal {
-                    detail: RedactedString::new(format!("command routing unavailable: {command}")),
-                }
-            }
             ProductWorkflowError::UnsupportedActionKind { kind } => ProductAdapterError::Internal {
                 detail: RedactedString::new(format!("unsupported action kind: {kind}")),
             },

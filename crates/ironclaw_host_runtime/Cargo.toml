@@ -39,7 +39,6 @@ ironclaw_runtime_policy = { path = "../ironclaw_runtime_policy" }
 ironclaw_safety = { path = "../ironclaw_safety" }
 ironclaw_scripts = { path = "../ironclaw_scripts" }
 ironclaw_secrets = { path = "../ironclaw_secrets" }
-ironclaw_skills = { path = "../ironclaw_skills" }
 ironclaw_trust = { path = "../ironclaw_trust" }
 ironclaw_turns = { path = "../ironclaw_turns" }
 ironclaw_wasm = { path = "../ironclaw_wasm" }

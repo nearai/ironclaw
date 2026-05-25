@@ -206,10 +206,19 @@ where
     F: RootFilesystem,
     G: ResourceGovernor,
 {
+    #[tracing::instrument(
+        level = "debug",
+        skip(self, request),
+        fields(
+            capability_id = %request.capability_id,
+            scope = ?request.scope,
+        )
+    )]
     async fn dispatch_json(
         &self,
         request: RuntimeAdapterRequest<'_, F, G>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
+        tracing::debug!("first-party runtime adapter dispatch started");
         let Some(handler) = self.registry.get(request.capability_id) else {
             if let Some(reservation) = request.resource_reservation
                 && let Err(error) = request.governor.release(reservation.id)
@@ -220,6 +229,7 @@ where
                     "failed to release prepared resource reservation after missing first-party handler"
                 );
             }
+            tracing::debug!("first-party runtime adapter missing handler");
             return Err(DispatchError::FirstParty {
                 kind: RuntimeDispatchErrorKind::UndeclaredCapability,
             });
@@ -227,6 +237,10 @@ where
 
         let plan =
             plan_capability(request.descriptor, request.runtime_policy).map_err(|error| {
+                tracing::debug!(
+                    error_kind = %planner_error_kind(&error),
+                    "first-party runtime adapter policy planning failed"
+                );
                 if let Some(reservation) = &request.resource_reservation {
                     release_first_party_reservation(request.governor, reservation.id);
                 }
@@ -234,6 +248,13 @@ where
                     kind: planner_error_kind(&error),
                 }
             })?;
+        tracing::debug!(
+            filesystem_backend = ?plan.filesystem_backend,
+            process_backend = ?plan.process_backend,
+            network_mode = ?plan.network_mode,
+            secret_mode = ?plan.secret_mode,
+            "first-party runtime adapter policy plan resolved"
+        );
         let services = self
             .invocation_services
             .resolve(InvocationServicesResolutionRequest {
@@ -242,22 +263,40 @@ where
                 mounts: request.mounts.as_ref(),
             })
             .map_err(|error| {
+                tracing::debug!(
+                    error_kind = %error.kind(),
+                    "first-party runtime adapter service resolution failed"
+                );
                 if let Some(reservation) = &request.resource_reservation {
                     release_first_party_reservation(request.governor, reservation.id);
                 }
                 DispatchError::FirstParty { kind: error.kind() }
             })?;
+        tracing::debug!("first-party runtime adapter services resolved");
 
+        let used_prepared_reservation = request.resource_reservation.is_some();
         let reservation = match request.resource_reservation {
             Some(reservation) => reservation,
             None => request
                 .governor
                 .reserve(request.scope.clone(), request.estimate.clone())
-                .map_err(|_| DispatchError::FirstParty {
-                    kind: RuntimeDispatchErrorKind::Resource,
+                .map_err(|_| {
+                    tracing::debug!("first-party runtime adapter resource reservation failed");
+                    DispatchError::FirstParty {
+                        kind: RuntimeDispatchErrorKind::Resource,
+                    }
                 })?,
         };
+        tracing::debug!(
+            reservation_id = %reservation.id,
+            used_prepared_reservation,
+            "first-party runtime adapter resource reservation ready"
+        );
 
+        tracing::debug!(
+            reservation_id = %reservation.id,
+            "first-party runtime adapter invoking handler"
+        );
         let result = match AssertUnwindSafe(handler.dispatch(FirstPartyCapabilityRequest {
             capability_id: request.capability_id.clone(),
             scope: request.scope.clone(),
@@ -271,6 +310,11 @@ where
         {
             Ok(Ok(result)) => result,
             Ok(Err(error)) => {
+                tracing::debug!(
+                    reservation_id = %reservation.id,
+                    error_kind = %error.kind(),
+                    "first-party runtime adapter handler failed"
+                );
                 account_or_release_failed_first_party_execution(
                     request.governor,
                     reservation.id,
@@ -279,6 +323,10 @@ where
                 return Err(DispatchError::FirstParty { kind: error.kind() });
             }
             Err(_) => {
+                tracing::debug!(
+                    reservation_id = %reservation.id,
+                    "first-party runtime adapter handler panicked"
+                );
                 release_first_party_reservation(request.governor, reservation.id);
                 return Err(DispatchError::FirstParty {
                     kind: RuntimeDispatchErrorKind::Backend,
@@ -288,14 +336,24 @@ where
 
         let output_bytes = serde_json::to_vec(&result.output)
             .map(|bytes| bytes.len() as u64)
-            .map_err(|_| DispatchError::FirstParty {
-                kind: RuntimeDispatchErrorKind::OutputDecode,
+            .map_err(|_| {
+                tracing::debug!(
+                    reservation_id = %reservation.id,
+                    "first-party runtime adapter output serialization failed"
+                );
+                DispatchError::FirstParty {
+                    kind: RuntimeDispatchErrorKind::OutputDecode,
+                }
             })?;
         let mut usage = result.usage;
         usage.output_bytes = usage.output_bytes.max(output_bytes);
         let receipt = match request.governor.reconcile(reservation.id, usage.clone()) {
             Ok(receipt) => receipt,
             Err(_) => {
+                tracing::debug!(
+                    reservation_id = %reservation.id,
+                    "first-party runtime adapter resource reconcile failed"
+                );
                 if let Err(release_error) = request.governor.release(reservation.id) {
                     tracing::warn!(
                         reservation_id = %reservation.id,
@@ -308,6 +366,11 @@ where
                 });
             }
         };
+        tracing::debug!(
+            reservation_id = %reservation.id,
+            output_bytes,
+            "first-party runtime adapter dispatch completed"
+        );
 
         Ok(RuntimeAdapterResult {
             output: result.output,
@@ -419,11 +482,7 @@ where
                 });
             }
         };
-        let cache_key = format!(
-            "{}:{}",
-            request.capability_id.as_str(),
-            module_path.as_str()
-        );
+        let cache_key = module_path.as_str().to_string();
         let prepared = self.prepared_guard()?.get(&cache_key).cloned();
         if let Some(prepared) = prepared {
             let host = self.host_for_scope(&request.scope, request.capability_id);
@@ -439,7 +498,7 @@ where
             })?;
         let prepared = Arc::new(
             self.runtime
-                .prepare(request.capability_id.as_str(), &wasm_bytes)
+                .prepare(request.package.id.as_str(), &wasm_bytes)
                 .map_err(|error| DispatchError::Wasm {
                     kind: wasm_error_kind(&error),
                 })?,
@@ -496,7 +555,12 @@ where
             });
         }
     };
-    let execution = match runtime.execute(prepared, host, WitToolRequest::new(input_json)) {
+    let context_json = wasm_invocation_context(request.capability_id);
+    let execution = match runtime.execute(
+        prepared,
+        host,
+        WitToolRequest::new(input_json).with_context(context_json),
+    ) {
         Ok(execution) => execution,
         Err(error) => {
             if let Some(usage) = preserved_wasm_error_usage(&error) {
@@ -516,7 +580,7 @@ where
             &execution.usage,
         )?;
         return Err(DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::Guest,
+            kind: RuntimeDispatchErrorKind::OperationFailed,
         });
     }
     let Some(output_json) = execution.output_json else {
@@ -560,6 +624,13 @@ where
         usage: execution.usage,
         receipt,
     })
+}
+
+fn wasm_invocation_context(capability_id: &CapabilityId) -> String {
+    serde_json::json!({
+        "capability_id": capability_id.as_str(),
+    })
+    .to_string()
 }
 
 fn account_or_release_failed_first_party_execution<G>(

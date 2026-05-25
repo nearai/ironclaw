@@ -58,6 +58,7 @@ pub(super) struct MockHost {
     fail_progress_port: bool,
     cancellation: Arc<Mutex<Option<LoopCancellationSignal>>>,
     cancel_after_poll_inputs: Arc<Mutex<bool>>,
+    cancel_after_prompt_bundle_count: Arc<Mutex<Option<usize>>>,
     cancel_after_checkpoint: Arc<Mutex<Option<LoopCheckpointKind>>>,
     cancel_after_model_response: Arc<Mutex<bool>>,
     cancel_after_batch_invocation: Arc<Mutex<bool>>,
@@ -90,6 +91,7 @@ impl MockHost {
             fail_progress_port: false,
             cancellation: Arc::new(Mutex::new(None)),
             cancel_after_poll_inputs: Arc::new(Mutex::new(false)),
+            cancel_after_prompt_bundle_count: Arc::new(Mutex::new(None)),
             cancel_after_checkpoint: Arc::new(Mutex::new(None)),
             cancel_after_model_response: Arc::new(Mutex::new(false)),
             cancel_after_batch_invocation: Arc::new(Mutex::new(false)),
@@ -206,6 +208,11 @@ impl MockHost {
 
     pub(super) fn cancel_after_poll_inputs(self) -> Self {
         *self.cancel_after_poll_inputs.lock().expect("lock") = true;
+        self
+    }
+
+    pub(super) fn cancel_after_prompt_bundle(self, count: usize) -> Self {
+        *self.cancel_after_prompt_bundle_count.lock().expect("lock") = Some(count);
         self
     }
 
@@ -339,7 +346,7 @@ impl ironclaw_turns::run_profile::LoopPromptPort for MockHost {
                 "prompt bundle unavailable",
             ));
         }
-        Ok(LoopPromptBundle {
+        let bundle = LoopPromptBundle {
             bundle_ref: LoopPromptBundleRef::for_run(&self.context, "bundle").expect("valid"),
             messages: vec![LoopModelMessage {
                 role: "user".to_string(),
@@ -349,7 +356,26 @@ impl ironclaw_turns::run_profile::LoopPromptPort for MockHost {
             instruction_fingerprint: None,
             identity_message_count: 0,
             instruction_snippet_count: 0,
-        })
+        };
+        let should_cancel = {
+            let mut remaining = self.cancel_after_prompt_bundle_count.lock().expect("lock");
+            match remaining.as_mut() {
+                Some(count) => {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        *remaining = None;
+                        true
+                    } else {
+                        false
+                    }
+                }
+                None => false,
+            }
+        };
+        if should_cancel {
+            self.request_cancellation(LoopCancelReasonKind::UserRequested);
+        }
+        Ok(bundle)
     }
 }
 
@@ -578,6 +604,7 @@ pub(super) fn calls_response() -> LoopModelResponse {
             surface_version: surface_version(),
             capability_id: capability_id(),
             input_ref: CapabilityInputRef::new("input:demo").expect("valid"),
+            effective_capability_ids: vec![capability_id()],
             provider_replay: None,
         }]),
         effective_model_profile_id: ModelProfileId::new("model").expect("valid"),
@@ -592,12 +619,14 @@ pub(super) fn two_calls_response() -> LoopModelResponse {
                 surface_version: surface_version(),
                 capability_id: capability_id(),
                 input_ref: CapabilityInputRef::new("input:first").expect("valid"), // safety: test-only fixture
+                effective_capability_ids: vec![capability_id()],
                 provider_replay: None,
             },
             CapabilityCallCandidate {
                 surface_version: surface_version(),
                 capability_id: capability_id(),
                 input_ref: CapabilityInputRef::new("input:second").expect("valid"), // safety: test-only fixture
+                effective_capability_ids: vec![capability_id()],
                 provider_replay: None,
             },
         ]),
@@ -612,6 +641,7 @@ pub(super) fn provider_calls_response() -> LoopModelResponse {
             surface_version: surface_version(),
             capability_id: capability_id(),
             input_ref: CapabilityInputRef::new("input:demo").expect("valid"),
+            effective_capability_ids: vec![capability_id()],
             provider_replay: Some(ProviderToolCallReplay {
                 provider_id: "test-provider".to_string(),
                 provider_model_id: "test-model".to_string(),
@@ -636,6 +666,7 @@ pub(super) fn provider_two_calls_response() -> LoopModelResponse {
                 surface_version: surface_version(),
                 capability_id: capability_id(),
                 input_ref: CapabilityInputRef::new("input:first").expect("valid"),
+                effective_capability_ids: vec![capability_id()],
                 provider_replay: Some(ProviderToolCallReplay {
                     provider_id: "test-provider".to_string(),
                     provider_model_id: "test-model".to_string(),
@@ -652,6 +683,7 @@ pub(super) fn provider_two_calls_response() -> LoopModelResponse {
                 surface_version: surface_version(),
                 capability_id: capability_id(),
                 input_ref: CapabilityInputRef::new("input:second").expect("valid"),
+                effective_capability_ids: vec![capability_id()],
                 provider_replay: Some(ProviderToolCallReplay {
                     provider_id: "test-provider".to_string(),
                     provider_model_id: "test-model".to_string(),
@@ -676,6 +708,7 @@ pub(super) fn stale_surface_calls_response() -> LoopModelResponse {
             surface_version: stale_surface_version(),
             capability_id: capability_id(),
             input_ref: CapabilityInputRef::new("input:demo").expect("valid"),
+            effective_capability_ids: vec![capability_id()],
             provider_replay: None,
         }]),
         effective_model_profile_id: ModelProfileId::new("model").expect("valid"),
@@ -690,12 +723,14 @@ pub(super) fn mixed_surface_calls_response() -> LoopModelResponse {
                 surface_version: stale_surface_version(),
                 capability_id: capability_id(),
                 input_ref: CapabilityInputRef::new("input:stale").expect("valid"),
+                effective_capability_ids: vec![capability_id()],
                 provider_replay: None,
             },
             CapabilityCallCandidate {
                 surface_version: surface_version(),
                 capability_id: capability_id(),
                 input_ref: CapabilityInputRef::new("input:visible").expect("valid"),
+                effective_capability_ids: vec![capability_id()],
                 provider_replay: None,
             },
         ]),

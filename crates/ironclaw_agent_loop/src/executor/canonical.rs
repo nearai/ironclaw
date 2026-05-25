@@ -2,6 +2,7 @@ use ironclaw_turns::{
     LoopExit,
     run_profile::{AgentLoopDriverHost, LoopProgressEvent, ParentLoopOutput},
 };
+use tracing::debug;
 
 use crate::{family::LoopFamily, state::LoopExecutionState, strategies::TurnEndKind};
 
@@ -191,6 +192,10 @@ impl DefaultExecutorPipeline {
 
             match completed_kind {
                 TurnEndKind::ReplyOnly => {
+                    debug!(
+                        iteration = state.iteration,
+                        "agent loop handling reply-only turn end"
+                    );
                     match self
                         .input
                         .process(
@@ -211,6 +216,10 @@ impl DefaultExecutorPipeline {
                             state = *next;
                             pending_input_ack = ack;
                             if drained {
+                                debug!(
+                                    iteration = state.iteration,
+                                    "agent loop continuing after queued follow-up input"
+                                );
                                 state.iteration = state.iteration.saturating_add(1);
                                 continue;
                             }
@@ -227,6 +236,11 @@ impl DefaultExecutorPipeline {
                             },
                         )
                         .await?;
+                    debug!(
+                        iteration = checked.state.iteration,
+                        checkpoint_id = %checked.checkpoint_id.as_uuid(),
+                        "agent loop exiting after reply-only model output"
+                    );
                     pending_input_ack.ack(host).await?;
                     return completed_exit(host, checked.state, Some(checked.checkpoint_id));
                 }
