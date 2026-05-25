@@ -192,6 +192,12 @@ pub struct RebornListThreadsResponse {
     pub next_cursor: Option<String>,
 }
 
+/// WebUI v2 setup projection for extension lifecycle.
+///
+/// This intentionally uses the v2 `phase`/`blockers` lifecycle contract and
+/// omits the legacy `status` field from the earlier unimplemented route shape.
+/// The live browser consumer still uses the v1 setup route, so this v2 contract
+/// can become lifecycle-native before it has compatibility consumers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornSetupExtensionResponse {
     pub extension_name: ExtensionName,

@@ -119,6 +119,12 @@ impl LifecyclePackageRef {
     }
 }
 
+/// Browser lifecycle contract phases.
+///
+/// Some phases are forward-declared. The first local facades currently emit
+/// only the states they can prove from their backing systems; future
+/// extension/skill stores may make the remaining states reachable without
+/// changing the wire enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LifecyclePhase {
@@ -266,7 +272,7 @@ pub struct LifecycleProductSurfaceContext {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "source", rename_all = "snake_case")]
 pub enum LifecycleProductContext {
-    Command(ProductCommandContext),
+    Command(Box<ProductCommandContext>),
     Surface(LifecycleProductSurfaceContext),
 }
 

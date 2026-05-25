@@ -161,7 +161,7 @@ fn lifecycle_command_parser_handles_json_forms_and_rejects_malformed_refs() {
         };
         assert!(matches!(
             ProductCommand::from_payload(&payload),
-            ProductCommand::Unknown { .. }
+            ProductCommand::Invalid { .. }
         ));
     }
 }
@@ -261,7 +261,7 @@ fn lifecycle_command_parser_rejects_invalid_skill_install_name() {
 
     assert!(matches!(
         ProductCommand::from_payload(&payload),
-        ProductCommand::Unknown { .. }
+        ProductCommand::Invalid { .. }
     ));
 }
 

@@ -110,7 +110,7 @@ impl RebornLocalLifecycleFacade {
                 let count = matched_skills.len();
                 Ok(response_with_payload(
                     None,
-                    LifecyclePhase::Installed,
+                    LifecyclePhase::Discovered,
                     json!({
                         "skills": matched_skills,
                         "count": count,
@@ -274,7 +274,7 @@ mod tests {
             })
             .await
             .expect("list skills");
-        assert_eq!(list.phase, LifecyclePhase::Installed);
+        assert_eq!(list.phase, LifecyclePhase::Discovered);
         assert_eq!(
             list.payload
                 .as_ref()

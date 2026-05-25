@@ -317,6 +317,11 @@ async fn dispatch_payload(
             let context =
                 ProductCommandContext::from_envelope(envelope, action_id, action_fingerprint)?;
             let command = ProductCommand::from_payload(cmd);
+            if let Some(rejection) = command.invalid_rejection() {
+                let ack = ProductInboundAck::Rejected(rejection);
+                let dispatch_kind = dispatch_kind_from_ack(&ack, envelope.payload())?;
+                return Ok(DispatchedAction { ack, dispatch_kind });
+            }
             match command_admission_service.admit(&context, &command).await? {
                 ProductCommandAdmission::Allowed => {}
                 ProductCommandAdmission::Rejected(rejection) => {
@@ -444,7 +449,7 @@ fn terminal_ack_for_error(error: &ProductWorkflowError) -> Option<ProductInbound
         }
         ProductWorkflowError::InvalidBindingRequest { reason } => {
             Some(ProductInboundAck::Rejected(ProductRejection::permanent(
-                ProductRejectionKind::PolicyDenied,
+                ProductRejectionKind::InvalidRequest,
                 reason.clone(),
             )))
         }

@@ -250,7 +250,17 @@ async fn lifecycle_command_dispatches_through_lifecycle_facade() {
 
     let ack = workflow.accept_inbound(envelope).await.expect("accept");
 
-    assert!(matches!(ack, ProductInboundAck::NoOp));
+    let ProductInboundAck::CommandResult { command, payload } = ack else {
+        panic!("expected lifecycle command result ack");
+    };
+    assert_eq!(command, "extension_install");
+    assert_eq!(
+        payload
+            .as_value()
+            .get("phase")
+            .and_then(serde_json::Value::as_str),
+        Some("installed")
+    );
     assert_eq!(inbound.accepted_count(), 0);
     assert_eq!(
         lifecycle_facade.commands(),
@@ -262,6 +272,33 @@ async fn lifecycle_command_dispatches_through_lifecycle_facade() {
             .unwrap(),
         }]
     );
+}
+
+#[tokio::test]
+async fn malformed_known_lifecycle_command_rejects_before_admission() {
+    let inbound = Arc::new(FakeInboundTurnService::new());
+    let ledger = Arc::new(FakeIdempotencyLedger::new());
+    let binding = Arc::new(FakeConversationBindingService::new());
+    let admission_service = Arc::new(RecordingProductCommandAdmissionService::allowing());
+    let command_service = Arc::new(RecordingProductCommandService::with_ack(
+        ProductInboundAck::NoOp,
+    ));
+    let workflow = DefaultProductWorkflow::new(inbound.clone(), ledger.clone(), binding)
+        .with_product_command_admission_service(admission_service.clone())
+        .with_product_command_service(command_service.clone());
+    let envelope = sample_command_envelope("command-extension-invalid", "extension_install", "{}");
+
+    let ack = workflow.accept_inbound(envelope).await.expect("accept");
+
+    assert!(matches!(
+        ack,
+        ProductInboundAck::Rejected(rejection)
+            if rejection.kind == ironclaw_product_adapters::ProductRejectionKind::InvalidRequest
+    ));
+    assert!(admission_service.records().is_empty());
+    assert!(command_service.commands().is_empty());
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(ledger.settled_count(), 1);
 }
 
 #[tokio::test]
