@@ -58,7 +58,7 @@ async fn calendar_handler_integration_tests() {
         ],
     )
     .await;
-    let egress = Arc::new(RecordingEgress::default());
+    let egress = Arc::new(RecordingEgress::permissive_success());
 
     dispatch_ok(
         auth.clone(),
@@ -94,7 +94,7 @@ async fn gmail_handler_integration_tests() {
     let scope = scope();
     let auth =
         auth_with_google_account(&scope, vec![provider_scope(GOOGLE_GMAIL_READONLY_SCOPE)]).await;
-    let egress = Arc::new(RecordingEgress::default());
+    let egress = Arc::new(RecordingEgress::permissive_success());
 
     dispatch_ok(
         auth.clone(),
@@ -133,7 +133,7 @@ async fn gsuite_handler_uses_selected_credential_handle_for_runtime_egress() {
         auth_with_google_account(&scope, vec![provider_scope(GOOGLE_GMAIL_SEND_SCOPE)]).await;
     let executor = GsuiteExecutor::new(auth);
     let capability_id = capability_id(GMAIL_SEND_MESSAGE_CAPABILITY_ID);
-    let egress = Arc::new(RecordingEgress::default());
+    let egress = Arc::new(RecordingEgress::permissive_success());
 
     let result = executor
         .dispatch(GsuiteDispatchRequest {
@@ -170,7 +170,7 @@ async fn gsuite_handler_applies_google_api_network_policy() {
         auth_with_google_account(&scope, vec![provider_scope(GOOGLE_GMAIL_SEND_SCOPE)]).await;
     let executor = GsuiteExecutor::new(auth);
     let capability_id = capability_id(GMAIL_SEND_MESSAGE_CAPABILITY_ID);
-    let egress = Arc::new(RecordingEgress::default());
+    let egress = Arc::new(RecordingEgress::permissive_success());
 
     executor
         .dispatch(GsuiteDispatchRequest {
@@ -206,7 +206,7 @@ async fn gsuite_handler_fails_before_egress_when_scope_is_missing() {
         auth_with_google_account(&scope, vec![provider_scope(GOOGLE_GMAIL_SEND_SCOPE)]).await;
     let executor = GsuiteExecutor::new(auth);
     let capability_id = capability_id(GMAIL_TRASH_MESSAGE_CAPABILITY_ID);
-    let egress = Arc::new(RecordingEgress::default());
+    let egress = Arc::new(RecordingEgress::permissive_success());
 
     let error = executor
         .dispatch(GsuiteDispatchRequest {
@@ -230,7 +230,7 @@ async fn gsuite_handler_allows_reply_to_message_with_send_scope_only() {
     let scope = scope();
     let auth =
         auth_with_google_account(&scope, vec![provider_scope(GOOGLE_GMAIL_SEND_SCOPE)]).await;
-    let egress = Arc::new(RecordingEgress::default());
+    let egress = Arc::new(RecordingEgress::permissive_success());
 
     dispatch_ok(
         auth,
@@ -293,7 +293,7 @@ async fn gsuite_handler_fails_before_egress_when_account_is_not_configured() {
         true,
     )
     .await;
-    let egress = Arc::new(RecordingEgress::default());
+    let egress = Arc::new(RecordingEgress::permissive_success());
 
     let error = dispatch_error(
         auth,
@@ -321,7 +321,7 @@ async fn gsuite_handler_fails_before_egress_when_access_secret_is_missing() {
         false,
     )
     .await;
-    let egress = Arc::new(RecordingEgress::default());
+    let egress = Arc::new(RecordingEgress::permissive_success());
 
     let error = dispatch_error(
         auth,
@@ -350,7 +350,7 @@ async fn gsuite_handler_rejects_missing_required_input() {
         scope,
         GMAIL_GET_MESSAGE_CAPABILITY_ID,
         json!({}),
-        Arc::new(RecordingEgress::default()),
+        Arc::new(RecordingEgress::permissive_success()),
     )
     .await;
 
@@ -372,7 +372,7 @@ async fn calendar_id_default_does_not_swallow_invalid_type() {
         scope,
         CALENDAR_LIST_EVENTS_CAPABILITY_ID,
         json!({ "calendar_id": false }),
-        Arc::new(RecordingEgress::default()),
+        Arc::new(RecordingEgress::permissive_success()),
     )
     .await;
 
@@ -476,7 +476,7 @@ async fn gsuite_handler_maps_runtime_egress_errors() {
 async fn gsuite_handler_fails_before_egress_when_google_account_is_missing_or_ambiguous() {
     let scope = scope();
     let auth = Arc::new(InMemoryAuthProductServices::new());
-    let egress = Arc::new(RecordingEgress::default());
+    let egress = Arc::new(RecordingEgress::permissive_success());
 
     let error = dispatch_error(
         auth.clone(),
@@ -531,7 +531,7 @@ async fn gsuite_handlers_build_expected_requests_for_each_capability() {
         provider_scope(GOOGLE_GMAIL_MODIFY_SCOPE),
     ];
     let auth = auth_with_google_account(&scope, all_scopes).await;
-    let egress = Arc::new(RecordingEgress::default());
+    let egress = Arc::new(RecordingEgress::permissive_success());
 
     let cases = [
         (

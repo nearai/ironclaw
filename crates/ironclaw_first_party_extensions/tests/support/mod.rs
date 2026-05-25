@@ -18,10 +18,10 @@ use ironclaw_host_api::{
 };
 use serde_json::json;
 
-#[derive(Default)]
 pub(crate) struct RecordingEgress {
     requests: Mutex<Vec<RuntimeHttpEgressRequest>>,
     responses: Mutex<VecDeque<Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError>>>,
+    permissive_success: bool,
 }
 
 impl RecordingEgress {
@@ -29,6 +29,7 @@ impl RecordingEgress {
         Self {
             requests: Mutex::new(Vec::new()),
             responses: Mutex::new(responses.into_iter().map(Ok).collect()),
+            permissive_success: false,
         }
     }
 
@@ -36,6 +37,15 @@ impl RecordingEgress {
         Self {
             requests: Mutex::new(Vec::new()),
             responses: Mutex::new(errors.into_iter().map(Err).collect()),
+            permissive_success: false,
+        }
+    }
+
+    pub(crate) fn permissive_success() -> Self {
+        Self {
+            requests: Mutex::new(Vec::new()),
+            responses: Mutex::new(VecDeque::new()),
+            permissive_success: true,
         }
     }
 
@@ -107,7 +117,13 @@ impl RuntimeHttpEgress for RecordingEgress {
             .lock()
             .expect("response lock")
             .pop_front()
-            .unwrap_or_else(|| Ok(RecordingEgress::json(json!({"id":"sent-message"}))))
+            .unwrap_or_else(|| {
+                if self.permissive_success {
+                    Ok(RecordingEgress::json(json!({"id":"sent-message"})))
+                } else {
+                    panic!("recording egress response queue exhausted")
+                }
+            })
     }
 }
 
