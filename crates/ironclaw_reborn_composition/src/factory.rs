@@ -722,6 +722,37 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn postgres_resolved_secret_master_key_constructor_defers_to_keychain_resolution() {
+        let config: deadpool_postgres::tokio_postgres::Config =
+            "postgres://postgres:postgres@127.0.0.1:5432/ironclaw_test"
+                .parse()
+                .expect("test database URL must parse");
+        let manager =
+            deadpool_postgres::Manager::new(config, deadpool_postgres::tokio_postgres::NoTls);
+        let pool = deadpool_postgres::Pool::builder(manager)
+            .max_size(1)
+            .build()
+            .expect("pool should build without connecting");
+
+        let input = RebornBuildInput::postgres_with_resolved_secret_master_key(
+            RebornCompositionProfile::Production,
+            "test-owner",
+            pool,
+            ironclaw_secrets::SecretMaterial::from(
+                "postgres://postgres:postgres@127.0.0.1:5432/ironclaw_test",
+            ),
+        );
+
+        match input.storage {
+            RebornStorageInput::Postgres {
+                secret_master_key, ..
+            } => assert!(secret_master_key.is_none()),
+            _ => panic!("expected postgres storage"),
+        }
+    }
+
     #[tokio::test]
     async fn local_dev_services_include_repl_runtime_substrate() {
         let dir = tempfile::tempdir().expect("tempdir");

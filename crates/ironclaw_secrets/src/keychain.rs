@@ -97,11 +97,8 @@ async fn resolve_keychain_master_key() -> Result<Option<Vec<u8>>, SecretError> {
     let keychain_key = match get_master_key().await {
         Ok(keychain_key) => keychain_key,
         Err(SecretError::NotFound(_)) => return Ok(None),
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                "failed to resolve secrets master key from OS keychain"
-            );
+        Err(_) => {
+            tracing::warn!("failed to resolve secrets master key from OS keychain");
             return Err(SecretError::KeychainError(
                 "failed to resolve secret master key from keychain".to_string(),
             ));
@@ -364,7 +361,6 @@ mod platform {
 pub use platform::{delete_master_key, get_master_key, has_master_key, store_master_key};
 
 /// Parse a hex string to bytes.
-#[cfg(any(target_os = "macos", target_os = "linux", test))]
 fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, SecretError> {
     if !hex.len().is_multiple_of(2) {
         return Err(SecretError::KeychainError(
@@ -384,6 +380,40 @@ fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, SecretError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use secrecy::ExposeSecret;
+    use tokio::sync::Mutex;
+
+    static SECRETS_MASTER_KEY_ENV_LOCK: Mutex<()> = Mutex::const_new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            // SAFETY: tests serialize process-env mutation with
+            // SECRETS_MASTER_KEY_ENV_LOCK and restore the prior value on drop.
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: EnvVarGuard is only constructed while
+            // SECRETS_MASTER_KEY_ENV_LOCK is held by this test module.
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_generate_master_key() {
@@ -466,6 +496,33 @@ mod tests {
             .unwrap(),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn resolve_master_key_material_uses_valid_env_key() {
+        let _guard = SECRETS_MASTER_KEY_ENV_LOCK.lock().await;
+        let key = "aa".repeat(32);
+        let _env = EnvVarGuard::set(SECRETS_MASTER_KEY_ENV, &key);
+
+        let material = resolve_master_key_material()
+            .await
+            .expect("env resolver should succeed")
+            .expect("env key should resolve");
+
+        assert_eq!(material.expose_secret(), &key);
+    }
+
+    #[test]
+    fn resolve_master_key_propagates_keychain_errors() {
+        assert!(matches!(
+            resolve_master_key_from_sources(
+                None,
+                Err(SecretError::KeychainError(
+                    "backend unavailable".to_string()
+                ))
+            ),
+            Err(SecretError::KeychainError(_))
+        ));
     }
 
     #[test]
