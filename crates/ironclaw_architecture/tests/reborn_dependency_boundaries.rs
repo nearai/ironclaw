@@ -1050,6 +1050,7 @@ fn reborn_product_api_crates_do_not_bind_http_ingress() {
         "crates/ironclaw_product_workflow/src",
         "crates/ironclaw_wasm_product_adapters/src",
         "crates/ironclaw_telegram_v2_adapter/src",
+        "crates/ironclaw_slack_v2_adapter/src",
         "crates/ironclaw_outbound/src",
         "crates/ironclaw_conversations/src",
         "crates/ironclaw_turns/src",

@@ -5161,6 +5161,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_slack_v2_adapter"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "ironclaw_product_adapters",
+ "ironclaw_turns",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "ironclaw_telegram_v2_adapter"
 version = "0.1.0"
 dependencies = [
