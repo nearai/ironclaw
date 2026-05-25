@@ -3,13 +3,16 @@ use std::{
     sync::{Arc, Mutex as StdMutex},
 };
 
+use async_trait::async_trait;
 use chrono::Utc;
 use uuid::Uuid;
 
+use ironclaw_approvals::LeaseApproval;
 use ironclaw_host_api::{
-    CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind, ExecutionContext,
-    ExtensionId, GrantConstraints, MountAlias, MountGrant, MountPermissions, MountView,
-    NetworkPolicy, NetworkTargetPattern, Principal, RuntimeKind, TrustClass, UserId, VirtualPath,
+    Action, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
+    ExecutionContext, ExtensionId, GrantConstraints, MountAlias, MountGrant, MountPermissions,
+    MountView, NetworkPolicy, NetworkTargetPattern, Principal, RuntimeKind, TrustClass, UserId,
+    VirtualPath,
 };
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, CapabilitySurfacePolicy, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID,
@@ -23,6 +26,9 @@ use ironclaw_loop_support::{
     HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
     HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
     loop_driver_execution_extension_id,
+};
+use ironclaw_product_workflow::{
+    ApprovalGateRecord, ApprovalLeaseTermsProvider, ProductWorkflowError,
 };
 use ironclaw_reborn::loop_driver_host::LoopCapabilityPortFactory;
 use ironclaw_threads::{ToolResultReferenceEnvelope, ToolResultSafeSummary};
@@ -40,6 +46,60 @@ use crate::RebornServices;
 pub(super) struct LocalDevCapabilityWiring {
     pub(super) capability_factory: Arc<dyn LoopCapabilityPortFactory>,
     pub(super) model_gateway: Arc<dyn HostManagedModelGateway>,
+}
+
+pub(super) struct LocalDevApprovalLeaseTermsProvider {
+    workspace_mounts: MountView,
+    skill_mounts: MountView,
+}
+
+impl LocalDevApprovalLeaseTermsProvider {
+    pub(super) fn new(workspace_mounts: MountView, skill_mounts: MountView) -> Self {
+        Self {
+            workspace_mounts,
+            skill_mounts,
+        }
+    }
+}
+
+#[async_trait]
+impl ApprovalLeaseTermsProvider for LocalDevApprovalLeaseTermsProvider {
+    async fn lease_terms_for(
+        &self,
+        gate: &ApprovalGateRecord,
+    ) -> Result<LeaseApproval, ProductWorkflowError> {
+        let (capability, is_spawn) = match gate.request().action.as_ref() {
+            Action::Dispatch { capability, .. } => (capability, false),
+            Action::SpawnCapability { capability, .. } => (capability, true),
+            _ => {
+                return Err(ProductWorkflowError::ApprovalInteractionRejected {
+                    kind: ironclaw_product_workflow::ApprovalInteractionRejectionKind::UnsupportedAction,
+                });
+            }
+        };
+        let mut constraints = local_dev_grant_constraints(
+            capability.as_str(),
+            &self.workspace_mounts,
+            &self.skill_mounts,
+        );
+        if is_spawn
+            && !constraints
+                .allowed_effects
+                .contains(&EffectKind::SpawnProcess)
+        {
+            constraints.allowed_effects.push(EffectKind::SpawnProcess);
+        }
+        Ok(LeaseApproval {
+            issued_by: Principal::HostRuntime,
+            allowed_effects: constraints.allowed_effects,
+            mounts: constraints.mounts,
+            network: constraints.network,
+            secrets: constraints.secrets,
+            resource_ceiling: constraints.resource_ceiling,
+            expires_at: constraints.expires_at,
+            max_invocations: Some(1),
+        })
+    }
 }
 
 pub(super) fn capability_wiring(

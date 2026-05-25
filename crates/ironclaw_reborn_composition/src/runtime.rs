@@ -46,6 +46,10 @@ use ironclaw_loop_support::{
     HostIdentityContextSource, HostSkillContextSource,
 };
 use ironclaw_product_adapters::ProjectionStream;
+use ironclaw_product_workflow::{
+    ApprovalInteractionService, ApprovalResolverPort, DefaultApprovalInteractionService,
+    RunStateApprovalInteractionReadModel,
+};
 use ironclaw_reborn::loop_exit_applier::ThreadCheckpointLoopExitEvidencePort;
 use ironclaw_reborn::milestone_events::{
     DurableLoopHostMilestoneScope, DurableLoopHostMilestoneSink,
@@ -172,6 +176,7 @@ pub struct RebornRuntime {
     source_binding_ref: SourceBindingRef,
     reply_target_binding_ref: ReplyTargetBindingRef,
     projection_services: RebornProjectionServices,
+    approval_interaction_service: Arc<dyn ApprovalInteractionService>,
     webui_event_log: Arc<dyn DurableEventLog>,
     default_run_profile_id: String,
     wake_sender: TurnRunnerWakeSender,
@@ -207,6 +212,10 @@ impl RebornRuntime {
 
     pub(crate) fn webui_event_stream(&self) -> Arc<dyn ProjectionStream> {
         self.projection_services.webui_event_stream()
+    }
+
+    pub(crate) fn webui_approval_interaction_service(&self) -> Arc<dyn ApprovalInteractionService> {
+        self.approval_interaction_service.clone()
     }
 
     pub(crate) fn webui_skill_activation_source(
@@ -849,6 +858,24 @@ pub async fn build_reborn_runtime(
         })?;
     let default_run_profile_id = default_resolved_run_profile.profile_id.as_str().to_string();
     let planned_turn_coordinator: Arc<dyn TurnCoordinator> = composition.coordinator.clone();
+    let approval_read_model = Arc::new(RunStateApprovalInteractionReadModel::new(
+        local_runtime.run_state.clone(),
+        local_runtime.approval_requests.clone(),
+    ));
+    let approval_resolver = Arc::new(ApprovalResolverPort::new(
+        local_runtime.approval_requests.clone(),
+        local_runtime.capability_leases.clone(),
+    ));
+    let approval_interaction_service: Arc<dyn ApprovalInteractionService> =
+        Arc::new(DefaultApprovalInteractionService::new(
+            approval_read_model,
+            Arc::new(local_dev::LocalDevApprovalLeaseTermsProvider::new(
+                local_runtime.workspace_mounts.clone(),
+                local_runtime.skill_mounts.clone(),
+            )),
+            approval_resolver,
+            Arc::clone(&planned_turn_coordinator),
+        ));
     let turn_event_source: Arc<dyn TurnEventProjectionSource> = turn_state_store.clone();
     let projection_services = build_reborn_projection_services(
         Arc::clone(&event_log),
@@ -878,6 +905,7 @@ pub async fn build_reborn_runtime(
         source_binding_ref: validated_identity.source_binding_ref,
         reply_target_binding_ref: validated_identity.reply_target_binding_ref,
         projection_services,
+        approval_interaction_service,
         webui_event_log: event_log,
         default_run_profile_id,
         wake_sender,
@@ -1079,7 +1107,7 @@ mod tests {
 
     use async_trait::async_trait;
     use ironclaw_host_api::{
-        AgentId, CapabilityId, TenantId, UserId,
+        AgentId, ApprovalRequestId, CapabilityId, TenantId, UserId,
         runtime_policy::{
             ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy,
             FilesystemBackendKind, NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -1092,8 +1120,9 @@ mod tests {
     };
     use ironclaw_product_adapters::{ProductOutboundPayload, ProductProjectionItem};
     use ironclaw_product_workflow::{
-        RebornStreamEventsRequest, RebornSubmitTurnResponse, WebUiAuthenticatedCaller,
-        WebUiCreateThreadRequest, WebUiSendMessageRequest,
+        RebornServicesErrorCode, RebornServicesErrorKind, RebornStreamEventsRequest,
+        RebornSubmitTurnResponse, WebUiAuthenticatedCaller, WebUiCreateThreadRequest,
+        WebUiResolveGateRequest, WebUiSendMessageRequest, approval_gate_ref,
     };
     use ironclaw_skills::SkillTrust;
     use ironclaw_threads::{
@@ -2449,6 +2478,76 @@ mod tests {
         assert_eq!(bundle.readiness, runtime.services().readiness);
         assert_eq!(bundle.readiness.state, RebornReadinessState::DevOnly);
 
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn local_dev_webui_bundle_routes_approval_gates_into_interaction_service() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "unused".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-webui-approval-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-webui-approval-tenant".to_string(),
+            agent_id: "runtime-webui-approval-agent".to_string(),
+            source_binding_id: "runtime-webui-approval-source".to_string(),
+            reply_target_binding_id: "runtime-webui-approval-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+        let caller = WebUiAuthenticatedCaller::new(
+            TenantId::new("runtime-webui-approval-tenant").unwrap(),
+            UserId::new("runtime-webui-approval-owner").unwrap(),
+            Some(AgentId::new("runtime-webui-approval-agent").unwrap()),
+            None,
+        );
+        let created = bundle
+            .api
+            .create_thread(
+                caller.clone(),
+                WebUiCreateThreadRequest {
+                    client_action_id: Some("create-webui-approval-thread".to_string()),
+                    requested_thread_id: None,
+                },
+            )
+            .await
+            .expect("create thread");
+        let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate");
+
+        let err = bundle
+            .api
+            .resolve_gate(
+                caller,
+                WebUiResolveGateRequest {
+                    client_action_id: Some("resolve-webui-approval-gate".to_string()),
+                    thread_id: Some(created.thread.thread_id.to_string()),
+                    run_id: Some(TurnRunId::new().to_string()),
+                    gate_ref: Some(gate_ref.as_str().to_string()),
+                    resolution: Some("approved".to_string()),
+                    always: None,
+                    credential_ref: None,
+                },
+            )
+            .await
+            .expect_err("missing approval gate should reach approval interaction service");
+
+        assert_eq!(err.code, RebornServicesErrorCode::NotFound);
+        assert_eq!(err.kind, RebornServicesErrorKind::NotFound);
+        assert_eq!(err.status_code, 404);
         runtime.shutdown().await.expect("runtime shutdown");
     }
 
