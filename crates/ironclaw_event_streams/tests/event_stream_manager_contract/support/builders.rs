@@ -250,6 +250,7 @@ fn run_status(scope: &ProjectionScope, cursor: u64) -> RunStatusProjection {
 fn capability_activity(scope: &ProjectionScope, cursor: u64) -> CapabilityActivityProjection {
     CapabilityActivityProjection {
         invocation_id: InvocationId::new(),
+        run_id: None,
         capability_id: CapabilityId::new("script.echo").unwrap(),
         thread_id: scope.read_scope.thread_id.clone(),
         status: CapabilityActivityStatus::Completed,

@@ -1041,6 +1041,10 @@ async fn publish_loop_milestone_projects_capability_lifecycle_to_runtime_events(
         .iter()
         .find(|activity| activity.invocation_id == first_invocation_id)
         .expect("first capability activity projected");
+    assert_eq!(
+        completed.run_id,
+        Some(InvocationId::from_uuid(run_id.as_uuid()))
+    );
     assert_eq!(completed.capability_id, first_capability_id);
     assert_eq!(completed.provider.as_ref(), Some(&provider_id));
     assert_eq!(completed.runtime, Some(RuntimeKind::FirstParty));
@@ -1050,6 +1054,10 @@ async fn publish_loop_milestone_projects_capability_lifecycle_to_runtime_events(
         .iter()
         .find(|activity| activity.invocation_id == second_invocation_id)
         .expect("second capability activity projected");
+    assert_eq!(
+        failed.run_id,
+        Some(InvocationId::from_uuid(run_id.as_uuid()))
+    );
     assert_eq!(failed.capability_id, second_capability_id);
     assert_eq!(failed.provider.as_ref(), Some(&provider_id));
     assert_eq!(failed.runtime, Some(RuntimeKind::FirstParty));

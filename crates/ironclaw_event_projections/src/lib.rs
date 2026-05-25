@@ -283,6 +283,8 @@ pub enum RunProjectionStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityActivityProjection {
     pub invocation_id: InvocationId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<InvocationId>,
     pub capability_id: CapabilityId,
     pub thread_id: Option<ThreadId>,
     pub status: CapabilityActivityStatus,

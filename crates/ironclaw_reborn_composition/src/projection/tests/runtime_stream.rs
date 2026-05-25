@@ -292,6 +292,7 @@ fn webui_projection_snapshot_bounds_activity_fanout_before_payload_mapping() {
         capability_activities: (0..(WEBUI_PROJECTION_PAGE_LIMIT + 10))
             .map(|index| CapabilityActivityProjection {
                 invocation_id: InvocationId::new(),
+                run_id: None,
                 capability_id: capability.clone(),
                 thread_id: Some(thread_id.clone()),
                 status: ironclaw_event_projections::CapabilityActivityStatus::Running,

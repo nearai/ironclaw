@@ -649,11 +649,11 @@ impl HostRuntimeLoopCapabilityPort {
         result: Result<CapabilityOutcome, AgentLoopHostError>,
         terminal_milestone: Option<LoopHostMilestoneKind>,
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
-        if let Some(milestone) = terminal_milestone {
-            if let Err(error) = self.emit_capability_milestone(milestone.clone()).await {
-                self.record_terminal_milestone_pending(key, result.clone(), milestone)?;
-                return Err(error);
-            }
+        if let Some(milestone) = terminal_milestone
+            && let Err(error) = self.emit_capability_milestone(milestone.clone()).await
+        {
+            self.record_terminal_milestone_pending(key, result.clone(), milestone)?;
+            return Err(error);
         }
         self.record_loop_completed(key, result.clone())?;
         result
@@ -1332,6 +1332,9 @@ const CAPABILITY_ACTIVITY_INVOCATION_NAMESPACE: uuid::Uuid =
     uuid::uuid!("4e42ab0b-7d09-5f1c-8c87-73436fb53a61");
 
 fn capability_activity_invocation_id(key: &IdempotencyKey) -> InvocationId {
+    // `invocation_idempotency_key` includes the loop run id, surface version,
+    // requested capability id, and input ref, so each logical capability call
+    // gets a stable activity id without colliding with sibling calls in a run.
     InvocationId::from_uuid(uuid::Uuid::new_v5(
         &CAPABILITY_ACTIVITY_INVOCATION_NAMESPACE,
         key.as_str().as_bytes(),

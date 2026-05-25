@@ -208,7 +208,11 @@ impl DurableLoopHostMilestoneSink {
             } => {
                 let mut scope = scope;
                 scope.invocation_id = *invocation_id;
-                RuntimeEvent::capability_activity_requested(scope, capability_id.clone())
+                let mut event =
+                    RuntimeEvent::capability_activity_requested(scope, capability_id.clone());
+                event.parent_invocation_id =
+                    Some(InvocationId::from_uuid(milestone.run_id.as_uuid()));
+                event
             }
             LoopHostMilestoneKind::CapabilityCompleted {
                 invocation_id,
@@ -219,13 +223,16 @@ impl DurableLoopHostMilestoneSink {
             } => {
                 let mut scope = scope;
                 scope.invocation_id = *invocation_id;
-                RuntimeEvent::capability_activity_succeeded(
+                let mut event = RuntimeEvent::capability_activity_succeeded(
                     scope,
                     capability_id.clone(),
                     provider.clone(),
                     *runtime,
                     *output_bytes,
-                )
+                );
+                event.parent_invocation_id =
+                    Some(InvocationId::from_uuid(milestone.run_id.as_uuid()));
+                event
             }
             LoopHostMilestoneKind::CapabilityFailed {
                 invocation_id,
@@ -236,13 +243,16 @@ impl DurableLoopHostMilestoneSink {
             } => {
                 let mut scope = scope;
                 scope.invocation_id = *invocation_id;
-                RuntimeEvent::capability_activity_failed(
+                let mut event = RuntimeEvent::capability_activity_failed(
                     scope,
                     capability_id.clone(),
                     provider.clone(),
                     *runtime,
                     reason_kind.as_str(),
-                )
+                );
+                event.parent_invocation_id =
+                    Some(InvocationId::from_uuid(milestone.run_id.as_uuid()));
+                event
             }
             LoopHostMilestoneKind::AssistantReplyFinalized { .. } => {
                 RuntimeEvent::assistant_reply_finalized(
@@ -358,7 +368,7 @@ fn durable_event_error(error: EventError) -> AgentLoopHostError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_events::{InMemoryDurableEventLog, RuntimeEventKind};
+    use ironclaw_events::{EventStreamKey, InMemoryDurableEventLog, ReadScope, RuntimeEventKind};
     use ironclaw_host_api::{
         AgentId, ExtensionId, InvocationId, ProjectId, RuntimeKind, TenantId, ThreadId, UserId,
     };
@@ -458,6 +468,10 @@ mod tests {
 
         assert_eq!(event.kind, RuntimeEventKind::CapabilityActivityRequested);
         assert_eq!(event.scope.invocation_id, invocation_id);
+        assert_eq!(
+            event.parent_invocation_id,
+            Some(InvocationId::from_uuid(run_id.as_uuid()))
+        );
         assert_eq!(event.capability_id, capability_id);
         assert!(event.provider.is_none());
         assert!(event.runtime.is_none());
@@ -485,6 +499,10 @@ mod tests {
 
         assert_eq!(event.kind, RuntimeEventKind::CapabilityActivitySucceeded);
         assert_eq!(event.scope.invocation_id, invocation_id);
+        assert_eq!(
+            event.parent_invocation_id,
+            Some(InvocationId::from_uuid(run_id.as_uuid()))
+        );
         assert_eq!(event.capability_id, capability_id);
         assert_eq!(event.provider.as_ref(), Some(&provider));
         assert_eq!(event.runtime, Some(RuntimeKind::Wasm));
@@ -513,10 +531,70 @@ mod tests {
 
         assert_eq!(event.kind, RuntimeEventKind::CapabilityActivityFailed);
         assert_eq!(event.scope.invocation_id, invocation_id);
+        assert_eq!(
+            event.parent_invocation_id,
+            Some(InvocationId::from_uuid(run_id.as_uuid()))
+        );
         assert_eq!(event.capability_id, capability_id);
         assert_eq!(event.provider.as_ref(), Some(&provider));
         assert_eq!(event.runtime, Some(RuntimeKind::Script));
         assert_eq!(event.error_kind.as_deref(), Some("operation_failed"));
+    }
+
+    #[tokio::test]
+    async fn capability_milestones_with_scope_mismatch_are_not_appended() {
+        let capability_id = CapabilityId::new("demo.echo").unwrap();
+        let provider = ExtensionId::new("demo").unwrap();
+        let invocation_id = InvocationId::new();
+
+        for kind in [
+            LoopHostMilestoneKind::CapabilityInvoked {
+                invocation_id,
+                capability_id: capability_id.clone(),
+            },
+            LoopHostMilestoneKind::CapabilityCompleted {
+                invocation_id,
+                capability_id: capability_id.clone(),
+                provider: provider.clone(),
+                runtime: RuntimeKind::Wasm,
+                output_bytes: 42,
+            },
+            LoopHostMilestoneKind::CapabilityFailed {
+                invocation_id,
+                capability_id: capability_id.clone(),
+                provider: Some(provider.clone()),
+                runtime: Some(RuntimeKind::Script),
+                reason_kind: CapabilityFailureKind::OperationFailed,
+            },
+        ] {
+            let (mut milestone, thread_id, run_id) = fixture_milestone(kind);
+            let sink = projector_for(thread_id, run_id);
+            let valid_scope = sink
+                .resource_scope(&milestone)
+                .expect("fixture milestone matches sink scope");
+            milestone.scope.tenant_id = TenantId::new("tenant-foreign").unwrap();
+
+            let error = sink
+                .publish_loop_milestone(milestone)
+                .await
+                .expect_err("scope mismatch must reject capability milestone");
+            assert_eq!(error.kind, AgentLoopHostErrorKind::ScopeMismatch);
+
+            let replay = sink
+                .event_log()
+                .read_after_cursor(
+                    &EventStreamKey::from_scope(&valid_scope),
+                    &ReadScope::any(),
+                    None,
+                    10,
+                )
+                .await
+                .expect("read event log after rejected publish");
+            assert!(
+                replay.entries.is_empty(),
+                "scope-mismatched capability milestone must not append an event"
+            );
+        }
     }
 
     #[test]

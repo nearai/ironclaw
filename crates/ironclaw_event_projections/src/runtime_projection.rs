@@ -171,6 +171,7 @@ fn apply_capability_activity_event(
         .entry(event.scope.invocation_id)
         .or_insert_with(|| CapabilityActivityProjection {
             invocation_id: event.scope.invocation_id,
+            run_id: event.parent_invocation_id,
             capability_id: event.capability_id.clone(),
             thread_id: event.scope.thread_id.clone(),
             status,
@@ -184,6 +185,9 @@ fn apply_capability_activity_event(
         });
 
     activity.status = status;
+    if event.parent_invocation_id.is_some() {
+        activity.run_id = event.parent_invocation_id;
+    }
     activity.capability_id = event.capability_id.clone();
     activity.thread_id = event.scope.thread_id.clone();
     if event.provider.is_some() {

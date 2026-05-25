@@ -1,6 +1,6 @@
 use chrono::Utc;
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, ProcessId, ResourceScope, RuntimeKind, Timestamp,
+    CapabilityId, ExtensionId, InvocationId, ProcessId, ResourceScope, RuntimeKind, Timestamp,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -82,6 +82,8 @@ pub struct RuntimeEvent {
     pub timestamp: Timestamp,
     pub kind: RuntimeEventKind,
     pub scope: ResourceScope,
+    /// Parent run invocation id when this event represents nested activity.
+    pub parent_invocation_id: Option<InvocationId>,
     pub capability_id: CapabilityId,
     pub provider: Option<ExtensionId>,
     pub runtime: Option<RuntimeKind>,
@@ -114,6 +116,8 @@ struct RuntimeEventWire {
     timestamp: Timestamp,
     kind: RuntimeEventKind,
     scope: ResourceScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent_invocation_id: Option<InvocationId>,
     capability_id: CapabilityId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     provider: Option<ExtensionId>,
@@ -153,6 +157,7 @@ impl Serialize for RuntimeEvent {
             timestamp: self.timestamp,
             kind: self.kind,
             scope: self.scope.clone(),
+            parent_invocation_id: self.parent_invocation_id,
             capability_id: self.capability_id.clone(),
             provider: self.provider.clone(),
             runtime: self.runtime,
@@ -184,6 +189,7 @@ impl<'de> Deserialize<'de> for RuntimeEvent {
             timestamp: wire.timestamp,
             kind: wire.kind,
             scope: wire.scope,
+            parent_invocation_id: wire.parent_invocation_id,
             capability_id: wire.capability_id,
             provider: wire.provider,
             runtime: wire.runtime,
@@ -494,6 +500,7 @@ impl RuntimeEvent {
             timestamp: Utc::now(),
             kind: payload.kind,
             scope: payload.scope,
+            parent_invocation_id: None,
             capability_id: payload.capability_id,
             provider: payload.provider,
             runtime: payload.runtime,
