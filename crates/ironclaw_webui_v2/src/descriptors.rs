@@ -281,8 +281,14 @@ fn read_rate_limit() -> RateLimitPolicy {
 }
 
 fn stream_rate_limit() -> RateLimitPolicy {
-    // SSE sessions are long-lived; cap concurrent opens hard.
-    rate_limit_per_caller(12, 60)
+    // SSE sessions are long-lived; the per-tenant/user concurrency
+    // cap (3 streams, enforced in `WebUiV2State::SseCapacity`) does
+    // the real bounding. The request-rate window here is just for
+    // burst protection against reconnect storms — bumped to 60/60s
+    // (parity with the mutation budget) so a browser doing
+    // exponential-backoff reconnects after a transient outage does
+    // not lock itself out before the concurrency cap recycles.
+    rate_limit_per_caller(60, 60)
 }
 
 fn rate_limit_per_caller(max: u32, window_secs: u32) -> RateLimitPolicy {

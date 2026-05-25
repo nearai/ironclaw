@@ -1,12 +1,28 @@
 import { React } from "../../../lib/html.js";
 import { openEventStream } from "../../../lib/api.js";
 
-// v2 SSE emits `WebChatV2EventFrame` JSON on the default `message`
-// channel. Each frame carries `{ cursor, type, ...payload }` and
-// the SSE `id:` is the JSON-serialized projection cursor so the
-// browser can resume from the last delivered event via the
-// standard `Last-Event-ID` reconnect header (handled automatically
-// by the `EventSource` API).
+// v2 SSE emits `WebChatV2EventFrame` JSON, tagged with a typed
+// event name (`event: accepted`, `event: final_reply`, etc.) so
+// each frame routes to its `addEventListener("<name>", …)` handler.
+// `onmessage` would only catch frames without an `event:` field,
+// which the Rust handler never emits — so the SPA must register a
+// listener for every event name it cares about. The names below
+// mirror `WebChatV2Event::event_name()` in
+// `crates/ironclaw_webui_v2/src/schema.rs`.
+const V2_EVENT_NAMES = [
+  "accepted",
+  "running",
+  "capability_progress",
+  "gate",
+  "auth_required",
+  "final_reply",
+  "cancelled",
+  "failed",
+  "projection_snapshot",
+  "projection_update",
+  "keep_alive",
+  "error",
+];
 export function useSSE({ threadId, onEvent, enabled }) {
   const [status, setStatus] = React.useState("idle");
   const onEventRef = React.useRef(onEvent);
@@ -45,7 +61,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
         reconnectTimer = setTimeout(connect, delay);
       };
 
-      es.onmessage = (event) => {
+      const dispatchFrame = (event, fallbackType) => {
         let frame = null;
         try {
           frame = JSON.parse(event.data);
@@ -54,11 +70,25 @@ export function useSSE({ threadId, onEvent, enabled }) {
         }
         if (!frame || typeof frame !== "object") return;
         onEventRef.current?.({
-          type: frame.type,
+          // The frame's own `type` field is the canonical source;
+          // `event.type` (from the SSE `event:` line) is the
+          // fallback for forwards-compatibility if Rust adds an
+          // event without setting `type` in the body.
+          type: frame.type || fallbackType,
           frame,
           lastEventId: event.lastEventId || null,
         });
       };
+
+      // Cover anything emitted without an `event:` field — defensive
+      // only; the Rust handler always tags its frames today.
+      es.onmessage = (event) => dispatchFrame(event, "message");
+
+      // The Rust handler tags each frame with `event: <name>` so the
+      // browser routes it through the named listener below.
+      for (const name of V2_EVENT_NAMES) {
+        es.addEventListener(name, (event) => dispatchFrame(event, name));
+      }
     }
 
     function disconnectForHiddenTab() {
