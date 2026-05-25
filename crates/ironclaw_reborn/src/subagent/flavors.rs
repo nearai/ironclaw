@@ -17,13 +17,6 @@ impl SubagentFlavorId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SubagentBudget {
-    pub iteration_limit: u32,
-    pub max_total_tokens: Option<u64>,
-    pub max_cost_micro_usd: Option<u64>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubagentToolId {
@@ -46,27 +39,11 @@ impl SubagentToolId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SubagentModelProfile {
-    Default,
-}
-
-impl SubagentModelProfile {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Default => "default",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SubagentFlavor {
     pub id: SubagentFlavorId,
     pub direction: DirectionId,
     pub tool_allowlist: &'static [SubagentToolId],
-    pub model: SubagentModelProfile,
-    pub budget: SubagentBudget,
     pub allow_nesting: bool,
 }
 
@@ -89,24 +66,12 @@ pub const BUILTIN_SUBAGENT_FLAVORS: &[SubagentFlavor] = &[
         id: SubagentFlavorId::General,
         direction: DirectionId::General,
         tool_allowlist: GENERAL_TOOLS,
-        model: SubagentModelProfile::Default,
-        budget: SubagentBudget {
-            iteration_limit: 16,
-            max_total_tokens: Some(200_000),
-            max_cost_micro_usd: Some(500_000),
-        },
         allow_nesting: false,
     },
     SubagentFlavor {
         id: SubagentFlavorId::Researcher,
         direction: DirectionId::Researcher,
         tool_allowlist: RESEARCHER_TOOLS,
-        model: SubagentModelProfile::Default,
-        budget: SubagentBudget {
-            iteration_limit: 12,
-            max_total_tokens: Some(150_000),
-            max_cost_micro_usd: Some(300_000),
-        },
         allow_nesting: false,
     },
 ];
@@ -153,15 +118,6 @@ mod tests {
                 .iter()
                 .flat_map(|flavor| flavor.tool_allowlist.iter())
                 .all(|tool| tool.as_str() != "spawn_subagent")
-        );
-    }
-
-    #[test]
-    fn flavor_model_profiles_are_typed() {
-        assert!(
-            BUILTIN_SUBAGENT_FLAVORS
-                .iter()
-                .all(|flavor| flavor.model == SubagentModelProfile::Default)
         );
     }
 }

@@ -186,14 +186,14 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                         ..
                     } => {
                         push_call_signature_once(&mut state, &mut signatures, &call)?;
-                        let safe_summary = sanitized_strategy_summary(safe_summary)?.into_inner();
-                        let result = CapabilityResultMessage {
+                        append_spawned_child_result(
+                            ctx.host,
+                            &mut state,
+                            &call,
                             result_ref,
                             safe_summary,
-                            terminate_hint: false,
-                        };
-                        append_capability_result_ref(ctx.host, &call, &result).await?;
-                        push_completed_result(&mut state, result);
+                        )
+                        .await?;
                     }
                     other => pending_outcomes.push((call, other)),
                 }
@@ -409,14 +409,7 @@ impl CapabilityStage {
         result_ref: LoopResultRef,
         safe_summary: String,
     ) -> Result<BatchStep, AgentLoopExecutorError> {
-        let safe_summary = sanitized_strategy_summary(safe_summary)?.into_inner();
-        let result = CapabilityResultMessage {
-            result_ref,
-            safe_summary,
-            terminate_hint: false,
-        };
-        append_capability_result_ref(ctx.host, &call, &result).await?;
-        push_completed_result(&mut state, result);
+        append_spawned_child_result(ctx.host, &mut state, &call, result_ref, safe_summary).await?;
         Ok(BatchStep::Continue(Box::new(state)))
     }
 
@@ -574,4 +567,22 @@ impl CapabilityStage {
             Some(checked.checkpoint_id),
         )?))
     }
+}
+
+async fn append_spawned_child_result(
+    host: &(dyn ironclaw_turns::run_profile::AgentLoopDriverHost + Send + Sync),
+    state: &mut LoopExecutionState,
+    call: &CapabilityCallCandidate,
+    result_ref: LoopResultRef,
+    safe_summary: String,
+) -> Result<(), AgentLoopExecutorError> {
+    let safe_summary = sanitized_strategy_summary(safe_summary)?.into_inner();
+    let result = CapabilityResultMessage {
+        result_ref,
+        safe_summary,
+        terminate_hint: false,
+    };
+    append_capability_result_ref(host, call, &result).await?;
+    push_completed_result(state, result);
+    Ok(())
 }
