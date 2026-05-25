@@ -200,7 +200,7 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
         &self,
         request: ResolveApprovalInteractionRequest,
     ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
-        let run_id = request.run_id.unwrap_or(self.run_id);
+        let run_id = request.run_id_hint.unwrap_or(self.run_id);
         self.resolutions.lock().expect("lock").push(request);
         Ok(
             match self
@@ -528,7 +528,7 @@ async fn approval_resolution_payload_routes_through_approval_interaction_service
     let resolutions = approval_service.resolutions();
     assert_eq!(resolutions.len(), 1);
     assert_eq!(resolutions[0].gate_ref, gate_ref);
-    assert_eq!(resolutions[0].run_id, None);
+    assert_eq!(resolutions[0].run_id_hint, None);
     assert_eq!(
         resolutions[0].decision,
         ApprovalInteractionDecision::ApproveOnce

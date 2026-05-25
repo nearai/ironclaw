@@ -5,7 +5,7 @@ use ironclaw_host_api::{InvocationId, ResourceScope};
 use ironclaw_run_state::{ApprovalRequestStore, RunStateError, RunStateStore, RunStatus};
 use ironclaw_turns::TurnRunId;
 
-use super::{ApprovalInteractionScope, PendingApprovalGateRecord, approval_gate_ref};
+use super::{ApprovalGateRecord, ApprovalInteractionScope, approval_gate_ref};
 use crate::error::ProductWorkflowError;
 
 #[async_trait]
@@ -13,7 +13,7 @@ pub trait ApprovalInteractionReadModel: Send + Sync {
     async fn approval_gates(
         &self,
         scope: &ApprovalInteractionScope,
-    ) -> Result<Vec<PendingApprovalGateRecord>, ProductWorkflowError>;
+    ) -> Result<Vec<ApprovalGateRecord>, ProductWorkflowError>;
 }
 
 /// Read-model backed directly by canonical run-state and approval records.
@@ -39,7 +39,7 @@ impl ApprovalInteractionReadModel for RunStateApprovalInteractionReadModel {
     async fn approval_gates(
         &self,
         scope: &ApprovalInteractionScope,
-    ) -> Result<Vec<PendingApprovalGateRecord>, ProductWorkflowError> {
+    ) -> Result<Vec<ApprovalGateRecord>, ProductWorkflowError> {
         let owner_scope = resource_scope_for_interaction(scope);
         let approvals = self
             .approval_requests
@@ -72,7 +72,7 @@ impl ApprovalInteractionReadModel for RunStateApprovalInteractionReadModel {
             if approval.scope != run.scope {
                 continue;
             }
-            gates.push(PendingApprovalGateRecord::with_status(
+            gates.push(ApprovalGateRecord::with_status(
                 approval.scope.clone(),
                 TurnRunId::from_uuid(run.invocation_id.as_uuid()),
                 approval_gate_ref(request_id)?,

@@ -427,7 +427,7 @@ async fn dispatch_approval_resolution(
         .resolve(ResolveApprovalInteractionRequest {
             scope,
             actor,
-            run_id: None,
+            run_id_hint: None,
             gate_ref,
             decision,
             idempotency_key,

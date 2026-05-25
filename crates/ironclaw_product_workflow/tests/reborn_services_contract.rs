@@ -323,7 +323,7 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
         request: ResolveApprovalInteractionRequest,
     ) -> Result<ResolveApprovalInteractionResponse, ironclaw_product_workflow::ProductWorkflowError>
     {
-        let run_id = request.run_id.expect("webui passes run_id");
+        let run_id = request.run_id_hint.expect("webui passes run_id");
         self.resolutions.lock().expect("lock").push(request);
         Ok(ResolveApprovalInteractionResponse::Approved(
             ResumeTurnResponse {

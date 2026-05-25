@@ -13,9 +13,9 @@ use super::gate_ref::{
     approval_reply_binding_ref, approval_request_id_from_gate_ref, approval_source_binding_ref,
 };
 use super::{
-    ApprovalInteractionDecision, ApprovalInteractionReadModel, ApprovalInteractionRejectionKind,
-    ApprovalInteractionScope, ApprovalLeaseTermsProvider, ApprovalResolutionPort,
-    ListPendingApprovalsRequest, ListPendingApprovalsResponse, PendingApprovalGateRecord,
+    ApprovalGateRecord, ApprovalInteractionDecision, ApprovalInteractionReadModel,
+    ApprovalInteractionRejectionKind, ApprovalInteractionScope, ApprovalLeaseTermsProvider,
+    ApprovalResolutionPort, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
     ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse, approval_rejected,
 };
 use crate::error::ProductWorkflowError;
@@ -82,16 +82,16 @@ impl DefaultApprovalInteractionService {
     async fn find_gate(
         &self,
         scope: &ApprovalInteractionScope,
-        run_id: Option<TurnRunId>,
+        run_id_hint: Option<TurnRunId>,
         gate_ref: &GateRef,
-    ) -> Result<PendingApprovalGateRecord, ProductWorkflowError> {
+    ) -> Result<ApprovalGateRecord, ProductWorkflowError> {
         let approval_request_id = approval_request_id_from_gate_ref(gate_ref)?;
         self.read_model
             .approval_gates(scope)
             .await?
             .into_iter()
             .find(|gate| {
-                run_id.is_none_or(|run_id| gate.run_id() == run_id)
+                run_id_hint.is_none_or(|run_id| gate.run_id() == run_id)
                     && gate.gate_ref() == gate_ref
                     && gate.request().id == approval_request_id
                     && gate.scope() == scope
@@ -130,7 +130,7 @@ impl DefaultApprovalInteractionService {
     async fn approve_gate(
         &self,
         request: ResolveApprovalInteractionRequest,
-        gate: PendingApprovalGateRecord,
+        gate: ApprovalGateRecord,
         run_id: TurnRunId,
     ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
         let approve_dispatch = match gate.request().action.as_ref() {
@@ -142,25 +142,35 @@ impl DefaultApprovalInteractionService {
                 ));
             }
         };
-        match gate.status() {
-            ApprovalStatus::Pending => {
-                let mut terms = self.lease_terms_provider.lease_terms_for(&gate).await?;
-                terms.issued_by = Principal::User(request.actor.user_id.clone());
-                if approve_dispatch {
-                    self.resolver
-                        .approve_dispatch(gate.resource_scope(), gate.request().id, terms)
-                        .await?;
-                } else {
-                    self.resolver
-                        .approve_spawn(gate.resource_scope(), gate.request().id, terms)
-                        .await?;
-                }
+        let status = gate.status();
+        if matches!(status, ApprovalStatus::Denied | ApprovalStatus::Expired) {
+            return Err(approval_rejected(
+                ApprovalInteractionRejectionKind::StaleGate,
+            ));
+        }
+        let mut terms = self.lease_terms_provider.lease_terms_for(&gate).await?;
+        terms.issued_by = Principal::User(request.actor.user_id.clone());
+        let already_approved = status == ApprovalStatus::Approved;
+        match (already_approved, approve_dispatch) {
+            (false, true) => {
+                self.resolver
+                    .approve_dispatch(gate.resource_scope(), gate.request().id, terms)
+                    .await?;
             }
-            ApprovalStatus::Approved => {}
-            ApprovalStatus::Denied | ApprovalStatus::Expired => {
-                return Err(approval_rejected(
-                    ApprovalInteractionRejectionKind::StaleGate,
-                ));
+            (false, false) => {
+                self.resolver
+                    .approve_spawn(gate.resource_scope(), gate.request().id, terms)
+                    .await?;
+            }
+            (true, true) => {
+                self.resolver
+                    .ensure_dispatch_lease(gate.resource_scope(), gate.request().id, terms)
+                    .await?;
+            }
+            (true, false) => {
+                self.resolver
+                    .ensure_spawn_lease(gate.resource_scope(), gate.request().id, terms)
+                    .await?;
             }
         }
 
@@ -184,7 +194,7 @@ impl DefaultApprovalInteractionService {
     async fn deny_gate(
         &self,
         request: ResolveApprovalInteractionRequest,
-        gate: PendingApprovalGateRecord,
+        gate: ApprovalGateRecord,
         run_id: TurnRunId,
     ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
         match gate.status() {
@@ -251,9 +261,9 @@ impl ApprovalInteractionService for DefaultApprovalInteractionService {
     ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
         let scope = ApprovalInteractionScope::from_turn(&request.scope, &request.actor);
         let gate = self
-            .find_gate(&scope, request.run_id, &request.gate_ref)
+            .find_gate(&scope, request.run_id_hint, &request.gate_ref)
             .await?;
-        let run_id = request.run_id.unwrap_or_else(|| gate.run_id());
+        let run_id = request.run_id_hint.unwrap_or_else(|| gate.run_id());
         self.assert_turn_is_parked_on_gate(&request, run_id).await?;
         match request.decision {
             ApprovalInteractionDecision::ApproveOnce => {

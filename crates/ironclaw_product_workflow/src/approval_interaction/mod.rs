@@ -17,10 +17,10 @@ pub use resolver::{ApprovalLeaseTermsProvider, ApprovalResolutionPort, ApprovalR
 pub(crate) use service::RejectingApprovalInteractionService;
 pub use service::{ApprovalInteractionService, DefaultApprovalInteractionService};
 pub use types::{
-    ApprovalInteractionActionView, ApprovalInteractionDecision, ApprovalInteractionRejectionKind,
-    ApprovalInteractionScope, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
-    PendingApprovalGateRecord, PendingApprovalInteractionView, ResolveApprovalInteractionRequest,
-    ResolveApprovalInteractionResponse,
+    ApprovalGateRecord, ApprovalInteractionActionView, ApprovalInteractionDecision,
+    ApprovalInteractionRejectionKind, ApprovalInteractionScope, ListPendingApprovalsRequest,
+    ListPendingApprovalsResponse, PendingApprovalInteractionView,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
 };
 
 use crate::error::ProductWorkflowError;

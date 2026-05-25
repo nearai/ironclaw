@@ -138,7 +138,7 @@ pub struct PendingApprovalInteractionView {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct PendingApprovalGateRecord {
+pub struct ApprovalGateRecord {
     scope: ApprovalInteractionScope,
     resource_scope: ResourceScope,
     run_id: TurnRunId,
@@ -147,7 +147,7 @@ pub struct PendingApprovalGateRecord {
     status: ApprovalStatus,
 }
 
-impl PendingApprovalGateRecord {
+impl ApprovalGateRecord {
     pub fn new(
         resource_scope: ResourceScope,
         run_id: TurnRunId,
@@ -253,7 +253,7 @@ pub enum ApprovalInteractionDecision {
 pub struct ResolveApprovalInteractionRequest {
     pub scope: TurnScope,
     pub actor: TurnActor,
-    pub run_id: Option<TurnRunId>,
+    pub run_id_hint: Option<TurnRunId>,
     pub gate_ref: GateRef,
     pub decision: ApprovalInteractionDecision,
     pub idempotency_key: IdempotencyKey,

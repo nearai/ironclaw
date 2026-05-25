@@ -581,12 +581,7 @@ impl RebornServicesApi for RebornServices {
                     // no approval-policy port. Fail loud rather than silently
                     // downgrade.
                     if always {
-                        return Err(RebornServicesError::from_status_kind(
-                            RebornServicesErrorCode::Unavailable,
-                            RebornServicesErrorKind::BlockedApproval,
-                            503,
-                            false,
-                        ));
+                        return Err(persistent_approval_unavailable());
                     }
                     ApprovalInteractionDecision::ApproveOnce
                 }
@@ -606,7 +601,7 @@ impl RebornServicesApi for RebornServices {
                 .resolve(ResolveApprovalInteractionRequest {
                     scope,
                     actor,
-                    run_id: Some(run_id),
+                    run_id_hint: Some(run_id),
                     gate_ref,
                     decision,
                     idempotency_key: client_action_id,
@@ -628,12 +623,7 @@ impl RebornServicesApi for RebornServices {
                 // facade has only one-shot `resume_turn` and no approval-policy
                 // port. Fail loud rather than silently downgrade.
                 if always {
-                    return Err(RebornServicesError::from_status_kind(
-                        RebornServicesErrorCode::Unavailable,
-                        RebornServicesErrorKind::BlockedApproval,
-                        503,
-                        false,
-                    ));
+                    return Err(persistent_approval_unavailable());
                 }
                 let binding_id = webui_gate_binding_id(&scope, &gate_ref_string(&gate_ref));
                 let response = self
@@ -1244,6 +1234,15 @@ fn webui_gate_binding_id(scope: &TurnScope, gate_ref: &str) -> String {
 
 fn gate_ref_string(gate_ref: &ironclaw_turns::GateRef) -> String {
     gate_ref.as_str().to_string()
+}
+
+fn persistent_approval_unavailable() -> RebornServicesError {
+    RebornServicesError::from_status_kind(
+        RebornServicesErrorCode::Unavailable,
+        RebornServicesErrorKind::BlockedApproval,
+        503,
+        false,
+    )
 }
 
 fn segment(name: &str, value: &str) -> String {

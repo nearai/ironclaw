@@ -48,13 +48,13 @@ pub use action::{
     ProductActionId, ProductCommandName, ProductInboundAction, SourceBindingKey,
 };
 pub use approval_interaction::{
-    ApprovalInteractionActionView, ApprovalInteractionDecision, ApprovalInteractionReadModel,
-    ApprovalInteractionRejectionKind, ApprovalInteractionScope, ApprovalInteractionService,
-    ApprovalLeaseTermsProvider, ApprovalResolutionPort, ApprovalResolverPort,
-    DefaultApprovalInteractionService, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
-    PendingApprovalGateRecord, PendingApprovalInteractionView, ResolveApprovalInteractionRequest,
-    ResolveApprovalInteractionResponse, RunStateApprovalInteractionReadModel, approval_gate_ref,
-    is_approval_gate_ref,
+    ApprovalGateRecord, ApprovalInteractionActionView, ApprovalInteractionDecision,
+    ApprovalInteractionReadModel, ApprovalInteractionRejectionKind, ApprovalInteractionScope,
+    ApprovalInteractionService, ApprovalLeaseTermsProvider, ApprovalResolutionPort,
+    ApprovalResolverPort, DefaultApprovalInteractionService, ListPendingApprovalsRequest,
+    ListPendingApprovalsResponse, PendingApprovalInteractionView,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    RunStateApprovalInteractionReadModel, approval_gate_ref, is_approval_gate_ref,
 };
 /// Concrete turn-gate resume dispatcher used by the Reborn composition crate to
 /// bridge product-auth continuations into the workflow-owned turn boundary.

@@ -2,19 +2,19 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_approvals::{ApprovalResolutionError, ApprovalResolver, DenyApproval, LeaseApproval};
-use ironclaw_authorization::CapabilityLeaseStore;
+use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStore};
 use ironclaw_events::AuditSink;
-use ironclaw_host_api::{ApprovalRequestId, ResourceScope};
-use ironclaw_run_state::{ApprovalRequestStore, RunStateError};
+use ironclaw_host_api::{Action, ApprovalRequestId, CapabilityId, ResourceScope};
+use ironclaw_run_state::{ApprovalRequestStore, ApprovalStatus, RunStateError};
 
-use super::{ApprovalInteractionRejectionKind, PendingApprovalGateRecord, approval_rejected};
+use super::{ApprovalGateRecord, ApprovalInteractionRejectionKind, approval_rejected};
 use crate::error::ProductWorkflowError;
 
 #[async_trait]
 pub trait ApprovalLeaseTermsProvider: Send + Sync {
     async fn lease_terms_for(
         &self,
-        gate: &PendingApprovalGateRecord,
+        gate: &ApprovalGateRecord,
     ) -> Result<LeaseApproval, ProductWorkflowError>;
 }
 
@@ -28,6 +28,20 @@ pub trait ApprovalResolutionPort: Send + Sync {
     ) -> Result<(), ProductWorkflowError>;
 
     async fn approve_spawn(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+        approval: LeaseApproval,
+    ) -> Result<(), ProductWorkflowError>;
+
+    async fn ensure_dispatch_lease(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+        approval: LeaseApproval,
+    ) -> Result<(), ProductWorkflowError>;
+
+    async fn ensure_spawn_lease(
         &self,
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
@@ -72,6 +86,46 @@ impl ApprovalResolverPort {
         }
         resolver
     }
+
+    async fn matching_lease_exists(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+        expected_action: ApprovedApprovalAction,
+    ) -> Result<bool, ProductWorkflowError> {
+        let record = self
+            .approvals
+            .get(scope, request_id)
+            .await
+            .map_err(|error| {
+                map_approval_resolution_error(ApprovalResolutionError::RunState(error))
+            })?
+            .ok_or_else(|| approval_rejected(ApprovalInteractionRejectionKind::MissingGate))?;
+        if record.status != ApprovalStatus::Approved {
+            return Err(approval_rejected(
+                ApprovalInteractionRejectionKind::StaleGate,
+            ));
+        }
+        let capability = capability_for_action(record.request.action.as_ref(), expected_action)?;
+        let Some(fingerprint) = record.request.invocation_fingerprint.as_ref() else {
+            return Err(approval_rejected(
+                ApprovalInteractionRejectionKind::StaleGate,
+            ));
+        };
+        Ok(self
+            .leases
+            .leases_for_scope(scope)
+            .await
+            .into_iter()
+            .any(|lease| {
+                matches!(
+                    lease.status,
+                    CapabilityLeaseStatus::Active | CapabilityLeaseStatus::Claimed
+                ) && lease.grant.capability == *capability
+                    && lease.grant.grantee == record.request.requested_by
+                    && lease.invocation_fingerprint.as_ref() == Some(fingerprint)
+            }))
+    }
 }
 
 #[async_trait]
@@ -102,6 +156,44 @@ impl ApprovalResolutionPort for ApprovalResolverPort {
             .map_err(map_approval_resolution_error)
     }
 
+    async fn ensure_dispatch_lease(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+        approval: LeaseApproval,
+    ) -> Result<(), ProductWorkflowError> {
+        if self
+            .matching_lease_exists(scope, request_id, ApprovedApprovalAction::Dispatch)
+            .await?
+        {
+            return Ok(());
+        }
+        self.resolver()
+            .retry_lease_issue_for_dispatch(scope, request_id, approval)
+            .await
+            .map(|_| ())
+            .map_err(map_approval_resolution_error)
+    }
+
+    async fn ensure_spawn_lease(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+        approval: LeaseApproval,
+    ) -> Result<(), ProductWorkflowError> {
+        if self
+            .matching_lease_exists(scope, request_id, ApprovedApprovalAction::Spawn)
+            .await?
+        {
+            return Ok(());
+        }
+        self.resolver()
+            .retry_lease_issue_for_spawn(scope, request_id, approval)
+            .await
+            .map(|_| ())
+            .map_err(map_approval_resolution_error)
+    }
+
     async fn deny(
         &self,
         scope: &ResourceScope,
@@ -113,6 +205,27 @@ impl ApprovalResolutionPort for ApprovalResolverPort {
             .await
             .map(|_| ())
             .map_err(map_approval_resolution_error)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApprovedApprovalAction {
+    Dispatch,
+    Spawn,
+}
+
+fn capability_for_action(
+    action: &Action,
+    expected_action: ApprovedApprovalAction,
+) -> Result<&CapabilityId, ProductWorkflowError> {
+    match (action, expected_action) {
+        (Action::Dispatch { capability, .. }, ApprovedApprovalAction::Dispatch)
+        | (Action::SpawnCapability { capability, .. }, ApprovedApprovalAction::Spawn) => {
+            Ok(capability)
+        }
+        _ => Err(approval_rejected(
+            ApprovalInteractionRejectionKind::UnsupportedAction,
+        )),
     }
 }
 
