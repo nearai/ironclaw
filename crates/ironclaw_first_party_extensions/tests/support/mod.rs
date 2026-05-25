@@ -6,9 +6,8 @@ use std::{
 };
 
 use ironclaw_auth::{
-    AuthProductScope, AuthSurface, CredentialAccountLabel, CredentialAccountService,
-    CredentialAccountStatus, CredentialOwnership, InMemoryAuthProductServices,
-    NewCredentialAccount, ProviderScope,
+    AuthProductScope, AuthSurface, CredentialAccountLabel, CredentialAccountStatus,
+    CredentialOwnership, InMemoryAuthProductServices, NewCredentialAccount, ProviderScope,
 };
 use ironclaw_first_party_extensions::{
     GsuiteDispatchError, GsuiteDispatchRequest, GsuiteExecutor, google_provider_id,
@@ -181,19 +180,22 @@ pub(crate) async fn add_google_account(
     status: CredentialAccountStatus,
     include_access_secret: bool,
 ) {
-    auth.create_account(NewCredentialAccount {
-        scope: auth_scope(scope),
-        provider: google_provider_id().unwrap(),
-        label: CredentialAccountLabel::new(label).unwrap(),
-        status,
-        ownership: CredentialOwnership::UserReusable,
-        owner_extension: None,
-        granted_extensions: Vec::new(),
-        access_secret: include_access_secret
-            .then(|| SecretHandle::new("google-access-token").unwrap()),
-        refresh_secret: None,
-        scopes,
-    })
+    ironclaw_auth::CredentialAccountService::create_account(
+        auth,
+        NewCredentialAccount {
+            scope: auth_scope(scope),
+            provider: google_provider_id().unwrap(),
+            label: CredentialAccountLabel::new(label).unwrap(),
+            status,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: include_access_secret
+                .then(|| SecretHandle::new("google-access-token").unwrap()),
+            refresh_secret: None,
+            scopes,
+        },
+    )
     .await
     .unwrap();
 }

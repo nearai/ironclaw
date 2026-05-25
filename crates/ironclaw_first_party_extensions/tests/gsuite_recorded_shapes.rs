@@ -76,7 +76,15 @@ async fn calendar_read_handlers_use_recorded_google_api_shapes() {
     .await;
 
     assert_eq!(calendars["body"]["items"][0]["id"], "primary");
+    assert_eq!(calendars["body"]["items"][1]["id"], "team@example.com");
     assert_eq!(events["body"]["nextPageToken"], "CiAKGjBpNDd2Nm");
+    assert_eq!(
+        events["body"]["items"]
+            .as_array()
+            .expect("Calendar events response items is an array")
+            .len(),
+        2
+    );
     assert_eq!(event["body"]["id"], "evt-standup-001");
     assert_eq!(
         free_busy["body"]["calendars"]["primary"]["busy"][0]["start"],
@@ -182,17 +190,51 @@ async fn calendar_write_handlers_use_recorded_google_api_shapes() {
     assert_eq!(requests[4].method, NetworkMethod::Patch);
     assert_eq!(requests[5].method, NetworkMethod::Patch);
     assert_eq!(
-        serde_json::from_slice::<Value>(&requests[0].body).unwrap()["summary"],
+        serde_json::from_slice::<Value>(&requests[0].body)
+            .expect("parse Calendar create request body")["summary"],
         "Project review"
     );
     assert_eq!(
-        serde_json::from_slice::<Value>(&requests[4].body).unwrap()["attendees"][0]["email"],
+        serde_json::from_slice::<Value>(&requests[4].body)
+            .expect("parse Calendar attendees request body")["attendees"][0]["email"],
         "ada@example.com"
     );
     assert_eq!(
-        serde_json::from_slice::<Value>(&requests[5].body).unwrap()["reminders"]["overrides"][0]["minutes"],
+        serde_json::from_slice::<Value>(&requests[5].body)
+            .expect("parse Calendar reminders request body")["reminders"]["overrides"][0]["minutes"],
         10
     );
+}
+
+#[tokio::test]
+async fn calendar_handler_preserves_insufficient_scope_response() {
+    let scope = scope();
+    let auth =
+        auth_with_google_account(&scope, vec![provider_scope(GOOGLE_CALENDAR_READONLY_SCOPE)])
+            .await;
+    let egress = Arc::new(RecordingEgress::with_responses(vec![
+        RecordingEgress::json_status(403, fixture("calendar", "insufficient_scope.json")),
+    ]));
+
+    let output = dispatch_ok(
+        auth,
+        scope,
+        CALENDAR_LIST_CALENDARS_CAPABILITY_ID,
+        json!({}),
+        egress.clone(),
+    )
+    .await;
+
+    assert_eq!(output["status"], 403);
+    assert_eq!(output["body"]["error"]["status"], "PERMISSION_DENIED");
+    assert_eq!(
+        output["body"]["error"]["details"][0]["reason"],
+        "insufficient_scope"
+    );
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, NetworkMethod::Get);
+    assert!(requests[0].url.ends_with("/users/me/calendarList"));
 }
 
 #[tokio::test]
@@ -291,11 +333,18 @@ async fn gmail_handlers_use_recorded_google_api_shapes() {
             .ends_with("/users/me/messages/msg-001/trash")
     );
     assert_eq!(
-        serde_json::from_slice::<Value>(&requests[2].body).unwrap()["raw"],
+        serde_json::from_slice::<Value>(&requests[2].body).expect("parse Gmail send request body")
+            ["raw"],
         "base64url-rfc822"
     );
     assert_eq!(
-        serde_json::from_slice::<Value>(&requests[3].body).unwrap()["message"]["raw"],
+        serde_json::from_slice::<Value>(&requests[3].body).expect("parse Gmail draft request body")
+            ["message"]["raw"],
         "base64url-rfc822"
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&requests[4].body).expect("parse Gmail reply request body")
+            ["threadId"],
+        "thr-001"
     );
 }
