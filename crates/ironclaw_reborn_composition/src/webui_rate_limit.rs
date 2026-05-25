@@ -12,11 +12,11 @@
 //!
 //! - **Sliding window per descriptor-declared bucket** — authenticated
 //!   routes use `(route, caller)`, while public callback-style routes
-//!   use route/global buckets that do not need caller identity.
+//!   use route/global/IP buckets that do not need caller identity.
 //! - **Supported scopes:** `PerCaller` for authenticated routes and
-//!   `PerRoute` / `Global` for public callback-style routes that have
-//!   no authenticated caller extension yet. `PerTenant` and `PerIp`
-//!   remain explicit `Err` at composition time so a future policy
+//!   `PerRoute` / `PerIp` / `Global` for public callback-style routes
+//!   that have no authenticated caller extension yet. `PerTenant`
+//!   remains an explicit `Err` at composition time so a future policy
 //!   change cannot silently degrade enforcement.
 //! - **Sharded LRU eviction** — counters live in 16 independent
 //!   `Mutex<LruCache>` shards picked by a hash of the resolved bucket key.
@@ -36,7 +36,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Request, State};
-use axum::http::{Method, StatusCode};
+use axum::http::{HeaderMap, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use ironclaw_host_api::ingress::{IngressRouteDescriptor, RateLimitPolicy, RateLimitScope};
@@ -74,7 +74,7 @@ const RATE_LIMIT_PER_SHARD_CAPACITY: NonZeroUsize = match NonZeroUsize::new(512)
 pub enum RateLimitConfigError {
     #[error(
         "rate-limit scope {scope:?} on route `{route_id}` is not supported by the WebUI gateway \
-         composition; supported scopes are PerCaller, PerRoute, and Global"
+         composition; supported scopes are PerCaller, PerRoute, PerIp, and Global"
     )]
     UnsupportedScope {
         route_id: String,
@@ -131,7 +131,7 @@ struct CounterKey {
     route_idx: usize,
     /// Stable limiter bucket. For authenticated routes this is the
     /// caller identity formatted as `tenant\x1fuser`; for public callback
-    /// routes it is route/global-scoped and contains no user material.
+    /// routes it is route/global/IP-scoped and contains no user material.
     bucket_key: String,
 }
 
@@ -200,13 +200,14 @@ fn resolve_policy(
             max_requests,
             window_seconds,
         } => match scope {
-            RateLimitScope::PerCaller | RateLimitScope::PerRoute | RateLimitScope::Global => {
-                Ok(ResolvedPolicy::Limited {
-                    scope: *scope,
-                    max_requests: max_requests.get(),
-                    window: Duration::from_secs(u64::from(window_seconds.get())),
-                })
-            }
+            RateLimitScope::PerCaller
+            | RateLimitScope::PerRoute
+            | RateLimitScope::PerIp
+            | RateLimitScope::Global => Ok(ResolvedPolicy::Limited {
+                scope: *scope,
+                max_requests: max_requests.get(),
+                window: Duration::from_secs(u64::from(window_seconds.get())),
+            }),
             other => Err(RateLimitConfigError::UnsupportedScope {
                 route_id: route_id.to_string(),
                 scope: *other,
@@ -238,8 +239,11 @@ fn request_counter_key(
             caller_key(caller)
         }
         RateLimitScope::PerRoute => format!("route\x1f{}", route.route_id),
+        RateLimitScope::PerIp => {
+            format!("ip\x1f{}", rate_limit_key_from_headers(request.headers()))
+        }
         RateLimitScope::Global => "global".to_string(),
-        RateLimitScope::PerTenant | RateLimitScope::PerIp => {
+        RateLimitScope::PerTenant => {
             tracing::debug!(
                 target = "ironclaw::reborn::webui_rate_limit",
                 route_id = %route.route_id,
@@ -260,6 +264,33 @@ fn request_counter_key(
         route_idx,
         bucket_key,
     })
+}
+
+/// Extract a public callback rate-limit bucket from proxy headers.
+///
+/// This mirrors the legacy web OAuth limiter: prefer the first parseable
+/// `X-Forwarded-For` entry, then `X-Real-IP`, then a shared `"unknown"` bucket
+/// when no usable address is present.
+fn rate_limit_key_from_headers(headers: &HeaderMap) -> String {
+    let x_forwarded_for = headers
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+        .into_iter()
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .find_map(|candidate| candidate.parse::<std::net::IpAddr>().ok())
+        .map(|ip| ip.to_string());
+
+    if let Some(ip) = x_forwarded_for {
+        return ip;
+    }
+
+    headers
+        .get("x-real-ip")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<std::net::IpAddr>().ok())
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 /// Build the `(method, path)` → route index lookup for one request.

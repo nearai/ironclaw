@@ -211,29 +211,7 @@ async fn start_oauth_flow(
     pkce: &str,
     extra_fields: serde_json::Value,
 ) -> StartedFlow {
-    let expires_at = (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339();
-    let mut body = json!({
-        "provider": "github",
-        "authorization_url": "https://provider.example/oauth?client_id=reborn",
-        "opaque_state": state,
-        "pkce_verifier": pkce,
-        "expires_at": expires_at
-    });
-    merge_json_object(&mut body, extra_fields);
-
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/api/reborn/product-auth/oauth/start")
-                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(body.to_string()))
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
+    let response = post_oauth_start(app, oauth_start_body(state, pkce, extra_fields)).await;
     assert_eq!(response.status(), StatusCode::OK);
     let body = read_body_string(response).await;
     let json: serde_json::Value = serde_json::from_str(&body).expect("start json");
@@ -245,6 +223,34 @@ async fn start_oauth_flow(
             .to_string(),
         body,
     }
+}
+
+fn oauth_start_body(state: &str, pkce: &str, extra_fields: serde_json::Value) -> serde_json::Value {
+    let expires_at = (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339();
+    let mut body = json!({
+        "provider": "github",
+        "authorization_url": "https://provider.example/oauth?client_id=reborn",
+        "opaque_state": state,
+        "pkce_verifier": pkce,
+        "expires_at": expires_at
+    });
+    merge_json_object(&mut body, extra_fields);
+    body
+}
+
+async fn post_oauth_start(app: &axum::Router, body: serde_json::Value) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/reborn/product-auth/oauth/start")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot")
 }
 
 fn merge_json_object(target: &mut serde_json::Value, source: serde_json::Value) {
@@ -319,6 +325,64 @@ async fn product_auth_oauth_start_oversized_body_rejects_before_auth() {
 }
 
 #[tokio::test]
+async fn product_auth_oauth_start_has_per_caller_rate_limit() {
+    let (app, _) = build_app_with_product_auth();
+
+    for index in 0..20 {
+        let response = post_oauth_start(
+            &app,
+            oauth_start_body(
+                &format!("start-rate-state-{index}"),
+                &format!("start-rate-pkce-{index}"),
+                json!({}),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    let response = post_oauth_start(
+        &app,
+        oauth_start_body("start-rate-state-over", "start-rate-pkce-over", json!({})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn product_auth_oauth_start_invalid_requests_are_sanitized() {
+    let (app, _) = build_app_with_product_auth();
+
+    let invalid_requests = [
+        oauth_start_body(
+            "expired-start-state",
+            "expired-start-pkce",
+            json!({ "expires_at": (Utc::now() - ChronoDuration::minutes(1)).to_rfc3339() }),
+        ),
+        oauth_start_body(
+            "bad-provider-state",
+            "bad-provider-pkce",
+            json!({ "provider": "" }),
+        ),
+        oauth_start_body(
+            "bad-thread-state",
+            "bad-thread-pkce",
+            json!({ "thread_id": "" }),
+        ),
+    ];
+
+    for body in invalid_requests {
+        let response = post_oauth_start(&app, body).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = read_body_string(response).await;
+        assert!(body.contains("\"code\":\"invalid_request\""));
+        assert!(!body.contains("expired-start-state"));
+        assert!(!body.contains("bad-provider-pkce"));
+        assert!(!body.contains("bad-thread-state"));
+    }
+}
+
+#[tokio::test]
 async fn product_auth_oauth_routes_create_flow_and_complete_callback() {
     let (app, dispatcher) = build_app_with_product_auth();
     let started = start_oauth_flow(
@@ -351,7 +415,6 @@ async fn product_auth_oauth_routes_create_flow_and_complete_callback() {
                     "route-state-secret",
                     "&thread_id=thread-auth-1&session_id=web-session-1&provider=github&account_label=work%20github&code=route-auth-code&scopes=repo",
                 ))
-                .header("x-reborn-pkce-verifier", "route-pkce-secret")
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -463,13 +526,14 @@ async fn product_auth_callback_rejects_request_body() {
 }
 
 #[tokio::test]
-async fn product_auth_callback_has_route_scoped_rate_limit() {
+async fn product_auth_callback_has_ip_scoped_rate_limit() {
     let (app, dispatcher) = build_app_with_product_auth();
-    let make_request = || {
+    let make_request = |ip: &'static str| {
         let flow_id = uuid::Uuid::new_v4().to_string();
         let invocation_id = ironclaw_host_api::InvocationId::new().to_string();
         Request::builder()
             .method(Method::GET)
+            .header("x-forwarded-for", ip)
             .uri(callback_uri(
                 &flow_id,
                 &invocation_id,
@@ -482,11 +546,24 @@ async fn product_auth_callback_has_route_scoped_rate_limit() {
     };
 
     for _ in 0..120 {
-        let response = app.clone().oneshot(make_request()).await.expect("oneshot");
+        let response = app
+            .clone()
+            .oneshot(make_request("203.0.113.10"))
+            .await
+            .expect("oneshot");
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
-    let response = app.oneshot(make_request()).await.expect("oneshot");
+    let response = app
+        .clone()
+        .oneshot(make_request("203.0.113.10"))
+        .await
+        .expect("oneshot");
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    let response = app
+        .oneshot(make_request("203.0.113.11"))
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
     assert!(dispatcher.events().is_empty());
 }
 
@@ -520,7 +597,6 @@ async fn product_auth_callback_provider_exchange_failure_is_sanitized() {
                     "exchange-failed-state",
                     "&provider=github&account_label=work%20github&code=exchange-failed-code&scopes=repo",
                 ))
-                .header("x-reborn-pkce-verifier", "exchange-failed-pkce")
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -552,7 +628,6 @@ async fn product_auth_callback_cross_scope_failure_is_sanitized() {
                     "wrong-scope-state",
                     "&provider=github&account_label=work%20github&code=wrong-scope-code",
                 ))
-                .header("x-reborn-pkce-verifier", "wrong-scope-pkce")
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -583,7 +658,6 @@ async fn product_auth_callback_malformed_flow_id_uses_sanitized_error() {
                     "malformed-flow-state",
                     "&provider=github&account_label=work%20github&code=malformed-flow-code",
                 ))
-                .header("x-reborn-pkce-verifier", "malformed-flow-pkce")
                 .body(Body::empty())
                 .expect("request"),
         )
