@@ -202,6 +202,33 @@ impl DurableLoopHostMilestoneSink {
                 capability_id(MODEL_CAPABILITY_ID)?,
                 reason_kind.as_str(),
             ),
+            LoopHostMilestoneKind::CapabilityInvoked { capability_id } => {
+                RuntimeEvent::dispatch_requested(scope, capability_id.clone())
+            }
+            LoopHostMilestoneKind::CapabilityCompleted {
+                capability_id,
+                provider,
+                runtime,
+                output_bytes,
+            } => RuntimeEvent::dispatch_succeeded(
+                scope,
+                capability_id.clone(),
+                provider.clone(),
+                *runtime,
+                *output_bytes,
+            ),
+            LoopHostMilestoneKind::CapabilityFailed {
+                capability_id,
+                provider,
+                runtime,
+                reason_kind,
+            } => RuntimeEvent::dispatch_failed(
+                scope,
+                capability_id.clone(),
+                provider.clone(),
+                *runtime,
+                reason_kind.as_str(),
+            ),
             LoopHostMilestoneKind::AssistantReplyFinalized { .. } => {
                 RuntimeEvent::assistant_reply_finalized(
                     scope,
@@ -274,7 +301,6 @@ impl DurableLoopHostMilestoneSink {
             // Similarly, PromptBundleBuilt is emitted by LoopPromptPort with richer context.
             LoopHostMilestoneKind::IterationStarted { .. }
             | LoopHostMilestoneKind::PromptBundleBuilt { .. }
-            | LoopHostMilestoneKind::CapabilityInvoked { .. }
             | LoopHostMilestoneKind::CapabilityBatchStarted { .. }
             | LoopHostMilestoneKind::CapabilityBatchCompleted { .. }
             | LoopHostMilestoneKind::GateBlocked { .. }
@@ -318,11 +344,15 @@ fn durable_event_error(error: EventError) -> AgentLoopHostError {
 mod tests {
     use super::*;
     use ironclaw_events::{InMemoryDurableEventLog, RuntimeEventKind};
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+    use ironclaw_host_api::{
+        AgentId, ExtensionId, ProjectId, RuntimeKind, TenantId, ThreadId, UserId,
+    };
     use ironclaw_threads::ThreadScope;
     use ironclaw_turns::{
         TurnId, TurnScope,
-        run_profile::{HookDecisionSummary, LoopDriverId, LoopHostMilestone},
+        run_profile::{
+            CapabilityFailureKind, HookDecisionSummary, LoopDriverId, LoopHostMilestone,
+        },
     };
 
     const HOOK_HEX_ID: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -393,6 +423,76 @@ mod tests {
         assert_eq!(event.hook_trust_class.as_deref(), Some("builtin"));
         assert!(event.hook_decision.is_none());
         assert!(event.hook_failure_category.is_none());
+    }
+
+    #[test]
+    fn capability_invoked_milestone_projects_to_dispatch_requested() {
+        let capability_id = CapabilityId::new("demo.echo").unwrap();
+        let (milestone, thread_id, run_id) =
+            fixture_milestone(LoopHostMilestoneKind::CapabilityInvoked {
+                capability_id: capability_id.clone(),
+            });
+
+        let sink = projector_for(thread_id, run_id);
+        let event = sink
+            .runtime_event_for_milestone(&milestone)
+            .expect("projection succeeds")
+            .expect("capability invocation projects to a runtime event");
+
+        assert_eq!(event.kind, RuntimeEventKind::DispatchRequested);
+        assert_eq!(event.capability_id, capability_id);
+        assert!(event.provider.is_none());
+        assert!(event.runtime.is_none());
+    }
+
+    #[test]
+    fn capability_completed_milestone_projects_to_dispatch_succeeded() {
+        let capability_id = CapabilityId::new("demo.echo").unwrap();
+        let provider = ExtensionId::new("demo").unwrap();
+        let (milestone, thread_id, run_id) =
+            fixture_milestone(LoopHostMilestoneKind::CapabilityCompleted {
+                capability_id: capability_id.clone(),
+                provider: provider.clone(),
+                runtime: RuntimeKind::Wasm,
+                output_bytes: 42,
+            });
+
+        let sink = projector_for(thread_id, run_id);
+        let event = sink
+            .runtime_event_for_milestone(&milestone)
+            .expect("projection succeeds")
+            .expect("capability completion projects to a runtime event");
+
+        assert_eq!(event.kind, RuntimeEventKind::DispatchSucceeded);
+        assert_eq!(event.capability_id, capability_id);
+        assert_eq!(event.provider.as_ref(), Some(&provider));
+        assert_eq!(event.runtime, Some(RuntimeKind::Wasm));
+        assert_eq!(event.output_bytes, Some(42));
+    }
+
+    #[test]
+    fn capability_failed_milestone_projects_to_dispatch_failed() {
+        let capability_id = CapabilityId::new("demo.echo").unwrap();
+        let provider = ExtensionId::new("demo").unwrap();
+        let (milestone, thread_id, run_id) =
+            fixture_milestone(LoopHostMilestoneKind::CapabilityFailed {
+                capability_id: capability_id.clone(),
+                provider: Some(provider.clone()),
+                runtime: Some(RuntimeKind::Script),
+                reason_kind: CapabilityFailureKind::OperationFailed,
+            });
+
+        let sink = projector_for(thread_id, run_id);
+        let event = sink
+            .runtime_event_for_milestone(&milestone)
+            .expect("projection succeeds")
+            .expect("capability failure projects to a runtime event");
+
+        assert_eq!(event.kind, RuntimeEventKind::DispatchFailed);
+        assert_eq!(event.capability_id, capability_id);
+        assert_eq!(event.provider.as_ref(), Some(&provider));
+        assert_eq!(event.runtime, Some(RuntimeKind::Script));
+        assert_eq!(event.error_kind.as_deref(), Some("operation_failed"));
     }
 
     #[test]
