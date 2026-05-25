@@ -536,17 +536,6 @@ pub(crate) async fn relay_events_handler(
         &signature,
     );
     if !valid {
-        // Recompute expected signature for diagnostics
-        let expected = {
-            use hmac::{Hmac, Mac};
-            use sha2::Sha256;
-            type HmacSha256 = Hmac<Sha256>;
-            let mut mac = HmacSha256::new_from_slice(&signing_secret).unwrap();
-            mac.update(timestamp.as_bytes());
-            mac.update(b".");
-            mac.update(&body);
-            format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
-        };
         tracing::warn!(
             secret_len = signing_secret.len(),
             secret_sha256 = %{
@@ -556,7 +545,6 @@ pub(crate) async fn relay_events_handler(
             body_len = body.len(),
             timestamp = %timestamp,
             received_sig = %signature,
-            expected_sig = %expected,
             "relay callback: HMAC signature mismatch"
         );
         return (StatusCode::UNAUTHORIZED, "invalid signature").into_response();
