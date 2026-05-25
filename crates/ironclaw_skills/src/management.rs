@@ -7,11 +7,14 @@ use ironclaw_filesystem::{
     RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{HostApiError, MountView, ResourceScope, ScopedPath, VirtualPath};
+use serde::Deserialize;
+use serde_json::json;
 
 const USER_SKILLS_ROOT: &str = "/skills";
 const SYSTEM_SKILLS_ROOT: &str = "/system/skills";
 const SKILL_FILE_NAME: &str = "SKILL.md";
-const MAX_INSTALL_BUNDLE_FILES: usize = 256;
+const INSTALL_METADATA_FILE_NAME: &str = ".ironclaw-install.json";
+pub const MAX_INSTALL_BUNDLE_FILES: usize = 256;
 const MAX_INSTALL_BUNDLE_FILE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_INSTALL_BUNDLE_TOTAL_BYTES: usize = 20 * 1024 * 1024;
 
@@ -117,6 +120,7 @@ pub struct SkillSummary {
 pub enum SkillSource {
     System,
     User,
+    Installed,
 }
 
 impl SkillSource {
@@ -124,8 +128,15 @@ impl SkillSource {
         match self {
             Self::System => "system",
             Self::User => "user",
+            Self::Installed => "installed",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillInstallSource {
+    User,
+    InstalledUrl,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,6 +144,8 @@ pub struct SkillInstallRequest<'a> {
     pub name: Option<&'a str>,
     pub content: &'a str,
     pub files: &'a [SkillInstallFile<'a>],
+    pub source: SkillInstallSource,
+    pub source_url: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,6 +158,7 @@ pub struct SkillInstallFile<'a> {
 pub struct SkillInstallResult {
     pub name: String,
     pub scoped_path: String,
+    pub source: SkillSource,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -245,15 +259,6 @@ pub async fn install_skill(
             log_skill_filesystem_phase("create_dir_all_failed", &skill_name, &skill_dir);
             filesystem_error(error)
         })?;
-    log_skill_filesystem_phase("write_file", &skill_name, &skill_path);
-    context
-        .filesystem
-        .write_file(&context.scope, &skill_path, normalized.as_bytes())
-        .await
-        .map_err(|error| {
-            log_skill_filesystem_phase("write_file_failed", &skill_name, &skill_path);
-            filesystem_error(error)
-        })?;
     for file in request.files {
         let relative_path = normalize_install_relative_path(file.relative_path)?;
         let file_path =
@@ -293,6 +298,36 @@ pub async fn install_skill(
                 filesystem_error(error)
             })?;
     }
+    if request.source == SkillInstallSource::InstalledUrl {
+        let metadata_path = skill_bundle_file_scoped_path(
+            USER_SKILLS_ROOT,
+            &skill_name,
+            INSTALL_METADATA_FILE_NAME,
+        )?;
+        let metadata = install_metadata_bytes(request.source_url)?;
+        log_skill_filesystem_phase("write_install_metadata", &skill_name, &metadata_path);
+        context
+            .filesystem
+            .write_file(&context.scope, &metadata_path, &metadata)
+            .await
+            .map_err(|error| {
+                log_skill_filesystem_phase(
+                    "write_install_metadata_failed",
+                    &skill_name,
+                    &metadata_path,
+                );
+                filesystem_error(error)
+            })?;
+    }
+    log_skill_filesystem_phase("write_file", &skill_name, &skill_path);
+    context
+        .filesystem
+        .write_file(&context.scope, &skill_path, normalized.as_bytes())
+        .await
+        .map_err(|error| {
+            log_skill_filesystem_phase("write_file_failed", &skill_name, &skill_path);
+            filesystem_error(error)
+        })?;
     tracing::debug!(
         skill_name = %skill_name,
         scoped_path = %skill_path,
@@ -303,6 +338,7 @@ pub async fn install_skill(
     Ok(SkillInstallResult {
         name: skill_name.clone(),
         scoped_path: format!("{USER_SKILLS_ROOT}/{skill_name}/{SKILL_FILE_NAME}"),
+        source: installed_skill_source(request.source),
     })
 }
 
@@ -420,6 +456,7 @@ async fn read_skill_summary(
         skill_name = %parsed.manifest.name,
         "skill management parsed skill summary"
     );
+    let source = skill_source_with_install_metadata(context, path, source).await?;
     Ok(Some(SkillSummary {
         name: parsed.manifest.name,
         version: parsed.manifest.version,
@@ -429,6 +466,11 @@ async fn read_skill_summary(
         tags: parsed.manifest.activation.tags,
         requires_skills: parsed.manifest.requires.skills,
     }))
+}
+
+#[derive(Debug, Deserialize)]
+struct InstallMetadata {
+    source: Option<String>,
 }
 
 fn skill_root_scoped_path(root: &str, name: &str) -> Result<ScopedPath, SkillManagementError> {
@@ -545,12 +587,72 @@ fn normalize_install_relative_path(path: &str) -> Result<String, SkillManagement
         }
     }
 
-    if parts.is_empty() || parts == [SKILL_FILE_NAME] {
+    if parts.is_empty() || parts == [SKILL_FILE_NAME] || parts == [INSTALL_METADATA_FILE_NAME] {
         return Err(SkillManagementError::new(
             SkillManagementErrorKind::InvalidInput,
         ));
     }
     Ok(parts.join("/"))
+}
+
+fn installed_skill_source(source: SkillInstallSource) -> SkillSource {
+    match source {
+        SkillInstallSource::User => SkillSource::User,
+        SkillInstallSource::InstalledUrl => SkillSource::Installed,
+    }
+}
+
+fn install_metadata_bytes(source_url: Option<&str>) -> Result<Vec<u8>, SkillManagementError> {
+    serde_json::to_vec_pretty(&json!({
+        "source": "installed_url",
+        "source_url": source_url,
+    }))
+    .map_err(|_| SkillManagementError::new(SkillManagementErrorKind::InvalidInput))
+}
+
+async fn skill_source_with_install_metadata(
+    context: &SkillManagementContext,
+    skill_path: &ScopedPath,
+    default_source: SkillSource,
+) -> Result<SkillSource, SkillManagementError> {
+    if default_source != SkillSource::User {
+        return Ok(default_source);
+    }
+    let Some(metadata_path) = scoped_sibling(skill_path, INSTALL_METADATA_FILE_NAME)? else {
+        return Ok(default_source);
+    };
+    let bytes = match context
+        .filesystem
+        .read_bytes_bounded(&context.scope, &metadata_path, 4096)
+        .await
+    {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) | Err(FilesystemError::NotFound { .. }) => return Ok(default_source),
+        Err(error) => return Err(filesystem_error(error)),
+    };
+    let Ok(metadata) = serde_json::from_slice::<InstallMetadata>(&bytes) else {
+        return Ok(default_source);
+    };
+    if metadata.source.as_deref() == Some("installed_url") {
+        Ok(SkillSource::Installed)
+    } else {
+        Ok(default_source)
+    }
+}
+
+fn scoped_sibling(
+    path: &ScopedPath,
+    sibling: &str,
+) -> Result<Option<ScopedPath>, SkillManagementError> {
+    let Some((parent, _)) = path.as_str().rsplit_once('/') else {
+        return Ok(None);
+    };
+    if parent.is_empty() {
+        return Ok(None);
+    }
+    ScopedPath::new(format!("{parent}/{sibling}"))
+        .map(Some)
+        .map_err(|_| SkillManagementError::new(SkillManagementErrorKind::InvalidInput))
 }
 
 fn scoped_parent(path: &ScopedPath) -> Result<Option<ScopedPath>, SkillManagementError> {
@@ -688,6 +790,8 @@ mod tests {
                     "LOCAL_SKILL_PROMPT",
                 ),
                 files: &[],
+                source: SkillInstallSource::User,
+                source_url: None,
             },
         )
         .await
@@ -734,12 +838,149 @@ mod tests {
                 name: Some("expected"),
                 content: &skill_md("actual", "description", "PROMPT"),
                 files: &[],
+                source: SkillInstallSource::User,
+                source_url: None,
             },
         )
         .await
         .unwrap_err();
 
         assert_eq!(error.kind(), SkillManagementErrorKind::InvalidInput);
+    }
+
+    #[tokio::test]
+    async fn install_rejects_invalid_bundle_files() {
+        let cases = [
+            (
+                "../escape.md",
+                b"ok".as_slice(),
+                SkillManagementErrorKind::InvalidInput,
+            ),
+            (
+                "/absolute.md",
+                b"ok".as_slice(),
+                SkillManagementErrorKind::InvalidInput,
+            ),
+            (
+                "SKILL.md",
+                b"ok".as_slice(),
+                SkillManagementErrorKind::InvalidInput,
+            ),
+            (
+                ".ironclaw-install.json",
+                b"ok".as_slice(),
+                SkillManagementErrorKind::InvalidInput,
+            ),
+        ];
+
+        for (relative_path, contents, expected) in cases {
+            let filesystem = Arc::new(InMemoryBackend::default());
+            let context = skill_management_context(filesystem, skill_mounts());
+
+            let error = install_skill(
+                &context,
+                SkillInstallRequest {
+                    name: None,
+                    content: &skill_md("bundle-helper", "description", "PROMPT"),
+                    files: &[SkillInstallFile {
+                        relative_path,
+                        contents,
+                    }],
+                    source: SkillInstallSource::User,
+                    source_url: None,
+                },
+            )
+            .await
+            .unwrap_err();
+
+            assert_eq!(error.kind(), expected);
+        }
+
+        let oversized = vec![b'x'; MAX_INSTALL_BUNDLE_FILE_BYTES + 1];
+        let filesystem = Arc::new(InMemoryBackend::default());
+        let context = skill_management_context(filesystem, skill_mounts());
+        let error = install_skill(
+            &context,
+            SkillInstallRequest {
+                name: None,
+                content: &skill_md("oversized-helper", "description", "PROMPT"),
+                files: &[SkillInstallFile {
+                    relative_path: "references/large.bin",
+                    contents: &oversized,
+                }],
+                source: SkillInstallSource::User,
+                source_url: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind(), SkillManagementErrorKind::Resource);
+
+        let paths = (0..=MAX_INSTALL_BUNDLE_FILES)
+            .map(|index| format!("references/{index}.md"))
+            .collect::<Vec<_>>();
+        let files = paths
+            .iter()
+            .map(|path| SkillInstallFile {
+                relative_path: path.as_str(),
+                contents: b"ok",
+            })
+            .collect::<Vec<_>>();
+        let filesystem = Arc::new(InMemoryBackend::default());
+        let context = skill_management_context(filesystem, skill_mounts());
+        let error = install_skill(
+            &context,
+            SkillInstallRequest {
+                name: None,
+                content: &skill_md("too-many-helper", "description", "PROMPT"),
+                files: &files,
+                source: SkillInstallSource::User,
+                source_url: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind(), SkillManagementErrorKind::Resource);
+    }
+
+    #[tokio::test]
+    async fn install_bundle_failure_does_not_publish_skill_md() {
+        let inner = Arc::new(InMemoryBackend::default());
+        let filesystem = Arc::new(FailingBundleWriteFilesystem {
+            inner: inner.clone(),
+        });
+        let context = skill_management_context_with_root(filesystem, skill_mounts());
+
+        let error = install_skill(
+            &context,
+            SkillInstallRequest {
+                name: None,
+                content: &skill_md("partial-helper", "description", "PROMPT"),
+                files: &[SkillInstallFile {
+                    relative_path: "scripts/run.py",
+                    contents: b"print('nope')\n",
+                }],
+                source: SkillInstallSource::User,
+                source_url: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind(), SkillManagementErrorKind::InvalidSkill);
+
+        match inner
+            .read_file_bounded(
+                &VirtualPath::new("/projects/skills/partial-helper/SKILL.md").unwrap(),
+                1024,
+            )
+            .await
+        {
+            Ok(None) | Err(FilesystemError::NotFound { .. }) => {}
+            Ok(Some(_)) => panic!(
+                "SKILL.md should be written last so failed bundle writes do not publish a partial skill"
+            ),
+            Err(error) => panic!("unexpected filesystem error: {error:?}"),
+        }
     }
 
     #[tokio::test]
@@ -789,6 +1030,57 @@ mod tests {
             .unwrap();
     }
 
+    #[derive(Clone)]
+    struct FailingBundleWriteFilesystem {
+        inner: Arc<InMemoryBackend>,
+    }
+
+    #[async_trait]
+    impl RootFilesystem for FailingBundleWriteFilesystem {
+        fn capabilities(&self) -> BackendCapabilities {
+            self.inner.capabilities()
+        }
+
+        async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+            self.inner.list_dir(path).await
+        }
+
+        async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+            self.inner.stat(path).await
+        }
+
+        async fn read_file_bounded(
+            &self,
+            path: &VirtualPath,
+            max_bytes: usize,
+        ) -> Result<Option<Vec<u8>>, FilesystemError> {
+            self.inner.read_file_bounded(path, max_bytes).await
+        }
+
+        async fn write_file(
+            &self,
+            path: &VirtualPath,
+            bytes: &[u8],
+        ) -> Result<(), FilesystemError> {
+            if path.as_str().ends_with("/scripts/run.py") {
+                return Err(FilesystemError::Backend {
+                    operation: FilesystemOperation::WriteFile,
+                    path: path.clone(),
+                    reason: "injected bundle write failure".to_string(),
+                });
+            }
+            self.inner.write_file(path, bytes).await
+        }
+
+        async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+            self.inner.create_dir_all(path).await
+        }
+
+        async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+            self.inner.delete(path).await
+        }
+    }
+
     fn skill_mounts() -> MountView {
         MountView::new(vec![
             MountGrant::new(
@@ -819,6 +1111,13 @@ mod tests {
         mounts: MountView,
     ) -> SkillManagementContext {
         let filesystem: Arc<dyn RootFilesystem> = filesystem;
+        SkillManagementContext::new(filesystem, mounts, ResourceScope::system())
+    }
+
+    fn skill_management_context_with_root(
+        filesystem: Arc<dyn RootFilesystem>,
+        mounts: MountView,
+    ) -> SkillManagementContext {
         SkillManagementContext::new(filesystem, mounts, ResourceScope::system())
     }
 

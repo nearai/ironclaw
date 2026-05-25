@@ -6,12 +6,13 @@
 
 use std::sync::Arc;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{MountView, ResourceScope, RuntimeDispatchErrorKind};
 use ironclaw_skills::{
-    SkillInstallFile, SkillInstallRequest, SkillManagementContext, SkillManagementError,
-    SkillManagementErrorKind, SkillRemoveRequest, SkillSummary, install_skill, list_skills,
-    remove_skill,
+    SkillInstallFile, SkillInstallRequest, SkillInstallSource, SkillManagementContext,
+    SkillManagementError, SkillManagementErrorKind, SkillRemoveRequest, SkillSummary,
+    install_skill, list_skills, remove_skill,
 };
 use serde_json::{Value, json};
 
@@ -134,6 +135,8 @@ async fn dispatch_install(
         })
         .collect::<Vec<_>>();
     let name = request.input.get("name").and_then(Value::as_str);
+    let source = parse_install_source(request.input)?;
+    let source_url = request.input.get("source_url").and_then(Value::as_str);
     let context = management_context(request)?;
     let installed = install_skill(
         &context,
@@ -141,6 +144,8 @@ async fn dispatch_install(
             name,
             content,
             files: &files,
+            source,
+            source_url,
         },
     )
     .await
@@ -156,6 +161,7 @@ async fn dispatch_install(
         "installed": true,
         "name": installed.name,
         "path": installed.scoped_path,
+        "source": installed.source.as_str(),
         "files_installed": files.len(),
     }))
 }
@@ -237,19 +243,33 @@ fn parse_install_files(
             .and_then(Value::as_str)
             .ok_or_else(input_error)?
             .to_string();
-        let contents = file
-            .get("bytes")
-            .and_then(Value::as_array)
-            .ok_or_else(input_error)?
-            .iter()
-            .map(|value| {
-                let byte = value.as_u64().ok_or_else(input_error)?;
-                u8::try_from(byte).map_err(|_| input_error())
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let contents = if let Some(encoded) = file.get("bytes_base64") {
+            let encoded = encoded.as_str().ok_or_else(input_error)?;
+            BASE64_STANDARD.decode(encoded).map_err(|_| input_error())?
+        } else {
+            file.get("bytes")
+                .and_then(Value::as_array)
+                .ok_or_else(input_error)?
+                .iter()
+                .map(|value| {
+                    let byte = value.as_u64().ok_or_else(input_error)?;
+                    u8::try_from(byte).map_err(|_| input_error())
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
         parsed.push(ParsedInstallFile { path, contents });
     }
     Ok(parsed)
+}
+
+fn parse_install_source(
+    input: &Value,
+) -> Result<SkillInstallSource, SkillManagementCapabilityError> {
+    match input.get("source").and_then(Value::as_str) {
+        None => Ok(SkillInstallSource::User),
+        Some("installed_url") => Ok(SkillInstallSource::InstalledUrl),
+        Some(_) => Err(input_error()),
+    }
 }
 
 fn capability_error(error: SkillManagementError) -> SkillManagementCapabilityError {

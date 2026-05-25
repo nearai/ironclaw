@@ -58,9 +58,10 @@ pub use types::{
 
 pub use gating::{GatingResult, check_requirements, check_requirements_sync};
 pub use management::{
-    SkillInstallFile, SkillInstallRequest, SkillInstallResult, SkillManagementContext,
-    SkillManagementError, SkillManagementErrorKind, SkillRemoveRequest, SkillRemoveResult,
-    SkillSource as ManagedSkillSource, SkillSummary, install_skill, list_skills, remove_skill,
+    MAX_INSTALL_BUNDLE_FILES, SkillInstallFile, SkillInstallRequest, SkillInstallResult,
+    SkillInstallSource, SkillManagementContext, SkillManagementError, SkillManagementErrorKind,
+    SkillRemoveRequest, SkillRemoveResult, SkillSource as ManagedSkillSource, SkillSummary,
+    install_skill, list_skills, remove_skill,
 };
 pub use parser::{ParsedSkill, SkillParseError, parse_skill_md};
 pub use selector::{

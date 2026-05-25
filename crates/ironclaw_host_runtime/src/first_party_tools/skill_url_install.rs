@@ -16,6 +16,7 @@ const SKILL_URL_FETCH_TIMEOUT_MS: u32 = 10_000;
 const MAX_ZIP_ENTRY_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_TOTAL_UNZIPPED_BYTES: u64 = 20 * 1024 * 1024;
 const MAX_GITHUB_PATH_SEGMENTS: usize = 32;
+const MAX_ZIP_FILE_ENTRIES: usize = ironclaw_skills::MAX_INSTALL_BUNDLE_FILES * 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SkillUrlPayload {
@@ -178,7 +179,7 @@ async fn fetch_skill_payload_from_url(
 
     let bytes = fetch_url_bytes(request, parsed, usage).await?;
     if bytes.starts_with(b"PK\x03\x04") {
-        let bundle = extract_skill_bundle_from_zip(&bytes, None)?;
+        let bundle = extract_skill_bundle_from_zip_blocking(bytes, None).await?;
         return Ok(SkillUrlPayload {
             content: bundle.skill_md,
             files: bundle.files,
@@ -521,7 +522,7 @@ async fn fetch_github_repo_payload(
         repo.owner, repo.repo, commit_sha
     ))?;
     let bytes = fetch_url_bytes(request, &archive_url, usage).await?;
-    let bundle = extract_skill_bundle_from_zip(&bytes, repo.subdir.as_deref())?;
+    let bundle = extract_skill_bundle_from_zip_blocking(bytes, repo.subdir).await?;
     tracing::debug!(
         source_url,
         source_subdir = ?bundle.bundle_subdir,
@@ -532,6 +533,22 @@ async fn fetch_github_repo_payload(
         content: bundle.skill_md,
         files: bundle.files,
     })
+}
+
+async fn extract_skill_bundle_from_zip_blocking(
+    data: Vec<u8>,
+    requested_subdir: Option<String>,
+) -> Result<ZipSkillBundle, FirstPartyCapabilityError> {
+    tokio::task::spawn_blocking(move || {
+        extract_skill_bundle_from_zip(&data, requested_subdir.as_deref())
+    })
+    .await
+    .map_err(|error| {
+        if error.is_panic() {
+            tracing::error!("skill URL ZIP extraction worker panicked");
+        }
+        FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend)
+    })?
 }
 
 fn normalize_archive_path(path: &Path) -> Result<PathBuf, FirstPartyCapabilityError> {
@@ -590,6 +607,11 @@ fn extract_skill_bundle_from_zip(
             FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
         })?;
         if !file.is_dir() {
+            if raw_paths.len() >= MAX_ZIP_FILE_ENTRIES {
+                return Err(FirstPartyCapabilityError::new(
+                    RuntimeDispatchErrorKind::OutputTooLarge,
+                ));
+            }
             raw_paths.push(normalize_archive_path(Path::new(file.name()))?);
         }
     }
@@ -703,6 +725,11 @@ fn extract_skill_bundle_from_zip(
             path: relative.to_path_buf(),
             contents,
         });
+        if extra_files.len() > ironclaw_skills::MAX_INSTALL_BUNDLE_FILES {
+            return Err(FirstPartyCapabilityError::new(
+                RuntimeDispatchErrorKind::OutputTooLarge,
+            ));
+        }
     }
 
     let skill_md = skill_md

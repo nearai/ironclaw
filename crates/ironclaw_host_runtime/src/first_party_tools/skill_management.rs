@@ -1,6 +1,7 @@
 use std::{sync::Arc, time::Instant};
 
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
 use ironclaw_first_party_extensions::skills::{
     SkillManagementCapabilityError, SkillManagementCapabilityKind,
@@ -143,14 +144,26 @@ async fn skill_install_input(
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty());
     match (request.capability_id.as_str(), has_content, url) {
-        (SKILL_INSTALL_CAPABILITY_ID, true, None) if !object.contains_key("files") => {
+        (SKILL_INSTALL_CAPABILITY_ID, true, None)
+            if !object.contains_key("files")
+                && !object.contains_key("source")
+                && !object.contains_key("source_url") =>
+        {
             Ok(request.input.clone())
         }
         (SKILL_INSTALL_URL_CAPABILITY_ID, false, Some(url)) => {
             let payload = fetch_skill_url_payload(request, url, usage).await?;
             let mut rewritten = object.clone();
             rewritten.remove("url");
+            rewritten.remove("files");
+            rewritten.remove("source");
+            rewritten.remove("source_url");
             rewritten.insert("content".to_string(), Value::String(payload.content));
+            rewritten.insert(
+                "source".to_string(),
+                Value::String("installed_url".to_string()),
+            );
+            rewritten.insert("source_url".to_string(), Value::String(url.to_string()));
             if !payload.files.is_empty() {
                 rewritten.insert(
                     "files".to_string(),
@@ -161,7 +174,7 @@ async fn skill_install_input(
                             .map(|file| {
                                 json!({
                                     "path": file.path.display().to_string(),
-                                    "bytes": file.contents,
+                                    "bytes_base64": BASE64_STANDARD.encode(file.contents),
                                 })
                             })
                             .collect(),

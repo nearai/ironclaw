@@ -679,6 +679,7 @@ async fn builtin_skill_install_accepts_content_when_network_is_denied() {
 
     assert_eq!(installed["installed"], json!(true));
     assert_eq!(installed["name"], json!("offline-helper"));
+    assert_eq!(installed["source"], json!("user"));
 
     let listed = invoke_with_context(
         &runtime,
@@ -690,6 +691,7 @@ async fn builtin_skill_install_accepts_content_when_network_is_denied() {
     .unwrap();
     assert_eq!(listed["count"], json!(1));
     assert_eq!(listed["skills"][0]["name"], json!("offline-helper"));
+    assert_eq!(listed["skills"][0]["source"], json!("user"));
 }
 
 #[tokio::test]
@@ -718,6 +720,7 @@ async fn builtin_skill_install_url_fetches_through_host_runtime_egress() {
     assert_eq!(installed["installed"], json!(true));
     assert_eq!(installed["name"], json!("fetched-helper"));
     assert_eq!(installed["path"], json!("/skills/fetched-helper/SKILL.md"));
+    assert_eq!(installed["source"], json!("installed"));
 
     let requests = egress.requests();
     assert_eq!(requests.len(), 1);
@@ -739,6 +742,44 @@ async fn builtin_skill_install_url_fetches_through_host_runtime_egress() {
         .unwrap();
     assert_eq!(listed["count"], json!(1));
     assert_eq!(listed["skills"][0]["name"], json!("fetched-helper"));
+    assert_eq!(listed["skills"][0]["source"], json!("installed"));
+}
+
+#[tokio::test]
+async fn builtin_skill_install_url_ignores_caller_supplied_hidden_bundle_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
+        b"---\nname: fetched-helper\ndescription: fetched skill\n---\nFetched prompt.\n".to_vec(),
+    ));
+    let runtime = runtime_with_filesystem_and_http_egress(filesystem, egress);
+
+    let installed = invoke_with_context(
+        &runtime,
+        SKILL_INSTALL_URL_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/skills/fetched.md",
+            "files": [{
+                "path": "references/injected.md",
+                "bytes": [35, 32, 73, 110, 106, 101, 99, 116, 101, 100, 10],
+            }],
+        }),
+        execution_context_with_mounts_and_network(
+            [SKILL_INSTALL_URL_CAPABILITY_ID],
+            mounts,
+            http_test_policy(),
+        ),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(installed["files_installed"], json!(0));
+    assert!(
+        !temp
+            .path()
+            .join("fetched-helper/references/injected.md")
+            .exists()
+    );
 }
 
 #[tokio::test]
@@ -842,6 +883,183 @@ async fn builtin_skill_install_url_installs_github_repo_bundle_supporting_files(
         "print('repo')\n"
     );
     assert_eq!(egress.requests().len(), 3);
+}
+
+#[tokio::test]
+async fn builtin_skill_install_url_installs_github_blob_skill_md() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_url_bodies(BTreeMap::from([
+        (
+            "https://api.github.com/repos/Pika-Labs/Pika-Skills/contents/SKILL.md?ref=main"
+                .to_string(),
+            (
+                200,
+                br#"{"type":"file","download_url":"https://raw.githubusercontent.com/Pika-Labs/Pika-Skills/main/SKILL.md"}"#.to_vec(),
+            ),
+        ),
+        (
+            "https://raw.githubusercontent.com/Pika-Labs/Pika-Skills/main/SKILL.md".to_string(),
+            (
+                200,
+                b"---\nname: blob-helper\ndescription: blob skill\n---\nBlob prompt.\n".to_vec(),
+            ),
+        ),
+    ])));
+    let runtime = runtime_with_filesystem_and_http_egress(filesystem, Arc::clone(&egress));
+
+    let installed = invoke_with_context(
+        &runtime,
+        SKILL_INSTALL_URL_CAPABILITY_ID,
+        json!({"url": "https://github.com/Pika-Labs/Pika-Skills/blob/main/SKILL.md"}),
+        execution_context_with_mounts_and_network(
+            [SKILL_INSTALL_URL_CAPABILITY_ID],
+            mounts,
+            http_test_policy(),
+        ),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(installed["name"], json!("blob-helper"));
+    assert_eq!(installed["source"], json!("installed"));
+    assert_eq!(egress.requests().len(), 2);
+}
+
+#[tokio::test]
+async fn builtin_skill_install_url_installs_github_tree_subdir_bundle_supporting_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
+    let archive = skill_bundle_zip(&[
+        (
+            "Pika-Skills-release-v1/skills/foo/SKILL.md",
+            b"---\nname: tree-helper\ndescription: tree skill\n---\nTree prompt.\n",
+        ),
+        (
+            "Pika-Skills-release-v1/skills/foo/references/tree.md",
+            b"# Tree\n",
+        ),
+    ]);
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_url_bodies(BTreeMap::from([
+        (
+            "https://api.github.com/repos/Pika-Labs/Pika-Skills/contents?ref=release%2Fv1%2Fskills%2Ffoo".to_string(),
+            (404, b"not found".to_vec()),
+        ),
+        (
+            "https://api.github.com/repos/Pika-Labs/Pika-Skills/contents/foo?ref=release%2Fv1%2Fskills".to_string(),
+            (404, b"not found".to_vec()),
+        ),
+        (
+            "https://api.github.com/repos/Pika-Labs/Pika-Skills/contents/skills/foo?ref=release%2Fv1".to_string(),
+            (200, br#"{"type":"dir"}"#.to_vec()),
+        ),
+        (
+            "https://api.github.com/repos/Pika-Labs/Pika-Skills/commits?sha=release%2Fv1&per_page=1".to_string(),
+            (200, br#"[{"sha":"abcdef0123456789abcdef0123456789abcdef01"}]"#.to_vec()),
+        ),
+        (
+            "https://codeload.github.com/Pika-Labs/Pika-Skills/legacy.zip/abcdef0123456789abcdef0123456789abcdef01".to_string(),
+            (200, archive),
+        ),
+    ])));
+    let runtime = runtime_with_filesystem_and_http_egress(filesystem, Arc::clone(&egress));
+
+    let installed = invoke_with_context(
+        &runtime,
+        SKILL_INSTALL_URL_CAPABILITY_ID,
+        json!({"url": "https://github.com/Pika-Labs/Pika-Skills/tree/release/v1/skills/foo"}),
+        execution_context_with_mounts_and_network(
+            [SKILL_INSTALL_URL_CAPABILITY_ID],
+            mounts,
+            http_test_policy(),
+        ),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(installed["name"], json!("tree-helper"));
+    assert_eq!(installed["files_installed"], json!(1));
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("tree-helper/references/tree.md")).unwrap(),
+        "# Tree\n"
+    );
+    assert_eq!(egress.requests().len(), 5);
+}
+
+#[tokio::test]
+async fn builtin_skill_install_url_rejects_invalid_zip_bundles() {
+    let oversized_entry = vec![b'x'; 2 * 1024 * 1024 + 1];
+    let too_many_entries = (0..(ironclaw_skills::MAX_INSTALL_BUNDLE_FILES * 4 + 1))
+        .map(|index| (format!("bundle/empty-{index}.txt"), Vec::new()))
+        .collect::<Vec<_>>();
+    let oversized_total = (0..11)
+        .map(|index| {
+            (
+                format!("bundle/big-{index}.bin"),
+                vec![b'x'; 2 * 1024 * 1024],
+            )
+        })
+        .collect::<Vec<_>>();
+    let cases = [
+        (
+            skill_bundle_zip(&[("bundle/references/guide.md", b"# Guide\n")]),
+            RuntimeFailureKind::OperationFailed,
+        ),
+        (
+            skill_bundle_zip(&[
+                ("bundle/one/SKILL.md", b"---\nname: one\n---\nOne\n"),
+                ("bundle/two/SKILL.md", b"---\nname: two\n---\nTwo\n"),
+            ]),
+            RuntimeFailureKind::InvalidInput,
+        ),
+        (
+            skill_bundle_zip(&[("../escape/SKILL.md", b"---\nname: escape\n---\nEscape\n")]),
+            RuntimeFailureKind::InvalidInput,
+        ),
+        (
+            skill_bundle_zip_owned([("bundle/oversized.bin".to_string(), oversized_entry)]),
+            RuntimeFailureKind::OutputTooLarge,
+        ),
+        (
+            skill_bundle_zip_owned(too_many_entries),
+            RuntimeFailureKind::OutputTooLarge,
+        ),
+        (
+            skill_bundle_zip_owned(
+                std::iter::once((
+                    "bundle/SKILL.md".to_string(),
+                    b"---\nname: oversized-total\n---\nPrompt\n".to_vec(),
+                ))
+                .chain(oversized_total),
+            ),
+            RuntimeFailureKind::OutputTooLarge,
+        ),
+    ];
+
+    for (body, expected) in cases {
+        let temp = tempfile::tempdir().unwrap();
+        let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
+        let runtime = runtime_with_filesystem_and_http_egress(
+            filesystem,
+            Arc::new(RecordingRuntimeHttpEgress::with_body(body)),
+        );
+
+        let actual = invoke_with_context(
+            &runtime,
+            SKILL_INSTALL_URL_CAPABILITY_ID,
+            json!({"url": "https://api.example.test/skills/invalid.zip"}),
+            execution_context_with_mounts_and_network(
+                [SKILL_INSTALL_URL_CAPABILITY_ID],
+                mounts,
+                http_test_policy(),
+            ),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(actual, expected);
+        assert!(temp.path().read_dir().unwrap().next().is_none());
+    }
 }
 
 #[tokio::test]
@@ -2916,12 +3134,20 @@ fn mounted_skill_filesystem(path: &Path) -> (LocalFilesystem, MountView) {
 }
 
 fn skill_bundle_zip(files: &[(&str, &[u8])]) -> Vec<u8> {
+    skill_bundle_zip_owned(
+        files
+            .iter()
+            .map(|(path, content)| ((*path).to_string(), (*content).to_vec())),
+    )
+}
+
+fn skill_bundle_zip_owned(files: impl IntoIterator<Item = (String, Vec<u8>)>) -> Vec<u8> {
     let cursor = std::io::Cursor::new(Vec::new());
     let mut writer = zip::ZipWriter::new(cursor);
     let options = zip::write::SimpleFileOptions::default();
     for (path, content) in files {
-        writer.start_file(*path, options).unwrap();
-        writer.write_all(content).unwrap();
+        writer.start_file(path, options).unwrap();
+        writer.write_all(&content).unwrap();
     }
     writer.finish().unwrap().into_inner()
 }
