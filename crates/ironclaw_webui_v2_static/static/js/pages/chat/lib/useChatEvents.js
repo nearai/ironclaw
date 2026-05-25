@@ -29,7 +29,13 @@ export function useChatEvents({
   setIsProcessing,
   setPendingGate,
   setActiveRun,
+  onRunCompleted,
 }) {
+  // Track which runIds we've already announced completion for so that
+  // SSE replays (reconnect with `last-event-id`, repeated snapshots)
+  // don't trigger duplicate timeline refetches.
+  const completedRunsRef = React.useRef(new Set());
+
   return React.useCallback(
     (envelope) => {
       const { type, frame } = envelope || {};
@@ -111,6 +117,8 @@ export function useChatEvents({
             setIsProcessing,
             setPendingGate,
             setActiveRun,
+            onRunCompleted,
+            completedRunsRef,
           });
           return;
         }
@@ -120,7 +128,14 @@ export function useChatEvents({
           return;
       }
     },
-    [threadId, setMessages, setIsProcessing, setPendingGate, setActiveRun],
+    [
+      threadId,
+      setMessages,
+      setIsProcessing,
+      setPendingGate,
+      setActiveRun,
+      onRunCompleted,
+    ],
   );
 }
 
@@ -132,6 +147,8 @@ const TERMINAL_RUN_STATUSES = new Set([
   "recovery_required",
 ]);
 
+const SUCCESS_RUN_STATUSES = new Set(["completed", "succeeded"]);
+
 function applyProjectionItems({
   items,
   threadId,
@@ -139,6 +156,8 @@ function applyProjectionItems({
   setIsProcessing,
   setPendingGate,
   setActiveRun,
+  onRunCompleted,
+  completedRunsRef,
 }) {
   for (const item of items) {
     if (item.run_status) {
@@ -152,6 +171,21 @@ function applyProjectionItems({
       }
       if (TERMINAL_RUN_STATUSES.has(status)) {
         setIsProcessing(false);
+        if (
+          SUCCESS_RUN_STATUSES.has(status) &&
+          onRunCompleted &&
+          runId &&
+          !completedRunsRef?.current.has(runId)
+        ) {
+          // Reborn's projection bridge does not currently emit `Text`
+          // items for assistant replies — the reply lives only in the
+          // thread timeline. Trigger a timeline refetch on terminal
+          // success so the assistant message becomes visible. Dedup
+          // by runId because SSE replays the same projection on every
+          // reconnect.
+          completedRunsRef.current.add(runId);
+          onRunCompleted(runId);
+        }
         if (status === "failed" || status === "recovery_required") {
           // Dedup by `err-<runId>` so replays of the same projection
           // (SSE reconnect with `last-event-id`, or repeated updates

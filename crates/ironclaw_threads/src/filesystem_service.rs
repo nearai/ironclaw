@@ -39,8 +39,8 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{
-    CasExpectation, ContentType, Entry, FilesystemError, FilesystemOperation, RecordVersion,
-    RootFilesystem, ScopedFilesystem,
+    CasExpectation, ContentType, Entry, FileType, FilesystemError, FilesystemOperation,
+    RecordVersion, RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{HostApiError, ResourceScope, ScopedPath, ThreadId};
 use serde::{Deserialize, Serialize};
@@ -50,10 +50,11 @@ use crate::identifiers::SummaryArtifactId;
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextMessage, ContextMessages,
-    ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest, LoadContextMessagesRequest,
-    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
-    ProviderToolCallReferenceEnvelope, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
-    SessionThreadError, SessionThreadRecord, SessionThreadService, SummaryArtifact, ThreadHistory,
+    ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest, ListThreadsForScopeRequest,
+    ListThreadsForScopeResponse, LoadContextMessagesRequest, LoadContextWindowRequest,
+    MessageContent, MessageKind, MessageStatus, ProviderToolCallReferenceEnvelope,
+    RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
+    SessionThreadRecord, SessionThreadService, SummaryArtifact, ThreadHistory,
     ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
     ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
 };
@@ -1062,7 +1063,67 @@ where
             Err(PutError::Other(error)) => Err(error),
         }
     }
+
+    async fn list_threads_for_scope(
+        &self,
+        request: ListThreadsForScopeRequest,
+    ) -> Result<ListThreadsForScopeResponse, SessionThreadError> {
+        let limit = request
+            .limit
+            .map(|n| (n as usize).clamp(1, LIST_THREADS_MAX_PAGE_SIZE))
+            .unwrap_or(LIST_THREADS_DEFAULT_PAGE_SIZE);
+        let resource_scope = request.scope.to_resource_scope();
+        let root = scoped_path(&format!("{}/threads", scope_axes_string(&request.scope)))?;
+        let entries = match self.filesystem.list_dir(&resource_scope, &root).await {
+            Ok(entries) => entries,
+            Err(error) if is_not_found(&error) => {
+                return Ok(ListThreadsForScopeResponse {
+                    threads: Vec::new(),
+                    next_cursor: None,
+                });
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let mut thread_ids: Vec<String> = entries
+            .into_iter()
+            .filter(|entry| entry.file_type == FileType::Directory)
+            .map(|entry| entry.name)
+            .collect();
+        thread_ids.sort();
+        let start_index = match request.cursor.as_deref() {
+            Some(cursor) => thread_ids
+                .iter()
+                .position(|id| id.as_str() > cursor)
+                .unwrap_or(thread_ids.len()),
+            None => 0,
+        };
+        let end_index = start_index.saturating_add(limit).min(thread_ids.len());
+        let mut page: Vec<SessionThreadRecord> = Vec::with_capacity(end_index - start_index);
+        for name in &thread_ids[start_index..end_index] {
+            let thread_id = ThreadId::new(name.clone()).map_err(invalid_path)?;
+            if let Some((stored, _)) = self
+                .read_thread_versioned(&request.scope, &thread_id)
+                .await?
+                && stored.record.scope == request.scope
+            {
+                page.push(stored.record);
+            }
+        }
+        let next_cursor = if end_index < thread_ids.len() {
+            page.last()
+                .map(|record| record.thread_id.as_str().to_string())
+        } else {
+            None
+        };
+        Ok(ListThreadsForScopeResponse {
+            threads: page,
+            next_cursor,
+        })
+    }
 }
+
+const LIST_THREADS_DEFAULT_PAGE_SIZE: usize = 50;
+const LIST_THREADS_MAX_PAGE_SIZE: usize = 200;
 
 // ── Idempotency key shape ──────────────────────────────────────
 //

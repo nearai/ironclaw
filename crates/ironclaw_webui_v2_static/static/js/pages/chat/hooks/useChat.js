@@ -65,6 +65,17 @@ export function useChat(threadId) {
     setIsProcessing,
     setPendingGate,
     setActiveRun,
+    // Reborn's projection bridge does not yet emit `Text` items for
+    // assistant replies, so the SSE stream only delivers `run_status`.
+    // On terminal success, refetch the timeline so the assistant
+    // message that landed in the thread becomes visible in the UI.
+    // Clear pending optimistic messages first so the real user
+    // message from the server doesn't render alongside its
+    // pre-submit optimistic twin.
+    onRunCompleted: () => {
+      setPendingMessages([]);
+      loadHistory();
+    },
   });
 
   const { status: sseStatus } = useSSE({
