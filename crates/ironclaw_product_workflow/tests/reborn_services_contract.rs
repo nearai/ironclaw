@@ -4,18 +4,20 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{AgentId, ApprovalRequestId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductOutboundEnvelope, ProductWorkflowRejectionKind, ProjectionCursor,
     ProjectionStream, ProjectionSubscriptionRequest, ProtocolAuthFailure, RedactedString,
 };
 use ironclaw_product_workflow::{
+    ApprovalInteractionService, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
     RebornGetRunStateRequest, RebornResolveGateResponse, RebornServices, RebornServicesApi,
     RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
     RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiInboundValidationCode, WebUiListThreadsRequest, WebUiResolveGateRequest,
-    WebUiSendMessageRequest,
+    WebUiSendMessageRequest, approval_gate_ref,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
@@ -289,6 +291,47 @@ impl TurnCoordinator for FakeTurnCoordinator {
             failure: None,
             event_cursor: EventCursor(17),
         })
+    }
+}
+
+#[derive(Default)]
+struct RecordingApprovalInteractionService {
+    resolutions: Mutex<Vec<ResolveApprovalInteractionRequest>>,
+}
+
+impl RecordingApprovalInteractionService {
+    fn resolution_count(&self) -> usize {
+        self.resolutions.lock().expect("lock").len()
+    }
+
+    fn last_resolution(&self) -> Option<ResolveApprovalInteractionRequest> {
+        self.resolutions.lock().expect("lock").last().cloned()
+    }
+}
+
+#[async_trait]
+impl ApprovalInteractionService for RecordingApprovalInteractionService {
+    async fn list_pending(
+        &self,
+        _request: ListPendingApprovalsRequest,
+    ) -> Result<ListPendingApprovalsResponse, ironclaw_product_workflow::ProductWorkflowError> {
+        Ok(ListPendingApprovalsResponse { approvals: vec![] })
+    }
+
+    async fn resolve(
+        &self,
+        request: ResolveApprovalInteractionRequest,
+    ) -> Result<ResolveApprovalInteractionResponse, ironclaw_product_workflow::ProductWorkflowError>
+    {
+        let run_id = request.run_id;
+        self.resolutions.lock().expect("lock").push(request);
+        Ok(ResolveApprovalInteractionResponse::Approved(
+            ResumeTurnResponse {
+                run_id,
+                status: TurnStatus::Queued,
+                event_cursor: EventCursor(19),
+            },
+        ))
     }
 }
 
@@ -2134,6 +2177,45 @@ async fn approved_gate_resolution_resumes_turn() {
             .last_resumption_source_binding_ref()
             .expect("resume source binding")
             .contains("gate-alpha")
+    );
+}
+
+#[tokio::test]
+async fn approval_gate_resolution_uses_approval_interaction_service() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let approval_interactions = Arc::new(RecordingApprovalInteractionService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    )
+    .with_approval_interactions(approval_interactions.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+    let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
+
+    let response = services
+        .resolve_gate(
+            caller(),
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "approval-gate-1",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string(),
+                "gate_ref": gate_ref.as_str(),
+                "resolution": "approved"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("approval gate resolution succeeds");
+
+    assert!(matches!(response, RebornResolveGateResponse::Resumed(_)));
+    assert_eq!(approval_interactions.resolution_count(), 1);
+    assert_eq!(coordinator.resumption_count(), 0);
+    assert_eq!(
+        approval_interactions
+            .last_resolution()
+            .expect("resolution")
+            .gate_ref,
+        gate_ref
     );
 }
 

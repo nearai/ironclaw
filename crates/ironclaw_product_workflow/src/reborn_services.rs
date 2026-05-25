@@ -27,14 +27,16 @@ use ironclaw_turns::{
 use uuid::Uuid;
 
 use crate::{
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiGateResolution,
-    WebUiInboundCommand, WebUiInboundValidationCode, WebUiInboundValidationError,
-    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest,
+    ApprovalInteractionDecision, ApprovalInteractionService, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundCommand, WebUiInboundValidationCode,
+    WebUiInboundValidationError, WebUiListThreadsRequest, WebUiResolveGateRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest,
     binding_ref::{
         DEFAULT_BINDING_REF_RAW_MAX_BYTES, bounded_reply_target_binding_ref,
         bounded_source_binding_ref,
     },
+    is_approval_gate_ref,
 };
 
 mod error;
@@ -139,6 +141,7 @@ pub struct RebornServices {
     thread_service: Arc<dyn SessionThreadService>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
     event_stream: Option<Arc<dyn ProjectionStream>>,
+    approval_interactions: Option<Arc<dyn ApprovalInteractionService>>,
     skill_activation_recorder: Option<Arc<SkillActivationRecorder>>,
     skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
 }
@@ -152,6 +155,7 @@ impl RebornServices {
             thread_service,
             turn_coordinator,
             event_stream: None,
+            approval_interactions: None,
             skill_activation_recorder: None,
             skill_activation_clearer: None,
         }
@@ -159,6 +163,14 @@ impl RebornServices {
 
     pub fn with_event_stream(mut self, event_stream: Arc<dyn ProjectionStream>) -> Self {
         self.event_stream = Some(event_stream);
+        self
+    }
+
+    pub fn with_approval_interactions(
+        mut self,
+        approval_interactions: Arc<dyn ApprovalInteractionService>,
+    ) -> Self {
+        self.approval_interactions = Some(approval_interactions);
         self
     }
 
@@ -553,6 +565,63 @@ impl RebornServicesApi for RebornServices {
         // the message transcript and the load would be wasted work.
         self.resolve_webui_thread_metadata(scope.clone(), &actor)
             .await?;
+        if is_approval_gate_ref(&gate_ref) {
+            let Some(approval_interactions) = &self.approval_interactions else {
+                return Err(RebornServicesError::from_status_kind(
+                    RebornServicesErrorCode::Unavailable,
+                    RebornServicesErrorKind::BlockedApproval,
+                    503,
+                    false,
+                ));
+            };
+            let decision = match resolution {
+                WebUiGateResolution::Approved { always } => {
+                    // `always: true` requests a *persistent* approval but this
+                    // facade has only one-shot approval interaction routing and
+                    // no approval-policy port. Fail loud rather than silently
+                    // downgrade.
+                    if always {
+                        return Err(RebornServicesError::from_status_kind(
+                            RebornServicesErrorCode::Unavailable,
+                            RebornServicesErrorKind::BlockedApproval,
+                            503,
+                            false,
+                        ));
+                    }
+                    ApprovalInteractionDecision::ApproveOnce
+                }
+                WebUiGateResolution::Denied | WebUiGateResolution::Cancelled => {
+                    ApprovalInteractionDecision::Deny
+                }
+                WebUiGateResolution::CredentialProvided { .. } => {
+                    return Err(RebornServicesError::from_status_kind(
+                        RebornServicesErrorCode::Unavailable,
+                        RebornServicesErrorKind::BlockedAuthentication,
+                        503,
+                        false,
+                    ));
+                }
+            };
+            let response = approval_interactions
+                .resolve(ResolveApprovalInteractionRequest {
+                    scope,
+                    actor,
+                    run_id,
+                    gate_ref,
+                    decision,
+                    idempotency_key: client_action_id,
+                })
+                .await
+                .map_err(|error| map_adapter_error(error.into()))?;
+            return match response {
+                ResolveApprovalInteractionResponse::Approved(response) => {
+                    Ok(RebornResolveGateResponse::Resumed(response.into()))
+                }
+                ResolveApprovalInteractionResponse::Denied(response) => {
+                    Ok(RebornResolveGateResponse::Cancelled(response.into()))
+                }
+            };
+        }
         match resolution {
             WebUiGateResolution::Approved { always } => {
                 // `always: true` requests a *persistent* approval but this

@@ -23,13 +23,17 @@ handling, gate routing, mission routing, and redacted acknowledgements.
 | `ProductInboundAction` | Durable ledger record for inbound actions |
 | `ProductCommandAdmissionService` | Source/auth-aware admission port that decides whether a typed product command may execute |
 | `ProductCommandService` | Reborn-native product command execution port for already-admitted typed commands |
+| `ApprovalInteractionService` / `DefaultApprovalInteractionService` | Approval-only product/WebUI boundary for listing redacted pending approval gates and resolving click approve/deny through canonical approval resolver + turn coordinator ports |
+| `RunStateApprovalInteractionReadModel` | Canonical read model that lists pending blocked approvals from scoped run-state and approval-request stores |
 | `RebornServicesApi` / `RebornServices` | Native WebChat v2 facade — stable surface beta WebUI route handlers consume in place of reaching into turn coordination, thread stores, runtime lanes, dispatchers, or capability hosts. Enforces caller ownership of the thread before any turn mutation; rejects stale or attacker-supplied `gate_ref` on denied/cancelled gate resolutions; refuses persistent (`always: true`) approvals until an approval-policy port lands |
 
 ## Dependencies
 
 - `ironclaw_product_adapters` — trait definitions, envelope/ack types, `ProjectionStream` for SSE
+- `ironclaw_approvals` / `ironclaw_authorization` — canonical approval resolution and scoped lease issue ports used by approval interactions
 - `ironclaw_auth` — typed product-auth continuation events consumed by the workflow auth bridge
 - `ironclaw_conversations` — canonical actor/conversation binding and thread route ownership
+- `ironclaw_run_state` — approval request store contract surfaced through approval resolution/read-model ports
 - `ironclaw_turns` — turn coordinator, scope, IDs
 - `ironclaw_threads` — session thread service contract
 - `ironclaw_host_api` — canonical identifiers (TenantId, UserId, etc.)
@@ -52,6 +56,15 @@ the source-agnostic command model must not know which product surface produced
 the command. Admitted commands dispatch through `ProductCommandService`, not
 `InboundTurnService`, v1 `SubmissionParser`, v1 command routers, or agent-loop
 command handlers.
+
+Approval interactions are click-approval only. Pending approval DTOs must be
+redacted, scoped, and derived from canonical run-state/approval records or a
+projection read model built from them. Approve/deny decisions must go through
+`ApprovalResolutionPort` and `TurnCoordinator`; product/WebUI code must not
+directly execute tools, mutate approval stores ad hoc, or implement
+`AlwaysAllow` before a durable approval-policy port exists. High-value signing
+and attested approvals require a separate service shape with canonical payload
+attestation and must not be folded into this redacted click-approval DTO.
 
 WebUI-facing facade methods must bind browser thread ids through
 `SessionThreadService` using a `ThreadScope` derived from the authenticated
