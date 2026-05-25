@@ -209,16 +209,17 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     )
     .with_first_party_capabilities(Arc::new(builtin_first_party_registry()?))
     .with_trust_policy(Arc::new(local_dev_first_party_trust_policy()?))
-    .with_secret_store(Arc::new(ironclaw_secrets::InMemorySecretStore::new()))
-    .try_with_host_http_egress(ironclaw_network::PolicyNetworkHttpEgress::new(
-        ironclaw_network::ReqwestNetworkTransport::default(),
-    ))?
-    .with_run_state(Arc::clone(&run_state))
-    .with_approval_requests(Arc::clone(&approval_requests))
-    .with_turn_state(Arc::clone(&turn_state));
+    .with_secret_store(Arc::new(ironclaw_secrets::InMemorySecretStore::new()));
     if let Some(runtime_policy) = runtime_policy {
         services = services.with_runtime_policy(runtime_policy);
     }
+    let services = services
+        .try_with_host_http_egress(ironclaw_network::PolicyNetworkHttpEgress::new(
+            ironclaw_network::ReqwestNetworkTransport::default(),
+        ))?
+        .with_run_state(Arc::clone(&run_state))
+        .with_approval_requests(Arc::clone(&approval_requests))
+        .with_turn_state(Arc::clone(&turn_state));
     // TODO(process-port): local runtime policies intentionally use the
     // LocalHostProcessPort until a non-local process backend is composed.
 

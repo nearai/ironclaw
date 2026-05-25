@@ -7,11 +7,8 @@ use ironclaw_host_api::{
     valid_http_field_name,
 };
 use serde_json::{Map, Value, json};
-use std::env;
 
-use crate::{
-    FirstPartyCapabilityError, FirstPartyCapabilityRequest, UNSAFE_RAW_HTTP_EGRESS_ERRORS_ENV,
-};
+use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest};
 
 use super::{first_party_capability_manifest, input_error};
 
@@ -72,29 +69,60 @@ pub(super) async fn dispatch(
     // Keep this handler as a translator only: URL parsing, DNS/private-IP
     // enforcement, allowlists, transport, and credential injection remain in
     // HostHttpEgressService / ironclaw_network.
+    let unsafe_raw_diagnostics_allowed = request.services.unsafe_raw_diagnostics_allowed;
     let mut headers = headers(&request.input).map_err(|error| {
-        log_raw_http_input_error_for_local_diagnostics(&request.input, "headers", error)
+        log_raw_http_input_error_for_local_diagnostics(
+            unsafe_raw_diagnostics_allowed,
+            &request.input,
+            "headers",
+            error,
+        )
     })?;
     if json_body_needs_default_content_type(&request.input) && !has_header(&headers, "content-type")
     {
         headers.push(("content-type".to_string(), "application/json".to_string()));
     }
     let method = method(&request.input).map_err(|error| {
-        log_raw_http_input_error_for_local_diagnostics(&request.input, "method", error)
+        log_raw_http_input_error_for_local_diagnostics(
+            unsafe_raw_diagnostics_allowed,
+            &request.input,
+            "method",
+            error,
+        )
     })?;
     let url = required_string(&request.input, "url")
         .map_err(|error| {
-            log_raw_http_input_error_for_local_diagnostics(&request.input, "url", error)
+            log_raw_http_input_error_for_local_diagnostics(
+                unsafe_raw_diagnostics_allowed,
+                &request.input,
+                "url",
+                error,
+            )
         })?
         .to_string();
     let body = body(&request.input).map_err(|error| {
-        log_raw_http_input_error_for_local_diagnostics(&request.input, "body", error)
+        log_raw_http_input_error_for_local_diagnostics(
+            unsafe_raw_diagnostics_allowed,
+            &request.input,
+            "body",
+            error,
+        )
     })?;
     let response_body_limit = response_body_limit(&request.input).map_err(|error| {
-        log_raw_http_input_error_for_local_diagnostics(&request.input, "response_body_limit", error)
+        log_raw_http_input_error_for_local_diagnostics(
+            unsafe_raw_diagnostics_allowed,
+            &request.input,
+            "response_body_limit",
+            error,
+        )
     })?;
     let timeout_ms = timeout_ms(&request.input).map_err(|error| {
-        log_raw_http_input_error_for_local_diagnostics(&request.input, "timeout_ms", error)
+        log_raw_http_input_error_for_local_diagnostics(
+            unsafe_raw_diagnostics_allowed,
+            &request.input,
+            "timeout_ms",
+            error,
+        )
     })?;
     let http_request = RuntimeHttpEgressRequest {
         runtime: RuntimeKind::FirstParty,
@@ -332,11 +360,12 @@ fn http_error(error: RuntimeHttpEgressError) -> FirstPartyCapabilityError {
 }
 
 fn log_raw_http_input_error_for_local_diagnostics(
+    unsafe_raw_diagnostics_allowed: bool,
     input: &Value,
     validation_stage: &'static str,
     error: FirstPartyCapabilityError,
 ) -> FirstPartyCapabilityError {
-    if env::var(UNSAFE_RAW_HTTP_EGRESS_ERRORS_ENV).as_deref() == Ok("1") {
+    if crate::unsafe_raw_http_diagnostics_enabled(unsafe_raw_diagnostics_allowed) {
         tracing::warn!(
             validation_stage,
             raw_http_tool_input = %input,
