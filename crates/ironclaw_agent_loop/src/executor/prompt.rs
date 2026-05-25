@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use ironclaw_turns::{
     LoopExit,
     run_profile::{
-        LoopModelCapabilityView, LoopProgressEvent, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        CapabilitySurfaceVersion, LoopModelCapabilityView, LoopModelMessage, LoopProgressEvent,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 use tracing::debug;
@@ -96,10 +96,13 @@ impl ExecutorStage<PromptInput> for PromptStage {
             CancelCheck::Exit(exit) => return Ok(PromptStep::Exit(exit)),
         };
 
-        let mut context_request = ctx.planner.context().plan_context_request(&state).await;
-        context_request.surface_version = Some(surface.version.clone());
-        context_request.capability_view = Some(capability_view.clone());
-        let prompt_mode = context_request.mode;
+        let messages = build_prompt_bundle_for_surface(
+            ctx,
+            &state,
+            surface.version.clone(),
+            capability_view.clone(),
+        )
+        .await?;
         state = match CheckpointStage
             .cancel_if_requested_after_pending_input_ack(ctx, state, &mut pending_input_ack)
             .await?
@@ -107,41 +110,47 @@ impl ExecutorStage<PromptInput> for PromptStage {
             CancelCheck::Continue(state) => *state,
             CancelCheck::Exit(exit) => return Ok(PromptStep::Exit(exit)),
         };
-        let prompt_bundle = ctx
-            .host
-            .build_prompt_bundle(context_request)
-            .await
-            .map_err(|_| AgentLoopExecutorError::HostUnavailable {
-                stage: HostStage::Prompt,
-            })?;
-        CheckpointStage
-            .emit_progress(
-                ctx,
-                LoopProgressEvent::PromptBundleBuilt {
-                    iteration: state.iteration,
-                    bundle_ref: prompt_bundle.bundle_ref.clone(),
-                    mode: prompt_mode,
-                    surface_version: prompt_bundle.surface_version.clone(),
-                    message_count: prompt_bundle.messages.len() as u32,
-                    identity_message_count: prompt_bundle.identity_message_count,
-                    instruction_snippet_count: prompt_bundle.instruction_snippet_count,
-                },
-            )
-            .await;
-        state = match CheckpointStage
-            .cancel_if_requested_after_pending_input_ack(ctx, state, &mut pending_input_ack)
-            .await?
-        {
-            CancelCheck::Continue(state) => *state,
-            CancelCheck::Exit(exit) => return Ok(PromptStep::Exit(exit)),
-        };
-
         Ok(PromptStep::Prepared(Box::new(PromptOutput {
             state,
             pending_input_ack,
             surface,
-            messages: prompt_bundle.messages,
+            messages,
             capability_view,
         })))
     }
+}
+
+pub(super) async fn build_prompt_bundle_for_surface(
+    ctx: StageContext<'_>,
+    state: &LoopExecutionState,
+    surface_version: CapabilitySurfaceVersion,
+    capability_view: LoopModelCapabilityView,
+) -> Result<Vec<LoopModelMessage>, AgentLoopExecutorError> {
+    let mut context_request = ctx.planner.context().plan_context_request(state).await;
+    context_request.surface_version = Some(surface_version);
+    context_request.capability_view = Some(capability_view);
+    let prompt_mode = context_request.mode;
+    let prompt_bundle = ctx
+        .host
+        .build_prompt_bundle(context_request)
+        .await
+        .map_err(|_| AgentLoopExecutorError::HostUnavailable {
+            stage: HostStage::Prompt,
+        })?;
+    CheckpointStage
+        .emit_progress(
+            ctx,
+            LoopProgressEvent::PromptBundleBuilt {
+                iteration: state.iteration,
+                bundle_ref: prompt_bundle.bundle_ref.clone(),
+                mode: prompt_mode,
+                surface_version: prompt_bundle.surface_version.clone(),
+                message_count: prompt_bundle.messages.len() as u32,
+                identity_message_count: prompt_bundle.identity_message_count,
+                instruction_snippet_count: prompt_bundle.instruction_snippet_count,
+            },
+        )
+        .await;
+
+    Ok(prompt_bundle.messages)
 }

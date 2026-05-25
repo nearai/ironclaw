@@ -2,7 +2,10 @@ use ironclaw_host_api::{
     InvocationId, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTarget, NetworkTargetPattern,
     ProjectId, ResourceScope, TenantId, ThreadId, UserId,
 };
-use ironclaw_network::{NetworkPolicyEnforcer, NetworkRequest, StaticNetworkPolicyEnforcer};
+use ironclaw_network::{
+    NetworkPolicyEnforcer, NetworkRequest, StaticNetworkPolicyEnforcer, network_target_for_url,
+    target_matches_pattern,
+};
 
 #[tokio::test]
 async fn network_policy_allows_exact_scoped_target_without_executing_io() {
@@ -74,6 +77,28 @@ async fn network_policy_supports_one_label_wildcard_hosts_only() {
         .await
         .unwrap_err();
     assert!(nested_subdomain.is_target_denied());
+}
+
+#[test]
+fn network_target_matching_supports_one_label_wildcard_hosts_only() {
+    let pattern = pattern(Some(NetworkScheme::Https), "*.example.test", Some(443));
+    assert!(target_matches_pattern(
+        &target(NetworkScheme::Https, "api.example.test", Some(443)),
+        &pattern
+    ));
+    assert!(!target_matches_pattern(
+        &target(NetworkScheme::Https, "deep.api.example.test", Some(443)),
+        &pattern
+    ));
+}
+
+#[test]
+fn network_target_for_url_normalizes_default_ports() {
+    assert_eq!(
+        network_target_for_url("https://api.example.test/repos").unwrap(),
+        target(NetworkScheme::Https, "api.example.test", Some(443))
+    );
+    assert!(network_target_for_url("ftp://api.example.test/repos").is_err());
 }
 
 #[tokio::test]

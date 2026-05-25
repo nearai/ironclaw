@@ -8,6 +8,7 @@
 mod echo;
 mod http;
 mod json;
+mod schemas;
 mod shell;
 mod skill_management;
 mod time;
@@ -32,6 +33,8 @@ use crate::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
+
+pub(crate) use self::schemas::resolve_builtin_input_schema_ref;
 
 pub use echo::ECHO_CAPABILITY_ID;
 pub use http::HTTP_CAPABILITY_ID;
@@ -200,10 +203,9 @@ fn first_party_capability_manifest(
         output_schema_ref: CapabilityProfileSchemaRef::new(format!(
             "schemas/builtin/{schema_name}.output.v1.json"
         ))?,
-        prompt_doc_ref: Some(CapabilityProfileSchemaRef::new(format!(
-            "prompts/builtin/{schema_name}.md"
-        ))?),
+        prompt_doc_ref: None,
         required_host_ports: Vec::new(),
+        runtime_credentials: Vec::new(),
         resource_profile,
     })
 }
@@ -344,8 +346,8 @@ fn input_error() -> FirstPartyCapabilityError {
     FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode)
 }
 
-fn guest_error() -> FirstPartyCapabilityError {
-    FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Guest)
+fn operation_error() -> FirstPartyCapabilityError {
+    FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
 }
 
 fn coding_error(error: CodingCapabilityError) -> FirstPartyCapabilityError {

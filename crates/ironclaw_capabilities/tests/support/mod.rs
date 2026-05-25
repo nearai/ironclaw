@@ -1,6 +1,9 @@
 #![allow(dead_code)]
 
-use std::sync::Mutex;
+use std::sync::{
+    Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -13,6 +16,7 @@ use serde_json::json;
 #[derive(Default)]
 pub struct RecordingDispatcher {
     request: Mutex<Option<CapabilityDispatchRequest>>,
+    dispatch_count: AtomicUsize,
 }
 
 impl RecordingDispatcher {
@@ -30,6 +34,10 @@ impl RecordingDispatcher {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .is_some()
     }
+
+    pub fn dispatch_count(&self) -> usize {
+        self.dispatch_count.load(Ordering::SeqCst)
+    }
 }
 
 #[async_trait]
@@ -38,6 +46,7 @@ impl CapabilityDispatcher for RecordingDispatcher {
         &self,
         request: CapabilityDispatchRequest,
     ) -> Result<CapabilityDispatchResult, DispatchError> {
+        self.dispatch_count.fetch_add(1, Ordering::SeqCst);
         *self
             .request
             .lock()
@@ -66,7 +75,7 @@ impl TrustAwareCapabilityDispatchAuthorizer for ApprovalAuthorizer {
     async fn authorize_dispatch_with_trust(
         &self,
         context: &ExecutionContext,
-        _descriptor: &CapabilityDescriptor,
+        descriptor: &CapabilityDescriptor,
         estimate: &ResourceEstimate,
         _trust_decision: &TrustDecision,
     ) -> Decision {
@@ -76,7 +85,7 @@ impl TrustAwareCapabilityDispatchAuthorizer for ApprovalAuthorizer {
                 correlation_id: context.correlation_id,
                 requested_by: Principal::Extension(context.extension_id.clone()),
                 action: Box::new(Action::Dispatch {
-                    capability: capability_id(),
+                    capability: descriptor.id.clone(),
                     estimated_resources: estimate.clone(),
                 }),
                 invocation_fingerprint: None,
@@ -159,6 +168,23 @@ pub fn registry_with_echo_capability() -> ExtensionRegistry {
     registry
 }
 
+pub fn registry_with_github_comment_capability() -> ExtensionRegistry {
+    let manifest = ExtensionManifest::parse(
+        GITHUB_COMMENT_MANIFEST,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .unwrap();
+    let package = ExtensionPackage::from_manifest(
+        manifest,
+        VirtualPath::new("/system/extensions/github").unwrap(),
+    )
+    .unwrap();
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(package).unwrap();
+    registry
+}
+
 pub fn execution_context(grants: CapabilitySet) -> ExecutionContext {
     ExecutionContext::local_default(
         UserId::new("user").unwrap(),
@@ -223,6 +249,10 @@ pub fn capability_id() -> CapabilityId {
     CapabilityId::new("echo.say").unwrap()
 }
 
+pub fn github_comment_capability_id() -> CapabilityId {
+    CapabilityId::new("github.comment_issue").unwrap()
+}
+
 pub fn extension_id() -> ExtensionId {
     ExtensionId::new("echo").unwrap()
 }
@@ -247,4 +277,27 @@ default_permission = "allow"
 visibility = "host_internal"
 input_schema_ref = "schemas/echo/say.input.v1.json"
 output_schema_ref = "schemas/echo/say.output.v1.json"
+"#;
+
+const GITHUB_COMMENT_MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "github"
+name = "GitHub"
+version = "0.2.5"
+description = "GitHub issue comment test extension"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/github_tool.wasm"
+
+[[capabilities]]
+id = "github.comment_issue"
+description = "Add a comment to a GitHub issue or pull request."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/github/comment_issue.input.v1.json"
+output_schema_ref = "schemas/github/comment_issue.output.v1.json"
+prompt_doc_ref = "prompts/github/comment_issue.md"
 "#;

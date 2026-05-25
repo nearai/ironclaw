@@ -398,6 +398,13 @@ fn run_status_wire(status: RunProjectionStatus) -> &'static str {
 }
 
 fn map_event_stream_error(error: EventProjectionStreamError) -> ProductAdapterError {
+    tracing::warn!(
+        component = "event_projection_stream",
+        operation = "map_stream_error",
+        error = %error,
+        error_debug = ?error,
+        "event projection stream error mapped to product adapter error"
+    );
     match error {
         EventProjectionStreamError::InvalidRequest { reason } => {
             ProductAdapterError::InvalidIdentifier {

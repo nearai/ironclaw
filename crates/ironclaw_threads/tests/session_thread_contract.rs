@@ -148,6 +148,42 @@ async fn duplicate_tool_result_reference_accepts_matching_provider_metadata() {
 }
 
 #[tokio::test]
+async fn append_tool_result_reference_accepts_multiline_provider_arguments() {
+    let service = InMemorySessionThreadService::default();
+    let scope = scope("tool-result-multiline-provider");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-tool-result-multiline-provider").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let mut provider_call = provider_call_reference();
+    provider_call.capability_id = CapabilityId::new("builtin.skill_install").unwrap();
+    provider_call.provider_tool_name = "builtin__skill_install".to_string();
+    provider_call.arguments = serde_json::json!({
+        "content": "---\nname: pasted-skill\n---\n\nUse multiline Markdown.\n"
+    });
+
+    let record = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope,
+            thread_id: thread.thread_id,
+            turn_run_id: "run-1".into(),
+            result_ref: "result:demo-provider-multiline".into(),
+            safe_summary: ToolResultSafeSummary::new("safe tool result").unwrap(),
+            provider_call: Some(provider_call.clone()),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(record.tool_result_provider_call, Some(provider_call));
+}
+
+#[tokio::test]
 async fn append_tool_result_reference_backfills_provider_metadata_on_idempotent_retry() {
     let service = InMemorySessionThreadService::default();
     let scope = scope("tool-result-provider-backfill");

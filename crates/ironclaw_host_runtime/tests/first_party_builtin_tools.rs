@@ -102,6 +102,19 @@ fn is_coding_capability_id(id: &str) -> bool {
 }
 
 #[tokio::test]
+async fn builtin_first_party_package_omits_prompt_doc_refs() {
+    let package = builtin_first_party_package().unwrap();
+
+    assert!(
+        package
+            .manifest
+            .capabilities
+            .iter()
+            .all(|capability| capability.prompt_doc_ref.is_none())
+    );
+}
+
+#[tokio::test]
 async fn builtin_first_party_surface_lists_allowed_tools_in_registry_order() {
     let runtime = runtime();
     let request = VisibleCapabilityRequest::new(
@@ -936,7 +949,7 @@ async fn builtin_http_maps_runtime_egress_errors_by_source() {
                 request_bytes: 4,
                 response_bytes: 1024,
             },
-            RuntimeFailureKind::InvalidInput,
+            RuntimeFailureKind::OperationFailed,
         ),
     ];
 
@@ -1945,7 +1958,7 @@ async fn builtin_apply_patch_matches_v1_exact_unique_and_replace_all_behavior() 
     )
     .await
     .unwrap_err();
-    assert_eq!(duplicate, RuntimeFailureKind::Backend);
+    assert_eq!(duplicate, RuntimeFailureKind::OperationFailed);
 
     let replaced = invoke_with_context(
         &runtime,
@@ -1995,7 +2008,7 @@ async fn builtin_apply_patch_requires_full_fresh_read_like_v1() {
     )
     .await
     .unwrap_err();
-    assert_eq!(unread, RuntimeFailureKind::Backend);
+    assert_eq!(unread, RuntimeFailureKind::OperationFailed);
 
     invoke_with_context(
         &runtime,
@@ -2013,7 +2026,7 @@ async fn builtin_apply_patch_requires_full_fresh_read_like_v1() {
     )
     .await
     .unwrap_err();
-    assert_eq!(partial, RuntimeFailureKind::Backend);
+    assert_eq!(partial, RuntimeFailureKind::OperationFailed);
 }
 
 #[tokio::test]
@@ -2043,7 +2056,7 @@ async fn builtin_apply_patch_rejects_same_second_content_changes_after_read() {
     )
     .await
     .unwrap_err();
-    assert_eq!(stale, RuntimeFailureKind::Backend);
+    assert_eq!(stale, RuntimeFailureKind::OperationFailed);
 }
 
 #[tokio::test]

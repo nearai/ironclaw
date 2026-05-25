@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GitHub issue search input",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "query": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "description": "GitHub issue search query. Use qualifiers such as repo:, org:, is:issue, is:pr, label:, state:, author:, assignee:, or involves:."
+    },
+    "page": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100,
+      "default": 1,
+      "description": "1-based results page."
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100,
+      "default": 30,
+      "description": "Maximum number of results to return."
+    },
+    "sort": {
+      "type": "string",
+      "enum": ["comments", "created", "updated"],
+      "description": "Optional GitHub issue search sort field."
+    },
+    "order": {
+      "type": "string",
+      "enum": ["asc", "desc"],
+      "default": "desc",
+      "description": "Sort order when sort is supplied."
+    }
+  },
+  "required": ["query"]
+}

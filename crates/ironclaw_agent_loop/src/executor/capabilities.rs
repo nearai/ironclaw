@@ -325,7 +325,7 @@ impl CapabilityStage {
                 .on_capability_error(&state, &summary)
                 .await
             {
-                RecoveryOutcome::SkipResult { recovery } => {
+                RecoveryOutcome::ToolErrorResult { recovery } => {
                     state.recovery_state = recovery;
                     append_capability_error_ref(ctx.host, &mut state, &call, &summary).await?;
                     match CheckpointStage.cancel_if_requested(ctx, state).await? {

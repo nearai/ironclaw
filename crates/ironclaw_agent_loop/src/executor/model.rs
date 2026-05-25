@@ -13,6 +13,7 @@ use crate::{
     strategies::{ModelErrorSummary, RecoveryOutcome},
 };
 
+use super::prompt::build_prompt_bundle_for_surface;
 use super::{
     AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, HostStage,
     MAX_MODEL_RETRIES, StageContext, failed_exit, honor_retry_alteration, model_error_class,
@@ -58,24 +59,18 @@ impl ExecutorStage<ModelInput> for ModelStage {
             CancelCheck::Continue(state) => *state,
             CancelCheck::Exit(exit) => return Ok(ModelStep::Exit(exit)),
         };
-        let request = LoopModelRequest {
+        let surface_version = input.surface_version;
+        let capability_view = input.capability_view;
+        let mut request = LoopModelRequest {
             messages: input.messages,
-            surface_version: Some(input.surface_version),
+            surface_version: Some(surface_version.clone()),
             model_preference,
-            capability_view: Some(input.capability_view),
+            capability_view: Some(capability_view.clone()),
         };
-        let visible_capability_count = request
-            .capability_view
-            .as_ref()
-            .map(|view| view.visible_capability_ids.len())
-            .unwrap_or(0);
+        let visible_capability_count = capability_view.visible_capability_ids.len();
         debug!(
             iteration = state.iteration,
-            surface_version = request
-                .surface_version
-                .as_ref()
-                .map(|version| version.as_str())
-                .unwrap_or("<none>"),
+            surface_version = surface_version.as_str(),
             visible_capability_count,
             model_preference = request
                 .model_preference
@@ -162,10 +157,22 @@ impl ExecutorStage<ModelInput> for ModelStage {
                                     })?,
                                 )
                                 .await;
+                            let messages = build_prompt_bundle_for_surface(
+                                ctx,
+                                &state,
+                                surface_version.clone(),
+                                capability_view.clone(),
+                            )
+                            .await?;
+                            match CheckpointStage.cancel_if_requested(ctx, state).await? {
+                                CancelCheck::Continue(next) => state = *next,
+                                CancelCheck::Exit(exit) => return Ok(ModelStep::Exit(exit)),
+                            }
+                            request.messages = messages;
                         }
-                        RecoveryOutcome::SkipResult { .. } => {
+                        RecoveryOutcome::ToolErrorResult { .. } => {
                             return Err(AgentLoopExecutorError::PlannerContract {
-                                detail: "SkipResult on model error",
+                                detail: "ToolErrorResult on model error",
                             });
                         }
                         RecoveryOutcome::Abort {

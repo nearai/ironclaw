@@ -10,8 +10,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CapabilityGrantId, CapabilityId, ExtensionId, MountView, NetworkPolicy, Principal,
-    ResourceCeiling, ResourceProfile, RuntimeKind, SecretHandle, Timestamp, TrustClass,
+    CapabilityGrantId, CapabilityId, ExtensionId, MountView, NetworkPolicy, NetworkTargetPattern,
+    Principal, ResourceCeiling, ResourceProfile, RuntimeCredentialTarget, RuntimeKind,
+    SecretHandle, Timestamp, TrustClass,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -50,7 +51,16 @@ pub struct CapabilityDescriptor {
     pub parameters_schema: serde_json::Value,
     pub effects: Vec<EffectKind>,
     pub default_permission: PermissionMode,
+    pub runtime_credentials: Vec<RuntimeCredentialRequirement>,
     pub resource_profile: Option<ResourceProfile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeCredentialRequirement {
+    pub handle: SecretHandle,
+    pub audience: NetworkTargetPattern,
+    pub target: RuntimeCredentialTarget,
+    pub required: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -55,9 +55,11 @@ mod obligations;
 mod planner;
 mod process_port;
 mod production;
+mod sandbox_process;
 mod services;
 mod surface;
 mod turn_scheduler;
+mod wasm_credentials;
 
 pub use capability_catalog::{
     HotCapabilityCatalog, HotCapabilityRecord, MAX_HOT_PROMPT_BYTES, MAX_HOT_SCHEMA_BYTES,
@@ -95,6 +97,10 @@ pub use process_port::{
     RuntimeProcessPort, SandboxCommandTransport, TenantSandboxProcessPort,
 };
 pub use production::DefaultHostRuntime;
+pub use sandbox_process::{
+    RebornSandboxConfig, RebornSandboxContainerIdentity, RebornSandboxScopeKey,
+    RebornSandboxWorkspaceMode, RebornScopedSandboxCommandTransport,
+};
 pub use services::{
     HostRuntimeServices, ProductionEventStoreWiringError, ProductionWiringComponent,
     ProductionWiringConfig, ProductionWiringIssue, ProductionWiringIssueKind,
@@ -556,8 +562,10 @@ pub enum RuntimeFailureKind {
     Cancelled,
     Dispatcher,
     InvalidInput,
+    InvalidOutput,
     MissingRuntime,
     Network,
+    OperationFailed,
     OutputTooLarge,
     Process,
     Resource,
@@ -573,8 +581,10 @@ impl RuntimeFailureKind {
             Self::Cancelled => "cancelled",
             Self::Dispatcher => "dispatcher",
             Self::InvalidInput => "invalid_input",
+            Self::InvalidOutput => "invalid_output",
             Self::MissingRuntime => "missing_runtime",
             Self::Network => "network",
+            Self::OperationFailed => "operation_failed",
             Self::OutputTooLarge => "output_too_large",
             Self::Process => "process",
             Self::Resource => "resource",
@@ -1154,13 +1164,13 @@ fn apply_credential_injection(
     target: &RuntimeCredentialTarget,
     value: &str,
 ) -> Result<(), RuntimeHttpEgressError> {
+    target
+        .validate_declaration()
+        .map_err(|_| RuntimeHttpEgressError::Credential {
+            reason: "credential injection target is invalid".to_string(),
+        })?;
     match target {
         RuntimeCredentialTarget::Header { name, prefix } => {
-            if !valid_injected_header_name(name) {
-                return Err(RuntimeHttpEgressError::Credential {
-                    reason: "credential injection header name is invalid".to_string(),
-                });
-            }
             let injected = match prefix {
                 Some(prefix) => format!("{prefix}{value}"),
                 None => value.to_string(),
@@ -1182,30 +1192,6 @@ fn apply_credential_injection(
         }
     }
     Ok(())
-}
-
-fn valid_injected_header_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric()
-                || matches!(
-                    byte,
-                    b'!' | b'#'
-                        | b'$'
-                        | b'%'
-                        | b'&'
-                        | b'\''
-                        | b'*'
-                        | b'+'
-                        | b'-'
-                        | b'.'
-                        | b'^'
-                        | b'_'
-                        | b'`'
-                        | b'|'
-                        | b'~'
-                )
-        })
 }
 
 fn runtime_network_error(error: NetworkHttpError) -> RuntimeHttpEgressError {

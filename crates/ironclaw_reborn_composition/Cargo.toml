@@ -33,6 +33,7 @@ webui-v2-beta = [
     "ironclaw_webui_v2/webui-v2-beta",
     "dep:ironclaw_webui_v2_static",
     "ironclaw_webui_v2_static/webui-v2-beta",
+    "libsql",
     "dep:axum",
     "dep:tower",
     "dep:tower-http",

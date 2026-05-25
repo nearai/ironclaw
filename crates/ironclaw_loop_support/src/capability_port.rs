@@ -6,7 +6,7 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_host_api::{
     CapabilityId, CapabilitySet, CorrelationId, EffectKind, ExecutionContext, ExtensionId,
-    InvocationId, MountView, Principal, ResourceEstimate, RuntimeKind, sha256_digest_token,
+    InvocationId, MountView, Principal, sha256_digest_token,
 };
 use ironclaw_host_runtime::{
     HostRuntime, HostRuntimeError, IdempotencyKey, RuntimeBlockedReason, RuntimeCapabilityOutcome,
@@ -21,13 +21,26 @@ use ironclaw_turns::{
         CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, ConcurrencyHint,
         LoopCapabilityPort, LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopProcessRef,
         LoopRunContext, LoopSafeSummary, ProcessHandleSummary, ProviderToolCall,
-        ProviderToolCallReplay, ProviderToolDefinition, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 use tokio::sync::Notify;
 
-const PROVIDER_TOOL_NAME_MAX_BYTES: usize = 64;
+mod provider_validation;
+mod surface_snapshot;
+
+use self::provider_validation::{
+    PROVIDER_TOOL_NAME_MAX_BYTES, validate_provider_arguments, validate_provider_tool_call,
+};
+use self::surface_snapshot::{
+    RuntimeSurfaceCapabilitySnapshot, SurfaceCapabilitySnapshot, SurfaceSnapshot,
+    SyntheticSurfaceCapabilitySnapshot,
+};
+
+// arch-exempt: large_file, tracked in #3988; this PR keeps new synthetic surface
+// snapshot logic in `capability_port/surface_snapshot.rs` while preserving the
+// existing adapter boundary.
 const PROVIDER_TOOL_NAME_DIGEST_BYTES: usize = 32;
 
 #[async_trait]
@@ -189,50 +202,15 @@ impl HostRuntimeLoopCapabilityPortFactory {
     }
 }
 
-#[derive(Clone)]
-struct SurfaceCapabilitySnapshot {
-    provider: ExtensionId,
-    runtime: RuntimeKind,
-    estimate: ResourceEstimate,
-    safe_description: String,
-    parameters_schema: serde_json::Value,
-    provider_tool_name: String,
-}
-
-#[derive(Clone, Default)]
-struct SurfaceSnapshot {
-    capabilities: HashMap<CapabilityId, SurfaceCapabilitySnapshot>,
-    provider_names: HashMap<String, CapabilityId>,
-}
-
 struct PreparedProviderToolCall {
     surface_version: ironclaw_turns::run_profile::CapabilitySurfaceVersion,
     capability_id: CapabilityId,
     provider_turn_id: String,
     normalized_arguments: serde_json::Value,
+    effective_capability_ids: Vec<CapabilityId>,
 }
 
 const MAX_IN_MEMORY_DISPATCH_RECORDS: usize = 128;
-const SENSITIVE_PROVIDER_TEXT_MARKERS: [&str; 18] = [
-    "access token",
-    "api key",
-    "api_key",
-    "apikey",
-    "authorization:",
-    "bearer ",
-    "host path",
-    "invalid api key",
-    "invalid_api_key",
-    "password",
-    "passwd",
-    "provider error",
-    "raw runtime",
-    "secret",
-    "stack trace",
-    "tool input",
-    "tool_input",
-    "traceback",
-];
 
 #[derive(Clone)]
 enum DispatchRecord {
@@ -639,6 +617,28 @@ impl HostRuntimeLoopCapabilityPort {
         milestones.capability_invoked(capability_id).await
     }
 
+    async fn invoke_synthetic_capability(
+        &self,
+        request: CapabilityInvocation,
+        capability: SyntheticSurfaceCapabilitySnapshot,
+        snapshot: SurfaceSnapshot,
+    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        let input = self
+            .input_resolver
+            .resolve_capability_input(&self.run_context, &request.input_ref)
+            .await?;
+        let output = capability.output(&input, |requested| snapshot.capability_info(requested))?;
+        let result_ref = self
+            .result_writer
+            .write_capability_result(&self.run_context, &request.capability_id, output)
+            .await?;
+        Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
+            result_ref,
+            safe_summary: "capability info returned".to_string(),
+            terminate_hint: false,
+        }))
+    }
+
     fn prepare_provider_tool_call(
         &self,
         tool_call: &ProviderToolCall,
@@ -657,35 +657,15 @@ impl HostRuntimeLoopCapabilityPort {
                 "capability surface is unavailable",
             ));
         };
-        let Some(capability_id) = snapshot.provider_names.get(&tool_call.name).cloned() else {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::InvalidInvocation,
-                "provider tool call is outside the visible capability surface",
-            ));
-        };
-        let Some(capability) = snapshot.capabilities.get(&capability_id) else {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::StaleSurface,
-                "capability surface snapshot is missing provider metadata",
-            ));
-        };
-        if !provider_schema_is_usable(&capability.parameters_schema) {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::InvalidInvocation,
-                "provider tool call was not advertised to the model",
-            ));
-        }
-        let normalized_arguments = normalize_provider_arguments(
-            &tool_call.arguments,
-            &capability.parameters_schema,
-            "provider arguments",
-        )?;
-        validate_provider_arguments(&normalized_arguments)?;
+        let (capability_id, capability) = snapshot.provider_capability(&tool_call.name)?;
+        let prepared =
+            capability.prepare_provider_tool_call(capability_id, &snapshot, tool_call)?;
         Ok(PreparedProviderToolCall {
             surface_version: loop_surface_version(&version)?,
-            capability_id,
+            capability_id: prepared.capability_id,
             provider_turn_id,
-            normalized_arguments,
+            normalized_arguments: prepared.normalized_arguments,
+            effective_capability_ids: prepared.effective_capability_ids,
         })
     }
 }
@@ -697,27 +677,25 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
         let Some((_, snapshot)) = self.current_snapshot()? else {
             return Ok(Vec::new());
         };
-        let mut definitions = snapshot
-            .capabilities
-            .iter()
-            .filter_map(|(capability_id, capability)| {
-                if !provider_schema_is_usable(&capability.parameters_schema) {
-                    tracing::debug!(
-                        capability_id = capability_id.as_str(),
-                        "capability omitted from provider tool definitions because its parameter schema is not provider-usable"
-                    );
-                    return None;
-                }
-                Some(ProviderToolDefinition {
-                    capability_id: capability_id.clone(),
-                    name: capability.provider_tool_name.clone(),
-                    description: capability.safe_description.clone(),
-                    parameters: capability.parameters_schema.clone(),
-                })
-            })
-            .collect::<Vec<_>>();
+        let mut definitions = Vec::new();
+        for (capability_id, capability) in &snapshot.capabilities {
+            if let Some(definition) = capability.tool_definition(capability_id)? {
+                definitions.push(definition);
+            }
+        }
         definitions.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(definitions)
+    }
+
+    fn provider_tool_call_capability_ids(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<ProviderToolCallCapabilityIds, AgentLoopHostError> {
+        let prepared = self.prepare_provider_tool_call(tool_call)?;
+        Ok(ProviderToolCallCapabilityIds {
+            provider_capability_id: prepared.capability_id,
+            effective_capability_ids: prepared.effective_capability_ids,
+        })
     }
 
     fn validate_provider_tool_call(
@@ -742,6 +720,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             surface_version: prepared.surface_version,
             capability_id: prepared.capability_id,
             input_ref,
+            effective_capability_ids: prepared.effective_capability_ids,
             provider_replay: Some(ProviderToolCallReplay {
                 provider_id: tool_call.provider_id,
                 provider_model_id: tool_call.provider_model_id,
@@ -767,12 +746,18 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             .await
             .map_err(host_runtime_error)?;
         let version = loop_surface_version(runtime_surface.version.as_str())?;
-        let mut snapshot = SurfaceSnapshot::default();
-        let descriptors = runtime_surface
+        let mut snapshot = SurfaceSnapshot::with_synthetic_capabilities()?;
+        let mut descriptors = runtime_surface
             .capabilities
             .into_iter()
             .map(|capability| {
                 let capability_id = capability.descriptor.id.clone();
+                if snapshot.capabilities.contains_key(&capability_id) {
+                    return Err(AgentLoopHostError::new(
+                        AgentLoopHostErrorKind::InvalidInvocation,
+                        "host runtime capability id is reserved for a synthetic loop capability",
+                    ));
+                }
                 let provider_tool_name =
                     provider_tool_name(&capability.descriptor.id, &snapshot.provider_names);
                 snapshot
@@ -780,16 +765,19 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                     .insert(provider_tool_name.clone(), capability_id.clone());
                 snapshot.capabilities.insert(
                     capability_id.clone(),
-                    SurfaceCapabilitySnapshot {
-                        provider: capability.descriptor.provider.clone(),
-                        runtime: capability.descriptor.runtime,
-                        estimate: capability.estimated_resources.clone(),
-                        safe_description: capability.descriptor.description.clone(),
-                        parameters_schema: capability.descriptor.parameters_schema.clone(),
-                        provider_tool_name,
-                    },
+                    SurfaceCapabilitySnapshot::Runtime(Box::new(
+                        RuntimeSurfaceCapabilitySnapshot {
+                            provider: capability.descriptor.provider.clone(),
+                            runtime: capability.descriptor.runtime,
+                            estimate: capability.estimated_resources.clone(),
+                            safe_description: capability.descriptor.description.clone(),
+                            parameters_schema: capability.descriptor.parameters_schema.clone(),
+                            effects: capability.descriptor.effects.clone(),
+                            provider_tool_name,
+                        },
+                    )),
                 );
-                CapabilityDescriptorView {
+                Ok(CapabilityDescriptorView {
                     capability_id,
                     provider: Some(capability.descriptor.provider),
                     runtime: capability.descriptor.runtime,
@@ -797,9 +785,10 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                     safe_description: capability.descriptor.description,
                     concurrency_hint: concurrency_hint_from_effects(&capability.descriptor.effects),
                     parameters_schema: capability.descriptor.parameters_schema,
-                }
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, AgentLoopHostError>>()?;
+        descriptors.extend(snapshot.synthetic_descriptor_views()?);
 
         let mut snapshots = lock_mut(&self.snapshots, "capability surface snapshot store")?;
         snapshots.clear();
@@ -824,17 +813,6 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             return Ok(CapabilityOutcome::Denied(CapabilityDenied {
                 reason_kind: capability_denied_reason_kind("outside_visible_surface")?,
                 safe_summary: "capability was not visible on the cited surface".to_string(),
-            }));
-        };
-        let Some(trust_decision) = self
-            .visible_request
-            .provider_trust
-            .get(&capability.provider)
-            .cloned()
-        else {
-            return Ok(CapabilityOutcome::Denied(CapabilityDenied {
-                reason_kind: capability_denied_reason_kind("missing_provider_trust")?,
-                safe_summary: "capability provider trust is unavailable".to_string(),
             }));
         };
         let idempotency_key = invocation_idempotency_key(&self.run_context, &request)?;
@@ -863,6 +841,31 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
         // `finish_runtime_outcome` rather than cleared.
         let guard = self.dispatch_reservation_guard(&idempotency_key);
 
+        let capability = match capability {
+            SurfaceCapabilitySnapshot::Runtime(capability) => capability,
+            SurfaceCapabilitySnapshot::Synthetic(capability) => {
+                let result = self
+                    .invoke_synthetic_capability(request, capability, snapshot)
+                    .await;
+                if result.is_ok() {
+                    self.record_loop_completed(&idempotency_key, result.clone())?;
+                    guard.commit();
+                }
+                return result;
+            }
+        };
+
+        let Some(trust_decision) = self
+            .visible_request
+            .provider_trust
+            .get(&capability.provider)
+            .cloned()
+        else {
+            return Ok(CapabilityOutcome::Denied(CapabilityDenied {
+                reason_kind: capability_denied_reason_kind("missing_provider_trust")?,
+                safe_summary: "capability provider trust is unavailable".to_string(),
+            }));
+        };
         let input = self
             .input_resolver
             .resolve_capability_input(&self.run_context, &request.input_ref)
@@ -1172,222 +1175,6 @@ fn provider_tool_name_base(capability_id: &str) -> String {
     }
 }
 
-fn validate_provider_tool_call(tool_call: &ProviderToolCall) -> Result<(), AgentLoopHostError> {
-    validate_provider_identity(&tool_call.provider_id, "provider id", 512)?;
-    validate_provider_identity(&tool_call.provider_model_id, "provider model id", 512)?;
-    let turn_id = tool_call.turn_id.as_deref().ok_or_else(|| {
-        AgentLoopHostError::new(
-            AgentLoopHostErrorKind::InvalidInvocation,
-            "provider tool call is missing a provider turn id",
-        )
-    })?;
-    validate_provider_token(turn_id, "provider turn id", 512)?;
-    validate_provider_token(&tool_call.id, "provider call id", 512)?;
-    validate_provider_tool_name(&tool_call.name)?;
-    validate_provider_arguments(&tool_call.arguments)?;
-    validate_optional_provider_text(
-        &tool_call.response_reasoning,
-        "provider response reasoning",
-        4096,
-    )?;
-    validate_optional_provider_text(&tool_call.reasoning, "provider reasoning", 4096)?;
-    validate_optional_provider_text(&tool_call.signature, "provider signature", 4096)?;
-    Ok(())
-}
-
-fn validate_provider_tool_name(value: &str) -> Result<(), AgentLoopHostError> {
-    if value.is_empty() {
-        return Err(AgentLoopHostError::new(
-            AgentLoopHostErrorKind::InvalidInvocation,
-            "provider tool name must not be empty",
-        ));
-    }
-    if value.len() > PROVIDER_TOOL_NAME_MAX_BYTES {
-        return Err(AgentLoopHostError::new(
-            AgentLoopHostErrorKind::InvalidInvocation,
-            format!("provider tool name exceeds {PROVIDER_TOOL_NAME_MAX_BYTES} bytes"),
-        ));
-    }
-    if !value
-        .chars()
-        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
-    {
-        return Err(AgentLoopHostError::new(
-            AgentLoopHostErrorKind::InvalidInvocation,
-            "provider tool name must contain only ASCII letters, digits, _, or -",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_provider_identity(
-    value: &str,
-    label: &'static str,
-    max_len: usize,
-) -> Result<(), AgentLoopHostError> {
-    if value.trim().is_empty() {
-        return Err(AgentLoopHostError::new(
-            AgentLoopHostErrorKind::InvalidInvocation,
-            format!("{label} must not be empty"),
-        ));
-    }
-    if value.len() > max_len {
-        return Err(AgentLoopHostError::new(
-            AgentLoopHostErrorKind::InvalidInvocation,
-            format!("{label} exceeds {max_len} bytes"),
-        ));
-    }
-    if value
-        .chars()
-        .any(|character| character == '\0' || character.is_control())
-    {
-        return Err(AgentLoopHostError::new(
-            AgentLoopHostErrorKind::InvalidInvocation,
-            format!("{label} must not contain NUL/control characters"),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_provider_token(
-    value: &str,
-    label: &'static str,
-    max_len: usize,
-) -> Result<(), AgentLoopHostError> {
-    if value.is_empty() {
-        return Err(AgentLoopHostError::new(
-            AgentLoopHostErrorKind::InvalidInvocation,
-            format!("{label} must not be empty"),
-        ));
-    }
-    if value.len() > max_len {
-        return Err(AgentLoopHostError::new(
-            AgentLoopHostErrorKind::InvalidInvocation,
-            format!("{label} exceeds {max_len} bytes"),
-        ));
-    }
-    if !value.chars().all(|character| {
-        character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.' | ':')
-    }) {
-        return Err(AgentLoopHostError::new(
-            AgentLoopHostErrorKind::InvalidInvocation,
-            format!("{label} must contain only ASCII letters, digits, _, -, ., or :"),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_provider_arguments(arguments: &serde_json::Value) -> Result<(), AgentLoopHostError> {
-    let arguments_len = serde_json::to_vec(arguments)
-        .map_err(|error| {
-            AgentLoopHostError::new(AgentLoopHostErrorKind::InvalidInvocation, error.to_string())
-        })?
-        .len();
-    if arguments_len > 16 * 1024 {
-        return Err(AgentLoopHostError::new(
-            AgentLoopHostErrorKind::InvalidInvocation,
-            "provider tool arguments exceed 16384 bytes",
-        ));
-    }
-    validate_provider_json_value(arguments, "provider arguments", 0)
-}
-
-fn validate_provider_json_value(
-    value: &serde_json::Value,
-    label: &'static str,
-    depth: usize,
-) -> Result<(), AgentLoopHostError> {
-    if depth > 16 {
-        return Err(AgentLoopHostError::new(
-            AgentLoopHostErrorKind::InvalidInvocation,
-            format!("{label} exceed maximum nesting depth"),
-        ));
-    }
-    match value {
-        serde_json::Value::String(text) => validate_provider_text_content(text, label),
-        serde_json::Value::Array(items) => {
-            for item in items {
-                validate_provider_json_value(item, label, depth + 1)?;
-            }
-            Ok(())
-        }
-        serde_json::Value::Object(entries) => {
-            for (key, item) in entries {
-                validate_provider_json_key(key)?;
-                validate_provider_json_value(item, label, depth + 1)?;
-            }
-            Ok(())
-        }
-        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
-            Ok(())
-        }
-    }
-}
-
-fn validate_provider_json_key(key: &str) -> Result<(), AgentLoopHostError> {
-    if key
-        .chars()
-        .any(|character| character == '\0' || character.is_control())
-    {
-        return Err(AgentLoopHostError::new(
-            AgentLoopHostErrorKind::InvalidInvocation,
-            "provider argument key must not contain NUL/control characters",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_optional_provider_text(
-    value: &Option<String>,
-    label: &'static str,
-    max_len: usize,
-) -> Result<(), AgentLoopHostError> {
-    let Some(value) = value else {
-        return Ok(());
-    };
-    if value.len() > max_len {
-        return Err(AgentLoopHostError::new(
-            AgentLoopHostErrorKind::InvalidInvocation,
-            format!("{label} exceeds {max_len} bytes"),
-        ));
-    }
-    validate_provider_text_content(value, label)
-}
-
-fn validate_provider_text_content(
-    value: &str,
-    label: &'static str,
-) -> Result<(), AgentLoopHostError> {
-    if value
-        .chars()
-        .any(|character| character == '\0' || character.is_control())
-    {
-        return Err(AgentLoopHostError::new(
-            AgentLoopHostErrorKind::InvalidInvocation,
-            format!("{label} must not contain NUL/control characters"),
-        ));
-    }
-    let lower = value.to_ascii_lowercase();
-    for forbidden in SENSITIVE_PROVIDER_TEXT_MARKERS {
-        if lower.contains(forbidden) {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::InvalidInvocation,
-                format!("{label} must not contain sensitive marker `{forbidden}`"),
-            ));
-        }
-    }
-    if lower
-        .split(|character: char| !character.is_ascii_alphanumeric() && character != '-')
-        .any(|token| token.starts_with("sk-"))
-    {
-        return Err(AgentLoopHostError::new(
-            AgentLoopHostErrorKind::InvalidInvocation,
-            format!("{label} must not contain API-key-like tokens"),
-        ));
-    }
-    Ok(())
-}
-
 pub fn concurrency_hint_from_effects(effects: &[EffectKind]) -> ConcurrencyHint {
     if effects.is_empty() {
         return ConcurrencyHint::Exclusive;
@@ -1422,7 +1209,7 @@ fn invocation_context_from_visible(
     base: &ExecutionContext,
     run_context: &LoopRunContext,
     capability_id: &CapabilityId,
-    capability: &SurfaceCapabilitySnapshot,
+    capability: &RuntimeSurfaceCapabilitySnapshot,
     trust: ironclaw_host_api::TrustClass,
     allowed_effects: &[EffectKind],
     execution_mounts: &MountView,
@@ -1614,7 +1401,14 @@ fn provider_tool_call_input_ref(
         )
     })?;
     let arguments = serde_json::to_string(&tool_call.arguments).map_err(|error| {
-        AgentLoopHostError::new(AgentLoopHostErrorKind::InvalidInvocation, error.to_string())
+        let safe_summary = error.to_string();
+        crate::raw_agent_loop_host_error(
+            "capability_provider_tool_call",
+            "serialize_arguments",
+            AgentLoopHostErrorKind::InvalidInvocation,
+            safe_summary,
+            error,
+        )
     })?;
     let payload = format!(
         "provider-tool-input\nrun={}\nprovider={}\nmodel={}\nturn={}\ncall={}\ntool={}\narguments={}",
@@ -1733,8 +1527,10 @@ fn runtime_failure_kind_to_loop(
         RuntimeFailureKind::Cancelled => CapabilityFailureKind::Cancelled,
         RuntimeFailureKind::Dispatcher => CapabilityFailureKind::Dispatcher,
         RuntimeFailureKind::InvalidInput => CapabilityFailureKind::InvalidInput,
+        RuntimeFailureKind::InvalidOutput => CapabilityFailureKind::InvalidOutput,
         RuntimeFailureKind::MissingRuntime => CapabilityFailureKind::MissingRuntime,
         RuntimeFailureKind::Network => CapabilityFailureKind::Network,
+        RuntimeFailureKind::OperationFailed => CapabilityFailureKind::OperationFailed,
         RuntimeFailureKind::OutputTooLarge => CapabilityFailureKind::OutputTooLarge,
         RuntimeFailureKind::Process => CapabilityFailureKind::Process,
         RuntimeFailureKind::Resource => CapabilityFailureKind::Resource,
@@ -1814,16 +1610,25 @@ fn blocked_summary(reason: RuntimeBlockedReason) -> &'static str {
 
 fn host_runtime_error(error: HostRuntimeError) -> AgentLoopHostError {
     match error {
-        HostRuntimeError::InvalidRequest { reason } => AgentLoopHostError::new(
+        HostRuntimeError::InvalidRequest { reason } => crate::raw_agent_loop_host_error(
+            "host_runtime_capability",
+            "invoke",
             AgentLoopHostErrorKind::InvalidInvocation,
-            runtime_safe_summary(Some(reason), "host runtime rejected capability request"),
+            runtime_safe_summary(
+                Some(reason.clone()),
+                "host runtime rejected capability request",
+            ),
+            reason,
         ),
-        HostRuntimeError::Unavailable { reason } => AgentLoopHostError::new(
+        HostRuntimeError::Unavailable { reason } => crate::raw_agent_loop_host_error(
+            "host_runtime_capability",
+            "invoke",
             AgentLoopHostErrorKind::Unavailable,
             runtime_safe_summary(
-                Some(reason),
+                Some(reason.clone()),
                 "host runtime capability service is unavailable",
             ),
+            reason,
         ),
     }
 }
@@ -1831,11 +1636,13 @@ fn host_runtime_error(error: HostRuntimeError) -> AgentLoopHostError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use async_trait::async_trait;
     use ironclaw_host_api::{
         AgentId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, GrantConstraints,
         MountAlias, MountGrant, MountPermissions, NetworkPolicy, PermissionMode, ProjectId,
-        ResourceUsage, TenantId, TrustClass, UserId, VirtualPath,
+        ResourceEstimate, ResourceUsage, RuntimeKind, TenantId, TrustClass, UserId, VirtualPath,
     };
     use ironclaw_host_runtime::{
         CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, CapabilitySurfaceVersion,
@@ -1848,6 +1655,8 @@ mod tests {
         InMemoryRunProfileResolver, LoopDriverId, RunProfileResolutionRequest, RunProfileResolver,
         TurnId, TurnRunId, TurnScope,
     };
+
+    use crate::{capability_info, capability_surface_filter::CapabilitySurfaceVisibleFilter};
 
     #[test]
     fn concurrency_hint_treats_empty_effects_as_exclusive() {
@@ -1913,10 +1722,18 @@ mod tests {
                 CapabilityFailureKind::InvalidInput,
             ),
             (
+                RuntimeFailureKind::InvalidOutput,
+                CapabilityFailureKind::InvalidOutput,
+            ),
+            (
                 RuntimeFailureKind::MissingRuntime,
                 CapabilityFailureKind::MissingRuntime,
             ),
             (RuntimeFailureKind::Network, CapabilityFailureKind::Network),
+            (
+                RuntimeFailureKind::OperationFailed,
+                CapabilityFailureKind::OperationFailed,
+            ),
             (
                 RuntimeFailureKind::OutputTooLarge,
                 CapabilityFailureKind::OutputTooLarge,
@@ -1991,36 +1808,7 @@ mod tests {
         let name = provider_tool_name(&capability_id, &HashMap::new());
 
         assert_eq!(name, "demo__echo__v1");
-        validate_provider_tool_name(&name).expect("provider-safe name");
-    }
-
-    #[test]
-    fn provider_tool_call_validation_rejects_provider_unsafe_tool_name() {
-        let mut call = provider_tool_call();
-        call.name = "demo.echo".to_string();
-
-        let error = validate_provider_tool_call(&call).expect_err("unsafe name rejected");
-        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
-    }
-
-    #[test]
-    fn provider_tool_call_validation_requires_turn_id() {
-        let mut call = provider_tool_call();
-        call.turn_id = None;
-
-        let error = validate_provider_tool_call(&call).expect_err("missing turn id rejected");
-        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
-    }
-
-    #[test]
-    fn provider_tool_call_validation_rejects_sensitive_metadata() {
-        let mut call = provider_tool_call();
-        call.arguments = serde_json::json!({"password":"sk-live-secret"});
-        assert!(validate_provider_tool_call(&call).is_err());
-
-        let mut call = provider_tool_call();
-        call.reasoning = Some("provider error included traceback".to_string());
-        assert!(validate_provider_tool_call(&call).is_err());
+        provider_validation::validate_provider_tool_name(&name).expect("provider-safe name");
     }
 
     #[test]
@@ -2230,6 +2018,493 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn capability_info_is_advertised_and_returns_lazy_schema_on_request() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let context = execution_context("thread-capability-info");
+        let run_context = loop_run_context(&context).await;
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+            capability_id.clone(),
+            provider_id,
+        )]));
+        let result_writer = Arc::new(RecordingResultWriter::default());
+        let port = Arc::new(
+            HostRuntimeLoopCapabilityPortFactory::new(
+                runtime.clone(),
+                visible_request(context),
+                dummy_input_resolver(),
+                result_writer.clone(),
+                dummy_milestone_sink(),
+            )
+            .port_for_run_context(run_context),
+        );
+
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+        assert!(surface.descriptors.iter().any(|descriptor| {
+            descriptor.capability_id.as_str() == capability_info::CAPABILITY_ID
+        }));
+        let visible_filter = CapabilitySurfaceVisibleFilter::new(
+            port.clone(),
+            surface
+                .descriptors
+                .iter()
+                .map(|descriptor| descriptor.capability_id.clone()),
+        );
+        let filtered_tool_definitions = visible_filter
+            .tool_definitions()
+            .expect("filtered tool definitions");
+        assert!(
+            filtered_tool_definitions
+                .iter()
+                .any(|definition| definition.name == capability_info::TOOL_NAME),
+            "capability_info must survive the ordinary model-visible capability filter"
+        );
+        let tool_definitions = port.tool_definitions().expect("tool definitions");
+        assert!(
+            tool_definitions
+                .iter()
+                .any(|definition| definition.name == capability_info::TOOL_NAME)
+        );
+        let capability_info_definition = tool_definitions
+            .iter()
+            .find(|definition| definition.name == capability_info::TOOL_NAME)
+            .expect("capability_info definition is advertised");
+        assert_eq!(
+            capability_info_definition.parameters["anyOf"],
+            serde_json::json!([
+                { "required": ["name"] },
+                { "required": ["capability_id"] }
+            ])
+        );
+        assert!(
+            tool_definitions
+                .iter()
+                .any(|definition| definition.capability_id == capability_id)
+        );
+
+        let mut call = provider_tool_call();
+        call.name = capability_info::TOOL_NAME.to_string();
+        call.arguments = serde_json::json!({
+            "capability_id": capability_id.as_str(),
+            "include_schema": true
+        });
+        let candidate = port
+            .register_provider_tool_call(call)
+            .await
+            .expect("capability_info call should register");
+        assert_eq!(
+            candidate.capability_id.as_str(),
+            capability_info::CAPABILITY_ID
+        );
+
+        let invocation = CapabilityInvocation {
+            surface_version: surface.version,
+            capability_id: candidate.capability_id,
+            input_ref: candidate.input_ref,
+        };
+        let outcome = port
+            .invoke_capability(invocation.clone())
+            .await
+            .expect("capability_info invocation succeeds");
+        let replayed_outcome = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: invocation.surface_version,
+                capability_id: invocation.capability_id,
+                input_ref: invocation.input_ref,
+            })
+            .await
+            .expect("capability_info invocation replays");
+
+        assert!(matches!(outcome, CapabilityOutcome::Completed(_)));
+        assert!(matches!(replayed_outcome, CapabilityOutcome::Completed(_)));
+        let records = result_writer.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].0.as_str(), capability_info::CAPABILITY_ID);
+        assert_eq!(records[0].1["capability_id"], capability_id.as_str());
+        assert_eq!(records[0].1["schema"], serde_json::json!({"type":"object"}));
+        assert!(
+            runtime.take_requests().is_empty(),
+            "capability_info must be served by the loop port without dispatching to the host runtime"
+        );
+    }
+
+    #[tokio::test]
+    async fn capability_info_result_write_failure_is_retryable() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let context = execution_context("thread-capability-info-retry-result-write");
+        let run_context = loop_run_context(&context).await;
+        let result_writer = Arc::new(FailOnceResultWriter::default());
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+                capability_id.clone(),
+                provider_id,
+            )])),
+            visible_request(context),
+            dummy_input_resolver(),
+            result_writer.clone(),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+        let mut call = provider_tool_call();
+        call.name = capability_info::TOOL_NAME.to_string();
+        call.arguments = serde_json::json!({ "name": capability_id.as_str() });
+        let candidate = port
+            .register_provider_tool_call(call)
+            .await
+            .expect("capability_info call should register");
+        let invocation = CapabilityInvocation {
+            surface_version: surface.version,
+            capability_id: candidate.capability_id,
+            input_ref: candidate.input_ref,
+        };
+
+        let error = port
+            .invoke_capability(invocation.clone())
+            .await
+            .expect_err("first result write should fail");
+        assert_eq!(error.kind, AgentLoopHostErrorKind::TranscriptWriteFailed);
+        let retried_outcome = port
+            .invoke_capability(invocation)
+            .await
+            .expect("second invocation should retry the write");
+
+        assert!(matches!(retried_outcome, CapabilityOutcome::Completed(_)));
+        assert_eq!(result_writer.attempts(), 2);
+    }
+
+    #[tokio::test]
+    async fn capability_info_accepts_visible_provider_tool_name() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let context = execution_context("thread-capability-info-provider-name");
+        let run_context = loop_run_context(&context).await;
+        let result_writer = Arc::new(RecordingResultWriter::default());
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+                capability_id.clone(),
+                provider_id,
+            )])),
+            visible_request(context),
+            dummy_input_resolver(),
+            result_writer.clone(),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+        let provider_tool_name = port
+            .tool_definitions()
+            .expect("tool definitions")
+            .into_iter()
+            .find(|definition| definition.capability_id == capability_id)
+            .expect("runtime capability is advertised")
+            .name;
+
+        let mut call = provider_tool_call();
+        call.name = capability_info::TOOL_NAME.to_string();
+        call.arguments = serde_json::json!({
+            "name": provider_tool_name,
+            "detail": "summary"
+        });
+        let candidate = port
+            .register_provider_tool_call(call)
+            .await
+            .expect("capability_info call should register by provider tool name");
+        port.invoke_capability(CapabilityInvocation {
+            surface_version: surface.version,
+            capability_id: candidate.capability_id,
+            input_ref: candidate.input_ref,
+        })
+        .await
+        .expect("capability_info invocation succeeds");
+
+        let records = result_writer.records();
+        assert_eq!(records[0].1["capability_id"], capability_id.as_str());
+        assert_eq!(
+            records[0].1["summary"]["notes"],
+            serde_json::json!(["runtime: first_party", "effects: dispatch_capability"])
+        );
+    }
+
+    #[tokio::test]
+    async fn capability_info_rejects_invalid_detail_arguments() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let context = execution_context("thread-capability-info-invalid-detail");
+        let run_context = loop_run_context(&context).await;
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+            capability_id.clone(),
+            provider_id,
+        )]));
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            runtime,
+            visible_request(context),
+            dummy_input_resolver(),
+            dummy_result_writer(),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+        port.visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+
+        for arguments in [
+            serde_json::json!({ "name": capability_id.as_str(), "include_schema": 1 }),
+            serde_json::json!({ "name": capability_id.as_str(), "detail": "everything" }),
+        ] {
+            let mut call = provider_tool_call();
+            call.name = capability_info::TOOL_NAME.to_string();
+            call.arguments = arguments;
+            let error = port
+                .register_provider_tool_call(call)
+                .await
+                .expect_err("invalid capability_info arguments should fail");
+            assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        }
+    }
+
+    #[tokio::test]
+    async fn capability_info_rejects_invalid_name_inputs() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let context = execution_context("thread-capability-info-invalid-name");
+        let run_context = loop_run_context(&context).await;
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+            capability_id,
+            provider_id,
+        )]));
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            runtime,
+            visible_request(context),
+            dummy_input_resolver(),
+            dummy_result_writer(),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+        port.visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+
+        for arguments in [
+            serde_json::json!({}),
+            serde_json::json!({ "name": "" }),
+            serde_json::json!({ "name": "demo echo" }),
+            serde_json::json!({ "name": "demo.echo!" }),
+            serde_json::json!({ "name": "demo.écho" }),
+            serde_json::json!({ "name": "a".repeat(161) }),
+        ] {
+            let mut call = provider_tool_call();
+            call.name = capability_info::TOOL_NAME.to_string();
+            call.arguments = arguments;
+            let error = port
+                .register_provider_tool_call(call)
+                .await
+                .expect_err("invalid capability_info name should fail");
+            assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        }
+    }
+
+    #[tokio::test]
+    async fn capability_info_rejects_targets_outside_visible_surface() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let context = execution_context("thread-capability-info-invisible-target");
+        let run_context = loop_run_context(&context).await;
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+            capability_id,
+            provider_id,
+        )]));
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            runtime,
+            visible_request(context),
+            dummy_input_resolver(),
+            dummy_result_writer(),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+        port.visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+
+        let mut call = provider_tool_call();
+        call.name = capability_info::TOOL_NAME.to_string();
+        call.arguments = serde_json::json!({ "name": "demo.missing" });
+        let error = port
+            .register_provider_tool_call(call)
+            .await
+            .expect_err("unknown target should fail");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    }
+
+    #[tokio::test]
+    async fn capability_info_returns_names_and_summary_details() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let context = execution_context("thread-capability-info-detail-modes");
+        let run_context = loop_run_context(&context).await;
+        let mut visible = visible_capability(capability_id.clone(), provider_id);
+        visible.descriptor.parameters_schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "count": { "type": "integer" },
+                "message": { "type": "string" }
+            },
+            "required": ["message"],
+            "allOf": [{
+                "properties": {
+                    "limit": { "type": "integer" }
+                },
+                "required": ["limit"]
+            }],
+            "anyOf": [{
+                "properties": {
+                    "mode": { "type": "string" }
+                },
+                "required": ["mode"]
+            }]
+        });
+        let result_writer = Arc::new(RecordingResultWriter::default());
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            Arc::new(RecordingHostRuntime::new(vec![visible])),
+            visible_request(context),
+            dummy_input_resolver(),
+            result_writer.clone(),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+
+        for (detail, expected_summary) in [(None, false), (Some("summary"), true)] {
+            let mut call = provider_tool_call();
+            call.name = capability_info::TOOL_NAME.to_string();
+            call.arguments = serde_json::json!({ "name": capability_id.as_str() });
+            if let Some(detail) = detail {
+                call.arguments["detail"] = serde_json::json!(detail);
+            }
+            let candidate = port
+                .register_provider_tool_call(call)
+                .await
+                .expect("capability_info call should register");
+            port.invoke_capability(CapabilityInvocation {
+                surface_version: surface.version.clone(),
+                capability_id: candidate.capability_id,
+                input_ref: candidate.input_ref,
+            })
+            .await
+            .expect("capability_info invocation succeeds");
+
+            let records = result_writer.records();
+            let output = &records.last().expect("result was written").1;
+            assert_eq!(
+                output["parameters"],
+                serde_json::json!(["count", "limit", "message", "mode"])
+            );
+            assert_eq!(output.get("summary").is_some(), expected_summary);
+            if expected_summary {
+                assert_eq!(
+                    output["summary"]["always_required"],
+                    serde_json::json!(["limit", "message"])
+                );
+                assert_eq!(
+                    output["summary"]["notes"],
+                    serde_json::json!(["runtime: first_party", "effects: dispatch_capability"])
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_capability_can_use_old_builtin_capability_info_id_without_synthetic_intercept()
+    {
+        let capability_id =
+            CapabilityId::new("builtin.capability_info").expect("valid capability id");
+        let provider_id = ExtensionId::new("builtin").expect("valid provider id");
+        let mut context = execution_context("thread-capability-info-id-collision");
+        let run_context = loop_run_context(&context).await;
+        let loop_driver_extension =
+            loop_driver_execution_extension_id(&run_context).expect("valid extension id");
+        context.grants.grants.push(dispatch_capability_grant(
+            &capability_id,
+            &loop_driver_extension,
+        ));
+
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+            capability_id.clone(),
+            provider_id.clone(),
+        )]));
+        let visible_request = visible_request(context).with_provider_trust(
+            std::collections::BTreeMap::from([(provider_id, dispatch_trust_decision())]),
+        );
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            runtime.clone(),
+            visible_request,
+            Arc::new(StaticInputResolver),
+            Arc::new(StaticResultWriter),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+        port.invoke_capability(CapabilityInvocation {
+            surface_version: surface.version,
+            capability_id: capability_id.clone(),
+            input_ref: CapabilityInputRef::new("input:old-builtin-capability-info")
+                .expect("valid input ref"),
+        })
+        .await
+        .expect("runtime capability invocation succeeds");
+
+        let requests = runtime.take_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].capability_id, capability_id);
+    }
+
+    #[tokio::test]
+    async fn runtime_capability_with_reserved_synthetic_id_is_rejected_from_surface() {
+        let capability_id =
+            CapabilityId::new(capability_info::CAPABILITY_ID).expect("valid capability id");
+        let provider_id = ExtensionId::new("ironclaw.loop").expect("valid provider id");
+        let context = execution_context("thread-capability-info-reserved-id");
+        let run_context = loop_run_context(&context).await;
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+            capability_id,
+            provider_id,
+        )]));
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            runtime,
+            visible_request(context),
+            dummy_input_resolver(),
+            dummy_result_writer(),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+
+        let error = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect_err("reserved synthetic capability id should be rejected");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    }
+
+    #[tokio::test]
     async fn factory_with_execution_mounts_propagates_to_port() {
         let context = execution_context("thread-factory-mounts");
         let run_context = loop_run_context(&context).await;
@@ -2350,12 +2625,13 @@ mod tests {
                 max_invocations: None,
             },
         });
-        let capability = SurfaceCapabilitySnapshot {
+        let capability = RuntimeSurfaceCapabilitySnapshot {
             provider: ExtensionId::new("demo").expect("valid provider"),
             runtime: RuntimeKind::Wasm,
             estimate: ResourceEstimate::default(),
             safe_description: "demo capability".to_string(),
             parameters_schema: serde_json::json!({"type":"object"}),
+            effects: vec![EffectKind::ReadFilesystem],
             provider_tool_name: "demo__echo".to_string(),
         };
 
@@ -2401,12 +2677,13 @@ mod tests {
                 max_invocations: None,
             },
         });
-        let capability = SurfaceCapabilitySnapshot {
+        let capability = RuntimeSurfaceCapabilitySnapshot {
             provider: ExtensionId::new("demo").expect("valid provider"),
             runtime: RuntimeKind::Wasm,
             estimate: ResourceEstimate::default(),
             safe_description: "demo capability".to_string(),
             parameters_schema: serde_json::json!({"type":"object"}),
+            effects: vec![EffectKind::ReadFilesystem],
             provider_tool_name: "demo__echo".to_string(),
         };
 
@@ -2449,12 +2726,13 @@ mod tests {
                 max_invocations: None,
             },
         });
-        let capability = SurfaceCapabilitySnapshot {
+        let capability = RuntimeSurfaceCapabilitySnapshot {
             provider: ExtensionId::new("demo").expect("valid provider"),
             runtime: RuntimeKind::Wasm,
             estimate: ResourceEstimate::default(),
             safe_description: "demo capability".to_string(),
             parameters_schema: serde_json::json!({"type":"object"}),
+            effects: vec![EffectKind::ReadFilesystem],
             provider_tool_name: "demo__echo".to_string(),
         };
 
@@ -2498,12 +2776,13 @@ mod tests {
                 max_invocations: None,
             },
         });
-        let capability = SurfaceCapabilitySnapshot {
+        let capability = RuntimeSurfaceCapabilitySnapshot {
             provider: ExtensionId::new("demo").expect("valid provider"),
             runtime: RuntimeKind::FirstParty,
             estimate: ResourceEstimate::default(),
             safe_description: "demo echo".to_string(),
             parameters_schema: serde_json::json!({ "type": "object" }),
+            effects: vec![EffectKind::DispatchCapability],
             provider_tool_name: "demo_echo".to_string(),
         };
 
@@ -2580,12 +2859,13 @@ mod tests {
                 max_invocations: None,
             },
         });
-        let capability = SurfaceCapabilitySnapshot {
+        let capability = RuntimeSurfaceCapabilitySnapshot {
             provider: ExtensionId::new("demo").expect("valid provider"),
             runtime: RuntimeKind::Script,
             estimate: ResourceEstimate::default(),
             safe_description: "demo capability".to_string(),
             parameters_schema: serde_json::json!({"type":"object"}),
+            effects: vec![EffectKind::ExecuteCode],
             provider_tool_name: "demo__echo".to_string(),
         };
 
@@ -2678,6 +2958,7 @@ mod tests {
                 parameters_schema: serde_json::json!({"type":"object"}),
                 effects: vec![EffectKind::DispatchCapability],
                 default_permission: PermissionMode::Allow,
+                runtime_credentials: Vec::new(),
                 resource_profile: None,
             },
             access: VisibleCapabilityAccess::Available,
@@ -2798,6 +3079,72 @@ mod tests {
             _output: serde_json::Value,
         ) -> Result<LoopResultRef, AgentLoopHostError> {
             LoopResultRef::new("result:mount-test").map_err(|_| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Internal,
+                    "result ref could not be built",
+                )
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct FailOnceResultWriter {
+        attempts: AtomicUsize,
+    }
+
+    impl FailOnceResultWriter {
+        fn attempts(&self) -> usize {
+            self.attempts.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl LoopCapabilityResultWriter for FailOnceResultWriter {
+        async fn write_capability_result(
+            &self,
+            _run_context: &LoopRunContext,
+            _capability_id: &CapabilityId,
+            _output: serde_json::Value,
+        ) -> Result<LoopResultRef, AgentLoopHostError> {
+            if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::TranscriptWriteFailed,
+                    "transient result write failure",
+                ));
+            }
+            LoopResultRef::new("result:capability-info-retry").map_err(|_| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Internal,
+                    "result ref could not be built",
+                )
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingResultWriter {
+        records: Mutex<Vec<(CapabilityId, serde_json::Value)>>,
+    }
+
+    impl RecordingResultWriter {
+        fn records(&self) -> Vec<(CapabilityId, serde_json::Value)> {
+            self.records.lock().expect("records lock").clone()
+        }
+    }
+
+    #[async_trait]
+    impl LoopCapabilityResultWriter for RecordingResultWriter {
+        async fn write_capability_result(
+            &self,
+            _run_context: &LoopRunContext,
+            capability_id: &CapabilityId,
+            output: serde_json::Value,
+        ) -> Result<LoopResultRef, AgentLoopHostError> {
+            self.records
+                .lock()
+                .expect("records lock")
+                .push((capability_id.clone(), output));
+            LoopResultRef::new("result:capability-info").map_err(|_| {
                 AgentLoopHostError::new(
                     AgentLoopHostErrorKind::Internal,
                     "result ref could not be built",

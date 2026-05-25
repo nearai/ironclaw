@@ -148,6 +148,7 @@ pub fn capability_call_response(
             surface_version: harness_surface_version(),
             capability_id: harness_capability_id(capability_id.into()),
             input_ref: CapabilityInputRef::new(input_ref.into()).expect("valid harness input ref"),
+            effective_capability_ids: Vec::new(),
             provider_replay: None,
         }]),
     }
@@ -530,6 +531,7 @@ impl ScriptedHostRuntimeToolCall {
                 surface_version,
                 capability_id: self.capability_id.clone(),
                 input_ref,
+                effective_capability_ids: vec![self.capability_id.clone()],
                 provider_replay: None,
             }]),
         }))

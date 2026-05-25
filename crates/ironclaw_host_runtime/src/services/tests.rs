@@ -28,6 +28,7 @@ use super::{
     ProcessResultStore, ProcessStore, RootFilesystem, RuntimeAdapter, RuntimeAdapterRequest,
     RuntimeAdapterResult, RuntimeProfile, SecretMode, ServiceResolvedRuntimeAdapter,
 };
+use crate::CommandExecutionRequest;
 
 #[test]
 fn host_http_egress_borrows_staged_policy_for_repeated_invocation_requests() {
@@ -103,6 +104,70 @@ fn host_http_egress_helper_injects_staged_credentials_from_handoff_store() {
             "Bearer staged-secret".to_string()
         ))
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn inherited_env_runtime_policy_selects_inherited_local_process_port() {
+    let workdir = tempfile::tempdir().expect("tempdir");
+    let home = std::env::var("HOME").expect("HOME set for inherited env test");
+    let services = test_services().with_runtime_policy(policy_with(
+        FilesystemBackendKind::HostWorkspace,
+        ProcessBackendKind::LocalHost,
+        NetworkMode::Direct,
+        SecretMode::InheritedEnv,
+    ));
+
+    let output = services
+        .process_port
+        .run_command(CommandExecutionRequest {
+            scope: sample_scope(),
+            mounts: None,
+            command: "printf '%s' \"$HOME\"".to_string(),
+            workdir: Some(workdir.path().display().to_string()),
+            timeout_secs: Some(5),
+            extra_env: Default::default(),
+        })
+        .await
+        .expect("command succeeds");
+
+    assert_eq!(output.exit_code, 0);
+    assert_eq!(output.output, home);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn scrubbed_runtime_policy_resets_managed_local_process_port_after_inherited_policy() {
+    let workdir = tempfile::tempdir().expect("tempdir");
+    let services = test_services()
+        .with_runtime_policy(policy_with(
+            FilesystemBackendKind::HostWorkspace,
+            ProcessBackendKind::LocalHost,
+            NetworkMode::Direct,
+            SecretMode::InheritedEnv,
+        ))
+        .with_runtime_policy(policy_with(
+            FilesystemBackendKind::HostWorkspace,
+            ProcessBackendKind::LocalHost,
+            NetworkMode::Direct,
+            SecretMode::ScrubbedEnv,
+        ));
+
+    let output = services
+        .process_port
+        .run_command(CommandExecutionRequest {
+            scope: sample_scope(),
+            mounts: None,
+            command: "printf '%s' \"$HOME\"".to_string(),
+            workdir: Some(workdir.path().display().to_string()),
+            timeout_secs: Some(5),
+            extra_env: Default::default(),
+        })
+        .await
+        .expect("command succeeds");
+
+    assert_eq!(output.exit_code, 0);
+    assert_eq!(output.output, workdir.path().display().to_string());
 }
 
 #[tokio::test]
@@ -525,6 +590,7 @@ fn test_descriptor(runtime: RuntimeKind, effects: Vec<EffectKind>) -> Capability
         parameters_schema: serde_json::Value::Null,
         effects,
         default_permission: PermissionMode::Allow,
+        runtime_credentials: Vec::new(),
         resource_profile: None,
     }
 }

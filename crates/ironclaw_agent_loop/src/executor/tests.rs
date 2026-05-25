@@ -440,6 +440,7 @@ fn sanitize_result_ref_suffix_handles_empty_special_chars_and_truncation() {
         surface_version: surface_version(),
         capability_id: capability_id(),
         input_ref: CapabilityInputRef::new("input:demo").expect("valid"),
+        effective_capability_ids: vec![capability_id()],
         provider_replay: Some(ProviderToolCallReplay {
             provider_id: "test-provider".to_string(),
             provider_model_id: "test-model".to_string(),
@@ -974,11 +975,12 @@ async fn model_request_uses_current_visible_surface_not_prompt_bundle_version() 
 
 #[tokio::test]
 async fn model_retry_success_clears_recovery_state() {
-    let host =
-        MockHost::new(vec![reply_response()]).with_model_errors(vec![AgentLoopHostError::new(
+    let host = MockHost::new(vec![reply_response()])
+        .with_model_errors(vec![AgentLoopHostError::new(
             AgentLoopHostErrorKind::Unavailable,
             "model unavailable",
-        )]);
+        )])
+        .with_prompt_surface_version(Some(stale_surface_version()));
     let executor = CanonicalAgentLoopExecutor;
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
@@ -988,7 +990,15 @@ async fn model_retry_success_clears_recovery_state() {
         .expect("execute");
 
     assert!(matches!(exit, LoopExit::Completed(_)));
-    assert_eq!(host.model_requests().len(), 2);
+    let requests = host.model_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].surface_version, Some(surface_version()));
+    assert_eq!(requests[1].surface_version, Some(surface_version()));
+    assert_eq!(
+        host.prompt_requests().len(),
+        2,
+        "model retry must request a fresh host-built prompt bundle"
+    );
     assert_eq!(final_staged_state(&host).recovery_state, Default::default());
 }
 
@@ -1335,4 +1345,57 @@ async fn denied_provider_call_appends_failure_tool_result_for_replay() {
         final_staged_state(&host).result_refs,
         vec![result_ref, appended[1].result_ref.clone()]
     );
+}
+
+#[tokio::test]
+async fn model_visible_provider_tool_failures_append_failure_tool_result_for_replay() {
+    for (error_kind, safe_summary) in [
+        (CapabilityFailureKind::InvalidInput, "invalid input"),
+        (CapabilityFailureKind::OperationFailed, "operation failed"),
+    ] {
+        let host = MockHost::new(vec![provider_calls_response(), reply_response()])
+            .with_batch_outcomes(vec![ironclaw_turns::run_profile::CapabilityBatchOutcome {
+                outcomes: vec![CapabilityOutcome::Failed(
+                    ironclaw_turns::run_profile::CapabilityFailure {
+                        error_kind,
+                        safe_summary: safe_summary.to_string(),
+                    },
+                )],
+                stopped_on_suspension: false,
+            }]);
+        let executor = CanonicalAgentLoopExecutor;
+        let state = LoopExecutionState::initial_for_run(host.run_context());
+
+        let exit = executor
+            .execute_family(&crate::families::default(), &host, state)
+            .await
+            .expect("execute");
+
+        let appended = host.appended_result_refs();
+        assert_eq!(appended.len(), 1);
+        assert_eq!(appended[0].safe_summary, safe_summary);
+        assert!(
+            appended[0]
+                .result_ref
+                .as_str()
+                .starts_with("result:provider-error-turn_1-call_1")
+        );
+        let provider_call = appended[0]
+            .provider_call
+            .as_ref()
+            .expect("provider replay metadata");
+        assert_eq!(provider_call.provider_turn_id, "turn_1");
+        assert_eq!(provider_call.provider_call_id, "call_1");
+        assert_eq!(provider_call.provider_tool_name, "demo__echo");
+        match exit {
+            LoopExit::Completed(completed) => {
+                assert_eq!(completed.result_refs, vec![appended[0].result_ref.clone()]);
+            }
+            other => panic!("expected completed, got {other:?}"),
+        }
+        assert_eq!(
+            final_staged_state(&host).result_refs,
+            vec![appended[0].result_ref.clone()]
+        );
+    }
 }

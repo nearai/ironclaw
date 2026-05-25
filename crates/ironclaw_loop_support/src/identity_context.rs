@@ -177,7 +177,7 @@ pub enum HostIdentityContextBuildError {
 
 impl HostIdentityContextBuildError {
     pub fn into_host_error(self) -> AgentLoopHostError {
-        let kind = match self {
+        let kind = match &self {
             Self::SourceUnavailable => AgentLoopHostErrorKind::Unavailable,
             Self::UnknownIdentityFile | Self::InvalidIdentityFile | Self::PolicyDenied => {
                 AgentLoopHostErrorKind::PolicyDenied

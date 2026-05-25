@@ -535,9 +535,22 @@ pub struct CapabilityDescriptor {
     pub parameters_schema: serde_json::Value,
     pub effects: Vec<EffectKind>,
     pub default_permission: PermissionMode,
+    pub runtime_credentials: Vec<RuntimeCredentialRequirement>,
     pub resource_profile: Option<ResourceProfile>,
 }
+
+pub struct RuntimeCredentialRequirement {
+    pub handle: SecretHandle,
+    pub audience: NetworkTargetPattern,
+    pub target: RuntimeCredentialTarget,
+    pub required: bool,
+}
 ```
+
+`runtime_credentials` is declarative host-owned injection metadata only. A
+credential requirement names the secret handle, HTTPS audience, injection target,
+and required/optional behavior; authorization and runtime egress still decide
+whether material is staged and consumed for a specific invocation.
 
 ### 10.3 Capability grants
 
@@ -678,6 +691,8 @@ Rules:
 - `CapabilityDispatchRequest` is already authorized; grant checks and approvals happen before this boundary. Optional `mounts` and `resource_reservation` fields are prepared obligation effects, not new authority grants.
 - `CapabilityDispatchResult` exposes normalized host facts: capability ID, provider, runtime, output, usage, and resource receipt.
 - `DispatchError` uses stable control-plane variants for registry/routing failures and `RuntimeDispatchErrorKind` for WASM/Script/MCP failures.
+- `RuntimeDispatchErrorKind::OperationFailed` is for model-visible capability-domain failures after a valid invocation reaches the capability implementation; runtime-lane execution failures such as guest traps remain runtime failures, not operation failures.
+- Runtime output contract failures such as `OutputDecode` and `InvalidResult` must not be conflated with malformed caller input.
 - Runtime/backend detail strings, stderr, host paths, and secret-bearing messages must not cross this port.
 - `ironclaw_dispatcher` implements the port; it does not own the port vocabulary.
 
