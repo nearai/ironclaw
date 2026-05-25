@@ -789,6 +789,8 @@ mod tests {
         );
         assert!(RebornSandboxNetworkBroker::unix_socket("relative.sock").is_err());
         assert!(RebornSandboxSecretBroker::unix_socket("/tmp/bad:path.sock").is_err());
+        assert!(RebornSandboxNetworkBroker::unix_socket("/tmp/bad\npath.sock").is_err());
+        assert!(RebornSandboxSecretBroker::unix_socket("/tmp/bad\tpath.sock").is_err());
     }
 
     #[tokio::test]
@@ -842,6 +844,49 @@ mod tests {
             "{}:/tmp/ironclaw-secret-broker.sock:rw",
             secret_socket.display()
         )));
+    }
+
+    #[tokio::test]
+    async fn container_launch_config_applies_http_proxy_broker_env_and_drops_none_network() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let config = RebornSandboxConfig::new(temp.path().join("workspaces"))
+            .with_network_broker_proxy_url("http://broker.internal:8181")
+            .unwrap();
+        let transport = RebornScopedSandboxCommandTransport::new(
+            Docker::connect_with_local_defaults().unwrap(),
+            config,
+        );
+        let launch = transport
+            .container_launch_config(
+                CommandExecutionRequest {
+                    scope: ResourceScope::system(),
+                    mounts: None,
+                    command: "true".to_string(),
+                    workdir: None,
+                    timeout_secs: Some(1),
+                    extra_env: HashMap::new(),
+                },
+                &workspace,
+                ContainerWorkdir::workspace_root(),
+            )
+            .await
+            .unwrap();
+        let host_config = launch.host_config.unwrap();
+        let binds = host_config.binds.unwrap();
+        let env = launch.env.unwrap();
+
+        assert_eq!(host_config.network_mode, None);
+        assert!(env.contains(&"IRONCLAW_REBORN_NETWORK_MODE=brokered".to_string()));
+        assert!(env.contains(&"http_proxy=http://broker.internal:8181".to_string()));
+        assert!(env.contains(&"HTTPS_PROXY=http://broker.internal:8181".to_string()));
+        assert!(binds.contains(&format!("{}:/workspace:rw", workspace.display())));
+        assert!(
+            binds
+                .iter()
+                .all(|bind| !bind.contains("ironclaw-http-broker.sock"))
+        );
     }
 
     #[tokio::test]

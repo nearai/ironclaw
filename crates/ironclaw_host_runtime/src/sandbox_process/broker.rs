@@ -67,6 +67,10 @@ impl RebornSandboxNetworkBroker {
         }
     }
 
+    /// Configures a host Unix-domain socket broker.
+    ///
+    /// This broker shape is supported only on Unix hosts. Windows hosts should
+    /// use the HTTP-proxy broker shape instead.
     pub fn unix_socket(host_socket: impl Into<PathBuf>) -> Result<Self, RuntimeProcessError> {
         Ok(Self {
             kind: RebornSandboxNetworkBrokerKind::UnixSocket {
@@ -137,6 +141,10 @@ impl RebornSandboxSecretBroker {
         })
     }
 
+    /// Configures a host Unix-domain socket broker.
+    ///
+    /// This broker shape is supported only on Unix hosts. Windows hosts should
+    /// use the HTTP endpoint broker shape instead.
     pub fn unix_socket(host_socket: impl Into<PathBuf>) -> Result<Self, RuntimeProcessError> {
         Ok(Self {
             kind: RebornSandboxSecretBrokerKind::UnixSocket {
@@ -305,9 +313,14 @@ fn broker_url_contains_manual_credentials(value: &str) -> bool {
 fn validate_host_socket_path(label: &str, path: &Path) -> Result<(), RuntimeProcessError> {
     let raw = path.to_string_lossy();
     reject_nul(label, &raw)?;
-    if !path.is_absolute() || raw.contains(':') || raw.is_empty() {
+    if cfg!(windows) {
         return Err(RuntimeProcessError::ExecutionFailed(format!(
-            "{label} must be an absolute host path without ':'"
+            "{label} is only supported on Unix hosts"
+        )));
+    }
+    if !path.is_absolute() || raw.contains(':') || raw.chars().any(char::is_control) {
+        return Err(RuntimeProcessError::ExecutionFailed(format!(
+            "{label} must be an absolute host path without ':' or control characters"
         )));
     }
     Ok(())
