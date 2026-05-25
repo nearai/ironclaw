@@ -30,7 +30,10 @@ use crate::{
 };
 
 mod container_identity;
+mod mounts;
 mod scope_key;
+
+use mounts::RebornSandboxMountSources;
 
 pub use container_identity::{RebornSandboxContainerIdentity, RebornSandboxWorkspaceMode};
 pub use scope_key::RebornSandboxScopeKey;
@@ -69,6 +72,7 @@ impl ContainerWorkdir {
 #[derive(Debug, Clone)]
 pub struct RebornSandboxConfig {
     workspace_root: PathBuf,
+    mount_sources: RebornSandboxMountSources,
     image: String,
     default_timeout: Duration,
     memory_bytes: u64,
@@ -82,6 +86,7 @@ impl RebornSandboxConfig {
     pub fn new(workspace_root: impl Into<PathBuf>) -> Self {
         Self {
             workspace_root: workspace_root.into(),
+            mount_sources: RebornSandboxMountSources::default(),
             image: std::env::var("IRONCLAW_REBORN_SANDBOX_IMAGE")
                 .or_else(|_| std::env::var("IRONCLAW_SANDBOX_IMAGE"))
                 .unwrap_or_else(|_| DEFAULT_IMAGE.to_string()),
@@ -107,6 +112,16 @@ impl RebornSandboxConfig {
     pub fn with_network_enabled(mut self) -> Self {
         self.disable_network = false;
         self
+    }
+
+    pub fn with_local_mount_source(
+        mut self,
+        virtual_root: ironclaw_host_api::VirtualPath,
+        host_root: impl Into<PathBuf>,
+    ) -> Result<Self, RuntimeProcessError> {
+        self.mount_sources
+            .add_local_source(virtual_root, host_root)?;
+        Ok(self)
     }
 
     pub fn with_container_identity(mut self, identity: RebornSandboxContainerIdentity) -> Self {
@@ -233,10 +248,14 @@ impl RebornScopedSandboxCommandTransport {
         );
         let env = validate_env(request.extra_env)?;
         let container_user = self.config.container_identity.container_user()?;
-        let binds = vec![format!(
-            "{}:{CONTAINER_WORKSPACE_ROOT}:rw",
-            workspace.display()
-        )];
+        let binds = self
+            .config
+            .mount_sources
+            .prepare_container_binds(workspace, request.mounts.as_ref())
+            .await?
+            .into_iter()
+            .map(|bind| bind.into_docker_bind())
+            .collect::<Vec<_>>();
         let host_config = HostConfig {
             binds: Some(binds),
             memory: Some(self.config.memory_bytes as i64),
@@ -328,16 +347,6 @@ impl SandboxCommandTransport for RebornScopedSandboxCommandTransport {
         request: CommandExecutionRequest,
     ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
         reject_nul("sandbox command", &request.command)?;
-        if request
-            .mounts
-            .as_ref()
-            .is_some_and(|mounts| !mounts.mounts.is_empty())
-        {
-            return Err(RuntimeProcessError::ExecutionFailed(
-                "scoped mounts are not supported by the Reborn Docker command sandbox yet"
-                    .to_string(),
-            ));
-        }
 
         let workspace = self.prepare_workspace(&request.scope).await?;
         let workdir = Self::resolve_container_workdir(request.workdir.as_deref())?;
@@ -518,6 +527,7 @@ fn validate_relative_workdir(path: &Path) -> Result<(), RuntimeProcessError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
 
     #[test]
     fn relative_workdir_rejects_escape() {
@@ -555,5 +565,42 @@ mod tests {
 
         assert_eq!(private.container_identity.workspace_mode(), 0o700);
         assert_eq!(group_shared.container_identity.workspace_mode(), 0o770);
+    }
+
+    #[tokio::test]
+    async fn run_command_rejects_unconfigured_scoped_mount_before_container_create() {
+        let temp = tempfile::tempdir().unwrap();
+        let docker = Docker::connect_with_local_defaults().unwrap();
+        let transport = RebornScopedSandboxCommandTransport::new(
+            docker,
+            RebornSandboxConfig::new(temp.path().join("workspaces")),
+        );
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workspace").unwrap(),
+            VirtualPath::new("/projects/app").unwrap(),
+            process_read_only_permissions(),
+        )])
+        .unwrap();
+
+        let error = transport
+            .run_command(CommandExecutionRequest {
+                scope: ResourceScope::system(),
+                mounts: Some(mounts),
+                command: "true".to_string(),
+                workdir: None,
+                timeout_secs: Some(1),
+                extra_env: HashMap::new(),
+            })
+            .await
+            .unwrap_err();
+
+        assert!(format!("{error}").contains("no trusted sandbox mount source"));
+    }
+
+    fn process_read_only_permissions() -> MountPermissions {
+        MountPermissions {
+            execute: true,
+            ..MountPermissions::read_only()
+        }
     }
 }
