@@ -285,12 +285,22 @@ impl EventProjectionService for FailingUpdatesProjectionService {
             ProjectionError::InvalidRequest { reason } => {
                 ProjectionError::InvalidRequest { reason }
             }
+            ProjectionError::MissingProjectionMetadata { field } => {
+                ProjectionError::MissingProjectionMetadata { field: *field }
+            }
             ProjectionError::RebaseRequired {
                 requested,
                 earliest,
             } => ProjectionError::RebaseRequired {
                 requested: requested.clone(),
                 earliest: earliest.clone(),
+            },
+            ProjectionError::TurnEventRebaseRequired {
+                requested,
+                earliest,
+            } => ProjectionError::TurnEventRebaseRequired {
+                requested: *requested,
+                earliest: *earliest,
             },
             ProjectionError::Source { operation } => ProjectionError::Source { operation },
         };
@@ -312,12 +322,22 @@ impl EventProjectionService for FailingSnapshotProjectionService {
             ProjectionError::InvalidRequest { reason } => {
                 ProjectionError::InvalidRequest { reason }
             }
+            ProjectionError::MissingProjectionMetadata { field } => {
+                ProjectionError::MissingProjectionMetadata { field: *field }
+            }
             ProjectionError::RebaseRequired {
                 requested,
                 earliest,
             } => ProjectionError::RebaseRequired {
                 requested: requested.clone(),
                 earliest: earliest.clone(),
+            },
+            ProjectionError::TurnEventRebaseRequired {
+                requested,
+                earliest,
+            } => ProjectionError::TurnEventRebaseRequired {
+                requested: *requested,
+                earliest: *earliest,
             },
             ProjectionError::Source { operation } => ProjectionError::Source { operation },
         })

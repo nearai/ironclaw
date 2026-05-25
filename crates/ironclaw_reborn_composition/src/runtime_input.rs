@@ -267,6 +267,12 @@ impl RebornRuntimeInput {
         self
     }
 
+    pub fn grants_trusted_laptop_access(&self) -> bool {
+        self.services
+            .as_ref()
+            .is_some_and(|services| services.grants_trusted_laptop_access())
+    }
+
     #[cfg(test)]
     pub(crate) fn with_model_gateway_override(
         mut self,

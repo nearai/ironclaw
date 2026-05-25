@@ -31,13 +31,15 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use ironclaw_events::{DurableEventLog, RuntimeEvent};
+use ironclaw_events::{DurableAuditLog, DurableEventLog, RuntimeEvent};
 use ironclaw_first_party_extension_ports::{
     FirstPartySkillsExtension, FirstPartySkillsExtensionHandles, SelectableSkillContextSource,
     SkillActivationSelectorConfig, SkillExecutionAdapter,
 };
 use ironclaw_host_api::{
-    AgentId, CapabilityId, InvocationId, ResourceScope, TenantId, ThreadId, UserId,
+    ActionResultSummary, ActionSummary, AgentId, AuditEnvelope, AuditEventId, AuditStage,
+    CapabilityId, CorrelationId, DecisionSummary, EffectKind, InvocationId, ResourceScope,
+    TenantId, ThreadId, UserId,
 };
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
@@ -700,6 +702,7 @@ pub async fn build_reborn_runtime(
         });
     }
 
+    let trusted_laptop_access = services_input.grants_trusted_laptop_access();
     let owner_id = services_input.owner_id().to_string();
     let mut services = build_reborn_services(services_input).await?;
 
@@ -787,6 +790,7 @@ pub async fn build_reborn_runtime(
         thread_scope.clone(),
     ));
     let event_log = Arc::clone(&local_runtime.event_log);
+    let audit_log = Arc::clone(&local_runtime.audit_log);
     let milestone_thread_scope = ThreadScope {
         owner_user_id: Some(actor_user_id.clone()),
         ..thread_scope.clone()
@@ -798,6 +802,9 @@ pub async fn build_reborn_runtime(
     let milestone_sink: Arc<dyn LoopHostMilestoneSink> = Arc::new(
         DurableLoopHostMilestoneSink::new(Arc::clone(&event_log), milestone_scope),
     );
+    if trusted_laptop_access {
+        append_trusted_laptop_access_audit(&audit_log, &thread_scope, &actor_user_id).await?;
+    }
     let local_dev_capabilities = local_dev::capability_wiring(
         &services,
         actor_user_id.clone(),
@@ -886,6 +893,60 @@ pub async fn build_reborn_runtime(
 }
 
 const LOOP_RUN_CAPABILITY_ID: &str = "loop.run";
+const TRUSTED_LAPTOP_ACCESS_AUDIT_KIND: &str = "local_dev_trusted_laptop_access";
+const TRUSTED_LAPTOP_ACCESS_AUDIT_TARGET: &str = "filesystem=host_workspace_and_home;process=local_host;network=direct;secrets=inherited_env;host_home_mount=/host";
+const TRUSTED_LAPTOP_ACCESS_AUDIT_STATUS: &str = "host_home_mounted_read_write";
+
+async fn append_trusted_laptop_access_audit(
+    audit_log: &Arc<dyn DurableAuditLog>,
+    thread_scope: &ThreadScope,
+    actor_user_id: &UserId,
+) -> Result<(), RebornRuntimeError> {
+    let invocation_id = InvocationId::new();
+    audit_log
+        .append(AuditEnvelope {
+            event_id: AuditEventId::new(),
+            correlation_id: CorrelationId::new(),
+            stage: AuditStage::After,
+            timestamp: Utc::now(),
+            tenant_id: thread_scope.tenant_id.clone(),
+            user_id: actor_user_id.clone(),
+            agent_id: Some(thread_scope.agent_id.clone()),
+            project_id: thread_scope.project_id.clone(),
+            mission_id: thread_scope.mission_id.clone(),
+            thread_id: None,
+            invocation_id,
+            process_id: None,
+            approval_request_id: None,
+            extension_id: None,
+            action: ActionSummary {
+                kind: TRUSTED_LAPTOP_ACCESS_AUDIT_KIND.to_string(),
+                target: Some(TRUSTED_LAPTOP_ACCESS_AUDIT_TARGET.to_string()),
+                effects: vec![
+                    EffectKind::ReadFilesystem,
+                    EffectKind::WriteFilesystem,
+                    EffectKind::SpawnProcess,
+                    EffectKind::Network,
+                    EffectKind::UseSecret,
+                ],
+            },
+            decision: DecisionSummary {
+                kind: "allowed".to_string(),
+                reason: None,
+                actor: None,
+            },
+            result: Some(ActionResultSummary {
+                success: true,
+                status: Some(TRUSTED_LAPTOP_ACCESS_AUDIT_STATUS.to_string()),
+                output_bytes: None,
+            }),
+        })
+        .await
+        .map(|_| ())
+        .map_err(|error| RebornRuntimeError::InvalidArgument {
+            reason: format!("could not record trusted laptop access audit event: {error}"),
+        })
+}
 
 struct LocalDevSkillContextSource {
     source: Arc<dyn HostSkillContextSource>,
@@ -1076,8 +1137,9 @@ mod tests {
     use std::time::Duration;
 
     use async_trait::async_trait;
+    use ironclaw_events::{EventStreamKey, ReadScope};
     use ironclaw_host_api::{
-        AgentId, CapabilityId, TenantId, UserId,
+        AgentId, AuditStage, CapabilityId, TenantId, UserId,
         runtime_policy::{
             ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy,
             FilesystemBackendKind, NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -1109,7 +1171,11 @@ mod tests {
     use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
     use crate::webui::build_webui_services;
 
-    use super::{RebornSkillSourceKind, build_reborn_runtime};
+    use super::{
+        RebornSkillSourceKind, TRUSTED_LAPTOP_ACCESS_AUDIT_KIND,
+        TRUSTED_LAPTOP_ACCESS_AUDIT_STATUS, TRUSTED_LAPTOP_ACCESS_AUDIT_TARGET,
+        build_reborn_runtime,
+    };
 
     fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
         EffectiveRuntimePolicy {
@@ -1393,6 +1459,72 @@ mod tests {
             .lock()
             .expect("recording gateway requests lock poisoned")
             .len()
+    }
+
+    #[tokio::test]
+    async fn local_dev_yolo_records_trusted_laptop_access_audit_event() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let host_home = root.path().join("host-home");
+        std::fs::create_dir_all(&host_home).expect("host home");
+        let mut policy = local_dev_runtime_policy();
+        policy.requested_profile = RuntimeProfile::LocalYolo;
+        policy.resolved_profile = RuntimeProfile::LocalYolo;
+        policy.filesystem_backend = FilesystemBackendKind::HostWorkspaceAndHome;
+        policy.network_mode = NetworkMode::Direct;
+        policy.secret_mode = SecretMode::InheritedEnv;
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev_with_profile(
+                crate::RebornCompositionProfile::LocalDevYolo,
+                "runtime-yolo-audit-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(policy)
+            .with_local_dev_confirmed_host_home_root(host_home),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-yolo-audit-tenant".to_string(),
+            agent_id: "runtime-yolo-audit-agent".to_string(),
+            source_binding_id: "runtime-yolo-audit-source".to_string(),
+            reply_target_binding_id: "runtime-yolo-audit-reply".to_string(),
+        });
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let stream = EventStreamKey::new(
+            runtime.thread_scope.tenant_id.clone(),
+            runtime.actor_user_id.clone(),
+            Some(runtime.thread_scope.agent_id.clone()),
+        );
+        let replay = runtime
+            .services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime")
+            .audit_log
+            .read_after_cursor(&stream, &ReadScope::any(), None, 10)
+            .await
+            .expect("audit replay");
+
+        let audit = replay
+            .entries
+            .iter()
+            .map(|entry| &entry.record)
+            .find(|record| record.action.kind == TRUSTED_LAPTOP_ACCESS_AUDIT_KIND)
+            .expect("trusted laptop access audit event");
+        assert_eq!(audit.stage, AuditStage::After);
+        assert_eq!(
+            audit.action.target.as_deref(),
+            Some(TRUSTED_LAPTOP_ACCESS_AUDIT_TARGET)
+        );
+        assert_eq!(
+            audit
+                .result
+                .as_ref()
+                .and_then(|result| result.status.as_deref()),
+            Some(TRUSTED_LAPTOP_ACCESS_AUDIT_STATUS)
+        );
+        assert_eq!(audit.decision.kind, "allowed");
+        runtime.shutdown().await.expect("shutdown");
     }
 
     #[tokio::test]

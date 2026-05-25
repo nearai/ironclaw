@@ -16,8 +16,9 @@ use ironclaw_product_adapters::{
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor as TurnEventCursor,
     GateRef, GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
-    RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnError,
-    TurnEventKind, TurnEventPage, TurnLifecycleEvent, TurnRunState, TurnStatus,
+    RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
+    TurnBlockedGateKind, TurnBlockedGateMetadata, TurnError, TurnEventKind, TurnEventPage,
+    TurnLifecycleEvent, TurnRunState, TurnStatus,
 };
 
 mod cursor_validation;

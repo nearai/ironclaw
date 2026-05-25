@@ -21,9 +21,11 @@
 mod auth;
 mod error;
 mod factory;
+mod gsuite;
 mod input;
 #[cfg(feature = "root-llm-provider")]
 mod llm_catalog;
+mod local_dev_mounts;
 mod local_runtime_profile;
 mod product_live_adapters;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -52,6 +54,7 @@ pub use auth::{
 };
 pub use error::RebornBuildError;
 pub use factory::{RebornServices, build_reborn_services};
+pub use gsuite::{bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers};
 pub use input::{RebornBuildInput, RebornRuntimeProcessBinding};
 #[cfg(feature = "root-llm-provider")]
 pub use llm_catalog::{
@@ -59,8 +62,9 @@ pub use llm_catalog::{
     resolve_reborn_runtime_llm,
 };
 pub use local_runtime_profile::{
-    RebornLocalRuntimeProfileError, local_dev_runtime_policy, local_dev_yolo_runtime_policy,
-    local_runtime_build_input,
+    RebornLocalRuntimeProfileError, RebornLocalRuntimeProfileOptions, local_dev_runtime_policy,
+    local_dev_yolo_runtime_policy, local_runtime_build_input,
+    local_runtime_build_input_with_options,
 };
 pub use product_live_adapters::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
@@ -173,6 +177,7 @@ pub fn reborn_runtime_readiness_snapshot() -> RebornRuntimeReadinessSnapshot {
     }
 }
 
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use std::sync::Arc;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]

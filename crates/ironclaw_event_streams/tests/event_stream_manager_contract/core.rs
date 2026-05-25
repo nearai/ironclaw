@@ -289,6 +289,23 @@ async fn fetch_snapshot_maps_projection_snapshot_errors() {
                 reason: "projection rebase required outside subscribe flow",
             },
         ),
+        (
+            ProjectionError::TurnEventRebaseRequired {
+                requested: ironclaw_turns::EventCursor(0),
+                earliest: ironclaw_turns::EventCursor(5),
+            },
+            ProjectionStreamError::InvalidRequest {
+                reason: "turn event projection rebase required outside subscribe flow",
+            },
+        ),
+        (
+            ProjectionError::MissingProjectionMetadata {
+                field: ironclaw_event_projections::MissingMetadataField::OwnerUserId,
+            },
+            ProjectionStreamError::InvalidRequest {
+                reason: "projection metadata missing on lifecycle event",
+            },
+        ),
     ] {
         let manager = EventStreamManager::new(
             Arc::new(FailingSnapshotProjectionService {

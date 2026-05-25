@@ -154,7 +154,7 @@ impl InvocationServicesResolver for LocalInvocationServicesResolver {
         if plan.requires_filesystem
             && !matches!(
                 plan.filesystem_backend,
-                FilesystemBackendKind::HostWorkspace
+                FilesystemBackendKind::HostWorkspace | FilesystemBackendKind::HostWorkspaceAndHome
             )
         {
             return Err(InvocationServicesError::UnsupportedFilesystemBackend {
@@ -473,6 +473,30 @@ mod tests {
                 backend: FilesystemBackendKind::TenantWorkspace
             }
         ));
+    }
+
+    #[test]
+    fn local_resolver_accepts_host_workspace_and_home_when_filesystem_required() {
+        let resolver = resolver_without_http();
+        let mut plan = plan(
+            ProcessBackendKind::None,
+            false,
+            false,
+            NetworkMode::Deny,
+            false,
+        );
+        plan.requires_filesystem = true;
+        plan.filesystem_backend = FilesystemBackendKind::HostWorkspaceAndHome;
+
+        let services = resolver
+            .resolve(InvocationServicesResolutionRequest {
+                plan: &plan,
+                scope: &ResourceScope::system(),
+                mounts: None,
+            })
+            .expect("local-yolo filesystem backend should resolve");
+
+        assert!(services.runtime_http_egress.is_none());
     }
 
     #[test]

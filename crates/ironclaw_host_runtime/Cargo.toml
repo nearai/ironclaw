@@ -6,6 +6,7 @@ publish = false
 
 [features]
 default = []
+test-support = []
 postgres = ["dep:deadpool-postgres", "ironclaw_filesystem/postgres", "ironclaw_resources/postgres", "ironclaw_run_state/postgres"]
 libsql = ["dep:libsql", "ironclaw_filesystem/libsql", "ironclaw_resources/libsql", "ironclaw_run_state/libsql"]
 

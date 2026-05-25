@@ -813,7 +813,7 @@ async fn builtin_http_rejects_request_bodies_over_network_egress_cap() {
 async fn builtin_http_accounts_request_bytes_when_output_is_too_large() {
     let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(vec![
         b'\\';
-        6 * 1024 * 1024
+        8 * 1024 * 1024
     ]));
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let runtime = runtime_with_http_egress_and_governor(Arc::clone(&egress), Arc::clone(&governor));
@@ -947,7 +947,7 @@ async fn builtin_http_maps_runtime_egress_errors_by_source() {
                 request_bytes: 0,
                 response_bytes: 0,
             },
-            RuntimeFailureKind::Authorization,
+            RuntimeFailureKind::PolicyDenied,
         ),
         (
             RuntimeHttpEgressError::Network {
@@ -1045,7 +1045,7 @@ async fn builtin_http_exercises_real_policy_private_ip_rejection() {
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::Authorization);
+    assert_eq!(error, RuntimeFailureKind::PolicyDenied);
     assert!(requests.lock().unwrap().is_empty());
 }
 
@@ -1393,6 +1393,178 @@ async fn builtin_coding_blocks_sensitive_scoped_paths_like_v1() {
         entries
             .iter()
             .all(|entry| entry.as_str() != Some(".env (13B)"))
+    );
+}
+
+#[tokio::test]
+async fn builtin_coding_blocks_sensitive_host_paths_like_v1() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join(".ssh")).unwrap();
+    std::fs::create_dir_all(temp.path().join(".aws")).unwrap();
+    std::fs::create_dir_all(temp.path().join(".config/gh")).unwrap();
+    std::fs::write(temp.path().join(".ssh/id_rsa"), "ssh-secret\n").unwrap();
+    std::fs::write(temp.path().join(".aws/credentials"), "aws-secret\n").unwrap();
+    std::fs::write(temp.path().join(".config/gh/hosts.yml"), "gh-secret\n").unwrap();
+    std::fs::write(temp.path().join(".env"), "TOKEN=secret\n").unwrap();
+    std::fs::write(temp.path().join("server.key"), "tls-secret\n").unwrap();
+    std::fs::write(temp.path().join("safe.txt"), "safe host file\n").unwrap();
+
+    let (filesystem, mounts) = mounted_host_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    for path in [
+        "/host/.ssh/id_rsa",
+        "/host/.aws/credentials",
+        "/host/.config/gh/hosts.yml",
+        "/host/.env",
+        "/host/server.key",
+    ] {
+        let error = invoke_with_context(
+            &runtime,
+            READ_FILE_CAPABILITY_ID,
+            json!({"path": path}),
+            context.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, RuntimeFailureKind::Authorization, "{path}");
+    }
+
+    for (capability, input) in [
+        (
+            WRITE_FILE_CAPABILITY_ID,
+            json!({"path": "/host/.env", "content": "changed"}),
+        ),
+        (
+            APPLY_PATCH_CAPABILITY_ID,
+            json!({"path": "/host/server.key", "old_string": "tls", "new_string": "x"}),
+        ),
+    ] {
+        let error = invoke_with_context(&runtime, capability, input, context.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(error, RuntimeFailureKind::Authorization);
+    }
+
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(temp.path().join(".ssh"), temp.path().join("dotssh")).unwrap();
+        let error = invoke_with_context(
+            &runtime,
+            WRITE_FILE_CAPABILITY_ID,
+            json!({"path": "/host/dotssh/config", "content": "created through symlink\n"}),
+            context.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, RuntimeFailureKind::Authorization);
+        assert!(
+            !temp.path().join(".ssh/config").exists(),
+            "write must not create files under sensitive canonical parents"
+        );
+
+        let error = invoke_with_context(
+            &runtime,
+            WRITE_FILE_CAPABILITY_ID,
+            json!({"path": "/host/dotssh/generated/config", "content": "created through nested symlink\n"}),
+            context.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, RuntimeFailureKind::Authorization);
+        assert!(
+            !temp.path().join(".ssh/generated").exists(),
+            "write must not create intermediate directories under sensitive canonical parents"
+        );
+
+        let error = invoke_with_context(
+            &runtime,
+            LIST_DIR_CAPABILITY_ID,
+            json!({"path": "/host/dotssh", "recursive": true}),
+            context.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, RuntimeFailureKind::Authorization);
+
+        let listed = invoke_with_context(
+            &runtime,
+            LIST_DIR_CAPABILITY_ID,
+            json!({"path": "/host", "recursive": true}),
+            context.clone(),
+        )
+        .await
+        .unwrap();
+        let entries = listed["entries"].as_array().unwrap();
+        assert!(
+            /* safety: test-only assertion. */
+            entries
+                .iter()
+                .all(|entry| !entry.as_str().unwrap_or_default().contains("id_rsa")),
+            "recursive list_dir must not traverse sensitive symlink targets: {entries:?}"
+        );
+    }
+
+    let read = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/host/safe.txt"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(read["content"], json!("     1│ safe host file"));
+
+    invoke_with_context(
+        &runtime,
+        WRITE_FILE_CAPABILITY_ID,
+        json!({"path": "/host/output.txt", "content": "created\n"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("output.txt")).unwrap(),
+        "created\n"
+    );
+
+    let raw_host_home = temp.path().canonicalize().unwrap();
+    let raw_host_home = raw_host_home.to_string_lossy();
+    let raw_sensitive_path = format!("{raw_host_home}/.ssh/id_rsa");
+    let error = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": raw_sensitive_path}),
+        context.clone(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error, RuntimeFailureKind::Authorization);
+
+    let raw_safe_path = format!("{raw_host_home}/safe.txt");
+    let read = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": raw_safe_path}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(read["content"], json!("     1│ safe host file"));
+
+    let raw_output_path = format!("{raw_host_home}/raw-output.txt");
+    invoke_with_context(
+        &runtime,
+        WRITE_FILE_CAPABILITY_ID,
+        json!({"path": raw_output_path, "content": "raw created\n"}),
+        context,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("raw-output.txt")).unwrap(),
+        "raw created\n"
     );
 }
 
@@ -2415,6 +2587,34 @@ fn mounted_filesystem(path: &Path, permissions: MountPermissions) -> (LocalFiles
         VirtualPath::new("/projects/coding-pack").unwrap(),
         permissions,
     )])
+    .unwrap();
+    (filesystem, mounts)
+}
+
+fn mounted_host_filesystem(
+    path: &Path,
+    permissions: MountPermissions,
+) -> (LocalFilesystem, MountView) {
+    let mut filesystem = LocalFilesystem::new();
+    filesystem
+        .mount_local(
+            VirtualPath::new("/projects/host").unwrap(),
+            HostPath::from_path_buf(path.to_path_buf()),
+        )
+        .unwrap();
+    let raw_alias = path.canonicalize().unwrap().to_string_lossy().into_owned();
+    let mounts = MountView::new(vec![
+        MountGrant::new(
+            MountAlias::new("/host").unwrap(),
+            VirtualPath::new("/projects/host").unwrap(),
+            permissions.clone(),
+        ),
+        MountGrant::new(
+            MountAlias::new(raw_alias).unwrap(),
+            VirtualPath::new("/projects/host").unwrap(),
+            permissions,
+        ),
+    ])
     .unwrap();
     (filesystem, mounts)
 }

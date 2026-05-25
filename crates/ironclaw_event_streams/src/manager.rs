@@ -596,8 +596,16 @@ fn map_projection_error(error: ProjectionError) -> ProjectionStreamError {
         ProjectionError::InvalidRequest { reason } => {
             ProjectionStreamError::InvalidRequest { reason }
         }
+        ProjectionError::MissingProjectionMetadata { .. } => {
+            ProjectionStreamError::InvalidRequest {
+                reason: "projection metadata missing on lifecycle event",
+            }
+        }
         ProjectionError::RebaseRequired { .. } => ProjectionStreamError::InvalidRequest {
             reason: "projection rebase required outside subscribe flow",
+        },
+        ProjectionError::TurnEventRebaseRequired { .. } => ProjectionStreamError::InvalidRequest {
+            reason: "turn event projection rebase required outside subscribe flow",
         },
         ProjectionError::Source { .. } => ProjectionStreamError::Source,
     }

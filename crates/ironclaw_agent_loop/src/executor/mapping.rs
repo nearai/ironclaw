@@ -114,27 +114,32 @@ pub(super) fn capability_host_error(error: AgentLoopHostError) -> AgentLoopExecu
 }
 
 pub(super) fn capability_error_class(kind: &CapabilityFailureKind) -> CapabilityErrorClass {
+    // Runtime capability failures are first dispositioned in
+    // `ironclaw_host_runtime` and adapted by `ironclaw_loop_support`.
+    // Keep this recovery class mapping aligned with that adapter: retryable
+    // runtime kinds must arrive here as Transient/Unavailable/Internal,
+    // model-visible kinds as OperationFailed/InputInvalid/PolicyDenied, and
+    // run-ending protocol/cancellation kinds as Permanent or Cancelled.
     match kind {
         CapabilityFailureKind::Network | CapabilityFailureKind::Transient => {
             CapabilityErrorClass::Transient
         }
-        CapabilityFailureKind::Backend
-        | CapabilityFailureKind::MissingRuntime
-        | CapabilityFailureKind::Unavailable => CapabilityErrorClass::Unavailable,
-        CapabilityFailureKind::InvalidInput => CapabilityErrorClass::InputInvalid,
-        CapabilityFailureKind::OperationFailed | CapabilityFailureKind::OutputTooLarge => {
-            CapabilityErrorClass::OperationFailed
+        CapabilityFailureKind::Backend | CapabilityFailureKind::Unavailable => {
+            CapabilityErrorClass::Unavailable
         }
+        CapabilityFailureKind::InvalidInput => CapabilityErrorClass::InputInvalid,
+        CapabilityFailureKind::MissingRuntime
+        | CapabilityFailureKind::OperationFailed
+        | CapabilityFailureKind::OutputTooLarge
+        | CapabilityFailureKind::Process
+        | CapabilityFailureKind::Resource => CapabilityErrorClass::OperationFailed,
         CapabilityFailureKind::Authorization | CapabilityFailureKind::PolicyDenied => {
             CapabilityErrorClass::PolicyDenied
         }
-        CapabilityFailureKind::Dispatcher | CapabilityFailureKind::Internal => {
-            CapabilityErrorClass::Internal
-        }
+        CapabilityFailureKind::Internal => CapabilityErrorClass::Internal,
+        CapabilityFailureKind::Dispatcher => CapabilityErrorClass::Permanent,
         CapabilityFailureKind::Cancelled => CapabilityErrorClass::Permanent,
         CapabilityFailureKind::InvalidOutput
-        | CapabilityFailureKind::Process
-        | CapabilityFailureKind::Resource
         | CapabilityFailureKind::Permanent
         | CapabilityFailureKind::Unknown(_) => CapabilityErrorClass::Permanent,
         // CapabilityFailureKind is #[non_exhaustive]; treat unrecognised future variants as

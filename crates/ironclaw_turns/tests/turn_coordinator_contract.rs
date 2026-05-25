@@ -2107,8 +2107,98 @@ async fn runner_claim_and_block_update_persistent_run_lock_and_checkpoint_record
     assert_eq!(checkpoint.checkpoint_id, checkpoint_id);
     assert_eq!(checkpoint.run_id, run_id);
     assert_eq!(checkpoint.sequence, 1);
-    assert_eq!(checkpoint.gate_ref, gate_ref);
+    assert_eq!(checkpoint.gate_ref, gate_ref.clone());
     assert_eq!(checkpoint.state_ref, state_ref);
+
+    let blocked_event = store
+        .events()
+        .into_iter()
+        .find(|event| event.kind == TurnEventKind::Blocked && event.run_id == run_id)
+        .unwrap();
+    assert_eq!(blocked_event.owner_user_id, Some(actor().user_id));
+    assert!(blocked_event.occurred_at.is_some());
+    let blocked_gate = blocked_event.blocked_gate.unwrap();
+    assert_eq!(blocked_gate.gate_ref, gate_ref);
+    assert_eq!(
+        blocked_gate.gate_kind,
+        ironclaw_turns::TurnBlockedGateKind::Approval
+    );
+}
+
+async fn block_run_with_reason_yields_expected_blocked_gate(
+    thread_id: &str,
+    idem_key: &str,
+    reason_builder: impl Fn(GateRef) -> BlockedReason,
+    expected_kind: ironclaw_turns::TurnBlockedGateKind,
+    gate_ref_str: &str,
+) {
+    let (coordinator, store) = coordinator();
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(thread_id, idem_key))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    let gate_ref = GateRef::new(gate_ref_str).unwrap();
+    let state_ref = LoopCheckpointStateRef::new("checkpoint:reason-block-state").unwrap();
+    store
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref,
+            reason: reason_builder(gate_ref.clone()),
+        })
+        .await
+        .unwrap();
+
+    let blocked_event = store
+        .events()
+        .into_iter()
+        .find(|event| event.kind == TurnEventKind::Blocked && event.run_id == run_id)
+        .expect("block_run emits a Blocked lifecycle event");
+    let blocked_gate = blocked_event
+        .blocked_gate
+        .expect("block_run sets blocked_gate metadata for the reason");
+    assert_eq!(blocked_gate.gate_ref, gate_ref);
+    assert_eq!(blocked_gate.gate_kind, expected_kind);
+}
+
+#[tokio::test]
+async fn block_run_auth_emits_blocked_event_with_auth_gate_kind() {
+    block_run_with_reason_yields_expected_blocked_gate(
+        "thread-block-auth",
+        "idem-submit-auth",
+        |gate_ref| BlockedReason::Auth { gate_ref },
+        ironclaw_turns::TurnBlockedGateKind::Auth,
+        "auth-gate",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn block_run_resource_emits_blocked_event_with_resource_gate_kind() {
+    block_run_with_reason_yields_expected_blocked_gate(
+        "thread-block-resource",
+        "idem-submit-resource",
+        |gate_ref| BlockedReason::Resource { gate_ref },
+        ironclaw_turns::TurnBlockedGateKind::Resource,
+        "resource-gate",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -3932,9 +4022,12 @@ async fn in_memory_event_sink_retains_a_bounded_tail() {
         sink.publish(TurnLifecycleEvent {
             cursor: EventCursor(cursor),
             scope: scope("thread-a"),
+            occurred_at: None,
+            owner_user_id: None,
             run_id: TurnRunId::new(),
             status: TurnStatus::Queued,
             kind: TurnEventKind::Submitted,
+            blocked_gate: None,
             sanitized_reason: None,
         })
         .await

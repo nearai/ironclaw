@@ -210,7 +210,7 @@ async fn first_party_handler_maps_egress_error_codes_to_dispatch_errors() {
                 request_bytes: 11,
                 response_bytes: 0,
             },
-            RuntimeFailureKind::Authorization,
+            RuntimeFailureKind::PolicyDenied,
         ),
         (
             RuntimeHttpEgressError::Response {

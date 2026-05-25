@@ -299,7 +299,7 @@ fn backends_for(
             AuditMode::LocalMinimal,
         ),
         LocalYolo => (
-            FilesystemBackendKind::HostWorkspace,
+            FilesystemBackendKind::HostWorkspaceAndHome,
             ProcessBackendKind::LocalHost,
             NetworkMode::Direct,
             SecretMode::InheritedEnv,
@@ -543,6 +543,22 @@ mod tests {
     }
 
     #[test]
+    fn local_yolo_maps_to_host_workspace_and_confirmed_home() {
+        let policy = resolve(req_yolo(
+            DeploymentMode::LocalSingleUser,
+            RuntimeProfile::LocalYolo,
+        ))
+        .unwrap();
+
+        assert_eq!(
+            policy.filesystem_backend,
+            FilesystemBackendKind::HostWorkspaceAndHome
+        );
+        assert_eq!(policy.process_backend, ProcessBackendKind::LocalHost);
+        assert_eq!(policy.approval_policy, ApprovalPolicy::Minimal);
+    }
+
+    #[test]
     fn enterprise_yolo_dedicated_requires_disclosure_and_org_admin_approval() {
         // Without disclosure: YoloRequiresDisclosure (checked first).
         let r = resolve(req(
@@ -661,6 +677,11 @@ mod tests {
                 "hosted multi-tenant must never produce HostWorkspace; profile={profile:?}"
             );
             assert_ne!(
+                policy.filesystem_backend,
+                FilesystemBackendKind::HostWorkspaceAndHome,
+                "hosted multi-tenant must never produce HostWorkspaceAndHome; profile={profile:?}"
+            );
+            assert_ne!(
                 policy.process_backend,
                 ProcessBackendKind::LocalHost,
                 "hosted multi-tenant must never produce LocalHost; profile={profile:?}"
@@ -675,6 +696,10 @@ mod tests {
         assert_ne!(
             policy.filesystem_backend,
             FilesystemBackendKind::HostWorkspace
+        );
+        assert_ne!(
+            policy.filesystem_backend,
+            FilesystemBackendKind::HostWorkspaceAndHome
         );
         assert_ne!(policy.process_backend, ProcessBackendKind::LocalHost);
     }

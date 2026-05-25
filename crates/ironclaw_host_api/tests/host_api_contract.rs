@@ -438,6 +438,27 @@ fn scoped_path_rejects_raw_host_paths_urls_and_traversal() {
 }
 
 #[test]
+fn scoped_path_accepts_raw_host_path_only_when_mount_alias_matches() {
+    let view = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/Users/alice").unwrap(),
+        VirtualPath::new("/projects/host").unwrap(),
+        MountPermissions::read_write(),
+    )])
+    .unwrap();
+
+    let path = view.scoped_path("/Users/alice/project/README.md").unwrap();
+    assert_eq!(path.as_str(), "/Users/alice/project/README.md");
+    assert_eq!(
+        view.resolve(&path).unwrap().as_str(),
+        "/projects/host/project/README.md"
+    );
+
+    assert!(view.scoped_path("/Users/bob/project/README.md").is_err());
+    assert!(view.scoped_path("/Users/alice2/private.txt").is_err()); // safety: test-only assertion.
+    assert!(view.scoped_path("/etc/passwd").is_err());
+}
+
+#[test]
 fn scoped_path_redacts_all_rejected_values_in_error_display() {
     for invalid in [
         "",

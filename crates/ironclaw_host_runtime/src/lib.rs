@@ -99,8 +99,9 @@ pub use process_port::{
 };
 pub use production::DefaultHostRuntime;
 pub use sandbox_process::{
-    RebornSandboxConfig, RebornSandboxContainerIdentity, RebornSandboxScopeKey,
-    RebornSandboxWorkspaceMode, RebornScopedSandboxCommandTransport,
+    RebornSandboxConfig, RebornSandboxContainerIdentity, RebornSandboxNetworkBroker,
+    RebornSandboxScopeKey, RebornSandboxSecretBroker, RebornSandboxWorkspaceMode,
+    RebornScopedSandboxCommandTransport,
 };
 pub use services::{
     HostRuntimeServices, ProductionEventStoreWiringError, ProductionWiringComponent,
@@ -622,14 +623,18 @@ pub enum RuntimeFailureKind {
     Backend,
     Cancelled,
     Dispatcher,
+    Internal,
     InvalidInput,
     InvalidOutput,
     MissingRuntime,
     Network,
     OperationFailed,
     OutputTooLarge,
+    PolicyDenied,
     Process,
     Resource,
+    Transient,
+    Unavailable,
     Unknown,
 }
 
@@ -641,17 +646,126 @@ impl RuntimeFailureKind {
             Self::Backend => "backend",
             Self::Cancelled => "cancelled",
             Self::Dispatcher => "dispatcher",
+            Self::Internal => "internal",
             Self::InvalidInput => "invalid_input",
             Self::InvalidOutput => "invalid_output",
             Self::MissingRuntime => "missing_runtime",
             Self::Network => "network",
             Self::OperationFailed => "operation_failed",
             Self::OutputTooLarge => "output_too_large",
+            Self::PolicyDenied => "policy_denied",
             Self::Process => "process",
             Self::Resource => "resource",
+            Self::Transient => "transient",
+            Self::Unavailable => "unavailable",
             Self::Unknown => "unknown",
         }
     }
+}
+
+/// Agent-loop handling decision for a sanitized runtime capability failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CapabilityFailureDisposition {
+    /// Return a normal tool error observation to the model in the same loop.
+    ModelVisibleToolError,
+    /// Retry the same runtime invocation before exposing anything to the model.
+    /// The loop recovery strategy owns the retry budget and post-exhaustion
+    /// fallback; the host-runtime disposition only classifies the first outcome.
+    RetrySameCall,
+    /// End this unsafe run cleanly and provide recovery context on the next turn.
+    RecoverableRunFailure,
+}
+
+const MAX_RUNTIME_FAILURE_SUMMARY_CHARS: usize = 512;
+
+impl RuntimeCapabilityFailure {
+    pub fn new(
+        capability_id: CapabilityId,
+        kind: RuntimeFailureKind,
+        message: Option<String>,
+    ) -> Self {
+        Self {
+            capability_id,
+            kind,
+            message,
+        }
+    }
+
+    pub fn safe_summary(&self) -> Option<String> {
+        let summary = self.message.as_deref()?.trim();
+        if summary.is_empty() {
+            return None;
+        }
+
+        Some(bounded_runtime_failure_summary(summary))
+    }
+
+    pub fn disposition(&self) -> CapabilityFailureDisposition {
+        let has_safe_summary = self
+            .message
+            .as_deref()
+            .is_some_and(|summary| !summary.trim().is_empty());
+        capability_failure_disposition(self.kind, has_safe_summary)
+    }
+}
+
+fn bounded_runtime_failure_summary(summary: &str) -> String {
+    let mut chars = summary.chars();
+    let bounded: String = chars
+        .by_ref()
+        .take(MAX_RUNTIME_FAILURE_SUMMARY_CHARS)
+        .collect();
+    if chars.next().is_some() {
+        format!("{bounded}...")
+    } else {
+        bounded
+    }
+}
+
+/// Central disposition policy for runtime capability failures.
+///
+/// Same-loop continuation is reserved for failures the runtime can summarize
+/// safely. Protocol, cancellation, and unknown failures end the current run
+/// even if they have a displayable message, so the next turn can receive
+/// recovery context without corrupting the assistant/tool-result transcript.
+pub const fn capability_failure_disposition(
+    kind: RuntimeFailureKind,
+    has_safe_summary: bool,
+) -> CapabilityFailureDisposition {
+    if runtime_failure_requires_run_recovery(kind) {
+        return CapabilityFailureDisposition::RecoverableRunFailure;
+    }
+
+    if runtime_failure_is_retryable(kind) {
+        return CapabilityFailureDisposition::RetrySameCall;
+    }
+
+    if has_safe_summary {
+        CapabilityFailureDisposition::ModelVisibleToolError
+    } else {
+        CapabilityFailureDisposition::RecoverableRunFailure
+    }
+}
+
+const fn runtime_failure_requires_run_recovery(kind: RuntimeFailureKind) -> bool {
+    matches!(
+        kind,
+        RuntimeFailureKind::Cancelled
+            | RuntimeFailureKind::InvalidOutput
+            | RuntimeFailureKind::Dispatcher
+            | RuntimeFailureKind::Unknown
+    )
+}
+
+const fn runtime_failure_is_retryable(kind: RuntimeFailureKind) -> bool {
+    matches!(
+        kind,
+        RuntimeFailureKind::Internal
+            | RuntimeFailureKind::Backend
+            | RuntimeFailureKind::Network
+            | RuntimeFailureKind::Transient
+            | RuntimeFailureKind::Unavailable
+    )
 }
 
 /// Work ids tracked by the host runtime for status/cancellation.
