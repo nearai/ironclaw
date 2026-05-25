@@ -104,6 +104,18 @@ impl ToolDispatcher {
     }
 
     /// Wire in the shared channel routing Arc for execution-time enforcement.
+    ///
+    /// **Scope (v1 agent loop).** This gate covers `ToolDispatcher::dispatch`
+    /// (gateway/CLI non-agent callers), the chat-path preflight
+    /// (`ChatDelegate::execute_tool_calls`), the approval-resume path
+    /// (`Agent::process_approval`), and the worker loop
+    /// (`JobDelegate::execute_tool_inner`).
+    ///
+    /// **Intentionally out of scope:**
+    /// - Engine v2 (`EffectBridgeAdapter::execute_action`) — has its own
+    ///   event-sourced audit trail; channel routing integration is a v2 follow-up.
+    /// - `Scheduler::execute_tool_task` (subtask/`ToolExec`) — operator-initiated
+    ///   subtasks run outside the user's channel context.
     pub fn with_channel_routing(
         mut self,
         routing: Arc<tokio::sync::RwLock<Option<ChannelRoutingConfig>>>,

@@ -2726,4 +2726,43 @@ mod tests {
             "description should not mention claude_code when mode is disabled, got: {desc}"
         );
     }
+
+    /// Regression: `derive_routed_mcp_servers` must intersect caller-supplied
+    /// `mcp_servers` with the channel's routing allowlist — a caller cannot
+    /// widen MCP access past what the channel group permits.
+    #[tokio::test]
+    async fn test_derive_routed_mcp_servers_intersects_with_channel_allowlist() {
+        let json = r#"{
+            "groups": { "research": ["Archon", "Serpstat"] },
+            "channels": { "research-channel": "research" },
+            "default_group": "research"
+        }"#;
+        let config: ChannelRoutingConfig = serde_json::from_str(json).unwrap();
+        let arc = Arc::new(RwLock::new(Some(config)));
+
+        let manager = Arc::new(ContextManager::new(5));
+        let tool = CreateJobTool::new(manager).with_channel_routing(arc);
+
+        let mut ctx = JobContext::default();
+        ctx.metadata = serde_json::json!({ "notify_channel": "research-channel" });
+
+        // Caller supplies Serpstat (allowed) + Kiro (not in research group).
+        // Only Serpstat should survive the intersection.
+        let result = tool
+            .derive_routed_mcp_servers(&ctx, Some(vec!["Serpstat".to_string(), "Kiro".to_string()]))
+            .await;
+        assert_eq!(result, Some(vec!["Serpstat".to_string()]));
+
+        // Caller supplies only out-of-group server → empty list, not the full group.
+        let result_empty = tool
+            .derive_routed_mcp_servers(&ctx, Some(vec!["Kiro".to_string()]))
+            .await;
+        assert_eq!(result_empty, Some(vec![]));
+
+        // No explicit servers → falls back to routing-derived set (both group members).
+        let result_derived = tool.derive_routed_mcp_servers(&ctx, None).await;
+        let mut derived = result_derived.unwrap_or_default();
+        derived.sort();
+        assert_eq!(derived, vec!["Archon".to_string(), "Serpstat".to_string()]);
+    }
 }

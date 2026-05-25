@@ -1031,7 +1031,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                         .and_then(|v| v.as_str())
                         == Some("direct_message");
                     if is_relay && !is_dm {
-                        tracing::info!(
+                        tracing::debug!(
                             tool = %tc.name,
                             channel = %self.message.channel,
                             "Auto-denying approval-requiring tool in non-DM relay channel"

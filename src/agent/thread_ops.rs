@@ -1644,6 +1644,28 @@ impl Agent {
                 )
                 .await;
 
+            // Re-verify channel routing — a hot-reload between approval-queue and
+            // approval-resume can narrow policy, and a directly-submitted ExecApproval
+            // JSON bypasses the preflight gate in execute_tool_calls entirely.
+            {
+                let routing = self.deps.channel_routing.read().await.clone();
+                if let Some(config) = routing {
+                    let builtin_names = self.tools().builtin_tool_names().await;
+                    if !config.is_tool_permitted(
+                        &message.channel,
+                        &message.metadata,
+                        &pending.tool_name,
+                        &builtin_names,
+                    ) {
+                        return Ok(SubmissionResult::ok_with_message(format!(
+                            "Tool '{}' is no longer permitted on channel '{}' \
+                             (channel routing policy changed since approval was queued).",
+                            pending.tool_name, message.channel
+                        )));
+                    }
+                }
+            }
+
             let started_at = std::time::Instant::now();
             let tool_result = self
                 .execute_chat_tool(&pending.tool_name, &pending.parameters, &job_ctx)
