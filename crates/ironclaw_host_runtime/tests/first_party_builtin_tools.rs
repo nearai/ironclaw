@@ -632,9 +632,31 @@ async fn builtin_http_invokes_through_host_runtime_egress() {
     assert_eq!(request.method, NetworkMethod::Post);
     assert_eq!(request.url, "https://api.example.test/v1/items");
     assert_eq!(request.body, br#"{"ok":true}"#);
-    assert_eq!(request.response_body_limit, Some(4096));
+    assert_eq!(request.response_body_limit, Some(10 * 1024 * 1024));
     assert_eq!(request.timeout_ms, Some(2500));
     assert!(request.credential_injections.is_empty());
+}
+
+#[tokio::test]
+async fn builtin_http_clamps_oversized_timeout_to_runtime_ceiling() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(b"ok".to_vec()));
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "timeout_ms": 120_000
+        }),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap();
+
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].timeout_ms, Some(30_000));
 }
 
 #[tokio::test]
@@ -791,7 +813,7 @@ async fn builtin_http_rejects_request_bodies_over_network_egress_cap() {
 async fn builtin_http_accounts_request_bytes_when_output_is_too_large() {
     let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(vec![
         b'\\';
-        700 * 1024
+        6 * 1024 * 1024
     ]));
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let runtime = runtime_with_http_egress_and_governor(Arc::clone(&egress), Arc::clone(&governor));
@@ -803,7 +825,7 @@ async fn builtin_http_accounts_request_bytes_when_output_is_too_large() {
             "method": "post",
             "url": "https://api.example.test/v1/items",
             "body": "paid",
-            "response_body_limit": 700 * 1024
+            "response_body_limit": 10 * 1024 * 1024
         }),
         execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
     )

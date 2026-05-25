@@ -7,23 +7,26 @@ use ironclaw_host_api::{
     valid_http_field_name,
 };
 use serde_json::{Map, Value, json};
+use std::env;
 
-use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest};
+use crate::{
+    FirstPartyCapabilityError, FirstPartyCapabilityRequest, UNSAFE_RAW_HTTP_EGRESS_ERRORS_ENV,
+};
 
-use super::{FIRST_PARTY_MAX_OUTPUT_BYTES, first_party_capability_manifest, input_error};
+use super::{first_party_capability_manifest, input_error};
 
 pub const HTTP_CAPABILITY_ID: &str = "builtin.http";
 
 const DEFAULT_HTTP_TIMEOUT_MS: u32 = 10_000;
 const MAX_HTTP_TIMEOUT_MS: u32 = 30_000;
-const DEFAULT_RESPONSE_BODY_LIMIT: u64 = 512 * 1024;
-const MAX_RESPONSE_BODY_LIMIT: u64 = 700 * 1024;
+pub(super) const MAX_HTTP_OUTPUT_BYTES: u64 = 10 * 1024 * 1024;
+const DEFAULT_RESPONSE_BODY_LIMIT: u64 = MAX_HTTP_OUTPUT_BYTES;
+const MAX_RESPONSE_BODY_LIMIT: u64 = MAX_HTTP_OUTPUT_BYTES;
 const DEFAULT_NETWORK_EGRESS_BYTES: u64 = 16 * 1024;
 const MAX_NETWORK_EGRESS_BYTES: u64 = 256 * 1024;
 const MAX_HTTP_HEADERS: usize = 64;
 const MAX_HTTP_HEADER_NAME_BYTES: usize = 512;
 const MAX_HTTP_HEADER_VALUE_BYTES: usize = 8 * 1024;
-
 pub(super) struct HttpDispatchOutput {
     pub output: Value,
     pub network_egress_bytes: u64,
@@ -47,7 +50,7 @@ pub(super) fn manifest() -> Result<CapabilityManifest, ExtensionError> {
                 max_input_tokens: None,
                 max_output_tokens: None,
                 max_wall_clock_ms: Some(MAX_HTTP_TIMEOUT_MS.into()),
-                max_output_bytes: Some(FIRST_PARTY_MAX_OUTPUT_BYTES),
+                max_output_bytes: Some(MAX_HTTP_OUTPUT_BYTES),
                 sandbox: Some(SandboxQuota {
                     network_egress_bytes: Some(MAX_NETWORK_EGRESS_BYTES),
                     ..SandboxQuota::default()
@@ -69,25 +72,44 @@ pub(super) async fn dispatch(
     // Keep this handler as a translator only: URL parsing, DNS/private-IP
     // enforcement, allowlists, transport, and credential injection remain in
     // HostHttpEgressService / ironclaw_network.
-    let mut headers = headers(&request.input)?;
+    let mut headers = headers(&request.input).map_err(|error| {
+        log_raw_http_input_error_for_local_diagnostics(&request.input, "headers", error)
+    })?;
     if json_body_needs_default_content_type(&request.input) && !has_header(&headers, "content-type")
     {
         headers.push(("content-type".to_string(), "application/json".to_string()));
     }
+    let method = method(&request.input).map_err(|error| {
+        log_raw_http_input_error_for_local_diagnostics(&request.input, "method", error)
+    })?;
+    let url = required_string(&request.input, "url")
+        .map_err(|error| {
+            log_raw_http_input_error_for_local_diagnostics(&request.input, "url", error)
+        })?
+        .to_string();
+    let body = body(&request.input).map_err(|error| {
+        log_raw_http_input_error_for_local_diagnostics(&request.input, "body", error)
+    })?;
+    let response_body_limit = response_body_limit(&request.input).map_err(|error| {
+        log_raw_http_input_error_for_local_diagnostics(&request.input, "response_body_limit", error)
+    })?;
+    let timeout_ms = timeout_ms(&request.input).map_err(|error| {
+        log_raw_http_input_error_for_local_diagnostics(&request.input, "timeout_ms", error)
+    })?;
     let http_request = RuntimeHttpEgressRequest {
         runtime: RuntimeKind::FirstParty,
         scope: request.scope.clone(),
         capability_id: request.capability_id.clone(),
-        method: method(&request.input)?,
-        url: required_string(&request.input, "url")?.to_string(),
+        method,
+        url,
         headers,
-        body: body(&request.input)?,
+        body,
         network_policy: staged_policy_placeholder(),
         credential_injections: Vec::new(),
         // Always send a bounded limit, even when caller omits the field, so the
         // host transport stays fail-closed instead of inheriting an unbounded cap.
-        response_body_limit: Some(response_body_limit(&request.input)?),
-        timeout_ms: Some(timeout_ms(&request.input)?),
+        response_body_limit: Some(response_body_limit),
+        timeout_ms: Some(timeout_ms),
     };
     let response = tokio::task::spawn_blocking(move || egress.execute(http_request))
         .await
@@ -237,13 +259,14 @@ fn staged_policy_placeholder() -> NetworkPolicy {
 }
 
 fn response_body_limit(input: &Value) -> Result<u64, FirstPartyCapabilityError> {
-    ranged_u64(
+    let limit = ranged_u64(
         input,
         "response_body_limit",
         DEFAULT_RESPONSE_BODY_LIMIT,
         1,
         MAX_RESPONSE_BODY_LIMIT,
-    )
+    )?;
+    Ok(limit.max(DEFAULT_RESPONSE_BODY_LIMIT))
 }
 
 fn timeout_ms(input: &Value) -> Result<u32, FirstPartyCapabilityError> {
@@ -252,8 +275,9 @@ fn timeout_ms(input: &Value) -> Result<u32, FirstPartyCapabilityError> {
         "timeout_ms",
         DEFAULT_HTTP_TIMEOUT_MS.into(),
         1,
-        MAX_HTTP_TIMEOUT_MS.into(),
+        u64::MAX,
     )?;
+    let value = value.min(u64::from(MAX_HTTP_TIMEOUT_MS));
     u32::try_from(value).map_err(|_| input_error())
 }
 
@@ -305,4 +329,20 @@ fn http_error(error: RuntimeHttpEgressError) -> FirstPartyCapabilityError {
         usage.network_egress_bytes = error.request_bytes();
     }
     FirstPartyCapabilityError::new(kind).with_usage(usage)
+}
+
+fn log_raw_http_input_error_for_local_diagnostics(
+    input: &Value,
+    validation_stage: &'static str,
+    error: FirstPartyCapabilityError,
+) -> FirstPartyCapabilityError {
+    if env::var(UNSAFE_RAW_HTTP_EGRESS_ERRORS_ENV).as_deref() == Ok("1") {
+        tracing::warn!(
+            validation_stage,
+            raw_http_tool_input = %input,
+            unsafe_raw_diagnostics = true,
+            "unsafe raw HTTP tool input diagnostic enabled"
+        );
+    }
+    error
 }

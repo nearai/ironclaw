@@ -42,7 +42,7 @@ use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStoreError};
 use ironclaw_trust::TrustDecision;
 use secrecy::ExposeSecret;
 use serde_json::Value;
-use std::{collections::BTreeMap, fmt, sync::Arc};
+use std::{collections::BTreeMap, env, fmt, sync::Arc};
 use thiserror::Error;
 
 mod capability_catalog;
@@ -547,6 +547,13 @@ pub enum RuntimeBlockedReason {
     ResourceLimit,
     ResourceUnavailable,
 }
+
+/// Opt-in local diagnostic switch for raw HTTP egress failures.
+///
+/// Raw transport errors can contain URLs, query strings, host paths, proxy
+/// details, or credential-shaped text. Keep this disabled unless debugging a
+/// trusted local run.
+pub(crate) const UNSAFE_RAW_HTTP_EGRESS_ERRORS_ENV: &str = "IRONCLAW_UNSAFE_RAW_HTTP_EGRESS_ERRORS";
 
 /// Stable, sanitized failure categories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1190,11 +1197,25 @@ fn apply_credential_injection(
 }
 
 fn runtime_network_error(error: NetworkHttpError) -> RuntimeHttpEgressError {
+    log_raw_network_http_error_for_local_diagnostics(&error);
     RuntimeHttpEgressError::Network {
         reason: error.stable_reason().to_string(),
         request_bytes: error.request_bytes(),
         response_bytes: error.response_bytes(),
     }
+}
+
+fn log_raw_network_http_error_for_local_diagnostics(error: &NetworkHttpError) {
+    if env::var(UNSAFE_RAW_HTTP_EGRESS_ERRORS_ENV).as_deref() != Ok("1") {
+        return;
+    }
+
+    tracing::warn!(
+        network_error_kind = error.kind().as_str(),
+        raw_network_error = %error,
+        unsafe_raw_diagnostics = true,
+        "unsafe raw HTTP egress error diagnostic enabled"
+    );
 }
 
 fn validate_runtime_request(

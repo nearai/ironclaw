@@ -236,14 +236,15 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
             SHELL_CAPABILITY_ID => {
                 let (output, duration) = shell::dispatch(&request).await?;
                 let wall_clock_ms = duration.as_millis().try_into().unwrap_or(u64::MAX);
-                let output_bytes = bounded_output_bytes(&output).map_err(|error| {
-                    error.with_usage(ResourceUsage {
-                        wall_clock_ms,
-                        network_egress_bytes,
-                        process_count: 1,
-                        ..ResourceUsage::default()
-                    })
-                })?;
+                let output_bytes = bounded_output_bytes(&output, FIRST_PARTY_MAX_OUTPUT_BYTES)
+                    .map_err(|error| {
+                        error.with_usage(ResourceUsage {
+                            wall_clock_ms,
+                            network_egress_bytes,
+                            process_count: 1,
+                            ..ResourceUsage::default()
+                        })
+                    })?;
                 return Ok(FirstPartyCapabilityResult::new(
                     output,
                     ResourceUsage {
@@ -275,7 +276,11 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
             }
         };
         let wall_clock_ms = start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
-        let output_bytes = bounded_output_bytes(&output).map_err(|error| {
+        let output_limit_bytes = match request.capability_id.as_str() {
+            HTTP_CAPABILITY_ID => http::MAX_HTTP_OUTPUT_BYTES,
+            _ => FIRST_PARTY_MAX_OUTPUT_BYTES,
+        };
+        let output_bytes = bounded_output_bytes(&output, output_limit_bytes).map_err(|error| {
             if network_egress_bytes > 0 {
                 error.with_usage(ResourceUsage {
                     wall_clock_ms,
@@ -312,11 +317,14 @@ fn bounded_input_size(
     Ok(())
 }
 
-fn bounded_output_bytes(output: &serde_json::Value) -> Result<u64, FirstPartyCapabilityError> {
+fn bounded_output_bytes(
+    output: &serde_json::Value,
+    max_bytes: u64,
+) -> Result<u64, FirstPartyCapabilityError> {
     let bytes = serde_json::to_vec(output).map_err(|_| input_error())?;
     let bytes = u64::try_from(bytes.len())
         .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OutputTooLarge))?;
-    if bytes > FIRST_PARTY_MAX_OUTPUT_BYTES {
+    if bytes > max_bytes {
         return Err(FirstPartyCapabilityError::new(
             RuntimeDispatchErrorKind::OutputTooLarge,
         ));

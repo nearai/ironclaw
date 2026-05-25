@@ -56,6 +56,15 @@ fn network_target_patterns_validate_declaration_shape() {
     assert!(pattern.validate_declaration().is_ok());
     assert!(
         NetworkTargetPattern {
+            scheme: None,
+            host_pattern: "*".to_string(),
+            port: None,
+        }
+        .validate_declaration()
+        .is_ok()
+    );
+    assert!(
+        NetworkTargetPattern {
             scheme: Some(NetworkScheme::Https),
             host_pattern: "".to_string(),
             port: None,
