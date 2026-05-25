@@ -47,13 +47,20 @@ pub fn generate_master_key_hex() -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
+/// Resolve an existing master key and wrap it for secret-store consumers.
+pub async fn resolve_master_key_material() -> Result<Option<crate::SecretMaterial>, SecretError> {
+    Ok(resolve_master_key_hex()
+        .await?
+        .map(crate::SecretMaterial::from))
+}
+
 /// Resolve an existing master key from the environment or OS keychain.
 ///
 /// This mirrors the v1 lookup order without auto-generating new material:
 /// an explicitly set `SECRETS_MASTER_KEY` wins, otherwise the OS keychain is
 /// consulted. Empty environment values are ignored. Callers that require
 /// production durability should fail closed when this returns `None`.
-pub async fn resolve_master_key() -> Result<Option<String>, SecretError> {
+async fn resolve_master_key_hex() -> Result<Option<String>, SecretError> {
     let env_key = std::env::var(SECRETS_MASTER_KEY_ENV)
         .ok()
         .filter(|value| !value.trim().is_empty());
@@ -62,11 +69,6 @@ pub async fn resolve_master_key() -> Result<Option<String>, SecretError> {
     }
 
     resolve_master_key_from_sources(None, resolve_keychain_master_key().await)
-}
-
-/// Resolve an existing master key and wrap it for secret-store consumers.
-pub async fn resolve_master_key_material() -> Result<Option<crate::SecretMaterial>, SecretError> {
-    Ok(resolve_master_key().await?.map(crate::SecretMaterial::from))
 }
 
 fn resolve_master_key_from_sources(

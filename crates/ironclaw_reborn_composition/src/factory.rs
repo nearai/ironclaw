@@ -460,21 +460,14 @@ async fn resolve_secret_master_key(
     explicit: Option<ironclaw_secrets::SecretMaterial>,
 ) -> Result<ironclaw_secrets::SecretMaterial, RebornBuildError> {
     if let Some(master_key) = explicit {
-        select_secret_master_key(Some(master_key))
+        Ok(master_key)
     } else if let Some(master_key) =
         ironclaw_secrets::keychain::resolve_master_key_material().await?
     {
-        select_secret_master_key(Some(master_key))
+        Ok(master_key)
     } else {
-        select_secret_master_key(None)
+        Err(RebornBuildError::MissingSecretMasterKey)
     }
-}
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-fn select_secret_master_key(
-    resolved: Option<ironclaw_secrets::SecretMaterial>,
-) -> Result<ironclaw_secrets::SecretMaterial, RebornBuildError> {
-    resolved.ok_or(RebornBuildError::MissingSecretMasterKey)
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -727,21 +720,6 @@ mod tests {
             } => assert!(secret_master_key.is_none()),
             _ => panic!("expected libsql storage"),
         }
-    }
-
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
-    #[test]
-    fn select_secret_master_key_requires_resolved_material() {
-        assert!(matches!(
-            select_secret_master_key(None),
-            Err(RebornBuildError::MissingSecretMasterKey)
-        ));
-        assert!(
-            select_secret_master_key(Some(ironclaw_secrets::SecretMaterial::from(
-                "01234567890123456789012345678901"
-            )))
-            .is_ok()
-        );
     }
 
     #[tokio::test]

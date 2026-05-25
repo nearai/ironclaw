@@ -20,6 +20,37 @@ use tokio::sync::Mutex;
 
 static SECRETS_MASTER_KEY_ENV_LOCK: Mutex<()> = Mutex::const_new(());
 
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(key);
+        // SAFETY: callers serialize process-env mutation with
+        // SECRETS_MASTER_KEY_ENV_LOCK. The guard restores the previous value on
+        // drop, including panic unwinds from the awaited builder below.
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        // SAFETY: EnvVarGuard is only constructed while
+        // SECRETS_MASTER_KEY_ENV_LOCK is held by this test module.
+        unsafe {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn libsql_substrate_builder_wires_production_components_without_local_only_seams() {
     let dir = tempdir().unwrap();
@@ -90,14 +121,10 @@ async fn libsql_substrate_builder_rejects_invalid_secret_master_key() {
 #[tokio::test]
 async fn libsql_substrate_builder_rejects_weak_env_secret_master_key() {
     let _guard = SECRETS_MASTER_KEY_ENV_LOCK.lock().await;
-    // SAFETY: this test serializes access to SECRETS_MASTER_KEY with
-    // SECRETS_MASTER_KEY_ENV_LOCK and restores the variable before returning.
-    unsafe {
-        std::env::set_var(
-            ironclaw_secrets::keychain::SECRETS_MASTER_KEY_ENV,
-            "correct horse battery staple pad!!",
-        );
-    }
+    let _env = EnvVarGuard::set(
+        ironclaw_secrets::keychain::SECRETS_MASTER_KEY_ENV,
+        "correct horse battery staple pad!!",
+    );
     let dir = tempdir().unwrap();
     let state_db_path = dir.path().join("state.db");
     let events_db_path = dir.path().join("events.db");
@@ -121,11 +148,6 @@ async fn libsql_substrate_builder_rejects_weak_env_secret_master_key() {
         surface_version: CapabilitySurfaceVersion::new("test-surface").unwrap(),
     })
     .await;
-    // SAFETY: guarded by SECRETS_MASTER_KEY_ENV_LOCK; see the set_var block
-    // above.
-    unsafe {
-        std::env::remove_var(ironclaw_secrets::keychain::SECRETS_MASTER_KEY_ENV);
-    }
 
     assert!(matches!(
         result,
