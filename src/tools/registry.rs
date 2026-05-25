@@ -497,15 +497,25 @@ impl ToolRegistry {
         tracing::debug!("Registered tool_info discovery tool");
     }
 
-    /// Register system introspection tools (tools_list, version).
+    /// Register system control/introspection tools (tools_list, version, restart).
     ///
     /// Requires `Arc<Self>` because `SystemToolsListTool` queries the
     /// registry at runtime. Call after other registration methods.
+    ///
+    /// `RestartTool` is registered here (the main gateway bootstrap) rather than
+    /// in `register_builtin_tools` so it is *not* pulled into worker/container
+    /// registries — restarting the process only makes sense in the host gateway.
+    /// The `/restart` control command now dispatches to it through
+    /// `execute_tool_audited`, so it must be resolvable from the registry; it
+    /// self-guards on `IRONCLAW_IN_DOCKER` and approval/channel gating stays at
+    /// the command layer.
     pub fn register_system_tools(self: &Arc<Self>) {
+        use crate::tools::builtin::RestartTool;
         use crate::tools::builtin::system::{SystemToolsListTool, SystemVersionTool};
         self.register_sync(Arc::new(SystemToolsListTool::new(Arc::clone(self))));
         self.register_sync(Arc::new(SystemVersionTool));
-        tracing::debug!("Registered system introspection tools");
+        self.register_sync(Arc::new(RestartTool));
+        tracing::debug!("Registered system control/introspection tools");
     }
 
     /// Register only orchestrator-domain tools (safe for the main process).
@@ -1596,6 +1606,21 @@ mod tests {
 
         let echo = registry.get("echo").await.unwrap();
         assert_eq!(echo.engine_compatibility(), EngineCompatibility::Both);
+    }
+
+    #[tokio::test]
+    async fn register_system_tools_makes_restart_resolvable() {
+        // Regression (#4025 P1): the /restart control command dispatches to a
+        // tool named "restart" through execute_tool_audited, so the standard
+        // gateway bootstrap (register_system_tools) must actually register it —
+        // otherwise /restart fails with "tool not found" in production.
+        let registry = Arc::new(ToolRegistry::new());
+        registry.register_system_tools();
+
+        assert!(
+            registry.get("restart").await.is_some(),
+            "register_system_tools must register the restart tool"
+        );
     }
 
     #[tokio::test]
