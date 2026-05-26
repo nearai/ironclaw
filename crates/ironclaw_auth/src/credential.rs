@@ -144,12 +144,107 @@ pub enum CredentialRecoveryReason {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CredentialRecoveryProjection {
     pub provider: AuthProviderId,
-    pub kind: CredentialRecoveryKind,
     pub reason: CredentialRecoveryReason,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub selected_account: Option<CredentialAccountProjection>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub choices: Vec<CredentialAccountProjection>,
+    #[serde(flatten)]
+    pub state: CredentialRecoveryState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CredentialRecoveryState {
+    Configured {
+        selected_account: CredentialAccountProjection,
+    },
+    SetupRequired {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        choices: Vec<CredentialAccountProjection>,
+    },
+    ReauthorizeRequired {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        choices: Vec<CredentialAccountProjection>,
+    },
+    AccountSelectionRequired {
+        choices: Vec<CredentialAccountProjection>,
+    },
+}
+
+impl CredentialRecoveryProjection {
+    pub fn configured(
+        provider: AuthProviderId,
+        selected_account: CredentialAccountProjection,
+    ) -> Self {
+        Self {
+            provider,
+            reason: CredentialRecoveryReason::Configured,
+            state: CredentialRecoveryState::Configured { selected_account },
+        }
+    }
+
+    pub fn setup_required(
+        provider: AuthProviderId,
+        reason: CredentialRecoveryReason,
+        choices: Vec<CredentialAccountProjection>,
+    ) -> Self {
+        Self {
+            provider,
+            reason,
+            state: CredentialRecoveryState::SetupRequired { choices },
+        }
+    }
+
+    pub fn reauthorize_required(
+        provider: AuthProviderId,
+        reason: CredentialRecoveryReason,
+        choices: Vec<CredentialAccountProjection>,
+    ) -> Self {
+        Self {
+            provider,
+            reason,
+            state: CredentialRecoveryState::ReauthorizeRequired { choices },
+        }
+    }
+
+    pub fn account_selection_required(
+        provider: AuthProviderId,
+        choices: Vec<CredentialAccountProjection>,
+    ) -> Self {
+        Self {
+            provider,
+            reason: CredentialRecoveryReason::AmbiguousAccount,
+            state: CredentialRecoveryState::AccountSelectionRequired { choices },
+        }
+    }
+
+    pub fn kind(&self) -> CredentialRecoveryKind {
+        match &self.state {
+            CredentialRecoveryState::Configured { .. } => CredentialRecoveryKind::Configured,
+            CredentialRecoveryState::SetupRequired { .. } => CredentialRecoveryKind::SetupRequired,
+            CredentialRecoveryState::ReauthorizeRequired { .. } => {
+                CredentialRecoveryKind::ReauthorizeRequired
+            }
+            CredentialRecoveryState::AccountSelectionRequired { .. } => {
+                CredentialRecoveryKind::AccountSelectionRequired
+            }
+        }
+    }
+
+    pub fn selected_account(&self) -> Option<&CredentialAccountProjection> {
+        match &self.state {
+            CredentialRecoveryState::Configured { selected_account } => Some(selected_account),
+            CredentialRecoveryState::SetupRequired { .. }
+            | CredentialRecoveryState::ReauthorizeRequired { .. }
+            | CredentialRecoveryState::AccountSelectionRequired { .. } => None,
+        }
+    }
+
+    pub fn choices(&self) -> &[CredentialAccountProjection] {
+        match &self.state {
+            CredentialRecoveryState::Configured { .. } => &[],
+            CredentialRecoveryState::SetupRequired { choices }
+            | CredentialRecoveryState::ReauthorizeRequired { choices }
+            | CredentialRecoveryState::AccountSelectionRequired { choices } => choices,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

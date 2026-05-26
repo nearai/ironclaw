@@ -376,10 +376,10 @@ async fn credential_recovery_projection_distinguishes_recoverable_states() {
         .project_credential_recovery(CredentialRecoveryRequest::new(owner, provider()))
         .await
         .expect("empty recovery projection");
-    assert_eq!(no_account.kind, CredentialRecoveryKind::SetupRequired);
+    assert_eq!(no_account.kind(), CredentialRecoveryKind::SetupRequired);
     assert_eq!(no_account.reason, CredentialRecoveryReason::NoAccount);
-    assert!(no_account.selected_account.is_none());
-    assert!(no_account.choices.is_empty());
+    assert!(no_account.selected_account().is_none());
+    assert!(no_account.choices().is_empty());
 
     for (status, expected_kind, expected_reason, user) in [
         (
@@ -448,18 +448,18 @@ async fn credential_recovery_projection_distinguishes_recoverable_states() {
             .await
             .expect("recovery projection");
 
-        assert_eq!(projection.kind, expected_kind);
+        assert_eq!(projection.kind(), expected_kind);
         assert_eq!(projection.reason, expected_reason);
         if expected_kind == CredentialRecoveryKind::Configured {
             assert_eq!(
-                projection.selected_account.as_ref().map(|choice| choice.id),
+                projection.selected_account().map(|choice| choice.id),
                 Some(account.id)
             );
-            assert!(projection.choices.is_empty());
+            assert!(projection.choices().is_empty());
         } else {
-            assert!(projection.selected_account.is_none());
-            assert_eq!(projection.choices.len(), 1);
-            assert_eq!(projection.choices[0].id, account.id);
+            assert!(projection.selected_account().is_none());
+            assert_eq!(projection.choices().len(), 1);
+            assert_eq!(projection.choices()[0].id, account.id);
         }
     }
 }
@@ -504,15 +504,15 @@ async fn credential_recovery_projection_returns_redacted_authorized_choices() {
         .await
         .expect("recovery projection");
     assert_eq!(
-        projection.kind,
+        projection.kind(),
         CredentialRecoveryKind::AccountSelectionRequired
     );
     assert_eq!(
         projection.reason,
         CredentialRecoveryReason::AmbiguousAccount
     );
-    assert_eq!(projection.choices.len(), 2);
-    assert!(projection.selected_account.is_none());
+    assert_eq!(projection.choices().len(), 2);
+    assert!(projection.selected_account().is_none());
 
     let serialized = serde_json::to_string(&projection).unwrap();
     let round_trip: CredentialRecoveryProjection = serde_json::from_str(&serialized).unwrap();
@@ -627,13 +627,13 @@ async fn shared_admin_managed_credentials_require_explicit_grants() {
             .project_credential_recovery(request)
             .await
             .expect("recovery projection");
-        assert_eq!(projection.kind, CredentialRecoveryKind::SetupRequired);
+        assert_eq!(projection.kind(), CredentialRecoveryKind::SetupRequired);
         assert_eq!(
             projection.reason,
             CredentialRecoveryReason::NoAuthorizedAccount
         );
-        assert!(projection.choices.is_empty());
-        assert!(projection.selected_account.is_none());
+        assert!(projection.choices().is_empty());
+        assert!(projection.selected_account().is_none());
     }
 
     let granted = services
@@ -643,9 +643,9 @@ async fn shared_admin_managed_credentials_require_explicit_grants() {
         )
         .await
         .expect("granted recovery projection");
-    assert_eq!(granted.kind, CredentialRecoveryKind::Configured);
+    assert_eq!(granted.kind(), CredentialRecoveryKind::Configured);
     assert_eq!(
-        granted.selected_account.as_ref().map(|account| account.id),
+        granted.selected_account().map(|account| account.id),
         Some(shared.id)
     );
 
