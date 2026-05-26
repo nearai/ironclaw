@@ -192,16 +192,31 @@ pub(crate) async fn libsql_backend() -> LibSqlFixture {
     }
 }
 
-/// Build a fresh, migrated Postgres backend bound to an isolated schema and
-/// truncated table, or `None` if no DB URL is set. Each call uses a unique
-/// schema so concurrent matrix runs cannot collide.
+/// Build the Postgres parity leg, distinguishing *missing env* from *setup
+/// failure after env discovery*:
+///
+/// - `Ok(None)` — no DB URL configured. The leg is legitimately absent; the
+///   caller may skip it (subject to [`require_postgres_or_skip`]).
+/// - `Err(_)` — a DB URL *was* found but connect / schema-create / pool-build /
+///   migration / truncate failed. This is a real setup failure and must never
+///   collapse into a green skip-pass; the caller turns it into a hard panic.
+///
+/// This is the shape the review asked for: missing env skips, but any error
+/// after env discovery fails loudly so a misconfigured-but-reachable CI DB
+/// cannot silently drop the Postgres parity leg. Each call uses a unique schema
+/// so concurrent matrix runs cannot collide.
 #[cfg(feature = "postgres")]
-pub(crate) async fn postgres_backend() -> Option<Arc<dyn PredicateStateBackend>> {
+pub(crate) async fn postgres_backend() -> Result<Option<Arc<dyn PredicateStateBackend>>, String> {
     use ironclaw_hooks_postgres::PostgresPredicateStateBackend;
 
-    let url = std::env::var("IRONCLAW_HOOKS_POSTGRES_URL")
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .ok()?;
+    // Missing env => skip-eligible. Everything below this point is a real
+    // setup step whose failure is fatal (mapped to `Err`, never silently
+    // swallowed into a skip).
+    let Ok(url) =
+        std::env::var("IRONCLAW_HOOKS_POSTGRES_URL").or_else(|_| std::env::var("DATABASE_URL"))
+    else {
+        return Ok(None);
+    };
 
     // Unique schema per process so the parity binary cannot collide with the
     // per-backend test binaries `cargo test` runs in parallel.
@@ -216,15 +231,17 @@ pub(crate) async fn postgres_backend() -> Option<Arc<dyn PredicateStateBackend>>
     {
         let (client, conn) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
             .await
-            .ok()?;
+            .map_err(|e| format!("connect: {e}"))?;
         tokio::spawn(conn);
         client
             .batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {schema}"))
             .await
-            .ok()?;
+            .map_err(|e| format!("create schema: {e}"))?;
     }
 
-    let config = url.parse::<tokio_postgres::Config>().ok()?;
+    let config = url
+        .parse::<tokio_postgres::Config>()
+        .map_err(|e| format!("parse config: {e}"))?;
     let manager = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
     let schema_for_hook = schema.clone();
     let pool = deadpool_postgres::Pool::builder(manager)
@@ -240,15 +257,18 @@ pub(crate) async fn postgres_backend() -> Option<Arc<dyn PredicateStateBackend>>
             })
         }))
         .build()
-        .ok()?;
+        .map_err(|e| format!("build pool: {e}"))?;
     let backend = PostgresPredicateStateBackend::new(pool.clone());
-    backend.run_migrations().await.ok()?;
-    let client = pool.get().await.ok()?;
+    backend
+        .run_migrations()
+        .await
+        .map_err(|e| format!("run migrations: {e}"))?;
+    let client = pool.get().await.map_err(|e| format!("pool get: {e}"))?;
     client
         .batch_execute("TRUNCATE TABLE hooks_predicate_invocations, hooks_predicate_values")
         .await
-        .ok()?;
-    Some(Arc::new(backend))
+        .map_err(|e| format!("truncate: {e}"))?;
+    Ok(Some(Arc::new(backend)))
 }
 
 // ---------------------------------------------------------------------------
@@ -377,16 +397,26 @@ where
     // Postgres leg (compiled under `postgres`, runs only with a DB URL).
     #[cfg(feature = "postgres")]
     {
-        if let Some(pg) = postgres_backend().await {
-            let pg_log = script(pg).await;
-            assert_eq!(
-                pg_log, expected,
-                "[{script_name}] Postgres diverged from the oracle — \
-                 a real cross-backend behavioral bug, do NOT loosen this assertion"
-            );
-            ran.push("postgres");
-        } else {
-            require_postgres_or_skip(script_name);
+        // `Err` = DB URL was set but setup (connect/schema/pool/migrate/
+        // truncate) failed: ALWAYS fatal, never a skip — a misconfigured but
+        // reachable CI DB must not silently drop the Postgres parity leg.
+        // `Ok(None)` = no DB URL: skip-eligible (subject to the hard-gate).
+        match postgres_backend().await {
+            Ok(Some(pg)) => {
+                let pg_log = script(pg).await;
+                assert_eq!(
+                    pg_log, expected,
+                    "[{script_name}] Postgres diverged from the oracle — \
+                     a real cross-backend behavioral bug, do NOT loosen this assertion"
+                );
+                ran.push("postgres");
+            }
+            Ok(None) => require_postgres_or_skip(script_name),
+            Err(e) => panic!(
+                "[{script_name}] Postgres parity leg setup FAILED after the DB URL was \
+                 found: {e}. A configured-but-unreachable/misconfigured DB must fail \
+                 loudly, not skip-pass."
+            ),
         }
     }
     #[cfg(not(feature = "postgres"))]

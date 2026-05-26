@@ -465,26 +465,23 @@ async fn scenario_clock_skew_follows_caller_clock(
     );
 }
 
-// ---------------------------------------------------------------------------
-// libSQL drivers (always run under `integration`)
-// ---------------------------------------------------------------------------
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn libsql_concurrent_writers_no_desync() {
-    let cluster = libsql_cluster::Cluster::new().await;
-    scenario_concurrent_writers_no_desync(cluster.host(), cluster.host(), cluster.host()).await;
-}
-
-#[tokio::test]
-async fn libsql_cross_host_replay_exactly_once() {
-    let cluster = libsql_cluster::Cluster::new().await;
-    scenario_cross_host_replay_exactly_once(cluster.host(), cluster.host()).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn libsql_lru_eviction_race_holds_quota() {
-    let cluster = libsql_cluster::Cluster::new().await;
-    let backend = cluster.host();
+/// 3. LRU eviction race: a noisy tenant floods past its per-tenant key quota
+///    concurrently while a quiet tenant holds one key. The quiet tenant must
+///    survive (cross-tenant isolation: a tenant evicts only ITS OWN oldest
+///    key), the noisy tenant must stay capped at `MAX_KEYS_PER_TENANT`, and the
+///    eviction counter must advance.
+///
+/// Extracted into a shared scenario so it runs against EVERY durable backend
+/// rather than only libSQL — the per-backend driver supplies the cluster's
+/// distinct-scope counter (the SQL differs by column type) via `count_scopes`,
+/// which returns the number of distinct `key_hash` buckets the tenant retains.
+async fn scenario_lru_eviction_race_holds_quota<C, Fut>(
+    backend: Arc<dyn PredicateStateBackend>,
+    count_scopes: C,
+) where
+    C: Fn(&'static str) -> Fut,
+    Fut: std::future::Future<Output = usize>,
+{
     let window = Duration::from_secs(3600);
 
     // Quiet tenant beta records one scope.
@@ -495,7 +492,7 @@ async fn libsql_lru_eviction_race_holds_quota() {
         .expect("ok");
 
     // Noisy tenant alpha floods past its quota concurrently. Bound concurrency
-    // (libSQL opens a connection per op; unbounded fan-out exhausts FDs).
+    // (each op may open a connection; unbounded fan-out exhausts FDs / the pool).
     let flood = MAX_KEYS_PER_TENANT + 16;
     let sem = Arc::new(tokio::sync::Semaphore::new(16));
     let mut handles = Vec::with_capacity(flood);
@@ -520,7 +517,7 @@ async fn libsql_lru_eviction_race_holds_quota() {
         h.await.expect("joined");
     }
 
-    // Quiet tenant beta survives.
+    // Quiet tenant beta survives (cross-tenant isolation).
     let beta_count = backend
         .record_invocation(&beta, &ev("beta-evt"), at_secs(0), window)
         .await
@@ -528,7 +525,7 @@ async fn libsql_lru_eviction_race_holds_quota() {
     assert_eq!(beta_count, 1, "quiet tenant scope must survive the flood");
 
     // Alpha held at quota; evictions advanced deterministically.
-    let alpha_scopes = cluster.distinct_invocation_scopes("alpha").await;
+    let alpha_scopes = count_scopes("alpha").await;
     assert!(
         alpha_scopes <= MAX_KEYS_PER_TENANT,
         "noisy tenant capped at its quota; got {alpha_scopes}"
@@ -539,14 +536,62 @@ async fn libsql_lru_eviction_race_holds_quota() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// libSQL drivers (always run under `integration`)
+// ---------------------------------------------------------------------------
+
+/// Process-global async mutex serializing the libSQL legs. Each leg builds its
+/// OWN independent libSQL `Database` handle (separate temp dir), and the heavy
+/// legs do large fills (per-key cap = thousands of connect/BEGIN IMMEDIATE/
+/// COMMIT cycles, or the per-tenant-quota flood). Running multiple independent
+/// `Database` handles' heavy fills concurrently in one process intermittently
+/// trips `SQLITE_MISUSE` ("bad parameter or other API misuse") in the
+/// replication-enabled libSQL build — a driver-level limit on concurrent
+/// independent handles, NOT a backend bug (the per-backend libSQL contract
+/// suite and the parity matrix document the same and serialize identically).
+/// Holding this guard across each libSQL leg gives the one-heavy-fill-at-a-time
+/// discipline without rewriting the harness.
+fn libsql_serial_guard() -> &'static tokio::sync::Mutex<()> {
+    static GUARD: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    GUARD.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn libsql_concurrent_writers_no_desync() {
+    let _guard = libsql_serial_guard().lock().await;
+    let cluster = libsql_cluster::Cluster::new().await;
+    scenario_concurrent_writers_no_desync(cluster.host(), cluster.host(), cluster.host()).await;
+}
+
+#[tokio::test]
+async fn libsql_cross_host_replay_exactly_once() {
+    let _guard = libsql_serial_guard().lock().await;
+    let cluster = libsql_cluster::Cluster::new().await;
+    scenario_cross_host_replay_exactly_once(cluster.host(), cluster.host()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn libsql_lru_eviction_race_holds_quota() {
+    let _guard = libsql_serial_guard().lock().await;
+    let cluster = libsql_cluster::Cluster::new().await;
+    let backend = cluster.host();
+    scenario_lru_eviction_race_holds_quota(backend, |tenant| {
+        let cluster = &cluster;
+        async move { cluster.distinct_invocation_scopes(tenant).await }
+    })
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn libsql_per_key_cap_fails_closed_under_flood() {
+    let _guard = libsql_serial_guard().lock().await;
     let cluster = libsql_cluster::Cluster::new().await;
     scenario_per_key_cap_fails_closed_under_flood(cluster.host(), cluster.host()).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn libsql_cap_boundary_race_admits_exactly_one() {
+    let _guard = libsql_serial_guard().lock().await;
     let cluster = libsql_cluster::Cluster::new().await;
     scenario_cap_boundary_race_admits_exactly_one(cluster.host(), cluster.host(), cluster.host())
         .await;
@@ -554,6 +599,7 @@ async fn libsql_cap_boundary_race_admits_exactly_one() {
 
 #[tokio::test]
 async fn libsql_clock_skew_follows_caller_clock() {
+    let _guard = libsql_serial_guard().lock().await;
     let cluster = libsql_cluster::Cluster::new().await;
     scenario_clock_skew_follows_caller_clock(cluster.host(), cluster.host()).await;
 }
@@ -626,6 +672,27 @@ mod postgres_cluster {
         ))
     }
 
+    /// Count distinct `key_hash` buckets retained for `tenant` in the invocation
+    /// table — the Postgres analogue of `libsql_cluster::Cluster::
+    /// distinct_invocation_scopes`, used to assert the per-tenant LRU quota held
+    /// under flood. The tenant grain is the `scope_hash` digest (stored as
+    /// `BYTEA`); resolve it via `test_support` and count distinct `key_hash`.
+    pub(super) async fn distinct_invocation_scopes(url: &str, tenant: &str) -> usize {
+        let pool = build_pool(url).expect("pool");
+        let client = pool.get().await.expect("pool get");
+        let scope = ironclaw_hooks_postgres::test_support::scope_hash_bytes(tenant).to_vec();
+        let row = client
+            .query_one(
+                "SELECT count(DISTINCT key_hash) FROM hooks_predicate_invocations \
+                 WHERE scope_hash = $1",
+                &[&scope],
+            )
+            .await
+            .expect("count distinct key_hash");
+        let v: i64 = row.get(0);
+        v.max(0) as usize
+    }
+
     /// `IRONCLAW_REQUIRE_POSTGRES=1` turns a missing/unreachable Postgres into a
     /// HARD failure (CI sets this) instead of a silent skip-pass; local runs
     /// without it still skip cleanly.
@@ -672,6 +739,19 @@ mod postgres_cluster {
         let _g = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let url = pg_skip_or!(url);
         scenario_cross_host_replay_exactly_once(host(&url), host(&url)).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[allow(clippy::await_holding_lock)]
+    async fn postgres_lru_eviction_race_holds_quota() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let url = pg_skip_or!(url);
+        let url_for_count = url.clone();
+        scenario_lru_eviction_race_holds_quota(host(&url), move |tenant| {
+            let url = url_for_count.clone();
+            async move { distinct_invocation_scopes(&url, tenant).await }
+        })
+        .await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
