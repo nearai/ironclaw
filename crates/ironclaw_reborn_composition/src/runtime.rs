@@ -497,6 +497,10 @@ impl RebornRuntime {
                 requested_run_profile: None,
                 idempotency_key,
                 received_at: Utc::now(),
+                requested_run_id: None,
+                parent_run_id: None,
+                subagent_depth: 0,
+                spawn_tree_root_run_id: None,
             })
             .await
         {

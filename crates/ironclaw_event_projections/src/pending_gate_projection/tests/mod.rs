@@ -180,7 +180,7 @@ async fn malformed_blocked_metadata_errors_without_advancing_cursor() {
 }
 
 #[tokio::test]
-async fn auth_and_resource_blocked_events_upsert_expected_gate_kinds() {
+async fn non_approval_blocked_events_upsert_expected_gate_kinds() {
     for (status, source_kind, projected_kind, gate_ref) in [
         (
             TurnStatus::BlockedAuth,
@@ -193,6 +193,12 @@ async fn auth_and_resource_blocked_events_upsert_expected_gate_kinds() {
             TurnBlockedGateKind::Resource,
             PendingGateKind::Resource,
             "gate:resource-a",
+        ),
+        (
+            TurnStatus::BlockedDependentRun,
+            TurnBlockedGateKind::AwaitDependentRun,
+            PendingGateKind::AwaitDependentRun,
+            "gate:run-a",
         ),
     ] {
         let sink = Arc::new(MemorySink::default());

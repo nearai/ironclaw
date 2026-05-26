@@ -950,6 +950,10 @@ async fn turn_runner_worker_completes_after_libsql_turn_and_thread_services_reop
                     requested_run_profile: None,
                     idempotency_key: IdempotencyKey::new("idem-libsql-restart").unwrap(),
                     received_at: Utc::now(),
+                    requested_run_id: None,
+                    parent_run_id: None,
+                    subagent_depth: 0,
+                    spawn_tree_root_run_id: None,
                 },
                 &ironclaw_turns::AllowAllTurnAdmissionPolicy,
                 &resolver,
@@ -2151,6 +2155,10 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
             requested_run_profile: None,
             idempotency_key: IdempotencyKey::new("idem-runtime-planned").unwrap(),
             received_at: Utc::now(),
+            requested_run_id: None,
+            parent_run_id: None,
+            subagent_depth: 0,
+            spawn_tree_root_run_id: None,
         })
         .await
         .unwrap();
@@ -5791,9 +5799,10 @@ id = "script.echo"
 description = "Echo text through Reborn adapter e2e"
 effects = ["dispatch_capability"]
 default_permission = "allow"
-visibility = "host_internal"
+visibility = "model"
 input_schema_ref = "schemas/script/echo.input.v1.json"
 output_schema_ref = "schemas/script/echo.output.v1.json"
+prompt_doc_ref = "prompt/script/echo.md"
 "#;
 
 /// Test-only evidence port that bypasses all durable evidence checks.
@@ -6238,6 +6247,10 @@ async fn queue_fixture_turn(
                 requested_run_profile: None,
                 idempotency_key: IdempotencyKey::new(idempotency_key).unwrap(),
                 received_at: Utc::now(),
+                requested_run_id: None,
+                parent_run_id: None,
+                subagent_depth: 0,
+                spawn_tree_root_run_id: None,
             },
             &ironclaw_turns::AllowAllTurnAdmissionPolicy,
             resolver,

@@ -27,6 +27,7 @@ mod input_queue;
 mod skill_bundle_context_source;
 mod skill_bundle_source;
 mod skill_context;
+mod turn_event_publisher;
 
 pub use budget_accountant::{
     BudgetSeedingPolicy, GovernorBackedAccountant, ModelCost, ModelCostTable, ZeroCostTable,
@@ -69,6 +70,7 @@ pub use skill_context::{
     HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
     build_skill_run_snapshot,
 };
+pub use turn_event_publisher::EventPublishingTurnRunTransitionPort;
 
 use tokio::sync::{Mutex, OnceCell};
 

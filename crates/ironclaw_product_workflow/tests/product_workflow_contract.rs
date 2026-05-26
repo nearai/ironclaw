@@ -34,7 +34,7 @@ use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
     GetRunStateRequest, LoopGateRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
     RunProfileVersion, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnCoordinator,
-    TurnError, TurnId, TurnRunId, TurnRunState, TurnStatus,
+    TurnError, TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
 };
 
 fn sample_envelope(event_suffix: &str) -> ProductInboundEnvelope {
@@ -116,6 +116,10 @@ impl RecordingTurnCoordinator {
 
 #[async_trait]
 impl TurnCoordinator for RecordingTurnCoordinator {
+    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        Ok(TurnRunId::new())
+    }
+
     async fn submit_turn(
         &self,
         request: SubmitTurnRequest,

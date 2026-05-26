@@ -331,6 +331,10 @@ impl FakeTurnCoordinator {
 
 #[async_trait]
 impl TurnCoordinator for FakeTurnCoordinator {
+    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        Ok(TurnRunId::new())
+    }
+
     async fn submit_turn(
         &self,
         _request: SubmitTurnRequest,

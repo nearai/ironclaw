@@ -2321,6 +2321,10 @@ async fn claimed_run_context() -> LoopRunContext {
             requested_run_profile: Some(RunProfileRequest::new("default").unwrap()),
             idempotency_key: IdempotencyKey::new("idem-loop-host").unwrap(),
             received_at: Utc.with_ymd_and_hms(2026, 5, 7, 12, 0, 0).unwrap(),
+            requested_run_id: None,
+            parent_run_id: None,
+            subagent_depth: 0,
+            spawn_tree_root_run_id: None,
         })
         .await
         .unwrap();

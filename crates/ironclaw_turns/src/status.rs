@@ -15,6 +15,7 @@ pub enum TurnStatus {
     BlockedApproval,
     BlockedAuth,
     BlockedResource,
+    BlockedDependentRun,
     CancelRequested,
     Cancelled,
     Completed,
@@ -102,9 +103,19 @@ fn compatibility_profile_id(resolved: &ResolvedRunProfile) -> RunProfileId {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BlockedReason {
-    Approval { gate_ref: GateRef },
-    Auth { gate_ref: GateRef },
-    Resource { gate_ref: GateRef },
+    Approval {
+        gate_ref: GateRef,
+    },
+    Auth {
+        gate_ref: GateRef,
+    },
+    Resource {
+        gate_ref: GateRef,
+    },
+    #[serde(alias = "DependentRun")]
+    AwaitDependentRun {
+        gate_ref: GateRef,
+    },
 }
 
 impl BlockedReason {
@@ -113,14 +124,16 @@ impl BlockedReason {
             Self::Approval { .. } => TurnStatus::BlockedApproval,
             Self::Auth { .. } => TurnStatus::BlockedAuth,
             Self::Resource { .. } => TurnStatus::BlockedResource,
+            Self::AwaitDependentRun { .. } => TurnStatus::BlockedDependentRun,
         }
     }
 
     pub fn gate_ref(&self) -> &GateRef {
         match self {
-            Self::Approval { gate_ref } | Self::Auth { gate_ref } | Self::Resource { gate_ref } => {
-                gate_ref
-            }
+            Self::Approval { gate_ref }
+            | Self::Auth { gate_ref }
+            | Self::Resource { gate_ref }
+            | Self::AwaitDependentRun { gate_ref } => gate_ref,
         }
     }
 }
@@ -293,6 +306,32 @@ pub enum TurnErrorCategory {
     InvalidRequest,
     Unavailable,
     Conflict,
+    CapacityExceeded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnCapacityResource {
+    SpawnTreeDescendants,
+    SubmitTurn,
+    #[serde(other)]
+    Replayed,
+}
+
+impl TurnCapacityResource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SpawnTreeDescendants => "spawn_tree_descendants",
+            Self::SubmitTurn => "submit_turn",
+            Self::Replayed => "replayed",
+        }
+    }
+}
+
+impl std::fmt::Display for TurnCapacityResource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -311,6 +350,11 @@ pub enum TurnError {
     Unavailable { reason: String },
     #[error("turn conflict: {reason}")]
     Conflict { reason: String },
+    #[error("turn capacity exceeded for {resource}: cap {cap}")]
+    CapacityExceeded {
+        resource: TurnCapacityResource,
+        cap: u64,
+    },
     #[error("invalid turn transition from {from:?} to {to:?}")]
     InvalidTransition { from: TurnStatus, to: TurnStatus },
     #[error("turn run lease mismatch")]
@@ -336,7 +380,12 @@ impl TurnError {
             Self::Conflict { .. } | Self::InvalidTransition { .. } | Self::LeaseMismatch => {
                 TurnErrorCategory::Conflict
             }
+            Self::CapacityExceeded { .. } => TurnErrorCategory::CapacityExceeded,
         }
+    }
+
+    pub fn capacity_exceeded(resource: TurnCapacityResource, cap: u64) -> Self {
+        Self::CapacityExceeded { resource, cap }
     }
 
     pub fn is_expected_admission_outcome(&self) -> bool {
@@ -347,6 +396,7 @@ impl TurnError {
         match self.category() {
             TurnErrorCategory::ThreadBusy | TurnErrorCategory::Conflict => 409,
             TurnErrorCategory::AdmissionRejected => 429,
+            TurnErrorCategory::CapacityExceeded => 429,
             TurnErrorCategory::ScopeNotFound => 404,
             TurnErrorCategory::Unauthorized => 403,
             TurnErrorCategory::InvalidRequest => 400,

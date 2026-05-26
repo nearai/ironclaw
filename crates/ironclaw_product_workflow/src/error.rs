@@ -116,6 +116,7 @@ fn workflow_rejection_kind(category: TurnErrorCategory) -> ProductWorkflowReject
         TurnErrorCategory::Unauthorized => ProductWorkflowRejectionKind::Unauthorized,
         TurnErrorCategory::InvalidRequest => ProductWorkflowRejectionKind::InvalidRequest,
         TurnErrorCategory::Unavailable => ProductWorkflowRejectionKind::Unavailable,
+        TurnErrorCategory::CapacityExceeded => ProductWorkflowRejectionKind::AdmissionRejected,
         TurnErrorCategory::Conflict => ProductWorkflowRejectionKind::Conflict,
     }
 }
@@ -282,6 +283,15 @@ mod tests {
                 },
                 ProductWorkflowRejectionKind::Unavailable,
                 503,
+                true,
+            ),
+            (
+                TurnError::capacity_exceeded(
+                    ironclaw_turns::TurnCapacityResource::SpawnTreeDescendants,
+                    3,
+                ),
+                ProductWorkflowRejectionKind::AdmissionRejected,
+                429,
                 true,
             ),
         ] {
