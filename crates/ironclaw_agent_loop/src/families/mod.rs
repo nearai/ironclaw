@@ -4,6 +4,10 @@ use crate::default_planner::DefaultPlanner;
 use crate::family::{ComponentDigest, LoopFamily};
 use crate::planner::AgentLoopPlanner;
 
+mod subagent;
+
+pub use subagent::{SUBAGENT_FAMILY_DIGEST, subagent};
+
 #[cfg(test)]
 const DEFAULT_FAMILY_FINGERPRINT: &[u8] = concat!(
     "ironclaw_agent_loop.default_family.v1:",

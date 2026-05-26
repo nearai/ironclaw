@@ -12,6 +12,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_product_adapters::{
     CapabilityActivityStatusView, ProductOutboundEnvelope, ProductOutboundPayload,
+    ProductProjectionItem,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor as TurnEventCursor,
@@ -107,6 +108,10 @@ struct FakeTurnCoordinator {
 
 #[async_trait]
 impl TurnCoordinator for FakeTurnCoordinator {
+    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        Ok(TurnRunId::new())
+    }
+
     async fn submit_turn(
         &self,
         _request: SubmitTurnRequest,
