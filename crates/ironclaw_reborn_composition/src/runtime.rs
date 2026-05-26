@@ -77,7 +77,7 @@ use ironclaw_turns::{
     SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
     TurnEventProjectionSource, TurnPersistenceSnapshot, TurnRunId, TurnRunRecord, TurnScope,
     TurnStatus,
-    run_profile::{LoopHostMilestoneSink, LoopRunContext, PromptMode},
+    run_profile::{LoopHostMilestoneSink, LoopRunContext},
 };
 
 use crate::default_system_prompt::DefaultSystemPromptIdentitySource;
@@ -88,6 +88,7 @@ use crate::{RebornBuildError, RebornCompositionProfile, RebornServices, build_re
 
 mod approval;
 #[cfg(test)]
+#[path = "runtime/tests/default_system_prompt.rs"]
 mod default_system_prompt_tests;
 mod local_dev;
 mod skills;
@@ -1023,7 +1024,10 @@ pub async fn build_reborn_runtime(
         skill_context_source,
         input_queue: None,
         identity_context_source: Arc::new(
+            // Local-dev seeding validates the prompt path first, so non-file prompt paths fail
+            // as build errors before this runtime-level identity-source guard is reached.
             DefaultSystemPromptIdentitySource::try_new(
+                local_runtime.local_dev_storage_root.clone(),
                 local_runtime.default_system_prompt_path.clone(),
             )
             .map_err(|error| RebornRuntimeError::InvalidArgument {

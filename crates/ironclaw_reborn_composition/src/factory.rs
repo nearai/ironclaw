@@ -187,6 +187,7 @@ pub(crate) struct RebornLocalRuntimeServices {
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     pub(crate) subagent_goal_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     pub(crate) workspace_mounts: MountView,
+    pub(crate) local_dev_storage_root: PathBuf,
     pub(crate) default_system_prompt_path: PathBuf,
     pub(crate) event_log: Arc<dyn DurableEventLog>,
     pub(crate) audit_log: Arc<dyn DurableAuditLog>,
@@ -329,7 +330,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     };
     validate_local_dev_workspace_skill_isolation(&root, &workspace_root)?;
     let default_system_prompt_path = local_dev_default_system_prompt_path(&root);
-    seed_default_system_prompt(&default_system_prompt_path).map_err(|error| {
+    seed_default_system_prompt(&root, &default_system_prompt_path).map_err(|error| {
         RebornBuildError::InvalidConfig {
             reason: error.to_string(),
         }
@@ -347,6 +348,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         skill_filesystem,
         workspace_filesystem,
         runtime_workspace_mounts,
+        root.clone(),
         default_system_prompt_path,
     )?;
 
@@ -404,6 +406,7 @@ fn build_local_dev_store_graph(
     skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     workspace_mounts: MountView,
+    local_dev_storage_root: PathBuf,
     default_system_prompt_path: PathBuf,
 ) -> Result<RebornLocalDevStoreGraph, RebornBuildError> {
     let scoped_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
@@ -452,6 +455,7 @@ fn build_local_dev_store_graph(
         workspace_filesystem,
         subagent_goal_filesystem: Arc::clone(&scoped_filesystem),
         workspace_mounts,
+        local_dev_storage_root,
         default_system_prompt_path,
         event_log,
         audit_log,
@@ -480,6 +484,7 @@ fn build_local_dev_store_graph(
     skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     workspace_mounts: MountView,
+    local_dev_storage_root: PathBuf,
     default_system_prompt_path: PathBuf,
 ) -> Result<RebornLocalDevStoreGraph, RebornBuildError> {
     #[cfg(feature = "postgres")]
@@ -523,6 +528,7 @@ fn build_local_dev_store_graph(
         #[cfg(feature = "postgres")]
         subagent_goal_filesystem,
         workspace_mounts,
+        local_dev_storage_root,
         default_system_prompt_path,
         event_log,
         audit_log,
