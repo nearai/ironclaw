@@ -35,6 +35,7 @@ pub(crate) fn validate_env_name(name: &str) -> Result<(), SandboxPlanError> {
         || !name
             .chars()
             .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
+        || is_dangerous_entrypoint_env_name(name)
     {
         return Err(SandboxPlanError::InvalidEnvName {
             env: name.to_string(),
@@ -60,7 +61,10 @@ pub(crate) fn validate_env_has_no_raw_sensitive_values(
 }
 
 pub(crate) fn is_container_absolute_path(path: &str) -> bool {
-    path.starts_with('/') && !path.contains('\0') && !path.split('/').any(|segment| segment == "..")
+    path.starts_with('/')
+        && !path.contains('\0')
+        && !path.contains(',')
+        && !path.split('/').any(|segment| segment == "..")
 }
 
 fn is_sensitive_env_name(name: &str) -> bool {
@@ -70,4 +74,19 @@ fn is_sensitive_env_name(name: &str) -> bool {
     }
     name.split('_')
         .any(|part| matches!(part, "TOKEN" | "SECRET" | "PASSWORD" | "AUTH"))
+}
+
+fn is_dangerous_entrypoint_env_name(name: &str) -> bool {
+    matches!(
+        name,
+        "BASH_ENV"
+            | "CDPATH"
+            | "ENV"
+            | "IFS"
+            | "LD_AUDIT"
+            | "LD_LIBRARY_PATH"
+            | "LD_PRELOAD"
+            | "PATH"
+            | "SHELLOPTS"
+    )
 }

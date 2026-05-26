@@ -259,7 +259,13 @@ impl ProcessSandboxBackend for DockerProcessSandboxBackend {
                 .run(invocation, &install.command, request.cancellation.clone())
                 .await
                 .map_err(sandbox_process_error)?;
+            let exit_code = output.exit_code;
             phases.push(phase_output(SandboxProcessPhase::Install, output));
+            if exit_code != 0 {
+                return Ok(SandboxProcessResult {
+                    output: SandboxProcessOutput { phases },
+                });
+            }
         }
 
         let invocation = docker_invocation_for_phase(
@@ -542,6 +548,11 @@ fn bind_mount_arg(
     container_path: &str,
     readonly: bool,
 ) -> Result<Vec<String>, SandboxPlanError> {
+    if container_path.contains(',') {
+        return Err(SandboxPlanError::InvalidContainerPath {
+            path: container_path.to_string(),
+        });
+    }
     let host_path = host_path.display().to_string();
     if host_path.contains(',') {
         return Err(SandboxPlanError::InvalidHostPath { path: host_path });

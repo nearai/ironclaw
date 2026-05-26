@@ -185,6 +185,58 @@ fn plan_validation_rejects_mounts_over_system_paths() {
 }
 
 #[test]
+fn plan_validation_rejects_mount_paths_that_break_mount_specs() {
+    let mut plan = sample_plan();
+    plan.mounts.workspace.container_path = "/workspace,src=/etc".to_string();
+
+    let error = plan.validate().unwrap_err();
+
+    assert_eq!(
+        error,
+        SandboxPlanError::InvalidContainerPath {
+            path: "/workspace,src=/etc".to_string()
+        }
+    );
+}
+
+#[test]
+fn plan_validation_rejects_entrypoint_control_env_names() {
+    let mut plan = sample_plan();
+    plan.run
+        .env
+        .insert("LD_PRELOAD".to_string(), "x".to_string());
+
+    let error = plan.validate().unwrap_err();
+
+    assert_eq!(
+        error,
+        SandboxPlanError::InvalidEnvName {
+            env: "LD_PRELOAD".to_string()
+        }
+    );
+}
+
+#[test]
+fn plan_validation_rejects_malformed_command_fields() {
+    let mut option_like = sample_plan();
+    option_like.run.command = "--help".to_string();
+    let option_like_error = option_like.validate().unwrap_err();
+
+    let mut shell_words = sample_plan();
+    shell_words.run.command = "notion cli".to_string();
+    let shell_words_error = shell_words.validate().unwrap_err();
+
+    assert_eq!(
+        option_like_error,
+        SandboxPlanError::UnsafeCommand { phase: "run" }
+    );
+    assert_eq!(
+        shell_words_error,
+        SandboxPlanError::UnsafeCommand { phase: "run" }
+    );
+}
+
+#[test]
 fn plan_validation_does_not_reject_sensitive_env_substrings_inside_words() {
     let mut plan = sample_plan();
     plan.run.env.clear();
@@ -535,6 +587,35 @@ impl DockerRunner for RecordingRunner {
     }
 }
 
+#[derive(Default)]
+struct InstallFailsRunner {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl DockerRunner for InstallFailsRunner {
+    async fn run(
+        &self,
+        invocation: DockerInvocation,
+        _command: &SandboxCommandPlan,
+        _cancellation: ProcessCancellationToken,
+    ) -> Result<DockerRunOutput, DockerRunError> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(DockerRunOutput {
+            exit_code: if invocation.phase == SandboxProcessPhase::Install && call == 0 {
+                42
+            } else {
+                0
+            },
+            stdout: b"install failed".to_vec(),
+            stderr: Vec::new(),
+            wall_clock_ms: 12,
+            stdout_truncated: false,
+            stderr_truncated: false,
+        })
+    }
+}
+
 #[tokio::test]
 async fn executor_returns_sanitized_phase_output_json() {
     let temp = tempfile::tempdir().unwrap();
@@ -553,6 +634,31 @@ async fn executor_returns_sanitized_phase_output_json() {
     assert_eq!(result.output["kind"], "process_sandbox_result");
     assert_eq!(result.output["phases"].as_array().unwrap().len(), 2);
     assert_eq!(runner.invocations.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn docker_backend_stops_after_failed_install_phase() {
+    let temp = tempfile::tempdir().unwrap();
+    let runner = Arc::new(InstallFailsRunner::default());
+    let backend = DockerProcessSandboxBackend::with_runner(
+        sample_config(temp.path()),
+        runner.clone() as Arc<dyn DockerRunner>,
+    );
+
+    let result = backend
+        .execute(SandboxProcessRequest {
+            process_id: ProcessId::new(),
+            scope: sample_request(serde_json::json!({})).scope,
+            plan: validated_sample_plan(),
+            cancellation: ProcessCancellationToken::new(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(runner.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(result.output.phases.len(), 1);
+    assert_eq!(result.output.phases[0].phase, SandboxProcessPhase::Install);
+    assert_eq!(result.output.phases[0].exit_code, 42);
 }
 
 #[derive(Clone)]

@@ -581,7 +581,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | Atomic reindexing | ✅ | ✅ | |
 | Embeddings batching | ✅ | ✅ | `embed_batch` on EmbeddingProvider trait |
 | Citation support | ✅ | ❌ | |
-| Memory process commands | ✅ | ✅ | `memory search/read/write/tree/status` CLI subcommands |
+| Memory CLI commands | ✅ | ✅ | `memory search/read/write/tree/status` CLI subcommands |
 | `openclaw ltm list` | ✅ | ❌ | Real LanceDB LTM rows with `--limit`/createdAt ordering |
 | Flexible path structure | ✅ | ✅ | Filesystem-like API |
 | Identity files (AGENTS.md, etc.) | ✅ | ✅ | |
@@ -811,7 +811,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 - ✅ Gateway token auth
 - ✅ Skills system (prompt-based with trust gating, attenuation, activation criteria)
 - ✅ Session file permissions (0o600)
-- ✅ Memory process commands (search, read, write, tree, status)
+- ✅ Memory CLI commands (search, read, write, tree, status)
 - ✅ Shell env scrubbing + command injection detection
 - ✅ Tinfoil private inference provider
 - ✅ OpenAI-compatible / OpenRouter provider support
