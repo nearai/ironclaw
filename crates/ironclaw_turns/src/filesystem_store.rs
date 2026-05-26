@@ -45,10 +45,10 @@ use crate::{
     GetLoopCheckpointRequest, GetRunStateRequest, InMemoryTurnStateStore,
     InMemoryTurnStateStoreLimits, LoopCheckpointRecord, LoopCheckpointStore,
     PutLoopCheckpointRequest, ResumeTurnRequest, ResumeTurnResponse, RunProfileResolver,
-    SpawnTreeReservation, SubmitTurnRequest, SubmitTurnResponse, TurnAdmissionLimitProvider,
-    TurnAdmissionPolicy, TurnError, TurnEventPage, TurnEventProjectionSource,
-    TurnPersistenceSnapshot, TurnRunId, TurnRunRecord, TurnRunState, TurnScope,
-    TurnSpawnTreeStateStore, TurnStateStore,
+    SpawnTreeReservation, SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse,
+    TurnAdmissionLimitProvider, TurnAdmissionPolicy, TurnError, TurnEventPage,
+    TurnEventProjectionSource, TurnPersistenceSnapshot, TurnRunId, TurnRunRecord, TurnRunState,
+    TurnScope, TurnSpawnTreeStateStore, TurnStateStore,
     events::project_turn_events,
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
@@ -270,6 +270,32 @@ impl<F> TurnSpawnTreeStateStore for FilesystemTurnStateStore<F>
 where
     F: RootFilesystem,
 {
+    async fn submit_child_turn(
+        &self,
+        request: SubmitChildRunRequest,
+        admission_policy: &dyn TurnAdmissionPolicy,
+        run_profile_resolver: &dyn RunProfileResolver,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        let profile_resolution = run_profile_resolver
+            .resolve_run_profile(crate::RunProfileResolutionRequest {
+                requested_run_profile: request.requested_run_profile.clone(),
+                ..crate::RunProfileResolutionRequest::interactive_default()
+            })
+            .await;
+        let pre_resolved = PreResolvedRunProfileResolver::new(profile_resolution);
+        self.apply(|store| {
+            let request = request.clone();
+            let pre_resolved = pre_resolved.clone();
+            async move {
+                let outcome = store
+                    .submit_child_turn(request, admission_policy, &pre_resolved)
+                    .await;
+                (outcome, store)
+            }
+        })
+        .await
+    }
+
     async fn children_of(
         &self,
         scope: &TurnScope,

@@ -33,10 +33,9 @@ use ironclaw_turns::{
     run_profile::{CapabilityOutcome, LoopGateKind, LoopModelRouteSnapshot},
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
-        ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, EventPublishingTurnRunTransitionPort,
-        FailRunRequest, HeartbeatRequest, RecordModelRouteSnapshotRequest,
-        RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, TurnRunTransitionPort,
-        TurnRunnerOutcome,
+        ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
+        RecordModelRouteSnapshotRequest, RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse,
+        TurnRunTransitionPort, TurnRunnerOutcome,
     },
 };
 
@@ -101,7 +100,7 @@ fn dependent_blocked_mapping(
     LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Blocked {
         checkpoint_id,
         state_ref,
-        reason: BlockedReason::DependentRun {
+        reason: BlockedReason::AwaitDependentRun {
             gate_ref: GateRef::new(gate_ref.as_str()).unwrap(),
         },
     })
@@ -214,18 +213,25 @@ fn subagent_gate_and_blocked_wire_contracts_are_stable() {
     );
 
     let gate_ref = GateRef::new("gate-dependent-run").unwrap();
-    let reason = BlockedReason::DependentRun {
+    let reason = BlockedReason::AwaitDependentRun {
         gate_ref: gate_ref.clone(),
     };
     let reason_json = serde_json::to_value(&reason).unwrap();
     assert_eq!(
         reason_json,
-        serde_json::json!({"DependentRun": {"gate_ref": gate_ref}})
+        serde_json::json!({"AwaitDependentRun": {"gate_ref": gate_ref}})
     );
     assert_eq!(reason.status(), TurnStatus::BlockedDependentRun);
     assert_eq!(reason.gate_ref(), &gate_ref);
     assert_eq!(
         serde_json::from_value::<BlockedReason>(reason_json).unwrap(),
+        reason
+    );
+    assert_eq!(
+        serde_json::from_value::<BlockedReason>(
+            serde_json::json!({"DependentRun": {"gate_ref": gate_ref}})
+        )
+        .unwrap(),
         reason
     );
 }
@@ -295,16 +301,34 @@ async fn children_of_get_run_record_and_tree_reservation_are_scope_checked() {
             .unwrap(),
     );
     let child_scope = scope("thread-child");
-    let mut child_a = submit_request("thread-child", "idem-child-a");
-    child_a.parent_run_id = Some(parent);
-    child_a.subagent_depth = 1;
-    child_a.spawn_tree_root_run_id = Some(parent);
-    let child_a_id = accepted_run_id(&coordinator.submit_turn(child_a).await.unwrap());
-    let mut child_b = submit_request("thread-child-b", "idem-child-b");
-    child_b.parent_run_id = Some(parent);
-    child_b.subagent_depth = 1;
-    child_b.spawn_tree_root_run_id = Some(parent);
-    let child_b_id = accepted_run_id(&coordinator.submit_turn(child_b).await.unwrap());
+    let child_a_id = TurnRunId::new();
+    accepted_run_id(
+        &coordinator
+            .submit_child_run(child_run_request(
+                scope("thread-parent"),
+                parent,
+                "thread-child",
+                child_a_id,
+                "idem-child-a",
+                3,
+            ))
+            .await
+            .unwrap(),
+    );
+    let child_b_id = TurnRunId::new();
+    accepted_run_id(
+        &coordinator
+            .submit_child_run(child_run_request(
+                scope("thread-parent"),
+                parent,
+                "thread-child-b",
+                child_b_id,
+                "idem-child-b",
+                3,
+            ))
+            .await
+            .unwrap(),
+    );
 
     let children = store
         .children_of(&scope("thread-parent"), parent)
@@ -371,11 +395,15 @@ async fn children_of_get_run_record_and_tree_reservation_are_scope_checked() {
         Err(TurnError::InvalidRequest { .. })
     ));
 
-    let reservation = store
-        .reserve_tree_descendants(&scope("thread-parent"), parent, 2, 3)
-        .await
-        .unwrap();
-    assert_eq!(reservation.descendant_count, 2);
+    assert_eq!(
+        store
+            .persistence_snapshot()
+            .spawn_tree_reservations
+            .iter()
+            .find(|reservation| reservation.root_run_id == parent)
+            .map(|reservation| reservation.descendant_count),
+        Some(2)
+    );
     assert!(matches!(
         store
             .reserve_tree_descendants(&scope("thread-parent"), parent, 2, 3)
@@ -449,6 +477,47 @@ async fn spawn_tree_port_submits_child_with_computed_lineage_and_reservation() {
 }
 
 #[tokio::test]
+async fn spawn_tree_port_idempotency_replay_does_not_reserve_again() {
+    let (coordinator, store) = coordinator();
+    let parent = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-spawn-replay-parent",
+                "idem-spawn-replay-parent",
+            ))
+            .await
+            .unwrap(),
+    );
+    let child_id = coordinator
+        .prepare_turn(scope("thread-spawn-replay-child"))
+        .await
+        .unwrap();
+    let request = child_run_request(
+        scope("thread-spawn-replay-parent"),
+        parent,
+        "thread-spawn-replay-child",
+        child_id,
+        "idem-spawn-replay-child",
+        1,
+    );
+
+    let first = coordinator.submit_child_run(request.clone()).await.unwrap();
+    let replay = coordinator.submit_child_run(request).await.unwrap();
+
+    assert_eq!(accepted_run_id(&first), child_id);
+    assert_eq!(accepted_run_id(&replay), child_id);
+    assert_eq!(
+        store
+            .persistence_snapshot()
+            .spawn_tree_reservations
+            .iter()
+            .find(|reservation| reservation.root_run_id == parent)
+            .map(|reservation| reservation.descendant_count),
+        Some(1)
+    );
+}
+
+#[tokio::test]
 async fn spawn_tree_port_releases_reservation_when_child_submit_fails() {
     let (coordinator, store) = coordinator();
     let parent = accepted_run_id(
@@ -501,7 +570,106 @@ async fn spawn_tree_port_releases_reservation_when_child_submit_fails() {
 }
 
 #[tokio::test]
-async fn child_lineage_is_validated_against_parent_record() {
+async fn spawn_tree_port_rejects_missing_parent_depth_overflow_and_capacity_exceeded() {
+    use ironclaw_turns::{InMemoryTurnStateStoreLimits, TurnPersistenceSnapshot};
+
+    let (coordinator, store) = coordinator();
+    let missing_parent = coordinator
+        .submit_child_run(child_run_request(
+            scope("thread-spawn-missing-parent"),
+            TurnRunId::new(),
+            "thread-spawn-missing-child",
+            TurnRunId::new(),
+            "idem-spawn-missing-child",
+            1,
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(missing_parent, TurnError::ScopeNotFound));
+
+    let parent = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-spawn-cap-parent",
+                "idem-spawn-cap-parent",
+            ))
+            .await
+            .unwrap(),
+    );
+    let first_child = coordinator
+        .prepare_turn(scope("thread-spawn-cap-child-a"))
+        .await
+        .unwrap();
+    coordinator
+        .submit_child_run(child_run_request(
+            scope("thread-spawn-cap-parent"),
+            parent,
+            "thread-spawn-cap-child-a",
+            first_child,
+            "idem-spawn-cap-child-a",
+            1,
+        ))
+        .await
+        .unwrap();
+    let capacity_error = coordinator
+        .submit_child_run(child_run_request(
+            scope("thread-spawn-cap-parent"),
+            parent,
+            "thread-spawn-cap-child-b",
+            TurnRunId::new(),
+            "idem-spawn-cap-child-b",
+            1,
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(capacity_error, TurnError::CapacityExceeded { .. }));
+
+    let depth_parent = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-spawn-depth-parent",
+                "idem-spawn-depth-parent",
+            ))
+            .await
+            .unwrap(),
+    );
+    let mut snapshot: TurnPersistenceSnapshot = store.persistence_snapshot();
+    if let Some(run) = snapshot
+        .runs
+        .iter_mut()
+        .find(|record| record.run_id == depth_parent)
+    {
+        run.subagent_depth = u32::MAX;
+    }
+    let depth_store = Arc::new(
+        InMemoryTurnStateStore::from_persistence_snapshot(
+            snapshot,
+            InMemoryTurnStateStoreLimits::default(),
+        )
+        .unwrap(),
+    );
+    let depth_coordinator = DefaultTurnCoordinator::new(depth_store);
+    let depth_error = depth_coordinator
+        .submit_child_run(child_run_request(
+            scope("thread-spawn-depth-parent"),
+            depth_parent,
+            "thread-spawn-depth-child",
+            TurnRunId::new(),
+            "idem-spawn-depth-child",
+            1,
+        ))
+        .await
+        .unwrap_err();
+    match depth_error {
+        TurnError::InvalidRequest { reason } => {
+            assert!(reason.contains("subagent depth would overflow"));
+        }
+        other => panic!("expected InvalidRequest, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn submit_turn_rejects_child_lineage_fields() {
     let (coordinator, store) = coordinator();
     let parent = accepted_run_id(
         &coordinator
@@ -513,74 +681,45 @@ async fn child_lineage_is_validated_against_parent_record() {
             .unwrap(),
     );
 
-    let mut bad_depth = submit_request("thread-lineage-child", "idem-lineage-bad-depth");
-    bad_depth.parent_run_id = Some(parent);
-    bad_depth.subagent_depth = 2;
-    bad_depth.spawn_tree_root_run_id = Some(parent);
-    assert!(matches!(
-        coordinator.submit_turn(bad_depth).await,
-        Err(TurnError::InvalidRequest { .. })
-    ));
+    let child_run_id = TurnRunId::new();
+    let mut child_shape = submit_request("thread-lineage-child", "idem-lineage-child");
+    child_shape.requested_run_id = Some(child_run_id);
+    child_shape.parent_run_id = Some(parent);
+    child_shape.subagent_depth = 1;
+    child_shape.spawn_tree_root_run_id = Some(parent);
+    let err = coordinator
+        .submit_turn(child_shape.clone())
+        .await
+        .unwrap_err();
+    match err {
+        TurnError::InvalidRequest { reason } => {
+            assert!(reason.contains("submit_child_turn"));
+        }
+        other => panic!("expected InvalidRequest, got {other:?}"),
+    }
+    assert!(
+        store
+            .get_run_record(&child_shape.scope, child_run_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
 
-    let mut bad_root = submit_request("thread-lineage-child", "idem-lineage-bad-root");
-    bad_root.parent_run_id = Some(parent);
-    bad_root.subagent_depth = 1;
-    bad_root.spawn_tree_root_run_id = Some(TurnRunId::new());
+    let mut top_level_with_depth =
+        submit_request("thread-lineage-top-depth", "idem-lineage-top-depth");
+    top_level_with_depth.subagent_depth = 1;
     assert!(matches!(
-        coordinator.submit_turn(bad_root).await,
+        coordinator.submit_turn(top_level_with_depth).await,
         Err(TurnError::InvalidRequest { .. })
     ));
 
     let mut top_level_with_root =
-        submit_request("thread-lineage-top", "idem-lineage-top-with-root");
+        submit_request("thread-lineage-top-root", "idem-lineage-top-root");
     top_level_with_root.spawn_tree_root_run_id = Some(parent);
     assert!(matches!(
         coordinator.submit_turn(top_level_with_root).await,
         Err(TurnError::InvalidRequest { .. })
     ));
-
-    let missing_child_run_id = TurnRunId::new();
-    let mut missing_parent = submit_request("thread-lineage-missing", "idem-lineage-missing");
-    missing_parent.requested_run_id = Some(missing_child_run_id);
-    missing_parent.parent_run_id = Some(TurnRunId::new());
-    missing_parent.subagent_depth = 1;
-    missing_parent.spawn_tree_root_run_id = Some(parent);
-    assert!(matches!(
-        coordinator.submit_turn(missing_parent.clone()).await,
-        Err(TurnError::InvalidRequest { .. })
-    ));
-    assert!(
-        store
-            .get_run_record(&missing_parent.scope, missing_child_run_id)
-            .await
-            .unwrap()
-            .is_none()
-    );
-
-    let cross_scope_child_run_id = TurnRunId::new();
-    let cross_scope = TurnScope::new(
-        TenantId::new("tenant-lineage-foreign").unwrap(),
-        Some(AgentId::new("agent1").unwrap()),
-        Some(ProjectId::new("project1").unwrap()),
-        ThreadId::new("thread-lineage-child").unwrap(),
-    );
-    let mut cross_scope_parent = submit_request("thread-lineage-child", "idem-lineage-cross-scope");
-    cross_scope_parent.scope = cross_scope.clone();
-    cross_scope_parent.requested_run_id = Some(cross_scope_child_run_id);
-    cross_scope_parent.parent_run_id = Some(parent);
-    cross_scope_parent.subagent_depth = 1;
-    cross_scope_parent.spawn_tree_root_run_id = Some(parent);
-    assert!(matches!(
-        coordinator.submit_turn(cross_scope_parent).await,
-        Err(TurnError::InvalidRequest { .. })
-    ));
-    assert!(
-        store
-            .get_run_record(&cross_scope, cross_scope_child_run_id)
-            .await
-            .unwrap()
-            .is_none()
-    );
 }
 
 #[tokio::test]
@@ -810,165 +949,6 @@ async fn default_turn_coordinator_does_not_publish_cancel_event_for_terminal_ret
     assert!(retry.already_terminal);
     assert_eq!(retry.status, TurnStatus::Completed);
     assert_eq!(sink.events(), events_before_retry);
-}
-
-#[tokio::test]
-async fn event_publishing_transition_port_publishes_blocked_and_terminal_events() {
-    let (coordinator, store) = coordinator();
-    let sink = Arc::new(InMemoryTurnEventSink::default());
-    let transition_port = EventPublishingTurnRunTransitionPort::new(
-        Arc::clone(&store) as Arc<dyn TurnRunTransitionPort>,
-        Arc::clone(&sink) as Arc<dyn TurnEventSink>,
-    );
-
-    let blocked_run_id = accepted_run_id(
-        &coordinator
-            .submit_turn(submit_request(
-                "thread-transition-blocked",
-                "idem-transition-blocked",
-            ))
-            .await
-            .unwrap(),
-    );
-    let blocked_runner_id = TurnRunnerId::new();
-    let blocked_lease = TurnLeaseToken::new();
-    transition_port
-        .claim_next_run(ClaimRunRequest {
-            runner_id: blocked_runner_id,
-            lease_token: blocked_lease,
-            scope_filter: Some(scope("thread-transition-blocked")),
-        })
-        .await
-        .unwrap()
-        .unwrap();
-    apply_test_loop_exit(
-        &transition_port,
-        blocked_run_id,
-        blocked_runner_id,
-        blocked_lease,
-        dependent_blocked_mapping(
-            TurnCheckpointId::new(),
-            block_state_ref(),
-            &LoopGateRef::new("gate:transition-dependent").unwrap(),
-        ),
-    )
-    .await
-    .unwrap();
-
-    let completed_run_id = accepted_run_id(
-        &coordinator
-            .submit_turn(submit_request(
-                "thread-transition-completed",
-                "idem-transition-completed",
-            ))
-            .await
-            .unwrap(),
-    );
-    let completed_runner_id = TurnRunnerId::new();
-    let completed_lease = TurnLeaseToken::new();
-    transition_port
-        .claim_next_run(ClaimRunRequest {
-            runner_id: completed_runner_id,
-            lease_token: completed_lease,
-            scope_filter: Some(scope("thread-transition-completed")),
-        })
-        .await
-        .unwrap()
-        .unwrap();
-    apply_test_loop_exit(
-        &transition_port,
-        completed_run_id,
-        completed_runner_id,
-        completed_lease,
-        completed_mapping(),
-    )
-    .await
-    .unwrap();
-
-    let events = sink.events();
-    assert!(events.iter().any(|event| {
-        event.run_id == blocked_run_id
-            && event.kind == TurnEventKind::Blocked
-            && event.status == TurnStatus::BlockedDependentRun
-    }));
-    assert!(events.iter().any(|event| {
-        event.run_id == completed_run_id
-            && event.kind == TurnEventKind::Completed
-            && event.status == TurnStatus::Completed
-    }));
-}
-
-#[tokio::test]
-async fn event_publishing_transition_port_publishes_recovered_lease_events() {
-    let (coordinator, store) = coordinator();
-    let sink = Arc::new(InMemoryTurnEventSink::default());
-    let transition_port = EventPublishingTurnRunTransitionPort::new(
-        Arc::clone(&store) as Arc<dyn TurnRunTransitionPort>,
-        Arc::clone(&sink) as Arc<dyn TurnEventSink>,
-    );
-
-    let empty = transition_port
-        .recover_expired_leases(RecoverExpiredLeasesRequest {
-            now: Utc::now() + ChronoDuration::seconds(120),
-            scope_filter: None,
-        })
-        .await
-        .unwrap();
-    assert!(empty.recovered.is_empty());
-    assert!(sink.events().is_empty());
-
-    let first = accepted_run_id(
-        &coordinator
-            .submit_turn(submit_request(
-                "thread-recover-event-a",
-                "idem-recover-event-a",
-            ))
-            .await
-            .unwrap(),
-    );
-    let second = accepted_run_id(
-        &coordinator
-            .submit_turn(submit_request(
-                "thread-recover-event-b",
-                "idem-recover-event-b",
-            ))
-            .await
-            .unwrap(),
-    );
-    for scope_filter in [
-        Some(scope("thread-recover-event-a")),
-        Some(scope("thread-recover-event-b")),
-    ] {
-        transition_port
-            .claim_next_run(ClaimRunRequest {
-                runner_id: TurnRunnerId::new(),
-                lease_token: TurnLeaseToken::new(),
-                scope_filter,
-            })
-            .await
-            .unwrap()
-            .unwrap();
-    }
-
-    let recovered = transition_port
-        .recover_expired_leases(RecoverExpiredLeasesRequest {
-            now: Utc::now() + ChronoDuration::seconds(120),
-            scope_filter: None,
-        })
-        .await
-        .unwrap();
-    assert_eq!(recovered.recovered.len(), 2);
-    let events = sink.events();
-    let recovered_events = events
-        .iter()
-        .filter(|event| {
-            event.kind == TurnEventKind::RecoveryRequired
-                && event.sanitized_reason.as_deref() == Some("lease_expired")
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(recovered_events.len(), 2);
-    assert!(recovered_events.iter().any(|event| event.run_id == first));
-    assert!(recovered_events.iter().any(|event| event.run_id == second));
 }
 
 #[tokio::test]
@@ -5234,7 +5214,7 @@ async fn any_blocked_gate_resume_does_not_resume_dependent_run_gate() {
             lease_token,
             checkpoint_id: TurnCheckpointId::new(),
             state_ref: block_state_ref(),
-            reason: BlockedReason::DependentRun {
+            reason: BlockedReason::AwaitDependentRun {
                 gate_ref: gate_ref.clone(),
             },
         })
@@ -5334,49 +5314,6 @@ async fn reserve_tree_descendants_rejects_zero_delta() {
             .spawn_tree_reservations
             .is_empty()
     );
-}
-
-#[tokio::test]
-async fn submit_turn_rejects_when_parent_subagent_depth_at_max() {
-    use ironclaw_turns::{InMemoryTurnStateStoreLimits, TurnPersistenceSnapshot};
-
-    let store = Arc::new(InMemoryTurnStateStore::default());
-    let coordinator = DefaultTurnCoordinator::new(store.clone());
-
-    // Seed a parent record at u32::MAX depth via persistence snapshot — the
-    // submit_turn path itself caps at u32::MAX+1, so a depth-max parent is
-    // only reachable through a hand-crafted snapshot in tests.
-    let parent_id = accepted_run_id(
-        &coordinator
-            .submit_turn(submit_request("thread-depth-max", "idem-depth-max"))
-            .await
-            .unwrap(),
-    );
-    complete_queued_run(&store, parent_id, "thread-depth-max").await;
-    let mut snapshot: TurnPersistenceSnapshot = store.persistence_snapshot();
-    if let Some(run) = snapshot.runs.iter_mut().find(|r| r.run_id == parent_id) {
-        run.subagent_depth = u32::MAX;
-    }
-    let store = Arc::new(
-        InMemoryTurnStateStore::from_persistence_snapshot(
-            snapshot,
-            InMemoryTurnStateStoreLimits::default(),
-        )
-        .unwrap(),
-    );
-    let coordinator = DefaultTurnCoordinator::new(store);
-
-    let mut child = submit_request("thread-depth-child", "idem-depth-child");
-    child.parent_run_id = Some(parent_id);
-    child.subagent_depth = 0; // will be rejected before depth check matters
-    child.spawn_tree_root_run_id = Some(parent_id);
-    let err = coordinator.submit_turn(child).await.unwrap_err();
-    match err {
-        TurnError::InvalidRequest { reason } => {
-            assert!(reason.contains("subagent depth would overflow"));
-        }
-        other => panic!("expected InvalidRequest, got {other:?}"),
-    }
 }
 
 fn coordinator() -> (

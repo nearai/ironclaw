@@ -24,9 +24,10 @@ use ironclaw_turns::{
     GetRunStateRequest, IdempotencyKey, InMemoryTurnStateStore, InMemoryTurnStateStoreLimits,
     NoopTurnRunWakeNotifier, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse,
     RunProfileRequest, SanitizedCancelReason, SourceBindingRef, SpawnTreeReservation,
-    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId,
-    TurnRunRecord, TurnRunState, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError,
-    TurnRunnerId, TurnScope, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
+    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator,
+    TurnError, TurnRunId, TurnRunRecord, TurnRunState, TurnRunWake, TurnRunWakeNotifier,
+    TurnRunWakeNotifyError, TurnRunnerId, TurnScope, TurnSpawnTreeStateStore, TurnStateStore,
+    TurnStatus,
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
         ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
@@ -304,6 +305,17 @@ impl TurnStateStore for DurableLikeTurnStore {
 
 #[async_trait]
 impl TurnSpawnTreeStateStore for DurableLikeTurnStore {
+    async fn submit_child_turn(
+        &self,
+        request: SubmitChildRunRequest,
+        admission_policy: &dyn ironclaw_turns::TurnAdmissionPolicy,
+        run_profile_resolver: &dyn ironclaw_turns::RunProfileResolver,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        self.inner
+            .submit_child_turn(request, admission_policy, run_profile_resolver)
+            .await
+    }
+
     async fn children_of(
         &self,
         scope: &TurnScope,

@@ -70,6 +70,8 @@ impl TurnAdmissionPolicy for AllowAllTurnAdmissionPolicy {
 
 #[async_trait]
 pub trait TurnCoordinator: Send + Sync {
+    /// Mint a run id without side effects. This intentionally has no default
+    /// implementation so every coordinator opts into prepared-run semantics.
     async fn prepare_turn(&self, scope: TurnScope) -> Result<TurnRunId, TurnError>;
 
     async fn submit_turn(
@@ -368,60 +370,13 @@ where
         &self,
         request: SubmitChildRunRequest,
     ) -> Result<SubmitTurnResponse, TurnError> {
-        let Some(parent) = self
-            .store
-            .get_run_record(&request.parent_scope, request.parent_run_id)
-            .await?
-        else {
-            return Err(TurnError::ScopeNotFound);
-        };
-        if parent.subagent_depth == u32::MAX {
-            return Err(TurnError::InvalidRequest {
-                reason: "subagent depth would overflow".to_string(),
-            });
-        }
-        let root_run_id = parent.spawn_tree_root_run_id.unwrap_or(parent.run_id);
         self.store
-            .reserve_tree_descendants(
-                &request.child_scope,
-                root_run_id,
-                1,
-                request.spawn_tree_descendant_cap,
+            .submit_child_turn(
+                request,
+                self.admission_policy.as_ref(),
+                self.run_profile_resolver.as_ref(),
             )
-            .await?;
-
-        let submit = SubmitTurnRequest {
-            scope: request.child_scope.clone(),
-            actor: request.actor,
-            accepted_message_ref: request.accepted_message_ref,
-            source_binding_ref: request.source_binding_ref,
-            reply_target_binding_ref: request.reply_target_binding_ref,
-            requested_run_profile: request.requested_run_profile,
-            idempotency_key: request.idempotency_key,
-            received_at: request.received_at,
-            requested_run_id: request.requested_run_id,
-            parent_run_id: Some(parent.run_id),
-            subagent_depth: parent.subagent_depth + 1,
-            spawn_tree_root_run_id: Some(root_run_id),
-        };
-
-        match self.submit_turn(submit).await {
-            Ok(response) => Ok(response),
-            Err(error) => {
-                if let Err(release_error) = self
-                    .store
-                    .release_tree_descendants(&request.child_scope, root_run_id, 1)
-                    .await
-                {
-                    debug!(
-                        error = %release_error,
-                        root_run_id = %root_run_id,
-                        "failed to release spawn-tree reservation after child submit failure"
-                    );
-                }
-                Err(error)
-            }
-        }
+            .await
     }
 }
 

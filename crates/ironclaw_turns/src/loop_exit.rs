@@ -399,7 +399,7 @@ impl LoopBlockedKind {
             Self::Approval => BlockedReason::Approval { gate_ref },
             Self::Auth => BlockedReason::Auth { gate_ref },
             Self::Resource => BlockedReason::Resource { gate_ref },
-            Self::AwaitDependentRun => BlockedReason::DependentRun { gate_ref },
+            Self::AwaitDependentRun => BlockedReason::AwaitDependentRun { gate_ref },
         })
     }
 }

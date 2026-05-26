@@ -49,6 +49,9 @@ pub struct SubmitTurnRequest {
     pub received_at: TurnTimestamp,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_run_id: Option<TurnRunId>,
+    /// Persisted lineage fields for compatibility with stored turn requests.
+    /// New child-run callers should use `SubmitChildRunRequest` so the store
+    /// derives these fields atomically with spawn-tree reservation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_run_id: Option<TurnRunId>,
     #[serde(default)]

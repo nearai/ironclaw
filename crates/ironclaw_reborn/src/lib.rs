@@ -17,7 +17,6 @@
 //! the boundary tests are designed to prevent.
 
 pub mod app_loop_family;
-pub mod directions;
 pub mod driver_registry;
 pub mod hook_gate_refs;
 pub mod loop_driver_host;

@@ -19,12 +19,13 @@ use crate::{
 };
 
 use super::{
-    AgentLoopExecutorError, BatchStep, CancelCheck, CapabilitySurfaceIndex, CheckpointStage,
-    ExecutorStage, GateInput, GateStage, MAX_CAPABILITY_RETRIES, StageContext, TurnCompletedStep,
-    append_capability_error_ref, append_capability_result_ref, append_capability_safe_summary_ref,
-    batch_policy_kind, cancelled_exit, capability_batch_counts, capability_error_class,
-    capability_failure_kind, capability_host_error, capability_invocation_from_candidate,
-    capability_is_visible, capability_summary, failed_exit, honor_retry_alteration,
+    AgentLoopExecutorError, BatchStep, CancelCheck, CapabilityOutcomeBucket,
+    CapabilitySurfaceIndex, CheckpointStage, ExecutorStage, GateInput, GateStage,
+    MAX_CAPABILITY_RETRIES, StageContext, TurnCompletedStep, append_capability_error_ref,
+    append_capability_result_ref, append_capability_safe_summary_ref, batch_policy_kind,
+    cancelled_exit, capability_batch_counts, capability_error_class, capability_failure_kind,
+    capability_host_error, capability_invocation_from_candidate, capability_is_visible,
+    capability_outcome_bucket, capability_summary, failed_exit, honor_retry_alteration,
     push_call_signature_once, push_completed_result, sanitized_strategy_summary,
 };
 
@@ -164,38 +165,17 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
 
         let outcomes = batch.outcomes;
         if !batch.stopped_on_suspension {
-            // Non-suspended batches record completed outcomes before handling
-            // possible gates/errors so partial parallel progress is durable in
-            // any later suspension checkpoint. Keep this in sync with the
-            // Completed and SpawnedChildRun arms in handle_capability_outcome —
-            // both are completing (non-suspension) outcomes whose result_refs
-            // must be appended before any sibling AwaitDependentRun gate
-            // exits the loop, otherwise the parent run loses the child's
-            // result on resume.
+            // Non-suspended batches record completed outcomes before gates so
+            // partial parallel progress is durable in any later suspension
+            // checkpoint.
             let mut pending_outcomes = Vec::new();
             for (call, outcome) in visible_calls.into_iter().zip(outcomes) {
-                match outcome {
-                    CapabilityOutcome::Completed(result) => {
-                        push_call_signature_once(&mut state, &mut signatures, &call)?;
-                        append_capability_result_ref(ctx.host, &call, &result).await?;
-                        push_completed_result(&mut state, result);
-                    }
-                    CapabilityOutcome::SpawnedChildRun {
-                        result_ref,
-                        safe_summary,
-                        ..
-                    } => {
-                        push_call_signature_once(&mut state, &mut signatures, &call)?;
-                        append_spawned_child_result(
-                            ctx.host,
-                            &mut state,
-                            &call,
-                            result_ref,
-                            safe_summary,
-                        )
+                if capability_outcome_bucket(&outcome) == CapabilityOutcomeBucket::Result {
+                    push_call_signature_once(&mut state, &mut signatures, &call)?;
+                    self.record_completing_outcome(ctx, &mut state, &call, outcome)
                         .await?;
-                    }
-                    other => pending_outcomes.push((call, other)),
+                } else {
+                    pending_outcomes.push((call, outcome));
                 }
             }
             for (call, outcome) in pending_outcomes {
@@ -295,12 +275,13 @@ impl CapabilityStage {
         call: CapabilityCallCandidate,
         outcome: CapabilityOutcome,
     ) -> Result<BatchStep, AgentLoopExecutorError> {
+        if capability_outcome_bucket(&outcome) == CapabilityOutcomeBucket::Result {
+            self.record_completing_outcome(ctx, &mut state, &call, outcome)
+                .await?;
+            return Ok(BatchStep::Continue(Box::new(state)));
+        }
+
         match outcome {
-            CapabilityOutcome::Completed(result) => {
-                append_capability_result_ref(ctx.host, &call, &result).await?;
-                push_completed_result(&mut state, result);
-                Ok(BatchStep::Continue(Box::new(state)))
-            }
             CapabilityOutcome::ApprovalRequired { gate_ref, .. } => {
                 GateStage
                     .process(
@@ -353,14 +334,6 @@ impl CapabilityStage {
                     )
                     .await
             }
-            CapabilityOutcome::SpawnedChildRun {
-                result_ref,
-                safe_summary,
-                ..
-            } => {
-                self.handle_spawned_child_run(ctx, state, call, result_ref, safe_summary)
-                    .await
-            }
             CapabilityOutcome::SpawnedProcess(handle) => {
                 self.fail_unsupported_process_wait(ctx, state, &call, &handle.process_ref)
                     .await
@@ -398,19 +371,32 @@ impl CapabilityStage {
                 self.handle_capability_error(ctx, state, call, summary)
                     .await
             }
+            CapabilityOutcome::Completed(_) | CapabilityOutcome::SpawnedChildRun { .. } => {
+                unreachable!("completion outcomes returned before gated/error handling")
+            }
         }
     }
 
-    async fn handle_spawned_child_run(
+    async fn record_completing_outcome(
         &self,
         ctx: StageContext<'_>,
-        mut state: LoopExecutionState,
-        call: CapabilityCallCandidate,
-        result_ref: LoopResultRef,
-        safe_summary: String,
-    ) -> Result<BatchStep, AgentLoopExecutorError> {
-        append_spawned_child_result(ctx.host, &mut state, &call, result_ref, safe_summary).await?;
-        Ok(BatchStep::Continue(Box::new(state)))
+        state: &mut LoopExecutionState,
+        call: &CapabilityCallCandidate,
+        outcome: CapabilityOutcome,
+    ) -> Result<(), AgentLoopExecutorError> {
+        match outcome {
+            CapabilityOutcome::Completed(result) => {
+                append_capability_result_ref(ctx.host, call, &result).await?;
+                push_completed_result(state, result);
+                Ok(())
+            }
+            CapabilityOutcome::SpawnedChildRun {
+                result_ref,
+                safe_summary,
+                ..
+            } => append_spawned_child_result(ctx.host, state, call, result_ref, safe_summary).await,
+            _ => unreachable!("record_completing_outcome called for non-completing outcome"),
+        }
     }
 
     async fn handle_capability_error(

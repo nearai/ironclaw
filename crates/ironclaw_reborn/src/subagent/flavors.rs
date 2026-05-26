@@ -1,4 +1,4 @@
-use crate::directions::DirectionId;
+use crate::subagent::directions::DirectionId;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -84,7 +84,7 @@ pub fn lookup_flavor(id: SubagentFlavorId) -> Option<&'static SubagentFlavor> {
 
 #[cfg(test)]
 mod tests {
-    use crate::directions::direction_prompt;
+    use crate::subagent::directions::direction_prompt;
 
     use super::*;
 

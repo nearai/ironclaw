@@ -1,5 +1,5 @@
 //! `GateHandlingStrategy` — decides what to do when a capability invocation
-//! returns a gate (Approval, Auth, or Resource).
+//! returns a gate (approval, auth, resource, or await-dependent-run).
 //!
 //! Mutates `gate_state` (e.g. record gate fingerprints for resume).
 //! Async because future strategies may consult host state for grant-history

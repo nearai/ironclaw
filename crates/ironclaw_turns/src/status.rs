@@ -103,10 +103,19 @@ fn compatibility_profile_id(resolved: &ResolvedRunProfile) -> RunProfileId {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BlockedReason {
-    Approval { gate_ref: GateRef },
-    Auth { gate_ref: GateRef },
-    Resource { gate_ref: GateRef },
-    DependentRun { gate_ref: GateRef },
+    Approval {
+        gate_ref: GateRef,
+    },
+    Auth {
+        gate_ref: GateRef,
+    },
+    Resource {
+        gate_ref: GateRef,
+    },
+    #[serde(alias = "DependentRun")]
+    AwaitDependentRun {
+        gate_ref: GateRef,
+    },
 }
 
 impl BlockedReason {
@@ -115,7 +124,7 @@ impl BlockedReason {
             Self::Approval { .. } => TurnStatus::BlockedApproval,
             Self::Auth { .. } => TurnStatus::BlockedAuth,
             Self::Resource { .. } => TurnStatus::BlockedResource,
-            Self::DependentRun { .. } => TurnStatus::BlockedDependentRun,
+            Self::AwaitDependentRun { .. } => TurnStatus::BlockedDependentRun,
         }
     }
 
@@ -124,7 +133,7 @@ impl BlockedReason {
             Self::Approval { gate_ref }
             | Self::Auth { gate_ref }
             | Self::Resource { gate_ref }
-            | Self::DependentRun { gate_ref } => gate_ref,
+            | Self::AwaitDependentRun { gate_ref } => gate_ref,
         }
     }
 }

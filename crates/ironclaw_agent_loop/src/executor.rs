@@ -40,10 +40,10 @@ use input::consume_drainable_inputs;
 use input::{DrainInput, InputStage, InputStep, UserFacingInputDrainMode};
 use loop_exit::{ExitInput, ExitStage};
 use mapping::{
-    batch_policy_kind, blocked_kind, capability_batch_counts, capability_error_class,
-    capability_failure_kind, capability_host_error, checkpoint_kind_to_host,
-    honor_retry_alteration, loop_gate_kind, model_error_class, model_preference_to_host,
-    sanitized_strategy_summary,
+    CapabilityOutcomeBucket, batch_policy_kind, blocked_kind, capability_batch_counts,
+    capability_error_class, capability_failure_kind, capability_host_error,
+    capability_outcome_bucket, checkpoint_kind_to_host, honor_retry_alteration, loop_gate_kind,
+    model_error_class, model_preference_to_host, sanitized_strategy_summary,
 };
 use model::{ModelInput, ModelStage, ModelStep};
 use pipeline::{DefaultExecutorPipeline, ExecutorStage, StageContext};

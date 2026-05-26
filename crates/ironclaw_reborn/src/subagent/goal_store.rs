@@ -202,7 +202,7 @@ fn fs_backend_error(error: FilesystemError) -> SubagentGoalStoreError {
 }
 
 #[derive(Default)]
-pub struct BoundedSubagentGoalStore {
+pub struct InMemoryBoundedSubagentGoalStore {
     inner: Mutex<GoalStoreInner>,
 }
 
@@ -227,7 +227,7 @@ impl GoalKey {
     }
 }
 
-impl BoundedSubagentGoalStore {
+impl InMemoryBoundedSubagentGoalStore {
     pub fn new() -> Self {
         Self::default()
     }
@@ -298,7 +298,7 @@ impl BoundedSubagentGoalStore {
 }
 
 #[async_trait]
-impl SubagentGoalStore for BoundedSubagentGoalStore {
+impl SubagentGoalStore for InMemoryBoundedSubagentGoalStore {
     async fn put_goal(
         &self,
         scope: &TurnScope,
@@ -360,7 +360,7 @@ mod tests {
 
     #[tokio::test]
     async fn put_then_get_round_trips() {
-        let store = BoundedSubagentGoalStore::new();
+        let store = InMemoryBoundedSubagentGoalStore::new();
         let owner_scope = scope("thread-goal");
         let run_id = TurnRunId::new();
         let expected = SubagentGoal {
@@ -381,7 +381,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_miss_is_not_found_error() {
-        let store = BoundedSubagentGoalStore::new();
+        let store = InMemoryBoundedSubagentGoalStore::new();
         let owner_scope = scope("thread-goal");
         let run_id = TurnRunId::new();
 
@@ -393,7 +393,7 @@ mod tests {
 
     #[tokio::test]
     async fn put_rejects_oversized_payload() {
-        let store = BoundedSubagentGoalStore::new();
+        let store = InMemoryBoundedSubagentGoalStore::new();
         let owner_scope = scope("thread-goal");
         let run_id = TurnRunId::new();
         let large = SubagentGoal {
@@ -409,7 +409,7 @@ mod tests {
 
     #[tokio::test]
     async fn put_rejects_payload_when_json_overhead_exceeds_limit() {
-        let store = BoundedSubagentGoalStore::new();
+        let store = InMemoryBoundedSubagentGoalStore::new();
         let owner_scope = scope("thread-goal");
         let run_id = TurnRunId::new();
         let large = SubagentGoal {
@@ -429,7 +429,7 @@ mod tests {
 
     #[tokio::test]
     async fn put_rejects_duplicate_key() {
-        let store = BoundedSubagentGoalStore::new();
+        let store = InMemoryBoundedSubagentGoalStore::new();
         let owner_scope = scope("thread-goal");
         let run_id = TurnRunId::new();
 
@@ -449,7 +449,7 @@ mod tests {
 
     #[tokio::test]
     async fn bounded_store_evicts_oldest() {
-        let store = BoundedSubagentGoalStore::new();
+        let store = InMemoryBoundedSubagentGoalStore::new();
         let owner_scope = scope("thread-goal");
         let first = TurnRunId::new();
         let second = TurnRunId::new();
@@ -485,7 +485,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_goal_is_idempotent_and_removes_row() {
-        let store = BoundedSubagentGoalStore::new();
+        let store = InMemoryBoundedSubagentGoalStore::new();
         let owner_scope = scope("thread-goal");
         let run_id = TurnRunId::new();
 
@@ -505,7 +505,7 @@ mod tests {
 
     #[tokio::test]
     async fn bounded_store_keys_goals_by_scope_and_run_id() {
-        let store = BoundedSubagentGoalStore::new();
+        let store = InMemoryBoundedSubagentGoalStore::new();
         let first_scope = scope("thread-goal-a");
         let second_scope = scope("thread-goal-b");
         let run_id = TurnRunId::new();
@@ -646,7 +646,7 @@ mod tests {
     fn goal_store_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<Arc<dyn SubagentGoalStore>>();
-        assert_send_sync::<BoundedSubagentGoalStore>();
+        assert_send_sync::<InMemoryBoundedSubagentGoalStore>();
         #[cfg(feature = "filesystem-goal-store")]
         assert_send_sync::<FilesystemSubagentGoalStore<InMemoryBackend>>();
     }

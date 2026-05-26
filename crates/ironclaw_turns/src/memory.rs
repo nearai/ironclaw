@@ -14,14 +14,14 @@ use crate::{
     LoopCheckpointStore, LoopExitMapping, PutLoopCheckpointRequest, ReplyTargetBindingRef,
     ResumeTurnRequest, ResumeTurnResponse, RunProfileResolutionError, RunProfileResolutionRequest,
     RunProfileResolver, SanitizedFailure, SourceBindingRef, SpawnTreeReservation,
-    SpawnTreeReservationKey, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActiveLockKey,
-    TurnActiveLockRecord, TurnActor, TurnAdmissionClass, TurnAdmissionLimitProvider,
-    TurnAdmissionPolicy, TurnAdmissionReservationRecord, TurnCapacityResource, TurnCheckpointId,
-    TurnCheckpointRecord, TurnError, TurnEventKind, TurnIdempotencyErrorReplay,
-    TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind, TurnIdempotencyRecord,
-    TurnIdempotencyReplay, TurnLifecycleEvent, TurnLockVersion, TurnPersistenceSnapshot,
-    TurnRecord, TurnRunId, TurnRunProfile, TurnRunRecord, TurnRunState, TurnScope,
-    TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
+    SpawnTreeReservationKey, SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse,
+    ThreadBusy, TurnActiveLockKey, TurnActiveLockRecord, TurnActor, TurnAdmissionClass,
+    TurnAdmissionLimitProvider, TurnAdmissionPolicy, TurnAdmissionReservationRecord,
+    TurnCapacityResource, TurnCheckpointId, TurnCheckpointRecord, TurnError, TurnEventKind,
+    TurnIdempotencyErrorReplay, TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind,
+    TurnIdempotencyRecord, TurnIdempotencyReplay, TurnLifecycleEvent, TurnLockVersion,
+    TurnPersistenceSnapshot, TurnRecord, TurnRunId, TurnRunProfile, TurnRunRecord, TurnRunState,
+    TurnScope, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
     admission::{TurnAdmissionBucket, admission_buckets},
     events::{EventCursor, TurnEventPage, TurnEventProjectionSource, project_turn_events},
     runner::{
@@ -401,6 +401,29 @@ impl TurnStateStore for InMemoryTurnStateStore {
             idempotency_key.clone(),
         );
 
+        if request.parent_run_id.is_some()
+            || request.subagent_depth != 0
+            || request.spawn_tree_root_run_id.is_some()
+        {
+            let mut inner = self.lock_inner()?;
+            if let Some(result) = inner.submit_idempotency.get(&idempotency_key).cloned() {
+                inner.submit_idempotency_in_flight.remove(&idempotency_key);
+                self.submit_idempotency_ready.notify_all();
+                return result;
+            }
+            let response = Err(TurnError::InvalidRequest {
+                reason: "child runs must be submitted through submit_child_turn".to_string(),
+            });
+            inner.remember_submit_idempotency(
+                idempotency_key.clone(),
+                response.clone(),
+                request.received_at,
+            );
+            inner.submit_idempotency_in_flight.remove(&idempotency_key);
+            self.submit_idempotency_ready.notify_all();
+            return response;
+        }
+
         let admission_result = admission_policy.check_submit(&request);
 
         {
@@ -474,90 +497,6 @@ impl TurnStateStore for InMemoryTurnStateStore {
             self.submit_idempotency_ready.notify_all();
             return response;
         }
-        let (parent_run_id, subagent_depth, spawn_tree_root_run_id) = match request.parent_run_id {
-            Some(parent_run_id) => {
-                let Some(parent) = inner.records.get(&parent_run_id) else {
-                    let response = Err(invalid_lineage("parent_run_id does not exist"));
-                    inner.remember_submit_idempotency(
-                        idempotency_key.clone(),
-                        response.clone(),
-                        request.received_at,
-                    );
-                    inner.submit_idempotency_in_flight.remove(&idempotency_key);
-                    self.submit_idempotency_ready.notify_all();
-                    return response;
-                };
-                if !same_scope_envelope(&parent.scope, &request.scope) {
-                    let response = Err(invalid_lineage(
-                        "child scope must match parent tenant/agent/project",
-                    ));
-                    inner.remember_submit_idempotency(
-                        idempotency_key.clone(),
-                        response.clone(),
-                        request.received_at,
-                    );
-                    inner.submit_idempotency_in_flight.remove(&idempotency_key);
-                    self.submit_idempotency_ready.notify_all();
-                    return response;
-                }
-                if parent.subagent_depth == u32::MAX {
-                    let response = Err(invalid_lineage("subagent depth would overflow"));
-                    inner.remember_submit_idempotency(
-                        idempotency_key.clone(),
-                        response.clone(),
-                        request.received_at,
-                    );
-                    inner.submit_idempotency_in_flight.remove(&idempotency_key);
-                    self.submit_idempotency_ready.notify_all();
-                    return response;
-                }
-                let expected_depth = parent.subagent_depth + 1;
-                if request.subagent_depth != expected_depth {
-                    let response = Err(invalid_lineage(
-                        "subagent_depth must be parent depth plus one",
-                    ));
-                    inner.remember_submit_idempotency(
-                        idempotency_key.clone(),
-                        response.clone(),
-                        request.received_at,
-                    );
-                    inner.submit_idempotency_in_flight.remove(&idempotency_key);
-                    self.submit_idempotency_ready.notify_all();
-                    return response;
-                }
-                let expected_root = parent.spawn_tree_root_run_id.unwrap_or(parent.run_id);
-                if request.spawn_tree_root_run_id != Some(expected_root) {
-                    let response = Err(invalid_lineage(
-                        "spawn_tree_root_run_id must inherit the parent root",
-                    ));
-                    inner.remember_submit_idempotency(
-                        idempotency_key.clone(),
-                        response.clone(),
-                        request.received_at,
-                    );
-                    inner.submit_idempotency_in_flight.remove(&idempotency_key);
-                    self.submit_idempotency_ready.notify_all();
-                    return response;
-                }
-                (Some(parent_run_id), expected_depth, Some(expected_root))
-            }
-            None => {
-                if request.subagent_depth != 0 || request.spawn_tree_root_run_id.is_some() {
-                    let response = Err(invalid_lineage(
-                        "top-level runs cannot set subagent lineage fields",
-                    ));
-                    inner.remember_submit_idempotency(
-                        idempotency_key.clone(),
-                        response.clone(),
-                        request.received_at,
-                    );
-                    inner.submit_idempotency_in_flight.remove(&idempotency_key);
-                    self.submit_idempotency_ready.notify_all();
-                    return response;
-                }
-                (None, 0, None)
-            }
-        };
         let admission_class = profile.admission_class.clone();
         if let Err(rejection) = inner.reserve_admission(
             run_id,
@@ -607,9 +546,9 @@ impl TurnStateStore for InMemoryTurnStateStore {
             last_heartbeat_at: None,
             claim_count: 0,
             received_at: request.received_at,
-            parent_run_id,
-            subagent_depth,
-            spawn_tree_root_run_id,
+            parent_run_id: None,
+            subagent_depth: 0,
+            spawn_tree_root_run_id: None,
         };
         inner.turns.insert(turn_id, turn_record);
         inner.active_locks.insert(
@@ -696,6 +635,372 @@ impl TurnStateStore for InMemoryTurnStateStore {
 
 #[async_trait]
 impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
+    async fn submit_child_turn(
+        &self,
+        request: SubmitChildRunRequest,
+        admission_policy: &dyn TurnAdmissionPolicy,
+        run_profile_resolver: &dyn RunProfileResolver,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        let idempotency_key = SubmitIdempotencyKey {
+            scope: request.child_scope.clone(),
+            key: request.idempotency_key.clone(),
+        };
+        {
+            let mut inner = self.lock_inner()?;
+            loop {
+                if let Some(result) = inner.submit_idempotency.get(&idempotency_key) {
+                    return result.clone();
+                }
+                if inner
+                    .submit_idempotency_in_flight
+                    .insert(idempotency_key.clone())
+                {
+                    break;
+                }
+                inner = self.wait_for_submit_idempotency(inner)?;
+            }
+        }
+        let _in_flight_guard = SubmitInFlightGuard::new(
+            &self.inner,
+            &self.submit_idempotency_ready,
+            idempotency_key.clone(),
+        );
+
+        let submit_template = {
+            let mut inner = self.lock_inner()?;
+            if let Some(result) = inner.submit_idempotency.get(&idempotency_key).cloned() {
+                inner.submit_idempotency_in_flight.remove(&idempotency_key);
+                self.submit_idempotency_ready.notify_all();
+                return result;
+            }
+            let Some(parent) = inner
+                .records
+                .get(&request.parent_run_id)
+                .filter(|record| record.scope == request.parent_scope)
+            else {
+                let response = Err(TurnError::ScopeNotFound);
+                inner.remember_submit_idempotency(
+                    idempotency_key.clone(),
+                    response.clone(),
+                    request.received_at,
+                );
+                inner.submit_idempotency_in_flight.remove(&idempotency_key);
+                self.submit_idempotency_ready.notify_all();
+                return response;
+            };
+            if !same_scope_envelope(&parent.scope, &request.child_scope) {
+                let response = Err(TurnError::Unauthorized);
+                inner.remember_submit_idempotency(
+                    idempotency_key.clone(),
+                    response.clone(),
+                    request.received_at,
+                );
+                inner.submit_idempotency_in_flight.remove(&idempotency_key);
+                self.submit_idempotency_ready.notify_all();
+                return response;
+            }
+            if parent.subagent_depth == u32::MAX {
+                let response = Err(invalid_lineage("subagent depth would overflow"));
+                inner.remember_submit_idempotency(
+                    idempotency_key.clone(),
+                    response.clone(),
+                    request.received_at,
+                );
+                inner.submit_idempotency_in_flight.remove(&idempotency_key);
+                self.submit_idempotency_ready.notify_all();
+                return response;
+            }
+            SubmitTurnRequest {
+                scope: request.child_scope.clone(),
+                actor: request.actor.clone(),
+                accepted_message_ref: request.accepted_message_ref.clone(),
+                source_binding_ref: request.source_binding_ref.clone(),
+                reply_target_binding_ref: request.reply_target_binding_ref.clone(),
+                requested_run_profile: request.requested_run_profile.clone(),
+                idempotency_key: request.idempotency_key.clone(),
+                received_at: request.received_at,
+                requested_run_id: request.requested_run_id,
+                parent_run_id: Some(parent.run_id),
+                subagent_depth: parent.subagent_depth + 1,
+                spawn_tree_root_run_id: Some(
+                    parent.spawn_tree_root_run_id.unwrap_or(parent.run_id),
+                ),
+            }
+        };
+
+        let admission_result = admission_policy.check_submit(&submit_template);
+        {
+            let mut inner = self.lock_inner()?;
+            if let Some(result) = inner.submit_idempotency.get(&idempotency_key).cloned() {
+                inner.submit_idempotency_in_flight.remove(&idempotency_key);
+                self.submit_idempotency_ready.notify_all();
+                return result;
+            }
+            if let Err(rejection) = admission_result {
+                let response = Err(TurnError::AdmissionRejected(rejection));
+                inner.remember_submit_idempotency(
+                    idempotency_key.clone(),
+                    response.clone(),
+                    request.received_at,
+                );
+                inner.submit_idempotency_in_flight.remove(&idempotency_key);
+                self.submit_idempotency_ready.notify_all();
+                return response;
+            }
+        }
+
+        let profile_resolution = run_profile_resolver
+            .resolve_run_profile(RunProfileResolutionRequest {
+                requested_run_profile: submit_template.requested_run_profile.clone(),
+                ..RunProfileResolutionRequest::interactive_default()
+            })
+            .await;
+
+        let mut inner = self.lock_inner()?;
+        if let Some(result) = inner.submit_idempotency.get(&idempotency_key).cloned() {
+            inner.submit_idempotency_in_flight.remove(&idempotency_key);
+            self.submit_idempotency_ready.notify_all();
+            return result;
+        }
+        let profile = match profile_resolution {
+            Ok(resolved) => TurnRunProfile::from_resolved(resolved),
+            Err(error) => {
+                let response = Err(profile_resolution_error_to_turn_error(error));
+                inner.remember_submit_idempotency(
+                    idempotency_key.clone(),
+                    response.clone(),
+                    request.received_at,
+                );
+                inner.submit_idempotency_in_flight.remove(&idempotency_key);
+                self.submit_idempotency_ready.notify_all();
+                return response;
+            }
+        };
+
+        let Some(parent) = inner
+            .records
+            .get(&request.parent_run_id)
+            .filter(|record| record.scope == request.parent_scope)
+        else {
+            let response = Err(TurnError::ScopeNotFound);
+            inner.remember_submit_idempotency(
+                idempotency_key.clone(),
+                response.clone(),
+                request.received_at,
+            );
+            inner.submit_idempotency_in_flight.remove(&idempotency_key);
+            self.submit_idempotency_ready.notify_all();
+            return response;
+        };
+        if !same_scope_envelope(&parent.scope, &request.child_scope) {
+            let response = Err(TurnError::Unauthorized);
+            inner.remember_submit_idempotency(
+                idempotency_key.clone(),
+                response.clone(),
+                request.received_at,
+            );
+            inner.submit_idempotency_in_flight.remove(&idempotency_key);
+            self.submit_idempotency_ready.notify_all();
+            return response;
+        }
+        if parent.subagent_depth == u32::MAX {
+            let response = Err(invalid_lineage("subagent depth would overflow"));
+            inner.remember_submit_idempotency(
+                idempotency_key.clone(),
+                response.clone(),
+                request.received_at,
+            );
+            inner.submit_idempotency_in_flight.remove(&idempotency_key);
+            self.submit_idempotency_ready.notify_all();
+            return response;
+        }
+        let parent_run_id = parent.run_id;
+        let subagent_depth = parent.subagent_depth + 1;
+        let root_run_id = parent.spawn_tree_root_run_id.unwrap_or(parent.run_id);
+        let Some(root) = inner.records.get(&root_run_id) else {
+            let response = Err(TurnError::ScopeNotFound);
+            inner.remember_submit_idempotency(
+                idempotency_key.clone(),
+                response.clone(),
+                request.received_at,
+            );
+            inner.submit_idempotency_in_flight.remove(&idempotency_key);
+            self.submit_idempotency_ready.notify_all();
+            return response;
+        };
+        if !same_scope_envelope(&root.scope, &request.child_scope) {
+            let response = Err(TurnError::Unauthorized);
+            inner.remember_submit_idempotency(
+                idempotency_key.clone(),
+                response.clone(),
+                request.received_at,
+            );
+            inner.submit_idempotency_in_flight.remove(&idempotency_key);
+            self.submit_idempotency_ready.notify_all();
+            return response;
+        }
+        if root.spawn_tree_root_run_id.unwrap_or(root.run_id) != root.run_id {
+            let response = Err(invalid_lineage(
+                "root_run_id must identify the spawn tree root",
+            ));
+            inner.remember_submit_idempotency(
+                idempotency_key.clone(),
+                response.clone(),
+                request.received_at,
+            );
+            inner.submit_idempotency_in_flight.remove(&idempotency_key);
+            self.submit_idempotency_ready.notify_all();
+            return response;
+        }
+
+        let lock_key = TurnActiveLockKey::from(&request.child_scope);
+        if let Some(response) = inner.thread_busy(&lock_key) {
+            inner.submit_idempotency_in_flight.remove(&idempotency_key);
+            self.submit_idempotency_ready.notify_all();
+            return Err(TurnError::ThreadBusy(response));
+        }
+        let run_id = request.requested_run_id.unwrap_or_else(fresh_turn_run_id);
+        if inner.records.contains_key(&run_id) {
+            let response = Err(TurnError::Conflict {
+                reason: "requested_run_id already bound".to_string(),
+            });
+            inner.remember_submit_idempotency(
+                idempotency_key.clone(),
+                response.clone(),
+                request.received_at,
+            );
+            inner.submit_idempotency_in_flight.remove(&idempotency_key);
+            self.submit_idempotency_ready.notify_all();
+            return response;
+        }
+
+        let reservation_key = SpawnTreeReservationKey::new(&request.child_scope, root_run_id);
+        let previous_tree_count = *inner.tree_reservations.get(&reservation_key).unwrap_or(&0);
+        let next_tree_count = previous_tree_count.checked_add(1).ok_or_else(|| {
+            TurnError::capacity_exceeded(
+                TurnCapacityResource::SpawnTreeDescendants,
+                u64::from(request.spawn_tree_descendant_cap),
+            )
+        });
+        let next_tree_count = match next_tree_count {
+            Ok(next) if next <= u64::from(request.spawn_tree_descendant_cap) => next,
+            _ => {
+                let response = Err(TurnError::capacity_exceeded(
+                    TurnCapacityResource::SpawnTreeDescendants,
+                    u64::from(request.spawn_tree_descendant_cap),
+                ));
+                inner.remember_submit_idempotency(
+                    idempotency_key.clone(),
+                    response.clone(),
+                    request.received_at,
+                );
+                inner.submit_idempotency_in_flight.remove(&idempotency_key);
+                self.submit_idempotency_ready.notify_all();
+                return response;
+            }
+        };
+        inner
+            .tree_reservations
+            .insert(reservation_key.clone(), next_tree_count);
+
+        let admission_class = profile.admission_class.clone();
+        if let Err(rejection) = inner.reserve_admission(
+            run_id,
+            admission_class.clone(),
+            &request.child_scope,
+            &request.actor,
+            self.admission_limit_provider.as_ref(),
+        ) {
+            if previous_tree_count == 0 {
+                inner.tree_reservations.remove(&reservation_key);
+            } else {
+                inner
+                    .tree_reservations
+                    .insert(reservation_key, previous_tree_count);
+            }
+            let response = Err(TurnError::AdmissionRejected(rejection));
+            inner.remember_submit_idempotency(
+                idempotency_key.clone(),
+                response.clone(),
+                request.received_at,
+            );
+            inner.submit_idempotency_in_flight.remove(&idempotency_key);
+            self.submit_idempotency_ready.notify_all();
+            return response;
+        }
+
+        let turn_id = crate::TurnId::new();
+        let cursor = inner.next_cursor();
+        let turn_record = TurnRecord {
+            turn_id,
+            scope: request.child_scope.clone(),
+            actor: request.actor.clone(),
+            accepted_message_ref: request.accepted_message_ref.clone(),
+            source_binding_ref: request.source_binding_ref.clone(),
+            reply_target_binding_ref: request.reply_target_binding_ref.clone(),
+            created_at: request.received_at,
+        };
+        let record = RunRecord {
+            scope: request.child_scope.clone(),
+            actor: request.actor,
+            turn_id,
+            run_id,
+            status: TurnStatus::Queued,
+            profile: profile.clone(),
+            resolved_model_route: None,
+            accepted_message_ref: request.accepted_message_ref.clone(),
+            source_binding_ref: request.source_binding_ref.clone(),
+            reply_target_binding_ref: request.reply_target_binding_ref.clone(),
+            checkpoint_id: None,
+            gate_ref: None,
+            failure: None,
+            event_cursor: cursor,
+            runner_id: None,
+            lease_token: None,
+            lease_expires_at: None,
+            last_heartbeat_at: None,
+            claim_count: 0,
+            received_at: request.received_at,
+            parent_run_id: Some(parent_run_id),
+            subagent_depth,
+            spawn_tree_root_run_id: Some(root_run_id),
+        };
+        inner.turns.insert(turn_id, turn_record);
+        inner.active_locks.insert(
+            lock_key.clone(),
+            TurnActiveLockRecord {
+                key: lock_key,
+                run_id,
+                status: TurnStatus::Queued,
+                lock_version: TurnLockVersion::new(1),
+                acquired_at: request.received_at,
+                updated_at: request.received_at,
+            },
+        );
+        inner.queued_runs.push_back(run_id);
+        inner.records.insert(run_id, record.clone());
+        inner.push_event(&record, TurnEventKind::Submitted, None);
+
+        let response = Ok(SubmitTurnResponse::Accepted {
+            turn_id,
+            run_id,
+            status: TurnStatus::Queued,
+            resolved_run_profile_id: profile.id,
+            resolved_run_profile_version: profile.version,
+            event_cursor: cursor,
+            accepted_message_ref: request.accepted_message_ref,
+            reply_target_binding_ref: request.reply_target_binding_ref,
+        });
+        inner.remember_submit_idempotency(
+            idempotency_key.clone(),
+            response.clone(),
+            record.received_at,
+        );
+        inner.submit_idempotency_in_flight.remove(&idempotency_key);
+        self.submit_idempotency_ready.notify_all();
+        response
+    }
+
     async fn children_of(
         &self,
         scope: &TurnScope,

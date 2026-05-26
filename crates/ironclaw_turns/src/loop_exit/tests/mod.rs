@@ -30,7 +30,7 @@ fn await_dependent_run_blocked_kind_maps_to_dependent_run_reason() {
 
     assert_eq!(
         reason,
-        BlockedReason::DependentRun {
+        BlockedReason::AwaitDependentRun {
             gate_ref: GateRef::new(gate_ref.as_str()).unwrap()
         }
     );
@@ -781,7 +781,7 @@ fn blocked_variants_map_to_correct_blocked_reason() {
             LoopBlockedKind::Approval => BlockedReason::Approval { gate_ref },
             LoopBlockedKind::Auth => BlockedReason::Auth { gate_ref },
             LoopBlockedKind::Resource => BlockedReason::Resource { gate_ref },
-            LoopBlockedKind::AwaitDependentRun => BlockedReason::DependentRun { gate_ref },
+            LoopBlockedKind::AwaitDependentRun => BlockedReason::AwaitDependentRun { gate_ref },
         };
 
         assert_eq!(decision.violation, None);
