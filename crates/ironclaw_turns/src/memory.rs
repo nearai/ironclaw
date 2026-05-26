@@ -6,6 +6,7 @@ use std::{
 };
 
 use chrono::{Duration as ChronoDuration, Utc};
+use ironclaw_host_api::UserId;
 
 use crate::{
     AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason,
@@ -311,6 +312,7 @@ impl TurnEventProjectionSource for InMemoryTurnStateStore {
     async fn read_turn_events_after(
         &self,
         scope: &TurnScope,
+        owner_user_id: Option<&UserId>,
         after: Option<EventCursor>,
         limit: usize,
     ) -> Result<TurnEventPage, TurnError> {
@@ -318,6 +320,7 @@ impl TurnEventProjectionSource for InMemoryTurnStateStore {
         Ok(project_turn_events(
             &inner.events,
             scope,
+            owner_user_id,
             after,
             limit,
             inner.event_retention_floor,

@@ -1031,6 +1031,7 @@ async fn turn_lifecycle_projection_replays_submit_block_resume_complete_without_
     let snapshot = projection
         .snapshot(TurnEventProjectionRequest {
             scope: request.scope.clone(),
+            owner_user_id: None,
             after: None,
             limit: 10,
         })
@@ -1067,6 +1068,7 @@ async fn turn_lifecycle_projection_replays_submit_block_resume_complete_without_
     let foreign = projection
         .updates(TurnEventProjectionRequest {
             scope: scope("thread-foreign-turn-events"),
+            owner_user_id: None,
             after: Some(snapshot.next_cursor.clone()),
             limit: 10,
         })
@@ -1139,6 +1141,7 @@ async fn turn_lifecycle_projection_replays_failed_terminal_with_sanitized_reason
     let snapshot = projection
         .snapshot(TurnEventProjectionRequest {
             scope: request.scope.clone(),
+            owner_user_id: None,
             after: None,
             limit: 10,
         })
@@ -1244,6 +1247,7 @@ async fn turn_lifecycle_projection_replays_cancelled_terminal_without_raw_refs()
     let snapshot = projection
         .snapshot(TurnEventProjectionRequest {
             scope: request.scope.clone(),
+            owner_user_id: None,
             after: None,
             limit: 10,
         })
@@ -1346,6 +1350,7 @@ async fn turn_lifecycle_projection_requires_rebase_for_pruned_or_fabricated_curs
     let pruned_origin = projection
         .snapshot(TurnEventProjectionRequest {
             scope: request.scope.clone(),
+            owner_user_id: None,
             after: Some(origin),
             limit: 10,
         })
@@ -1359,6 +1364,7 @@ async fn turn_lifecycle_projection_requires_rebase_for_pruned_or_fabricated_curs
     let fabricated = projection
         .updates(TurnEventProjectionRequest {
             scope: request.scope.clone(),
+            owner_user_id: None,
             after: Some(TurnEventProjectionCursor::for_scope(
                 request.scope.clone(),
                 EventCursor(999),

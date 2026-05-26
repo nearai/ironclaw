@@ -4814,6 +4814,7 @@ dependencies = [
  "axum 0.8.9",
  "chrono",
  "deadpool-postgres",
+ "futures",
  "http 1.4.0",
  "http-body-util",
  "ironclaw_auth",
