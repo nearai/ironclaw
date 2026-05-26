@@ -1093,6 +1093,50 @@ async fn head_cursor_reports_latest_appended_cursor() {
 }
 
 #[tokio::test]
+async fn head_cursor_snapshot_classifies_later_appends_as_live() {
+    // Atomicity contract (PR #3931, Hole 1): a record appended *after*
+    // `head_cursor` returns must receive a cursor strictly greater than the
+    // observed `startup_head`, so it is classified live and never folded into
+    // the replay window. A non-atomic draining head would race and risk
+    // absorbing the later append into the snapshot.
+    let log = InMemoryDurableEventLog::new();
+    let scope = local_scope("alice", Some("default"));
+    let stream = EventStreamKey::from_scope(&scope);
+
+    for _ in 0..3 {
+        log.append(RuntimeEvent::dispatch_requested(
+            scope.clone(),
+            capability_id(),
+        ))
+        .await
+        .expect("seed append");
+    }
+
+    // Snapshot the head at "subscription start".
+    let startup_head = log
+        .head_cursor(&stream, EventCursor::origin())
+        .await
+        .expect("head snapshot");
+    assert_eq!(startup_head, EventCursor::new(3));
+
+    // A record appended strictly after the snapshot is observed.
+    let live = log
+        .append(RuntimeEvent::dispatch_requested(
+            scope.clone(),
+            capability_id(),
+        ))
+        .await
+        .expect("live append");
+
+    assert!(
+        live.cursor.as_u64() > startup_head.as_u64(),
+        "post-snapshot append (cursor {}) must be strictly greater than startup_head ({}) so it is classified live, not replay",
+        live.cursor.as_u64(),
+        startup_head.as_u64()
+    );
+}
+
+#[tokio::test]
 async fn head_cursor_rejects_cursor_beyond_head_as_replay_gap() {
     let log = InMemoryDurableEventLog::new();
     let scope = local_scope("alice", Some("default"));
