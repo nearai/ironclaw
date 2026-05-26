@@ -38,7 +38,7 @@ use ironclaw_filesystem::{
     CasExpectation, ContentType, Entry, FilesystemError, FilesystemOperation, RecordVersion,
     RootFilesystem, ScopedFilesystem,
 };
-use ironclaw_host_api::{ResourceScope, ScopedPath};
+use ironclaw_host_api::{ResourceScope, ScopedPath, UserId};
 
 use crate::{
     AllowAllTurnAdmissionLimitProvider, CancelRunRequest, CancelRunResponse, EventCursor,
@@ -272,6 +272,7 @@ where
     async fn read_turn_events_after(
         &self,
         scope: &TurnScope,
+        owner_user_id: Option<&UserId>,
         after: Option<EventCursor>,
         limit: usize,
     ) -> Result<TurnEventPage, TurnError> {
@@ -279,6 +280,7 @@ where
         Ok(project_turn_events(
             &snapshot.events,
             scope,
+            owner_user_id,
             after,
             limit,
             snapshot.event_retention_floor,

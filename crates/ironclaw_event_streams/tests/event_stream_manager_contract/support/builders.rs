@@ -116,7 +116,7 @@ fn snapshot(scope: &ProjectionScope, cursor: u64) -> ProjectionSnapshot {
 
 fn snapshot_for_thread(scope: &ProjectionScope, cursor: u64, thread: &str) -> ProjectionSnapshot {
     let mut snapshot = snapshot(scope, cursor);
-    let thread_id = Some(ThreadId::new(thread).unwrap());
+    let thread_id = Some(ThreadId::new(thread).expect("valid test thread id"));
     for entry in &mut snapshot.timeline.entries {
         entry.thread_id = thread_id.clone();
     }
@@ -218,7 +218,7 @@ fn replay_with_activity_transition_thread(
 ) -> ProjectionReplay {
     let mut replay = replay(scope, cursor, next);
     let mut transition = capability_activity(scope, next);
-    transition.thread_id = Some(ThreadId::new(thread).unwrap());
+    transition.thread_id = Some(ThreadId::new(thread).expect("valid test thread id"));
     transition.status = CapabilityActivityStatus::Started;
     replay.capability_activity_transitions = vec![transition];
     replay

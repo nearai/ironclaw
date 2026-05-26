@@ -4,6 +4,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use futures::{StreamExt, stream};
 use ironclaw_event_projections::{
     CapabilityActivityProjection, CapabilityActivityStatus, EventProjectionService,
     ProjectionCursor as EventProjectionCursor, ProjectionReplay,
@@ -14,7 +15,8 @@ use ironclaw_event_streams::{
     AllowAllProjectionAccessPolicy, EventStreamManager, InMemoryProjectionStreamAdmissionPolicy,
     InMemoryProjectionUpdateSource, NoExposureProjectionRedactionValidator,
     ProjectionStreamError as EventProjectionStreamError, ProjectionStreamItem,
-    ProjectionSubscribeRequest, ProjectionTarget, ProjectionViewClass, SubscriberCapabilities,
+    ProjectionSubscribeRequest, ProjectionSubscription as EventProjectionSubscription,
+    ProjectionTarget, ProjectionViewClass, SubscriberCapabilities,
 };
 use ironclaw_events::{DurableEventLog, EventCursor, EventStreamKey, ReadScope};
 use ironclaw_host_api::{CapabilityId, InvocationId};
@@ -326,41 +328,30 @@ impl ProjectionStream for WebuiRuntimeProjectionStream {
                 .await?
             && !resumes_runtime_item
         {
-            for _ in 1..WEBUI_PROJECTION_PAGE_LIMIT {
-                if !batch.has_runtime_payload_capacity() {
-                    break;
-                }
-                let Some(item) = subscription.try_next_buffered() else {
-                    break;
-                };
-                if !batch
-                    .push_runtime_item(item, &request.scope, self.display_previews.as_ref())
-                    .await?
-                {
-                    break;
-                }
-            }
+            consume_buffered_runtime_items(
+                &mut subscription,
+                &mut batch,
+                &request.scope,
+                self.display_previews.as_ref(),
+            )
+            .await?;
         }
 
         if batch.runtime_payloads_pushed == 0 && !resumes_runtime_item {
-            for _ in 0..WEBUI_PROJECTION_PAGE_LIMIT {
-                if !batch.has_runtime_payload_capacity() {
-                    break;
-                }
-                let Some(item) = subscription.try_next_buffered() else {
-                    break;
-                };
-                if !batch
-                    .push_runtime_item(item, &request.scope, self.display_previews.as_ref())
-                    .await?
-                {
-                    break;
-                }
-            }
+            consume_buffered_runtime_items(
+                &mut subscription,
+                &mut batch,
+                &request.scope,
+                self.display_previews.as_ref(),
+            )
+            .await?;
         }
 
         let turn_after = batch.cursor().turn.clone();
-        let turn_drain = self.turn_events.drain(&request.scope, turn_after).await?;
+        let turn_drain = self
+            .turn_events
+            .drain(&request.actor.user_id, &request.scope, turn_after)
+            .await?;
         for TurnEventPayload {
             cursor: turn_cursor,
             payload,
@@ -387,6 +378,29 @@ impl ProjectionStream for WebuiRuntimeProjectionStream {
             })
             .collect()
     }
+}
+
+async fn consume_buffered_runtime_items(
+    subscription: &mut EventProjectionSubscription,
+    batch: &mut WebuiProjectionBatch,
+    scope: &TurnScope,
+    display_previews: &dyn CapabilityDisplayPreviewSource,
+) -> Result<(), ProductAdapterError> {
+    for _ in 0..WEBUI_PROJECTION_PAGE_LIMIT {
+        if !batch.has_runtime_payload_capacity() {
+            break;
+        }
+        let Some(item) = subscription.try_next_buffered() else {
+            break;
+        };
+        if !batch
+            .push_runtime_item(item, scope, display_previews)
+            .await?
+        {
+            break;
+        }
+    }
+    Ok(())
 }
 
 struct WebuiProjectionBatch {
@@ -763,15 +777,16 @@ async fn runtime_payloads_from_candidates(
     candidates: Vec<RuntimePayloadCandidate>,
     state_kind: StatePayloadKind,
 ) -> Result<Vec<ProductOutboundPayload>, ProductAdapterError> {
-    let mut payloads = Vec::with_capacity(candidates.len());
-    for candidate in candidates {
-        if let Some(payload) =
-            runtime_payload_from_candidate(scope, display_previews, candidate, state_kind).await?
-        {
-            payloads.push(payload);
-        }
-    }
-    Ok(payloads)
+    stream::iter(candidates)
+        .map(|candidate| {
+            runtime_payload_from_candidate(scope, display_previews, candidate, state_kind)
+        })
+        .buffered(16)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .filter_map(Result::transpose)
+        .collect()
 }
 
 async fn runtime_payload_from_candidate(
@@ -1233,6 +1248,12 @@ fn replay_item_cursor(
         .chain(
             replay
                 .capability_activities
+                .iter()
+                .map(|activity| activity.last_cursor),
+        )
+        .chain(
+            replay
+                .capability_activity_transitions
                 .iter()
                 .map(|activity| activity.last_cursor),
         )

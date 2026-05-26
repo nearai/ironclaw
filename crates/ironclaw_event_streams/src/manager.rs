@@ -37,12 +37,6 @@ pub struct EventStreamManager {
     validation_cache: ProjectionValidationCache,
 }
 
-#[derive(Clone, Copy)]
-enum SnapshotRebaseMode {
-    Reject,
-    UseEarliestAsInitialBaseline,
-}
-
 impl EventStreamManager {
     pub fn new<P, A, M, U, R, O>(
         projection: Arc<P>,
@@ -104,11 +98,7 @@ impl EventStreamManager {
         validate_actor_stream_user(&request.actor, request.view, &request.scope)?;
         validate_product_thread_view(request.view, &request.target, &request.scope)?;
         let envelope = self
-            .snapshot_envelope(
-                &request.scope,
-                request.limit,
-                SnapshotRebaseMode::UseEarliestAsInitialBaseline,
-            )
+            .snapshot_envelope(&request.scope, request.limit, true)
             .await?;
         validate_stream_envelope(&envelope, request.view, &request.target, &request.scope)?;
         self.validation_cache
@@ -158,11 +148,7 @@ impl EventStreamManager {
         let live_floor_cursor = match request.after_cursor.clone() {
             None => {
                 let snapshot_envelope = self
-                    .snapshot_envelope(
-                        &request.scope,
-                        request.limit,
-                        SnapshotRebaseMode::UseEarliestAsInitialBaseline,
-                    )
+                    .snapshot_envelope(&request.scope, request.limit, true)
                     .await?;
                 validate_stream_envelope(
                     &snapshot_envelope,
@@ -211,11 +197,7 @@ impl EventStreamManager {
                 }
                 Err(ProjectionError::RebaseRequired { .. }) => {
                     let snapshot_envelope = self
-                        .snapshot_envelope(
-                            &request.scope,
-                            request.limit,
-                            SnapshotRebaseMode::Reject,
-                        )
+                        .snapshot_envelope(&request.scope, request.limit, false)
                         .await?;
                     validate_stream_envelope(
                         &snapshot_envelope,
@@ -315,10 +297,10 @@ impl EventStreamManager {
         &self,
         scope: &ProjectionScope,
         limit: usize,
-        rebase_mode: SnapshotRebaseMode,
+        allow_rebase_baseline: bool,
     ) -> Result<ProductProjectionEnvelope, ProjectionStreamError> {
         let after = None;
-        self.snapshot_envelope_after(scope, limit, after, rebase_mode)
+        self.snapshot_envelope_after(scope, limit, after, allow_rebase_baseline)
             .await
     }
 
@@ -327,16 +309,11 @@ impl EventStreamManager {
         scope: &ProjectionScope,
         limit: usize,
         after: Option<ProjectionCursor>,
-        rebase_mode: SnapshotRebaseMode,
+        allow_rebase_baseline: bool,
     ) -> Result<ProductProjectionEnvelope, ProjectionStreamError> {
         match self.load_snapshot(scope, limit, after).await {
             Ok(snapshot) => Ok(ProductProjectionEnvelope::ThreadSnapshot(snapshot)),
-            Err(ProjectionError::RebaseRequired { earliest, .. })
-                if matches!(
-                    rebase_mode,
-                    SnapshotRebaseMode::UseEarliestAsInitialBaseline
-                ) =>
-            {
+            Err(ProjectionError::RebaseRequired { earliest, .. }) if allow_rebase_baseline => {
                 self.snapshot_envelope_at_rebase_cursor(scope, limit, *earliest)
                     .await
             }

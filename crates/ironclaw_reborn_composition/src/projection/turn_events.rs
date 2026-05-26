@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use futures::{StreamExt, stream};
 use ironclaw_product_adapters::{
     AuthPromptView, GatePromptView, ProductAdapterError, ProductOutboundPayload,
     ProductProjectionItem, ProductProjectionState, ProductWorkflowRejectionKind, RedactedString,
@@ -45,6 +46,7 @@ impl TurnEventBridge {
 
     pub(super) async fn drain(
         &self,
+        caller_user_id: &ironclaw_host_api::UserId,
         scope: &TurnScope,
         after: Option<TurnEventProjectionCursor>,
     ) -> Result<TurnEventDrain, ProductAdapterError> {
@@ -65,6 +67,7 @@ impl TurnEventBridge {
             let page = match service
                 .updates(TurnEventProjectionRequest {
                     scope: scope.clone(),
+                    owner_user_id: Some(caller_user_id.clone()),
                     after: after_cursor.clone(),
                     limit: WEBUI_TURN_EVENT_PAGE_LIMIT,
                 })
@@ -82,21 +85,9 @@ impl TurnEventBridge {
                 Err(error) => return Err(map_turn_event_projection_error(error)),
             };
             next_cursor = Some(page.next_cursor.clone());
-            for event in page.entries {
-                if let Some(payload) = turn_event_payload(coordinator.as_ref(), &event).await? {
-                    payloads.push(TurnEventPayload {
-                        cursor: TurnEventProjectionCursor::for_scope(
-                            event.scope.clone(),
-                            event.cursor,
-                        ),
-                        payload,
-                    });
-                }
-            }
-            if !payloads.is_empty()
-                || !page.truncated
-                || after_cursor.as_ref() == Some(&page.next_cursor)
-            {
+            payloads
+                .extend(turn_event_payloads_for_page(coordinator.as_ref(), page.entries).await?);
+            if !page.truncated || after_cursor.as_ref() == Some(&page.next_cursor) {
                 break;
             }
             after_cursor = Some(page.next_cursor);
@@ -106,6 +97,25 @@ impl TurnEventBridge {
             payloads,
         })
     }
+}
+
+async fn turn_event_payloads_for_page(
+    coordinator: &dyn TurnCoordinator,
+    events: Vec<TurnLifecycleEvent>,
+) -> Result<Vec<TurnEventPayload>, ProductAdapterError> {
+    stream::iter(events)
+        .map(|event| async move {
+            let cursor = TurnEventProjectionCursor::for_scope(event.scope.clone(), event.cursor);
+            turn_event_payload(coordinator, &event)
+                .await
+                .map(|payload| payload.map(|payload| TurnEventPayload { cursor, payload }))
+        })
+        .buffered(16)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .filter_map(Result::transpose)
+        .collect()
 }
 
 async fn turn_event_payload(
@@ -235,7 +245,7 @@ fn turn_status_wire(status: TurnStatus) -> &'static str {
 fn map_turn_event_projection_error(error: TurnEventProjectionError) -> ProductAdapterError {
     tracing::warn!(
         component = "turn_event_projection",
-        operation = "map_projection_error",
+        operation = "map_turn_event_projection_error",
         error = %error,
         error_debug = ?error,
         "turn event projection error mapped to product adapter error"

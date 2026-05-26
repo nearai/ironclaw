@@ -545,3 +545,54 @@ async fn webui_event_stream_uses_request_actor_for_projection_scope() {
         "projection stream must not read another user's event stream through a hidden runtime actor"
     );
 }
+
+#[tokio::test]
+async fn webui_event_stream_filters_turn_events_by_owner_user() {
+    let tenant_id = TenantId::new("webui-events-tenant").unwrap();
+    let owner_user_id = UserId::new("webui-events-owner").unwrap();
+    let other_user_id = UserId::new("webui-events-other").unwrap();
+    let agent_id = AgentId::new("webui-events-agent").unwrap();
+    let thread_id = ThreadId::new("webui-events-thread").unwrap();
+    let scope = TurnScope::new(tenant_id, Some(agent_id), None, thread_id);
+    let run_id = TurnRunId::new();
+    let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let services = build_reborn_projection_services(
+        event_log,
+        ReplyTargetBindingRef::new("webui-events-reply").unwrap(),
+    )
+    .with_turn_events(
+        Arc::new(FakeTurnEventSource {
+            events: vec![TurnLifecycleEvent {
+                cursor: TurnEventCursor(1),
+                scope: scope.clone(),
+                occurred_at: Some(chrono::Utc::now()),
+                owner_user_id: Some(owner_user_id.clone()),
+                run_id,
+                status: TurnStatus::Running,
+                kind: TurnEventKind::RunnerClaimed,
+                blocked_gate: None,
+                sanitized_reason: None,
+            }],
+        }),
+        Arc::new(FakeTurnCoordinator {
+            state: turn_run_state(&scope, &owner_user_id, run_id, TurnEventCursor(1)),
+        }),
+    );
+
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(other_user_id),
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        events
+            .iter()
+            .all(|event| matches!(event.payload(), ProductOutboundPayload::KeepAlive)),
+        "turn event bridge must not emit another user's lifecycle event payload"
+    );
+}

@@ -1,6 +1,11 @@
+use std::collections::HashSet;
+
 use ironclaw_event_projections::{
-    CapabilityActivityProjection, ProjectionReplay, ProjectionSnapshot, RunStatusProjection,
+    CapabilityActivityProjection, CapabilityActivityStatus, ProjectionReplay, ProjectionSnapshot,
+    RunStatusProjection,
 };
+use ironclaw_events::EventCursor;
+use ironclaw_host_api::InvocationId;
 
 use super::WEBUI_RUNTIME_ITEM_MAX_PAYLOADS;
 
@@ -68,8 +73,8 @@ fn replay_candidate_capacity(
 ) -> usize {
     let transition_count = replay.capability_activity_transitions.len();
     state_payloads
-        .saturating_add(activity_payloads.min(transition_count))
-        .saturating_add(replay.capability_activities.len())
+        .saturating_add(activity_payloads.min(transition_count).saturating_mul(2))
+        .saturating_add(replay.capability_activities.len().saturating_mul(2))
 }
 
 fn append_activity_replay_candidates(
@@ -78,10 +83,17 @@ fn append_activity_replay_candidates(
     candidates: &mut Vec<RuntimePayloadCandidate>,
 ) {
     let transitions = &replay.capability_activity_transitions;
+    let transition_keys = transitions
+        .iter()
+        .map(activity_event_key)
+        .collect::<HashSet<_>>();
     let mut emitted_activities = 0usize;
 
     for activity in transitions.iter().take(max_activities) {
         candidates.push(RuntimePayloadCandidate::CapabilityActivity(
+            activity.clone(),
+        ));
+        candidates.push(RuntimePayloadCandidate::CapabilityDisplayPreview(
             activity.clone(),
         ));
         emitted_activities = emitted_activities.saturating_add(1);
@@ -91,10 +103,7 @@ fn append_activity_replay_candidates(
         if emitted_activities >= max_activities {
             break;
         }
-        if transitions
-            .iter()
-            .any(|transition| same_activity_event(transition, activity))
-        {
+        if transition_keys.contains(&activity_event_key(activity)) {
             continue;
         }
         candidates.push(RuntimePayloadCandidate::CapabilityActivity(
@@ -107,11 +116,12 @@ fn append_activity_replay_candidates(
     }
 }
 
-fn same_activity_event(
-    left: &CapabilityActivityProjection,
-    right: &CapabilityActivityProjection,
-) -> bool {
-    left.invocation_id == right.invocation_id
-        && left.status == right.status
-        && left.last_cursor == right.last_cursor
+fn activity_event_key(
+    activity: &CapabilityActivityProjection,
+) -> (InvocationId, CapabilityActivityStatus, EventCursor) {
+    (
+        activity.invocation_id,
+        activity.status,
+        activity.last_cursor,
+    )
 }
