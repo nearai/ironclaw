@@ -230,17 +230,27 @@ where
     let scope_a = scope_a();
     let scope_b = scope_b();
 
-    // Both tenants share the query token ("needle") at the identical
-    // relative path, but carry a tenant-unique marker word in their
-    // chunk content. The marker is what makes the leak observable: an
-    // impl that re-anchors result *paths* to the requested scope (so a
-    // per-hit `path.scope()` check cannot catch a prefix leak) still
-    // returns the leaked chunk's *content*, so a stray "bravo" snippet
-    // in scope A's results exposes the cross-tenant read.
+    // Both tenants share the query token ("needle") but carry a
+    // tenant-unique marker word in their chunk content. The marker is
+    // what makes the leak observable: an impl that re-anchors result
+    // *paths* to the requested scope (so a per-hit `path.scope()` check
+    // cannot catch a prefix leak) still returns the leaked chunk's
+    // *content*, so a stray "bravo" snippet in scope A's results exposes
+    // the cross-tenant read.
+    //
+    // The two documents use *distinct* relative paths. They previously
+    // shared `notes/needle.md`, but `fuse_memory_search_results` keys its
+    // accumulator solely on `relative_path` (scope is not part of the
+    // key). With identical paths a leaked scope-B hit would collapse into
+    // the scope-A accumulator, and because fusion keeps the first-inserted
+    // snippet (and_modify never replaces it), the "bravo" marker could be
+    // discarded before the assertions run — masking the very leak this
+    // test exists to catch. Distinct paths keep the leaked hit as its own
+    // result so the marker survives fusion.
     let body_a = "alpha quick brown needle";
     let body_b = "bravo quick brown needle";
-    let path_a = path_in(&scope_a, "notes/needle.md");
-    let path_b = path_in(&scope_b, "notes/needle.md");
+    let path_a = path_in(&scope_a, "notes/needle-a.md");
+    let path_b = path_in(&scope_b, "notes/needle-b.md");
     repo.write_document(&path_a, body_a.as_bytes())
         .await
         .unwrap();
