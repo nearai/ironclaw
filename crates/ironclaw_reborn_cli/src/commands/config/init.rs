@@ -143,8 +143,9 @@ fn config_stub() -> String {
 api_version = "{api_version}"
 
 [boot]
-# Composition profile. One of: local-dev, production, migration-dry-run.
-# Today only local-dev is wired end-to-end.
+# Composition profile. One of: local-dev, local-dev-yolo, production, migration-dry-run.
+# Today local-dev and local-dev-yolo are wired end-to-end.
+# local-dev-yolo also requires --confirm-host-access at runtime.
 profile = "local-dev"
 
 [identity]

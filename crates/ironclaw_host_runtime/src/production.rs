@@ -742,13 +742,16 @@ impl DefaultHostRuntime {
                             reason: RuntimeBlockedReason::ApprovalRequired,
                         }),
                     ),
-                    Ok(None) => Ok(RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure {
-                        capability_id: capability,
-                        kind: RuntimeFailureKind::Authorization,
-                        message: Some(
-                            "approval required but no approval request was persisted".to_string(),
+                    Ok(None) => Ok(RuntimeCapabilityOutcome::Failed(
+                        RuntimeCapabilityFailure::new(
+                            capability,
+                            RuntimeFailureKind::Authorization,
+                            Some(
+                                "approval required but no approval request was persisted"
+                                    .to_string(),
+                            ),
                         ),
-                    })),
+                    )),
                     Err(host_error) => {
                         // Surface persistence outages as Unavailable rather than
                         // pretending the approval was never persisted; otherwise a
@@ -899,22 +902,22 @@ fn trust_evaluation_failure(
     capability_id: CapabilityId,
     error: TrustEvaluationError,
 ) -> RuntimeCapabilityOutcome {
-    RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure {
+    RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure::new(
         capability_id,
-        kind: trust_evaluation_failure_kind(error),
-        message: Some(error.message().to_string()),
-    })
+        trust_evaluation_failure_kind(error),
+        Some(error.message().to_string()),
+    ))
 }
 
 fn runtime_policy_failure(
     capability_id: CapabilityId,
     error: RuntimePolicyEvaluationError,
 ) -> RuntimeCapabilityOutcome {
-    RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure {
+    RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure::new(
         capability_id,
-        kind: runtime_policy_failure_kind(&error),
-        message: Some(error.message()),
-    })
+        runtime_policy_failure_kind(&error),
+        Some(error.message()),
+    ))
 }
 
 fn runtime_policy_failure_kind(error: &RuntimePolicyEvaluationError) -> RuntimeFailureKind {
@@ -1035,11 +1038,7 @@ fn failure_from(
 ) -> RuntimeCapabilityFailure {
     let kind = failure_kind_from(&error);
     let message = sanitized_failure_message(&error);
-    RuntimeCapabilityFailure {
-        capability_id,
-        kind,
-        message,
-    }
+    RuntimeCapabilityFailure::new(capability_id, kind, message)
 }
 
 /// Returns a stable, redacted summary message for a capability invocation
@@ -1122,10 +1121,12 @@ pub(crate) fn failure_kind_from(error: &CapabilityInvocationError) -> RuntimeFai
 
 fn dispatch_kind_to_failure(kind: DispatchFailureKind) -> RuntimeFailureKind {
     match kind {
-        DispatchFailureKind::UnknownCapability
-        | DispatchFailureKind::UnknownProvider
-        | DispatchFailureKind::MissingRuntimeBackend
-        | DispatchFailureKind::UnsupportedRuntime => RuntimeFailureKind::MissingRuntime,
+        DispatchFailureKind::UnknownCapability | DispatchFailureKind::UnknownProvider => {
+            RuntimeFailureKind::InvalidOutput
+        }
+        DispatchFailureKind::MissingRuntimeBackend | DispatchFailureKind::UnsupportedRuntime => {
+            RuntimeFailureKind::MissingRuntime
+        }
         DispatchFailureKind::RuntimeMismatch => RuntimeFailureKind::Backend,
         DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::ExtensionRuntimeMismatch) => {
             RuntimeFailureKind::MissingRuntime
@@ -1136,6 +1137,9 @@ fn dispatch_kind_to_failure(kind: DispatchFailureKind) -> RuntimeFailureKind {
         }
         DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied) => {
             RuntimeFailureKind::Network
+        }
+        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::PolicyDenied) => {
+            RuntimeFailureKind::PolicyDenied
         }
         DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OutputTooLarge) => {
             RuntimeFailureKind::OutputTooLarge
@@ -1149,10 +1153,15 @@ fn dispatch_kind_to_failure(kind: DispatchFailureKind) -> RuntimeFailureKind {
         DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::ExitFailure) => {
             RuntimeFailureKind::Process
         }
-        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InputEncode)
-        | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OutputDecode)
-        | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InvalidResult) => {
+        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InputEncode) => {
             RuntimeFailureKind::InvalidInput
+        }
+        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OutputDecode)
+        | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InvalidResult) => {
+            RuntimeFailureKind::InvalidOutput
+        }
+        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed) => {
+            RuntimeFailureKind::OperationFailed
         }
         DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend)
         | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Client)
@@ -1231,7 +1240,7 @@ mod tests {
             ),
             (
                 RuntimeDispatchErrorKind::InvalidResult,
-                RuntimeFailureKind::InvalidInput,
+                RuntimeFailureKind::InvalidOutput,
             ),
             (
                 RuntimeDispatchErrorKind::Manifest,
@@ -1250,12 +1259,20 @@ mod tests {
                 RuntimeFailureKind::Network,
             ),
             (
+                RuntimeDispatchErrorKind::OperationFailed,
+                RuntimeFailureKind::OperationFailed,
+            ),
+            (
                 RuntimeDispatchErrorKind::OutputDecode,
-                RuntimeFailureKind::InvalidInput,
+                RuntimeFailureKind::InvalidOutput,
             ),
             (
                 RuntimeDispatchErrorKind::OutputTooLarge,
                 RuntimeFailureKind::OutputTooLarge,
+            ),
+            (
+                RuntimeDispatchErrorKind::PolicyDenied,
+                RuntimeFailureKind::PolicyDenied,
             ),
             (
                 RuntimeDispatchErrorKind::Resource,
@@ -1292,11 +1309,11 @@ mod tests {
     fn dispatch_kind_to_failure_pins_dispatch_error_top_level_kinds() {
         assert_eq!(
             dispatch_kind_to_failure(DispatchFailureKind::UnknownCapability),
-            RuntimeFailureKind::MissingRuntime
+            RuntimeFailureKind::InvalidOutput
         );
         assert_eq!(
             dispatch_kind_to_failure(DispatchFailureKind::UnknownProvider),
-            RuntimeFailureKind::MissingRuntime
+            RuntimeFailureKind::InvalidOutput
         );
         assert_eq!(
             dispatch_kind_to_failure(DispatchFailureKind::MissingRuntimeBackend),
@@ -1313,12 +1330,9 @@ mod tests {
     }
 
     #[test]
-    fn failure_kind_from_dispatch_unknown_capability_maps_to_missing_runtime() {
+    fn failure_kind_from_dispatch_unknown_capability_maps_to_invalid_output() {
         let error = dispatch(DispatchFailureKind::UnknownCapability);
-        assert_eq!(
-            failure_kind_from(&error),
-            RuntimeFailureKind::MissingRuntime
-        );
+        assert_eq!(failure_kind_from(&error), RuntimeFailureKind::InvalidOutput);
     }
 
     #[test]
@@ -1352,19 +1366,114 @@ mod tests {
         assert_eq!(RuntimeFailureKind::Backend.as_str(), "backend");
         assert_eq!(RuntimeFailureKind::Cancelled.as_str(), "cancelled");
         assert_eq!(RuntimeFailureKind::Dispatcher.as_str(), "dispatcher");
+        assert_eq!(RuntimeFailureKind::Internal.as_str(), "internal");
         assert_eq!(RuntimeFailureKind::InvalidInput.as_str(), "invalid_input");
+        assert_eq!(RuntimeFailureKind::InvalidOutput.as_str(), "invalid_output");
         assert_eq!(
             RuntimeFailureKind::MissingRuntime.as_str(),
             "missing_runtime"
         );
         assert_eq!(RuntimeFailureKind::Network.as_str(), "network");
         assert_eq!(
+            RuntimeFailureKind::OperationFailed.as_str(),
+            "operation_failed"
+        );
+        assert_eq!(
             RuntimeFailureKind::OutputTooLarge.as_str(),
             "output_too_large"
         );
+        assert_eq!(RuntimeFailureKind::PolicyDenied.as_str(), "policy_denied");
         assert_eq!(RuntimeFailureKind::Process.as_str(), "process");
         assert_eq!(RuntimeFailureKind::Resource.as_str(), "resource");
+        assert_eq!(RuntimeFailureKind::Transient.as_str(), "transient");
+        assert_eq!(RuntimeFailureKind::Unavailable.as_str(), "unavailable");
         assert_eq!(RuntimeFailureKind::Unknown.as_str(), "unknown");
+    }
+
+    #[test]
+    fn capability_failure_disposition_maps_failure_kinds_once() {
+        use crate::CapabilityFailureDisposition::*;
+
+        let safe = true;
+        let cases = [
+            (RuntimeFailureKind::Authorization, ModelVisibleToolError),
+            (RuntimeFailureKind::Backend, RetrySameCall),
+            (RuntimeFailureKind::Cancelled, RecoverableRunFailure),
+            (RuntimeFailureKind::Dispatcher, RecoverableRunFailure),
+            (RuntimeFailureKind::Internal, RetrySameCall),
+            (RuntimeFailureKind::InvalidInput, ModelVisibleToolError),
+            (RuntimeFailureKind::InvalidOutput, RecoverableRunFailure),
+            (RuntimeFailureKind::MissingRuntime, ModelVisibleToolError),
+            (RuntimeFailureKind::Network, RetrySameCall),
+            (RuntimeFailureKind::OperationFailed, ModelVisibleToolError),
+            (RuntimeFailureKind::OutputTooLarge, ModelVisibleToolError),
+            (RuntimeFailureKind::PolicyDenied, ModelVisibleToolError),
+            (RuntimeFailureKind::Process, ModelVisibleToolError),
+            (RuntimeFailureKind::Resource, ModelVisibleToolError),
+            (RuntimeFailureKind::Transient, RetrySameCall),
+            (RuntimeFailureKind::Unavailable, RetrySameCall),
+            (RuntimeFailureKind::Unknown, RecoverableRunFailure),
+        ];
+
+        for (kind, expected) in cases {
+            assert_eq!(
+                crate::capability_failure_disposition(kind, safe),
+                expected,
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn capability_failure_disposition_retries_retryable_kinds_before_exhaustion() {
+        use crate::CapabilityFailureDisposition::*;
+        for kind in [
+            RuntimeFailureKind::Backend,
+            RuntimeFailureKind::Internal,
+            RuntimeFailureKind::Network,
+            RuntimeFailureKind::Transient,
+            RuntimeFailureKind::Unavailable,
+        ] {
+            assert_eq!(
+                crate::capability_failure_disposition(kind, true),
+                RetrySameCall,
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_failure_summary_is_bounded_and_blank_messages_are_not_safe() {
+        let blank = RuntimeCapabilityFailure::new(
+            cap(),
+            RuntimeFailureKind::InvalidInput,
+            Some("   ".to_string()),
+        );
+        assert!(blank.safe_summary().is_none());
+        assert_eq!(
+            blank.disposition(),
+            crate::CapabilityFailureDisposition::RecoverableRunFailure
+        );
+
+        let long = RuntimeCapabilityFailure::new(
+            cap(),
+            RuntimeFailureKind::InvalidInput,
+            Some("x".repeat(3000)),
+        );
+        let summary = long.safe_summary().expect("long message is still safe");
+        assert_eq!(summary.chars().count(), 515);
+        assert!(summary.ends_with("..."));
+
+        let multibyte = RuntimeCapabilityFailure::new(
+            cap(),
+            RuntimeFailureKind::InvalidInput,
+            Some("é".repeat(3000)),
+        );
+        let summary = multibyte
+            .safe_summary()
+            .expect("long multibyte message is still safe");
+        assert_eq!(summary.chars().count(), 515);
+        assert!(summary.ends_with("..."));
     }
 
     #[test]

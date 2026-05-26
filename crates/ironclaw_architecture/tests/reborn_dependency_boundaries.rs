@@ -162,9 +162,10 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
         [
             "ironclaw_reborn_composition",
             "ironclaw_reborn_config",
+            "ironclaw_reborn_traces",
             "ironclaw_reborn_webui_ingress",
         ],
-        "ironclaw_reborn_cli should enter Reborn through ironclaw_reborn_composition (assembled-runtime facade), ironclaw_reborn_config (boot-config contract), and ironclaw_reborn_webui_ingress (host-owned WebUI serve lifecycle) only. Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
+        "ironclaw_reborn_cli should enter Reborn through ironclaw_reborn_composition (assembled-runtime facade), ironclaw_reborn_config (boot-config contract), ironclaw_reborn_traces (contributor-side TraceCommons client extracted from the legacy monolith), and ironclaw_reborn_webui_ingress (host-owned WebUI serve lifecycle) only. Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
     );
     assert_workspace_deps_exactly(
         &dependencies_all_kinds,
@@ -1316,6 +1317,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_reborn_config",
                 "ironclaw_reborn_event_store",
                 "ironclaw_first_party_extensions",
+                "ironclaw_first_party_extension_ports",
                 "ironclaw_resources",
                 "ironclaw_run_state",
                 "ironclaw_runtime_policy",
@@ -1372,10 +1374,55 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             ],
         },
         BoundaryRule {
-            // First-party extensions are userland packages. They may
-            // consume scoped storage and loop-facing DTO adapters, but must not
-            // receive ambient runtime authority or lower substrate handles.
+            // First-party extensions are userland implementation packages.
+            // They may consume scoped storage and pure safety helpers, but
+            // must not receive ambient runtime authority or loop-facing
+            // runtime handles.
             crate_name: "ironclaw_first_party_extensions",
+            forbidden: vec![
+                "ironclaw",
+                "ironclaw_approvals",
+                "ironclaw_authorization",
+                "ironclaw_capabilities",
+                "ironclaw_conversations",
+                "ironclaw_dispatcher",
+                "ironclaw_engine",
+                "ironclaw_events",
+                "ironclaw_extensions",
+                "ironclaw_first_party_extension_ports",
+                "ironclaw_gateway",
+                "ironclaw_host_runtime",
+                "ironclaw_llm",
+                "ironclaw_loop_support",
+                "ironclaw_mcp",
+                "ironclaw_memory",
+                "ironclaw_network",
+                "ironclaw_outbound",
+                "ironclaw_processes",
+                "ironclaw_product_adapters",
+                "ironclaw_product_workflow",
+                "ironclaw_product_adapter_registry",
+                "ironclaw_reborn",
+                "ironclaw_reborn_composition",
+                "ironclaw_reborn_config",
+                "ironclaw_reborn_event_store",
+                "ironclaw_resources",
+                "ironclaw_run_state",
+                "ironclaw_runtime_policy",
+                "ironclaw_scripts",
+                "ironclaw_secrets",
+                "ironclaw_threads",
+                "ironclaw_tui",
+                "ironclaw_wasm",
+                "ironclaw_wasm_product_adapters",
+            ],
+        },
+        BoundaryRule {
+            // First-party extension ports are adapter glue above concrete
+            // userland implementations. They may depend on loop/turn-facing
+            // contracts, but must not reach into host runtime authority or
+            // product composition.
+            crate_name: "ironclaw_first_party_extension_ports",
             forbidden: vec![
                 "ironclaw",
                 "ironclaw_approvals",
@@ -1407,7 +1454,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_safety",
                 "ironclaw_scripts",
                 "ironclaw_secrets",
-                "ironclaw_threads",
                 "ironclaw_tui",
                 "ironclaw_wasm",
                 "ironclaw_wasm_product_adapters",
@@ -1617,6 +1663,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_dispatcher",
                 "ironclaw_events",
                 "ironclaw_first_party_extensions",
+                "ironclaw_first_party_extension_ports",
                 "ironclaw_host_runtime",
                 "ironclaw_secrets",
                 "ironclaw_network",
@@ -1648,6 +1695,12 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             ],
         },
         BoundaryRule {
+            // Product-facing projection reducers consume typed domain events.
+            // `ironclaw_turns` is intentionally allowed here for
+            // `TurnLifecycleEvent`-derived read models such as pending gates;
+            // projection crates must still stay below product/runtime
+            // composition and must not import root `src/` or legacy engine
+            // pending-gate types.
             crate_name: "ironclaw_event_projections",
             forbidden: vec![
                 "ironclaw",
@@ -1903,7 +1956,9 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_processes",
                 "ironclaw_resources",
                 "ironclaw_run_state",
-                "ironclaw_safety",
+                // ironclaw_safety is permitted: thread/transcript storage
+                // validates provider-originated replay metadata before it can
+                // be persisted or exposed back to a model-visible context.
                 "ironclaw_scripts",
                 "ironclaw_secrets",
                 "ironclaw_skills",
@@ -1956,11 +2011,37 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 // routes turn-coordination persistence through ScopedFilesystem
                 // under the universal-fs-dispatch rework (plan
                 // 2026-05-14-universal-fs-dispatch).
+                "ironclaw_hooks",
                 "ironclaw_host_runtime",
                 "ironclaw_mcp",
                 "ironclaw_memory",
                 "ironclaw_network",
                 "ironclaw_processes",
+                "ironclaw_run_state",
+                "ironclaw_scripts",
+                "ironclaw_secrets",
+                "ironclaw_wasm",
+            ],
+        },
+        // The hooks framework depends on `ironclaw_turns` and host primitives
+        // but must not pull in runtime adapters or dispatcher concretions.
+        // This keeps the contract surface narrow and prevents the framework
+        // from acquiring authority it should not have.
+        BoundaryRule {
+            crate_name: "ironclaw_hooks",
+            forbidden: vec![
+                "ironclaw_approvals",
+                "ironclaw_authorization",
+                "ironclaw_capabilities",
+                "ironclaw_dispatcher",
+                "ironclaw_extensions",
+                "ironclaw_filesystem",
+                "ironclaw_host_runtime",
+                "ironclaw_mcp",
+                "ironclaw_memory",
+                "ironclaw_network",
+                "ironclaw_processes",
+                "ironclaw_reborn",
                 "ironclaw_run_state",
                 "ironclaw_scripts",
                 "ironclaw_secrets",

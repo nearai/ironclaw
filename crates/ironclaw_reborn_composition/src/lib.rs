@@ -22,10 +22,15 @@ mod auth;
 mod budget;
 mod error;
 mod factory;
+mod gsuite;
 mod input;
 #[cfg(feature = "root-llm-provider")]
 mod llm_catalog;
+mod local_dev_mounts;
+mod local_runtime_profile;
 mod product_live_adapters;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+mod production_runtime_policy;
 mod profile;
 mod projection;
 mod readiness;
@@ -45,17 +50,25 @@ mod webui_serve;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_ws_origin;
 
-use ironclaw_runtime_policy::{EffectiveRuntimePolicy as ResolvedRuntimePolicy, ResolveError};
-
-pub use auth::RebornProductAuthServices;
+pub use auth::{
+    RebornAuthContinuationDispatcher, RebornOAuthCallbackError, RebornOAuthCallbackOutcome,
+    RebornOAuthCallbackRequest, RebornOAuthCallbackResponse, RebornProductAuthServicePorts,
+    RebornProductAuthServices,
+};
 pub use budget::build_default_budget_accountant;
 pub use error::RebornBuildError;
 pub use factory::{RebornServices, build_reborn_services};
-pub use input::RebornBuildInput;
+pub use gsuite::{bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers};
+pub use input::{RebornBuildInput, RebornRuntimeProcessBinding};
 #[cfg(feature = "root-llm-provider")]
 pub use llm_catalog::{
     RebornLlmCatalogError, resolve_against_registry, resolve_llm_selection_against_catalog,
     resolve_reborn_runtime_llm,
+};
+pub use local_runtime_profile::{
+    RebornLocalRuntimeProfileError, RebornLocalRuntimeProfileOptions, local_dev_runtime_policy,
+    local_dev_yolo_runtime_policy, local_runtime_build_input,
+    local_runtime_build_input_with_options,
 };
 pub use product_live_adapters::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
@@ -63,6 +76,8 @@ pub use product_live_adapters::{
     ProductLivePlannedRuntimeAdapters, ProductLiveVisibleCapabilityRequestConfig,
     capability_allowlist, visible_capability_request_for_run,
 };
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub use production_runtime_policy::RebornProductionRuntimePolicy;
 pub use profile::{RebornCompositionProfile, RebornCompositionProfileParseError};
 pub use readiness::{RebornFacadeReadiness, RebornReadiness, RebornReadinessState};
 pub use runtime::{
@@ -103,16 +118,6 @@ pub fn reborn_model_slot_names() -> Vec<&'static str> {
         .iter()
         .map(|slot| slot.as_str())
         .collect()
-}
-
-/// Resolved policy for the standalone local development runtime profile.
-pub fn local_dev_runtime_policy() -> Result<ResolvedRuntimePolicy, ResolveError> {
-    use ironclaw_host_api::runtime_policy::{DeploymentMode, RuntimeProfile};
-
-    ironclaw_runtime_policy::resolve(ironclaw_runtime_policy::ResolveRequest::new(
-        DeploymentMode::LocalSingleUser,
-        RuntimeProfile::LocalDev,
-    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,10 +197,11 @@ use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::PostgresRootFilesystem;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
+use ironclaw_host_api::ProcessBackendKind;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{
-    MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, SecretHandle, VirtualPath,
-    runtime_policy::EffectiveRuntimePolicy,
+    MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, SYSTEM_RESERVED_ID,
+    SecretHandle, VirtualPath,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_runtime::{CapabilitySurfaceVersion, HostRuntimeServices};
@@ -255,6 +261,7 @@ const PER_USER_ALIASES: &[&str] = &[
     "/threads",
     "/conversations",
     "/turns",
+    "/checkpoint-state",
     "/resources",
     "/engine",
     "/skills",
@@ -272,18 +279,34 @@ const PER_USER_ALIASES: &[&str] = &[
 ///
 /// The system sentinel scope (see
 /// [`ironclaw_host_api::ResourceScope::system`]) routes records under
-/// `/tenants/__SYSTEM__/users/__SYSTEM__/<alias>`. Production code uses
+/// `/tenants/__system__/users/__system__/<alias>`. Production code uses
 /// it for process-global records whose paths already encode per-tenant
 /// identity (event-log stream keys, conversation singleton state).
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub fn invocation_mount_view(
     scope: &ResourceScope,
 ) -> Result<MountView, ironclaw_host_api::HostApiError> {
-    let tenant_user_prefix = format!(
-        "/tenants/{}/users/{}",
-        scope.tenant_id.as_str(),
-        scope.user_id.as_str()
-    );
+    invocation_mount_view_for_segments(
+        resource_scope_path_segment(scope.tenant_id.as_str()),
+        resource_scope_path_segment(scope.user_id.as_str()),
+    )
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn resource_scope_path_segment(value: &str) -> &str {
+    if value == SYSTEM_RESERVED_ID {
+        "__system__"
+    } else {
+        value
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn invocation_mount_view_for_segments(
+    tenant_id: &str,
+    user_id: &str,
+) -> Result<MountView, ironclaw_host_api::HostApiError> {
+    let tenant_user_prefix = format!("/tenants/{tenant_id}/users/{user_id}");
     let mut grants = Vec::with_capacity(PER_USER_ALIASES.len() + 2);
     for alias in PER_USER_ALIASES {
         let target = format!("{tenant_user_prefix}{alias}");
@@ -295,7 +318,7 @@ pub fn invocation_mount_view(
     }
     grants.push(MountGrant::new(
         MountAlias::new("/tenant-shared")?,
-        VirtualPath::new(format!("/tenants/{}/shared", scope.tenant_id.as_str()))?,
+        VirtualPath::new(format!("/tenants/{tenant_id}/shared"))?,
         MountPermissions::read_write(),
     ));
     for system_subroot in ["/system/settings", "/system/extensions", "/system/skills"] {
@@ -331,7 +354,7 @@ where
     pub event_store: RebornEventStoreConfig,
     pub secret_master_key: Option<SecretMaterial>,
     pub trust_policy: Arc<TPolicy>,
-    pub runtime_policy: EffectiveRuntimePolicy,
+    pub runtime_policy: RebornProductionRuntimePolicy,
     pub turn_run_wake_notifier: Arc<TWake>,
     pub surface_version: CapabilitySurfaceVersion,
 }
@@ -347,14 +370,16 @@ where
     pub event_store: RebornEventStoreConfig,
     pub secret_master_key: Option<SecretMaterial>,
     pub trust_policy: Arc<TPolicy>,
-    pub runtime_policy: EffectiveRuntimePolicy,
+    pub runtime_policy: RebornProductionRuntimePolicy,
     pub turn_run_wake_notifier: Arc<TWake>,
     pub surface_version: CapabilitySurfaceVersion,
 }
 
 #[derive(Debug, Error)]
 pub enum RebornCompositionError {
-    #[error("reborn production composition requires explicit secret master key")]
+    #[error(
+        "reborn production composition requires a configured or keychain-resolvable secret master key"
+    )]
     MissingSecretMasterKey,
     #[error("reborn mount view construction failed: {0}")]
     Mount(#[from] ironclaw_host_api::HostApiError),
@@ -374,6 +399,10 @@ pub enum RebornCompositionError {
     Turn(#[from] TurnError),
     #[error("reborn run-profile resolver substrate failed: {0}")]
     RunProfile(#[from] ironclaw_turns::run_profile::RunProfileRegistryError),
+    #[error("tenant-sandbox process backend requires explicit tenant sandbox process port")]
+    MissingTenantSandboxProcessPort,
+    #[error("tenant sandbox process port was supplied for runtime backend {process_backend:?}")]
+    UnexpectedTenantSandboxProcessPort { process_backend: ProcessBackendKind },
 }
 
 /// Build production-wired host-runtime services over libSQL-backed substrates.
@@ -410,6 +439,8 @@ where
         &scoped_filesystem,
     )));
 
+    let (runtime_policy, process_binding) = config.runtime_policy.into_parts();
+
     let services = HostRuntimeServices::new(
         Arc::new(ExtensionRegistry::new()),
         filesystem,
@@ -419,7 +450,7 @@ where
         config.surface_version,
     )
     .with_trust_policy(config.trust_policy)
-    .with_runtime_policy(config.runtime_policy)
+    .with_runtime_policy(runtime_policy)
     .with_capability_leases(capability_leases)
     .with_secret_store(Arc::clone(&secret_store))
     .with_turn_run_wake_notifier(config.turn_run_wake_notifier)
@@ -430,6 +461,8 @@ where
     ))
     .with_reborn_event_store_config(RebornProfile::Production, config.event_store)
     .await?;
+    let services =
+        crate::factory::apply_production_runtime_process_binding(services, process_binding);
 
     // safety: `with_secret_store` is called unconditionally above on the same
     // builder chain, so `try_with_host_http_egress` can only return a
@@ -475,6 +508,8 @@ where
         &scoped_filesystem,
     )));
 
+    let (runtime_policy, process_binding) = config.runtime_policy.into_parts();
+
     let services = HostRuntimeServices::new(
         Arc::new(ExtensionRegistry::new()),
         filesystem,
@@ -484,7 +519,7 @@ where
         config.surface_version,
     )
     .with_trust_policy(config.trust_policy)
-    .with_runtime_policy(config.runtime_policy)
+    .with_runtime_policy(runtime_policy)
     .with_capability_leases(capability_leases)
     .with_secret_store(Arc::clone(&secret_store))
     .with_turn_run_wake_notifier(config.turn_run_wake_notifier)
@@ -495,6 +530,8 @@ where
     ))
     .with_reborn_event_store_config(RebornProfile::Production, config.event_store)
     .await?;
+    let services =
+        crate::factory::apply_production_runtime_process_binding(services, process_binding);
 
     // safety: `with_secret_store` is called unconditionally above on the same
     // builder chain, so `try_with_host_http_egress` can only return a
@@ -528,7 +565,18 @@ async fn build_filesystem_secret_store<F>(
 where
     F: RootFilesystem + 'static,
 {
-    let crypto = secrets_crypto(master_key)?;
+    let crypto = secrets_crypto(master_key).await?;
+    build_filesystem_secret_store_with_crypto(scoped_filesystem, crypto)
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn build_filesystem_secret_store_with_crypto<F>(
+    scoped_filesystem: Arc<ScopedFilesystem<F>>,
+    crypto: Arc<SecretsCrypto>,
+) -> Result<Arc<SharedSecretStore>, RebornCompositionError>
+where
+    F: RootFilesystem + 'static,
+{
     let store = FilesystemSecretStore::new(scoped_filesystem, crypto);
     // The FS-stored master-key sentinel was removed alongside the tenant-aware
     // ScopedFilesystem rework — see filesystem_store.rs. Master-key
@@ -538,11 +586,26 @@ where
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-fn secrets_crypto(
+async fn secrets_crypto(
     master_key: Option<SecretMaterial>,
 ) -> Result<Arc<SecretsCrypto>, RebornCompositionError> {
-    let master_key = master_key.ok_or(RebornCompositionError::MissingSecretMasterKey)?;
+    let master_key = resolve_composition_secret_master_key(master_key).await?;
     Ok(Arc::new(SecretsCrypto::new(master_key)?))
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+async fn resolve_composition_secret_master_key(
+    explicit: Option<SecretMaterial>,
+) -> Result<SecretMaterial, RebornCompositionError> {
+    if let Some(master_key) = explicit {
+        Ok(master_key)
+    } else if let Some(master_key) =
+        ironclaw_secrets::keychain::resolve_master_key_material().await?
+    {
+        Ok(master_key)
+    } else {
+        Err(RebornCompositionError::MissingSecretMasterKey)
+    }
 }
 
 // TODO(#3571): remove this adapter when the host-runtime services builder
@@ -682,6 +745,18 @@ mod mount_view_tests {
         assert_eq!(
             resolved.as_str(),
             &format!("/tenants/{}/shared/foo", scope.tenant_id.as_str())
+        );
+    }
+
+    #[test]
+    fn invocation_mount_view_sanitizes_system_scope_segments() {
+        let view = invocation_mount_view(&ResourceScope::system()).unwrap();
+        let resolved = view
+            .resolve(&ScopedPath::new("/turns/state.json").unwrap())
+            .unwrap();
+        assert_eq!(
+            resolved.as_str(),
+            "/tenants/__system__/users/__system__/turns/state.json"
         );
     }
 

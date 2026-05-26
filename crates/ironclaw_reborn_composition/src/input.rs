@@ -1,11 +1,78 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
-use ironclaw_host_runtime::SchedulerTurnRunWakeNotifier;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_host_api::runtime_policy::ProcessBackendKind;
+use ironclaw_host_api::runtime_policy::{
+    EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode, SecretMode,
+};
+use ironclaw_host_runtime::{SchedulerTurnRunWakeNotifier, TenantSandboxProcessPort};
 use ironclaw_trust::HostTrustPolicy;
 
-use crate::{RebornCompositionProfile, RebornProductAuthServices};
+use crate::{RebornCompositionProfile, RebornProductAuthServicePorts};
+
+#[derive(Clone, Debug, Default)]
+pub enum RebornRuntimeProcessBinding {
+    #[default]
+    None,
+    TenantSandbox {
+        process_port: Arc<TenantSandboxProcessPort>,
+    },
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RebornRuntimeProcessBindingError {
+    MissingTenantSandboxProcessPort,
+    UnexpectedTenantSandboxProcessPort { process_backend: ProcessBackendKind },
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+impl std::fmt::Display for RebornRuntimeProcessBindingError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingTenantSandboxProcessPort => formatter.write_str(
+                "production tenant-sandbox process backend requires a tenant sandbox process binding",
+            ),
+            Self::UnexpectedTenantSandboxProcessPort { process_backend } => write!(
+                formatter,
+                "production runtime policy uses {process_backend:?} but a tenant sandbox process binding was supplied"
+            ),
+        }
+    }
+}
+
+impl RebornRuntimeProcessBinding {
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    pub fn tenant_sandbox(process_port: Arc<TenantSandboxProcessPort>) -> Self {
+        Self::TenantSandbox { process_port }
+    }
+
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    pub(crate) fn validate_for_production_policy(
+        &self,
+        runtime_policy: &EffectiveRuntimePolicy,
+    ) -> Result<(), RebornRuntimeProcessBindingError> {
+        match (runtime_policy.process_backend, self) {
+            (
+                ProcessBackendKind::TenantSandbox,
+                RebornRuntimeProcessBinding::TenantSandbox { .. },
+            ) => Ok(()),
+            (ProcessBackendKind::TenantSandbox, RebornRuntimeProcessBinding::None) => {
+                Err(RebornRuntimeProcessBindingError::MissingTenantSandboxProcessPort)
+            }
+            (_, RebornRuntimeProcessBinding::TenantSandbox { .. }) => Err(
+                RebornRuntimeProcessBindingError::UnexpectedTenantSandboxProcessPort {
+                    process_backend: runtime_policy.process_backend,
+                },
+            ),
+            (_, RebornRuntimeProcessBinding::None) => Ok(()),
+        }
+    }
+}
 
 pub struct RebornBuildInput {
     pub(crate) profile: RebornCompositionProfile,
@@ -14,10 +81,11 @@ pub struct RebornBuildInput {
     pub(crate) production_trust_policy: Option<Arc<HostTrustPolicy>>,
     pub(crate) runtime_policy: Option<EffectiveRuntimePolicy>,
     pub(crate) turn_run_wake_notifier: Option<Arc<SchedulerTurnRunWakeNotifier>>,
+    pub(crate) runtime_process_binding: RebornRuntimeProcessBinding,
     pub(crate) required_runtime_backends: Vec<ironclaw_host_api::RuntimeKind>,
     pub(crate) require_runtime_http_egress: bool,
     pub(crate) require_wasm_credentials: bool,
-    pub(crate) product_auth_services: Option<Arc<RebornProductAuthServices>>,
+    pub(crate) product_auth_ports: Option<RebornProductAuthServicePorts>,
 }
 
 pub(crate) enum RebornStorageInput {
@@ -25,19 +93,20 @@ pub(crate) enum RebornStorageInput {
     LocalDev {
         root: PathBuf,
         workspace_root: Option<PathBuf>,
+        host_home_root: Option<PathBuf>,
     },
     #[cfg(feature = "libsql")]
     Libsql {
         db: Arc<libsql::Database>,
         path_or_url: String,
         auth_token: Option<ironclaw_secrets::SecretMaterial>,
-        secret_master_key: ironclaw_secrets::SecretMaterial,
+        secret_master_key: Option<ironclaw_secrets::SecretMaterial>,
     },
     #[cfg(feature = "postgres")]
     Postgres {
         pool: deadpool_postgres::Pool,
         url: ironclaw_secrets::SecretMaterial,
-        secret_master_key: ironclaw_secrets::SecretMaterial,
+        secret_master_key: Option<ironclaw_secrets::SecretMaterial>,
     },
 }
 
@@ -62,12 +131,25 @@ impl RebornBuildInput {
     }
 
     pub fn local_dev(owner_id: impl Into<String>, root: PathBuf) -> Self {
+        Self::local_dev_with_profile(RebornCompositionProfile::LocalDev, owner_id, root)
+    }
+
+    pub(crate) fn local_dev_with_profile(
+        profile: RebornCompositionProfile,
+        owner_id: impl Into<String>,
+        root: PathBuf,
+    ) -> Self {
+        debug_assert!(matches!(
+            profile,
+            RebornCompositionProfile::LocalDev | RebornCompositionProfile::LocalDevYolo
+        ));
         Self::new(
-            RebornCompositionProfile::LocalDev,
+            profile,
             owner_id,
             RebornStorageInput::LocalDev {
                 root,
                 workspace_root: None,
+                host_home_root: None,
             },
         )
     }
@@ -81,6 +163,31 @@ impl RebornBuildInput {
             *root = Some(workspace_root);
         }
         self
+    }
+
+    pub fn with_local_dev_confirmed_host_home_root(mut self, host_home_root: PathBuf) -> Self {
+        if let RebornStorageInput::LocalDev {
+            host_home_root: root,
+            ..
+        } = &mut self.storage
+        {
+            *root = Some(host_home_root);
+        }
+        self
+    }
+
+    pub fn requires_local_dev_confirmed_host_home_root(&self) -> bool {
+        self.runtime_policy.as_ref().is_some_and(|policy| {
+            policy.filesystem_backend == FilesystemBackendKind::HostWorkspaceAndHome
+        })
+    }
+
+    pub fn grants_trusted_laptop_access(&self) -> bool {
+        self.runtime_policy.as_ref().is_some_and(|policy| {
+            policy.filesystem_backend == FilesystemBackendKind::HostWorkspaceAndHome
+                || policy.network_mode == NetworkMode::Direct
+                || policy.secret_mode == SecretMode::InheritedEnv
+        })
     }
 
     #[cfg(feature = "libsql")]
@@ -99,7 +206,27 @@ impl RebornBuildInput {
                 db,
                 path_or_url: path_or_url.into(),
                 auth_token,
-                secret_master_key,
+                secret_master_key: Some(secret_master_key),
+            },
+        )
+    }
+
+    #[cfg(feature = "libsql")]
+    pub fn libsql_with_resolved_secret_master_key(
+        profile: RebornCompositionProfile,
+        owner_id: impl Into<String>,
+        db: Arc<libsql::Database>,
+        path_or_url: impl Into<String>,
+        auth_token: Option<ironclaw_secrets::SecretMaterial>,
+    ) -> Self {
+        Self::new(
+            profile,
+            owner_id,
+            RebornStorageInput::Libsql {
+                db,
+                path_or_url: path_or_url.into(),
+                auth_token,
+                secret_master_key: None,
             },
         )
     }
@@ -118,7 +245,25 @@ impl RebornBuildInput {
             RebornStorageInput::Postgres {
                 pool,
                 url,
-                secret_master_key,
+                secret_master_key: Some(secret_master_key),
+            },
+        )
+    }
+
+    #[cfg(feature = "postgres")]
+    pub fn postgres_with_resolved_secret_master_key(
+        profile: RebornCompositionProfile,
+        owner_id: impl Into<String>,
+        pool: deadpool_postgres::Pool,
+        url: ironclaw_secrets::SecretMaterial,
+    ) -> Self {
+        Self::new(
+            profile,
+            owner_id,
+            RebornStorageInput::Postgres {
+                pool,
+                url,
+                secret_master_key: None,
             },
         )
     }
@@ -153,6 +298,11 @@ impl RebornBuildInput {
         self
     }
 
+    pub fn with_runtime_process_binding(mut self, binding: RebornRuntimeProcessBinding) -> Self {
+        self.runtime_process_binding = binding;
+        self
+    }
+
     pub fn require_runtime_http_egress(mut self) -> Self {
         self.require_runtime_http_egress = true;
         self
@@ -163,13 +313,14 @@ impl RebornBuildInput {
         self
     }
 
-    /// Inject a Reborn-native product-auth composition bundle.
+    /// Inject Reborn-native product-auth service ports.
     ///
-    /// Production callers should provide durable implementations here once the
-    /// auth-flow and credential-account storage substrate is available. The
-    /// composition root never falls back to V1 route state or V1 secret stores.
-    pub fn with_product_auth_services(mut self, services: Arc<RebornProductAuthServices>) -> Self {
-        self.product_auth_services = Some(services);
+    /// Production callers should provide durable implementations here. The
+    /// composition root attaches the turn-continuation dispatcher after it has
+    /// composed the profile's [`ironclaw_turns::TurnCoordinator`], so OAuth
+    /// continuations cannot accidentally bypass the active coordinator.
+    pub fn with_product_auth_ports(mut self, ports: RebornProductAuthServicePorts) -> Self {
+        self.product_auth_ports = Some(ports);
         self
     }
 
@@ -185,10 +336,11 @@ impl RebornBuildInput {
             production_trust_policy: None,
             runtime_policy: None,
             turn_run_wake_notifier: None,
+            runtime_process_binding: RebornRuntimeProcessBinding::default(),
             required_runtime_backends: Vec::new(),
             require_runtime_http_egress: false,
             require_wasm_credentials: false,
-            product_auth_services: None,
+            product_auth_ports: None,
         }
     }
 }
@@ -202,20 +354,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn with_product_auth_services_records_injected_bundle() {
-        let product_auth = Arc::new(RebornProductAuthServices::from_shared(Arc::new(
+    fn with_product_auth_ports_records_injected_ports() {
+        let product_auth = RebornProductAuthServicePorts::from_shared(Arc::new(
             InMemoryAuthProductServices::new(),
-        )));
-
-        let input = RebornBuildInput::disabled("test-owner")
-            .with_product_auth_services(Arc::clone(&product_auth));
-
-        assert!(Arc::ptr_eq(
-            input
-                .product_auth_services
-                .as_ref()
-                .expect("builder should retain injected product auth services"),
-            &product_auth
         ));
+
+        let input =
+            RebornBuildInput::disabled("test-owner").with_product_auth_ports(product_auth.clone());
+
+        assert!(input.product_auth_ports.is_some());
     }
 }

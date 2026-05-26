@@ -14,6 +14,7 @@
 #   7. Gateway/CLI handlers bypassing ToolDispatcher (must go through tools)
 #   8. CredentialName referenced in web-layer code (wrong identity at boundary)
 #   9. SSE broadcast emitted outside the engine→AppEvent projection bridge
+#  10. Newly-added pub fn/type/struct/enum/trait with zero callers (dead/speculative API)
 #
 # Also runs check-i18n-parity.sh when crates/ironclaw_gateway/static/i18n/*.js
 # files are staged, to ensure every language pack has the same key set.
@@ -22,6 +23,7 @@
 # For check #7, use "// dispatch-exempt: <reason>" instead.
 # For check #8, use "// web-identity-exempt: <reason>" instead.
 # For check #9, use "// projection-exempt: <category>, <detail>" instead.
+# For check #10, use "// pub-api-exempt: <reason>" instead.
 
 set -euo pipefail
 
@@ -427,12 +429,62 @@ if [ -n "$PROJECTION_HITS" ]; then
     echo "$PROJECTION_HITS" | sed 's/^/    /'
 fi
 
+# 10. Dead/speculative public API: newly-added `pub fn`/`pub type`/`pub struct`/
+#     `pub enum`/`pub trait` whose identifier appears exactly once in the whole
+#     repo — i.e. only the definition, no callers/uses. This is the "Theme 1"
+#     maintainability anti-pattern: accessors, `_dyn` variants, and getters that
+#     expand the stable surface with zero consumers.
+#
+#     Heuristic, not a proof: a brand-new public symbol with a single repo-wide
+#     occurrence is almost always dead-on-arrival. It's a WARNING (the script
+#     only hard-blocks on the documented categories above via the shared
+#     summary, but this check is advisory by design — see note below).
+#
+#     Only added lines are scanned (`DIFF_OUTPUT_NO_TESTS` already drops test
+#     modules and `tests/` files), so it never trips on pre-existing code or
+#     on test-only helpers. Suppress an intentional new-but-uncalled symbol
+#     (e.g. a trait method implemented elsewhere, an FFI/`#[no_mangle]` export,
+#     or API staged ahead of its first caller in the same series) with
+#     "// pub-api-exempt: <reason>" on the declaration line.
+PUB_API_HITS=""
+# Pull added pub-item declaration lines, excluding those already exempted.
+PUB_DECL_LINES=$(echo "$DIFF_OUTPUT_NO_TESTS" | grep -E '^\+' \
+    | grep -E '^\+[[:space:]]*pub(\([^)]*\))?[[:space:]]+(async[[:space:]]+)?(unsafe[[:space:]]+)?(fn|type|struct|enum|trait)[[:space:]]' \
+    | grep -vE '// pub-api-exempt:|// safety:' || true)
+if [ -n "$PUB_DECL_LINES" ]; then
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        # Extract the declared identifier: strip leading `+`, the `pub[(...)]`
+        # qualifier and modifier keywords, the item keyword, then take the
+        # first identifier token (cutting at `<`, `(`, `{`, `:`, whitespace).
+        ident=$(printf '%s\n' "$line" | sed -E \
+            -e 's/^\+[[:space:]]*//' \
+            -e 's/^pub(\([^)]*\))?[[:space:]]+//' \
+            -e 's/^(async[[:space:]]+)?(unsafe[[:space:]]+)?//' \
+            -e 's/^(fn|type|struct|enum|trait)[[:space:]]+//' \
+            | grep -oE '^[A-Za-z_][A-Za-z0-9_]*' || true)
+        [ -z "$ident" ] && continue
+        # Count repo-wide occurrences of the identifier as a whole word.
+        # `git grep -w` is fast and respects .gitignore; one hit == definition only.
+        occ=$(git grep -wIE "$ident" -- '*.rs' 2>/dev/null | wc -l | tr -d ' ')
+        if [ "${occ:-0}" -le 1 ]; then
+            PUB_API_HITS="${PUB_API_HITS}    ${ident} (${occ:-0} occurrence) — ${line#+}
+"
+        fi
+    done <<<"$PUB_DECL_LINES"
+fi
+if [ -n "$PUB_API_HITS" ]; then
+    warn "PUBAPI" "New \`pub\` item(s) with zero callers/uses (dead or speculative public API — maintainability audit Theme 1). Make them \`pub(crate)\`, delete, or annotate with '// pub-api-exempt: <reason>'."
+    printf '%s' "$PUB_API_HITS"
+fi
+
 if [ "$WARNINGS" -gt 0 ]; then
     echo ""
     echo "Found $WARNINGS potential issue(s). Fix them or add '// safety: <reason>' to suppress."
     echo "(For DISPATCH warnings, use '// dispatch-exempt: <reason>' instead.)"
     echo "(For CREDNAME warnings, use '// web-identity-exempt: <reason>' instead.)"
     echo "(For PROJECTION warnings, use '// projection-exempt: <category>, <detail>' instead.)"
+    echo "(For PUBAPI warnings, use '// pub-api-exempt: <reason>' instead.)"
     echo ""
     exit 1
 fi

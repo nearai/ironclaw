@@ -83,32 +83,44 @@ async fn recovery_budget_exhaustion_uses_single_call_retry() {
 
     match exit {
         LoopExit::Failed(failed) => {
-            assert_eq!(failed.reason_kind, LoopFailureKind::CapabilityProtocolError);
+            assert_eq!(failed.reason_kind, LoopFailureKind::ModelError);
         }
         other => panic!("expected failed exit, got {other:?}"),
     }
 
     let calls = host.call_log();
     assert!(
-        matches!(
-            calls.as_slice(),
-            [
-                MockHostCall::PollInputs,
-                MockHostCall::VisibleCapabilities,
-                MockHostCall::BuildPromptBundle,
-                MockHostCall::StageCheckpointPayload(CheckpointKind::BeforeModel),
-                MockHostCall::SaveCheckpoint(CheckpointKind::BeforeModel),
-                MockHostCall::StreamModel,
-                MockHostCall::StageCheckpointPayload(CheckpointKind::BeforeSideEffect),
-                MockHostCall::SaveCheckpoint(CheckpointKind::BeforeSideEffect),
-                MockHostCall::InvokeCapabilityBatch { .. },
-                MockHostCall::InvokeCapability { .. },
-                MockHostCall::InvokeCapability { .. },
-                MockHostCall::StageCheckpointPayload(CheckpointKind::Final),
-                MockHostCall::SaveCheckpoint(CheckpointKind::Final),
-            ]
-        ),
+        calls.starts_with(&[
+            MockHostCall::PollInputs,
+            MockHostCall::VisibleCapabilities,
+            MockHostCall::BuildPromptBundle,
+            MockHostCall::StageCheckpointPayload(CheckpointKind::BeforeModel),
+            MockHostCall::SaveCheckpoint(CheckpointKind::BeforeModel),
+            MockHostCall::StreamModel,
+            MockHostCall::StageCheckpointPayload(CheckpointKind::BeforeSideEffect),
+            MockHostCall::SaveCheckpoint(CheckpointKind::BeforeSideEffect),
+        ]),
         "retry result ordering should stay on the wire; got {calls:?}"
+    );
+    assert!(matches!(
+        calls.get(8),
+        Some(MockHostCall::InvokeCapabilityBatch { .. })
+    ));
+    assert!(matches!(
+        calls.get(9),
+        Some(MockHostCall::InvokeCapability { .. })
+    ));
+    assert!(matches!(
+        calls.get(10),
+        Some(MockHostCall::InvokeCapability { .. })
+    ));
+    let final_calls = &calls[calls.len().saturating_sub(2)..];
+    assert_eq!(
+        final_calls,
+        [
+            MockHostCall::StageCheckpointPayload(CheckpointKind::Final),
+            MockHostCall::SaveCheckpoint(CheckpointKind::Final)
+        ]
     );
     assert_eq!(
         calls

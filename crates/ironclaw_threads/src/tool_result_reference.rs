@@ -1,4 +1,8 @@
 use ironclaw_host_api::CapabilityId;
+use ironclaw_safety::{
+    validate_optional_provider_metadata_text, validate_provider_arguments,
+    validate_provider_identity, validate_provider_token, validate_provider_tool_name,
+};
 use serde::{Deserialize, Serialize};
 
 // Mirrors `ironclaw_turns::LoopResultRef` without adding a threads -> turns
@@ -84,12 +88,16 @@ pub struct ProviderToolCallReferenceEnvelope {
 
 impl ProviderToolCallReferenceEnvelope {
     pub fn validate(&self) -> Result<(), String> {
-        validate_provider_identity(&self.provider_id, "provider id", 512)?;
-        validate_provider_identity(&self.provider_model_id, "provider model id", 512)?;
-        validate_provider_token(&self.provider_turn_id, "provider turn id", 512)?;
-        validate_provider_token(&self.provider_call_id, "provider call id", 512)?;
-        validate_provider_tool_name(&self.provider_tool_name)?;
-        validate_provider_arguments(&self.arguments)?;
+        validate_provider_identity(&self.provider_id, "provider id", 512)
+            .map_err(|error| error.to_string())?;
+        validate_provider_identity(&self.provider_model_id, "provider model id", 512)
+            .map_err(|error| error.to_string())?;
+        validate_provider_token(&self.provider_turn_id, "provider turn id", 512)
+            .map_err(|error| error.to_string())?;
+        validate_provider_token(&self.provider_call_id, "provider call id", 512)
+            .map_err(|error| error.to_string())?;
+        validate_provider_tool_name(&self.provider_tool_name).map_err(|error| error.to_string())?;
+        validate_provider_arguments(&self.arguments).map_err(|error| error.to_string())?;
         validate_optional_provider_text(
             &self.response_reasoning,
             "provider response reasoning",
@@ -99,24 +107,6 @@ impl ProviderToolCallReferenceEnvelope {
         validate_optional_provider_text(&self.signature, "provider signature", 4096)?;
         Ok(())
     }
-}
-
-fn validate_provider_tool_name(value: &str) -> Result<(), String> {
-    if value.is_empty() {
-        return Err("provider tool name must not be empty".to_string());
-    }
-    if value.len() > 64 {
-        return Err("provider tool name exceeds 64 bytes".to_string());
-    }
-    if !value
-        .chars()
-        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
-    {
-        return Err(
-            "provider tool name must contain only ASCII letters, digits, _, or -".to_string(),
-        );
-    }
-    Ok(())
 }
 
 impl ToolResultReferenceEnvelope {
@@ -158,124 +148,13 @@ fn validate_tool_result_ref(value: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_provider_token(value: &str, label: &str, max_len: usize) -> Result<(), String> {
-    if value.is_empty() {
-        return Err(format!("{label} must not be empty"));
-    }
-    if value.len() > max_len {
-        return Err(format!("{label} exceeds {max_len} bytes"));
-    }
-    if !value.chars().all(|character| {
-        character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.' | ':')
-    }) {
-        return Err(format!(
-            "{label} must contain only ASCII letters, digits, _, -, ., or :"
-        ));
-    }
-    Ok(())
-}
-
-fn validate_provider_identity(value: &str, label: &str, max_len: usize) -> Result<(), String> {
-    if value.trim().is_empty() {
-        return Err(format!("{label} must not be empty"));
-    }
-    if value.len() > max_len {
-        return Err(format!("{label} exceeds {max_len} bytes"));
-    }
-    if value
-        .chars()
-        .any(|character| character == '\0' || character.is_control())
-    {
-        return Err(format!("{label} must not contain NUL/control characters"));
-    }
-    Ok(())
-}
-
-fn validate_provider_arguments(arguments: &serde_json::Value) -> Result<(), String> {
-    let arguments_len = serde_json::to_vec(arguments)
-        .map_err(|error| format!("provider arguments are not serializable: {error}"))?
-        .len();
-    if arguments_len > 16 * 1024 {
-        return Err("provider tool arguments exceed 16384 bytes".to_string());
-    }
-    validate_provider_json_value(arguments, "provider arguments", 0)
-}
-
-fn validate_provider_json_value(
-    value: &serde_json::Value,
-    label: &str,
-    depth: usize,
-) -> Result<(), String> {
-    if depth > 16 {
-        return Err(format!("{label} exceed maximum nesting depth"));
-    }
-    match value {
-        serde_json::Value::String(text) => validate_provider_text_content(text, label),
-        serde_json::Value::Array(items) => {
-            for item in items {
-                validate_provider_json_value(item, label, depth + 1)?;
-            }
-            Ok(())
-        }
-        serde_json::Value::Object(entries) => {
-            for (key, item) in entries {
-                validate_provider_json_key(key)?;
-                validate_provider_json_value(item, label, depth + 1)?;
-            }
-            Ok(())
-        }
-        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
-            Ok(())
-        }
-    }
-}
-
-fn validate_provider_json_key(key: &str) -> Result<(), String> {
-    if key
-        .chars()
-        .any(|character| character == '\0' || character.is_control())
-    {
-        return Err("provider argument key must not contain NUL/control characters".to_string());
-    }
-    Ok(())
-}
-
 fn validate_optional_provider_text(
     value: &Option<String>,
     label: &str,
     max_len: usize,
 ) -> Result<(), String> {
-    let Some(value) = value else {
-        return Ok(());
-    };
-    if value.len() > max_len {
-        return Err(format!("{label} exceeds {max_len} bytes"));
-    }
-    validate_provider_text_content(value, label)
-}
-
-fn validate_provider_text_content(value: &str, label: &str) -> Result<(), String> {
-    if value
-        .chars()
-        .any(|character| character == '\0' || character.is_control())
-    {
-        return Err(format!("{label} must not contain NUL/control characters"));
-    }
-    let lower = value.to_ascii_lowercase();
-    for forbidden in SENSITIVE_SUMMARY_MARKERS {
-        if lower.contains(forbidden) {
-            return Err(format!(
-                "{label} must not contain sensitive marker `{forbidden}`"
-            ));
-        }
-    }
-    if lower
-        .split(|character: char| !character.is_ascii_alphanumeric() && character != '-')
-        .any(|token| token.starts_with("sk-"))
-    {
-        return Err(format!("{label} must not contain API-key-like tokens"));
-    }
-    Ok(())
+    validate_optional_provider_metadata_text(value.as_deref(), label, max_len)
+        .map_err(|error| error.to_string())
 }
 
 fn validate_tool_result_safe_summary(value: String) -> Result<String, String> {
@@ -373,11 +252,30 @@ mod tests {
     #[test]
     fn provider_reference_validation_rejects_sensitive_arguments_and_text() {
         let mut envelope = provider_reference();
-        envelope.arguments = serde_json::json!({"api_key":"sk-live-secret"});
+        let api_key = format!("sk-proj-{}", "a".repeat(24));
+        envelope.arguments = serde_json::json!({"api_key": api_key});
         assert!(envelope.validate().is_err());
 
         let mut envelope = provider_reference();
         envelope.response_reasoning = Some("raw provider error included a stack trace".to_string());
+        assert!(envelope.validate().is_err());
+    }
+
+    #[test]
+    fn provider_reference_validation_allows_multiline_argument_text() {
+        let mut envelope = provider_reference();
+        envelope.arguments = serde_json::json!({
+            "content": "---\nname: pasted-skill\n---\n\nUse multiline Markdown.\n"
+        });
+
+        envelope.validate().expect("multiline arguments are valid");
+    }
+
+    #[test]
+    fn provider_reference_validation_rejects_non_whitespace_argument_controls() {
+        let mut envelope = provider_reference();
+        envelope.arguments = serde_json::json!({"content":"line one\u{0001}line two"});
+
         assert!(envelope.validate().is_err());
     }
 

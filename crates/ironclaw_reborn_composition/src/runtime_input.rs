@@ -67,7 +67,7 @@ impl Default for RebornRuntimeIdentity {
 /// composition-owned types so callers (the CLI) never name `ironclaw_llm`
 /// directly.
 #[cfg(feature = "root-llm-provider")]
-pub const DEFAULT_LLM_REQUEST_TIMEOUT_SECS: u64 = 120;
+pub(crate) const DEFAULT_LLM_REQUEST_TIMEOUT_SECS: u64 = 120;
 
 pub const DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 pub const DEFAULT_TURN_RUNNER_POLL_INTERVAL: Duration = Duration::from_millis(200);
@@ -274,6 +274,12 @@ impl RebornRuntimeInput {
     pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {
         self.skill_context_source = Some(source);
         self
+    }
+
+    pub fn grants_trusted_laptop_access(&self) -> bool {
+        self.services
+            .as_ref()
+            .is_some_and(|services| services.grants_trusted_laptop_access())
     }
 
     /// Test-only hook: drive `build_reborn_runtime` with a stub

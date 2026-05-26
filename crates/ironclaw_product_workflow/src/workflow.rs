@@ -21,6 +21,11 @@ use crate::binding::{
     ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
     ResolvedBinding,
 };
+use crate::command_dispatch::{
+    ProductCommandAdmission, ProductCommandAdmissionService, ProductCommandContext,
+    ProductCommandService, RejectingProductCommandAdmissionService, RejectingProductCommandService,
+};
+use crate::commands::ProductCommand;
 use crate::error::ProductWorkflowError;
 use crate::inbound_turn::{InboundTurnService, InboundUserMessageDispatch};
 use crate::ledger::{IdempotencyDecision, IdempotencyLedger};
@@ -34,6 +39,8 @@ pub struct DefaultProductWorkflow {
     idempotency_ledger: Arc<dyn IdempotencyLedger>,
     before_inbound_policy: Arc<dyn BeforeInboundPolicy>,
     binding_service: Arc<dyn ConversationBindingService>,
+    command_admission_service: Arc<dyn ProductCommandAdmissionService>,
+    command_service: Arc<dyn ProductCommandService>,
 }
 
 impl DefaultProductWorkflow {
@@ -47,6 +54,8 @@ impl DefaultProductWorkflow {
             idempotency_ledger,
             before_inbound_policy: Arc::new(NoopBeforeInboundPolicy),
             binding_service,
+            command_admission_service: Arc::new(RejectingProductCommandAdmissionService),
+            command_service: Arc::new(RejectingProductCommandService),
         }
     }
 
@@ -55,6 +64,22 @@ impl DefaultProductWorkflow {
         before_inbound_policy: Arc<dyn BeforeInboundPolicy>,
     ) -> Self {
         self.before_inbound_policy = before_inbound_policy;
+        self
+    }
+
+    pub fn with_product_command_admission_service(
+        mut self,
+        command_admission_service: Arc<dyn ProductCommandAdmissionService>,
+    ) -> Self {
+        self.command_admission_service = command_admission_service;
+        self
+    }
+
+    pub fn with_product_command_service(
+        mut self,
+        command_service: Arc<dyn ProductCommandService>,
+    ) -> Self {
+        self.command_service = command_service;
         self
     }
 }
@@ -103,8 +128,12 @@ impl ProductWorkflow for DefaultProductWorkflow {
             IdempotencyDecision::New(mut action) => {
                 let result = dispatch_payload(
                     &envelope,
+                    action.action_id,
+                    action.fingerprint.clone(),
                     &*self.inbound_turn_service,
                     &*self.before_inbound_policy,
+                    &*self.command_admission_service,
+                    &*self.command_service,
                 )
                 .await;
 
@@ -254,8 +283,12 @@ fn projection_thread_id_from_binding(
 
 async fn dispatch_payload(
     envelope: &ProductInboundEnvelope,
+    action_id: crate::ProductActionId,
+    action_fingerprint: ActionFingerprintKey,
     inbound_turn_service: &dyn InboundTurnService,
     before_inbound_policy: &dyn BeforeInboundPolicy,
+    command_admission_service: &dyn ProductCommandAdmissionService,
+    command_service: &dyn ProductCommandService,
 ) -> Result<DispatchedAction, ProductWorkflowError> {
     match envelope.payload() {
         ProductInboundPayload::UserMessage(_) => {
@@ -281,9 +314,20 @@ async fn dispatch_payload(
             }
         }
         ProductInboundPayload::Command(cmd) => {
-            Err(ProductWorkflowError::CommandRoutingUnavailable {
-                command: cmd.command.clone(),
-            })
+            let context =
+                ProductCommandContext::from_envelope(envelope, action_id, action_fingerprint)?;
+            let command = ProductCommand::from_payload(cmd);
+            match command_admission_service.admit(&context, &command).await? {
+                ProductCommandAdmission::Allowed => {}
+                ProductCommandAdmission::Rejected(rejection) => {
+                    let ack = ProductInboundAck::Rejected(rejection);
+                    let dispatch_kind = dispatch_kind_from_ack(&ack, envelope.payload())?;
+                    return Ok(DispatchedAction { ack, dispatch_kind });
+                }
+            }
+            let ack = command_service.execute(context, command).await?;
+            let dispatch_kind = dispatch_kind_from_command_ack(&ack, envelope.payload())?;
+            Ok(DispatchedAction { ack, dispatch_kind })
         }
         ProductInboundPayload::ApprovalResolution(_) => {
             Err(ProductWorkflowError::UnsupportedActionKind {
@@ -325,6 +369,23 @@ fn dispatch_kind_from_ack(
         ProductInboundAck::DeferredBusy { active_run_id, .. } => {
             Ok(ActionDispatchKind::UserMessageTurn {
                 run_id: *active_run_id,
+            })
+        }
+        ProductInboundAck::Rejected(rejection) => Ok(ActionDispatchKind::Rejected {
+            kind: rejection.kind.clone(),
+        }),
+        _ => ActionDispatchKind::try_from_payload(payload),
+    }
+}
+
+fn dispatch_kind_from_command_ack(
+    ack: &ProductInboundAck,
+    payload: &ProductInboundPayload,
+) -> Result<ActionDispatchKind, ProductWorkflowError> {
+    match ack {
+        ProductInboundAck::Accepted { .. } | ProductInboundAck::DeferredBusy { .. } => {
+            Err(ProductWorkflowError::UnsupportedActionKind {
+                kind: "turn_ack_from_product_command".into(),
             })
         }
         ProductInboundAck::Rejected(rejection) => Ok(ActionDispatchKind::Rejected {
@@ -387,12 +448,6 @@ fn terminal_ack_for_error(error: &ProductWorkflowError) -> Option<ProductInbound
                 reason.clone(),
             )))
         }
-        ProductWorkflowError::CommandRoutingUnavailable { command } => {
-            Some(ProductInboundAck::Rejected(ProductRejection::permanent(
-                ProductRejectionKind::PolicyDenied,
-                format!("command routing unavailable: {command}"),
-            )))
-        }
         ProductWorkflowError::UnsupportedActionKind { kind } => {
             Some(ProductInboundAck::Rejected(ProductRejection::permanent(
                 ProductRejectionKind::PolicyDenied,
@@ -416,6 +471,8 @@ fn terminal_ack_for_error(error: &ProductWorkflowError) -> Option<ProductInbound
         | ProductWorkflowError::TurnSubmissionRejected { .. }
         | ProductWorkflowError::TurnSubmissionFailed { .. }
         | ProductWorkflowError::TurnResumeRejected { .. }
+        | ProductWorkflowError::AuthContinuationRejected { .. }
+        | ProductWorkflowError::TurnResumeDenied { .. }
         | ProductWorkflowError::Transient { .. }
         | ProductWorkflowError::BeforeInboundPolicyFailed {
             permanent: false, ..
@@ -459,19 +516,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_ack_for_error_settles_command_and_unsupported_actions() {
-        let command = terminal_ack_for_error(&ProductWorkflowError::CommandRoutingUnavailable {
-            command: "help".to_string(),
-        })
-        .expect("command routing failure is terminal");
-        assert!(matches!(
-            command,
-            ProductInboundAck::Rejected(rejection)
-                if rejection.kind == ProductRejectionKind::PolicyDenied
-                    && rejection.disposition()
-                        == ironclaw_product_adapters::ProductRejectionDisposition::Permanent
-        ));
-
+    fn terminal_ack_for_error_settles_unsupported_actions() {
         let unsupported = terminal_ack_for_error(&ProductWorkflowError::UnsupportedActionKind {
             kind: "auth_resolution".to_string(),
         })

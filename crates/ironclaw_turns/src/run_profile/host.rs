@@ -66,6 +66,21 @@ fn validate_prefixed_loop_ref(
     Ok(value)
 }
 
+fn validate_prefixed_path_safe_loop_ref(
+    label: &'static str,
+    prefix: &'static str,
+    max_bytes: usize,
+    value: String,
+) -> Result<String, String> {
+    let value = validate_prefixed_loop_ref(label, prefix, max_bytes, value)?;
+    if value.contains('/') || value.contains('\\') || value.contains("..") {
+        return Err(format!(
+            "{label} must not contain path separators or parent-directory markers"
+        ));
+    }
+    Ok(value)
+}
+
 fn validate_loop_opaque_token(
     value: String,
     label: &'static str,
@@ -215,12 +230,6 @@ macro_rules! bounded_loop_ref {
 
 bounded_loop_ref!(CapabilityInputRef, "capability input ref", "input:", 256);
 bounded_loop_ref!(
-    LoopCheckpointStateRef,
-    "loop checkpoint state ref",
-    "checkpoint:",
-    256
-);
-bounded_loop_ref!(
     LoopInputCursorToken,
     "loop input cursor token",
     "input-cursor:",
@@ -228,6 +237,48 @@ bounded_loop_ref!(
 );
 bounded_loop_ref!(LoopInputAckToken, "loop input ack token", "input-ack:", 256);
 bounded_loop_ref!(LoopProcessRef, "loop process ref", "process:", 256);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct LoopCheckpointStateRef(String);
+
+impl LoopCheckpointStateRef {
+    pub fn new(value: impl Into<String>) -> Result<Self, String> {
+        validate_prefixed_path_safe_loop_ref(
+            "loop checkpoint state ref",
+            "checkpoint:",
+            256,
+            value.into(),
+        )
+        .map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for LoopCheckpointStateRef {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for LoopCheckpointStateRef {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for LoopCheckpointStateRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
 
 impl LoopCheckpointStateRef {
     pub(crate) fn legacy_unknown() -> Self {
@@ -1104,8 +1155,28 @@ pub struct CapabilityCallCandidate {
     pub surface_version: CapabilitySurfaceVersion,
     pub capability_id: CapabilityId,
     pub input_ref: CapabilityInputRef,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effective_capability_ids: Vec<CapabilityId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_replay: Option<ProviderToolCallReplay>,
+}
+
+/// Capability ids a provider tool call may touch before it is staged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderToolCallCapabilityIds {
+    /// Canonical capability id backing the provider-facing tool name.
+    pub provider_capability_id: CapabilityId,
+    /// Capabilities whose policy surface is used by this call.
+    pub effective_capability_ids: Vec<CapabilityId>,
+}
+
+impl ProviderToolCallCapabilityIds {
+    pub fn single(capability_id: CapabilityId) -> Self {
+        Self {
+            provider_capability_id: capability_id.clone(),
+            effective_capability_ids: vec![capability_id],
+        }
+    }
 }
 
 /// Provider-originated tool-call metadata needed to replay tool results back to the same provider.
@@ -1398,8 +1469,10 @@ pub enum CapabilityFailureKind {
     Cancelled,
     Dispatcher,
     InvalidInput,
+    InvalidOutput,
     MissingRuntime,
     Network,
+    OperationFailed,
     OutputTooLarge,
     PolicyDenied,
     Process,
@@ -1436,8 +1509,10 @@ impl CapabilityFailureKind {
             Self::Cancelled => "cancelled",
             Self::Dispatcher => "dispatcher",
             Self::InvalidInput => "invalid_input",
+            Self::InvalidOutput => "invalid_output",
             Self::MissingRuntime => "missing_runtime",
             Self::Network => "network",
+            Self::OperationFailed => "operation_failed",
             Self::OutputTooLarge => "output_too_large",
             Self::PolicyDenied => "policy_denied",
             Self::Process => "process",
@@ -1478,8 +1553,10 @@ impl<'de> Deserialize<'de> for CapabilityFailureKind {
             "cancelled" => Ok(Self::Cancelled),
             "dispatcher" => Ok(Self::Dispatcher),
             "invalid_input" => Ok(Self::InvalidInput),
+            "invalid_output" => Ok(Self::InvalidOutput),
             "missing_runtime" => Ok(Self::MissingRuntime),
             "network" => Ok(Self::Network),
+            "operation_failed" => Ok(Self::OperationFailed),
             "output_too_large" => Ok(Self::OutputTooLarge),
             "policy_denied" => Ok(Self::PolicyDenied),
             "process" => Ok(Self::Process),
@@ -1497,6 +1574,25 @@ impl<'de> Deserialize<'de> for CapabilityFailureKind {
 pub trait LoopCapabilityPort: Send + Sync {
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         Ok(Vec::new())
+    }
+
+    fn provider_tool_call_capability_ids(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<ProviderToolCallCapabilityIds, AgentLoopHostError> {
+        let Some(definition) = self
+            .tool_definitions()?
+            .into_iter()
+            .find(|definition| definition.name == tool_call.name)
+        else {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "provider tool call is outside the visible capability surface",
+            ));
+        };
+        Ok(ProviderToolCallCapabilityIds::single(
+            definition.capability_id,
+        ))
     }
 
     fn validate_provider_tool_call(
@@ -1773,6 +1869,12 @@ pub enum LoopDriverNoteKind {
     Planning,
     Waiting,
     Retrying,
+    /// An event-triggered hook subscription stopped before the run did —
+    /// typically because the durable event log reported a replay gap that
+    /// the subscription cannot bridge without losing events. Surfaced as
+    /// an operator-visible note so the missing telemetry isn't silently
+    /// invisible (NOTE(#3640)).
+    EventSubscriptionTerminated,
 }
 
 #[async_trait]
@@ -1856,4 +1958,73 @@ fn unsupported_host_method(method: &'static str) -> AgentLoopHostError {
         AgentLoopHostErrorKind::Unavailable,
         format!("agent loop host method {method} is unavailable"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct DefinitionPort {
+        definitions: Vec<ProviderToolDefinition>,
+    }
+
+    #[async_trait]
+    impl LoopCapabilityPort for DefinitionPort {
+        fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
+            Ok(self.definitions.clone())
+        }
+
+        async fn visible_capabilities(
+            &self,
+            _request: VisibleCapabilityRequest,
+        ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
+            unreachable!("not used by this test")
+        }
+
+        async fn invoke_capability(
+            &self,
+            _request: CapabilityInvocation,
+        ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+            unreachable!("not used by this test")
+        }
+
+        async fn invoke_capability_batch(
+            &self,
+            _request: CapabilityBatchInvocation,
+        ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+            unreachable!("not used by this test")
+        }
+    }
+
+    fn provider_tool_call(name: &str) -> ProviderToolCall {
+        ProviderToolCall {
+            provider_id: "provider".to_string(),
+            provider_model_id: "model".to_string(),
+            turn_id: Some("turn".to_string()),
+            id: "call".to_string(),
+            name: name.to_string(),
+            arguments: serde_json::json!({}),
+            response_reasoning: None,
+            reasoning: None,
+            signature: None,
+        }
+    }
+
+    #[test]
+    fn provider_tool_call_capability_ids_rejects_unknown_tool_name() {
+        let port = DefinitionPort {
+            definitions: vec![ProviderToolDefinition {
+                capability_id: CapabilityId::new("demo.allowed").expect("valid capability id"),
+                name: "demo__allowed".to_string(),
+                description: "allowed".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            }],
+        };
+
+        let error = port
+            .provider_tool_call_capability_ids(&provider_tool_call("demo__missing"))
+            .expect_err("unknown provider tool must fail closed");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    }
 }

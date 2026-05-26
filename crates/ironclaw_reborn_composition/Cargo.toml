@@ -36,6 +36,7 @@ test-support = []
 webui-v2-beta = [
     "dep:ironclaw_webui_v2",
     "ironclaw_webui_v2/webui-v2-beta",
+    "libsql",
     "dep:axum",
     "dep:tower",
     "dep:tower-http",
@@ -69,6 +70,7 @@ ironclaw_event_streams = { path = "../ironclaw_event_streams" }
 ironclaw_events = { path = "../ironclaw_events" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
+ironclaw_first_party_extensions = { path = "../ironclaw_first_party_extensions" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
 ironclaw_llm = { path = "../ironclaw_llm", optional = true, default-features = false }
@@ -81,7 +83,7 @@ ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
 ironclaw_reborn = { path = "../ironclaw_reborn" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config" }
 ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store" }
-ironclaw_first_party_extensions = { path = "../ironclaw_first_party_extensions" }
+ironclaw_first_party_extension_ports = { path = "../ironclaw_first_party_extension_ports" }
 ironclaw_resources = { path = "../ironclaw_resources" }
 ironclaw_run_state = { path = "../ironclaw_run_state" }
 ironclaw_runtime_policy = { path = "../ironclaw_runtime_policy" }
@@ -113,6 +115,7 @@ async-trait = "0.1"
 http = "1"
 http-body-util = "0.1"
 ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_host_runtime = { path = "../ironclaw_host_runtime", features = ["test-support"] }
 ironclaw_reborn_composition = { path = ".", features = ["test-support"] }
 ironclaw_skills = { path = "../ironclaw_skills" }
 ironclaw_threads = { path = "../ironclaw_threads" }
@@ -131,3 +134,6 @@ tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "
 # proper WS client.
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }
 tower = { version = "0.5", features = ["util"] }
+
+[lints]
+workspace = true

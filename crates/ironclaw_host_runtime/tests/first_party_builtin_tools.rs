@@ -25,7 +25,8 @@ use ironclaw_host_runtime::{
     GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HostRuntime, HostRuntimeServices, JSON_CAPABILITY_ID,
     LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityOutcome,
     RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeProcessError, RuntimeProcessPort,
-    SHELL_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind, TIME_CAPABILITY_ID,
+    SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
+    SKILL_REMOVE_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind, TIME_CAPABILITY_ID,
     TenantSandboxProcessPort, VisibleCapabilityAccess, VisibleCapabilityRequest,
     WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers, builtin_first_party_package,
 };
@@ -53,11 +54,64 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
         .map(|descriptor| descriptor.id.as_str())
         .collect::<Vec<_>>();
     assert_eq!(ids, all_builtin_capability_ids().to_vec());
+    for descriptor in &package.capabilities {
+        let expected_permission = match descriptor.id.as_str() {
+            HTTP_CAPABILITY_ID
+            | SHELL_CAPABILITY_ID
+            | SKILL_INSTALL_CAPABILITY_ID
+            | SKILL_REMOVE_CAPABILITY_ID => PermissionMode::Ask,
+            _ => PermissionMode::Allow,
+        };
+        assert_eq!(descriptor.default_permission, expected_permission);
+    }
+
+    for descriptor in package
+        .capabilities
+        .iter()
+        .filter(|descriptor| is_coding_capability_id(descriptor.id.as_str()))
+    {
+        assert_coding_manifest_contract(descriptor);
+    }
 
     let handlers = builtin_first_party_handlers().unwrap();
     for id in all_builtin_capability_ids() {
         assert!(handlers.contains_handler(&capability_id(id)));
     }
+}
+
+fn assert_coding_manifest_contract(descriptor: &CapabilityDescriptor) {
+    let expected_effects = match descriptor.id.as_str() {
+        WRITE_FILE_CAPABILITY_ID => vec![EffectKind::WriteFilesystem],
+        APPLY_PATCH_CAPABILITY_ID => vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
+        _ => vec![EffectKind::ReadFilesystem],
+    };
+    assert_eq!(descriptor.effects, expected_effects);
+    assert_eq!(descriptor.default_permission, PermissionMode::Allow);
+}
+
+fn is_coding_capability_id(id: &str) -> bool {
+    matches!(
+        id,
+        READ_FILE_CAPABILITY_ID
+            | WRITE_FILE_CAPABILITY_ID
+            | LIST_DIR_CAPABILITY_ID
+            | GLOB_CAPABILITY_ID
+            | GREP_CAPABILITY_ID
+            | APPLY_PATCH_CAPABILITY_ID
+    )
+}
+
+#[tokio::test]
+async fn builtin_first_party_package_omits_prompt_doc_refs() {
+    let package = builtin_first_party_package().unwrap();
+
+    assert!(
+        package
+            .manifest
+            .capabilities
+            .iter()
+            .all(|capability| capability.prompt_doc_ref.is_none())
+    );
 }
 
 #[tokio::test]
@@ -578,9 +632,31 @@ async fn builtin_http_invokes_through_host_runtime_egress() {
     assert_eq!(request.method, NetworkMethod::Post);
     assert_eq!(request.url, "https://api.example.test/v1/items");
     assert_eq!(request.body, br#"{"ok":true}"#);
-    assert_eq!(request.response_body_limit, Some(4096));
+    assert_eq!(request.response_body_limit, Some(10 * 1024 * 1024));
     assert_eq!(request.timeout_ms, Some(2500));
     assert!(request.credential_injections.is_empty());
+}
+
+#[tokio::test]
+async fn builtin_http_clamps_oversized_timeout_to_runtime_ceiling() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(b"ok".to_vec()));
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "timeout_ms": 120_000
+        }),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap();
+
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].timeout_ms, Some(30_000));
 }
 
 #[tokio::test]
@@ -737,7 +813,7 @@ async fn builtin_http_rejects_request_bodies_over_network_egress_cap() {
 async fn builtin_http_accounts_request_bytes_when_output_is_too_large() {
     let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(vec![
         b'\\';
-        700 * 1024
+        8 * 1024 * 1024
     ]));
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let runtime = runtime_with_http_egress_and_governor(Arc::clone(&egress), Arc::clone(&governor));
@@ -749,7 +825,7 @@ async fn builtin_http_accounts_request_bytes_when_output_is_too_large() {
             "method": "post",
             "url": "https://api.example.test/v1/items",
             "body": "paid",
-            "response_body_limit": 700 * 1024
+            "response_body_limit": 10 * 1024 * 1024
         }),
         execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
     )
@@ -871,7 +947,7 @@ async fn builtin_http_maps_runtime_egress_errors_by_source() {
                 request_bytes: 0,
                 response_bytes: 0,
             },
-            RuntimeFailureKind::Network,
+            RuntimeFailureKind::PolicyDenied,
         ),
         (
             RuntimeHttpEgressError::Network {
@@ -895,7 +971,7 @@ async fn builtin_http_maps_runtime_egress_errors_by_source() {
                 request_bytes: 4,
                 response_bytes: 1024,
             },
-            RuntimeFailureKind::InvalidInput,
+            RuntimeFailureKind::OperationFailed,
         ),
     ];
 
@@ -969,7 +1045,7 @@ async fn builtin_http_exercises_real_policy_private_ip_rejection() {
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::Network);
+    assert_eq!(error, RuntimeFailureKind::PolicyDenied);
     assert!(requests.lock().unwrap().is_empty());
 }
 
@@ -1320,6 +1396,178 @@ async fn builtin_coding_blocks_sensitive_scoped_paths_like_v1() {
     );
 }
 
+#[tokio::test]
+async fn builtin_coding_blocks_sensitive_host_paths_like_v1() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join(".ssh")).unwrap();
+    std::fs::create_dir_all(temp.path().join(".aws")).unwrap();
+    std::fs::create_dir_all(temp.path().join(".config/gh")).unwrap();
+    std::fs::write(temp.path().join(".ssh/id_rsa"), "ssh-secret\n").unwrap();
+    std::fs::write(temp.path().join(".aws/credentials"), "aws-secret\n").unwrap();
+    std::fs::write(temp.path().join(".config/gh/hosts.yml"), "gh-secret\n").unwrap();
+    std::fs::write(temp.path().join(".env"), "TOKEN=secret\n").unwrap();
+    std::fs::write(temp.path().join("server.key"), "tls-secret\n").unwrap();
+    std::fs::write(temp.path().join("safe.txt"), "safe host file\n").unwrap();
+
+    let (filesystem, mounts) = mounted_host_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    for path in [
+        "/host/.ssh/id_rsa",
+        "/host/.aws/credentials",
+        "/host/.config/gh/hosts.yml",
+        "/host/.env",
+        "/host/server.key",
+    ] {
+        let error = invoke_with_context(
+            &runtime,
+            READ_FILE_CAPABILITY_ID,
+            json!({"path": path}),
+            context.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, RuntimeFailureKind::Authorization, "{path}");
+    }
+
+    for (capability, input) in [
+        (
+            WRITE_FILE_CAPABILITY_ID,
+            json!({"path": "/host/.env", "content": "changed"}),
+        ),
+        (
+            APPLY_PATCH_CAPABILITY_ID,
+            json!({"path": "/host/server.key", "old_string": "tls", "new_string": "x"}),
+        ),
+    ] {
+        let error = invoke_with_context(&runtime, capability, input, context.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(error, RuntimeFailureKind::Authorization);
+    }
+
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(temp.path().join(".ssh"), temp.path().join("dotssh")).unwrap();
+        let error = invoke_with_context(
+            &runtime,
+            WRITE_FILE_CAPABILITY_ID,
+            json!({"path": "/host/dotssh/config", "content": "created through symlink\n"}),
+            context.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, RuntimeFailureKind::Authorization);
+        assert!(
+            !temp.path().join(".ssh/config").exists(),
+            "write must not create files under sensitive canonical parents"
+        );
+
+        let error = invoke_with_context(
+            &runtime,
+            WRITE_FILE_CAPABILITY_ID,
+            json!({"path": "/host/dotssh/generated/config", "content": "created through nested symlink\n"}),
+            context.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, RuntimeFailureKind::Authorization);
+        assert!(
+            !temp.path().join(".ssh/generated").exists(),
+            "write must not create intermediate directories under sensitive canonical parents"
+        );
+
+        let error = invoke_with_context(
+            &runtime,
+            LIST_DIR_CAPABILITY_ID,
+            json!({"path": "/host/dotssh", "recursive": true}),
+            context.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, RuntimeFailureKind::Authorization);
+
+        let listed = invoke_with_context(
+            &runtime,
+            LIST_DIR_CAPABILITY_ID,
+            json!({"path": "/host", "recursive": true}),
+            context.clone(),
+        )
+        .await
+        .unwrap();
+        let entries = listed["entries"].as_array().unwrap();
+        assert!(
+            /* safety: test-only assertion. */
+            entries
+                .iter()
+                .all(|entry| !entry.as_str().unwrap_or_default().contains("id_rsa")),
+            "recursive list_dir must not traverse sensitive symlink targets: {entries:?}"
+        );
+    }
+
+    let read = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/host/safe.txt"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(read["content"], json!("     1│ safe host file"));
+
+    invoke_with_context(
+        &runtime,
+        WRITE_FILE_CAPABILITY_ID,
+        json!({"path": "/host/output.txt", "content": "created\n"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("output.txt")).unwrap(),
+        "created\n"
+    );
+
+    let raw_host_home = temp.path().canonicalize().unwrap();
+    let raw_host_home = raw_host_home.to_string_lossy();
+    let raw_sensitive_path = format!("{raw_host_home}/.ssh/id_rsa");
+    let error = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": raw_sensitive_path}),
+        context.clone(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error, RuntimeFailureKind::Authorization);
+
+    let raw_safe_path = format!("{raw_host_home}/safe.txt");
+    let read = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": raw_safe_path}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(read["content"], json!("     1│ safe host file"));
+
+    let raw_output_path = format!("{raw_host_home}/raw-output.txt");
+    invoke_with_context(
+        &runtime,
+        WRITE_FILE_CAPABILITY_ID,
+        json!({"path": raw_output_path, "content": "raw created\n"}),
+        context,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("raw-output.txt")).unwrap(),
+        "raw created\n"
+    );
+}
+
 #[cfg(feature = "libsql")]
 #[tokio::test]
 async fn builtin_coding_blocks_sensitive_resolved_libsql_paths() {
@@ -1596,6 +1844,44 @@ async fn builtin_coding_grep_multiline_reports_matched_lines_and_count() {
 }
 
 #[tokio::test]
+async fn builtin_coding_grep_respects_multiline_false_for_line_anchors() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("doc.txt"), "alpha\nbeta\n").unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    let single_line_regex = invoke_with_context(
+        &runtime,
+        GREP_CAPABILITY_ID,
+        json!({
+            "path": "/workspace",
+            "pattern": "^beta",
+            "multiline": false
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(single_line_regex["files"], json!([]));
+
+    let multiline_regex = invoke_with_context(
+        &runtime,
+        GREP_CAPABILITY_ID,
+        json!({
+            "path": "/workspace",
+            "pattern": "^beta",
+            "multiline": true
+        }),
+        context,
+    )
+    .await
+    .unwrap();
+    assert_eq!(multiline_regex["files"], json!(["doc.txt"]));
+}
+
+#[tokio::test]
 async fn builtin_coding_write_allows_v1_sized_payloads_past_default_input_cap() {
     let temp = tempfile::tempdir().unwrap();
     let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
@@ -1705,6 +1991,36 @@ async fn builtin_coding_grep_requires_read_permission_but_glob_only_requires_lis
 }
 
 #[tokio::test]
+async fn builtin_coding_grep_denies_directory_without_list_grant() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join("src")).unwrap();
+    std::fs::write(temp.path().join("src/lib.rs"), "needle\n").unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(
+        temp.path(),
+        MountPermissions {
+            read: true,
+            write: false,
+            delete: false,
+            list: false,
+            execute: false,
+        },
+    );
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    let error = invoke_with_context(
+        &runtime,
+        GREP_CAPABILITY_ID,
+        json!({"path": "/workspace", "pattern": "needle"}),
+        context,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error, RuntimeFailureKind::Authorization);
+}
+
+#[tokio::test]
 async fn builtin_coding_list_and_glob_require_list_permission() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(temp.path().join("README.md"), "alpha\n").unwrap();
@@ -1792,6 +2108,25 @@ async fn builtin_coding_read_rejects_files_larger_than_v1_limit_before_loading_c
 }
 
 #[tokio::test]
+async fn builtin_coding_read_rejects_non_file_paths() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join("src")).unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem(filesystem);
+    let error = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/src"}),
+        execution_context_with_mounts(all_builtin_capability_ids(), mounts),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::Resource);
+}
+
+#[tokio::test]
 async fn builtin_apply_patch_matches_v1_exact_unique_and_replace_all_behavior() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(temp.path().join("code.rs"), "old\nold\nunique\n").unwrap();
@@ -1817,7 +2152,7 @@ async fn builtin_apply_patch_matches_v1_exact_unique_and_replace_all_behavior() 
     )
     .await
     .unwrap_err();
-    assert_eq!(duplicate, RuntimeFailureKind::Backend);
+    assert_eq!(duplicate, RuntimeFailureKind::OperationFailed);
 
     let replaced = invoke_with_context(
         &runtime,
@@ -1867,7 +2202,7 @@ async fn builtin_apply_patch_requires_full_fresh_read_like_v1() {
     )
     .await
     .unwrap_err();
-    assert_eq!(unread, RuntimeFailureKind::Backend);
+    assert_eq!(unread, RuntimeFailureKind::OperationFailed);
 
     invoke_with_context(
         &runtime,
@@ -1885,7 +2220,7 @@ async fn builtin_apply_patch_requires_full_fresh_read_like_v1() {
     )
     .await
     .unwrap_err();
-    assert_eq!(partial, RuntimeFailureKind::Backend);
+    assert_eq!(partial, RuntimeFailureKind::OperationFailed);
 }
 
 #[tokio::test]
@@ -1915,7 +2250,7 @@ async fn builtin_apply_patch_rejects_same_second_content_changes_after_read() {
     )
     .await
     .unwrap_err();
-    assert_eq!(stale, RuntimeFailureKind::Backend);
+    assert_eq!(stale, RuntimeFailureKind::OperationFailed);
 }
 
 #[tokio::test]
@@ -2220,7 +2555,7 @@ fn provider_id() -> ExtensionId {
     ExtensionId::new("builtin").unwrap()
 }
 
-fn all_builtin_capability_ids() -> [&'static str; 11] {
+fn all_builtin_capability_ids() -> [&'static str; 14] {
     [
         ECHO_CAPABILITY_ID,
         TIME_CAPABILITY_ID,
@@ -2233,6 +2568,9 @@ fn all_builtin_capability_ids() -> [&'static str; 11] {
         GLOB_CAPABILITY_ID,
         GREP_CAPABILITY_ID,
         APPLY_PATCH_CAPABILITY_ID,
+        SKILL_LIST_CAPABILITY_ID,
+        SKILL_INSTALL_CAPABILITY_ID,
+        SKILL_REMOVE_CAPABILITY_ID,
     ]
 }
 
@@ -2249,6 +2587,34 @@ fn mounted_filesystem(path: &Path, permissions: MountPermissions) -> (LocalFiles
         VirtualPath::new("/projects/coding-pack").unwrap(),
         permissions,
     )])
+    .unwrap();
+    (filesystem, mounts)
+}
+
+fn mounted_host_filesystem(
+    path: &Path,
+    permissions: MountPermissions,
+) -> (LocalFilesystem, MountView) {
+    let mut filesystem = LocalFilesystem::new();
+    filesystem
+        .mount_local(
+            VirtualPath::new("/projects/host").unwrap(),
+            HostPath::from_path_buf(path.to_path_buf()),
+        )
+        .unwrap();
+    let raw_alias = path.canonicalize().unwrap().to_string_lossy().into_owned();
+    let mounts = MountView::new(vec![
+        MountGrant::new(
+            MountAlias::new("/host").unwrap(),
+            VirtualPath::new("/projects/host").unwrap(),
+            permissions.clone(),
+        ),
+        MountGrant::new(
+            MountAlias::new(raw_alias).unwrap(),
+            VirtualPath::new("/projects/host").unwrap(),
+            permissions,
+        ),
+    ])
     .unwrap();
     (filesystem, mounts)
 }

@@ -1,0 +1,27 @@
+{
+  "id": "msg-001",
+  "threadId": "thr-001",
+  "labelIds": ["INBOX", "UNREAD"],
+  "snippet": "Quarterly numbers are in, see attached summary.",
+  "internalDate": "1716200000000",
+  "historyId": "9981234",
+  "sizeEstimate": 8421,
+  "payload": {
+    "mimeType": "multipart/mixed",
+    "headers": [
+      { "name": "From", "value": "Ada Lovelace <ada@example.com>" },
+      { "name": "To", "value": "Bob Hawk <bob@example.com>" },
+      { "name": "Subject", "value": "Q2 summary" },
+      { "name": "Date", "value": "Wed, 20 May 2026 14:00:00 -0400" },
+      { "name": "Message-ID", "value": "<orig-001@mail.example.com>" },
+      { "name": "X-Internal-Trace-Id", "value": "trace-should-not-leak" }
+    ],
+    "parts": [
+      {
+        "mimeType": "text/plain",
+        "filename": "",
+        "body": { "size": 31, "data": "UXVhcnRlcmx5IG51bWJlcnMgYXJlIGluLg" }
+      }
+    ]
+  }
+}

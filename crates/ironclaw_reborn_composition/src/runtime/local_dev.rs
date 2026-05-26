@@ -8,12 +8,16 @@ use uuid::Uuid;
 
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind, ExecutionContext,
-    ExtensionId, GrantConstraints, MountAlias, MountGrant, MountPermissions, MountView,
-    NetworkPolicy, NetworkTargetPattern, Principal, RuntimeKind, TrustClass, UserId, VirtualPath,
+    ExtensionId, GrantConstraints, InvocationId, MountView, NetworkPolicy, NetworkTargetPattern,
+    Principal, RuntimeKind, TrustClass, UserId,
 };
 use ironclaw_host_runtime::{
-    CapabilitySurfacePolicy, HostRuntime, SurfaceKind,
-    VisibleCapabilityRequest as HostVisibleCapabilityRequest,
+    APPLY_PATCH_CAPABILITY_ID, CapabilitySurfacePolicy, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID,
+    GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HostRuntime, JSON_CAPABILITY_ID,
+    LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
+    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SurfaceKind,
+    TIME_CAPABILITY_ID, VisibleCapabilityRequest as HostVisibleCapabilityRequest,
+    WRITE_FILE_CAPABILITY_ID,
 };
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
@@ -32,11 +36,16 @@ use ironclaw_turns::{
     },
 };
 
-use crate::RebornServices;
+use crate::local_dev_mounts::skill_management_mount_view;
+use crate::{
+    RebornServices,
+    projection::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore},
+};
 
 pub(super) struct LocalDevCapabilityWiring {
     pub(super) capability_factory: Arc<dyn LoopCapabilityPortFactory>,
     pub(super) model_gateway: Arc<dyn HostManagedModelGateway>,
+    pub(super) display_previews: Arc<CapabilityDisplayPreviewStore>,
 }
 
 pub(super) fn capability_wiring(
@@ -46,13 +55,19 @@ pub(super) fn capability_wiring(
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
 ) -> Option<LocalDevCapabilityWiring> {
     let runtime = services.host_runtime.clone()?;
-    let capability_io = Arc::new(LocalDevCapabilityIo::default());
+    let workspace_mounts = services
+        .local_runtime
+        .as_ref()
+        .map(|runtime| runtime.workspace_mounts.clone())?;
+    let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
+    let capability_io = Arc::new(LocalDevCapabilityIo::new(Arc::clone(&display_previews)));
     let capability_input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
     let capability_result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
     let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
         Arc::new(LocalDevLoopCapabilityPortFactory::new(
             runtime,
             user_id,
+            workspace_mounts,
             capability_input_resolver,
             capability_result_writer,
             milestone_sink,
@@ -64,6 +79,7 @@ pub(super) fn capability_wiring(
     Some(LocalDevCapabilityWiring {
         capability_factory,
         model_gateway,
+        display_previews,
     })
 }
 
@@ -71,6 +87,7 @@ pub(super) fn capability_wiring(
 struct LocalDevLoopCapabilityPortFactory {
     runtime: Arc<dyn HostRuntime>,
     user_id: UserId,
+    workspace_mounts: MountView,
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
@@ -80,6 +97,7 @@ impl LocalDevLoopCapabilityPortFactory {
     fn new(
         runtime: Arc<dyn HostRuntime>,
         user_id: UserId,
+        workspace_mounts: MountView,
         input_resolver: Arc<dyn LoopCapabilityInputResolver>,
         result_writer: Arc<dyn LoopCapabilityResultWriter>,
         milestone_sink: Arc<dyn LoopHostMilestoneSink>,
@@ -87,6 +105,7 @@ impl LocalDevLoopCapabilityPortFactory {
         Self {
             runtime,
             user_id,
+            workspace_mounts,
             input_resolver,
             result_writer,
             milestone_sink,
@@ -100,20 +119,28 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
         &self,
         run_context: &LoopRunContext,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
-        let execution_mounts = local_dev_workspace_mounts()?;
+        let workspace_mounts = self.workspace_mounts.clone();
+        let skill_mounts = skill_management_mount_view().map_err(host_api_agent_loop_error)?;
         let visible_request = local_dev_visible_capability_request(
             run_context,
             self.user_id.clone(),
-            execution_mounts.clone(),
+            workspace_mounts.clone(),
+            skill_mounts.clone(),
         )?;
-        let factory = HostRuntimeLoopCapabilityPortFactory::new(
+        let mut factory = HostRuntimeLoopCapabilityPortFactory::new(
             Arc::clone(&self.runtime),
             visible_request,
             Arc::clone(&self.input_resolver),
             Arc::clone(&self.result_writer),
             Arc::clone(&self.milestone_sink),
         )
-        .with_execution_mounts(execution_mounts);
+        .with_execution_mounts(workspace_mounts);
+        for capability_id in local_dev_skill_management_capability_ids() {
+            factory = factory.with_capability_execution_mount(
+                CapabilityId::new(capability_id).map_err(host_api_agent_loop_error)?,
+                skill_mounts.clone(),
+            );
+        }
         Ok(factory.for_run_context(run_context.clone()))
     }
 }
@@ -122,13 +149,26 @@ const LOCAL_DEV_CAPABILITY_IO_MAX_STAGED_REFS: usize = 1024;
 const LOCAL_DEV_CAPABILITY_IO_MAX_STAGED_BYTES: usize = 4 * 1024 * 1024;
 const MODEL_VISIBLE_TOOL_OUTPUT_MAX_BYTES: usize = 480;
 
-#[derive(Default)]
 struct LocalDevCapabilityIo {
     inputs: StdMutex<StagedValueStore>,
     results: StdMutex<StagedValueStore>,
+    display_previews: Arc<CapabilityDisplayPreviewStore>,
+}
+
+impl Default for LocalDevCapabilityIo {
+    fn default() -> Self {
+        Self::new(Arc::new(CapabilityDisplayPreviewStore::default()))
+    }
 }
 
 impl LocalDevCapabilityIo {
+    fn new(display_previews: Arc<CapabilityDisplayPreviewStore>) -> Self {
+        Self {
+            inputs: StdMutex::new(StagedValueStore::default()),
+            results: StdMutex::new(StagedValueStore::default()),
+            display_previews,
+        }
+    }
     fn result_output(
         &self,
         result_ref: &str,
@@ -221,10 +261,13 @@ impl StagedValueStore {
 fn staged_value_bytes(value: &serde_json::Value) -> Result<usize, AgentLoopHostError> {
     serde_json::to_vec(value)
         .map(|bytes| bytes.len())
-        .map_err(|_| {
-            AgentLoopHostError::new(
+        .map_err(|error| {
+            ironclaw_loop_support::raw_agent_loop_host_error(
+                "local_dev_capability_io",
+                "measure_payload",
                 AgentLoopHostErrorKind::InvalidInvocation,
                 "capability payload could not be measured",
+                error,
             )
         })
 }
@@ -262,6 +305,12 @@ impl LoopCapabilityInputResolver for LocalDevCapabilityIo {
         let mut inputs = self.inputs.lock().map_err(|_| capability_io_error())?;
         inputs
             .insert_without_eviction(input_ref.as_str().to_string(), tool_call.arguments.clone())?;
+        self.display_previews.record_input(
+            &run_context.run_id.to_string(),
+            &input_ref,
+            &tool_call.name,
+            &tool_call.arguments,
+        );
         Ok(input_ref)
     }
 }
@@ -271,6 +320,8 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
     async fn write_capability_result(
         &self,
         run_context: &LoopRunContext,
+        input_ref: &CapabilityInputRef,
+        invocation_id: InvocationId,
         _capability_id: &CapabilityId,
         output: serde_json::Value,
     ) -> Result<LoopResultRef, AgentLoopHostError> {
@@ -282,8 +333,19 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
                         "capability result ref could not be represented",
                     )
                 })?;
+        let output_bytes = staged_value_bytes(&output)?.try_into().unwrap_or(u64::MAX);
         let mut results = self.results.lock().map_err(|_| capability_io_error())?;
-        results.insert_with_oldest_eviction(result_ref.as_str().to_string(), output)?;
+        results.insert_with_oldest_eviction(result_ref.as_str().to_string(), output.clone())?;
+        self.display_previews
+            .record_result(CapabilityDisplayPreviewResult {
+                run_id: &run_context.run_id.to_string(),
+                input_ref,
+                invocation_id,
+                capability_id: _capability_id,
+                result_ref: result_ref.as_str(),
+                output: &output,
+                output_bytes,
+            });
         Ok(result_ref)
     }
 }
@@ -349,10 +411,13 @@ fn hydrate_tool_result_messages(
             continue;
         }
         let mut envelope: ToolResultReferenceEnvelope = serde_json::from_str(&message.content)
-            .map_err(|_| {
-                HostManagedModelError::safe(
+            .map_err(|error| {
+                ironclaw_loop_support::raw_host_managed_model_error(
+                    "local_dev_model_replay",
+                    "decode_tool_result_envelope",
                     HostManagedModelErrorKind::InvalidRequest,
                     "tool result reference transcript content is invalid",
+                    error,
                 )
             })?;
         let output = capability_io
@@ -362,16 +427,23 @@ fn hydrate_tool_result_messages(
             continue;
         };
         envelope.safe_summary = ToolResultSafeSummary::new(model_visible_tool_output(&output))
-            .map_err(|_| {
-                HostManagedModelError::safe(
+            .map_err(|error| {
+                ironclaw_loop_support::raw_host_managed_model_error(
+                    "local_dev_model_replay",
+                    "sanitize_tool_result",
                     HostManagedModelErrorKind::InvalidRequest,
                     "tool result output could not be represented safely for model replay",
+                    error,
                 )
             })?;
         message.content = serde_json::to_string(&envelope).map_err(|error| {
-            HostManagedModelError::safe(
+            let safe_summary = error.to_string();
+            ironclaw_loop_support::raw_host_managed_model_error(
+                "local_dev_model_replay",
+                "encode_tool_result_envelope",
                 HostManagedModelErrorKind::InvalidRequest,
-                error.to_string(),
+                safe_summary,
+                error,
             )
         })?;
     }
@@ -449,10 +521,11 @@ fn model_capability_io_error(error: AgentLoopHostError) -> HostManagedModelError
 fn local_dev_visible_capability_request(
     run_context: &LoopRunContext,
     user_id: UserId,
-    execution_mounts: MountView,
+    workspace_mounts: MountView,
+    skill_mounts: MountView,
 ) -> Result<HostVisibleCapabilityRequest, AgentLoopHostError> {
     let extension_id = loop_driver_execution_extension_id(run_context)?;
-    let grants = local_dev_builtin_grants(&extension_id, execution_mounts)?;
+    let grants = local_dev_builtin_grants(&extension_id, &workspace_mounts, &skill_mounts)?;
     let mut context = ExecutionContext::local_default(
         user_id,
         extension_id,
@@ -497,7 +570,8 @@ fn local_dev_visible_capability_request(
 
 fn local_dev_builtin_grants(
     grantee: &ExtensionId,
-    mounts: MountView,
+    workspace_mounts: &MountView,
+    skill_mounts: &MountView,
 ) -> Result<CapabilitySet, AgentLoopHostError> {
     let mut grants = Vec::new();
     for capability_id in local_dev_builtin_capability_ids() {
@@ -506,7 +580,7 @@ fn local_dev_builtin_grants(
             capability: CapabilityId::new(capability_id).map_err(host_api_agent_loop_error)?,
             grantee: Principal::Extension(grantee.clone()),
             issued_by: Principal::HostRuntime,
-            constraints: local_dev_grant_constraints(capability_id, &mounts),
+            constraints: local_dev_grant_constraints(capability_id, workspace_mounts, skill_mounts),
         });
     }
     Ok(CapabilitySet { grants })
@@ -516,17 +590,38 @@ fn local_dev_builtin_grants(
 enum LocalDevCapabilityKind {
     Workspace,
     AmbientShell,
+    Network,
+    SkillManagement,
 }
 
 fn local_dev_capability_kind(capability_id: &str) -> LocalDevCapabilityKind {
-    if capability_id == "builtin.shell" {
+    if capability_id == SHELL_CAPABILITY_ID {
         LocalDevCapabilityKind::AmbientShell
+    } else if capability_id == HTTP_CAPABILITY_ID {
+        LocalDevCapabilityKind::Network
+    } else if capability_id == SKILL_LIST_CAPABILITY_ID
+        || capability_id == SKILL_INSTALL_CAPABILITY_ID
+        || capability_id == SKILL_REMOVE_CAPABILITY_ID
+    {
+        LocalDevCapabilityKind::SkillManagement
     } else {
         LocalDevCapabilityKind::Workspace
     }
 }
 
-fn local_dev_grant_constraints(capability_id: &str, mounts: &MountView) -> GrantConstraints {
+fn local_dev_skill_management_capability_ids() -> impl Iterator<Item = &'static str> {
+    local_dev_builtin_capability_ids()
+        .into_iter()
+        .filter(|capability_id| {
+            local_dev_capability_kind(capability_id) == LocalDevCapabilityKind::SkillManagement
+        })
+}
+
+fn local_dev_grant_constraints(
+    capability_id: &str,
+    workspace_mounts: &MountView,
+    skill_mounts: &MountView,
+) -> GrantConstraints {
     match local_dev_capability_kind(capability_id) {
         LocalDevCapabilityKind::AmbientShell => GrantConstraints {
             allowed_effects: local_dev_shell_allowed_effects(),
@@ -543,9 +638,27 @@ fn local_dev_grant_constraints(capability_id: &str, mounts: &MountView) -> Grant
             expires_at: None,
             max_invocations: None,
         },
+        LocalDevCapabilityKind::Network => GrantConstraints {
+            allowed_effects: local_dev_network_allowed_effects(),
+            mounts: MountView::default(),
+            network: local_dev_shell_network_policy(),
+            secrets: Vec::new(),
+            resource_ceiling: None,
+            expires_at: None,
+            max_invocations: None,
+        },
         LocalDevCapabilityKind::Workspace => GrantConstraints {
             allowed_effects: local_dev_allowed_effects(),
-            mounts: mounts.clone(),
+            mounts: workspace_mounts.clone(),
+            network: NetworkPolicy::default(),
+            secrets: Vec::new(),
+            resource_ceiling: None,
+            expires_at: None,
+            max_invocations: None,
+        },
+        LocalDevCapabilityKind::SkillManagement => GrantConstraints {
+            allowed_effects: local_dev_allowed_effects(),
+            mounts: skill_mounts.clone(),
             network: NetworkPolicy::default(),
             secrets: Vec::new(),
             resource_ceiling: None,
@@ -555,19 +668,27 @@ fn local_dev_grant_constraints(capability_id: &str, mounts: &MountView) -> Grant
     }
 }
 
-fn local_dev_builtin_capability_ids() -> [&'static str; 10] {
+fn local_dev_builtin_capability_ids() -> [&'static str; 14] {
     [
-        "builtin.echo",
-        "builtin.time",
-        "builtin.json",
-        "builtin.shell",
-        "builtin.read_file",
-        "builtin.write_file",
-        "builtin.list_dir",
-        "builtin.glob",
-        "builtin.grep",
-        "builtin.apply_patch",
+        ECHO_CAPABILITY_ID,
+        TIME_CAPABILITY_ID,
+        JSON_CAPABILITY_ID,
+        HTTP_CAPABILITY_ID,
+        SHELL_CAPABILITY_ID,
+        READ_FILE_CAPABILITY_ID,
+        WRITE_FILE_CAPABILITY_ID,
+        LIST_DIR_CAPABILITY_ID,
+        GLOB_CAPABILITY_ID,
+        GREP_CAPABILITY_ID,
+        APPLY_PATCH_CAPABILITY_ID,
+        SKILL_LIST_CAPABILITY_ID,
+        SKILL_INSTALL_CAPABILITY_ID,
+        SKILL_REMOVE_CAPABILITY_ID,
     ]
+}
+
+fn local_dev_network_allowed_effects() -> Vec<EffectKind> {
+    vec![EffectKind::DispatchCapability, EffectKind::Network]
 }
 
 fn local_dev_allowed_effects() -> Vec<EffectKind> {
@@ -608,15 +729,6 @@ fn local_dev_shell_network_policy() -> NetworkPolicy {
     }
 }
 
-fn local_dev_workspace_mounts() -> Result<MountView, AgentLoopHostError> {
-    MountView::new(vec![MountGrant::new(
-        MountAlias::new("/workspace").map_err(host_api_agent_loop_error)?,
-        VirtualPath::new("/projects/workspace").map_err(host_api_agent_loop_error)?,
-        MountPermissions::read_write(),
-    )])
-    .map_err(host_api_agent_loop_error)
-}
-
 fn ensure_local_dev_ref_scope(
     prefix: &str,
     reference: &str,
@@ -640,18 +752,30 @@ fn capability_io_error() -> AgentLoopHostError {
     )
 }
 
-fn host_api_agent_loop_error(error: impl std::fmt::Display) -> AgentLoopHostError {
-    AgentLoopHostError::new(AgentLoopHostErrorKind::InvalidInvocation, error.to_string())
+fn host_api_agent_loop_error(
+    error: impl std::fmt::Debug + std::fmt::Display,
+) -> AgentLoopHostError {
+    let safe_summary = error.to_string();
+    ironclaw_loop_support::raw_agent_loop_host_error(
+        "local_dev_host_api",
+        "validate_local_dev_runtime_input",
+        AgentLoopHostErrorKind::InvalidInvocation,
+        safe_summary,
+        format!("{error:?}"),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
+    use ironclaw_host_api::{AgentId, MountPermissions, ProjectId, TenantId, ThreadId};
     use ironclaw_turns::{
         RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
-        run_profile::InMemoryRunProfileResolver,
+        run_profile::{
+            CapabilityInvocation, CapabilityOutcome, InMemoryLoopHostMilestoneSink,
+            InMemoryRunProfileResolver, VisibleCapabilityRequest,
+        },
     };
 
     async fn run_context(label: &str) -> LoopRunContext {
@@ -762,12 +886,16 @@ mod tests {
     }
 
     #[test]
-    fn local_dev_builtin_surface_grants_shell_as_ambient_escape_hatch() {
+    fn local_dev_builtin_surface_grants_capability_classes() {
         let capability_ids = local_dev_builtin_capability_ids();
 
-        assert!(capability_ids.contains(&"builtin.write_file"));
-        assert!(capability_ids.contains(&"builtin.apply_patch"));
-        assert!(capability_ids.contains(&"builtin.shell"));
+        assert!(capability_ids.contains(&WRITE_FILE_CAPABILITY_ID));
+        assert!(capability_ids.contains(&APPLY_PATCH_CAPABILITY_ID));
+        assert!(capability_ids.contains(&SKILL_LIST_CAPABILITY_ID));
+        assert!(capability_ids.contains(&SKILL_INSTALL_CAPABILITY_ID));
+        assert!(capability_ids.contains(&SKILL_REMOVE_CAPABILITY_ID));
+        assert!(capability_ids.contains(&SHELL_CAPABILITY_ID));
+        assert!(capability_ids.contains(&HTTP_CAPABILITY_ID));
         assert_eq!(
             local_dev_allowed_effects(),
             vec![
@@ -788,10 +916,33 @@ mod tests {
             ]
         );
 
-        let workspace_mounts = local_dev_workspace_mounts().expect("workspace mounts build");
+        let workspace_mounts =
+            crate::local_dev_mounts::workspace_mount_view(MountPermissions::read_write(), &[])
+                .expect("workspace mounts build");
+        let skill_mounts =
+            crate::local_dev_mounts::skill_management_mount_view().expect("skill mounts build");
+        assert!(workspace_mounts.mounts.iter().all(|mount| {
+            mount.alias.as_str() != "/skills" && mount.alias.as_str() != "/system/skills"
+        }));
+        let mount_for = |alias: &str| {
+            skill_mounts
+                .mounts
+                .iter()
+                .find(|mount| mount.alias.as_str() == alias)
+                .expect("mount exists")
+        };
+        assert_eq!(
+            mount_for("/skills").permissions,
+            MountPermissions::read_write_list_delete()
+        );
+        assert_eq!(
+            mount_for("/system/skills").permissions,
+            MountPermissions::read_only()
+        );
         let grants = local_dev_builtin_grants(
             &ExtensionId::new("loop-driver").expect("valid extension id"),
-            workspace_mounts.clone(),
+            &workspace_mounts,
+            &skill_mounts,
         )
         .expect("local-dev grants build");
         let grant_for = |capability_id: &str| {
@@ -802,7 +953,7 @@ mod tests {
                 .expect("capability grant exists")
         };
 
-        let shell_grant = grant_for("builtin.shell");
+        let shell_grant = grant_for(SHELL_CAPABILITY_ID);
         assert_eq!(
             shell_grant.constraints.allowed_effects,
             vec![
@@ -820,7 +971,18 @@ mod tests {
             local_dev_shell_network_policy()
         );
 
-        let read_file_grant = grant_for("builtin.read_file");
+        let http_grant = grant_for(HTTP_CAPABILITY_ID);
+        assert_eq!(
+            http_grant.constraints.allowed_effects,
+            vec![EffectKind::DispatchCapability, EffectKind::Network]
+        );
+        assert!(http_grant.constraints.mounts.mounts.is_empty());
+        assert_eq!(
+            http_grant.constraints.network,
+            local_dev_shell_network_policy()
+        );
+
+        let read_file_grant = grant_for(READ_FILE_CAPABILITY_ID);
         assert_eq!(
             read_file_grant.constraints.allowed_effects,
             local_dev_allowed_effects()
@@ -829,6 +991,91 @@ mod tests {
         assert_eq!(
             read_file_grant.constraints.network,
             NetworkPolicy::default()
+        );
+
+        let skill_install_grant = grant_for(SKILL_INSTALL_CAPABILITY_ID);
+        assert_eq!(skill_install_grant.constraints.mounts, skill_mounts);
+        assert_eq!(
+            skill_install_grant.constraints.network,
+            NetworkPolicy::default()
+        );
+    }
+
+    #[tokio::test]
+    async fn local_yolo_capability_port_reads_confirmed_host_mount() {
+        let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only setup in #[cfg(test)] module.
+        let storage_root = dir.path().join("local-dev");
+        let host_home = dir.path().join("home");
+        std::fs::create_dir_all(&host_home).expect("host home"); // safety: test-only setup in #[cfg(test)] module.
+        std::fs::write(host_home.join("safe.txt"), "safe host file\n").expect("host file"); // safety: test-only setup in #[cfg(test)] module.
+
+        let services = crate::build_reborn_services(
+            crate::RebornBuildInput::local_dev_with_profile(
+                crate::RebornCompositionProfile::LocalDevYolo,
+                "local-dev-yolo-host-owner",
+                storage_root,
+            )
+            .with_runtime_policy(
+                crate::local_dev_yolo_runtime_policy(true).expect("local-yolo policy resolves"), // safety: test-only helper in #[cfg(test)] module.
+            )
+            .with_local_dev_confirmed_host_home_root(host_home),
+        )
+        .await
+        .expect("local-dev-yolo services build"); // safety: test-only assertion in #[cfg(test)] module.
+        let runtime = services.host_runtime.clone().expect("host runtime"); // safety: test-only assertion in #[cfg(test)] module.
+        let workspace_mounts = services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime substrate") // safety: test-only assertion in #[cfg(test)] module.
+            .workspace_mounts
+            .clone();
+        let capability_io = Arc::new(LocalDevCapabilityIo::default());
+        let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
+        let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
+        let factory = LocalDevLoopCapabilityPortFactory::new(
+            runtime,
+            UserId::new("local-yolo-host-user").expect("user id"), // safety: literal test id is valid.
+            workspace_mounts,
+            input_resolver,
+            result_writer,
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        );
+        let run_context = run_context("host-mount-read").await;
+        let port = factory
+            .create_capability_port(&run_context)
+            .await
+            .expect("capability port"); // safety: test-only assertion in #[cfg(test)] module.
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible surface"); // safety: test-only assertion in #[cfg(test)] module.
+        let input_ref = capability_io
+            .register_provider_tool_call_input(
+                &run_context,
+                &provider_tool_call(serde_json::json!({"path": "/host/safe.txt"})),
+            )
+            .await
+            .expect("input ref"); // safety: test-only assertion in #[cfg(test)] module.
+
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: surface.version,
+                capability_id: CapabilityId::new(READ_FILE_CAPABILITY_ID)
+                    .expect("read_file capability id"), // safety: built-in capability id is a valid literal.
+                input_ref,
+            })
+            .await
+            .expect("read_file invocation"); // safety: test-only assertion in #[cfg(test)] module.
+        let CapabilityOutcome::Completed(completed) = outcome else {
+            panic!("expected completed read_file invocation");
+        };
+        let output = capability_io
+            .result_output(completed.result_ref.as_str())
+            .expect("result output lookup") // safety: test-only assertion in #[cfg(test)] module.
+            .expect("result output"); // safety: test-only assertion in #[cfg(test)] module.
+        assert_eq!(
+            output["content"],
+            serde_json::json!("     1│ safe host file")
         );
     }
 

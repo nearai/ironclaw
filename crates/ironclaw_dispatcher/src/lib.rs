@@ -187,6 +187,14 @@ where
         self
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        skip(self, request),
+        fields(
+            capability_id = %request.capability_id,
+            scope = ?request.scope,
+        )
+    )]
     pub async fn dispatch_json(
         &self,
         request: CapabilityDispatchRequest,
@@ -357,6 +365,15 @@ where
     }
 
     async fn emit_event(&self, event: RuntimeEvent) -> Result<(), DispatchError> {
+        tracing::debug!(
+            event_kind = ?event.kind,
+            capability_id = %event.capability_id,
+            provider = event.provider.as_ref().map(|provider| provider.as_str()).unwrap_or(""),
+            runtime = ?event.runtime,
+            output_bytes = event.output_bytes,
+            error_kind = event.error_kind.as_deref().unwrap_or(""),
+            "runtime dispatcher observed event"
+        );
         if let Some(sink) = self.event_sink.as_ref() {
             let _ = sink.as_ref().emit(event).await;
         }

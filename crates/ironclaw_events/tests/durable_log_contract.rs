@@ -908,6 +908,7 @@ async fn direct_construction_serialize_path_resanitizes_error_kind() {
         timestamp: chrono::Utc::now(),
         kind: RuntimeEventKind::DispatchFailed,
         scope,
+        parent_invocation_id: None,
         capability_id: capability_id(),
         provider: Some(extension_id()),
         runtime: Some(RuntimeKind::Wasm),
@@ -916,6 +917,12 @@ async fn direct_construction_serialize_path_resanitizes_error_kind() {
         // Free-form raw text with a path-like fragment — exactly what the
         // redaction invariant forbids in durable storage.
         error_kind: Some("/Users/alice/token=secret raw error".to_string()),
+        hook_id: None,
+        hook_point: None,
+        hook_trust_class: None,
+        hook_decision: None,
+        hook_failure_category: None,
+        hook_failure_disposition: None,
     };
 
     let json = serde_json::to_string(&event).expect("serialize");

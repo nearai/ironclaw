@@ -5,13 +5,14 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_host_api::{
     AgentId, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
-    ExecutionContext, ExtensionId, GrantConstraints, MountAlias, MountGrant, MountPermissions,
-    MountView, NetworkPolicy, NetworkTargetPattern, Principal, RuntimeKind, TenantId, ThreadId,
-    TrustClass, UserId, VirtualPath,
+    ExecutionContext, ExtensionId, GrantConstraints, InvocationId, MountAlias, MountGrant,
+    MountPermissions, MountView, NetworkPolicy, NetworkTargetPattern, Principal, RuntimeKind,
+    TenantId, ThreadId, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     CapabilitySurfacePolicy, ECHO_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
-    SurfaceKind, VisibleCapabilityRequest as HostVisibleCapabilityRequest,
+    SKILL_INSTALL_CAPABILITY_ID, SurfaceKind,
+    VisibleCapabilityRequest as HostVisibleCapabilityRequest,
 };
 use ironclaw_loop_support::{
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
@@ -67,6 +68,8 @@ async fn capability_io_resolves_staged_inputs_and_materializes_run_scoped_result
     let result_ref = io
         .write_capability_result(
             &run_context,
+            &input_ref,
+            InvocationId::new(),
             &capability_id("demo.echo"),
             serde_json::json!({ "reply": "hello" }),
         )
@@ -113,6 +116,8 @@ async fn capability_io_rejects_cross_run_input_and_result_refs() {
     let result_ref = io
         .write_capability_result(
             &first_run,
+            &input_ref,
+            InvocationId::new(),
             &capability_id("demo.echo"),
             serde_json::json!({ "reply": "first" }),
         )
@@ -141,6 +146,8 @@ async fn capability_io_prunes_refs_for_terminal_runs_without_cross_run_loss() {
     let first_result = io
         .write_capability_result(
             &first_run,
+            &first_input,
+            InvocationId::new(),
             &capability_id("demo.echo"),
             serde_json::json!({ "reply": "first" }),
         )
@@ -149,6 +156,8 @@ async fn capability_io_prunes_refs_for_terminal_runs_without_cross_run_loss() {
     let second_result = io
         .write_capability_result(
             &second_run,
+            &second_input,
+            InvocationId::new(),
             &capability_id("demo.echo"),
             serde_json::json!({ "reply": "second" }),
         )
@@ -219,7 +228,13 @@ async fn capability_io_enforces_staging_entry_and_byte_caps() {
 
     let oversized_result = serde_json::json!("x".repeat(4 * 1024 * 1024));
     let byte_error = ProductLiveCapabilityIo::default()
-        .write_capability_result(&run_context, &capability_id("demo.echo"), oversized_result)
+        .write_capability_result(
+            &run_context,
+            &CapabilityInputRef::new("input:oversized-result").unwrap(),
+            InvocationId::new(),
+            &capability_id("demo.echo"),
+            oversized_result,
+        )
         .await
         .expect_err("staging must enforce a serialized-byte cap");
     assert_eq!(
@@ -654,6 +669,14 @@ async fn local_dev_adapter_registers_provider_tool_calls_as_run_scoped_inputs() 
         .into_iter()
         .find(|definition| definition.capability_id == capability_id)
         .expect("builtin echo should be advertised as a provider tool");
+    assert!(
+        tool_definition
+            .parameters
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|properties| properties.contains_key("message")),
+        "provider tool definitions should receive resolved built-in input schemas"
+    );
 
     let provider_tool_call = ProviderToolCall {
         provider_id: "nearai".to_string(),
@@ -718,6 +741,86 @@ async fn local_dev_adapter_registers_provider_tool_calls_as_run_scoped_inputs() 
         io.result_for_ref(&run_context, &completed.result_ref)
             .unwrap(),
         serde_json::json!("hello from provider tool")
+    );
+}
+
+#[tokio::test]
+async fn local_dev_adapter_exposes_skill_install_provider_tool_schema_requires_string_content() {
+    let root = tempfile::tempdir().unwrap();
+    let services = build_reborn_services(RebornBuildInput::local_dev(
+        "provider-skill-install-owner",
+        root.path().join("local-dev"),
+    ))
+    .await
+    .unwrap();
+    let run_context = loop_run_context("provider-skill-install").await;
+    let io = Arc::new(ProductLiveCapabilityIo::default());
+    let capability_id = capability_id(SKILL_INSTALL_CAPABILITY_ID);
+    let user_id = UserId::new("user-provider-skill-install").unwrap();
+    let adapters = ProductLivePlannedRuntimeAdapters::from_services(
+        &services,
+        ProductLivePlannedRuntimeAdapterConfig {
+            capability_authority_resolver: authority_resolver(
+                ProductLiveVisibleCapabilityRequestConfig::new(
+                    user_id.clone(),
+                    RuntimeKind::FirstParty,
+                    TrustClass::FirstParty,
+                    SurfaceKind::new("agent_loop").unwrap(),
+                    CapabilitySurfacePolicy::allow_all(),
+                )
+                .with_grants(grants_for_principal_with_effects(
+                    Principal::User(user_id),
+                    [SKILL_INSTALL_CAPABILITY_ID],
+                    vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
+                ))
+                .with_provider_trust_for_effects(
+                    ExtensionId::new("builtin").unwrap(),
+                    EffectiveTrustClass::user_trusted(),
+                    vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
+                ),
+            ),
+            capability_input_resolver: io.clone(),
+            capability_result_writer: io,
+            capability_allow_set: capability_allowlist([capability_id.clone()]),
+            ..adapter_config()
+        },
+    )
+    .unwrap();
+    let capability_port = adapters
+        .capability_factory
+        .create_capability_port(&run_context)
+        .await
+        .unwrap();
+    capability_port
+        .visible_capabilities(VisibleCapabilityRequest)
+        .await
+        .unwrap();
+    let tool_definition = capability_port
+        .tool_definitions()
+        .unwrap()
+        .into_iter()
+        .find(|definition| definition.capability_id == capability_id)
+        .expect("builtin skill_install should be advertised as a provider tool");
+
+    let properties = tool_definition
+        .parameters
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .expect("skill_install schema should expose object properties");
+    assert_eq!(
+        properties
+            .get("content")
+            .and_then(|schema| schema.get("type")),
+        Some(&serde_json::json!("string")),
+        "skill_install content input should be advertised as a string"
+    );
+    assert!(
+        tool_definition
+            .parameters
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|required| required.iter().any(|field| field == "content")),
+        "skill_install content input should be required"
     );
 }
 
@@ -1459,6 +1562,8 @@ impl LoopCapabilityResultWriter for UnusedCapabilityIo {
     async fn write_capability_result(
         &self,
         _run_context: &LoopRunContext,
+        _input_ref: &CapabilityInputRef,
+        _invocation_id: InvocationId,
         _capability_id: &CapabilityId,
         _output: serde_json::Value,
     ) -> Result<LoopResultRef, AgentLoopHostError> {

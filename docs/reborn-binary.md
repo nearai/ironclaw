@@ -31,7 +31,11 @@ ironclaw-reborn models status
 ironclaw-reborn models status --json
 ironclaw-reborn profile list
 ironclaw-reborn profile list --json
+ironclaw-reborn repl
 ironclaw-reborn run
+ironclaw-reborn run --confirm-host-access
+ironclaw-reborn serve
+ironclaw-reborn serve --confirm-host-access
 ironclaw-reborn skills list
 ironclaw-reborn skills list --json
 ironclaw-reborn skills list --verbose
@@ -176,6 +180,7 @@ cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- profile list --json
 Supported profiles:
 
 - `local-dev` (default)
+- `local-dev-yolo`
 - `production`
 - `migration-dry-run`
 
@@ -208,6 +213,10 @@ Expected fields include:
 - `driver_registry: initialized`
 - `local_runtime_shell_readiness: ready`
 - `planned_default_profile: available`
+
+For `IRONCLAW_REBORN_PROFILE=local-dev-yolo`, `run`, `repl`, and `serve` require `--confirm-host-access` before the runtime receives trusted-laptop host access. Confirmed access mounts the host home through `/host`; Unix-style raw home aliases are also accepted when they can be represented as scoped mount aliases.
+
+When `serve --confirm-host-access` grants trusted-laptop access, `serve` refuses non-loopback listeners such as `0.0.0.0`. Bind to `127.0.0.1` or `::1`, or use a less privileged profile for non-loopback test listeners.
 
 ### `skills list`
 
@@ -245,6 +254,7 @@ Use `IRONCLAW_REBORN_PROFILE` to select the boot profile.
 Supported values:
 
 - `local-dev` (default)
+- `local-dev-yolo`
 - `production`
 - `migration-dry-run`
 

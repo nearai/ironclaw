@@ -12,7 +12,10 @@ use ironclaw_capabilities::{
     CapabilityObligationError, CapabilityObligationFailureKind, CapabilityObligationHandler,
     CapabilityObligationOutcome, CapabilityObligationPhase, CapabilityObligationRequest,
 };
-use ironclaw_events::{AuditSink, EventSink, RuntimeEvent};
+use ironclaw_events::{
+    AuditSink, EventSink, RuntimeEvent, SecurityAuditEvent, SecurityAuditSink, SecurityBoundary,
+    SecurityDecision,
+};
 use ironclaw_host_api::{
     ActionResultSummary, ActionSummary, AuditEnvelope, AuditEventId, AuditStage,
     CapabilityDispatchResult, CapabilityId, DecisionSummary, EffectKind, MountView, NetworkPolicy,
@@ -961,6 +964,7 @@ fn close_reservation_once<T>(result: Result<T, ResourceError>) -> Result<(), Pro
 #[derive(Clone, Default)]
 pub struct BuiltinObligationHandler {
     audit_sink: Option<Arc<dyn AuditSink>>,
+    security_audit_sink: Option<Arc<dyn SecurityAuditSink>>,
     network_policies: Option<Arc<NetworkObligationPolicyStore>>,
     secret_store: Option<Arc<dyn SecretStore>>,
     secret_injections: Option<Arc<RuntimeSecretInjectionStore>>,
@@ -983,6 +987,17 @@ impl BuiltinObligationHandler {
 
     pub fn with_audit_sink_dyn(mut self, sink: Arc<dyn AuditSink>) -> Self {
         self.audit_sink = Some(sink);
+        self
+    }
+
+    /// Wire in a [`SecurityAuditSink`] for boundary-decision recording.
+    ///
+    /// Currently consumed by the output-redaction (leak-detector) path in
+    /// [`Self::complete_dispatch`]. Additional boundaries inside this handler
+    /// will adopt the same sink in follow-up PRs; the wiring is intentionally
+    /// optional so unconfigured callers keep working unchanged.
+    pub fn with_security_audit_sink(mut self, sink: Arc<dyn SecurityAuditSink>) -> Self {
+        self.security_audit_sink = Some(sink);
         self
     }
 
@@ -1326,7 +1341,27 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
             .iter()
             .any(|obligation| matches!(obligation, Obligation::RedactOutput))
         {
-            dispatch.output = redact_output(dispatch.output)?;
+            dispatch.output = match redact_output(dispatch.output) {
+                Ok(value) => value,
+                Err(error) => {
+                    // Leak-detector blocked: record the boundary decision
+                    // before propagating. The event is payload-free by
+                    // construction — only the boundary, decision, and a
+                    // stable code reach the sink. The original output never
+                    // leaves the type system.
+                    if let Some(sink) = &self.security_audit_sink {
+                        let event = SecurityAuditEvent::new(
+                            SecurityBoundary::LeakDetector,
+                            SecurityDecision::Blocked,
+                            LEAK_REDACT_FAILED_CODE,
+                        )
+                        .with_capability_id(request.capability_id.clone())
+                        .with_scope(request.context.resource_scope.clone());
+                        sink.record(event);
+                    }
+                    return Err(error);
+                }
+            };
         }
 
         let output_bytes = dispatch_output_bytes(&dispatch.output)?;
@@ -1698,6 +1733,11 @@ fn dispatch_output_bytes(output: &serde_json::Value) -> Result<u64, CapabilityOb
         .map_err(|_| output_obligation_failed())
 }
 
+/// Security-audit reason code emitted when [`redact_output`] rejects output
+/// because the leak detector matched. Stable grep target for SRE pattern
+/// matching across durable security-audit logs.
+pub const LEAK_REDACT_FAILED_CODE: &str = "leak_redact_failed";
+
 fn redact_output(
     output: serde_json::Value,
 ) -> Result<serde_json::Value, CapabilityObligationError> {
@@ -2013,6 +2053,167 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn leak_detector_block_records_security_audit_event_through_complete_dispatch() {
+        use ironclaw_events::{
+            InMemorySecurityAuditSink, SecurityAuditSink, SecurityBoundary, SecurityDecision,
+        };
+        use ironclaw_host_api::{ReservationStatus, ResourceReceipt, ResourceUsage, RuntimeKind};
+
+        // Build a handler with both an audit sink (unused here — we hit the
+        // redact branch, not the AuditAfter branch) and a recording
+        // security-audit sink. Other backing stores are not exercised by
+        // the redact-only path, but the handler requires them to be set
+        // for safety; we install minimal in-memory ones.
+        let security_sink: Arc<InMemorySecurityAuditSink> =
+            Arc::new(InMemorySecurityAuditSink::new());
+        let security_sink_dyn: Arc<dyn SecurityAuditSink> = security_sink.clone();
+
+        let services = BuiltinObligationServices::with_handoff_stores(
+            Arc::new(InMemoryAuditSink::new()),
+            Arc::new(NetworkObligationPolicyStore::new()),
+            Arc::new(InMemorySecretStore::new()),
+            Arc::new(RuntimeSecretInjectionStore::new()),
+            Arc::new(InMemoryResourceGovernor::new()),
+        );
+        let handler = services
+            .obligation_handler()
+            .with_security_audit_sink(security_sink_dyn);
+
+        let context = execution_context();
+        let capability_id = capability_id();
+        let estimate = ResourceEstimate::default();
+        let obligations = vec![Obligation::RedactOutput];
+
+        // An AWS access-key shaped string is a built-in BLOCK pattern in
+        // `ironclaw_safety::LeakDetector` (`AKIA[0-9A-Z]{16}`). Per the
+        // module invariant we drive the *caller* (`complete_dispatch`),
+        // not the helper, and assert the recorded event:
+        //   - boundary  == LeakDetector
+        //   - decision  == Blocked
+        //   - code      == LEAK_REDACT_FAILED_CODE
+        //   - capability_id + scope are populated
+        //   - no payload (the offending string never appears in the event)
+        let leaky_payload =
+            serde_json::Value::String("hello AKIAABCDEFGHIJKLMNOP goodbye".to_string());
+        let dispatch = CapabilityDispatchResult {
+            capability_id: capability_id.clone(),
+            provider: context.extension_id.clone(),
+            runtime: RuntimeKind::Wasm,
+            output: leaky_payload,
+            usage: ResourceUsage::default(),
+            receipt: ResourceReceipt {
+                id: ResourceReservationId::new(),
+                scope: context.resource_scope.clone(),
+                status: ReservationStatus::Released,
+                estimate: ResourceEstimate::default(),
+                actual: None,
+            },
+        };
+
+        let request = CapabilityObligationCompletionRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+            dispatch: &dispatch,
+        };
+
+        let result = handler.complete_dispatch(request).await;
+        assert!(
+            matches!(
+                result,
+                Err(CapabilityObligationError::Failed {
+                    kind: CapabilityObligationFailureKind::Output
+                })
+            ),
+            "expected output-obligation failure, got {result:?}"
+        );
+
+        let events = security_sink.snapshot();
+        assert_eq!(
+            events.len(),
+            1,
+            "exactly one boundary decision should have been recorded, got {events:?}"
+        );
+        let event = &events[0];
+        assert_eq!(event.boundary, SecurityBoundary::LeakDetector);
+        assert_eq!(event.decision, SecurityDecision::Blocked);
+        assert_eq!(event.code, LEAK_REDACT_FAILED_CODE);
+        assert_eq!(event.code, "leak_redact_failed"); // stability lock
+        assert_eq!(event.capability_id.as_ref(), Some(&capability_id));
+        assert_eq!(event.scope.as_ref(), Some(&context.resource_scope));
+
+        // The `SecurityAuditEvent` shape has no free-form payload field.
+        // That invariant is enforced at the type level by the absence of
+        // a `String` member on the struct. The check below is therefore a
+        // documentation-only assertion: it locks the field set at the
+        // value level for future readers, but the real guard is the type
+        // shape in `ironclaw_events::security_audit`.
+        //
+        //   pub struct SecurityAuditEvent {
+        //       pub boundary: SecurityBoundary,
+        //       pub decision: SecurityDecision,
+        //       pub capability_id: Option<CapabilityId>,
+        //       pub scope: Option<ResourceScope>,
+        //       pub timestamp: SystemTime,
+        //       pub code: &'static str,
+        //   }
+    }
+
+    #[tokio::test]
+    async fn leak_detector_block_without_security_sink_does_not_panic() {
+        use ironclaw_host_api::{ReservationStatus, ResourceReceipt, ResourceUsage, RuntimeKind};
+
+        let services = BuiltinObligationServices::with_handoff_stores(
+            Arc::new(InMemoryAuditSink::new()),
+            Arc::new(NetworkObligationPolicyStore::new()),
+            Arc::new(InMemorySecretStore::new()),
+            Arc::new(RuntimeSecretInjectionStore::new()),
+            Arc::new(InMemoryResourceGovernor::new()),
+        );
+        // No `.with_security_audit_sink(...)` — confirms the sink is
+        // optional and the original failure semantics are preserved.
+        let handler = services.obligation_handler();
+
+        let context = execution_context();
+        let capability_id = capability_id();
+        let estimate = ResourceEstimate::default();
+        let obligations = vec![Obligation::RedactOutput];
+        let dispatch = CapabilityDispatchResult {
+            capability_id: capability_id.clone(),
+            provider: context.extension_id.clone(),
+            runtime: RuntimeKind::Wasm,
+            output: serde_json::Value::String("leak AKIAABCDEFGHIJKLMNOP".to_string()),
+            usage: ResourceUsage::default(),
+            receipt: ResourceReceipt {
+                id: ResourceReservationId::new(),
+                scope: context.resource_scope.clone(),
+                status: ReservationStatus::Released,
+                estimate: ResourceEstimate::default(),
+                actual: None,
+            },
+        };
+
+        let result = handler
+            .complete_dispatch(CapabilityObligationCompletionRequest {
+                phase: CapabilityObligationPhase::Invoke,
+                context: &context,
+                capability_id: &capability_id,
+                estimate: &estimate,
+                obligations: &obligations,
+                dispatch: &dispatch,
+            })
+            .await;
+        assert!(matches!(
+            result,
+            Err(CapabilityObligationError::Failed {
+                kind: CapabilityObligationFailureKind::Output
+            })
+        ));
     }
 
     fn same_invocation_agent_scopes() -> (ResourceScope, ResourceScope) {

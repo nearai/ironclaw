@@ -10,6 +10,11 @@
 - Product auth composition must use `ironclaw_auth` trait-shaped ports. Do not
   wire product auth through V1 OAuth routes, V1 pending maps, V1
   `ExtensionManager`, V1 secret stores, or route-local raw HTTP clients.
+- OAuth callback routes should only parse/validate HTTP input and call
+  `RebornProductAuthServices::handle_oauth_callback`; the handler must claim
+  the scoped flow/state/provider through `AuthFlowManager` before exchanging
+  provider material through `AuthProviderClient`, then complete the flow and
+  emit typed continuations.
 - Blocked run-state approval/auth gate rendering and resume belongs to #3094;
   keep this crate's #3811 auth seam reusable by that layer without implementing
   a second gate-resolution path.
@@ -164,12 +169,13 @@ The `serve` subcommand builds a full local-dev `RebornRuntime`, asks
 `build_webui_services(&runtime, None)` for the WebUI bundle, and hands
 the resulting router to the host-owned `ironclaw_reborn_webui_ingress`
 listener lifecycle. The bundle's default projection stream is backed by
-the runtime's process-local in-memory durable event log plus
-`EventStreamManager`, so `/events` and `/ws` no longer advertise routes
-that only return `Unavailable`. That log is intentionally local-dev
-scaffolding for this slice; production durable retention/live fanout
-belongs in the host runtime/event-store follow-up rather than this
-composition facade.
+the runtime-owned durable event log plus `EventStreamManager`, so
+`/events` and `/ws` no longer advertise routes that only return
+`Unavailable`. In local-dev builds with `libsql` enabled, the log and
+runtime state stores sit behind the composed local-dev root filesystem
+(`reborn-local-dev.db` for durable records, `/projects` for workspace
+files). Production durable retention/live fanout still belongs in the
+host runtime/event-store follow-up rather than this composition facade.
 
 ```rust
 // Inside a host-owned ingress crate / binary (NOT in this crate —

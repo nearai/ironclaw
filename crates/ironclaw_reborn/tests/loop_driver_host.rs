@@ -11,9 +11,9 @@ use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::{
     AgentId, ApprovalRequestId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId,
     CapabilityId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId, GrantConstraints,
-    HostPortCatalog, MountView, NetworkPolicy, PackageId, PermissionMode, Principal, ProcessId,
-    ProjectId, ResourceEstimate, ResourceUsage, RuntimeKind, SecretHandle, TenantId, ThreadId,
-    TrustClass, UserId, VirtualPath,
+    HostPortCatalog, InvocationId, MountView, NetworkPolicy, PackageId, PermissionMode, Principal,
+    ProcessId, ProjectId, ResourceEstimate, ResourceUsage, RuntimeKind, SecretHandle, TenantId,
+    ThreadId, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, CapabilitySurfacePolicy, HostRuntime,
@@ -90,18 +90,19 @@ use ironclaw_turns::{
     TurnRunState, TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
-        BatchPolicyKind, CapabilityDeniedReasonKind, CapabilityFailureKind, CapabilityInputRef,
-        CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion,
-        FinalizeAssistantMessage, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
-        LoopCancelReasonKind, LoopCancellationPort, LoopCapabilityPort, LoopCheckpointKind,
-        LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextRequest,
-        LoopDriverId, LoopDriverNoteKind, LoopGateKind, LoopHostMilestone, LoopHostMilestoneKind,
-        LoopInlineMessage, LoopInlineMessageRole, LoopInput, LoopInputAckToken, LoopInputCursor,
-        LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant, LoopModelGatewayError,
-        LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot, LoopProgressEvent,
-        LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopSafeSummary, ModelCallOutcome,
-        NoOpBudgetAccountant, NoOpPolicyGuard, ParentLoopOutput, PersonalContextPolicy, PromptMode,
-        SkillVisibility, StageCheckpointPayloadRequest, VisibleCapabilityRequest,
+        BatchPolicyKind, CapabilityDeniedReasonKind, CapabilityDescriptorView,
+        CapabilityFailureKind, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
+        CapabilitySurfaceVersion, FinalizeAssistantMessage, InMemoryLoopHostMilestoneSink,
+        InstructionSafetyContext, LoopCancelReasonKind, LoopCancellationPort, LoopCapabilityPort,
+        LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef,
+        LoopContextRequest, LoopDriverId, LoopDriverNoteKind, LoopGateKind, LoopHostMilestone,
+        LoopHostMilestoneKind, LoopInlineMessage, LoopInlineMessageRole, LoopInput,
+        LoopInputAckToken, LoopInputCursor, LoopInputCursorToken, LoopInputPort,
+        LoopModelBudgetAccountant, LoopModelGatewayError, LoopModelPort, LoopModelRequest,
+        LoopModelRouteSnapshot, LoopProgressEvent, LoopPromptBundleRequest, LoopPromptPort,
+        LoopRunContext, LoopSafeSummary, ModelCallOutcome, NoOpBudgetAccountant, NoOpPolicyGuard,
+        ParentLoopOutput, PersonalContextPolicy, PromptMode, SkillVisibility,
+        StageCheckpointPayloadRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
     runner::{ClaimRunRequest, ClaimedTurnRun, TurnRunTransitionPort},
 };
@@ -124,6 +125,23 @@ fn turn_state_store_dyn(store: &Arc<InMemoryTurnStateStore>) -> Arc<dyn TurnStat
 fn test_safety_context() -> InstructionSafetyContext {
     InstructionSafetyContext::new("policy:test", "test safety context")
         .expect("test safety context")
+}
+
+const SYNTHETIC_CAPABILITY_INFO_ID: &str = "ironclaw.loop.capability_info";
+
+fn only_runtime_surface_descriptor<'a>(
+    surface: &'a VisibleCapabilitySurface,
+    expected_id: &CapabilityId,
+) -> &'a CapabilityDescriptorView {
+    let runtime_descriptors = surface
+        .descriptors
+        .iter()
+        .filter(|descriptor| descriptor.capability_id.as_str() != SYNTHETIC_CAPABILITY_INFO_ID)
+        .collect::<Vec<_>>();
+    assert_eq!(runtime_descriptors.len(), 1);
+    let descriptor = runtime_descriptors[0];
+    assert_eq!(&descriptor.capability_id, expected_id);
+    descriptor
 }
 
 #[tokio::test]
@@ -1539,6 +1557,7 @@ async fn turn_runner_blocks_on_approval_then_coordinator_resume_completes_same_r
             actor: TurnActor::new(UserId::new("user-text-host").unwrap()),
             run_id,
             gate_resolution_ref: gate_ref.clone(),
+            precondition: ironclaw_turns::ResumeTurnPrecondition::AnyBlockedGate,
             source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
             idempotency_key: IdempotencyKey::new("resume-approval-once").unwrap(),
@@ -1899,8 +1918,7 @@ async fn planned_host_factory_create_host_uses_profiled_capabilities() {
         .visible_capabilities(VisibleCapabilityRequest)
         .await
         .unwrap();
-    assert_eq!(surface.descriptors.len(), 1);
-    assert_eq!(surface.descriptors[0].capability_id, allowed_id);
+    let _descriptor = only_runtime_surface_descriptor(&surface, &allowed_id);
 
     let outcome = host
         .invoke_capability(CapabilityInvocation {
@@ -2163,8 +2181,7 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
         .visible_capabilities(VisibleCapabilityRequest)
         .await
         .unwrap();
-    assert_eq!(surface.descriptors.len(), 1);
-    assert_eq!(surface.descriptors[0].capability_id, allowed_id);
+    let _descriptor = only_runtime_surface_descriptor(&surface, &allowed_id);
 
     let outcome = host
         .invoke_capability(CapabilityInvocation {
@@ -3697,8 +3714,12 @@ async fn text_only_host_routes_capability_invocation_through_host_runtime() {
         .visible_capabilities(VisibleCapabilityRequest)
         .await
         .unwrap();
-    assert_eq!(surface.descriptors.len(), 1);
-    assert_eq!(surface.descriptors[0].capability_id, capability_id);
+    assert!(
+        surface
+            .descriptors
+            .iter()
+            .any(|descriptor| descriptor.capability_id == capability_id)
+    );
 
     let outcome = host
         .invoke_capability(CapabilityInvocation {
@@ -3761,8 +3782,7 @@ async fn text_only_host_profiled_capabilities_filter_surface_and_invocation() {
         .visible_capabilities(VisibleCapabilityRequest)
         .await
         .unwrap();
-    assert_eq!(surface.descriptors.len(), 1);
-    assert_eq!(surface.descriptors[0].capability_id, allowed_id);
+    let _descriptor = only_runtime_surface_descriptor(&surface, &allowed_id);
 
     let outcome = host
         .invoke_capability(CapabilityInvocation {
@@ -3834,8 +3854,7 @@ async fn default_strategy_filter_all_loses_to_host_profile_filter() {
         .visible_capabilities(VisibleCapabilityRequest)
         .await
         .unwrap();
-    assert_eq!(surface.descriptors.len(), 1);
-    assert_eq!(surface.descriptors[0].capability_id, tool_a_id);
+    let _descriptor = only_runtime_surface_descriptor(&surface, &tool_a_id);
 
     // Invoking tool_b must be denied — the host profile filter wins over the
     // strategy's implicit `All` permit.
@@ -4031,11 +4050,13 @@ async fn text_only_host_sanitizes_runtime_failure_message_before_driver_output()
     let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([
         capability_descriptor(capability_id.as_str()),
     ])));
-    runtime.push_outcome(RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure {
-        capability_id: capability_id.clone(),
-        kind: RuntimeFailureKind::Dispatcher,
-        message: Some("raw provider error sk-secret /host/path tool_input".to_string()),
-    }));
+    runtime.push_outcome(RuntimeCapabilityOutcome::Failed(
+        RuntimeCapabilityFailure::new(
+            capability_id.clone(),
+            RuntimeFailureKind::Dispatcher,
+            Some("raw provider error sk-secret /host/path tool_input".to_string()),
+        ),
+    ));
     let io = Arc::new(InMemoryCapabilityIo::default());
     let input_ref = CapabilityInputRef::new("input:failure-request").unwrap();
     io.put_input(input_ref.clone(), json!({"message": "fail"}));
@@ -4075,7 +4096,10 @@ async fn text_only_host_sanitizes_runtime_failure_message_before_driver_output()
     let CapabilityOutcome::Failed(failure) = outcome else {
         panic!("expected failed capability outcome");
     };
-    assert_eq!(failure.safe_summary, "capability invocation failed");
+    assert_eq!(
+        failure.safe_summary,
+        "capability invocation could not safely continue"
+    );
 }
 
 #[tokio::test]
@@ -4427,11 +4451,9 @@ async fn text_only_host_does_not_reinvoke_runtime_after_failed_outcome_retry() {
     let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([
         capability_descriptor(capability_id.as_str()),
     ])));
-    runtime.push_outcome(RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure {
-        capability_id: capability_id.clone(),
-        kind: RuntimeFailureKind::Dispatcher,
-        message: None,
-    }));
+    runtime.push_outcome(RuntimeCapabilityOutcome::Failed(
+        RuntimeCapabilityFailure::new(capability_id.clone(), RuntimeFailureKind::Dispatcher, None),
+    ));
     let io = Arc::new(InMemoryCapabilityIo::default());
     let input_ref = CapabilityInputRef::new("input:failed-idempotent-request").unwrap();
     io.put_input(input_ref.clone(), json!({"message": "fail once"}));
@@ -4994,12 +5016,15 @@ async fn text_only_host_e2e_invokes_script_capability_through_real_host_runtime(
         .visible_capabilities(VisibleCapabilityRequest)
         .await
         .unwrap();
-    assert_eq!(surface.descriptors.len(), 1);
     assert_eq!(
-        surface.descriptors[0].capability_id,
-        e2e_script_capability_id()
+        surface
+            .descriptors
+            .iter()
+            .find(|descriptor| descriptor.capability_id == e2e_script_capability_id())
+            .expect("script capability should be visible")
+            .runtime,
+        RuntimeKind::Script
     );
-    assert_eq!(surface.descriptors[0].runtime, RuntimeKind::Script);
 
     let outcome = host
         .invoke_capability(CapabilityInvocation {
@@ -5475,6 +5500,8 @@ impl LoopCapabilityResultWriter for InMemoryCapabilityIo {
     async fn write_capability_result(
         &self,
         run_context: &LoopRunContext,
+        _input_ref: &CapabilityInputRef,
+        _invocation_id: InvocationId,
         capability_id: &CapabilityId,
         output: Value,
     ) -> Result<LoopResultRef, AgentLoopHostError> {
@@ -5622,6 +5649,7 @@ fn capability_descriptor(id: &str) -> CapabilityDescriptor {
         parameters_schema: json!({"type": "object"}),
         effects: vec![EffectKind::DispatchCapability],
         default_permission: PermissionMode::Allow,
+        runtime_credentials: Vec::new(),
         resource_profile: None,
     }
 }
@@ -6598,6 +6626,7 @@ impl RecordingGateway {
                     surface_version: CapabilitySurfaceVersion::new("empty:v1").unwrap(),
                     capability_id: CapabilityId::new("demo.echo").unwrap(),
                     input_ref: CapabilityInputRef::new("input:opaque-tool-call").unwrap(),
+                    effective_capability_ids: vec![CapabilityId::new("demo.echo").unwrap()],
                     provider_replay: None,
                 },
             ]),

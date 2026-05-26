@@ -1902,6 +1902,7 @@ impl LoopCapabilityPort for GatewayCapabilityPort {
             surface_version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
             capability_id: CapabilityId::new("demo.echo").unwrap(),
             input_ref,
+            effective_capability_ids: vec![CapabilityId::new("demo.echo").unwrap()],
             provider_replay: tool_call
                 .turn_id
                 .map(|provider_turn_id| ProviderToolCallReplay {

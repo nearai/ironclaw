@@ -166,6 +166,7 @@ async fn turn_lifecycle_projection_replays_submit_block_resume_complete_without_
             actor: actor(),
             run_id,
             gate_resolution_ref: gate_ref,
+            precondition: ironclaw_turns::ResumeTurnPrecondition::AnyBlockedGate,
             source_binding_ref: SourceBindingRef::new("source-TURN_RESUME_SOURCE_SENTINEL_3022")
                 .unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new(
@@ -790,6 +791,7 @@ async fn resume_turn_wakes_runner_for_same_run_after_requeue() {
             actor: actor(),
             run_id,
             gate_resolution_ref: gate_ref,
+            precondition: ironclaw_turns::ResumeTurnPrecondition::AnyBlockedGate,
             source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
@@ -915,6 +917,7 @@ async fn resume_turn_ignores_wake_notification_panic_after_requeue() {
             actor: actor(),
             run_id,
             gate_resolution_ref: gate_ref,
+            precondition: ironclaw_turns::ResumeTurnPrecondition::AnyBlockedGate,
             source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
@@ -1940,6 +1943,7 @@ async fn blocked_resume_and_recovery_required_keep_existing_admission_reservatio
             actor: actor(),
             run_id,
             gate_resolution_ref: gate_ref,
+            precondition: ironclaw_turns::ResumeTurnPrecondition::AnyBlockedGate,
             source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
@@ -2103,8 +2107,98 @@ async fn runner_claim_and_block_update_persistent_run_lock_and_checkpoint_record
     assert_eq!(checkpoint.checkpoint_id, checkpoint_id);
     assert_eq!(checkpoint.run_id, run_id);
     assert_eq!(checkpoint.sequence, 1);
-    assert_eq!(checkpoint.gate_ref, gate_ref);
+    assert_eq!(checkpoint.gate_ref, gate_ref.clone());
     assert_eq!(checkpoint.state_ref, state_ref);
+
+    let blocked_event = store
+        .events()
+        .into_iter()
+        .find(|event| event.kind == TurnEventKind::Blocked && event.run_id == run_id)
+        .unwrap();
+    assert_eq!(blocked_event.owner_user_id, Some(actor().user_id));
+    assert!(blocked_event.occurred_at.is_some());
+    let blocked_gate = blocked_event.blocked_gate.unwrap();
+    assert_eq!(blocked_gate.gate_ref, gate_ref);
+    assert_eq!(
+        blocked_gate.gate_kind,
+        ironclaw_turns::TurnBlockedGateKind::Approval
+    );
+}
+
+async fn block_run_with_reason_yields_expected_blocked_gate(
+    thread_id: &str,
+    idem_key: &str,
+    reason_builder: impl Fn(GateRef) -> BlockedReason,
+    expected_kind: ironclaw_turns::TurnBlockedGateKind,
+    gate_ref_str: &str,
+) {
+    let (coordinator, store) = coordinator();
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(thread_id, idem_key))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    let gate_ref = GateRef::new(gate_ref_str).unwrap();
+    let state_ref = LoopCheckpointStateRef::new("checkpoint:reason-block-state").unwrap();
+    store
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref,
+            reason: reason_builder(gate_ref.clone()),
+        })
+        .await
+        .unwrap();
+
+    let blocked_event = store
+        .events()
+        .into_iter()
+        .find(|event| event.kind == TurnEventKind::Blocked && event.run_id == run_id)
+        .expect("block_run emits a Blocked lifecycle event");
+    let blocked_gate = blocked_event
+        .blocked_gate
+        .expect("block_run sets blocked_gate metadata for the reason");
+    assert_eq!(blocked_gate.gate_ref, gate_ref);
+    assert_eq!(blocked_gate.gate_kind, expected_kind);
+}
+
+#[tokio::test]
+async fn block_run_auth_emits_blocked_event_with_auth_gate_kind() {
+    block_run_with_reason_yields_expected_blocked_gate(
+        "thread-block-auth",
+        "idem-submit-auth",
+        |gate_ref| BlockedReason::Auth { gate_ref },
+        ironclaw_turns::TurnBlockedGateKind::Auth,
+        "auth-gate",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn block_run_resource_emits_blocked_event_with_resource_gate_kind() {
+    block_run_with_reason_yields_expected_blocked_gate(
+        "thread-block-resource",
+        "idem-submit-resource",
+        |gate_ref| BlockedReason::Resource { gate_ref },
+        ironclaw_turns::TurnBlockedGateKind::Resource,
+        "resource-gate",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -2146,6 +2240,7 @@ async fn resume_updates_persisted_run_binding_refs_and_replay_envelope() {
         actor: actor(),
         run_id,
         gate_resolution_ref: gate_ref,
+        precondition: ironclaw_turns::ResumeTurnPrecondition::AnyBlockedGate,
         source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
         reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
         idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
@@ -2465,6 +2560,7 @@ async fn idempotency_persistence_snapshot_retains_each_operation_kind_capacity()
             actor: actor(),
             run_id,
             gate_resolution_ref: gate_ref,
+            precondition: ironclaw_turns::ResumeTurnPrecondition::AnyBlockedGate,
             source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
@@ -2562,6 +2658,7 @@ async fn idempotency_replay_helpers_require_matching_operation_kind() {
             actor: actor(),
             run_id,
             gate_resolution_ref: gate_ref,
+            precondition: ironclaw_turns::ResumeTurnPrecondition::AnyBlockedGate,
             source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
@@ -3405,6 +3502,7 @@ async fn blocked_run_persists_checkpoint_and_keeps_same_thread_lock_until_resume
         actor: actor(),
         run_id,
         gate_resolution_ref: gate_ref,
+        precondition: ironclaw_turns::ResumeTurnPrecondition::BlockedApprovalGate,
         source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
         reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
         idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
@@ -3418,6 +3516,73 @@ async fn blocked_run_persists_checkpoint_and_keeps_same_thread_lock_until_resume
     assert_eq!(duplicate, resumed);
     assert_eq!(store.events().len(), event_count_after_resume);
     assert_eq!(resumed.status, TurnStatus::Queued);
+}
+
+#[tokio::test]
+async fn resume_turn_rejects_unexpected_blocked_status_without_requeueing_run() {
+    let (coordinator, store) = coordinator();
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-a", "idem-submit-a"))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let gate_ref = GateRef::new("approval-gate").unwrap();
+    store
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref: block_state_ref(),
+            reason: BlockedReason::Approval {
+                gate_ref: gate_ref.clone(),
+            },
+        })
+        .await
+        .unwrap();
+
+    let err = coordinator
+        .resume_turn(ResumeTurnRequest {
+            scope: scope("thread-a"),
+            actor: actor(),
+            run_id,
+            gate_resolution_ref: gate_ref.clone(),
+            precondition: ironclaw_turns::ResumeTurnPrecondition::BlockedAuthGate,
+            source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
+            idempotency_key: IdempotencyKey::new("idem-resume-wrong-status").unwrap(),
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        err,
+        TurnError::InvalidTransition {
+            from: TurnStatus::BlockedApproval,
+            to: TurnStatus::Queued,
+        }
+    );
+    let state = coordinator
+        .get_run_state(GetRunStateRequest {
+            scope: scope("thread-a"),
+            run_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(state.status, TurnStatus::BlockedApproval);
+    assert_eq!(state.gate_ref, Some(gate_ref));
 }
 
 #[tokio::test]
@@ -3461,6 +3626,7 @@ async fn resume_turn_from_foreign_actor_is_denied_without_requeueing_run() {
             actor: TurnActor::new(UserId::new("user2").unwrap()),
             run_id,
             gate_resolution_ref: gate_ref.clone(),
+            precondition: ironclaw_turns::ResumeTurnPrecondition::AnyBlockedGate,
             source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-resume-foreign-actor").unwrap(),
@@ -3602,6 +3768,7 @@ async fn resume_turn_with_wrong_gate_resolution_ref_is_invalid_request() {
             actor: actor(),
             run_id,
             gate_resolution_ref: GateRef::new("wrong-gate").unwrap(),
+            precondition: ironclaw_turns::ResumeTurnPrecondition::AnyBlockedGate,
             source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-resume-wrong-gate").unwrap(),
@@ -3855,9 +4022,12 @@ async fn in_memory_event_sink_retains_a_bounded_tail() {
         sink.publish(TurnLifecycleEvent {
             cursor: EventCursor(cursor),
             scope: scope("thread-a"),
+            occurred_at: None,
+            owner_user_id: None,
             run_id: TurnRunId::new(),
             status: TurnStatus::Queued,
             kind: TurnEventKind::Submitted,
+            blocked_gate: None,
             sanitized_reason: None,
         })
         .await

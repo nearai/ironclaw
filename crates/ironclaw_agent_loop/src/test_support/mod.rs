@@ -897,6 +897,7 @@ fn scripted_capability_call(call: ScriptedCapabilityCall) -> CapabilityCallCandi
         capability_id: capability_id(&call.name),
         input_ref: CapabilityInputRef::new(call.input_ref)
             .unwrap_or_else(|error| panic!("test capability input ref should be valid: {error}")),
+        effective_capability_ids: vec![capability_id(&call.name)],
         provider_replay: None,
     }
 }
@@ -957,8 +958,10 @@ fn scripted_failure_kind(kind: &str) -> CapabilityFailureKind {
         "cancelled" => CapabilityFailureKind::Cancelled,
         "dispatcher" => CapabilityFailureKind::Dispatcher,
         "input_invalid" | "invalid_input" => CapabilityFailureKind::InvalidInput,
+        "invalid_output" => CapabilityFailureKind::InvalidOutput,
         "missing_runtime" => CapabilityFailureKind::MissingRuntime,
         "network" => CapabilityFailureKind::Network,
+        "operation_failed" => CapabilityFailureKind::OperationFailed,
         "output_too_large" => CapabilityFailureKind::OutputTooLarge,
         "policy_denied" => CapabilityFailureKind::PolicyDenied,
         "process" => CapabilityFailureKind::Process,

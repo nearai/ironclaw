@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/ironclaw_common", "crates/ironclaw_host_api", "crates/ironclaw_filesystem", "crates/ironclaw_memory", "crates/ironclaw_events", "crates/ironclaw_event_projections", "crates/ironclaw_event_streams", "crates/ironclaw_reborn_event_store", "crates/ironclaw_extensions", "crates/ironclaw_processes", "crates/ironclaw_dispatcher", "crates/ironclaw_scripts", "crates/ironclaw_mcp", "crates/ironclaw_wasm", "crates/ironclaw_wasm_sandbox_core", "crates/ironclaw_capabilities", "crates/ironclaw_secrets", "crates/ironclaw_network", "crates/ironclaw_host_runtime", "crates/ironclaw_runtime_policy", "crates/ironclaw_authorization", "crates/ironclaw_run_state", "crates/ironclaw_approvals", "crates/ironclaw_resources", "crates/ironclaw_auth", "crates/ironclaw_trust", "crates/ironclaw_turns", "crates/ironclaw_agent_loop", "crates/ironclaw_threads", "crates/ironclaw_loop_support", "crates/ironclaw_reborn", "crates/ironclaw_reborn_config", "crates/ironclaw_reborn_composition", "crates/ironclaw_first_party_extensions", "crates/ironclaw_reborn_cli", "crates/ironclaw_reborn_webui_ingress", "crates/ironclaw_conversations", "crates/ironclaw_product_adapters", "crates/ironclaw_product_workflow", "crates/ironclaw_product_workflow_storage", "crates/ironclaw_product_adapter_registry", "crates/ironclaw_wasm_product_adapters", "crates/ironclaw_telegram_v2_adapter", "crates/ironclaw_outbound", "crates/ironclaw_architecture", "crates/ironclaw_safety", "crates/ironclaw_skills", "crates/ironclaw_llm", "crates/ironclaw_engine", "crates/ironclaw_gateway", "crates/ironclaw_tui", "crates/ironclaw_webui_v2"]
+members = [".", "crates/ironclaw_common", "crates/ironclaw_host_api", "crates/ironclaw_filesystem", "crates/ironclaw_memory", "crates/ironclaw_events", "crates/ironclaw_event_projections", "crates/ironclaw_event_streams", "crates/ironclaw_reborn_event_store", "crates/ironclaw_extensions", "crates/ironclaw_processes", "crates/ironclaw_dispatcher", "crates/ironclaw_scripts", "crates/ironclaw_mcp", "crates/ironclaw_wasm", "crates/ironclaw_wasm_sandbox_core", "crates/ironclaw_wasm_limiter", "crates/ironclaw_capabilities", "crates/ironclaw_secrets", "crates/ironclaw_network", "crates/ironclaw_host_runtime", "crates/ironclaw_runtime_policy", "crates/ironclaw_authorization", "crates/ironclaw_run_state", "crates/ironclaw_approvals", "crates/ironclaw_resources", "crates/ironclaw_auth", "crates/ironclaw_trust", "crates/ironclaw_turns", "crates/ironclaw_agent_loop", "crates/ironclaw_threads", "crates/ironclaw_prompt_envelope", "crates/ironclaw_hooks", "crates/ironclaw_loop_support", "crates/ironclaw_reborn", "crates/ironclaw_reborn_config", "crates/ironclaw_reborn_composition", "crates/ironclaw_first_party_extensions", "crates/ironclaw_reborn_cli", "crates/ironclaw_reborn_traces", "crates/ironclaw_reborn_webui_ingress", "crates/ironclaw_conversations", "crates/ironclaw_product_adapters", "crates/ironclaw_product_workflow", "crates/ironclaw_product_workflow_storage", "crates/ironclaw_product_adapter_registry", "crates/ironclaw_wasm_product_adapters", "crates/ironclaw_telegram_v2_adapter", "crates/ironclaw_outbound", "crates/ironclaw_architecture", "crates/ironclaw_safety", "crates/ironclaw_skills", "crates/ironclaw_llm", "crates/ironclaw_engine", "crates/ironclaw_gateway", "crates/ironclaw_tui", "crates/ironclaw_webui_v2"]
 exclude = [
     "channels-src/discord",
     "channels-src/feishu",
@@ -21,6 +21,22 @@ exclude = [
     "fuzz",
     "crates/ironclaw_safety/fuzz",
 ]
+
+# Maintainability guardrails against dead/speculative public API
+# (the "Theme 1" anti-pattern from the maintainability audit: accessors,
+# `_dyn` variants, and getters with zero callers that needlessly expand the
+# stable surface). These are `warn`, not `deny`, and are *opted into*
+# per-crate via `[lints] workspace = true` so they do not flood the build
+# with pre-existing noise across the whole workspace. Currently scoped to the
+# hook/reborn crates.
+#
+# - `unreachable_pub`: flags `pub` items that are not reachable outside their
+#   crate — the classic "this should be `pub(crate)`" smell.
+# - `dead_code`: warn on never-used items (this is the rustc default, declared
+#   here so it survives any future `#![allow(dead_code)]` creep at the crate root).
+[workspace.lints.rust]
+unreachable_pub = "warn"
+dead_code = "warn"
 
 [package]
 name = "ironclaw"
@@ -128,6 +144,7 @@ ironclaw_turns = { path = "crates/ironclaw_turns", version = "0.1.0" }
 ironclaw_engine = { path = "crates/ironclaw_engine", version = "0.1.0" }
 ironclaw_gateway = { path = "crates/ironclaw_gateway", version = "0.1.0" }
 ironclaw_llm = { path = "crates/ironclaw_llm", version = "0.1.0" }
+ironclaw_reborn_traces = { path = "crates/ironclaw_reborn_traces", version = "0.1.0" }
 ironclaw_safety = { path = "crates/ironclaw_safety", version = "0.2.2" }
 ironclaw_skills = { path = "crates/ironclaw_skills", version = "0.3.0" }
 ironclaw_tui = { path = "crates/ironclaw_tui", optional = true, version = "0.1.0" }
@@ -252,6 +269,7 @@ ironclaw_host_runtime = { path = "crates/ironclaw_host_runtime", version = "0.1.
 ironclaw_network = { path = "crates/ironclaw_network", version = "0.1.0" }
 ironclaw_processes = { path = "crates/ironclaw_processes", version = "0.1.0" }
 ironclaw_resources = { path = "crates/ironclaw_resources", version = "0.1.0" }
+ironclaw_secrets = { path = "crates/ironclaw_secrets", version = "0.1.0" }
 ironclaw_product_adapters = { path = "crates/ironclaw_product_adapters", version = "0.1.0", features = ["test-support"] }
 ironclaw_product_workflow = { path = "crates/ironclaw_product_workflow", version = "0.1.0", features = ["test-support"] }
 ironclaw_reborn = { path = "crates/ironclaw_reborn", version = "0.1.0" }

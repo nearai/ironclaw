@@ -322,6 +322,10 @@ impl TurnRunnerWorker {
             runner_id = ?self.runner_id,
             run_id = ?run_id,
             status = ?status,
+            resolved_run_profile_id = claimed.resolved_run_profile.profile_id.as_str(),
+            resolved_run_profile_version = claimed.resolved_run_profile.profile_version.as_u64(),
+            loop_driver_id = claimed.resolved_run_profile.loop_driver.id.as_str(),
+            loop_driver_version = claimed.resolved_run_profile.loop_driver.version.as_u64(),
             "claimed turn run"
         );
 
@@ -403,6 +407,14 @@ impl TurnRunnerWorker {
         })?;
 
         let driver = registered.driver();
+        debug!(
+            runner_id = ?self.runner_id,
+            run_id = %claimed.state.run_id,
+            resolved_run_profile_id = claimed.resolved_run_profile.profile_id.as_str(),
+            loop_driver_id = descriptor.id.as_str(),
+            loop_driver_version = descriptor.version.as_u64(),
+            "reborn turn runner resolved loop driver"
+        );
 
         // Create host for this run
         let host = self

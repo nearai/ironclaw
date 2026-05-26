@@ -143,14 +143,7 @@ async fn first_party_handler_uses_staged_secret_through_production_host_egress()
         grants: vec![dispatch_grant_with_secret(&handle)],
     });
     let scope = context.resource_scope.clone();
-    secret_store
-        .put(
-            scope.clone(),
-            handle.clone(),
-            SecretMaterial::from("sk-first-party-staged-secret"),
-        )
-        .await
-        .unwrap();
+    stage_http_secret(&secret_store, &scope, &handle).await;
 
     let outcome = runtime
         .invoke_capability(RuntimeCapabilityRequest::new(
@@ -212,12 +205,20 @@ async fn first_party_handler_maps_egress_error_codes_to_dispatch_errors() {
             RuntimeFailureKind::Network,
         ),
         (
+            RuntimeHttpEgressError::Network {
+                reason: "policy_denied".to_string(),
+                request_bytes: 11,
+                response_bytes: 0,
+            },
+            RuntimeFailureKind::PolicyDenied,
+        ),
+        (
             RuntimeHttpEgressError::Response {
                 reason: "bad response".to_string(),
                 request_bytes: 11,
                 response_bytes: 22,
             },
-            RuntimeFailureKind::InvalidInput,
+            RuntimeFailureKind::OperationFailed,
         ),
         (
             RuntimeHttpEgressError::Response {
@@ -225,22 +226,26 @@ async fn first_party_handler_maps_egress_error_codes_to_dispatch_errors() {
                 request_bytes: 11,
                 response_bytes: 4097,
             },
-            RuntimeFailureKind::InvalidInput,
+            RuntimeFailureKind::OutputTooLarge,
         ),
     ];
 
     for (error, expected_kind) in cases {
         let handle = SecretHandle::new("api-token").unwrap();
+        let secret_store = Arc::new(InMemorySecretStore::new());
         let runtime = http_first_party_services(&handle)
+            .with_secret_store(Arc::clone(&secret_store))
             .with_runtime_http_egress(Arc::new(FailingRuntimeHttpEgress { error }))
             .with_trust_policy(Arc::new(first_party_trust_policy()))
             .host_runtime_for_local_testing();
+        let context = execution_context(CapabilitySet {
+            grants: vec![dispatch_grant_with_secret(&handle)],
+        });
+        stage_http_secret(&secret_store, &context.resource_scope, &handle).await;
 
         let outcome = invoke_http_fixture(
             &runtime,
-            execution_context(CapabilitySet {
-                grants: vec![dispatch_grant_with_secret(&handle)],
-            }),
+            context,
             json!({"url":"https://api.example.test/v1/native"}),
         )
         .await;
@@ -248,18 +253,22 @@ async fn first_party_handler_maps_egress_error_codes_to_dispatch_errors() {
         let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
             panic!("expected failed first-party HTTP fixture, got {outcome:?}");
         };
-        assert_eq!(failure.kind, expected_kind);
+        assert_eq!(failure.kind, expected_kind, "{failure:?}");
     }
 
     let handle = SecretHandle::new("api-token").unwrap();
+    let secret_store = Arc::new(InMemorySecretStore::new());
     let runtime = http_first_party_services(&handle)
+        .with_secret_store(Arc::clone(&secret_store))
         .with_trust_policy(Arc::new(first_party_trust_policy()))
         .host_runtime_for_local_testing();
+    let context = execution_context(CapabilitySet {
+        grants: vec![dispatch_grant_with_secret(&handle)],
+    });
+    stage_http_secret(&secret_store, &context.resource_scope, &handle).await;
     let outcome = invoke_http_fixture(
         &runtime,
-        execution_context(CapabilitySet {
-            grants: vec![dispatch_grant_with_secret(&handle)],
-        }),
+        context,
         json!({"url":"https://api.example.test/v1/native"}),
     )
     .await;
@@ -269,18 +278,17 @@ async fn first_party_handler_maps_egress_error_codes_to_dispatch_errors() {
     assert_eq!(failure.kind, RuntimeFailureKind::Network);
 
     let handle = SecretHandle::new("api-token").unwrap();
+    let secret_store = Arc::new(InMemorySecretStore::new());
     let runtime = http_first_party_services(&handle)
+        .with_secret_store(Arc::clone(&secret_store))
         .with_runtime_http_egress(Arc::new(UnreachableRuntimeHttpEgress))
         .with_trust_policy(Arc::new(first_party_trust_policy()))
         .host_runtime_for_local_testing();
-    let outcome = invoke_http_fixture(
-        &runtime,
-        execution_context(CapabilitySet {
-            grants: vec![dispatch_grant_with_secret(&handle)],
-        }),
-        json!({"missing_url": true}),
-    )
-    .await;
+    let context = execution_context(CapabilitySet {
+        grants: vec![dispatch_grant_with_secret(&handle)],
+    });
+    stage_http_secret(&secret_store, &context.resource_scope, &handle).await;
+    let outcome = invoke_http_fixture(&runtime, context, json!({"missing_url": true})).await;
     let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
         panic!("expected missing URL to fail, got {outcome:?}");
     };
@@ -291,19 +299,18 @@ async fn first_party_handler_maps_egress_error_codes_to_dispatch_errors() {
 async fn first_party_handler_rejects_non_string_url_input() {
     for input in [json!({"url": 123}), json!({"url": true})] {
         let handle = SecretHandle::new("api-token").unwrap();
+        let secret_store = Arc::new(InMemorySecretStore::new());
         let runtime = http_first_party_services(&handle)
+            .with_secret_store(Arc::clone(&secret_store))
             .with_runtime_http_egress(Arc::new(UnreachableRuntimeHttpEgress))
             .with_trust_policy(Arc::new(first_party_trust_policy()))
             .host_runtime_for_local_testing();
+        let context = execution_context(CapabilitySet {
+            grants: vec![dispatch_grant_with_secret(&handle)],
+        });
+        stage_http_secret(&secret_store, &context.resource_scope, &handle).await;
 
-        let outcome = invoke_http_fixture(
-            &runtime,
-            execution_context(CapabilitySet {
-                grants: vec![dispatch_grant_with_secret(&handle)],
-            }),
-            input,
-        )
-        .await;
+        let outcome = invoke_http_fixture(&runtime, context, input).await;
 
         let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
             panic!("expected non-string URL to fail, got {outcome:?}");
@@ -324,16 +331,20 @@ fn http_error_kind_maps_all_reason_codes() {
             RuntimeDispatchErrorKind::InputEncode,
         ),
         (
+            RuntimeHttpEgressReasonCode::PolicyDenied,
+            RuntimeDispatchErrorKind::PolicyDenied,
+        ),
+        (
             RuntimeHttpEgressReasonCode::NetworkError,
             RuntimeDispatchErrorKind::NetworkDenied,
         ),
         (
             RuntimeHttpEgressReasonCode::ResponseError,
-            RuntimeDispatchErrorKind::OutputDecode,
+            RuntimeDispatchErrorKind::OperationFailed,
         ),
         (
             RuntimeHttpEgressReasonCode::ResponseBodyLimitExceeded,
-            RuntimeDispatchErrorKind::OutputDecode,
+            RuntimeDispatchErrorKind::OutputTooLarge,
         ),
     ];
 
@@ -642,6 +653,14 @@ fn first_party_registry() -> ExtensionRegistry {
     first_party_registry_with_effects(vec![EffectKind::DispatchCapability])
 }
 
+fn first_party_http_registry() -> ExtensionRegistry {
+    first_party_registry_with_effects(vec![
+        EffectKind::DispatchCapability,
+        EffectKind::Network,
+        EffectKind::UseSecret,
+    ])
+}
+
 fn first_party_registry_with_effects(effects: Vec<EffectKind>) -> ExtensionRegistry {
     let package = ExtensionPackage::from_manifest(
         ExtensionManifest {
@@ -676,6 +695,7 @@ fn first_party_registry_with_effects(effects: Vec<EffectKind>) -> ExtensionRegis
                     CapabilityProfileSchemaRef::new("prompts/host/status.md").unwrap(),
                 ),
                 required_host_ports: Vec::new(),
+                runtime_credentials: Vec::new(),
                 resource_profile: None,
             }],
         },
@@ -750,10 +770,11 @@ fn http_error_kind(reason: RuntimeHttpEgressReasonCode) -> RuntimeDispatchErrorK
     match reason {
         RuntimeHttpEgressReasonCode::CredentialUnavailable => RuntimeDispatchErrorKind::Client,
         RuntimeHttpEgressReasonCode::RequestDenied => RuntimeDispatchErrorKind::InputEncode,
+        RuntimeHttpEgressReasonCode::PolicyDenied => RuntimeDispatchErrorKind::PolicyDenied,
         RuntimeHttpEgressReasonCode::NetworkError => RuntimeDispatchErrorKind::NetworkDenied,
-        RuntimeHttpEgressReasonCode::ResponseError => RuntimeDispatchErrorKind::OutputDecode,
+        RuntimeHttpEgressReasonCode::ResponseError => RuntimeDispatchErrorKind::OperationFailed,
         RuntimeHttpEgressReasonCode::ResponseBodyLimitExceeded => {
-            RuntimeDispatchErrorKind::OutputDecode
+            RuntimeDispatchErrorKind::OutputTooLarge
         }
     }
 }
@@ -773,7 +794,7 @@ fn http_first_party_services(
         FirstPartyCapabilityRegistry::new().with_handler(capability_id(), Arc::clone(&handler));
 
     HostRuntimeServices::new(
-        Arc::new(first_party_registry()),
+        Arc::new(first_party_http_registry()),
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
@@ -884,6 +905,21 @@ fn test_network_policy() -> NetworkPolicy {
         deny_private_ip_ranges: true,
         max_egress_bytes: Some(10_000),
     }
+}
+
+async fn stage_http_secret(
+    secret_store: &InMemorySecretStore,
+    scope: &ResourceScope,
+    handle: &SecretHandle,
+) {
+    secret_store
+        .put(
+            scope.clone(),
+            handle.clone(),
+            SecretMaterial::from("sk-first-party-staged-secret"),
+        )
+        .await
+        .unwrap();
 }
 
 fn trust_decision() -> TrustDecision {

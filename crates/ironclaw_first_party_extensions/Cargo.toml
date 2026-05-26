@@ -3,7 +3,7 @@ name = "ironclaw_first_party_extensions"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.92"
-description = "First-party userland extensions for IronClaw"
+description = "First-party userland extension implementations for IronClaw"
 authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/nearai/ironclaw"
@@ -12,13 +12,18 @@ publish = false
 
 [dependencies]
 async-trait = "0.1"
-futures = "0.3"
+blake3 = "1"
+glob = "0.3"
+ironclaw_auth = { path = "../ironclaw_auth" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
-ironclaw_loop_support = { path = "../ironclaw_loop_support" }
+ironclaw_safety = { path = "../ironclaw_safety" }
 ironclaw_skills = { path = "../ironclaw_skills" }
-ironclaw_turns = { path = "../ironclaw_turns" }
+regex = "1"
+serde_json = "1"
 thiserror = "2"
+tokio = { version = "1", features = ["rt", "sync"] }
+tracing = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }

@@ -132,9 +132,13 @@ source+handle into multiple targets, the egress service consumes or leases the
 material once and reuses it only within that request. Runtime callers must not
 supply their own `Authorization`, cookie, or API-key-style headers; those values
 must come from the host-approved injection plan. WASM host-mediated HTTP
-composition can construct staged plans with `WasmStagedRuntimeCredentials` after
-attaching the invoking capability id to the adapter; exact-url rules should be
-preferred when a credential is only valid for specific destinations.
+composition should derive production staged plans from manifest v2
+`runtime_credentials`: the declaration identifies the secret handle, HTTPS
+audience, required/optional behavior, and injection target, while authorization
+still decides whether the active grant may stage that handle. Explicit
+`WasmStagedRuntimeCredentials` construction is retained for named legacy/test
+composition; exact-url rules should be preferred there when a credential is only
+valid for specific destinations.
 
 ---
 

@@ -13,6 +13,7 @@ use ironclaw_memory::{
     MemoryBackend, MemoryContext, MemoryDocumentPath, MemoryDocumentScope, MemorySearchRequest,
     MemorySearchResult,
 };
+use ironclaw_prompt_envelope::{EnvelopeSource, EnvelopeTrust, wrap_untrusted_with_limit};
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, ContextProfileId, LoopContextSnippet,
     LoopSafeSummary, MemoryPromptContextRequest, MemoryPromptContextService,
@@ -25,29 +26,6 @@ const MAX_SAFE_SUMMARY_BYTES: usize = 512;
 
 /// Aggregate byte budget for memory summaries injected into a loop context.
 const MAX_TOTAL_SAFE_SUMMARY_BYTES: usize = 4 * 1024;
-
-/// Prefix every memory snippet with an explicit model-facing trust boundary.
-const UNTRUSTED_MEMORY_PREFIX: &str = "Untrusted memory content: ";
-
-const INSTRUCTION_LIKE_MARKERS: &[&str] = &[
-    "act as",
-    "assistant message",
-    "assistant messages",
-    "developer message",
-    "developer messages",
-    "disregard previous instructions",
-    "disregard prior instructions",
-    "function call",
-    "function calls",
-    "ignore all previous instructions",
-    "ignore previous instructions",
-    "ignore prior instructions",
-    "system prompt",
-    "tool call",
-    "tool calls",
-    "you are chatgpt",
-    "you are now",
-];
 
 /// Production adapter that loads memory snippets via [`MemoryBackend::search`].
 ///
@@ -263,61 +241,59 @@ fn snippet_ref_for_path(path: &MemoryDocumentPath) -> String {
 
 /// Sanitize a raw snippet string into a model-safe summary.
 ///
+/// Delegates envelope wrapping and instruction-hijack rejection to the shared
+/// [`ironclaw_prompt_envelope`] crate; this function still owns the
+/// `LoopSafeSummary`-specific 512-byte cap (memory snippets must fit in a
+/// safe summary) and the byte-level truncation that snippet display tolerates.
+///
+/// Behavior:
 /// - Strips control characters (NUL, tabs, etc.)
-/// - Drops instruction-like prompt-injection payloads
-/// - Wraps accepted snippets in an explicit untrusted-memory envelope
-/// - Truncates to `MAX_SAFE_SUMMARY_BYTES`
+/// - Drops instruction-like prompt-injection payloads via the envelope crate
+/// - Wraps accepted snippets in an `Untrusted memory content: ` envelope
+/// - Truncates the body to fit inside `MAX_SAFE_SUMMARY_BYTES`
 /// - Validates through [`LoopSafeSummary::new`] which rejects path delimiters,
 ///   sensitive markers, and API-key-like tokens
 ///
-/// Returns `None` if the sanitized text fails `LoopSafeSummary` validation.
+/// Returns `None` if the sanitized text fails any stage.
 fn sanitize_snippet_text(raw: &str) -> Option<String> {
+    // Pre-truncate the body so the envelope fits inside `LoopSafeSummary`'s
+    // 512-byte cap. The envelope prefix length is bounded, so we compute the
+    // payload budget by wrapping a one-byte probe and subtracting its prefix
+    // overhead.
+    const PROBE_BODY: &str = "x";
+    let probe = wrap_untrusted_with_limit(
+        EnvelopeSource::Memory,
+        EnvelopeTrust::Untrusted,
+        PROBE_BODY,
+        MAX_SAFE_SUMMARY_BYTES,
+    )
+    .ok()?;
+    let prefix_len = probe.byte_len().saturating_sub(PROBE_BODY.len());
+
     let cleaned: String = raw.chars().filter(|ch| !ch.is_control()).collect();
     let cleaned = cleaned.trim();
-
-    if cleaned.is_empty() || contains_instruction_like_marker(cleaned) {
+    if cleaned.is_empty() {
         return None;
     }
 
-    let max_payload_bytes = MAX_SAFE_SUMMARY_BYTES.saturating_sub(UNTRUSTED_MEMORY_PREFIX.len());
+    let max_payload_bytes = MAX_SAFE_SUMMARY_BYTES.saturating_sub(prefix_len);
     let truncated = truncate_to_char_boundary(cleaned, max_payload_bytes);
-
     if truncated.is_empty() {
         return None;
     }
 
-    let enveloped = format!("{UNTRUSTED_MEMORY_PREFIX}{truncated}");
+    let envelope = wrap_untrusted_with_limit(
+        EnvelopeSource::Memory,
+        EnvelopeTrust::Untrusted,
+        truncated,
+        MAX_SAFE_SUMMARY_BYTES,
+    )
+    .ok()?;
 
-    match LoopSafeSummary::new(enveloped) {
+    match LoopSafeSummary::new(envelope.into_string()) {
         Ok(summary) => Some(summary.as_str().to_string()),
         Err(_) => None,
     }
-}
-
-fn contains_instruction_like_marker(value: &str) -> bool {
-    let lower = value.to_ascii_lowercase();
-    INSTRUCTION_LIKE_MARKERS
-        .iter()
-        .any(|marker| contains_marker_phrase(&lower, marker))
-}
-
-fn contains_marker_phrase(lower_value: &str, marker: &str) -> bool {
-    let mut search_start = 0;
-    while let Some(offset) = lower_value[search_start..].find(marker) {
-        let start = search_start + offset;
-        let end = start + marker.len();
-        let before_ok = start == 0 || !lower_value.as_bytes()[start - 1].is_ascii_alphanumeric();
-        let after_ok =
-            end == lower_value.len() || !lower_value.as_bytes()[end].is_ascii_alphanumeric();
-
-        if before_ok && after_ok {
-            return true;
-        }
-
-        search_start = end;
-    }
-
-    false
 }
 
 fn truncate_to_char_boundary(value: &str, max_bytes: usize) -> &str {

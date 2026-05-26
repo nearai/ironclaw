@@ -30,9 +30,9 @@ use ironclaw_threads::{
 use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, CancelRunRequest,
     CancelRunResponse, DefaultTurnCoordinator, EventCursor, GateRef, GetRunStateRequest,
-    InMemoryTurnStateStore, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse,
-    RunProfileId, RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
-    TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnStatus,
+    InMemoryTurnStateStore, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
+    ResumeTurnResponse, RunProfileId, RunProfileVersion, SourceBindingRef, SubmitTurnRequest,
+    SubmitTurnResponse, TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnStatus,
 };
 use serde_json::json;
 
@@ -198,6 +198,14 @@ impl FakeTurnCoordinator {
             .expect("lock")
             .last()
             .map(|request| request.source_binding_ref.as_str().to_string())
+    }
+
+    fn last_resumption_precondition(&self) -> Option<ResumeTurnPrecondition> {
+        self.resumptions
+            .lock()
+            .expect("lock")
+            .last()
+            .map(|request| request.precondition)
     }
 
     fn last_submission_scope(&self) -> Option<ironclaw_turns::TurnScope> {
@@ -2117,6 +2125,10 @@ async fn approved_gate_resolution_resumes_turn() {
 
     assert!(matches!(response, RebornResolveGateResponse::Resumed(_)));
     assert_eq!(coordinator.resumption_count(), 1);
+    assert_eq!(
+        coordinator.last_resumption_precondition(),
+        Some(ResumeTurnPrecondition::AnyBlockedGate)
+    );
     assert!(
         coordinator
             .last_resumption_source_binding_ref()
