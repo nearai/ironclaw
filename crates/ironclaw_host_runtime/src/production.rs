@@ -70,6 +70,10 @@ pub struct DefaultHostRuntime {
 impl DefaultHostRuntime {
     /// Constructs a default host runtime over the supplied kernel services.
     ///
+    /// This constructor snapshots the supplied registry into an internal
+    /// [`SharedExtensionRegistry`]. Use [`Self::from_shared_registry`] when
+    /// callers need subsequent registry mutations to be shared with the runtime.
+    ///
     /// The runtime starts with an explicit fail-closed host trust policy, so
     /// capability dispatch is denied until composition attaches a concrete
     /// policy with [`Self::with_trust_policy`] or [`Self::with_trust_policy_dyn`].

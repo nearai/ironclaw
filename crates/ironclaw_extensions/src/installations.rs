@@ -153,7 +153,7 @@ impl ExtensionCredentialHandle {
 
 impl fmt::Display for ExtensionCredentialHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+        f.write_str(&self.0)
     }
 }
 

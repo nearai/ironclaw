@@ -125,7 +125,11 @@ impl ExtensionRegistry {
             .extension_order
             .iter()
             .position(|extension_id| extension_id == &id);
-        let Some(current) = self.packages.remove(&id) else {
+        let Some(current) = self.packages.get(&id).cloned() else {
+            debug_assert!(
+                false,
+                "replace_validated called without an existing package"
+            );
             return;
         };
         let current_capability_ids = current
@@ -163,6 +167,10 @@ impl ExtensionRegistry {
         if let Some(index) = extension_index {
             self.extension_order[index] = id.clone();
         } else {
+            debug_assert!(
+                false,
+                "replace_validated found package missing from extension_order"
+            );
             self.extension_order.push(id.clone());
         }
         self.packages.insert(id, package);
