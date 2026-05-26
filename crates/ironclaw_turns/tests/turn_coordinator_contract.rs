@@ -166,8 +166,10 @@ fn subagent_capability_outcomes_round_trip_with_suspension_semantics() {
     );
 
     let gate_ref = LoopGateRef::new("gate:dependent-run").unwrap();
+    let result_ref = LoopResultRef::new("result:dependent-run").unwrap();
     let awaiting = CapabilityOutcome::AwaitDependentRun {
         gate_ref: gate_ref.clone(),
+        result_ref: result_ref.clone(),
         safe_summary: "waiting on child".to_string(),
     };
     let awaiting_json = serde_json::to_value(&awaiting).unwrap();
@@ -176,6 +178,7 @@ fn subagent_capability_outcomes_round_trip_with_suspension_semantics() {
         serde_json::json!({
             "await_dependent_run": {
                 "gate_ref": gate_ref,
+                "result_ref": result_ref,
                 "safe_summary": "waiting on child"
             }
         })
@@ -5170,7 +5173,7 @@ fn turn_blocked_gate_kind_await_dependent_run_maps_from_status_and_round_trips_w
 }
 
 #[tokio::test]
-async fn prepare_turn_is_pure_id_mint_and_does_not_bind_scope() {
+async fn prepare_turn_with_requested_id_from_mismatched_scope_is_rejected() {
     let (coordinator, _store) = coordinator();
     let prepared = coordinator
         .prepare_turn(scope("thread-prepared-origin"))
@@ -5179,8 +5182,9 @@ async fn prepare_turn_is_pure_id_mint_and_does_not_bind_scope() {
 
     let mut request = submit_request("thread-prepared-submit", "idem-prepared-submit");
     request.requested_run_id = Some(prepared);
-    let accepted = coordinator.submit_turn(request).await.unwrap();
-    assert_eq!(accepted_run_id(&accepted), prepared);
+    let error = coordinator.submit_turn(request).await.unwrap_err();
+
+    assert!(matches!(error, TurnError::Unauthorized));
 }
 
 #[tokio::test]

@@ -174,6 +174,42 @@ where
 }
 
 #[cfg(feature = "filesystem-goal-store")]
+#[async_trait]
+impl<F> ironclaw_loop_support::SubagentSpawnGoalStore for FilesystemSubagentGoalStore<F>
+where
+    F: RootFilesystem + 'static,
+{
+    async fn put_goal(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+        goal: ironclaw_loop_support::SubagentGoalRecord,
+    ) -> Result<(), ironclaw_turns::run_profile::AgentLoopHostError> {
+        <Self as SubagentGoalStore>::put_goal(
+            self,
+            scope,
+            run_id,
+            SubagentGoal {
+                task: goal.task,
+                handoff: goal.handoff,
+            },
+        )
+        .await
+        .map_err(map_goal_error)
+    }
+
+    async fn delete_goal(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+    ) -> Result<(), ironclaw_turns::run_profile::AgentLoopHostError> {
+        <Self as SubagentGoalStore>::delete_goal(self, scope, run_id)
+            .await
+            .map_err(map_goal_error)
+    }
+}
+
+#[cfg(feature = "filesystem-goal-store")]
 fn goal_path(scope: &TurnScope, run_id: TurnRunId) -> Result<ScopedPath, SubagentGoalStoreError> {
     let mut path = String::from("/turns/subagent-goals");
     if let Some(agent_id) = &scope.agent_id {
@@ -324,6 +360,55 @@ impl SubagentGoalStore for InMemoryBoundedSubagentGoalStore {
         self.delete_inner(scope, run_id);
         Ok(())
     }
+}
+
+#[async_trait]
+impl ironclaw_loop_support::SubagentSpawnGoalStore for InMemoryBoundedSubagentGoalStore {
+    async fn put_goal(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+        goal: ironclaw_loop_support::SubagentGoalRecord,
+    ) -> Result<(), ironclaw_turns::run_profile::AgentLoopHostError> {
+        self.put(
+            scope,
+            run_id,
+            SubagentGoal {
+                task: goal.task,
+                handoff: goal.handoff,
+            },
+        )
+        .map_err(map_goal_error)
+    }
+
+    async fn delete_goal(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+    ) -> Result<(), ironclaw_turns::run_profile::AgentLoopHostError> {
+        self.delete_inner(scope, run_id);
+        Ok(())
+    }
+}
+
+fn map_goal_error(
+    error: SubagentGoalStoreError,
+) -> ironclaw_turns::run_profile::AgentLoopHostError {
+    let kind = match error {
+        SubagentGoalStoreError::NotFound { .. } => {
+            ironclaw_turns::run_profile::AgentLoopHostErrorKind::InvalidInvocation
+        }
+        SubagentGoalStoreError::PayloadTooLarge { .. } => {
+            ironclaw_turns::run_profile::AgentLoopHostErrorKind::BudgetExceeded
+        }
+        SubagentGoalStoreError::DuplicateKey { .. } => {
+            ironclaw_turns::run_profile::AgentLoopHostErrorKind::InvalidInvocation
+        }
+        SubagentGoalStoreError::Backend { .. } => {
+            ironclaw_turns::run_profile::AgentLoopHostErrorKind::Unavailable
+        }
+    };
+    ironclaw_turns::run_profile::AgentLoopHostError::new(kind, error.to_string())
 }
 
 fn lock(inner: &Mutex<GoalStoreInner>) -> MutexGuard<'_, GoalStoreInner> {

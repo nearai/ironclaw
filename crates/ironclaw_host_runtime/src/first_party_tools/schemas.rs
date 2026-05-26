@@ -84,6 +84,34 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["command"],
             "additionalProperties": false
         }),
+        "schemas/builtin/spawn_subagent.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "flavor_id": {
+                    "type": "string",
+                    "description": "Subagent kind to spawn"
+                },
+                "task": {
+                    "type": "string",
+                    "description": "Task for the child subagent run"
+                },
+                "handoff": {
+                    "type": "string",
+                    "description": "Optional context to pass to the child subagent"
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["blocking", "background"],
+                    "description": "Whether the parent waits for completion"
+                },
+                "run_in_background": {
+                    "type": "boolean",
+                    "description": "Legacy background-mode flag"
+                }
+            },
+            "required": ["flavor_id", "task"],
+            "additionalProperties": false
+        }),
         "schemas/builtin/read_file.input.v1.json" => json!({
             "type": "object",
             "properties": {

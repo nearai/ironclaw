@@ -171,6 +171,13 @@ async fn mixed_parallel_batch_blocks_after_recording_completed_results() {
         (CheckpointKind::BeforeSideEffect, 0),
         (CheckpointKind::BeforeBlock, 0),
     ]);
+    assert!(host.call_log().iter().any(|call| {
+        matches!(
+            call,
+            MockHostCall::AppendCapabilityResultRef { result_ref, .. }
+                if result_ref.as_str() == "result:a"
+        )
+    }));
 }
 
 #[tokio::test]
@@ -181,6 +188,7 @@ async fn await_dependent_run_blocks_with_dependent_gate_kind() {
         ])]),
         capability_outcomes: VecDeque::from([vec![ScriptedCapabilityOutcome::AwaitDependentRun {
             gate_ref: "gate:child-wait".to_string(),
+            result_ref: "result:child-wait".to_string(),
         }]]),
         single_call_retry_outcomes: VecDeque::new(),
         pending_inputs: VecDeque::new(),

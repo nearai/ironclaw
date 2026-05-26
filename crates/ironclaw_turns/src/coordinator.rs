@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt,
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{Arc, Mutex},
@@ -9,13 +9,14 @@ use std::{
 use tracing::debug;
 
 const MAX_DELIVERED_EVENT_CURSORS: usize = 4096;
+const MAX_PREPARED_RUN_IDS: usize = 4096;
 
 use crate::{
     AdmissionRejection, CancelRunRequest, CancelRunResponse, GetRunStateRequest,
     InMemoryRunProfileResolver, ResumeTurnRequest, ResumeTurnResponse, RunProfileResolver,
-    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnError, TurnEventKind,
-    TurnEventSink, TurnLifecycleEvent, TurnRunId, TurnRunState, TurnScope, TurnSpawnTreeStateStore,
-    TurnStateStore, TurnStatus, events::EventCursor,
+    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnCapacityResource, TurnError,
+    TurnEventKind, TurnEventSink, TurnLifecycleEvent, TurnRunId, TurnRunState, TurnScope,
+    TurnSpawnTreeStateStore, TurnStateStore, TurnStatus, events::EventCursor,
 };
 
 pub trait TurnAdmissionPolicy: Send + Sync {
@@ -74,6 +75,13 @@ pub trait TurnCoordinator: Send + Sync {
     /// implementation so every coordinator opts into prepared-run semantics.
     async fn prepare_turn(&self, scope: TurnScope) -> Result<TurnRunId, TurnError>;
 
+    /// Release a run id minted by `prepare_turn` when the caller fails before
+    /// submitting it. Coordinators without a prepared-id cache can treat this
+    /// as a no-op.
+    async fn abort_prepared_turn(&self, _run_id: TurnRunId) -> Result<(), TurnError> {
+        Ok(())
+    }
+
     async fn submit_turn(
         &self,
         request: SubmitTurnRequest,
@@ -106,6 +114,11 @@ pub struct DefaultTurnCoordinator<S: ?Sized> {
     wake_notifier: Arc<dyn TurnRunWakeNotifier>,
     event_sink: Option<Arc<dyn TurnEventSink>>,
     delivered_event_cursors: Mutex<HashSet<EventCursor>>,
+    // Per-coordinator binding of run ids handed out by `prepare_turn` to the
+    // scope they were prepared under. `submit_turn` consumes the reservation
+    // when `requested_run_id` is set and rejects cross-scope submission so a
+    // prepared id cannot be used to inject lineage into a different scope.
+    prepared_run_id_scopes: Mutex<HashMap<TurnRunId, TurnScope>>,
 }
 
 impl<S> DefaultTurnCoordinator<S>
@@ -120,6 +133,7 @@ where
             wake_notifier: Arc::new(NoopTurnRunWakeNotifier),
             event_sink: None,
             delivered_event_cursors: Mutex::new(HashSet::new()),
+            prepared_run_id_scopes: Mutex::new(HashMap::new()),
         }
     }
 
@@ -162,6 +176,29 @@ where
                 delivered.insert(cursor)
             }
         }
+    }
+
+    fn record_prepared_run_id(&self, run_id: TurnRunId, scope: TurnScope) -> Result<(), TurnError> {
+        let mut prepared = match self.prepared_run_id_scopes.lock() {
+            Ok(prepared) => prepared,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if prepared.len() >= MAX_PREPARED_RUN_IDS {
+            return Err(TurnError::CapacityExceeded {
+                resource: TurnCapacityResource::SubmitTurn,
+                cap: MAX_PREPARED_RUN_IDS as u64,
+            });
+        }
+        prepared.insert(run_id, scope);
+        Ok(())
+    }
+
+    fn consume_prepared_run_id(&self, run_id: TurnRunId) -> Option<TurnScope> {
+        let mut prepared = match self.prepared_run_id_scopes.lock() {
+            Ok(prepared) => prepared,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        prepared.remove(&run_id)
     }
 }
 
@@ -223,14 +260,35 @@ impl<S> TurnCoordinator for DefaultTurnCoordinator<S>
 where
     S: TurnStateStore + ?Sized + 'static,
 {
-    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
-        Ok(TurnRunId::new())
+    async fn prepare_turn(&self, scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        let run_id = TurnRunId::new();
+        self.record_prepared_run_id(run_id, scope)?;
+        Ok(run_id)
+    }
+
+    async fn abort_prepared_turn(&self, run_id: TurnRunId) -> Result<(), TurnError> {
+        self.consume_prepared_run_id(run_id);
+        Ok(())
     }
 
     async fn submit_turn(
         &self,
         request: SubmitTurnRequest,
     ) -> Result<SubmitTurnResponse, TurnError> {
+        // If the caller passed a run id that came out of prepare_turn, verify
+        // it is being submitted under the same scope it was prepared under,
+        // unless this is a child run (parent_run_id set). Subagent spawn
+        // legitimately prepares a run id in the parent scope and submits it
+        // under a different child scope. Reservations are consumed on the
+        // first submit attempt; a second attempt with the same id falls back
+        // to the store's duplicate-bound check.
+        if let Some(requested) = request.requested_run_id
+            && let Some(prepared_scope) = self.consume_prepared_run_id(requested)
+            && request.parent_run_id.is_none()
+            && prepared_scope != request.scope
+        {
+            return Err(TurnError::Unauthorized);
+        }
         let scope = request.scope.clone();
         let event_scope = request.scope.clone();
         let actor = request.actor.clone();
@@ -370,13 +428,46 @@ where
         &self,
         request: SubmitChildRunRequest,
     ) -> Result<SubmitTurnResponse, TurnError> {
-        self.store
+        let child_scope = request.child_scope.clone();
+        let event_scope = request.child_scope.clone();
+        let actor = request.actor.clone();
+        let occurred_at = request.received_at;
+        let response = self
+            .store
             .submit_child_turn(
                 request,
                 self.admission_policy.as_ref(),
                 self.run_profile_resolver.as_ref(),
             )
-            .await
+            .await?;
+        notify_queued_run_best_effort(
+            self.wake_notifier.as_ref(),
+            submit_wake(child_scope, &response),
+        );
+        let SubmitTurnResponse::Accepted {
+            run_id,
+            status,
+            event_cursor,
+            ..
+        } = &response;
+        if self.claim_event_cursor_for_publish(*event_cursor) {
+            publish_turn_event_best_effort(
+                self.event_sink.as_ref(),
+                TurnLifecycleEvent {
+                    cursor: *event_cursor,
+                    scope: event_scope,
+                    occurred_at: Some(occurred_at),
+                    owner_user_id: Some(actor.user_id),
+                    run_id: *run_id,
+                    status: *status,
+                    kind: TurnEventKind::Submitted,
+                    blocked_gate: None,
+                    sanitized_reason: None,
+                },
+            )
+            .await;
+        }
+        Ok(response)
     }
 }
 
@@ -387,6 +478,10 @@ where
 {
     async fn prepare_turn(&self, scope: TurnScope) -> Result<TurnRunId, TurnError> {
         self.as_ref().prepare_turn(scope).await
+    }
+
+    async fn abort_prepared_turn(&self, run_id: TurnRunId) -> Result<(), TurnError> {
+        self.as_ref().abort_prepared_turn(run_id).await
     }
 
     async fn submit_turn(
