@@ -11,6 +11,8 @@ mod json;
 mod schemas;
 mod shell;
 mod skill_management;
+mod skill_url_install;
+mod spawn_subagent;
 mod time;
 
 use std::{sync::Arc, time::Instant};
@@ -41,8 +43,10 @@ pub use http::HTTP_CAPABILITY_ID;
 pub use json::JSON_CAPABILITY_ID;
 pub use shell::SHELL_CAPABILITY_ID;
 pub use skill_management::{
-    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
+    SKILL_INSTALL_CAPABILITY_ID, SKILL_INSTALL_URL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
+    SKILL_REMOVE_CAPABILITY_ID,
 };
+pub use spawn_subagent::SPAWN_SUBAGENT_CAPABILITY_ID;
 pub use time::TIME_CAPABILITY_ID;
 
 pub const BUILTIN_FIRST_PARTY_PROVIDER: &str = "builtin";
@@ -141,6 +145,7 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                     json::manifest()?,
                     http::manifest()?,
                     shell::manifest()?,
+                    spawn_subagent::manifest()?,
                 ];
                 capabilities.extend(coding_manifests()?);
                 capabilities.extend(skill_management::manifests()?);
@@ -178,6 +183,10 @@ pub fn builtin_first_party_handlers() -> Result<FirstPartyCapabilityRegistry, Ho
     for metadata in CODING_CAPABILITIES {
         registry.insert_handler(CapabilityId::new(metadata.id)?, handler.clone());
     }
+    registry.insert_handler(
+        CapabilityId::new(SPAWN_SUBAGENT_CAPABILITY_ID)?,
+        handler.clone(),
+    );
     skill_management::insert_handlers(&mut registry)?;
     Ok(registry)
 }
@@ -236,14 +245,15 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
             SHELL_CAPABILITY_ID => {
                 let (output, duration) = shell::dispatch(&request).await?;
                 let wall_clock_ms = duration.as_millis().try_into().unwrap_or(u64::MAX);
-                let output_bytes = bounded_output_bytes(&output).map_err(|error| {
-                    error.with_usage(ResourceUsage {
-                        wall_clock_ms,
-                        network_egress_bytes,
-                        process_count: 1,
-                        ..ResourceUsage::default()
-                    })
-                })?;
+                let output_bytes = bounded_output_bytes(&output, FIRST_PARTY_MAX_OUTPUT_BYTES)
+                    .map_err(|error| {
+                        error.with_usage(ResourceUsage {
+                            wall_clock_ms,
+                            network_egress_bytes,
+                            process_count: 1,
+                            ..ResourceUsage::default()
+                        })
+                    })?;
                 return Ok(FirstPartyCapabilityResult::new(
                     output,
                     ResourceUsage {
@@ -255,6 +265,7 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
                     },
                 ));
             }
+            SPAWN_SUBAGENT_CAPABILITY_ID => spawn_subagent::dispatch(),
             capability_id => {
                 let Some(metadata) = coding_capability_metadata(capability_id) else {
                     return Err(FirstPartyCapabilityError::new(
@@ -275,7 +286,11 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
             }
         };
         let wall_clock_ms = start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
-        let output_bytes = bounded_output_bytes(&output).map_err(|error| {
+        let output_limit_bytes = match request.capability_id.as_str() {
+            HTTP_CAPABILITY_ID => http::MAX_HTTP_OUTPUT_BYTES,
+            _ => FIRST_PARTY_MAX_OUTPUT_BYTES,
+        };
+        let output_bytes = bounded_output_bytes(&output, output_limit_bytes).map_err(|error| {
             if network_egress_bytes > 0 {
                 error.with_usage(ResourceUsage {
                     wall_clock_ms,
@@ -312,11 +327,14 @@ fn bounded_input_size(
     Ok(())
 }
 
-fn bounded_output_bytes(output: &serde_json::Value) -> Result<u64, FirstPartyCapabilityError> {
+fn bounded_output_bytes(
+    output: &serde_json::Value,
+    max_bytes: u64,
+) -> Result<u64, FirstPartyCapabilityError> {
     let bytes = serde_json::to_vec(output).map_err(|_| input_error())?;
     let bytes = u64::try_from(bytes.len())
         .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OutputTooLarge))?;
-    if bytes > FIRST_PARTY_MAX_OUTPUT_BYTES {
+    if bytes > max_bytes {
         return Err(FirstPartyCapabilityError::new(
             RuntimeDispatchErrorKind::OutputTooLarge,
         ));
@@ -346,8 +364,8 @@ fn input_error() -> FirstPartyCapabilityError {
     FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode)
 }
 
-fn guest_error() -> FirstPartyCapabilityError {
-    FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Guest)
+fn operation_error() -> FirstPartyCapabilityError {
+    FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
 }
 
 fn coding_error(error: CodingCapabilityError) -> FirstPartyCapabilityError {

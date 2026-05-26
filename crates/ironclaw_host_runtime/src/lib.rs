@@ -33,6 +33,7 @@ use ironclaw_host_api::{
     RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
     RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
     is_sensitive_runtime_request_header, is_sensitive_runtime_response_header,
+    runtime_policy::{DeploymentMode, EffectiveRuntimePolicy, RuntimeProfile},
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse,
@@ -42,7 +43,7 @@ use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStoreError};
 use ironclaw_trust::TrustDecision;
 use secrecy::ExposeSecret;
 use serde_json::Value;
-use std::{collections::BTreeMap, fmt, sync::Arc};
+use std::{collections::BTreeMap, env, fmt, sync::Arc};
 use thiserror::Error;
 
 mod capability_catalog;
@@ -55,6 +56,7 @@ mod obligations;
 mod planner;
 mod process_port;
 mod production;
+mod sandbox_process;
 mod services;
 mod surface;
 mod turn_scheduler;
@@ -77,9 +79,9 @@ pub use first_party_tools::{
     APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, BuiltinFirstPartyTools,
     ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID,
     JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
-    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
-    TIME_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
-    builtin_first_party_package,
+    SKILL_INSTALL_CAPABILITY_ID, SKILL_INSTALL_URL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
+    SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, TIME_CAPABILITY_ID,
+    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers, builtin_first_party_package,
 };
 pub use invocation_services::{
     InvocationServices, InvocationServicesError, InvocationServicesResolutionRequest,
@@ -96,6 +98,11 @@ pub use process_port::{
     RuntimeProcessPort, SandboxCommandTransport, TenantSandboxProcessPort,
 };
 pub use production::DefaultHostRuntime;
+pub use sandbox_process::{
+    RebornSandboxConfig, RebornSandboxContainerIdentity, RebornSandboxNetworkBroker,
+    RebornSandboxScopeKey, RebornSandboxSecretBroker, RebornSandboxWorkspaceMode,
+    RebornScopedSandboxCommandTransport,
+};
 pub use services::{
     HostRuntimeServices, ProductionEventStoreWiringError, ProductionWiringComponent,
     ProductionWiringConfig, ProductionWiringIssue, ProductionWiringIssueKind,
@@ -548,6 +555,66 @@ pub enum RuntimeBlockedReason {
     ResourceUnavailable,
 }
 
+/// Opt-in local diagnostic switch for raw HTTP egress failures.
+///
+/// Raw transport errors can contain URLs, query strings, host paths, proxy
+/// details, or credential-shaped text. Keep this disabled unless debugging a
+/// trusted `LocalDev` or `LocalYolo` run. Hosted and enterprise deployments
+/// never enable raw diagnostics from this environment variable alone.
+pub(crate) const UNSAFE_RAW_HTTP_EGRESS_ERRORS_ENV: &str = "IRONCLAW_UNSAFE_RAW_HTTP_EGRESS_ERRORS";
+
+pub(crate) fn runtime_policy_allows_unsafe_raw_http_diagnostics(
+    policy: Option<&EffectiveRuntimePolicy>,
+) -> bool {
+    policy.is_some_and(|policy| {
+        local_runtime_allows_unsafe_raw_http_diagnostics(policy.deployment, policy.resolved_profile)
+    })
+}
+
+pub(crate) fn local_runtime_allows_unsafe_raw_http_diagnostics(
+    deployment: DeploymentMode,
+    profile: RuntimeProfile,
+) -> bool {
+    matches!(deployment, DeploymentMode::LocalSingleUser)
+        && matches!(
+            profile,
+            RuntimeProfile::LocalDev | RuntimeProfile::LocalYolo
+        )
+}
+
+pub(crate) fn unsafe_raw_http_diagnostics_enabled(runtime_allows_raw: bool) -> bool {
+    runtime_allows_raw && env::var(UNSAFE_RAW_HTTP_EGRESS_ERRORS_ENV).as_deref() == Ok("1")
+}
+
+#[cfg(test)]
+mod raw_http_diagnostic_policy_tests {
+    use super::*;
+
+    #[test]
+    fn raw_http_diagnostics_are_limited_to_local_dev_and_yolo_profiles() {
+        assert!(local_runtime_allows_unsafe_raw_http_diagnostics(
+            DeploymentMode::LocalSingleUser,
+            RuntimeProfile::LocalDev,
+        ));
+        assert!(local_runtime_allows_unsafe_raw_http_diagnostics(
+            DeploymentMode::LocalSingleUser,
+            RuntimeProfile::LocalYolo,
+        ));
+        assert!(!local_runtime_allows_unsafe_raw_http_diagnostics(
+            DeploymentMode::LocalSingleUser,
+            RuntimeProfile::LocalSafe,
+        ));
+        assert!(!local_runtime_allows_unsafe_raw_http_diagnostics(
+            DeploymentMode::HostedMultiTenant,
+            RuntimeProfile::HostedYoloTenantScoped,
+        ));
+        assert!(!local_runtime_allows_unsafe_raw_http_diagnostics(
+            DeploymentMode::EnterpriseDedicated,
+            RuntimeProfile::EnterpriseYoloDedicated,
+        ));
+    }
+}
+
 /// Stable, sanitized failure categories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -556,12 +623,18 @@ pub enum RuntimeFailureKind {
     Backend,
     Cancelled,
     Dispatcher,
+    Internal,
     InvalidInput,
+    InvalidOutput,
     MissingRuntime,
     Network,
+    OperationFailed,
     OutputTooLarge,
+    PolicyDenied,
     Process,
     Resource,
+    Transient,
+    Unavailable,
     Unknown,
 }
 
@@ -573,15 +646,126 @@ impl RuntimeFailureKind {
             Self::Backend => "backend",
             Self::Cancelled => "cancelled",
             Self::Dispatcher => "dispatcher",
+            Self::Internal => "internal",
             Self::InvalidInput => "invalid_input",
+            Self::InvalidOutput => "invalid_output",
             Self::MissingRuntime => "missing_runtime",
             Self::Network => "network",
+            Self::OperationFailed => "operation_failed",
             Self::OutputTooLarge => "output_too_large",
+            Self::PolicyDenied => "policy_denied",
             Self::Process => "process",
             Self::Resource => "resource",
+            Self::Transient => "transient",
+            Self::Unavailable => "unavailable",
             Self::Unknown => "unknown",
         }
     }
+}
+
+/// Agent-loop handling decision for a sanitized runtime capability failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CapabilityFailureDisposition {
+    /// Return a normal tool error observation to the model in the same loop.
+    ModelVisibleToolError,
+    /// Retry the same runtime invocation before exposing anything to the model.
+    /// The loop recovery strategy owns the retry budget and post-exhaustion
+    /// fallback; the host-runtime disposition only classifies the first outcome.
+    RetrySameCall,
+    /// End this unsafe run cleanly and provide recovery context on the next turn.
+    RecoverableRunFailure,
+}
+
+const MAX_RUNTIME_FAILURE_SUMMARY_CHARS: usize = 512;
+
+impl RuntimeCapabilityFailure {
+    pub fn new(
+        capability_id: CapabilityId,
+        kind: RuntimeFailureKind,
+        message: Option<String>,
+    ) -> Self {
+        Self {
+            capability_id,
+            kind,
+            message,
+        }
+    }
+
+    pub fn safe_summary(&self) -> Option<String> {
+        let summary = self.message.as_deref()?.trim();
+        if summary.is_empty() {
+            return None;
+        }
+
+        Some(bounded_runtime_failure_summary(summary))
+    }
+
+    pub fn disposition(&self) -> CapabilityFailureDisposition {
+        let has_safe_summary = self
+            .message
+            .as_deref()
+            .is_some_and(|summary| !summary.trim().is_empty());
+        capability_failure_disposition(self.kind, has_safe_summary)
+    }
+}
+
+fn bounded_runtime_failure_summary(summary: &str) -> String {
+    let mut chars = summary.chars();
+    let bounded: String = chars
+        .by_ref()
+        .take(MAX_RUNTIME_FAILURE_SUMMARY_CHARS)
+        .collect();
+    if chars.next().is_some() {
+        format!("{bounded}...")
+    } else {
+        bounded
+    }
+}
+
+/// Central disposition policy for runtime capability failures.
+///
+/// Same-loop continuation is reserved for failures the runtime can summarize
+/// safely. Protocol, cancellation, and unknown failures end the current run
+/// even if they have a displayable message, so the next turn can receive
+/// recovery context without corrupting the assistant/tool-result transcript.
+pub const fn capability_failure_disposition(
+    kind: RuntimeFailureKind,
+    has_safe_summary: bool,
+) -> CapabilityFailureDisposition {
+    if runtime_failure_requires_run_recovery(kind) {
+        return CapabilityFailureDisposition::RecoverableRunFailure;
+    }
+
+    if runtime_failure_is_retryable(kind) {
+        return CapabilityFailureDisposition::RetrySameCall;
+    }
+
+    if has_safe_summary {
+        CapabilityFailureDisposition::ModelVisibleToolError
+    } else {
+        CapabilityFailureDisposition::RecoverableRunFailure
+    }
+}
+
+const fn runtime_failure_requires_run_recovery(kind: RuntimeFailureKind) -> bool {
+    matches!(
+        kind,
+        RuntimeFailureKind::Cancelled
+            | RuntimeFailureKind::InvalidOutput
+            | RuntimeFailureKind::Dispatcher
+            | RuntimeFailureKind::Unknown
+    )
+}
+
+const fn runtime_failure_is_retryable(kind: RuntimeFailureKind) -> bool {
+    matches!(
+        kind,
+        RuntimeFailureKind::Internal
+            | RuntimeFailureKind::Backend
+            | RuntimeFailureKind::Network
+            | RuntimeFailureKind::Transient
+            | RuntimeFailureKind::Unavailable
+    )
 }
 
 /// Work ids tracked by the host runtime for status/cancellation.
@@ -750,6 +934,7 @@ pub struct HostHttpEgressService<N, S> {
     secret_injections: Option<Arc<RuntimeSecretInjectionStore>>,
     network_policy_store: Option<Arc<NetworkObligationPolicyStore>>,
     network_policy_source: NetworkPolicySource,
+    unsafe_raw_diagnostics_allowed: bool,
 }
 
 impl<N, S> HostHttpEgressService<N, S> {
@@ -766,6 +951,7 @@ impl<N, S> HostHttpEgressService<N, S> {
             secret_injections: None,
             network_policy_store: None,
             network_policy_source: NetworkPolicySource::StagedObligation,
+            unsafe_raw_diagnostics_allowed: false,
         }
     }
 
@@ -782,7 +968,13 @@ impl<N, S> HostHttpEgressService<N, S> {
             secret_injections: None,
             network_policy_store: None,
             network_policy_source: NetworkPolicySource::RequestPolicyFallback,
+            unsafe_raw_diagnostics_allowed: false,
         }
+    }
+
+    pub(crate) fn with_unsafe_raw_diagnostics_allowed(mut self, allowed: bool) -> Self {
+        self.unsafe_raw_diagnostics_allowed = allowed;
+        self
     }
 
     pub(crate) fn with_secret_injection_store(
@@ -957,7 +1149,7 @@ where
                 response_body_limit: request.response_body_limit,
                 timeout_ms: request.timeout_ms,
             })
-            .map_err(runtime_network_error)?;
+            .map_err(|error| runtime_network_error(self.unsafe_raw_diagnostics_allowed, error))?;
         let credentials_injected = !redaction_values.is_empty();
         let (response, response_redacted) = sanitize_runtime_response(response, &redaction_values)?;
         Ok(runtime_response(
@@ -1185,12 +1377,32 @@ fn apply_credential_injection(
     Ok(())
 }
 
-fn runtime_network_error(error: NetworkHttpError) -> RuntimeHttpEgressError {
+fn runtime_network_error(
+    unsafe_raw_diagnostics_allowed: bool,
+    error: NetworkHttpError,
+) -> RuntimeHttpEgressError {
+    log_raw_network_http_error_for_local_diagnostics(unsafe_raw_diagnostics_allowed, &error);
     RuntimeHttpEgressError::Network {
         reason: error.stable_reason().to_string(),
         request_bytes: error.request_bytes(),
         response_bytes: error.response_bytes(),
     }
+}
+
+fn log_raw_network_http_error_for_local_diagnostics(
+    unsafe_raw_diagnostics_allowed: bool,
+    error: &NetworkHttpError,
+) {
+    if !unsafe_raw_http_diagnostics_enabled(unsafe_raw_diagnostics_allowed) {
+        return;
+    }
+
+    tracing::warn!(
+        network_error_kind = error.kind().as_str(),
+        raw_network_error = %error,
+        unsafe_raw_diagnostics = true,
+        "unsafe raw HTTP egress error diagnostic enabled"
+    );
 }
 
 fn validate_runtime_request(

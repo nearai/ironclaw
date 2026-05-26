@@ -331,7 +331,8 @@ must be absolute within scoped namespace
 must begin with an alias visible in the current MountView
 must not contain `..`
 must not contain NUL/control characters
-must not look like a raw host path or URL
+must not look like a raw host path or URL unless an already-authorized local MountView
+explicitly includes that exact raw host prefix as a MountAlias
 ```
 
 Rejected as `ScopedPath`:
@@ -339,10 +340,19 @@ Rejected as `ScopedPath`:
 ```text
 ../../secret
 /workspace/../../system/extensions/other
-/Users/alice/project
 C:\Users\alice\project
 file:///etc/passwd
 ```
+
+Accepted only when the current local MountView contains a matching raw host alias:
+
+```text
+<raw-confirmed-home>/project
+```
+
+This exception is reserved for trusted local single-user host-home projections. Hosted
+and extension-declared mounts must continue to expose stable scoped aliases such as
+`/workspace` or `/host`, not ambient raw host paths.
 
 ### 7.4 Host paths
 
@@ -691,6 +701,8 @@ Rules:
 - `CapabilityDispatchRequest` is already authorized; grant checks and approvals happen before this boundary. Optional `mounts` and `resource_reservation` fields are prepared obligation effects, not new authority grants.
 - `CapabilityDispatchResult` exposes normalized host facts: capability ID, provider, runtime, output, usage, and resource receipt.
 - `DispatchError` uses stable control-plane variants for registry/routing failures and `RuntimeDispatchErrorKind` for WASM/Script/MCP failures.
+- `RuntimeDispatchErrorKind::OperationFailed` is for model-visible capability-domain failures after a valid invocation reaches the capability implementation; runtime-lane execution failures such as guest traps remain runtime failures, not operation failures.
+- Runtime output contract failures such as `OutputDecode` and `InvalidResult` must not be conflated with malformed caller input.
 - Runtime/backend detail strings, stderr, host paths, and secret-bearing messages must not cross this port.
 - `ironclaw_dispatcher` implements the port; it does not own the port vocabulary.
 

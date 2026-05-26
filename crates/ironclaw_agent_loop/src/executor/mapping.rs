@@ -30,6 +30,7 @@ pub(super) fn blocked_kind(kind: GateKind) -> LoopBlockedKind {
         GateKind::Approval => LoopBlockedKind::Approval,
         GateKind::Auth => LoopBlockedKind::Auth,
         GateKind::Resource => LoopBlockedKind::Resource,
+        GateKind::AwaitDependentRun => LoopBlockedKind::AwaitDependentRun,
     }
 }
 
@@ -38,6 +39,7 @@ pub(super) fn loop_gate_kind(kind: GateKind) -> LoopGateKind {
         GateKind::Approval => LoopGateKind::Approval,
         GateKind::Auth => LoopGateKind::Auth,
         GateKind::Resource => LoopGateKind::ResourceWait,
+        GateKind::AwaitDependentRun => LoopGateKind::AwaitDependentRun,
     }
 }
 
@@ -55,11 +57,14 @@ pub(super) fn capability_batch_counts(outcomes: &[CapabilityOutcome]) -> (u32, u
     let mut failed_count = 0;
     for outcome in outcomes {
         match outcome {
-            CapabilityOutcome::Completed(_) => result_count += 1,
+            CapabilityOutcome::Completed(_) | CapabilityOutcome::SpawnedChildRun { .. } => {
+                result_count += 1
+            }
             CapabilityOutcome::Denied(_) => denied_count += 1,
             CapabilityOutcome::ApprovalRequired { .. }
             | CapabilityOutcome::AuthRequired { .. }
             | CapabilityOutcome::ResourceBlocked { .. }
+            | CapabilityOutcome::AwaitDependentRun { .. }
             // SpawnedProcess: treated as gated — it is a non-completing, non-failing, non-denied
             // outcome that defers completion to a background process. Grouped with gated to avoid
             // treating it as completed or failed in batch accounting.
@@ -114,24 +119,32 @@ pub(super) fn capability_host_error(error: AgentLoopHostError) -> AgentLoopExecu
 }
 
 pub(super) fn capability_error_class(kind: &CapabilityFailureKind) -> CapabilityErrorClass {
+    // Runtime capability failures are first dispositioned in
+    // `ironclaw_host_runtime` and adapted by `ironclaw_loop_support`.
+    // Keep this recovery class mapping aligned with that adapter: retryable
+    // runtime kinds must arrive here as Transient/Unavailable/Internal,
+    // model-visible kinds as OperationFailed/InputInvalid/PolicyDenied, and
+    // run-ending protocol/cancellation kinds as Permanent or Cancelled.
     match kind {
         CapabilityFailureKind::Network | CapabilityFailureKind::Transient => {
             CapabilityErrorClass::Transient
         }
-        CapabilityFailureKind::Backend
-        | CapabilityFailureKind::MissingRuntime
-        | CapabilityFailureKind::Unavailable => CapabilityErrorClass::Unavailable,
+        CapabilityFailureKind::Backend | CapabilityFailureKind::Unavailable => {
+            CapabilityErrorClass::Unavailable
+        }
         CapabilityFailureKind::InvalidInput => CapabilityErrorClass::InputInvalid,
+        CapabilityFailureKind::MissingRuntime
+        | CapabilityFailureKind::OperationFailed
+        | CapabilityFailureKind::OutputTooLarge
+        | CapabilityFailureKind::Process
+        | CapabilityFailureKind::Resource => CapabilityErrorClass::OperationFailed,
         CapabilityFailureKind::Authorization | CapabilityFailureKind::PolicyDenied => {
             CapabilityErrorClass::PolicyDenied
         }
-        CapabilityFailureKind::Dispatcher | CapabilityFailureKind::Internal => {
-            CapabilityErrorClass::Internal
-        }
+        CapabilityFailureKind::Internal => CapabilityErrorClass::Internal,
+        CapabilityFailureKind::Dispatcher => CapabilityErrorClass::Permanent,
         CapabilityFailureKind::Cancelled => CapabilityErrorClass::Permanent,
-        CapabilityFailureKind::OutputTooLarge
-        | CapabilityFailureKind::Process
-        | CapabilityFailureKind::Resource
+        CapabilityFailureKind::InvalidOutput
         | CapabilityFailureKind::Permanent
         | CapabilityFailureKind::Unknown(_) => CapabilityErrorClass::Permanent,
         // CapabilityFailureKind is #[non_exhaustive]; treat unrecognised future variants as

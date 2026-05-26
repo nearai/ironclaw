@@ -309,7 +309,7 @@ fn split_shell_segments(cmd: &str) -> Vec<&str> {
             (ShellQuote::Single, '\'') => quote = ShellQuote::None,
             (ShellQuote::None, '"') => quote = ShellQuote::Double,
             (ShellQuote::Double, '"') => quote = ShellQuote::None,
-            (ShellQuote::None, ';' | '|') => {
+            (ShellQuote::None, ';' | '|' | '\n' | '\r') => {
                 segments.push(&cmd[start..i]);
                 if ch == '|' && matches!(chars.peek(), Some((_, '|'))) {
                     chars.next();
@@ -514,6 +514,13 @@ mod tests {
     fn sensitive_path_detection_checks_shell_aware_tokens() {
         assert!(check_sensitive_file_access("cat \"~/server key.pem\"").is_some());
         assert!(check_sensitive_file_access("echo hi > '~/.ssh/config'").is_some());
+    }
+
+    #[test]
+    fn sensitive_path_detection_treats_line_breaks_as_shell_separators() {
+        assert!(check_sensitive_file_access("echo ok\ncat ~/.aws/credentials").is_some());
+        assert!(check_sensitive_file_access("echo ok\rcat ~/.aws/credentials").is_some());
+        assert!(check_sensitive_file_access("printf 'ok\\ncat ~/.aws/credentials'").is_none());
     }
 
     #[test]

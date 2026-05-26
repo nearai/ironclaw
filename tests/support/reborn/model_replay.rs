@@ -11,7 +11,8 @@ use ironclaw_loop_support::{
 };
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, CapabilityCallCandidate, CapabilityInputRef, CapabilitySurfaceVersion,
-    LoopCapabilityPort, ProviderToolCall, ProviderToolCallReplay, VisibleCapabilityRequest,
+    LoopCapabilityPort, ProviderToolCall, ProviderToolCallReplay, ProviderToolDefinition,
+    VisibleCapabilityRequest,
 };
 use thiserror::Error;
 
@@ -42,6 +43,11 @@ pub struct RebornTraceReplayModelGateway {
 #[derive(Debug, Clone)]
 pub enum RebornModelReplayStep {
     Response {
+        response: HostManagedModelResponse,
+        expected_tool_results: Vec<ExpectedToolResult>,
+    },
+    AssertProviderToolsThenResponse {
+        capability_ids: Vec<CapabilityId>,
         response: HostManagedModelResponse,
         expected_tool_results: Vec<ExpectedToolResult>,
     },
@@ -90,6 +96,10 @@ struct ReplayStep {
 #[derive(Debug, Clone)]
 enum ReplayOutput {
     Response(HostManagedModelResponse),
+    AssertProviderToolsThenResponse {
+        capability_ids: Vec<CapabilityId>,
+        response: HostManagedModelResponse,
+    },
     ProviderToolCalls(Vec<RebornScriptedProviderToolCall>),
 }
 
@@ -127,6 +137,17 @@ impl RebornTraceReplayModelGateway {
                         expected_tool_results,
                     } => ReplayStep {
                         output: ReplayOutput::Response(response),
+                        expected_tool_results,
+                    },
+                    RebornModelReplayStep::AssertProviderToolsThenResponse {
+                        capability_ids,
+                        response,
+                        expected_tool_results,
+                    } => ReplayStep {
+                        output: ReplayOutput::AssertProviderToolsThenResponse {
+                            capability_ids,
+                            response,
+                        },
                         expected_tool_results,
                     },
                     RebornModelReplayStep::ProviderToolCalls {
@@ -180,6 +201,12 @@ impl HostManagedModelGateway for RebornTraceReplayModelGateway {
         let step = self.take_step(request)?;
         match step.output {
             ReplayOutput::Response(response) => Ok(response),
+            ReplayOutput::AssertProviderToolsThenResponse { .. } => {
+                Err(HostManagedModelError::safe(
+                    HostManagedModelErrorKind::InvalidRequest,
+                    "trace replay provider tool assertions require capability-aware model streaming",
+                ))
+            }
             ReplayOutput::ProviderToolCalls(_) => Err(HostManagedModelError::safe(
                 HostManagedModelErrorKind::InvalidRequest,
                 "trace replay provider tool calls require capability-aware model streaming",
@@ -195,6 +222,13 @@ impl HostManagedModelGateway for RebornTraceReplayModelGateway {
         let step = self.take_step(request.clone())?;
         match step.output {
             ReplayOutput::Response(response) => Ok(response),
+            ReplayOutput::AssertProviderToolsThenResponse {
+                capability_ids,
+                response,
+            } => {
+                assert_provider_tools(capabilities, &capability_ids).await?;
+                Ok(response)
+            }
             ReplayOutput::ProviderToolCalls(calls) => {
                 provider_tool_calls_response(&request, capabilities, calls).await
             }
@@ -226,18 +260,46 @@ impl RebornTraceReplayModelGateway {
     }
 }
 
+async fn assert_provider_tools(
+    capabilities: Arc<dyn LoopCapabilityPort>,
+    capability_ids: &[CapabilityId],
+) -> Result<(), HostManagedModelError> {
+    let definitions = provider_tool_definitions(&capabilities).await?;
+    for capability_id in capability_ids {
+        if !definitions
+            .iter()
+            .any(|definition| &definition.capability_id == capability_id)
+        {
+            return Err(HostManagedModelError::safe(
+                HostManagedModelErrorKind::InvalidRequest,
+                format!(
+                    "expected capability {} was not advertised to the model",
+                    capability_id.as_str()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn provider_tool_definitions(
+    capabilities: &Arc<dyn LoopCapabilityPort>,
+) -> Result<Vec<ProviderToolDefinition>, HostManagedModelError> {
+    capabilities
+        .visible_capabilities(VisibleCapabilityRequest)
+        .await
+        .map_err(capability_host_error)?;
+    capabilities
+        .tool_definitions()
+        .map_err(capability_host_error)
+}
+
 async fn provider_tool_calls_response(
     request: &HostManagedModelRequest,
     capabilities: Arc<dyn LoopCapabilityPort>,
     calls: Vec<RebornScriptedProviderToolCall>,
 ) -> Result<HostManagedModelResponse, HostManagedModelError> {
-    capabilities
-        .visible_capabilities(VisibleCapabilityRequest)
-        .await
-        .map_err(capability_host_error)?;
-    let definitions = capabilities
-        .tool_definitions()
-        .map_err(capability_host_error)?;
+    let definitions = provider_tool_definitions(&capabilities).await?;
     let mut candidates = Vec::with_capacity(calls.len());
     for call in calls {
         let definition = definitions

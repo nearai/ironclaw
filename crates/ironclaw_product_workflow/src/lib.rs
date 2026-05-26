@@ -25,6 +25,7 @@
 #![forbid(unsafe_code)]
 
 mod action;
+mod approval_interaction;
 mod auth_continuation;
 mod binding;
 mod binding_ref;
@@ -46,6 +47,16 @@ mod workflow;
 pub use action::{
     ActionDispatchKind, ActionFingerprintKey, ActionPhase, AuthRequestRef, LinkedThreadActionId,
     ProductActionId, ProductCommandName, ProductInboundAction, SourceBindingKey,
+};
+pub use approval_interaction::{
+    ApprovalBlockedTurnRun, ApprovalGateRecord, ApprovalInteractionActionView,
+    ApprovalInteractionDecision, ApprovalInteractionReadModel, ApprovalInteractionRejectionKind,
+    ApprovalInteractionScope, ApprovalInteractionService, ApprovalLeaseTermsProvider,
+    ApprovalResolutionPort, ApprovalResolverPort, ApprovalTurnRunLocator,
+    DefaultApprovalInteractionService, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
+    PendingApprovalInteractionView, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse, RunStateApprovalInteractionReadModel, approval_gate_ref,
+    is_approval_gate_ref,
 };
 /// Concrete turn-gate resume dispatcher used by the Reborn composition crate to
 /// bridge product-auth continuations into the workflow-owned turn boundary.
@@ -78,9 +89,11 @@ pub use inbound_turn::{
 };
 pub use ledger::{IdempotencyDecision, IdempotencyLedger};
 pub use lifecycle::{
-    LifecycleBlockerRef, LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef,
-    LifecyclePhase, LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
-    LifecycleProductResponse, LifecycleProductSurfaceContext, LifecycleReadinessBlocker,
+    LifecycleBlockerRef, LifecycleCommandKind, LifecycleExtensionSource, LifecycleExtensionSummary,
+    LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
+    LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
+    LifecycleProductPayload, LifecycleProductResponse, LifecycleProductSurfaceContext,
+    LifecycleReadinessBlocker, LifecycleSkillSource, LifecycleSkillSummary,
     UnsupportedLifecycleProductFacade,
 };
 pub use policy::{
@@ -93,7 +106,8 @@ pub use policy::{
 // a direct dependency on `ironclaw_product_adapters` — the single-facade
 // boundary is enforced by `ironclaw_architecture`.
 pub use ironclaw_product_adapters::{
-    AuthPromptView, FinalReplyView, GatePromptView, ProductOutboundEnvelope,
+    AuthPromptView, CapabilityActivityStatusView, CapabilityActivityView,
+    CapabilityDisplayPreviewView, FinalReplyView, GatePromptView, ProductOutboundEnvelope,
     ProductOutboundPayload, ProductProjectionItem, ProductProjectionState, ProgressKind,
     ProgressUpdateView, ProjectionCursor,
 };

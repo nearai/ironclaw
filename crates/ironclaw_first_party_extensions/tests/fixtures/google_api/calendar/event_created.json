@@ -1,0 +1,13 @@
+{
+  "kind": "calendar#event",
+  "etag": "\"3500000000000099\"",
+  "id": "evt-created-099",
+  "iCalUID": "evt-created-099@google.com",
+  "sequence": 0,
+  "status": "confirmed",
+  "htmlLink": "https://calendar.google.com/event?eid=evt-created-099",
+  "summary": "Sprint planning",
+  "start": { "dateTime": "2026-05-22T15:00:00-04:00" },
+  "end": { "dateTime": "2026-05-22T16:00:00-04:00" },
+  "reminders": { "useDefault": true }
+}

@@ -49,7 +49,8 @@ pub fn build_webui_services(
     let mut api = ProductRebornServices::new(
         runtime.webui_thread_service(),
         runtime.webui_turn_coordinator(),
-    );
+    )
+    .with_approval_interactions(runtime.webui_approval_interaction_service());
     if let Some(skill_activation_source) = runtime.webui_skill_activation_source() {
         let activation_recorder = Arc::clone(&skill_activation_source);
         let activation_clearer = skill_activation_source;
@@ -81,10 +82,13 @@ pub fn build_webui_services(
         );
     }
     if let Some(local_runtime) = &services.local_runtime {
-        api = api.with_lifecycle_product_facade(Arc::new(
-            RebornLocalLifecycleFacade::new(local_runtime.skill_management.clone())
-                .with_extension_management(local_runtime.extension_management.clone()),
-        ));
+        let mut lifecycle_facade =
+            RebornLocalLifecycleFacade::new(local_runtime.skill_management.clone());
+        if let Some(extension_management) = &local_runtime.extension_management {
+            lifecycle_facade =
+                lifecycle_facade.with_extension_management(extension_management.clone());
+        }
+        api = api.with_lifecycle_product_facade(Arc::new(lifecycle_facade));
     }
     api = api.with_event_stream(event_stream.unwrap_or_else(|| runtime.webui_event_stream()));
 

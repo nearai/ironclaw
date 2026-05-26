@@ -6,13 +6,12 @@ use ironclaw_extensions::{
     ExtensionManifestRecord, ExtensionManifestRef, ExtensionPackage, ManifestHash, ManifestSource,
     SharedExtensionRegistry,
 };
-use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
+use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{ExtensionId, VirtualPath, sha256_digest_token};
 use ironclaw_product_workflow::{
-    LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductResponse,
-    ProductWorkflowError,
+    LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload,
+    LifecycleProductResponse, ProductWorkflowError,
 };
-use serde_json::json;
 use tokio::sync::Mutex;
 
 use crate::available_extensions::{
@@ -22,7 +21,7 @@ use crate::available_extensions::{
 use crate::lifecycle::response_with_payload;
 
 pub(crate) struct RebornLocalExtensionManagementPort {
-    filesystem: Arc<LocalFilesystem>,
+    filesystem: Arc<dyn RootFilesystem>,
     catalog: AvailableExtensionCatalog,
     installation_store: Arc<dyn ExtensionInstallationStore>,
     lifecycle_service: Arc<Mutex<ExtensionLifecycleService>>,
@@ -32,7 +31,7 @@ pub(crate) struct RebornLocalExtensionManagementPort {
 
 impl RebornLocalExtensionManagementPort {
     pub(crate) fn new(
-        filesystem: Arc<LocalFilesystem>,
+        filesystem: Arc<dyn RootFilesystem>,
         catalog: AvailableExtensionCatalog,
         installation_store: Arc<dyn ExtensionInstallationStore>,
         lifecycle_service: Arc<Mutex<ExtensionLifecycleService>>,
@@ -55,15 +54,16 @@ impl RebornLocalExtensionManagementPort {
         let extensions = self.catalog.search(query);
         let summaries = extensions
             .into_iter()
-            .map(|extension| extension.summary_json())
+            .map(|extension| extension.summary())
             .collect::<Vec<_>>();
+        let count = summaries.len();
         Ok(response_with_payload(
             None,
             LifecyclePhase::Discovered,
-            json!({
-                "extensions": summaries,
-                "count": summaries.len(),
-            }),
+            LifecycleProductPayload::ExtensionSearch {
+                extensions: summaries,
+                count,
+            },
         ))
     }
 
@@ -97,10 +97,12 @@ impl RebornLocalExtensionManagementPort {
         Ok(response_with_payload(
             Some(package_ref),
             LifecyclePhase::Installed,
-            json!({
-                "installed": true,
-                "visible_capability_ids": visible_capability_ids(available).map(|id| id.as_str()).collect::<Vec<_>>(),
-            }),
+            LifecycleProductPayload::ExtensionInstall {
+                installed: true,
+                visible_capability_ids: visible_capability_ids(available)
+                    .map(|id| id.as_str().to_string())
+                    .collect(),
+            },
         ))
     }
 
@@ -138,7 +140,7 @@ impl RebornLocalExtensionManagementPort {
         Ok(response_with_payload(
             Some(package_ref),
             LifecyclePhase::Active,
-            json!({ "activated": true }),
+            LifecycleProductPayload::ExtensionActivate { activated: true },
         ))
     }
 
@@ -187,7 +189,7 @@ impl RebornLocalExtensionManagementPort {
         Ok(response_with_payload(
             Some(package_ref),
             LifecyclePhase::Removed,
-            json!({ "removed": true }),
+            LifecycleProductPayload::ExtensionRemove { removed: true },
         ))
     }
 
@@ -475,6 +477,7 @@ mod tests {
         ExtensionLifecycleService, ExtensionManifest, ExtensionRegistry,
         InMemoryExtensionInstallationStore,
     };
+    use ironclaw_filesystem::LocalFilesystem;
     use ironclaw_host_api::{
         HostPath, HostPortCatalog, MountAlias, MountGrant, MountPermissions, MountView, TenantId,
         UserId,
@@ -499,22 +502,14 @@ mod tests {
             .await
             .expect("search extensions");
         assert_eq!(search.phase, LifecyclePhase::Discovered);
-        let extensions = search
-            .payload
-            .as_ref()
-            .and_then(|payload| payload.get("extensions"))
-            .and_then(serde_json::Value::as_array)
-            .expect("extension summaries");
+        let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) =
+            search.payload.as_ref()
+        else {
+            panic!("expected extension search payload");
+        };
         assert_eq!(extensions.len(), 1);
-        let visible_ids = extensions[0]
-            .get("visible_read_only_capability_ids")
-            .and_then(serde_json::Value::as_array)
-            .expect("visible read-only ids");
         assert_eq!(
-            visible_ids
-                .iter()
-                .filter_map(serde_json::Value::as_str)
-                .collect::<Vec<_>>(),
+            extensions[0].visible_read_only_capability_ids,
             vec!["fixture.search"]
         );
 
@@ -755,7 +750,10 @@ mod tests {
                 .execute(lifecycle_surface_context(), action)
                 .await
                 .expect("unsupported response");
-            assert_unsupported_extension_response(response);
+            assert_unsupported_extension_response(
+                response,
+                "extension_auth_and_configure_not_yet_wired",
+            );
         }
     }
 
@@ -770,7 +768,7 @@ mod tests {
             .await
             .expect("unsupported projection");
 
-        assert_unsupported_extension_response(response);
+        assert_unsupported_extension_response(response, "extension_lifecycle_store_unwired");
     }
 
     fn extension_lifecycle_fixture() -> (
@@ -797,9 +795,10 @@ mod tests {
             )
             .expect("mount system extensions");
         let filesystem = Arc::new(filesystem);
+        let root_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
         let skill_management = Arc::new(crate::lifecycle::RebornLocalSkillManagementPort::new(
             UserId::new("lifecycle-owner").expect("valid user"),
-            Arc::clone(&filesystem),
+            root_filesystem.clone(),
             MountView::new(vec![MountGrant::new(
                 MountAlias::new("/skills").expect("valid alias"),
                 VirtualPath::new("/projects/skills").expect("valid path"),
@@ -809,7 +808,7 @@ mod tests {
         ));
         let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
         let extension_management = Arc::new(RebornLocalExtensionManagementPort::new(
-            Arc::clone(&filesystem),
+            root_filesystem,
             AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]),
             Arc::new(InMemoryExtensionInstallationStore::default()),
             Arc::new(Mutex::new(ExtensionLifecycleService::new(
@@ -888,12 +887,15 @@ output_schema_ref = "schemas/write.output.json"
         }
     }
 
-    fn assert_unsupported_extension_response(response: LifecycleProductResponse) {
+    fn assert_unsupported_extension_response(
+        response: LifecycleProductResponse,
+        expected_ref: &str,
+    ) {
         assert_eq!(response.phase, LifecyclePhase::UnsupportedOrLegacy);
         assert!(response.blockers.iter().any(|blocker| matches!(
             blocker,
             LifecycleReadinessBlocker::Runtime { ref_id: Some(ref_id) }
-                if ref_id.as_str() == "extension_auth_and_configure_not_yet_wired"
+                if ref_id.as_str() == expected_ref
         )));
     }
 }

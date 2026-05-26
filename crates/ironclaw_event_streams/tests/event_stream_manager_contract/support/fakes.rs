@@ -173,6 +173,70 @@ impl FakeProjectionService {
     }
 }
 
+struct InitialSnapshotRebaseProjectionService {
+    earliest_scope: ProjectionScope,
+    calls: Mutex<Vec<Option<EventCursor>>>,
+}
+
+impl InitialSnapshotRebaseProjectionService {
+    fn new(scope: ProjectionScope) -> Self {
+        Self {
+            earliest_scope: scope.clone(),
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn with_earliest_scope(earliest_scope: ProjectionScope) -> Self {
+        Self {
+            earliest_scope,
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn calls(&self) -> Vec<Option<EventCursor>> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl EventProjectionService for InitialSnapshotRebaseProjectionService {
+    async fn snapshot(
+        &self,
+        request: ProjectionRequest,
+    ) -> Result<ProjectionSnapshot, ProjectionError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(request.after.as_ref().map(|cursor| cursor.runtime));
+        match request.after {
+            None => Err(ProjectionError::RebaseRequired {
+                requested: Box::new(ProjectionCursor::origin_for_scope(request.scope)),
+                earliest: Box::new(ProjectionCursor::for_scope(
+                    self.earliest_scope.clone(),
+                    EventCursor::new(5),
+                )),
+            }),
+            Some(cursor) if cursor.runtime == EventCursor::new(4) => {
+                Ok(snapshot(&request.scope, 10))
+            }
+            Some(cursor) => Err(ProjectionError::RebaseRequired {
+                requested: Box::new(cursor),
+                earliest: Box::new(ProjectionCursor::for_scope(
+                    self.earliest_scope.clone(),
+                    EventCursor::new(5),
+                )),
+            }),
+        }
+    }
+
+    async fn updates(
+        &self,
+        _request: ProjectionRequest,
+    ) -> Result<ProjectionReplay, ProjectionError> {
+        panic!("initial snapshot rebase test does not resume updates")
+    }
+}
+
 #[async_trait]
 impl EventProjectionService for FakeProjectionService {
     async fn snapshot(
@@ -245,6 +309,49 @@ impl EventProjectionService for PayloadThreadMismatchProjectionService {
     }
 }
 
+struct ActivityThreadMismatchProjectionService;
+
+#[async_trait]
+impl EventProjectionService for ActivityThreadMismatchProjectionService {
+    async fn snapshot(
+        &self,
+        request: ProjectionRequest,
+    ) -> Result<ProjectionSnapshot, ProjectionError> {
+        Ok(snapshot_with_activity_thread(&request.scope, 10, "thread-b"))
+    }
+
+    async fn updates(
+        &self,
+        request: ProjectionRequest,
+    ) -> Result<ProjectionReplay, ProjectionError> {
+        Ok(replay_with_activity_thread(&request.scope, 2, 3, "thread-b"))
+    }
+}
+
+struct ActivityTransitionThreadMismatchProjectionService;
+
+#[async_trait]
+impl EventProjectionService for ActivityTransitionThreadMismatchProjectionService {
+    async fn snapshot(
+        &self,
+        request: ProjectionRequest,
+    ) -> Result<ProjectionSnapshot, ProjectionError> {
+        Ok(snapshot(&request.scope, 10))
+    }
+
+    async fn updates(
+        &self,
+        request: ProjectionRequest,
+    ) -> Result<ProjectionReplay, ProjectionError> {
+        Ok(replay_with_activity_transition_thread(
+            &request.scope,
+            2,
+            3,
+            "thread-b",
+        ))
+    }
+}
+
 struct FailingUpdatesProjectionService {
     error: ProjectionError,
 }
@@ -266,12 +373,22 @@ impl EventProjectionService for FailingUpdatesProjectionService {
             ProjectionError::InvalidRequest { reason } => {
                 ProjectionError::InvalidRequest { reason }
             }
+            ProjectionError::MissingProjectionMetadata { field } => {
+                ProjectionError::MissingProjectionMetadata { field: *field }
+            }
             ProjectionError::RebaseRequired {
                 requested,
                 earliest,
             } => ProjectionError::RebaseRequired {
                 requested: requested.clone(),
                 earliest: earliest.clone(),
+            },
+            ProjectionError::TurnEventRebaseRequired {
+                requested,
+                earliest,
+            } => ProjectionError::TurnEventRebaseRequired {
+                requested: *requested,
+                earliest: *earliest,
             },
             ProjectionError::Source { operation } => ProjectionError::Source { operation },
         };
@@ -293,12 +410,22 @@ impl EventProjectionService for FailingSnapshotProjectionService {
             ProjectionError::InvalidRequest { reason } => {
                 ProjectionError::InvalidRequest { reason }
             }
+            ProjectionError::MissingProjectionMetadata { field } => {
+                ProjectionError::MissingProjectionMetadata { field: *field }
+            }
             ProjectionError::RebaseRequired {
                 requested,
                 earliest,
             } => ProjectionError::RebaseRequired {
                 requested: requested.clone(),
                 earliest: earliest.clone(),
+            },
+            ProjectionError::TurnEventRebaseRequired {
+                requested,
+                earliest,
+            } => ProjectionError::TurnEventRebaseRequired {
+                requested: *requested,
+                earliest: *earliest,
             },
             ProjectionError::Source { operation } => ProjectionError::Source { operation },
         })

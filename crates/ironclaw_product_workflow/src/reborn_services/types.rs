@@ -9,7 +9,9 @@ use ironclaw_turns::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{LifecyclePackageRef, LifecyclePhase, LifecycleReadinessBlocker};
+use crate::{
+    LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload, LifecycleReadinessBlocker,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornCreateThreadResponse {
@@ -192,6 +194,12 @@ pub struct RebornListThreadsResponse {
     pub next_cursor: Option<String>,
 }
 
+/// WebUI v2 setup projection for extension lifecycle.
+///
+/// This intentionally uses the v2 `phase`/`blockers` lifecycle contract and
+/// omits the legacy `status` field from the earlier unimplemented route shape.
+/// The live browser consumer still uses the v1 setup route, so this v2 contract
+/// can become lifecycle-native before it has compatibility consumers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornSetupExtensionResponse {
     pub extension_name: ExtensionName,
@@ -201,5 +209,5 @@ pub struct RebornSetupExtensionResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package_ref: Option<LifecyclePackageRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub payload: Option<serde_json::Value>,
+    pub payload: Option<LifecycleProductPayload>,
 }

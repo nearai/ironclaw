@@ -27,14 +27,18 @@ use ironclaw_turns::{
 use uuid::Uuid;
 
 use crate::{
-    LifecycleProductFacade, UnsupportedLifecycleProductFacade, WebUiAuthenticatedCaller,
-    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundCommand,
-    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    ApprovalInteractionDecision, ApprovalInteractionService, LifecycleProductFacade,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    UnsupportedLifecycleProductFacade, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundCommand, WebUiInboundValidationCode,
+    WebUiInboundValidationError, WebUiListThreadsRequest, WebUiResolveGateRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    approval_interaction::RejectingApprovalInteractionService,
     binding_ref::{
         DEFAULT_BINDING_REF_RAW_MAX_BYTES, bounded_reply_target_binding_ref,
         bounded_source_binding_ref,
     },
+    is_approval_gate_ref,
 };
 
 mod error;
@@ -112,10 +116,13 @@ pub trait RebornServicesApi: Send + Sync {
         request: WebUiListThreadsRequest,
     ) -> Result<RebornListThreadsResponse, RebornServicesError>;
 
-    /// Run a step in a v2-native extension onboarding flow. The route returns
-    /// a product-safe lifecycle projection. Auth, approval, pairing, policy,
-    /// and credential requirements are represented as blockers that point back
-    /// to their owning services; this facade must not resolve those gates.
+    /// Run a step in a v2-native extension onboarding flow. Today the
+    /// facade returns
+    /// [`RebornSetupExtensionStatus::NotImplemented`](types::RebornSetupExtensionStatus::NotImplemented)
+    /// because the underlying extension lifecycle is still v1-only.
+    /// The route exists so the WebUI v2 entrypoint inventory is
+    /// complete and so future onboarding port work has a fixed surface
+    /// to fill in.
     ///
     /// `extension_name` is the validated, typed identifier from the
     /// route path. Per `.claude/rules/types.md`, extension identifiers
@@ -138,6 +145,7 @@ pub struct RebornServices {
     turn_coordinator: Arc<dyn TurnCoordinator>,
     event_stream: Option<Arc<dyn ProjectionStream>>,
     lifecycle_facade: Arc<dyn LifecycleProductFacade>,
+    approval_interactions: Arc<dyn ApprovalInteractionService>,
     skill_activation_recorder: Option<Arc<SkillActivationRecorder>>,
     skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
 }
@@ -151,11 +159,10 @@ impl RebornServices {
             thread_service,
             turn_coordinator,
             event_stream: None,
-            lifecycle_facade: Arc::new(
-                // SAFETY: this literal is a static, non-empty, control-free lifecycle blocker ref.
-                UnsupportedLifecycleProductFacade::new("reborn_lifecycle_facade_unwired")
-                    .expect("static lifecycle facade ref is valid"),
-            ),
+            lifecycle_facade: Arc::new(UnsupportedLifecycleProductFacade::new_static(
+                "reborn_lifecycle_facade_unwired",
+            )),
+            approval_interactions: Arc::new(RejectingApprovalInteractionService),
             skill_activation_recorder: None,
             skill_activation_clearer: None,
         }
@@ -171,6 +178,14 @@ impl RebornServices {
         lifecycle_facade: Arc<dyn LifecycleProductFacade>,
     ) -> Self {
         self.lifecycle_facade = lifecycle_facade;
+        self
+    }
+
+    pub fn with_approval_interactions(
+        mut self,
+        approval_interactions: Arc<dyn ApprovalInteractionService>,
+    ) -> Self {
+        self.approval_interactions = approval_interactions;
         self
     }
 
@@ -394,6 +409,10 @@ impl RebornServicesApi for RebornServices {
             requested_run_profile: None,
             idempotency_key: client_action_id.clone(),
             received_at: Utc::now(),
+            requested_run_id: None,
+            parent_run_id: None,
+            subagent_depth: 0,
+            spawn_tree_root_run_id: None,
         };
 
         self.record_skill_activation_message(&scope, &accepted_message_ref, &content)?;
@@ -565,18 +584,58 @@ impl RebornServicesApi for RebornServices {
         // the message transcript and the load would be wasted work.
         self.resolve_webui_thread_metadata(scope.clone(), &actor)
             .await?;
+        if is_approval_gate_ref(&gate_ref) {
+            let decision = match resolution {
+                WebUiGateResolution::Approved { always } => {
+                    // `always: true` requests a *persistent* approval but this
+                    // facade has only one-shot approval interaction routing and
+                    // no approval-policy port. Fail loud rather than silently
+                    // downgrade.
+                    if always {
+                        return Err(persistent_approval_unavailable());
+                    }
+                    ApprovalInteractionDecision::ApproveOnce
+                }
+                WebUiGateResolution::Denied | WebUiGateResolution::Cancelled => {
+                    ApprovalInteractionDecision::Deny
+                }
+                WebUiGateResolution::CredentialProvided { .. } => {
+                    return Err(RebornServicesError::from_status_kind(
+                        RebornServicesErrorCode::Unavailable,
+                        RebornServicesErrorKind::BlockedAuthentication,
+                        503,
+                        false,
+                    ));
+                }
+            };
+            let response = self
+                .approval_interactions
+                .resolve(ResolveApprovalInteractionRequest {
+                    scope,
+                    actor,
+                    run_id_hint: Some(run_id),
+                    gate_ref,
+                    decision,
+                    idempotency_key: client_action_id,
+                })
+                .await
+                .map_err(|error| map_adapter_error(error.into()))?;
+            return match response {
+                ResolveApprovalInteractionResponse::Approved(response) => {
+                    Ok(RebornResolveGateResponse::Resumed(response.into()))
+                }
+                ResolveApprovalInteractionResponse::Denied(response) => {
+                    Ok(RebornResolveGateResponse::Cancelled(response.into()))
+                }
+            };
+        }
         match resolution {
             WebUiGateResolution::Approved { always } => {
                 // `always: true` requests a *persistent* approval but this
                 // facade has only one-shot `resume_turn` and no approval-policy
                 // port. Fail loud rather than silently downgrade.
                 if always {
-                    return Err(RebornServicesError::from_status_kind(
-                        RebornServicesErrorCode::Unavailable,
-                        RebornServicesErrorKind::BlockedApproval,
-                        503,
-                        false,
-                    ));
+                    return Err(persistent_approval_unavailable());
                 }
                 let binding_id = webui_gate_binding_id(&scope, &gate_ref_string(&gate_ref));
                 let response = self
@@ -1187,6 +1246,15 @@ fn gate_ref_string(gate_ref: &ironclaw_turns::GateRef) -> String {
     gate_ref.as_str().to_string()
 }
 
+fn persistent_approval_unavailable() -> RebornServicesError {
+    RebornServicesError::from_status_kind(
+        RebornServicesErrorCode::Unavailable,
+        RebornServicesErrorKind::BlockedApproval,
+        503,
+        false,
+    )
+}
+
 fn segment(name: &str, value: &str) -> String {
     format!("{name}:{}:{value};", value.len())
 }
@@ -1252,6 +1320,12 @@ fn map_turn_error(error: TurnError) -> RebornServicesError {
             RebornServicesErrorKind::Busy,
             429,
             true,
+        ),
+        ironclaw_turns::TurnErrorCategory::CapacityExceeded => (
+            RebornServicesErrorCode::RateLimited,
+            RebornServicesErrorKind::Busy,
+            429,
+            false,
         ),
         ironclaw_turns::TurnErrorCategory::ScopeNotFound => (
             RebornServicesErrorCode::NotFound,

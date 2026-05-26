@@ -1,6 +1,8 @@
 //! Contract tests for the Reborn-native product command model.
 
-use ironclaw_product_adapters::{InboundCommandPayload, ProductTriggerReason};
+use ironclaw_product_adapters::{
+    InboundCommandPayload, ProductRejectionKind, ProductTriggerReason,
+};
 use ironclaw_product_workflow::{
     LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction,
     ProductCommand, ProductModelCommand, product_command_descriptors,
@@ -13,7 +15,7 @@ fn command_payload_maps_to_typed_model_command_without_v1_parser() {
             .expect("valid command");
 
     assert_eq!(
-        ProductCommand::from_payload(&payload).expect("model command parses"),
+        ProductCommand::from_payload(&payload).expect("parse model command"),
         ProductCommand::Model {
             action: ProductModelCommand::Set {
                 model: "gpt-5-mini".to_string(),
@@ -90,7 +92,7 @@ fn command_payload_maps_all_declared_commands_and_unknown_fallback() {
     for (name, arguments, expected, expected_name, expected_descriptor) in cases {
         let payload = InboundCommandPayload::new(name, arguments, ProductTriggerReason::BotCommand)
             .expect("valid command payload");
-        let command = ProductCommand::from_payload(&payload).expect("command parses");
+        let command = ProductCommand::from_payload(&payload).expect("parse command");
 
         assert_eq!(command, expected);
         assert_eq!(command.name(), expected_name);
@@ -111,7 +113,7 @@ fn lifecycle_command_parser_handles_json_forms_and_rejects_malformed_refs() {
     .expect("valid command payload");
 
     assert_eq!(
-        ProductCommand::from_payload(&configure_payload).expect("configure command parses"),
+        ProductCommand::from_payload(&configure_payload).expect("parse configure command"),
         ProductCommand::Lifecycle {
             action: LifecycleProductAction::ExtensionConfigure {
                 package_ref: ironclaw_product_workflow::LifecyclePackageRef::new(
@@ -129,7 +131,7 @@ fn lifecycle_command_parser_handles_json_forms_and_rejects_malformed_refs() {
             InboundCommandPayload::new("skill_remove", arguments, ProductTriggerReason::BotCommand)
                 .expect("valid command payload");
         assert_eq!(
-            ProductCommand::from_payload(&payload).expect("skill remove command parses"),
+            ProductCommand::from_payload(&payload).expect("parse skill remove command"),
             ProductCommand::Lifecycle {
                 action: LifecycleProductAction::SkillRemove {
                     package_ref: ironclaw_product_workflow::LifecyclePackageRef::new(
@@ -159,7 +161,8 @@ fn lifecycle_command_parser_handles_json_forms_and_rejects_malformed_refs() {
             arguments: arguments.to_string(),
             trigger: ProductTriggerReason::BotCommand,
         };
-        assert!(ProductCommand::from_payload(&payload).is_err());
+        let rejection = ProductCommand::from_payload(&payload).expect_err("invalid command");
+        assert_eq!(rejection.kind, ProductRejectionKind::InvalidRequest);
     }
 }
 
@@ -231,7 +234,7 @@ fn lifecycle_command_parser_maps_every_lifecycle_command_variant() {
                 .expect("valid command payload");
 
         assert_eq!(
-            ProductCommand::from_payload(&payload).expect("lifecycle command parses"),
+            ProductCommand::from_payload(&payload).expect("parse lifecycle command"),
             expected
         );
     }
@@ -259,7 +262,8 @@ fn lifecycle_command_parser_rejects_invalid_skill_install_name() {
         trigger: ProductTriggerReason::BotCommand,
     };
 
-    assert!(ProductCommand::from_payload(&payload).is_err());
+    let rejection = ProductCommand::from_payload(&payload).expect_err("invalid skill name");
+    assert_eq!(rejection.kind, ProductRejectionKind::InvalidRequest);
 }
 
 #[test]
@@ -276,7 +280,7 @@ fn lifecycle_command_parser_preserves_skill_install_content() {
     };
 
     assert_eq!(
-        ProductCommand::from_payload(&payload).expect("skill install command parses"),
+        ProductCommand::from_payload(&payload).expect("parse skill install command"),
         ProductCommand::Lifecycle {
             action: LifecycleProductAction::SkillInstall {
                 name: Some(LifecyclePackageId::new("review-helper").unwrap()),

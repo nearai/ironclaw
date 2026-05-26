@@ -6,12 +6,14 @@
 #
 # Prerequisites:
 #   rustup target add wasm32-wasip2
+#   rustup target add wasm32-wasip1
 #   cargo install cargo-component --locked
 #
 # Usage:
 #   ./scripts/build-wasm-extensions.sh           # build all
 #   ./scripts/build-wasm-extensions.sh --tools    # tools only
 #   ./scripts/build-wasm-extensions.sh --channels # channels only
+#   ./scripts/build-wasm-extensions.sh --first-party # first-party extensions only
 
 set -euo pipefail
 
@@ -19,12 +21,18 @@ cd "$(dirname "$0")/.."
 
 BUILD_TOOLS=true
 BUILD_CHANNELS=true
+BUILD_FIRST_PARTY=true
 FAILED=()
 
 if [[ "${1:-}" == "--tools" ]]; then
     BUILD_CHANNELS=false
+    BUILD_FIRST_PARTY=false
 elif [[ "${1:-}" == "--channels" ]]; then
     BUILD_TOOLS=false
+    BUILD_FIRST_PARTY=false
+elif [[ "${1:-}" == "--first-party" ]]; then
+    BUILD_TOOLS=false
+    BUILD_CHANNELS=false
 fi
 
 build_extension() {
@@ -51,10 +59,68 @@ build_extension() {
     echo "  OK   $name"
 }
 
+build_first_party_extension() {
+    local manifest_path="$1"
+    local extension_root
+    local source_dir
+    local module_path
+    local target_root
+    local artifact
+    local candidate
+    local name
+
+    extension_root=$(dirname "$manifest_path")
+    source_dir="$extension_root/wasm-src"
+    name="first-party/$(basename "$extension_root")"
+    module_path=$(awk -F'"' '/^[[:space:]]*module[[:space:]]*=/{ print $2; exit }' "$manifest_path")
+
+    if [ ! -d "$source_dir" ]; then
+        echo "  SKIP $name (source dir $source_dir not found)"
+        return 0
+    fi
+    if [ -z "$module_path" ]; then
+        echo "  FAIL $name (manifest missing runtime module)"
+        FAILED+=("$name")
+        return 1
+    fi
+
+    echo "  BUILD $name from $source_dir"
+    if ! cargo component build --release --target wasm32-wasip2 --manifest-path "$source_dir/Cargo.toml" 2>&1; then
+        echo "  FAIL $name"
+        FAILED+=("$name")
+        return 1
+    fi
+    target_root="${CARGO_TARGET_DIR:-$source_dir/target}"
+    artifact=""
+    for target_triple in wasm32-wasip1 wasm32-wasip2 wasm32-wasi; do
+        candidate="$target_root/$target_triple/release/$(basename "$module_path")"
+        if [ -f "$candidate" ]; then
+            artifact="$candidate"
+            break
+        fi
+    done
+    if [ ! -f "$artifact" ]; then
+        echo "  FAIL $name (expected artifact $(basename "$module_path") not found under $target_root)"
+        FAILED+=("$name")
+        return 1
+    fi
+
+    mkdir -p "$(dirname "$extension_root/$module_path")"
+    cp "$artifact" "$extension_root/$module_path"
+    echo "  OK   $name"
+}
+
 if $BUILD_TOOLS; then
     echo "Building WASM tools..."
     for manifest in registry/tools/*.json; do
         build_extension "$manifest" || true
+    done
+fi
+
+if $BUILD_FIRST_PARTY; then
+    echo "Building first-party WASM extensions..."
+    for manifest in crates/ironclaw_first_party_extensions/assets/*/manifest.toml; do
+        build_first_party_extension "$manifest" || true
     done
 fi
 

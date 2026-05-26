@@ -8,7 +8,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_product_adapters::{
-    InboundCommandPayload, ProductInboundAck, ProductRejection, ProductRejectionKind,
+    InboundCommandPayload, ProductCommandResultPayload, ProductInboundAck, ProductRejection,
+    ProductRejectionKind,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -16,8 +17,9 @@ use serde_json::Value;
 use crate::{
     ProductCommandContext, ProductCommandService, ProductWorkflowError,
     lifecycle::{
-        LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction,
-        LifecycleProductContext, LifecycleProductFacade, validate_lifecycle_text,
+        LifecycleCommandKind, LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef,
+        LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
+        validate_lifecycle_text,
     },
 };
 
@@ -31,52 +33,10 @@ pub struct ProductCommandDescriptor {
 
 struct ProductCommandSpec {
     descriptor: ProductCommandDescriptor,
-    parse: fn(&InboundCommandPayload) -> Result<ProductCommand, ProductWorkflowError>,
+    parse: fn(&InboundCommandPayload) -> ProductCommandParseResult,
 }
 
 const COMMAND_SPECS: &[ProductCommandSpec] = &[
-    ProductCommandSpec {
-        descriptor: ProductCommandDescriptor {
-            name: "extension_search",
-            aliases: &[],
-        },
-        parse: parse_lifecycle_command_payload,
-    },
-    ProductCommandSpec {
-        descriptor: ProductCommandDescriptor {
-            name: "extension_install",
-            aliases: &[],
-        },
-        parse: parse_lifecycle_command_payload,
-    },
-    ProductCommandSpec {
-        descriptor: ProductCommandDescriptor {
-            name: "extension_auth",
-            aliases: &[],
-        },
-        parse: parse_lifecycle_command_payload,
-    },
-    ProductCommandSpec {
-        descriptor: ProductCommandDescriptor {
-            name: "extension_activate",
-            aliases: &[],
-        },
-        parse: parse_lifecycle_command_payload,
-    },
-    ProductCommandSpec {
-        descriptor: ProductCommandDescriptor {
-            name: "extension_configure",
-            aliases: &[],
-        },
-        parse: parse_lifecycle_command_payload,
-    },
-    ProductCommandSpec {
-        descriptor: ProductCommandDescriptor {
-            name: "extension_remove",
-            aliases: &[],
-        },
-        parse: parse_lifecycle_command_payload,
-    },
     ProductCommandSpec {
         descriptor: ProductCommandDescriptor {
             name: "model",
@@ -91,31 +51,19 @@ const COMMAND_SPECS: &[ProductCommandSpec] = &[
         },
         parse: parse_status_command,
     },
-    ProductCommandSpec {
-        descriptor: ProductCommandDescriptor {
-            name: "skill_search",
-            aliases: &[],
-        },
-        parse: parse_lifecycle_command_payload,
-    },
-    ProductCommandSpec {
-        descriptor: ProductCommandDescriptor {
-            name: "skill_install",
-            aliases: &[],
-        },
-        parse: parse_lifecycle_command_payload,
-    },
-    ProductCommandSpec {
-        descriptor: ProductCommandDescriptor {
-            name: "skill_remove",
-            aliases: &[],
-        },
-        parse: parse_lifecycle_command_payload,
-    },
 ];
 
-pub fn product_command_descriptors() -> impl Iterator<Item = &'static ProductCommandDescriptor> {
-    COMMAND_SPECS.iter().map(|spec| &spec.descriptor)
+type ProductCommandParseResult = Result<ProductCommand, ProductRejection>;
+
+pub fn product_command_descriptors() -> impl Iterator<Item = ProductCommandDescriptor> {
+    LifecycleCommandKind::ALL
+        .iter()
+        .copied()
+        .map(|kind| ProductCommandDescriptor {
+            name: kind.command_name(),
+            aliases: &[],
+        })
+        .chain(COMMAND_SPECS.iter().map(|spec| spec.descriptor.clone()))
 }
 
 /// Typed command family produced from a normalized command payload.
@@ -136,14 +84,17 @@ pub enum ProductModelCommand {
 }
 
 impl ProductCommand {
-    pub fn from_payload(payload: &InboundCommandPayload) -> Result<Self, ProductWorkflowError> {
-        match command_spec_for_name(&payload.command) {
-            Some(spec) => (spec.parse)(payload),
-            None => Ok(Self::Unknown {
+    pub fn from_payload(payload: &InboundCommandPayload) -> ProductCommandParseResult {
+        if let Some(kind) = LifecycleCommandKind::from_command_name(&payload.command) {
+            return parse_lifecycle_command_payload(kind, payload);
+        }
+        Ok(match command_spec_for_name(&payload.command) {
+            Some(spec) => (spec.parse)(payload)?,
+            None => ProductCommand::Unknown {
                 name: payload.command.clone(),
                 arguments: payload.arguments.clone(),
-            }),
-        }
+            },
+        })
     }
 
     pub fn name(&self) -> &str {
@@ -155,8 +106,10 @@ impl ProductCommand {
         }
     }
 
-    pub fn descriptor(&self) -> Option<&'static ProductCommandDescriptor> {
-        command_spec_for_name(self.name()).map(|spec| &spec.descriptor)
+    pub fn descriptor(&self) -> Option<ProductCommandDescriptor> {
+        product_command_descriptors().find(|descriptor| {
+            descriptor.name == self.name() || descriptor.aliases.contains(&self.name())
+        })
     }
 }
 
@@ -166,9 +119,7 @@ fn command_spec_for_name(name: &str) -> Option<&'static ProductCommandSpec> {
         .find(|spec| spec.descriptor.name == name || spec.descriptor.aliases.contains(&name))
 }
 
-fn parse_model_command(
-    payload: &InboundCommandPayload,
-) -> Result<ProductCommand, ProductWorkflowError> {
+fn parse_model_command(payload: &InboundCommandPayload) -> ProductCommandParseResult {
     let model = payload.arguments.split_whitespace().next();
     Ok(match model {
         Some(model) => ProductCommand::Model {
@@ -182,9 +133,7 @@ fn parse_model_command(
     })
 }
 
-fn parse_status_command(
-    _payload: &InboundCommandPayload,
-) -> Result<ProductCommand, ProductWorkflowError> {
+fn parse_status_command(_payload: &InboundCommandPayload) -> ProductCommandParseResult {
     Ok(ProductCommand::Status)
 }
 
@@ -211,62 +160,68 @@ impl ProductCommandService for LifecycleProductCommandService {
                 format!("command routing unavailable: {}", command.name()),
             )));
         };
-        // Lifecycle commands are admitted and executed by the facade;
-        // the structured response (phase, blockers, payload) belongs to
-        // the lifecycle projection stream, not the command ack channel.
-        // TODO: once the product surface surfaces lifecycle projections
-        // to the caller, wire the response into the projection stream.
-        self.facade
-            .execute(LifecycleProductContext::Command(context), action)
+        let command_name = action.command_name().to_string();
+        let response = self
+            .facade
+            .execute(LifecycleProductContext::Command(Box::new(context)), action)
             .await?;
-        Ok(ProductInboundAck::NoOp)
+        let payload =
+            serde_json::to_value(response).map_err(|error| ProductWorkflowError::Transient {
+                reason: format!("lifecycle command response serialization failed: {error}"),
+            })?;
+        Ok(ProductInboundAck::CommandResult {
+            command: command_name,
+            payload: ProductCommandResultPayload::new(payload),
+        })
     }
 }
 
 fn parse_lifecycle_command_payload(
+    kind: LifecycleCommandKind,
     payload: &InboundCommandPayload,
-) -> Result<ProductCommand, ProductWorkflowError> {
-    match payload.command.as_str() {
-        "extension_search" => Ok(ProductCommand::Lifecycle {
+) -> ProductCommandParseResult {
+    Ok(match kind {
+        LifecycleCommandKind::ExtensionSearch => ProductCommand::Lifecycle {
             action: LifecycleProductAction::ExtensionSearch {
                 query: payload.arguments.trim().to_string(),
             },
-        }),
-        "extension_install" => extension_package_command(payload, |package_ref| {
-            LifecycleProductAction::ExtensionInstall { package_ref }
-        }),
-        "extension_auth" => extension_package_command(payload, |package_ref| {
+        },
+        LifecycleCommandKind::ExtensionInstall => {
+            extension_package_command(payload, |package_ref| {
+                LifecycleProductAction::ExtensionInstall { package_ref }
+            })?
+        }
+        LifecycleCommandKind::ExtensionAuth => extension_package_command(payload, |package_ref| {
             LifecycleProductAction::ExtensionAuth { package_ref }
-        }),
-        "extension_activate" => extension_package_command(payload, |package_ref| {
-            LifecycleProductAction::ExtensionActivate { package_ref }
-        }),
-        "extension_configure" => parse_extension_configure_command(payload),
-        "extension_remove" => extension_package_command(payload, |package_ref| {
-            LifecycleProductAction::ExtensionRemove { package_ref }
-        }),
-        "skill_search" => Ok(ProductCommand::Lifecycle {
+        })?,
+        LifecycleCommandKind::ExtensionActivate => {
+            extension_package_command(payload, |package_ref| {
+                LifecycleProductAction::ExtensionActivate { package_ref }
+            })?
+        }
+        LifecycleCommandKind::ExtensionConfigure => parse_extension_configure_command(payload)?,
+        LifecycleCommandKind::ExtensionRemove => {
+            extension_package_command(payload, |package_ref| {
+                LifecycleProductAction::ExtensionRemove { package_ref }
+            })?
+        }
+        LifecycleCommandKind::SkillSearch => ProductCommand::Lifecycle {
             action: LifecycleProductAction::SkillSearch {
                 query: payload.arguments.trim().to_string(),
             },
-        }),
-        "skill_install" => parse_skill_install_command(payload),
-        "skill_remove" => parse_skill_remove_command(payload),
-        _ => Ok(unknown_lifecycle_command(payload)),
-    }
+        },
+        LifecycleCommandKind::SkillInstall => parse_skill_install_command(payload)?,
+        LifecycleCommandKind::SkillRemove => parse_skill_remove_command(payload)?,
+    })
 }
 
-fn parse_extension_configure_command(
-    payload: &InboundCommandPayload,
-) -> Result<ProductCommand, ProductWorkflowError> {
+fn parse_extension_configure_command(payload: &InboundCommandPayload) -> ProductCommandParseResult {
     let args = payload.arguments.trim();
     let (id, config_payload) = match serde_json::from_str::<Value>(args) {
         Ok(json) => {
-            let id = json
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
+            let Some(id) = json.get("id").and_then(Value::as_str).map(str::to_string) else {
+                return invalid_lifecycle_command("extension_configure.id is required");
+            };
             (id, json.get("payload").cloned())
         }
         Err(_) => (first_argument(args).to_string(), None),
@@ -278,33 +233,27 @@ fn parse_extension_configure_command(
                 payload: config_payload,
             },
         }),
-        Err(error) => Err(error),
+        Err(error) => invalid_lifecycle_command(error.to_string()),
     }
 }
 
-fn parse_skill_install_command(
-    payload: &InboundCommandPayload,
-) -> Result<ProductCommand, ProductWorkflowError> {
+fn parse_skill_install_command(payload: &InboundCommandPayload) -> ProductCommandParseResult {
     let args = payload.arguments.trim();
     let Ok(json) = serde_json::from_str::<Value>(args) else {
-        return malformed_command(payload, "expected JSON command arguments");
+        return invalid_lifecycle_command("skill_install expects a JSON payload");
     };
     let content = match json.get("content").and_then(Value::as_str) {
         Some(content) => content,
-        None => return malformed_command(payload, "missing skill content"),
+        None => return invalid_lifecycle_command("skill_install.content is required"),
     };
     let content = match validate_lifecycle_text(content.to_string(), "skill content", 64 * 1024) {
         Ok(content) => content,
-        Err(error) => return Err(error),
+        Err(error) => return invalid_lifecycle_command(error.to_string()),
     };
     let name = match json.get("name").and_then(Value::as_str) {
         Some(name) => match LifecyclePackageId::new(name) {
             Ok(name) => Some(name),
-            Err(error) => {
-                return Err(ProductWorkflowError::InvalidBindingRequest {
-                    reason: error.to_string(),
-                });
-            }
+            Err(error) => return invalid_lifecycle_command(error.to_string()),
         },
         None => None,
     };
@@ -313,66 +262,73 @@ fn parse_skill_install_command(
     })
 }
 
-fn parse_skill_remove_command(
-    payload: &InboundCommandPayload,
-) -> Result<ProductCommand, ProductWorkflowError> {
+fn parse_skill_remove_command(payload: &InboundCommandPayload) -> ProductCommandParseResult {
     let args = payload.arguments.trim();
-    let id = serde_json::from_str::<Value>(args)
-        .ok()
-        .and_then(|json| {
-            json.get("id")
-                .or_else(|| json.get("name"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| first_argument(args).to_string());
+    let id = match skill_remove_ref_argument(args) {
+        Ok(id) => id,
+        Err(reason) => return invalid_lifecycle_command(reason),
+    };
     match lifecycle_package_ref(LifecyclePackageKind::Skill, id) {
         Ok(package_ref) => Ok(ProductCommand::Lifecycle {
             action: LifecycleProductAction::SkillRemove { package_ref },
         }),
-        Err(error) => Err(error),
+        Err(error) => invalid_lifecycle_command(error.to_string()),
     }
 }
 
 fn extension_package_command(
     payload: &InboundCommandPayload,
     build: fn(LifecyclePackageRef) -> LifecycleProductAction,
-) -> Result<ProductCommand, ProductWorkflowError> {
-    let id = lifecycle_ref_argument(payload);
+) -> ProductCommandParseResult {
+    let id = match lifecycle_ref_argument(payload) {
+        Ok(id) => id,
+        Err(reason) => return invalid_lifecycle_command(reason),
+    };
     match lifecycle_package_ref(LifecyclePackageKind::Extension, id) {
         Ok(package_ref) => Ok(ProductCommand::Lifecycle {
             action: build(package_ref),
         }),
-        Err(error) => Err(error),
+        Err(error) => invalid_lifecycle_command(error.to_string()),
     }
 }
 
-fn lifecycle_ref_argument(payload: &InboundCommandPayload) -> String {
+fn lifecycle_ref_argument(payload: &InboundCommandPayload) -> Result<String, String> {
     let args = payload.arguments.trim();
-    serde_json::from_str::<Value>(args)
-        .ok()
-        .and_then(|json| json.get("id").and_then(Value::as_str).map(str::to_string))
-        .unwrap_or_else(|| first_argument(args).to_string())
+    json_or_whitespace_field(args, &["id"], || {
+        format!("{}.id is required", payload.command)
+    })
+}
+
+fn skill_remove_ref_argument(args: &str) -> Result<String, String> {
+    json_or_whitespace_field(args, &["id", "name"], || {
+        "skill_remove.id or skill_remove.name is required".to_string()
+    })
+}
+
+fn json_or_whitespace_field(
+    args: &str,
+    keys: &[&str],
+    missing_message: impl FnOnce() -> String,
+) -> Result<String, String> {
+    match serde_json::from_str::<Value>(args) {
+        Ok(json) => keys
+            .iter()
+            .find_map(|key| json.get(*key).and_then(Value::as_str))
+            .map(str::to_string)
+            .ok_or_else(missing_message),
+        Err(_) => Ok(first_argument(args).to_string()),
+    }
 }
 
 fn first_argument(args: &str) -> &str {
     args.split_whitespace().next().unwrap_or("")
 }
 
-fn unknown_lifecycle_command(payload: &InboundCommandPayload) -> ProductCommand {
-    ProductCommand::Unknown {
-        name: payload.command.clone(),
-        arguments: payload.arguments.clone(),
-    }
-}
-
-fn malformed_command<T>(
-    payload: &InboundCommandPayload,
-    reason: impl Into<String>,
-) -> Result<T, ProductWorkflowError> {
-    Err(ProductWorkflowError::InvalidBindingRequest {
-        reason: format!("malformed {} command: {}", payload.command, reason.into()),
-    })
+fn invalid_lifecycle_command(reason: impl Into<String>) -> ProductCommandParseResult {
+    Err(ProductRejection::permanent(
+        ProductRejectionKind::InvalidRequest,
+        reason.into(),
+    ))
 }
 
 fn lifecycle_package_ref(

@@ -88,9 +88,9 @@ pub trait RootFilesystem: Send + Sync {
     /// Lists at most `max_entries` direct children of a canonical virtual
     /// directory.
     ///
-    /// Backends may override this to stop scanning as soon as the bound is
-    /// reached. The default preserves the bounded contract for existing
-    /// backends by truncating the unbounded listing.
+    /// Backends that can stop directory enumeration early should override this.
+    /// The default preserves compatibility by delegating to [`Self::list_dir`]
+    /// and truncating the result after materialization.
     async fn list_dir_bounded(
         &self,
         path: &VirtualPath,
@@ -280,4 +280,45 @@ fn unsupported<T>(
         path: path.clone(),
         operation,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct DefaultBoundedBackend;
+
+    #[async_trait::async_trait]
+    impl RootFilesystem for DefaultBoundedBackend {
+        async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+            Ok(["a", "b", "c"]
+                .into_iter()
+                .map(|name| DirEntry {
+                    name: name.to_string(),
+                    path: VirtualPath::new(format!("{}/{}", path.as_str(), name)).unwrap(),
+                    file_type: crate::FileType::File,
+                })
+                .collect())
+        }
+
+        async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+            Err(FilesystemError::NotFound {
+                path: path.clone(),
+                operation: FilesystemOperation::Stat,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn list_dir_bounded_default_truncates_materialized_entries() {
+        let backend = DefaultBoundedBackend;
+        let path = VirtualPath::new("/projects").unwrap();
+
+        let none = backend.list_dir_bounded(&path, 0).await.unwrap();
+        let all = backend.list_dir_bounded(&path, 10).await.unwrap();
+
+        assert!(none.is_empty());
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[2].name, "c");
+    }
 }

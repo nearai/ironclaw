@@ -33,6 +33,7 @@ pub struct InvocationServices {
     pub runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     pub process: Arc<dyn RuntimeProcessPort>,
     pub secret_store: Option<Arc<dyn SecretStore>>,
+    pub unsafe_raw_diagnostics_allowed: bool,
 }
 
 impl fmt::Debug for InvocationServices {
@@ -48,6 +49,10 @@ impl fmt::Debug for InvocationServices {
             .field(
                 "secret_store",
                 &self.secret_store.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "unsafe_raw_diagnostics_allowed",
+                &self.unsafe_raw_diagnostics_allowed,
             )
             .finish()
     }
@@ -149,7 +154,7 @@ impl InvocationServicesResolver for LocalInvocationServicesResolver {
         if plan.requires_filesystem
             && !matches!(
                 plan.filesystem_backend,
-                FilesystemBackendKind::HostWorkspace
+                FilesystemBackendKind::HostWorkspace | FilesystemBackendKind::HostWorkspaceAndHome
             )
         {
             return Err(InvocationServicesError::UnsupportedFilesystemBackend {
@@ -213,6 +218,10 @@ impl InvocationServicesResolver for LocalInvocationServicesResolver {
             } else {
                 None
             },
+            unsafe_raw_diagnostics_allowed: crate::local_runtime_allows_unsafe_raw_http_diagnostics(
+                plan.deployment,
+                plan.resolved_profile,
+            ),
         })
     }
 }
@@ -467,6 +476,30 @@ mod tests {
     }
 
     #[test]
+    fn local_resolver_accepts_host_workspace_and_home_when_filesystem_required() {
+        let resolver = resolver_without_http();
+        let mut plan = plan(
+            ProcessBackendKind::None,
+            false,
+            false,
+            NetworkMode::Deny,
+            false,
+        );
+        plan.requires_filesystem = true;
+        plan.filesystem_backend = FilesystemBackendKind::HostWorkspaceAndHome;
+
+        let services = resolver
+            .resolve(InvocationServicesResolutionRequest {
+                plan: &plan,
+                scope: &ResourceScope::system(),
+                mounts: None,
+            })
+            .expect("local-yolo filesystem backend should resolve");
+
+        assert!(services.runtime_http_egress.is_none());
+    }
+
+    #[test]
     fn local_resolver_ignores_unsupported_filesystem_backend_when_not_required() {
         let resolver = resolver_without_http();
         let mut plan = plan(
@@ -630,6 +663,53 @@ mod tests {
             .unwrap();
 
         assert!(services.runtime_http_egress.is_some());
+    }
+
+    #[test]
+    fn local_resolver_allows_raw_diagnostics_only_for_local_dev_and_yolo() {
+        let resolver = LocalInvocationServicesResolver::new(
+            Arc::new(LocalFilesystem::new()),
+            Some(Arc::new(NoopRuntimeHttpEgress)),
+            Arc::new(NoopProcessPort),
+            None,
+        );
+        let mut plan = plan(
+            ProcessBackendKind::None,
+            false,
+            true,
+            NetworkMode::Direct,
+            false,
+        );
+
+        plan.resolved_profile = RuntimeProfile::LocalSafe;
+        let services = resolver
+            .resolve(InvocationServicesResolutionRequest {
+                plan: &plan,
+                scope: &ResourceScope::system(),
+                mounts: None,
+            })
+            .unwrap();
+        assert!(!services.unsafe_raw_diagnostics_allowed);
+
+        plan.resolved_profile = RuntimeProfile::LocalDev;
+        let services = resolver
+            .resolve(InvocationServicesResolutionRequest {
+                plan: &plan,
+                scope: &ResourceScope::system(),
+                mounts: None,
+            })
+            .unwrap();
+        assert!(services.unsafe_raw_diagnostics_allowed);
+
+        plan.resolved_profile = RuntimeProfile::LocalYolo;
+        let services = resolver
+            .resolve(InvocationServicesResolutionRequest {
+                plan: &plan,
+                scope: &ResourceScope::system(),
+                mounts: None,
+            })
+            .unwrap();
+        assert!(services.unsafe_raw_diagnostics_allowed);
     }
 
     #[test]

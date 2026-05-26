@@ -9,7 +9,7 @@ use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
 
 use super::{CodingCapabilityError, CodingCapabilityRequest};
 
-use super::guest_error;
+use super::operation_error;
 
 pub(crate) type SharedCodingReadState = Arc<RwLock<CodingReadState>>;
 pub(crate) type SharedCodingEditLocks = Arc<CodingEditLocks>;
@@ -97,10 +97,10 @@ impl CodingReadState {
     ) -> Result<(), CodingCapabilityError> {
         let key = (scope.clone(), path.to_string());
         let Some(entry) = self.entries.get(&key) else {
-            return Err(guest_error());
+            return Err(operation_error());
         };
         if entry.partial || entry.content_hash != current_content_hash {
-            return Err(guest_error());
+            return Err(operation_error());
         }
         Ok(())
     }

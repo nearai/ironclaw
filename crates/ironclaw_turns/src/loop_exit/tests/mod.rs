@@ -22,6 +22,22 @@ fn policy_denied_failure_kind_serializes_as_snake_case() {
 }
 
 #[test]
+fn await_dependent_run_blocked_kind_maps_to_dependent_run_reason() {
+    let gate_ref = LoopGateRef::new("gate:dependent-run").unwrap();
+    let reason = LoopBlockedKind::AwaitDependentRun
+        .to_blocked_reason(gate_ref.clone())
+        .unwrap();
+
+    assert_eq!(
+        reason,
+        BlockedReason::AwaitDependentRun {
+            gate_ref: GateRef::new(gate_ref.as_str()).unwrap()
+        }
+    );
+    assert_eq!(reason.status(), TurnStatus::BlockedDependentRun);
+}
+
+#[test]
 fn validation_policy_named_constructors_keep_fail_closed_default_and_host_verified_evidence_explicit()
  {
     let default_policy = LoopExitValidationPolicy::recovery_required();
@@ -742,6 +758,7 @@ fn blocked_variants_map_to_correct_blocked_reason() {
         LoopBlockedKind::Approval,
         LoopBlockedKind::Auth,
         LoopBlockedKind::Resource,
+        LoopBlockedKind::AwaitDependentRun,
     ] {
         let checkpoint_id = TurnCheckpointId::new();
         let lg = loop_gate_ref("gate:test-gate");
@@ -764,6 +781,7 @@ fn blocked_variants_map_to_correct_blocked_reason() {
             LoopBlockedKind::Approval => BlockedReason::Approval { gate_ref },
             LoopBlockedKind::Auth => BlockedReason::Auth { gate_ref },
             LoopBlockedKind::Resource => BlockedReason::Resource { gate_ref },
+            LoopBlockedKind::AwaitDependentRun => BlockedReason::AwaitDependentRun { gate_ref },
         };
 
         assert_eq!(decision.violation, None);
@@ -872,6 +890,7 @@ fn terminal_statuses_release_lock_and_non_terminal_keep_it() {
         TurnStatus::BlockedApproval,
         TurnStatus::BlockedAuth,
         TurnStatus::BlockedResource,
+        TurnStatus::BlockedDependentRun,
         TurnStatus::CancelRequested,
         TurnStatus::Cancelled,
         TurnStatus::Completed,
@@ -884,6 +903,7 @@ fn terminal_statuses_release_lock_and_non_terminal_keep_it() {
             TurnStatus::BlockedApproval => (false, true),
             TurnStatus::BlockedAuth => (false, true),
             TurnStatus::BlockedResource => (false, true),
+            TurnStatus::BlockedDependentRun => (false, true),
             TurnStatus::CancelRequested => (false, true),
             TurnStatus::Cancelled => (true, false),
             TurnStatus::Completed => (true, false),

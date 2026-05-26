@@ -19,6 +19,7 @@ mod capability_allow_set;
 mod capability_info;
 mod capability_port;
 mod capability_surface_filter;
+mod filesystem_checkpoint_state;
 mod filesystem_skill_bundle_source;
 pub mod identity_context;
 mod input_port;
@@ -26,6 +27,9 @@ mod input_queue;
 mod skill_bundle_context_source;
 mod skill_bundle_source;
 mod skill_context;
+mod subagent_prompt_port;
+mod subagent_spawn_port;
+mod turn_event_publisher;
 
 pub use budget_accountant::{
     BudgetSeedingPolicy, GovernorBackedAccountant, ModelCost, ModelCostTable, ZeroCostTable,
@@ -48,6 +52,7 @@ pub use capability_port::{
 pub use capability_surface_filter::{
     CapabilitySurfaceProfileFilter, CapabilitySurfaceVisibleFilter,
 };
+pub use filesystem_checkpoint_state::FilesystemCheckpointStateStore;
 pub use filesystem_skill_bundle_source::{FilesystemSkillBundleRoot, FilesystemSkillBundleSource};
 pub use identity_context::{
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
@@ -67,6 +72,22 @@ pub use skill_context::{
     HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
     build_skill_run_snapshot,
 };
+pub use subagent_prompt_port::{
+    DEFAULT_SUBAGENT_GOAL_MAX_BYTES, SubagentLoopPromptPort, SubagentPromptComposer,
+    SubagentPromptGoal, SubagentPromptLimits, SubagentPromptMaterial, SubagentPromptMaterialSource,
+    materialize_direction_message, materialize_goal_framing_message, materialize_goal_message,
+    subagent_run_id_from_context,
+};
+pub use subagent_spawn_port::{
+    AwaitedChildSetRecord, DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, DEFAULT_SUBAGENT_MAX_DEPTH,
+    DEFAULT_SUBAGENT_MAX_SPAWN_PER_TURN, DEFAULT_SUBAGENT_MAX_TREE_DESCENDANTS,
+    InMemorySubagentGateResolutionStore, JsonSpawnSubagentInputCodec, SpawnSubagentArgs,
+    SpawnSubagentInputCodec, SpawnSubagentMode, SubagentDefinition, SubagentDefinitionResolver,
+    SubagentGateResolutionStore, SubagentGoalRecord, SubagentKindId, SubagentSpawnCapabilityPort,
+    SubagentSpawnDeps, SubagentSpawnGoalStore, SubagentSpawnLimits, SubagentThreadKind,
+    SubagentThreadMetadata,
+};
+pub use turn_event_publisher::EventPublishingTurnRunTransitionPort;
 
 use tokio::sync::{Mutex, OnceCell};
 
@@ -99,6 +120,44 @@ use ironclaw_turns::{
 use serde::{Deserialize, Serialize};
 const EMPTY_SURFACE_VERSION: &str = "empty:v1";
 const LOOP_SYSTEM_ROLE: &str = "system";
+
+pub fn raw_agent_loop_host_error(
+    component: &'static str,
+    operation: &'static str,
+    kind: AgentLoopHostErrorKind,
+    safe_summary: impl Into<String>,
+    raw_detail: impl std::fmt::Display,
+) -> AgentLoopHostError {
+    let safe_summary = safe_summary.into();
+    tracing::warn!(
+        component,
+        operation,
+        kind = ?kind,
+        safe_summary = %safe_summary,
+        raw_detail = %raw_detail,
+        "agent loop host error mapped to safe summary"
+    );
+    AgentLoopHostError::new(kind, safe_summary)
+}
+
+pub fn raw_host_managed_model_error(
+    component: &'static str,
+    operation: &'static str,
+    kind: HostManagedModelErrorKind,
+    safe_summary: impl Into<String>,
+    raw_detail: impl std::fmt::Display,
+) -> HostManagedModelError {
+    let safe_summary = safe_summary.into();
+    tracing::warn!(
+        component,
+        operation,
+        kind = ?kind,
+        safe_summary = %safe_summary,
+        raw_detail = %raw_detail,
+        "host-managed model error mapped to safe summary"
+    );
+    HostManagedModelError::safe(kind, safe_summary)
+}
 
 /// Thread-backed context adapter for text-only Reborn loops.
 #[derive(Clone)]
@@ -1624,17 +1683,23 @@ fn empty_capability_error() -> AgentLoopHostError {
     )
 }
 
-fn context_read_error(_error: SessionThreadError) -> AgentLoopHostError {
-    AgentLoopHostError::new(
+fn context_read_error(error: SessionThreadError) -> AgentLoopHostError {
+    raw_agent_loop_host_error(
+        "thread_context",
+        "read_context",
         AgentLoopHostErrorKind::Unavailable,
         "thread context is unavailable",
+        error,
     )
 }
 
-fn transcript_write_error(_error: SessionThreadError) -> AgentLoopHostError {
-    AgentLoopHostError::new(
+fn transcript_write_error(error: SessionThreadError) -> AgentLoopHostError {
+    raw_agent_loop_host_error(
+        "thread_transcript",
+        "write_transcript",
         AgentLoopHostErrorKind::TranscriptWriteFailed,
         "assistant transcript write failed",
+        error,
     )
 }
 

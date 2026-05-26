@@ -1,18 +1,21 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+#[cfg(test)]
 use ironclaw_filesystem::LocalFilesystem;
+use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{InvocationId, MountView, ResourceScope, UserId};
 use ironclaw_product_workflow::{
     LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
     LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
-    LifecycleProductResponse, LifecycleReadinessBlocker, ProductWorkflowError,
+    LifecycleProductPayload, LifecycleProductResponse, LifecycleReadinessBlocker,
+    LifecycleSkillSource, LifecycleSkillSummary, ProductWorkflowError,
 };
 use ironclaw_skills::{
-    SkillInstallRequest, SkillManagementContext, SkillManagementError, SkillManagementErrorKind,
-    SkillRemoveRequest, SkillSearchRequest, install_skill, remove_skill, search_skills,
+    SkillInstallRequest, SkillInstallSource, SkillManagementContext, SkillManagementError,
+    SkillManagementErrorKind, SkillRemoveRequest, SkillSearchRequest, install_skill, remove_skill,
+    search_skills,
 };
-use serde_json::{Value, json};
 
 use crate::extension_lifecycle::RebornLocalExtensionManagementPort;
 
@@ -21,14 +24,14 @@ const SKILL_SEARCH_RESULT_LIMIT: usize = 50;
 #[derive(Clone)]
 pub(crate) struct RebornLocalSkillManagementPort {
     owner_user_id: UserId,
-    filesystem: Arc<LocalFilesystem>,
+    filesystem: Arc<dyn RootFilesystem>,
     skill_management_mounts: MountView,
 }
 
 impl RebornLocalSkillManagementPort {
     pub(crate) fn new(
         owner_user_id: UserId,
-        filesystem: Arc<LocalFilesystem>,
+        filesystem: Arc<dyn RootFilesystem>,
         skill_management_mounts: MountView,
     ) -> Self {
         Self {
@@ -65,9 +68,18 @@ impl RebornLocalSkillManagementPort {
         content: &str,
     ) -> Result<ironclaw_skills::SkillInstallResult, ProductWorkflowError> {
         let context = self.skill_context()?;
-        install_skill(&context, SkillInstallRequest { name, content })
-            .await
-            .map_err(map_skill_error)
+        install_skill(
+            &context,
+            SkillInstallRequest {
+                name,
+                content,
+                files: &[],
+                source: SkillInstallSource::User,
+                source_url: None,
+            },
+        )
+        .await
+        .map_err(map_skill_error)
     }
 
     async fn remove(
@@ -119,18 +131,21 @@ impl RebornLocalLifecycleFacade {
                     .skill_management
                     .search(&query, SKILL_SEARCH_RESULT_LIMIT)
                     .await?;
-                let matched_skills: Vec<Value> =
-                    result.skills.into_iter().map(skill_json).collect();
+                let matched_skills = result
+                    .skills
+                    .into_iter()
+                    .map(skill_summary)
+                    .collect::<Result<Vec<_>, _>>()?;
                 let count = matched_skills.len();
                 Ok(response_with_payload(
                     None,
-                    LifecyclePhase::Installed,
-                    json!({
-                        "skills": matched_skills,
-                        "count": count,
-                        "limit": SKILL_SEARCH_RESULT_LIMIT,
-                        "truncated": result.truncated,
-                    }),
+                    LifecyclePhase::Discovered,
+                    LifecycleProductPayload::SkillSearch {
+                        skills: matched_skills,
+                        count,
+                        limit: SKILL_SEARCH_RESULT_LIMIT,
+                        truncated: result.truncated,
+                    },
                 ))
             }
             LifecycleProductAction::SkillInstall { name, content } => {
@@ -141,10 +156,10 @@ impl RebornLocalLifecycleFacade {
                 Ok(response_with_payload(
                     Some(skill_package_ref(&installed.name)?),
                     LifecyclePhase::Installed,
-                    json!({
-                        "installed": true,
-                        "name": installed.name,
-                    }),
+                    LifecycleProductPayload::SkillInstall {
+                        installed: true,
+                        name: LifecyclePackageId::new(installed.name)?,
+                    },
                 ))
             }
             LifecycleProductAction::SkillRemove { package_ref } => {
@@ -156,10 +171,10 @@ impl RebornLocalLifecycleFacade {
                 Ok(response_with_payload(
                     Some(skill_package_ref(&removed.name)?),
                     LifecyclePhase::Removed,
-                    json!({
-                        "removed": true,
-                        "name": removed.name,
-                    }),
+                    LifecycleProductPayload::SkillRemove {
+                        removed: true,
+                        name: LifecyclePackageId::new(removed.name)?,
+                    },
                 ))
             }
             LifecycleProductAction::ExtensionSearch { query } => {
@@ -188,7 +203,7 @@ impl RebornLocalLifecycleFacade {
             }
             LifecycleProductAction::ExtensionAuth { package_ref }
             | LifecycleProductAction::ExtensionConfigure { package_ref, .. } => {
-                unsupported_projection(Some(package_ref.clone()))
+                unsupported_extension_auth_configure_projection(Some(package_ref))
             }
         }
     }
@@ -220,7 +235,7 @@ fn skill_package_ref(name: &str) -> Result<LifecyclePackageRef, ProductWorkflowE
 pub(crate) fn response_with_payload(
     package_ref: Option<LifecyclePackageRef>,
     phase: LifecyclePhase,
-    payload: Value,
+    payload: LifecycleProductPayload,
 ) -> LifecycleProductResponse {
     LifecycleProductResponse {
         package_ref,
@@ -231,19 +246,37 @@ pub(crate) fn response_with_payload(
     }
 }
 
-fn skill_json(skill: ironclaw_skills::SkillSummary) -> Value {
-    json!({
-        "name": skill.name,
-        "version": skill.version,
-        "description": skill.description,
-        "source": skill.source.as_str(),
-        "keywords": skill.keywords,
-        "tags": skill.tags,
-        "requires_skills": skill.requires_skills,
+fn skill_summary(
+    skill: ironclaw_skills::SkillSummary,
+) -> Result<LifecycleSkillSummary, ProductWorkflowError> {
+    Ok(LifecycleSkillSummary {
+        name: LifecyclePackageId::new(skill.name)?,
+        version: skill.version,
+        description: skill.description,
+        source: match skill.source {
+            ironclaw_skills::ManagedSkillSource::System => LifecycleSkillSource::System,
+            ironclaw_skills::ManagedSkillSource::User
+            | ironclaw_skills::ManagedSkillSource::Installed => LifecycleSkillSource::User,
+        },
+        keywords: skill.keywords,
+        tags: skill.tags,
+        requires_skills: skill.requires_skills,
     })
 }
 
 fn unsupported_projection(
+    package_ref: Option<LifecyclePackageRef>,
+) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+    Ok(LifecycleProductResponse::projection(
+        package_ref,
+        LifecyclePhase::UnsupportedOrLegacy,
+        vec![LifecycleReadinessBlocker::runtime(Some(
+            "extension_lifecycle_store_unwired".to_string(),
+        ))?],
+    ))
+}
+
+fn unsupported_extension_auth_configure_projection(
     package_ref: Option<LifecyclePackageRef>,
 ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
     Ok(LifecycleProductResponse::projection(
@@ -261,7 +294,10 @@ fn map_skill_error(error: SkillManagementError) -> ProductWorkflowError {
         | SkillManagementErrorKind::NotFound
         | SkillManagementErrorKind::Conflict
         | SkillManagementErrorKind::InvalidSkill => ProductWorkflowError::InvalidBindingRequest {
-            reason: "skill management request rejected".to_string(),
+            reason: error
+                .reason()
+                .unwrap_or("skill management request rejected")
+                .to_string(),
         },
         SkillManagementErrorKind::FilesystemDenied => ProductWorkflowError::BindingAccessDenied,
         SkillManagementErrorKind::Resource => ProductWorkflowError::Transient {
@@ -308,14 +344,11 @@ mod tests {
             })
             .await
             .expect("list skills");
-        assert_eq!(list.phase, LifecyclePhase::Installed);
-        assert_eq!(
-            list.payload
-                .as_ref()
-                .and_then(|payload| payload.get("count"))
-                .and_then(Value::as_u64),
-            Some(1)
-        );
+        assert_eq!(list.phase, LifecyclePhase::Discovered);
+        let Some(LifecycleProductPayload::SkillSearch { count, .. }) = list.payload.as_ref() else {
+            panic!("expected skill search payload");
+        };
+        assert_eq!(*count, 1);
 
         for index in 0..55 {
             facade
@@ -338,20 +371,19 @@ mod tests {
             })
             .await
             .expect("list all skills");
-        let payload = all_skills.payload.as_ref().expect("skill search payload");
-        assert_eq!(payload.get("count").and_then(Value::as_u64), Some(50));
-        assert_eq!(payload.get("limit").and_then(Value::as_u64), Some(50));
-        assert_eq!(
-            payload.get("truncated").and_then(Value::as_bool),
-            Some(true)
-        );
-        assert_eq!(
-            payload
-                .get("skills")
-                .and_then(Value::as_array)
-                .map(Vec::len),
-            Some(50)
-        );
+        let Some(LifecycleProductPayload::SkillSearch {
+            skills,
+            count,
+            limit,
+            truncated,
+        }) = all_skills.payload.as_ref()
+        else {
+            panic!("expected skill search payload");
+        };
+        assert_eq!(*count, 50);
+        assert_eq!(*limit, 50);
+        assert!(*truncated);
+        assert_eq!(skills.len(), 50);
 
         let wrong_kind = facade
             .execute_action(LifecycleProductAction::SkillRemove {
@@ -453,29 +485,6 @@ mod tests {
             missing_remove,
             ProductWorkflowError::InvalidBindingRequest { .. }
         ));
-    }
-
-    #[tokio::test]
-    async fn skill_only_facade_rejects_extension_search() {
-        let (_dir, _storage_root, facade) = lifecycle_fixture();
-
-        let response = facade
-            .execute_action(LifecycleProductAction::ExtensionSearch {
-                query: "fixture".to_string(),
-            })
-            .await
-            .expect("unsupported extension search");
-
-        assert_unsupported_extension_response(response);
-    }
-
-    fn assert_unsupported_extension_response(response: LifecycleProductResponse) {
-        assert_eq!(response.phase, LifecyclePhase::UnsupportedOrLegacy);
-        assert!(response.blockers.iter().any(|blocker| matches!(
-            blocker,
-            LifecycleReadinessBlocker::Runtime { ref_id: Some(ref_id) }
-                if ref_id.as_str() == "extension_auth_and_configure_not_yet_wired"
-        )));
     }
 
     fn lifecycle_fixture() -> (

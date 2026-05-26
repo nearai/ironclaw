@@ -63,6 +63,36 @@ impl std::fmt::Display for TurnRunId {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
+pub struct CapabilityActivityId(Uuid);
+
+impl CapabilityActivityId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    pub fn from_uuid(value: Uuid) -> Self {
+        Self(value)
+    }
+
+    pub fn as_uuid(&self) -> Uuid {
+        self.0
+    }
+}
+
+impl Default for CapabilityActivityId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for CapabilityActivityId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct TurnCheckpointId(Uuid);
 
 impl TurnCheckpointId {

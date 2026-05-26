@@ -1,6 +1,7 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
 use ironclaw_first_party_extensions::skills::{
     SkillManagementCapabilityError, SkillManagementCapabilityKind,
@@ -9,16 +10,21 @@ use ironclaw_first_party_extensions::skills::{
 use ironclaw_host_api::{
     CapabilityId, EffectKind, HostApiError, PermissionMode, ResourceUsage, RuntimeDispatchErrorKind,
 };
+use ironclaw_skills::InstalledSkillMetadataSource;
+use serde_json::{Map, Value, json};
 
 use crate::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
 
-use super::{first_party_capability_manifest, resource_profile};
+use super::{
+    first_party_capability_manifest, resource_profile, skill_url_install::fetch_skill_url_payload,
+};
 
 pub const SKILL_LIST_CAPABILITY_ID: &str = "builtin.skill_list";
 pub const SKILL_INSTALL_CAPABILITY_ID: &str = "builtin.skill_install";
+pub const SKILL_INSTALL_URL_CAPABILITY_ID: &str = "builtin.skill_install_url";
 pub const SKILL_REMOVE_CAPABILITY_ID: &str = "builtin.skill_remove";
 
 pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
@@ -34,6 +40,17 @@ pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
             SKILL_INSTALL_CAPABILITY_ID,
             "Install a SKILL.md document into the current user's Reborn skill root",
             vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
+            PermissionMode::Ask,
+            resource_profile(),
+        )?,
+        first_party_capability_manifest(
+            SKILL_INSTALL_URL_CAPABILITY_ID,
+            "Fetch and install an HTTPS SKILL.md or skill bundle URL into the current user's Reborn skill root",
+            vec![
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+                EffectKind::Network,
+            ],
             PermissionMode::Ask,
             resource_profile(),
         )?,
@@ -59,6 +76,10 @@ pub(super) fn insert_handlers(
         CapabilityId::new(SKILL_INSTALL_CAPABILITY_ID)?,
         handler.clone(),
     );
+    registry.insert_handler(
+        CapabilityId::new(SKILL_INSTALL_URL_CAPABILITY_ID)?,
+        handler.clone(),
+    );
     registry.insert_handler(CapabilityId::new(SKILL_REMOVE_CAPABILITY_ID)?, handler);
     Ok(())
 }
@@ -71,9 +92,12 @@ impl FirstPartyCapabilityHandler for SkillManagementToolHandler {
         &self,
         request: FirstPartyCapabilityRequest,
     ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
+        let started = Instant::now();
         let kind = match request.capability_id.as_str() {
             SKILL_LIST_CAPABILITY_ID => SkillManagementCapabilityKind::List,
-            SKILL_INSTALL_CAPABILITY_ID => SkillManagementCapabilityKind::Install,
+            SKILL_INSTALL_CAPABILITY_ID | SKILL_INSTALL_URL_CAPABILITY_ID => {
+                SkillManagementCapabilityKind::Install
+            }
             SKILL_REMOVE_CAPABILITY_ID => SkillManagementCapabilityKind::Remove,
             _ => {
                 return Err(FirstPartyCapabilityError::new(
@@ -81,21 +105,98 @@ impl FirstPartyCapabilityHandler for SkillManagementToolHandler {
                 ));
             }
         };
+        let mut usage = ResourceUsage::default();
+        let input = if kind == SkillManagementCapabilityKind::Install {
+            skill_install_input(&request, &mut usage)
+                .await
+                .map_err(|error| error.with_usage(usage_with_elapsed(&usage, started)))?
+        } else {
+            request.input.clone()
+        };
         let skill_request = SkillManagementCapabilityRequest::new(
             kind,
             &request.scope,
             request.mounts.as_ref(),
             Arc::clone(&request.services.filesystem),
-            &request.input,
+            &input,
         );
-        let output = dispatch(&skill_request)
-            .await
-            .map_err(skill_management_error)?;
+        let output = dispatch(&skill_request).await.map_err(|error| {
+            skill_management_error(error).with_usage(usage_with_elapsed(&usage, started))
+        })?;
         Ok(FirstPartyCapabilityResult::new(
             output,
-            ResourceUsage::default(),
+            usage_with_elapsed(&usage, started),
         ))
     }
+}
+
+async fn skill_install_input(
+    request: &FirstPartyCapabilityRequest,
+    usage: &mut ResourceUsage,
+) -> Result<Value, FirstPartyCapabilityError> {
+    let Some(object) = request.input.as_object() else {
+        return Err(FirstPartyCapabilityError::new(
+            RuntimeDispatchErrorKind::InputEncode,
+        ));
+    };
+    let has_content = object.contains_key("content");
+    let url = object
+        .get("url")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    match (request.capability_id.as_str(), has_content, url) {
+        (SKILL_INSTALL_CAPABILITY_ID, true, None)
+            if !object.contains_key("files")
+                && !object.contains_key("source")
+                && !object.contains_key("source_url") =>
+        {
+            Ok(request.input.clone())
+        }
+        (SKILL_INSTALL_URL_CAPABILITY_ID, false, Some(url)) => {
+            let payload = fetch_skill_url_payload(request, url, usage).await?;
+            let mut rewritten = Map::new();
+            if let Some(name) = object.get("name").cloned() {
+                rewritten.insert("name".to_string(), name);
+            }
+            rewritten.insert("content".to_string(), Value::String(payload.content));
+            rewritten.insert(
+                "source".to_string(),
+                Value::String(
+                    InstalledSkillMetadataSource::InstalledUrl
+                        .as_str()
+                        .to_string(),
+                ),
+            );
+            rewritten.insert("source_url".to_string(), Value::String(url.to_string()));
+            if !payload.files.is_empty() {
+                rewritten.insert(
+                    "files".to_string(),
+                    Value::Array(
+                        payload
+                            .files
+                            .into_iter()
+                            .map(|file| {
+                                json!({
+                                    "path": file.path.display().to_string(),
+                                    "bytes_base64": BASE64_STANDARD.encode(file.contents),
+                                })
+                            })
+                            .collect(),
+                    ),
+                );
+            }
+            Ok(Value::Object(rewritten))
+        }
+        _ => Err(FirstPartyCapabilityError::new(
+            RuntimeDispatchErrorKind::InputEncode,
+        )),
+    }
+}
+
+fn usage_with_elapsed(usage: &ResourceUsage, started: Instant) -> ResourceUsage {
+    let mut usage = usage.clone();
+    usage.wall_clock_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+    usage
 }
 
 fn skill_management_error(error: SkillManagementCapabilityError) -> FirstPartyCapabilityError {

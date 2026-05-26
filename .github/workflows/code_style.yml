@@ -19,6 +19,13 @@ concurrency:
   group: code-style-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
+env:
+  # Tests must never touch the real OS keychain (macOS Keychain auth dialog /
+  # Linux Secret Service). Guarded by src/secrets/keychain.rs::os_keychain_suppressed:
+  # cfg!(test) covers unit tests; this covers integration/e2e that link the
+  # non-cfg(test) library.
+  IRONCLAW_DISABLE_OS_KEYCHAIN: "1"
+
 jobs:
   changes:
     name: Detect code changes

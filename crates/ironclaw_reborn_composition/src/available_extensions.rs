@@ -4,8 +4,10 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{CapabilityId, ExtensionId, VirtualPath};
-use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef, ProductWorkflowError};
-use serde_json::{Value, json};
+use ironclaw_product_workflow::{
+    LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
+    ProductWorkflowError,
+};
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct AvailableExtensionAsset {
@@ -28,21 +30,18 @@ pub(crate) struct AvailableExtensionPackage {
 }
 
 impl AvailableExtensionPackage {
-    pub(crate) fn summary_json(&self) -> Value {
+    pub(crate) fn summary(&self) -> LifecycleExtensionSummary {
         let visible_read_only_capability_ids = visible_capability_ids(self)
             .map(|id| id.as_str().to_string())
             .collect::<Vec<_>>();
-        json!({
-            "package_ref": {
-                "kind": lifecycle_kind_str(self.package_ref.kind),
-                "id": self.package_ref.id.as_str(),
-            },
-            "name": self.package.manifest.name,
-            "version": self.package.manifest.version,
-            "description": self.package.manifest.description,
-            "source": "host_bundled",
-            "visible_read_only_capability_ids": visible_read_only_capability_ids,
-        })
+        LifecycleExtensionSummary {
+            package_ref: self.package_ref.clone(),
+            name: self.package.manifest.name.clone(),
+            version: self.package.manifest.version.clone(),
+            description: self.package.manifest.description.clone(),
+            source: LifecycleExtensionSource::HostBundled,
+            visible_read_only_capability_ids,
+        }
     }
 }
 
@@ -61,7 +60,7 @@ impl AvailableExtensionCatalog {
         root: &VirtualPath,
     ) -> Result<Self, ProductWorkflowError>
     where
-        F: RootFilesystem,
+        F: RootFilesystem + ?Sized,
     {
         Ok(Self::from_packages(
             load_filesystem_packages(fs, root).await?,
@@ -110,21 +109,12 @@ impl AvailableExtensionCatalog {
     }
 }
 
-fn lifecycle_kind_str(kind: LifecyclePackageKind) -> &'static str {
-    match kind {
-        LifecyclePackageKind::Extension => "extension",
-        LifecyclePackageKind::Skill => "skill",
-        LifecyclePackageKind::Mcp => "mcp",
-        LifecyclePackageKind::Wasm => "wasm",
-    }
-}
-
 pub(crate) async fn materialize_available_extension<F>(
     fs: &F,
     extension: &AvailableExtensionPackage,
 ) -> Result<(), ProductWorkflowError>
 where
-    F: RootFilesystem,
+    F: RootFilesystem + ?Sized,
 {
     let mut written_paths = Vec::new();
     for asset in &extension.assets {
@@ -169,7 +159,7 @@ async fn load_filesystem_packages<F>(
     root: &VirtualPath,
 ) -> Result<Vec<AvailableExtensionPackage>, ProductWorkflowError>
 where
-    F: RootFilesystem,
+    F: RootFilesystem + ?Sized,
 {
     let mut entries = match fs.list_dir(root).await {
         Ok(entries) => entries,

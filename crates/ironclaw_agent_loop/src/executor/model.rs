@@ -170,9 +170,9 @@ impl ExecutorStage<ModelInput> for ModelStage {
                             }
                             request.messages = messages;
                         }
-                        RecoveryOutcome::SkipResult { .. } => {
+                        RecoveryOutcome::ToolErrorResult { .. } => {
                             return Err(AgentLoopExecutorError::PlannerContract {
-                                detail: "SkipResult on model error",
+                                detail: "ToolErrorResult on model error",
                             });
                         }
                         RecoveryOutcome::Abort {

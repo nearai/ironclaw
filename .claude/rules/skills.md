@@ -12,7 +12,7 @@ SKILL.md files extend the agent's prompt with domain-specific instructions. Each
 | Trust Level | Source | Tool Access |
 |-------------|--------|-------------|
 | **Trusted** | User-placed in `~/.ironclaw/skills/` or workspace `skills/` | All tools available to the agent |
-| **Installed** | Downloaded from ClawHub registry (`~/.ironclaw/installed_skills/`) | Read-only tools only (no shell, file write, HTTP) |
+| **Installed** | Downloaded from ClawHub registry or HTTPS skill URL (`~/.ironclaw/installed_skills/`, or URL provenance metadata in Reborn scoped skill storage) | Read-only tools only (no shell, file write, HTTP) |
 
 ## SKILL.md Format
 
@@ -55,5 +55,6 @@ compatibility.
 
 - `skill_list` -- List all discovered skills with trust level and status
 - `skill_search` -- Search ClawHub registry for available skills
-- `skill_install` -- Download and install a skill from ClawHub
+- `skill_install` -- Install a skill from raw SKILL.md content or ClawHub
+- `skill_install_url` -- Fetch and install a skill from an HTTPS raw SKILL.md, ZIP bundle, or supported GitHub repository/tree URL
 - `skill_remove` -- Remove an installed skill

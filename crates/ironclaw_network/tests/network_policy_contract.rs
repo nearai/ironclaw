@@ -92,6 +92,51 @@ fn network_target_matching_supports_one_label_wildcard_hosts_only() {
     ));
 }
 
+#[tokio::test]
+async fn network_policy_supports_any_host_wildcard_with_private_ip_guard() {
+    let enforcer = StaticNetworkPolicyEnforcer::new(NetworkPolicy {
+        allowed_targets: vec![pattern(None, "*", None)],
+        deny_private_ip_ranges: true,
+        max_egress_bytes: Some(1024),
+    });
+    let scope = sample_scope("tenant-a", "user-a");
+
+    enforcer
+        .authorize(NetworkRequest {
+            scope: scope.clone(),
+            target: target(NetworkScheme::Https, "api.example.test", Some(443)),
+            method: NetworkMethod::Get,
+            estimated_bytes: Some(0),
+        })
+        .await
+        .unwrap();
+
+    let private_ip = enforcer
+        .authorize(NetworkRequest {
+            scope,
+            target: target(NetworkScheme::Https, "10.0.0.7", Some(443)),
+            method: NetworkMethod::Get,
+            estimated_bytes: Some(0),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(private_ip.is_private_target_denied());
+}
+
+#[test]
+fn network_target_matching_supports_any_host_wildcard() {
+    let pattern = pattern(None, "*", None);
+    assert!(target_matches_pattern(
+        &target(NetworkScheme::Https, "api.example.test", Some(443)),
+        &pattern
+    ));
+    assert!(target_matches_pattern(
+        &target(NetworkScheme::Http, "example.org", Some(80)),
+        &pattern
+    ));
+}
+
 #[test]
 fn network_target_for_url_normalizes_default_ports() {
     assert_eq!(

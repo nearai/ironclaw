@@ -31,6 +31,7 @@ root-llm-provider = [
 webui-v2-beta = [
     "dep:ironclaw_webui_v2",
     "ironclaw_webui_v2/webui-v2-beta",
+    "libsql",
     "dep:axum",
     "dep:tower",
     "dep:tower-http",
@@ -40,6 +41,7 @@ libsql = [
     "dep:libsql",
     "ironclaw_filesystem/libsql",
     "ironclaw_host_runtime/libsql",
+    "ironclaw_reborn/filesystem-goal-store",
     "ironclaw_reborn_event_store/libsql",
     "ironclaw_resources/libsql",
     "ironclaw_run_state/libsql",
@@ -48,6 +50,7 @@ postgres = [
     "dep:deadpool-postgres",
     "ironclaw_filesystem/postgres",
     "ironclaw_host_runtime/postgres",
+    "ironclaw_reborn/filesystem-goal-store",
     "ironclaw_reborn_event_store/postgres",
     "ironclaw_resources/postgres",
     "ironclaw_run_state/postgres",
@@ -57,13 +60,16 @@ postgres = [
 async-trait = "0.1"
 chrono = "0.4"
 deadpool-postgres = { version = "0.14", optional = true }
+futures = "0.3"
 ironclaw_auth = { path = "../ironclaw_auth" }
+ironclaw_approvals = { path = "../ironclaw_approvals" }
 ironclaw_authorization = { path = "../ironclaw_authorization" }
 ironclaw_event_projections = { path = "../ironclaw_event_projections" }
 ironclaw_event_streams = { path = "../ironclaw_event_streams" }
 ironclaw_events = { path = "../ironclaw_events" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
+ironclaw_first_party_extensions = { path = "../ironclaw_first_party_extensions" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
 ironclaw_llm = { path = "../ironclaw_llm", optional = true, default-features = false }
@@ -108,6 +114,7 @@ async-trait = "0.1"
 http = "1"
 http-body-util = "0.1"
 ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_host_runtime = { path = "../ironclaw_host_runtime", features = ["test-support"] }
 ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_turns = { path = "../ironclaw_turns" }
 ironclaw_product_workflow = { path = "../ironclaw_product_workflow", features = ["test-support"] }

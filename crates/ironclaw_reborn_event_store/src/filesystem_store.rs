@@ -40,7 +40,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_events::{
     DurableAuditLog, DurableEventLog, EventCursor, EventError, EventLogEntry, EventReplay,
-    EventStreamKey, ReadScope, RuntimeEvent,
+    EventStreamKey, ReadScope, RuntimeEvent, runtime_event_from_trusted_json_slice,
 };
 use ironclaw_filesystem::{FilesystemError, RootFilesystem, ScopedFilesystem, SeqNo};
 use ironclaw_host_api::{AuditEnvelope, ResourceScope, ScopedPath};
@@ -160,8 +160,8 @@ where
         let mut entries = Vec::new();
         let mut last_scanned = after;
         for record in records {
-            let event: RuntimeEvent =
-                serde_json::from_slice(&record.payload).map_err(|error| EventError::Serialize {
+            let event: RuntimeEvent = runtime_event_from_trusted_json_slice(&record.payload)
+                .map_err(|error| EventError::Serialize {
                     reason: error.to_string(),
                 })?;
             last_scanned = EventCursor::new(record.seq.get());
