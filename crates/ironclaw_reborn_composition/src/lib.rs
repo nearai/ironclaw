@@ -39,6 +39,7 @@ mod projection;
 mod readiness;
 mod runtime;
 mod runtime_input;
+mod skill_catalog;
 mod webui;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_body_limit;
@@ -93,6 +94,10 @@ pub use runtime_input::{
 };
 #[cfg(feature = "root-llm-provider")]
 pub use runtime_input::{RebornLlmConfig, ResolvedRebornLlm};
+pub use skill_catalog::{
+    RebornLocalSkillCatalog, RebornSkillCatalogError, RebornSkillListResult, RebornSkillSource,
+    RebornSkillSummary, build_reborn_local_skill_catalog,
+};
 pub use webui::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]
 pub use webui_rate_limit::RateLimitConfigError;

@@ -1,8 +1,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-#[cfg(test)]
-use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{InvocationId, MountView, ResourceScope, UserId};
 use ironclaw_product_workflow::{
@@ -13,8 +11,8 @@ use ironclaw_product_workflow::{
 };
 use ironclaw_skills::{
     SkillInstallRequest, SkillInstallSource, SkillManagementContext, SkillManagementError,
-    SkillManagementErrorKind, SkillRemoveRequest, SkillSearchRequest, install_skill, remove_skill,
-    search_skills,
+    SkillManagementErrorKind, SkillRemoveRequest, SkillSearchRequest, install_skill, list_skills,
+    remove_skill, search_skills,
 };
 
 const SKILL_SEARCH_RESULT_LIMIT: usize = 50;
@@ -49,7 +47,14 @@ impl RebornLocalSkillManagementPort {
         ))
     }
 
-    async fn search(
+    pub(crate) async fn list(
+        &self,
+    ) -> Result<Vec<ironclaw_skills::SkillSummary>, ProductWorkflowError> {
+        let context = self.skill_context()?;
+        list_skills(&context).await.map_err(map_skill_error)
+    }
+
+    pub(crate) async fn search(
         &self,
         query: &str,
         limit: usize,
@@ -263,6 +268,7 @@ fn map_skill_error(error: SkillManagementError) -> ProductWorkflowError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_filesystem::LocalFilesystem;
     use ironclaw_host_api::{HostPath, MountAlias, MountGrant, MountPermissions, VirtualPath};
 
     #[tokio::test]

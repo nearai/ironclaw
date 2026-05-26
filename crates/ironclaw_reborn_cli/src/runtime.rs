@@ -30,6 +30,33 @@ pub(crate) struct RuntimeInputOptions {
     pub(crate) confirm_host_access: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SkillCatalogConfig {
+    pub(crate) owner_id: String,
+    pub(crate) local_dev_root: PathBuf,
+    pub(crate) profile: RebornProfile,
+}
+
+pub(crate) fn build_skill_catalog_config(
+    config: &RebornBootConfig,
+) -> anyhow::Result<SkillCatalogConfig> {
+    let config_file = read_config_file(config)?;
+    let profile = effective_profile(config, config_file.as_ref())?;
+    match profile {
+        RebornProfile::LocalDev | RebornProfile::LocalDevYolo => {}
+        RebornProfile::Production | RebornProfile::MigrationDryRun => {
+            anyhow::bail!(
+                "ironclaw-reborn skills currently supports profile=local-dev or profile=local-dev-yolo; got profile={profile}"
+            );
+        }
+    }
+    Ok(SkillCatalogConfig {
+        owner_id: default_owner_id(config_file.as_ref()).to_string(),
+        local_dev_root: config.home().path().join("local-dev"),
+        profile,
+    })
+}
+
 pub(crate) fn execute(
     context: RebornCliContext,
     message: Option<String>,
@@ -232,11 +259,7 @@ pub(crate) fn build_runtime_input_with_options(
 
     reject_unsupported_runtime_sections(config_file.as_ref(), caller)?;
 
-    let owner_id = config_file
-        .as_ref()
-        .and_then(|file| file.identity.as_ref())
-        .and_then(|identity| identity.default_owner.as_deref())
-        .unwrap_or("reborn-cli");
+    let owner_id = default_owner_id(config_file.as_ref());
 
     let local_dev_root: PathBuf = config.home().path().join("local-dev");
 
@@ -297,6 +320,13 @@ pub(crate) fn build_runtime_input_with_options(
     }
 
     Ok(runtime_input)
+}
+
+fn default_owner_id(config_file: Option<&ironclaw_reborn_config::RebornConfigFile>) -> &str {
+    config_file
+        .and_then(|file| file.identity.as_ref())
+        .and_then(|identity| identity.default_owner.as_deref())
+        .unwrap_or("reborn-cli")
 }
 
 fn confirmed_host_home_root(options: RuntimeInputOptions) -> anyhow::Result<PathBuf> {

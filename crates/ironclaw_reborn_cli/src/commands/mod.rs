@@ -74,7 +74,9 @@ impl Command {
             Self::Serve(command) => {
                 command.execute(crate::context::RebornCliContext::resolve_from_env()?)
             }
-            Self::Skills(command) => command.execute(),
+            Self::Skills(command) => {
+                command.execute(crate::context::RebornCliContext::resolve_from_env()?)
+            }
             Self::Traces(command) => command.execute(),
         }
     }

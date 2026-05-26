@@ -172,31 +172,102 @@ fn hooks_list_json_verbose_includes_status_details() {
 }
 
 #[test]
-fn skills_list_reports_unwired_empty_surface_without_reborn_home() {
-    assert_empty_not_wired_surface(
-        &["skills", "list"],
-        "IronClaw Reborn skills",
-        "skills",
-        "configured",
+fn skills_list_reports_reborn_skill_catalog() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    write_reborn_skill(&reborn_home, "catalog-helper", "catalog helper");
+
+    let output = Command::new(reborn_bin())
+        .arg("skills")
+        .arg("list")
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn skills list should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("IronClaw Reborn skills"),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("configured: 1"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("source: reborn-local-dev"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("- catalog-helper (user)"),
+        "stdout: {stdout}"
+    );
+    assert!(!stdout.contains("not-wired"), "stdout: {stdout}");
+    assert!(!stdout.contains("v1_state"), "stdout: {stdout}");
 }
 
 #[test]
-fn skills_list_verbose_explains_missing_reborn_catalog() {
-    assert_verbose_detail(
-        &["skills", "list", "--verbose"],
-        "Reborn skill catalog is not wired yet",
+fn skills_list_verbose_reports_reborn_skill_catalog_details() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    write_reborn_skill(&reborn_home, "verbose-helper", "verbose helper");
+
+    let output = Command::new(reborn_bin())
+        .arg("skills")
+        .arg("list")
+        .arg("--verbose")
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn skills list --verbose should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("profile: local-dev"), "stdout: {stdout}");
+    assert!(stdout.contains("reborn_home:"), "stdout: {stdout}");
+    assert!(stdout.contains("local_dev_root:"), "stdout: {stdout}");
+    assert!(stdout.contains("owner_id: reborn-cli"), "stdout: {stdout}");
 }
 
 #[test]
-fn skills_list_json_verbose_includes_status_details() {
-    assert_json_verbose_detail(
-        &["skills", "list", "--json", "--verbose"],
-        "skills",
-        "configured",
-        "Reborn skill catalog is not wired yet",
+fn skills_list_json_reports_reborn_skill_catalog() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    write_reborn_skill(&reborn_home, "json-helper", "json helper");
+
+    let output = Command::new(reborn_bin())
+        .arg("skills")
+        .arg("list")
+        .arg("--json")
+        .arg("--verbose")
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn skills list --json should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    assert_eq!(json["configured"], 1);
+    assert_eq!(json["source"], "reborn-local-dev");
+    assert_eq!(json["skills"][0]["name"], "json-helper");
+    assert_eq!(json["skills"][0]["source"], "user");
+    assert_eq!(json["details"]["profile"], "local-dev");
+    assert_eq!(json["details"]["owner_id"], "reborn-cli");
+    assert!(json.get("limit").is_none(), "json: {json}");
+    assert!(json.get("truncated").is_none(), "json: {json}");
+    assert!(json.get("status").is_none(), "json: {json}");
+    assert!(json.get("v1_state").is_none(), "json: {json}");
 }
 
 #[test]
@@ -320,6 +391,16 @@ fn assert_empty_not_wired_surface(
     );
     assert_eq!(json["status"], "not-wired");
     assert_eq!(json["v1_state"], "not-used");
+}
+
+fn write_reborn_skill(reborn_home: &std::path::Path, name: &str, description: &str) {
+    let skill_dir = reborn_home.join("local-dev/skills").join(name);
+    std::fs::create_dir_all(&skill_dir).expect("skill dir");
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: {description}\n---\nUse {name}.\n"),
+    )
+    .expect("skill file");
 }
 
 fn assert_verbose_detail(args: &[&str], expected_detail: &str) {
