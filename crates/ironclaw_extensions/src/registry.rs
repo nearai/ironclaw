@@ -214,24 +214,24 @@ impl ExtensionRegistry {
 
 #[derive(Debug, Clone)]
 pub struct SharedExtensionRegistry {
-    inner: Arc<RwLock<ExtensionRegistry>>,
+    inner: Arc<RwLock<Arc<ExtensionRegistry>>>,
     version: Arc<AtomicU64>,
 }
 
 impl SharedExtensionRegistry {
     pub fn new(registry: ExtensionRegistry) -> Self {
         Self {
-            inner: Arc::new(RwLock::new(registry)),
+            inner: Arc::new(RwLock::new(Arc::new(registry))),
             version: Arc::new(AtomicU64::new(0)),
         }
     }
 
     pub fn snapshot(&self) -> Arc<ExtensionRegistry> {
-        Arc::new(self.inner.read().clone())
+        Arc::clone(&self.inner.read())
     }
 
     pub fn snapshot_owned(&self) -> ExtensionRegistry {
-        self.inner.read().clone()
+        self.snapshot().as_ref().clone()
     }
 
     pub fn version(&self) -> u64 {
@@ -261,13 +261,13 @@ impl SharedExtensionRegistry {
     }
 
     fn with_mut<R>(&self, f: impl FnOnce(&mut ExtensionRegistry) -> R) -> R {
-        let result = f(&mut self.inner.write());
+        let result = f(Arc::make_mut(&mut self.inner.write()));
         self.version.fetch_add(1, Ordering::AcqRel);
         result
     }
 
     pub fn replace(&self, registry: ExtensionRegistry) {
-        *self.inner.write() = registry;
+        *self.inner.write() = Arc::new(registry);
         self.version.fetch_add(1, Ordering::AcqRel);
     }
 }

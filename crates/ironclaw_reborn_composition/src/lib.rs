@@ -21,6 +21,7 @@
 mod auth;
 mod available_extensions;
 mod error;
+mod extension_lifecycle;
 mod factory;
 mod input;
 mod lifecycle;

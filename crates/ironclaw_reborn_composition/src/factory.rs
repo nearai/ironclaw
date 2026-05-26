@@ -43,8 +43,8 @@ use crate::{
 };
 use crate::{
     available_extensions::AvailableExtensionCatalog,
-    input::RebornStorageInput,
-    lifecycle::{RebornLocalExtensionManagementPort, RebornLocalSkillManagementPort},
+    extension_lifecycle::RebornLocalExtensionManagementPort, input::RebornStorageInput,
+    lifecycle::RebornLocalSkillManagementPort,
 };
 
 pub struct RebornServices {
@@ -160,11 +160,19 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     std::fs::create_dir_all(&root).map_err(|_| RebornBuildError::InvalidConfig {
         reason: "local-dev storage root could not be initialized".to_string(),
     })?;
+    let system_extensions_root = root.join("system/extensions");
+    std::fs::create_dir_all(&system_extensions_root).map_err(|_| {
+        RebornBuildError::InvalidConfig {
+            reason: "local-dev system extensions root could not be initialized".to_string(),
+        }
+    })?;
     let workspace_root = workspace_root.unwrap_or_else(|| root.join("workspace"));
     std::fs::create_dir_all(&workspace_root).map_err(|_| RebornBuildError::InvalidConfig {
         reason: "local-dev workspace root could not be initialized".to_string(),
     })?;
     let root = canonicalize_local_dev_path(&root, "storage root")?;
+    let system_extensions_root =
+        canonicalize_local_dev_path(&system_extensions_root, "system extensions root")?;
     let workspace_root = canonicalize_local_dev_path(&workspace_root, "workspace root")?;
     validate_local_dev_workspace_skill_isolation(&root, &workspace_root)?;
     let mut filesystem = LocalFilesystem::new();
@@ -184,6 +192,14 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     filesystem.mount_local(
         workspace_virtual_root,
         ironclaw_host_api::HostPath::from_path_buf(workspace_root),
+    )?;
+    filesystem.mount_local(
+        ironclaw_host_api::VirtualPath::new("/system/extensions").map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: error.to_string(),
+            }
+        })?,
+        ironclaw_host_api::HostPath::from_path_buf(system_extensions_root),
     )?;
 
     let filesystem = Arc::new(filesystem);
@@ -231,9 +247,21 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     // TODO(process-port): local runtime policies intentionally use the
     // LocalHostProcessPort until a non-local process backend is composed.
 
+    let available_extensions = AvailableExtensionCatalog::from_filesystem_root(
+        filesystem.as_ref(),
+        &VirtualPath::new("/system/extensions").map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: error.to_string(),
+            }
+        })?,
+    )
+    .await
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("available extension catalog could not be loaded: {error}"),
+    })?;
     let extension_management = Arc::new(RebornLocalExtensionManagementPort::new(
         Arc::clone(&filesystem),
-        AvailableExtensionCatalog::empty(),
+        available_extensions,
         Arc::new(InMemoryExtensionInstallationStore::default()),
         Arc::new(tokio::sync::Mutex::new(ExtensionLifecycleService::new(
             services.shared_extension_registry().snapshot_owned(),
@@ -753,6 +781,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_dev_extension_catalog_loads_system_extension_manifests() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        let extension_root = storage_root.join("system/extensions/catalog-fixture");
+        std::fs::create_dir_all(extension_root.join("wasm")).expect("extension wasm dir");
+        std::fs::write(
+            extension_root.join("manifest.toml"),
+            catalog_fixture_manifest(),
+        )
+        .expect("extension manifest");
+        std::fs::write(
+            extension_root.join("wasm/catalog-fixture.wasm"),
+            b"\0asm\x01\0\0\0",
+        )
+        .expect("extension wasm");
+        let services = build_reborn_services(RebornBuildInput::local_dev(
+            "local-dev-extension-catalog-owner",
+            storage_root,
+        ))
+        .await
+        .expect("local-dev services build");
+        let local_runtime = services.local_runtime.expect("local-dev runtime substrate");
+
+        let response = local_runtime
+            .extension_management
+            .search("catalog")
+            .await
+            .expect("extension catalog search");
+
+        assert_eq!(
+            response
+                .payload
+                .as_ref()
+                .and_then(|payload| payload.get("count"))
+                .and_then(serde_json::Value::as_u64),
+            Some(1)
+        );
+    }
+
+    #[tokio::test]
     async fn local_dev_setup_marker_workspace_filesystem_is_read_only() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
@@ -1083,6 +1151,30 @@ mod tests {
 
     fn skill_md(name: &str, description: &str, prompt: &str) -> String {
         format!("---\nname: {name}\ndescription: {description}\n---\n{prompt}\n")
+    }
+
+    fn catalog_fixture_manifest() -> &'static str {
+        r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "catalog-fixture"
+name = "Catalog Fixture"
+version = "0.1.0"
+description = "Catalog fixture extension"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/catalog-fixture.wasm"
+
+[[capabilities]]
+id = "catalog-fixture.search"
+description = "Search fixture data"
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/search.input.json"
+output_schema_ref = "schemas/search.output.json"
+"#
     }
 }
 
