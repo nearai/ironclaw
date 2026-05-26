@@ -202,7 +202,52 @@ pub enum GateResolutionPayload {
         #[serde(default)]
         public_key: Option<String>,
     },
+    /// A NEAR browser-wallet redirect proof resolving a `BlockedAttested`
+    /// signing gate (attested-signing PR8). After IronClaw redirected the user
+    /// to the NEAR wallet, the wallet signed the bound approved-tx hash with the
+    /// account's ed25519 access key and redirected back. This payload carries the
+    /// signature material the backend re-verifies through
+    /// `NearRedirectSigningProvider::verify_resume`. No credential / token
+    /// identity is involved — the wallet holds the account's keys.
+    NearRedirectProof {
+        /// The NEAR account id the wallet claims signed (e.g. `alice.near`).
+        /// Never trusted; bound against the gate's bound account.
+        account_id: String,
+        /// Hex (optionally `0x`-prefixed) 32-byte ed25519 access-key public key.
+        public_key: String,
+        /// Hex (optionally `0x`-prefixed) 64-byte ed25519 signature over the
+        /// bound approved-tx hash.
+        signature: String,
+        /// Hex of the approved-tx hash the wallet attested to (32 bytes).
+        approved_tx_hash: String,
+        /// Access-key scope: `full_access`, or `function_call` with a receiver
+        /// and optional method names.
+        access_key_scope: NearAccessKeyScopeInput,
+        /// The opaque `state` parameter echoed back from the wallet redirect.
+        /// Re-derived and compared by the backend to defeat callback
+        /// interception (threat #20).
+        state: String,
+    },
     Cancelled,
+}
+
+/// The access-key scope a NEAR redirect proof declares, as carried on the
+/// `/api/chat/gate/resolve` wire payload. Mirrors
+/// `ironclaw_wallet_external::NearAccessKeyScope` but kept as a wire-input type
+/// so the web layer owns its own deserialization shape.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum NearAccessKeyScopeInput {
+    /// A full-access key.
+    FullAccess,
+    /// A function-call access key restricted to a receiver / methods.
+    FunctionCall {
+        /// The single contract account the key may call.
+        receiver_id: String,
+        /// The methods the key may call (empty = any).
+        #[serde(default)]
+        method_names: Vec<String>,
+    },
 }
 
 #[derive(Debug, Deserialize)]

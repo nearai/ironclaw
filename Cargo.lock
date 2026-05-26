@@ -5234,6 +5234,7 @@ name = "ironclaw_wallet_external"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "ed25519-dalek",
  "hex",
  "ironclaw_attestation",
