@@ -61,8 +61,8 @@ fn main() {
 }
 
 fn collect(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) {
-    for entry in fs::read_dir(dir).expect("read_dir static") {
-        // safety: build script — fail build on read error
+    let read_dir = fs::read_dir(dir).expect("read_dir static"); // safety: build script — fail build on read error
+    for entry in read_dir {
         let entry = entry.expect("dir entry"); // safety: build script — fail build on bad entry
         let path = entry.path();
         let file_type = entry.file_type().expect("file type"); // safety: build script — fail build on stat error
