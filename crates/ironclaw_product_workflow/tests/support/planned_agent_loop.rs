@@ -80,7 +80,7 @@ pub struct ProductLiveAgentLoopHarness {
     cancellation_factory: Arc<ReadyRunCancellationFactory>,
     composition: RebornRuntimeLoopComposition<
         InMemoryTurnStateStore,
-        InMemorySessionThreadService,
+        dyn SessionThreadService,
         RecordingModelGateway,
     >,
     model_requests: Arc<Mutex<Vec<HostManagedModelRequest>>>,
