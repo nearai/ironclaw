@@ -9,15 +9,19 @@
 
 use std::sync::Arc;
 
+use chrono::Utc;
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId, ThreadId,
-    UserId, VirtualPath,
+    AgentId, CapabilityId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
+    ProjectId, TenantId, ThreadId, UserId, VirtualPath,
 };
 use ironclaw_threads::{
-    AcceptInboundMessageRequest, AppendAssistantDraftRequest, CreateSummaryArtifactRequest,
-    EnsureThreadRequest, FilesystemSessionThreadService, LoadContextWindowRequest, MessageContent,
-    MessageKind, MessageStatus, RedactMessageRequest, SessionThreadError, SessionThreadService,
+    AcceptInboundMessageRequest, AppendAssistantDraftRequest,
+    AppendCapabilityDisplayPreviewRequest, CapabilityDisplayPreviewEnvelope,
+    CapabilityDisplayPreviewEnvelopeInput, CapabilityDisplayPreviewStatus,
+    CreateSummaryArtifactRequest, EnsureThreadRequest, FilesystemSessionThreadService,
+    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
+    MessageStatus, RedactMessageRequest, SessionThreadError, SessionThreadService,
     ThreadHistoryRequest, ThreadScope, UpdateAssistantDraftRequest,
 };
 
@@ -63,6 +67,107 @@ async fn filesystem_store_rejects_wrong_scope_history_reads() {
         .await;
 
     assert!(err.is_err(), "wrong-scope history lookup must fail closed");
+}
+
+#[tokio::test]
+async fn filesystem_store_persists_preview_history_while_hiding_it_from_context() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-preview", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("fs-preview");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-fs-preview").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("run a tool"),
+        })
+        .await
+        .unwrap();
+
+    let invocation_id = InvocationId::new();
+    let first = service
+        .append_capability_display_preview(AppendCapabilityDisplayPreviewRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            preview: preview_envelope(invocation_id),
+        })
+        .await
+        .unwrap();
+    let duplicate = service
+        .append_capability_display_preview(AppendCapabilityDisplayPreviewRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            preview: preview_envelope(invocation_id),
+        })
+        .await
+        .unwrap();
+    assert_eq!(first.message_id, duplicate.message_id);
+
+    service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            start_sequence: 1,
+            end_sequence: 2,
+            summary_kind: "model_context".into(),
+            content: MessageContent::text("summary must not replace preview range"),
+            model_context_policy: Some("replace_range_when_selected".into()),
+        })
+        .await
+        .unwrap();
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        history
+            .messages
+            .iter()
+            .map(|message| message.kind)
+            .collect::<Vec<_>>(),
+        vec![MessageKind::User, MessageKind::CapabilityDisplayPreview]
+    );
+
+    let context = service
+        .load_context_window(LoadContextWindowRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            max_messages: 10,
+        })
+        .await
+        .unwrap();
+    assert_eq!(context.messages.len(), 1);
+    assert_eq!(context.messages[0].kind, MessageKind::User);
+
+    let direct_context = service
+        .load_context_messages(LoadContextMessagesRequest {
+            scope,
+            thread_id: thread.thread_id,
+            message_ids: vec![first.message_id],
+        })
+        .await
+        .unwrap();
+    assert!(direct_context.messages.is_empty());
 }
 
 /// Regression for the ScopedFilesystem migration: two stores share one
@@ -393,6 +498,25 @@ fn scope(label: &str) -> ThreadScope {
         owner_user_id: Some(UserId::new(format!("user-{label}")).unwrap()),
         mission_id: None,
     }
+}
+
+fn preview_envelope(invocation_id: InvocationId) -> CapabilityDisplayPreviewEnvelope {
+    CapabilityDisplayPreviewEnvelope::new(CapabilityDisplayPreviewEnvelopeInput {
+        invocation_id,
+        capability_id: CapabilityId::new("demo.echo").unwrap(),
+        status: CapabilityDisplayPreviewStatus::Completed,
+        title: "echo".to_string(),
+        subtitle: None,
+        input_summary: Some("{\"message\":\"hello\"}".to_string()),
+        output_summary: Some("text output".to_string()),
+        output_preview: Some("hello".to_string()),
+        output_kind: Some("text".to_string()),
+        output_bytes: Some(5),
+        result_ref: Some("result:demo-preview".to_string()),
+        truncated: false,
+        updated_at: Utc::now(),
+    })
+    .unwrap()
 }
 
 /// Wrap a [`RootFilesystem`] in a [`ScopedFilesystem`] that exposes the

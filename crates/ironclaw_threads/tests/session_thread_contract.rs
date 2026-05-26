@@ -1,12 +1,17 @@
+use chrono::Utc;
 use futures::future::join_all;
-use ironclaw_host_api::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{
+    AgentId, CapabilityId, InvocationId, ProjectId, TenantId, ThreadId, UserId,
+};
 use ironclaw_threads::{
-    AcceptInboundMessageRequest, AppendAssistantDraftRequest, AppendToolResultReferenceRequest,
-    CreateSummaryArtifactRequest, EnsureThreadRequest, InMemorySessionThreadService,
-    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
-    MessageStatus, ProviderToolCallReferenceEnvelope, RedactMessageRequest, SessionThreadError,
-    SessionThreadService, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
-    ToolResultSafeSummary, UpdateAssistantDraftRequest,
+    AcceptInboundMessageRequest, AppendAssistantDraftRequest,
+    AppendCapabilityDisplayPreviewRequest, AppendToolResultReferenceRequest,
+    CapabilityDisplayPreviewEnvelope, CapabilityDisplayPreviewEnvelopeInput,
+    CapabilityDisplayPreviewStatus, CreateSummaryArtifactRequest, EnsureThreadRequest,
+    InMemorySessionThreadService, LoadContextMessagesRequest, LoadContextWindowRequest,
+    MessageContent, MessageKind, MessageStatus, ProviderToolCallReferenceEnvelope,
+    RedactMessageRequest, SessionThreadError, SessionThreadService, ThreadHistoryRequest,
+    ThreadMessageId, ThreadScope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
 };
 
 fn scope(label: &str) -> ThreadScope {
@@ -36,6 +41,25 @@ fn provider_call_reference() -> ProviderToolCallReferenceEnvelope {
         reasoning: Some("provider call reasoning".to_string()),
         signature: Some("sig-1".to_string()),
     }
+}
+
+fn preview_envelope(invocation_id: InvocationId) -> CapabilityDisplayPreviewEnvelope {
+    CapabilityDisplayPreviewEnvelope::new(CapabilityDisplayPreviewEnvelopeInput {
+        invocation_id,
+        capability_id: CapabilityId::new("demo.echo").unwrap(),
+        status: CapabilityDisplayPreviewStatus::Completed,
+        title: "echo".to_string(),
+        subtitle: None,
+        input_summary: Some("{\"message\":\"hello\"}".to_string()),
+        output_summary: Some("text output".to_string()),
+        output_preview: Some("hello".to_string()),
+        output_kind: Some("text".to_string()),
+        output_bytes: Some(5),
+        result_ref: Some("result:demo-preview".to_string()),
+        truncated: false,
+        updated_at: Utc::now(),
+    })
+    .unwrap()
 }
 
 fn same_tenant_scope(agent_label: &str) -> ThreadScope {
@@ -99,6 +123,108 @@ async fn append_tool_result_reference_is_finalized_and_idempotent_per_run_result
         .await
         .unwrap();
     assert_eq!(history.messages.len(), 1);
+}
+
+#[tokio::test]
+async fn append_capability_display_preview_is_history_visible_and_model_hidden() {
+    let service = InMemorySessionThreadService::default();
+    let scope = scope("display-preview");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-display-preview").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("run a tool"),
+        })
+        .await
+        .unwrap();
+
+    let invocation_id = InvocationId::new();
+    let first = service
+        .append_capability_display_preview(AppendCapabilityDisplayPreviewRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            preview: preview_envelope(invocation_id),
+        })
+        .await
+        .unwrap();
+    let duplicate = service
+        .append_capability_display_preview(AppendCapabilityDisplayPreviewRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            preview: preview_envelope(invocation_id),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(first.message_id, duplicate.message_id);
+    assert_eq!(first.kind, MessageKind::CapabilityDisplayPreview);
+    assert_eq!(first.status, MessageStatus::Finalized);
+    assert_eq!(first.sequence, 2);
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        history
+            .messages
+            .iter()
+            .map(|message| message.kind)
+            .collect::<Vec<_>>(),
+        vec![MessageKind::User, MessageKind::CapabilityDisplayPreview]
+    );
+    service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            start_sequence: 1,
+            end_sequence: 2,
+            summary_kind: "model_context".into(),
+            content: MessageContent::text("summary must not replace preview range"),
+            model_context_policy: Some("replace_range_when_selected".into()),
+        })
+        .await
+        .unwrap();
+
+    let context = service
+        .load_context_window(LoadContextWindowRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            max_messages: 10,
+        })
+        .await
+        .unwrap();
+    assert_eq!(context.messages.len(), 1);
+    assert_eq!(context.messages[0].kind, MessageKind::User);
+
+    let direct_context = service
+        .load_context_messages(LoadContextMessagesRequest {
+            scope,
+            thread_id: thread.thread_id,
+            message_ids: vec![first.message_id],
+        })
+        .await
+        .unwrap();
+    assert!(direct_context.messages.is_empty());
 }
 
 #[tokio::test]

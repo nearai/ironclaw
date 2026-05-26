@@ -26,7 +26,11 @@ use ironclaw_loop_support::{
     loop_driver_execution_extension_id,
 };
 use ironclaw_reborn::loop_driver_host::LoopCapabilityPortFactory;
-use ironclaw_threads::{ToolResultReferenceEnvelope, ToolResultSafeSummary};
+use ironclaw_threads::{
+    AppendCapabilityDisplayPreviewRequest, CapabilityDisplayPreviewEnvelope,
+    CapabilityDisplayPreviewEnvelopeInput, CapabilityDisplayPreviewStatus, SessionThreadService,
+    ThreadScope, ToolResultReferenceEnvelope, ToolResultSafeSummary,
+};
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use ironclaw_turns::{
     LoopResultRef,
@@ -50,6 +54,8 @@ pub(super) struct LocalDevCapabilityWiring {
 
 pub(super) fn capability_wiring(
     services: &RebornServices,
+    thread_service: Arc<dyn SessionThreadService>,
+    thread_scope: ThreadScope,
     user_id: UserId,
     model_gateway: Arc<dyn HostManagedModelGateway>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
@@ -60,7 +66,11 @@ pub(super) fn capability_wiring(
         .as_ref()
         .map(|runtime| runtime.workspace_mounts.clone())?;
     let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
-    let capability_io = Arc::new(LocalDevCapabilityIo::new(Arc::clone(&display_previews)));
+    let capability_io = Arc::new(LocalDevCapabilityIo::new_with_durable_previews(
+        Arc::clone(&display_previews),
+        thread_service,
+        thread_scope,
+    ));
     let capability_input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
     let capability_result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
     let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
@@ -153,6 +163,13 @@ struct LocalDevCapabilityIo {
     inputs: StdMutex<StagedValueStore>,
     results: StdMutex<StagedValueStore>,
     display_previews: Arc<CapabilityDisplayPreviewStore>,
+    durable_previews: Option<DurableCapabilityDisplayPreviewSink>,
+}
+
+#[derive(Clone)]
+struct DurableCapabilityDisplayPreviewSink {
+    thread_service: Arc<dyn SessionThreadService>,
+    thread_scope: ThreadScope,
 }
 
 impl Default for LocalDevCapabilityIo {
@@ -167,8 +184,26 @@ impl LocalDevCapabilityIo {
             inputs: StdMutex::new(StagedValueStore::default()),
             results: StdMutex::new(StagedValueStore::default()),
             display_previews,
+            durable_previews: None,
         }
     }
+
+    fn new_with_durable_previews(
+        display_previews: Arc<CapabilityDisplayPreviewStore>,
+        thread_service: Arc<dyn SessionThreadService>,
+        thread_scope: ThreadScope,
+    ) -> Self {
+        Self {
+            inputs: StdMutex::new(StagedValueStore::default()),
+            results: StdMutex::new(StagedValueStore::default()),
+            display_previews,
+            durable_previews: Some(DurableCapabilityDisplayPreviewSink {
+                thread_service,
+                thread_scope,
+            }),
+        }
+    }
+
     fn result_output(
         &self,
         result_ref: &str,
@@ -177,6 +212,72 @@ impl LocalDevCapabilityIo {
             .lock()
             .map_err(|_| capability_io_error())
             .map(|results| results.get(result_ref).cloned())
+    }
+
+    async fn append_durable_display_preview(
+        &self,
+        run_context: &LoopRunContext,
+        invocation_id: InvocationId,
+        capability_id: &CapabilityId,
+    ) {
+        let Some(durable_previews) = &self.durable_previews else {
+            return;
+        };
+        let Some(record) = self.display_previews.record_for_invocation(invocation_id) else {
+            tracing::warn!(
+                invocation_id = %invocation_id,
+                capability_id = capability_id.as_str(),
+                "capability display preview record missing after result staging"
+            );
+            return;
+        };
+        let preview =
+            match CapabilityDisplayPreviewEnvelope::new(CapabilityDisplayPreviewEnvelopeInput {
+                invocation_id,
+                capability_id: capability_id.clone(),
+                status: CapabilityDisplayPreviewStatus::Completed,
+                title: record.title,
+                subtitle: record.subtitle,
+                input_summary: record.input_summary,
+                output_summary: record.output_summary,
+                output_preview: record.output_preview,
+                output_kind: record.output_kind,
+                output_bytes: record.output_bytes,
+                result_ref: record.result_ref,
+                truncated: record.truncated,
+                updated_at: Utc::now(),
+            }) {
+                Ok(preview) => preview,
+                Err(error) => {
+                    tracing::warn!(
+                        invocation_id = %invocation_id,
+                        capability_id = capability_id.as_str(),
+                        error,
+                        "capability display preview envelope validation failed"
+                    );
+                    return;
+                }
+            };
+        match durable_previews
+            .thread_service
+            .append_capability_display_preview(AppendCapabilityDisplayPreviewRequest {
+                scope: durable_previews.thread_scope.clone(),
+                thread_id: run_context.thread_id.clone(),
+                turn_run_id: run_context.run_id.to_string(),
+                preview,
+            })
+            .await
+        {
+            Ok(message) => self
+                .display_previews
+                .attach_timeline_message_id(invocation_id, message.message_id.to_string()),
+            Err(error) => tracing::warn!(
+                invocation_id = %invocation_id,
+                capability_id = capability_id.as_str(),
+                error = %error,
+                "capability display preview durable append failed"
+            ),
+        }
     }
 }
 
@@ -334,8 +435,10 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
                     )
                 })?;
         let output_bytes = staged_value_bytes(&output)?.try_into().unwrap_or(u64::MAX);
-        let mut results = self.results.lock().map_err(|_| capability_io_error())?;
-        results.insert_with_oldest_eviction(result_ref.as_str().to_string(), output.clone())?;
+        {
+            let mut results = self.results.lock().map_err(|_| capability_io_error())?;
+            results.insert_with_oldest_eviction(result_ref.as_str().to_string(), output.clone())?;
+        }
         self.display_previews
             .record_result(CapabilityDisplayPreviewResult {
                 run_id: &run_context.run_id.to_string(),
@@ -346,6 +449,8 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
                 output: &output,
                 output_bytes,
             });
+        self.append_durable_display_preview(run_context, invocation_id, _capability_id)
+            .await;
         Ok(result_ref)
     }
 }
@@ -770,6 +875,9 @@ mod tests {
     use super::*;
 
     use ironclaw_host_api::{AgentId, MountPermissions, ProjectId, TenantId, ThreadId};
+    use ironclaw_threads::{
+        EnsureThreadRequest, InMemorySessionThreadService, MessageKind, ThreadHistoryRequest,
+    };
     use ironclaw_turns::{
         RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
         run_profile::{
@@ -808,6 +916,85 @@ mod tests {
             reasoning: None,
             signature: None,
         }
+    }
+
+    #[tokio::test]
+    async fn capability_io_writes_durable_preview_message_and_live_upsert_id() {
+        let run_context = run_context("durable-preview").await;
+        let thread_scope = ThreadScope {
+            tenant_id: run_context.scope.tenant_id.clone(),
+            agent_id: run_context.scope.agent_id.clone().expect("agent id"),
+            project_id: run_context.scope.project_id.clone(),
+            owner_user_id: None,
+            mission_id: None,
+        };
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        thread_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: thread_scope.clone(),
+                thread_id: Some(run_context.thread_id.clone()),
+                created_by_actor_id: "actor-a".to_string(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .expect("thread exists");
+        let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
+        let capability_io = LocalDevCapabilityIo::new_with_durable_previews(
+            Arc::clone(&display_previews),
+            thread_service.clone(),
+            thread_scope.clone(),
+        );
+        let input_ref = capability_io
+            .register_provider_tool_call_input(
+                &run_context,
+                &provider_tool_call(serde_json::json!({"message": "hello"})),
+            )
+            .await
+            .expect("input stages");
+        let invocation_id = InvocationId::new();
+
+        let result_ref = capability_io
+            .write_capability_result(
+                &run_context,
+                &input_ref,
+                invocation_id,
+                &CapabilityId::new("builtin.echo").expect("capability id"),
+                serde_json::json!({"content": "hello"}),
+            )
+            .await
+            .expect("result stages");
+
+        let history = thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: thread_scope,
+                thread_id: run_context.thread_id.clone(),
+            })
+            .await
+            .expect("history loads");
+        let preview_message = history
+            .messages
+            .iter()
+            .find(|message| message.kind == MessageKind::CapabilityDisplayPreview)
+            .expect("durable preview message");
+        let run_id = run_context.run_id.to_string();
+        assert_eq!(
+            preview_message.turn_run_id.as_deref(),
+            Some(run_id.as_str())
+        );
+        assert_eq!(
+            preview_message.tool_result_ref.as_deref(),
+            Some(result_ref.as_str())
+        );
+        assert!(preview_message.tool_result_provider_call.is_none());
+        let preview_record = display_previews
+            .record_for_invocation(invocation_id)
+            .expect("live preview record");
+        let preview_message_id = preview_message.message_id.to_string();
+        assert_eq!(
+            preview_record.timeline_message_id.as_deref(),
+            Some(preview_message_id.as_str())
+        );
     }
 
     #[tokio::test]

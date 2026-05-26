@@ -334,6 +334,7 @@ pub enum CapabilityActivityStatusView {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityDisplayPreviewView {
+    pub timeline_message_id: Option<String>,
     pub invocation_id: InvocationId,
     pub thread_id: Option<ThreadId>,
     pub capability_id: CapabilityId,
@@ -353,6 +354,7 @@ pub struct CapabilityDisplayPreviewView {
 impl CapabilityDisplayPreviewView {
     pub fn new(input: CapabilityDisplayPreviewViewInput) -> Result<Self, ProductAdapterError> {
         let value = Self {
+            timeline_message_id: input.timeline_message_id,
             invocation_id: input.invocation_id,
             thread_id: input.thread_id,
             capability_id: input.capability_id,
@@ -396,6 +398,11 @@ impl CapabilityDisplayPreviewView {
         validate_display_preview(self.output_preview.as_deref())?;
         validate_display_kind(self.output_kind.as_deref())?;
         validate_optional_display_text(
+            "capability_display_timeline_message_id",
+            self.timeline_message_id.as_deref(),
+            PROJECTION_ITEM_ID_MAX_BYTES,
+        )?;
+        validate_optional_display_text(
             "capability_display_result_ref",
             self.result_ref.as_deref(),
             CAPABILITY_DISPLAY_RESULT_REF_MAX_BYTES,
@@ -413,6 +420,7 @@ impl Serialize for CapabilityDisplayPreviewView {
 
         #[derive(Serialize)]
         struct Wire<'a> {
+            timeline_message_id: &'a Option<String>,
             invocation_id: &'a InvocationId,
             thread_id: &'a Option<ThreadId>,
             capability_id: &'a CapabilityId,
@@ -430,6 +438,7 @@ impl Serialize for CapabilityDisplayPreviewView {
         }
 
         Wire {
+            timeline_message_id: &self.timeline_message_id,
             invocation_id: &self.invocation_id,
             thread_id: &self.thread_id,
             capability_id: &self.capability_id,
@@ -451,6 +460,7 @@ impl Serialize for CapabilityDisplayPreviewView {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityDisplayPreviewViewInput {
+    pub timeline_message_id: Option<String>,
     pub invocation_id: InvocationId,
     pub thread_id: Option<ThreadId>,
     pub capability_id: CapabilityId,
@@ -474,6 +484,8 @@ impl<'de> Deserialize<'de> for CapabilityDisplayPreviewView {
     {
         #[derive(Deserialize)]
         struct Wire {
+            #[serde(default)]
+            timeline_message_id: Option<String>,
             invocation_id: InvocationId,
             thread_id: Option<ThreadId>,
             capability_id: CapabilityId,
@@ -491,6 +503,7 @@ impl<'de> Deserialize<'de> for CapabilityDisplayPreviewView {
         }
         let wire = Wire::deserialize(deserializer)?;
         Self::new(CapabilityDisplayPreviewViewInput {
+            timeline_message_id: wire.timeline_message_id,
             invocation_id: wire.invocation_id,
             thread_id: wire.thread_id,
             capability_id: wire.capability_id,
@@ -785,6 +798,7 @@ mod tests {
     #[test]
     fn capability_display_preview_view_allows_bounded_display_material() {
         let view = CapabilityDisplayPreviewView::new(CapabilityDisplayPreviewViewInput {
+            timeline_message_id: Some("timeline-message-1".to_string()),
             invocation_id: InvocationId::new(),
             thread_id: Some(ThreadId::new("thread-tool-preview").expect("thread id")),
             capability_id: CapabilityId::new("builtin.read_file").expect("capability id"),

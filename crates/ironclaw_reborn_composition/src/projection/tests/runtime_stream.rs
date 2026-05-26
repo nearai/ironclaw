@@ -130,6 +130,7 @@ async fn webui_event_stream_enriches_activity_with_display_preview_from_store() 
         output: &serde_json::json!({"content": "fn main() {}"}),
         output_bytes: 64,
     });
+    display_previews.attach_timeline_message_id(invocation_id, "timeline-message-1".to_string());
     let event_log = Arc::new(InMemoryDurableEventLog::new());
     event_log
         .append(RuntimeEvent::dispatch_succeeded(
@@ -170,6 +171,7 @@ async fn webui_event_stream_enriches_activity_with_display_preview_from_store() 
                         && preview.subtitle.as_deref() == Some("src/main.rs")
                         && preview.input_summary.as_deref().is_some_and(|summary| summary.contains("path: src/main.rs"))
                         && preview.output_preview.as_deref() == Some("fn main() {}")
+                        && preview.timeline_message_id.as_deref() == Some("timeline-message-1")
                         && preview.result_ref.as_deref() == Some("result:preview-output")
                         && preview.output_bytes == Some(64)
             )

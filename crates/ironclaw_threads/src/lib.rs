@@ -9,6 +9,7 @@
 //! `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
 #![warn(unreachable_pub)]
 
+mod capability_display_preview;
 mod contract;
 mod error;
 mod filesystem_service;
@@ -19,10 +20,15 @@ mod tool_result_reference;
 
 pub use filesystem_service::FilesystemSessionThreadService;
 
+pub use capability_display_preview::{
+    CapabilityDisplayPreviewEnvelope, CapabilityDisplayPreviewEnvelopeInput,
+    CapabilityDisplayPreviewStatus,
+};
 pub use contract::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
-    AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextMessage, ContextMessages,
-    ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest, ListThreadsForScopeRequest,
+    AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
+    AppendToolResultReferenceRequest, ContextMessage, ContextMessages, ContextWindow,
+    CreateSummaryArtifactRequest, EnsureThreadRequest, ListThreadsForScopeRequest,
     ListThreadsForScopeResponse, LoadContextMessagesRequest, LoadContextWindowRequest,
     MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
     ReplayAcceptedInboundMessageRequest, SessionThreadRecord, SummaryArtifact, ThreadHistory,

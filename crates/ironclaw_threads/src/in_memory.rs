@@ -4,19 +4,21 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::ThreadId;
+use ironclaw_host_api::{InvocationId, ThreadId};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::identifiers::SummaryArtifactId;
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
-    AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextMessage, ContextMessages,
-    ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest, LoadContextMessagesRequest,
-    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
-    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
-    SessionThreadService, SummaryArtifact, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
-    ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
+    AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
+    AppendToolResultReferenceRequest, CapabilityDisplayPreviewEnvelope, ContextMessage,
+    ContextMessages, ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest,
+    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
+    MessageStatus, RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
+    SessionThreadRecord, SessionThreadService, SummaryArtifact, ThreadHistory,
+    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
+    ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -336,6 +338,48 @@ impl SessionThreadService for InMemorySessionThreadService {
         Ok(message)
     }
 
+    async fn append_capability_display_preview(
+        &self,
+        request: AppendCapabilityDisplayPreviewRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        request
+            .preview
+            .validate()
+            .map_err(SessionThreadError::Serialization)?;
+        let mut state = self.state.lock().await;
+        let thread = get_thread_mut(&mut state, &request.scope, &request.thread_id)?;
+        if let Some(existing) = thread.messages.iter().find(|message| {
+            message.kind == MessageKind::CapabilityDisplayPreview
+                && message.status == MessageStatus::Finalized
+                && message.turn_run_id.as_deref() == Some(request.turn_run_id.as_str())
+                && preview_invocation_id(message.content.as_deref())
+                    == Some(request.preview.invocation_id)
+        }) {
+            return Ok(existing.clone());
+        }
+        let content = serde_json::to_string(&request.preview)
+            .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
+        let message = ThreadMessageRecord {
+            message_id: ThreadMessageId::new(),
+            thread_id: request.thread_id.clone(),
+            sequence: thread.next_sequence,
+            kind: MessageKind::CapabilityDisplayPreview,
+            status: MessageStatus::Finalized,
+            actor_id: None,
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            turn_id: None,
+            turn_run_id: Some(request.turn_run_id),
+            tool_result_ref: request.preview.result_ref.clone(),
+            tool_result_provider_call: None,
+            content: Some(content),
+            redaction_ref: None,
+        };
+        thread.next_sequence += 1;
+        thread.messages.push(message.clone());
+        Ok(message)
+    }
+
     async fn update_assistant_draft(
         &self,
         request: UpdateAssistantDraftRequest,
@@ -597,7 +641,7 @@ fn context_messages_with_summary_replacements(thread: &StoredThread) -> Vec<Cont
     for message in thread
         .messages
         .iter()
-        .filter(|message| is_model_visible(message.status))
+        .filter(|message| is_model_context_visible(message))
     {
         if message.sequence <= skip_through {
             continue;
@@ -640,7 +684,7 @@ fn context_messages_by_id(
     let visible_messages = thread
         .messages
         .iter()
-        .filter(|message| is_model_visible(message.status))
+        .filter(|message| is_model_context_visible(message))
         .map(|message| (message.message_id, message))
         .collect::<HashMap<_, _>>();
     message_ids
@@ -705,7 +749,7 @@ fn summary_covers_hidden_content(thread: &StoredThread, summary: &SummaryArtifac
     thread.messages.iter().any(|message| {
         summary.start_sequence <= message.sequence
             && message.sequence <= summary.end_sequence
-            && !is_model_visible(message.status)
+            && !is_model_context_visible(message)
     })
 }
 
@@ -728,4 +772,14 @@ fn is_model_visible(status: MessageStatus) -> bool {
         status,
         MessageStatus::Accepted | MessageStatus::Submitted | MessageStatus::Finalized
     )
+}
+
+fn is_model_context_visible(message: &ThreadMessageRecord) -> bool {
+    is_model_visible(message.status) && message.kind != MessageKind::CapabilityDisplayPreview
+}
+
+fn preview_invocation_id(content: Option<&str>) -> Option<InvocationId> {
+    let preview = serde_json::from_str::<CapabilityDisplayPreviewEnvelope>(content?).ok()?;
+    preview.validate().ok()?;
+    Some(preview.invocation_id)
 }

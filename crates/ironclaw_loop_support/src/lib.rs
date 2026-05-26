@@ -1623,6 +1623,7 @@ fn role_for_kind(kind: MessageKind) -> &'static str {
             LOOP_SYSTEM_ROLE
         }
         MessageKind::ToolResultReference => "tool_result_reference",
+        MessageKind::CapabilityDisplayPreview => "capability_display_preview",
     }
 }
 
@@ -1634,6 +1635,7 @@ fn model_role_for_kind(kind: MessageKind) -> HostManagedModelMessageRole {
             HostManagedModelMessageRole::System
         }
         MessageKind::ToolResultReference => HostManagedModelMessageRole::ToolResult,
+        MessageKind::CapabilityDisplayPreview => HostManagedModelMessageRole::System,
     }
 }
 
@@ -1645,6 +1647,7 @@ fn safe_context_summary(kind: MessageKind) -> &'static str {
         MessageKind::Summary => "summary artifact available",
         MessageKind::CheckpointReference => "checkpoint reference available",
         MessageKind::ToolResultReference => "tool result reference available",
+        MessageKind::CapabilityDisplayPreview => "capability display preview available",
     }
 }
 

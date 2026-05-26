@@ -807,6 +807,8 @@ pub async fn build_reborn_runtime(
     }
     let local_dev_capabilities = local_dev::capability_wiring(
         &services,
+        Arc::clone(&thread_service) as Arc<dyn SessionThreadService>,
+        thread_scope.clone(),
         actor_user_id.clone(),
         model_gateway,
         milestone_sink.clone(),
