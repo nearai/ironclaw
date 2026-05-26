@@ -34,12 +34,14 @@ pub struct RuntimeHttpEgressRequest {
     /// authorization/approval, destination policy, and host-approved injection
     /// shape before this request reaches [`RuntimeHttpEgress`].
     pub credential_injections: Vec<RuntimeCredentialInjection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_body_limit: Option<u64>,
     /// Optional scoped destination for storing the sanitized response body.
     ///
     /// This is a scoped path, not a host path. Host composition must provide the
     /// body store that resolves the scoped destination through filesystem
     /// authority for the invocation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub save_body_to: Option<RuntimeHttpSaveTarget>,
     /// Host-call timeout in milliseconds, already capped by the invoking
     /// runtime to its remaining execution deadline when applicable.
@@ -184,6 +186,7 @@ pub struct RuntimeHttpEgressResponse {
     pub status: u16,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub saved_body: Option<RuntimeHttpSavedBody>,
     pub request_bytes: u64,
     pub response_bytes: u64,

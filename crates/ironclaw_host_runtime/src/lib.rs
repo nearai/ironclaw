@@ -32,7 +32,6 @@ use ironclaw_host_api::{
 use ironclaw_host_api::{
     RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
     RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
-    RuntimeHttpSaveTarget, RuntimeHttpSavedBody,
     is_sensitive_runtime_request_header, is_sensitive_runtime_response_header,
     runtime_policy::{DeploymentMode, EffectiveRuntimePolicy, RuntimeProfile},
 };
@@ -51,6 +50,7 @@ mod capability_catalog;
 mod extension_contracts;
 mod first_party;
 mod first_party_tools;
+mod http_body;
 mod invocation_services;
 pub mod memory_context;
 mod obligations;
@@ -88,6 +88,7 @@ pub use invocation_services::{
     InvocationServices, InvocationServicesError, InvocationServicesResolutionRequest,
     InvocationServicesResolver, LocalInvocationServicesResolver,
 };
+pub use http_body::{RuntimeHttpBodyStore, RuntimeHttpBodyStoreError};
 pub use obligations::{
     BuiltinObligationHandler, BuiltinObligationServices, LEAK_REDACT_FAILED_CODE,
     ProcessObligationLifecycleStore,
@@ -936,23 +937,7 @@ pub struct HostHttpEgressService<N, S> {
     network_policy_store: Option<Arc<NetworkObligationPolicyStore>>,
     network_policy_source: NetworkPolicySource,
     unsafe_raw_diagnostics_allowed: bool,
-    body_store: Option<Arc<dyn RuntimeHttpBodyStore>>,
-}
-
-pub trait RuntimeHttpBodyStore: fmt::Debug + Send + Sync {
-    fn write_body(
-        &self,
-        scope: &ResourceScope,
-        capability_id: &CapabilityId,
-        target: &RuntimeHttpSaveTarget,
-        body: &[u8],
-    ) -> Result<(), RuntimeHttpBodyStoreError>;
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[error("runtime HTTP body store error: {reason}")]
-pub struct RuntimeHttpBodyStoreError {
-    pub reason: String,
+    body_store: Option<Arc<dyn http_body::RuntimeHttpBodyStore>>,
 }
 
 impl<N, S> HostHttpEgressService<N, S> {
@@ -1032,7 +1017,7 @@ impl<N, S> HostHttpEgressService<N, S> {
                 .is_some_and(|store| Arc::ptr_eq(store, secret_injections))
     }
 
-    pub fn with_body_store(mut self, store: Arc<dyn RuntimeHttpBodyStore>) -> Self {
+    pub fn with_body_store(mut self, store: Arc<dyn http_body::RuntimeHttpBodyStore>) -> Self {
         self.body_store = Some(store);
         self
     }
@@ -1123,19 +1108,20 @@ where
         mut request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
         let network_policy = self.network_policy_for_request(&mut request)?;
-        let save_body_to = request.save_body_to.clone();
-        if save_body_to.is_some() && self.body_store.is_none() {
-            self.discard_staged_policy_for_request(&request);
-            return Err(RuntimeHttpEgressError::Request {
-                reason: "response_body_store_unavailable".to_string(),
-                request_bytes: 0,
-                response_bytes: 0,
-            });
-        }
         if let Err(error) = self.validate_credential_sources_for_request(&request) {
             self.discard_staged_policy_for_request(&request);
             return Err(error);
         }
+        let body_disposition = match http_body::RuntimeHttpBodyDisposition::for_request(
+            request.save_body_to.clone(),
+            self.body_store.clone(),
+        ) {
+            Ok(disposition) => disposition,
+            Err(error) => {
+                self.discard_staged_policy_for_request(&request);
+                return Err(error);
+            }
+        };
         if let Err(error) = validate_runtime_request(&request) {
             self.discard_staged_policy_for_request(&request);
             return Err(error);
@@ -1196,13 +1182,8 @@ where
             .map_err(|error| runtime_network_error(self.unsafe_raw_diagnostics_allowed, error))?;
         let credentials_injected = !redaction_values.is_empty();
         let (response, response_redacted) = sanitize_runtime_response(response, &redaction_values)?;
-        let (response, saved_body) = save_response_body(
-            response,
-            save_body_to,
-            self.body_store.as_deref(),
-            &scope,
-            &capability_id,
-        )?;
+        let (response, saved_body) =
+            http_body::apply_body_disposition(response, body_disposition, &scope, &capability_id)?;
         Ok(runtime_response(
             response,
             credentials_injected || response_redacted,
@@ -1651,47 +1632,10 @@ fn sanitize_runtime_response(
     ))
 }
 
-fn save_response_body(
-    mut response: NetworkHttpResponse,
-    target: Option<RuntimeHttpSaveTarget>,
-    body_store: Option<&dyn RuntimeHttpBodyStore>,
-    scope: &ResourceScope,
-    capability_id: &CapabilityId,
-) -> Result<(NetworkHttpResponse, Option<RuntimeHttpSavedBody>), RuntimeHttpEgressError> {
-    let Some(target) = target else {
-        return Ok((response, None));
-    };
-    let Some(body_store) = body_store else {
-        return Err(RuntimeHttpEgressError::Request {
-            reason: "response_body_store_unavailable".to_string(),
-            request_bytes: response.usage.request_bytes,
-            response_bytes: response.usage.response_bytes,
-        });
-    };
-
-    body_store
-        .write_body(scope, capability_id, &target, &response.body)
-        .map_err(|_| RuntimeHttpEgressError::Response {
-            reason: "response_body_store_failed".to_string(),
-            request_bytes: response.usage.request_bytes,
-            response_bytes: response.usage.response_bytes,
-        })?;
-
-    let bytes_written = response.body.len() as u64;
-    response.body.clear();
-    Ok((
-        response,
-        Some(RuntimeHttpSavedBody {
-            path: target.path,
-            bytes_written,
-        }),
-    ))
-}
-
 fn runtime_response(
     response: NetworkHttpResponse,
     redaction_applied: bool,
-    saved_body: Option<RuntimeHttpSavedBody>,
+    saved_body: Option<ironclaw_host_api::RuntimeHttpSavedBody>,
 ) -> RuntimeHttpEgressResponse {
     RuntimeHttpEgressResponse {
         status: response.status,
