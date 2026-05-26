@@ -693,6 +693,7 @@ fn request_without_credentials(
         network_policy: caller_policy(),
         credential_injections: vec![],
         response_body_limit: Some(4096),
+        save_body_to: None,
         timeout_ms: None,
     }
 }

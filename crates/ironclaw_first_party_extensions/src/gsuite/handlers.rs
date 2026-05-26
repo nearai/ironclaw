@@ -542,6 +542,7 @@ fn runtime_request(
             required: true,
         }],
         response_body_limit: Some(GSUITE_RESPONSE_BODY_LIMIT),
+        save_body_to: None,
         timeout_ms: Some(GSUITE_TIMEOUT_MS),
     }
 }
@@ -948,6 +949,7 @@ mod tests {
             status: 200,
             headers: vec![("ETag".to_string(), "header-etag".to_string())],
             body: Vec::new(),
+            saved_body: None,
             request_bytes: 0,
             response_bytes: 0,
             redaction_applied: false,

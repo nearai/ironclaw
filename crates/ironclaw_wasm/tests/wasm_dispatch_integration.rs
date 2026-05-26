@@ -466,6 +466,7 @@ async fn wasm_lane_caps_overdue_host_import_at_dispatch_execution_deadline() {
         status: 200,
         headers: vec![],
         body: Vec::new(),
+        saved_body: None,
         request_bytes: 5,
         response_bytes: 0,
         redaction_applied: false,

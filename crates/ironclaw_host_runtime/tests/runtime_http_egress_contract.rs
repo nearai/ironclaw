@@ -808,6 +808,7 @@ fn request_policy_fallback_accepts_secret_store_lease_for_legacy_tests() {
                 required: true,
             }],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
         .expect("legacy/test fallback keeps direct leases available outside production wiring");
@@ -1142,6 +1143,7 @@ fn production_host_http_egress_rejects_direct_secret_store_lease_before_transpor
                 required: true,
             }],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: Some(1000),
         })
         .expect_err("production egress must require staged secret obligations");
@@ -1194,6 +1196,7 @@ fn production_host_http_egress_discards_staged_policy_when_direct_secret_store_l
                 required: true,
             }],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: Some(1000),
         })
         .expect_err("rejected direct lease should discard staged policy");
@@ -1211,6 +1214,7 @@ fn production_host_http_egress_discards_staged_policy_when_direct_secret_store_l
             network_policy: caller_supplied_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: Some(1000),
         })
         .expect_err("discarded staged policy must not authorize retry");
@@ -1276,6 +1280,7 @@ fn production_host_http_egress_rejects_cross_capability_staged_credentials_befor
                 required: true,
             }],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: Some(1000),
         })
         .expect_err("cross-capability staged credentials must be rejected");
@@ -1667,6 +1672,7 @@ fn first_party_http_egress_cannot_use_direct_secret_store_lease_with_production_
                 required: true,
             }],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
         .expect_err("production first-party egress must require staged credentials");
@@ -2023,6 +2029,7 @@ fn host_http_egress_saves_sanitized_response_body_to_store() {
         .expect("response body should be saved");
 
     assert_eq!(response.body, Vec::<u8>::new());
+    assert_eq!(response.body.capacity(), 0);
     assert_eq!(
         response.saved_body.as_ref().map(|saved| &saved.path),
         Some(&target.path)
@@ -2077,6 +2084,115 @@ fn host_http_egress_save_target_requires_configured_body_store_before_network() 
 
     assert!(matches!(error, RuntimeHttpEgressError::Request { .. }));
     assert!(network_recorder.lock().unwrap().is_empty());
+}
+
+#[test]
+fn host_http_egress_save_target_requires_write_authorization_before_network() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: b"large patch body".to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 16,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let store = Arc::new(
+        RecordingBodyStore::default()
+            .with_authorize_error("write permission denied for /workspace/pr.diff"),
+    );
+    let service = HostHttpEgressService::new_with_request_policy_for_tests(
+        network,
+        InMemorySecretStore::new(),
+    )
+    .with_body_store(store);
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::FirstParty,
+            scope: sample_scope(),
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Get,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            save_body_to: Some(save_target("/workspace/pr.diff")),
+            timeout_ms: None,
+        })
+        .expect_err("unauthorized save target should fail closed");
+
+    match error {
+        RuntimeHttpEgressError::Request {
+            reason,
+            request_bytes,
+            response_bytes,
+        } => {
+            assert_eq!(request_bytes, 0);
+            assert_eq!(response_bytes, 0);
+            assert_eq!(
+                reason,
+                "response_body_store_unauthorized: write permission denied for /workspace/pr.diff"
+            );
+        }
+        other => panic!("expected request authorization error, got {other:?}"),
+    }
+    assert!(network_recorder.lock().unwrap().is_empty());
+}
+
+#[test]
+fn host_http_egress_fails_closed_when_body_store_write_fails() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![("content-type".to_string(), "text/plain".to_string())],
+        body: b"large patch body".to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 16,
+            resolved_ip: None,
+        },
+    });
+    let store = Arc::new(RecordingBodyStore::default().with_write_error("disk full"));
+    let service = HostHttpEgressService::new_with_request_policy_for_tests(
+        network,
+        InMemorySecretStore::new(),
+    )
+    .with_body_store(store.clone());
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::FirstParty,
+            scope: sample_scope(),
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Get,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            save_body_to: Some(save_target("/workspace/pr.diff")),
+            timeout_ms: None,
+        })
+        .expect_err("body store write failure should fail closed");
+
+    match error {
+        RuntimeHttpEgressError::Response {
+            reason,
+            request_bytes,
+            response_bytes,
+        } => {
+            assert_eq!(request_bytes, 5);
+            assert_eq!(response_bytes, 16);
+            assert_eq!(reason, "response_body_store_failed: disk full");
+        }
+        other => panic!("expected response body store error, got {other:?}"),
+    }
+    assert!(store.writes().is_empty());
 }
 
 #[test]
@@ -2573,6 +2689,8 @@ struct RecordingNetwork {
 #[derive(Debug, Clone, Default)]
 struct RecordingBodyStore {
     writes: Arc<Mutex<Vec<RecordedBodyWrite>>>,
+    authorize_error: Arc<Mutex<Option<RuntimeHttpBodyStoreError>>>,
+    write_error: Arc<Mutex<Option<RuntimeHttpBodyStoreError>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2584,12 +2702,38 @@ struct RecordedBodyWrite {
 }
 
 impl RecordingBodyStore {
+    fn with_authorize_error(self, reason: &str) -> Self {
+        *self.authorize_error.lock().unwrap() = Some(RuntimeHttpBodyStoreError {
+            reason: reason.to_string(),
+        });
+        self
+    }
+
+    fn with_write_error(self, reason: &str) -> Self {
+        *self.write_error.lock().unwrap() = Some(RuntimeHttpBodyStoreError {
+            reason: reason.to_string(),
+        });
+        self
+    }
+
     fn writes(&self) -> Vec<RecordedBodyWrite> {
         self.writes.lock().unwrap().clone()
     }
 }
 
 impl RuntimeHttpBodyStore for RecordingBodyStore {
+    fn authorize_write(
+        &self,
+        _scope: &ResourceScope,
+        _capability_id: &CapabilityId,
+        _target: &RuntimeHttpSaveTarget,
+    ) -> Result<(), RuntimeHttpBodyStoreError> {
+        if let Some(error) = self.authorize_error.lock().unwrap().clone() {
+            return Err(error);
+        }
+        Ok(())
+    }
+
     fn write_body(
         &self,
         scope: &ResourceScope,
@@ -2597,6 +2741,9 @@ impl RuntimeHttpBodyStore for RecordingBodyStore {
         target: &RuntimeHttpSaveTarget,
         body: &[u8],
     ) -> Result<(), RuntimeHttpBodyStoreError> {
+        if let Some(error) = self.write_error.lock().unwrap().clone() {
+            return Err(error);
+        }
         self.writes.lock().unwrap().push(RecordedBodyWrite {
             scope: scope.clone(),
             capability_id: capability_id.clone(),

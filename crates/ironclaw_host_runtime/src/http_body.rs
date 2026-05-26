@@ -1,4 +1,4 @@
-use std::{fmt, sync::Arc};
+use std::fmt;
 
 use ironclaw_host_api::{
     CapabilityId, ResourceScope, RuntimeHttpEgressError, RuntimeHttpSaveTarget,
@@ -8,6 +8,13 @@ use ironclaw_network::NetworkHttpResponse;
 use thiserror::Error;
 
 pub trait RuntimeHttpBodyStore: fmt::Debug + Send + Sync {
+    fn authorize_write(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+        target: &RuntimeHttpSaveTarget,
+    ) -> Result<(), RuntimeHttpBodyStoreError>;
+
     fn write_body(
         &self,
         scope: &ResourceScope,
@@ -23,44 +30,28 @@ pub struct RuntimeHttpBodyStoreError {
     pub reason: String,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) enum RuntimeHttpBodyDisposition {
-    ReturnInline,
-    Save {
-        target: RuntimeHttpSaveTarget,
-        store: Arc<dyn RuntimeHttpBodyStore>,
-    },
-}
-
-impl RuntimeHttpBodyDisposition {
-    pub(crate) fn for_request(
-        target: Option<RuntimeHttpSaveTarget>,
-        store: Option<Arc<dyn RuntimeHttpBodyStore>>,
-    ) -> Result<Self, RuntimeHttpEgressError> {
-        match (target, store) {
-            (None, _) => Ok(Self::ReturnInline),
-            (Some(target), Some(store)) => Ok(Self::Save { target, store }),
-            (Some(_), None) => Err(RuntimeHttpEgressError::Request {
-                reason: "response_body_store_unavailable".to_string(),
-                request_bytes: 0,
-                response_bytes: 0,
-            }),
-        }
-    }
-}
-
 pub(crate) fn apply_body_disposition(
     mut response: NetworkHttpResponse,
-    disposition: RuntimeHttpBodyDisposition,
+    target: Option<RuntimeHttpSaveTarget>,
+    store: Option<&dyn RuntimeHttpBodyStore>,
     scope: &ResourceScope,
     capability_id: &CapabilityId,
 ) -> Result<(NetworkHttpResponse, Option<RuntimeHttpSavedBody>), RuntimeHttpEgressError> {
-    let RuntimeHttpBodyDisposition::Save { target, store } = disposition else {
+    let Some(target) = target else {
         return Ok((response, None));
     };
+    let Some(store) = store else {
+        return Err(RuntimeHttpEgressError::Request {
+            reason: "response_body_store_unavailable".to_string(),
+            request_bytes: 0,
+            response_bytes: 0,
+        });
+    };
 
+    let body = std::mem::take(&mut response.body);
+    let bytes_written = body.len() as u64;
     store
-        .write_body(scope, capability_id, &target, &response.body)
+        .write_body(scope, capability_id, &target, &body)
         .map_err(|error| {
             tracing::debug!(
                 error = %error.reason,
@@ -68,14 +59,13 @@ pub(crate) fn apply_body_disposition(
                 "runtime HTTP response body store failed"
             );
             RuntimeHttpEgressError::Response {
-                reason: "response_body_store_failed".to_string(),
+                reason: format!("response_body_store_failed: {}", error.reason),
                 request_bytes: response.usage.request_bytes,
                 response_bytes: response.usage.response_bytes,
             }
         })?;
+    drop(body);
 
-    let bytes_written = response.body.len() as u64;
-    response.body.clear();
     Ok((
         response,
         Some(RuntimeHttpSavedBody {

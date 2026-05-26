@@ -84,11 +84,11 @@ pub use first_party_tools::{
     SPAWN_SUBAGENT_CAPABILITY_ID, TIME_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
     builtin_first_party_handlers, builtin_first_party_package,
 };
+pub use http_body::{RuntimeHttpBodyStore, RuntimeHttpBodyStoreError};
 pub use invocation_services::{
     InvocationServices, InvocationServicesError, InvocationServicesResolutionRequest,
     InvocationServicesResolver, LocalInvocationServicesResolver,
 };
-pub use http_body::{RuntimeHttpBodyStore, RuntimeHttpBodyStoreError};
 pub use obligations::{
     BuiltinObligationHandler, BuiltinObligationServices, LEAK_REDACT_FAILED_CODE,
     ProcessObligationLifecycleStore,
@@ -937,7 +937,7 @@ pub struct HostHttpEgressService<N, S> {
     network_policy_store: Option<Arc<NetworkObligationPolicyStore>>,
     network_policy_source: NetworkPolicySource,
     unsafe_raw_diagnostics_allowed: bool,
-    body_store: Option<Arc<dyn http_body::RuntimeHttpBodyStore>>,
+    body_store: Option<Arc<dyn RuntimeHttpBodyStore>>,
 }
 
 impl<N, S> HostHttpEgressService<N, S> {
@@ -1017,7 +1017,7 @@ impl<N, S> HostHttpEgressService<N, S> {
                 .is_some_and(|store| Arc::ptr_eq(store, secret_injections))
     }
 
-    pub fn with_body_store(mut self, store: Arc<dyn http_body::RuntimeHttpBodyStore>) -> Self {
+    pub fn with_body_store(mut self, store: Arc<dyn RuntimeHttpBodyStore>) -> Self {
         self.body_store = Some(store);
         self
     }
@@ -1112,16 +1112,28 @@ where
             self.discard_staged_policy_for_request(&request);
             return Err(error);
         }
-        let body_disposition = match http_body::RuntimeHttpBodyDisposition::for_request(
-            request.save_body_to.clone(),
-            self.body_store.clone(),
-        ) {
-            Ok(disposition) => disposition,
-            Err(error) => {
+        let save_body_to = std::mem::take(&mut request.save_body_to);
+        let body_store = self.body_store.as_deref();
+        if let Some(target) = &save_body_to {
+            let Some(store) = body_store else {
                 self.discard_staged_policy_for_request(&request);
-                return Err(error);
+                return Err(RuntimeHttpEgressError::Request {
+                    reason: "response_body_store_unavailable".to_string(),
+                    request_bytes: 0,
+                    response_bytes: 0,
+                });
+            };
+            if let Err(error) =
+                store.authorize_write(&request.scope, &request.capability_id, target)
+            {
+                self.discard_staged_policy_for_request(&request);
+                return Err(RuntimeHttpEgressError::Request {
+                    reason: format!("response_body_store_unauthorized: {}", error.reason),
+                    request_bytes: 0,
+                    response_bytes: 0,
+                });
             }
-        };
+        }
         if let Err(error) = validate_runtime_request(&request) {
             self.discard_staged_policy_for_request(&request);
             return Err(error);
@@ -1182,8 +1194,13 @@ where
             .map_err(|error| runtime_network_error(self.unsafe_raw_diagnostics_allowed, error))?;
         let credentials_injected = !redaction_values.is_empty();
         let (response, response_redacted) = sanitize_runtime_response(response, &redaction_values)?;
-        let (response, saved_body) =
-            http_body::apply_body_disposition(response, body_disposition, &scope, &capability_id)?;
+        let (response, saved_body) = http_body::apply_body_disposition(
+            response,
+            save_body_to,
+            body_store,
+            &scope,
+            &capability_id,
+        )?;
         Ok(runtime_response(
             response,
             credentials_injected || response_redacted,

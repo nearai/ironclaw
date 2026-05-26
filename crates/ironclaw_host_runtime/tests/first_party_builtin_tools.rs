@@ -4033,6 +4033,7 @@ impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
             status,
             headers: vec![("content-type".to_string(), "application/json".to_string())],
             body: body.clone(),
+            saved_body: None,
             request_bytes: request.body.len() as u64,
             response_bytes: body.len() as u64,
             redaction_applied: false,
@@ -4062,6 +4063,7 @@ impl RuntimeHttpEgress for SleepingRuntimeHttpEgress {
             headers: Vec::new(),
             response_bytes: body.len() as u64,
             body,
+            saved_body: None,
             request_bytes: request.body.len() as u64,
             redaction_applied: false,
         })
