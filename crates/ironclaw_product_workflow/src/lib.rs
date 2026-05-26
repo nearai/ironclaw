@@ -96,7 +96,8 @@ pub use policy::{
 // a direct dependency on `ironclaw_product_adapters` — the single-facade
 // boundary is enforced by `ironclaw_architecture`.
 pub use ironclaw_product_adapters::{
-    AuthPromptView, FinalReplyView, GatePromptView, ProductOutboundEnvelope,
+    AuthPromptView, CapabilityActivityStatusView, CapabilityActivityView,
+    CapabilityDisplayPreviewView, FinalReplyView, GatePromptView, ProductOutboundEnvelope,
     ProductOutboundPayload, ProductProjectionItem, ProductProjectionState, ProgressKind,
     ProgressUpdateView, ProjectionCursor,
 };

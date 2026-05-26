@@ -259,8 +259,61 @@ mod platform {
     }
 }
 
-// Re-export platform-specific functions
-pub use platform::{delete_master_key, get_master_key, has_master_key, store_master_key};
+/// Whether OS-keychain access should be suppressed.
+///
+/// Touching the real OS keychain during automated tests pops a macOS Keychain
+/// authorization dialog (and blocks on a locked Secret Service on Linux), which
+/// derails `cargo test`. We suppress it when compiled for tests (`cfg!(test)`,
+/// covering this crate's unit tests) or when `IRONCLAW_DISABLE_OS_KEYCHAIN` is
+/// set in the environment (covering integration/e2e tests and CI, which link
+/// the non-`cfg(test)` library). When suppressed, lookups behave as "no key
+/// present" and writes fail closed — so `resolve_master_key` falls through to
+/// `None`/the env var exactly as it would with an empty keychain, with no
+/// prompt. Production (no `cfg(test)`, env unset) is unaffected.
+fn os_keychain_suppressed() -> bool {
+    cfg!(test) || std::env::var_os("IRONCLAW_DISABLE_OS_KEYCHAIN").is_some()
+}
+
+/// Retrieve the master key from the OS keychain (suppressed in tests/headless).
+pub async fn get_master_key() -> Result<Vec<u8>, SecretError> {
+    if os_keychain_suppressed() {
+        return Err(SecretError::KeychainError(
+            "OS keychain access suppressed (cfg!(test) or IRONCLAW_DISABLE_OS_KEYCHAIN)"
+                .to_string(),
+        ));
+    }
+    platform::get_master_key().await
+}
+
+/// Whether a master key exists in the OS keychain (suppressed in tests/headless).
+pub async fn has_master_key() -> bool {
+    if os_keychain_suppressed() {
+        return false;
+    }
+    platform::has_master_key().await
+}
+
+/// Store the master key in the OS keychain (suppressed in tests/headless).
+pub async fn store_master_key(key: &[u8]) -> Result<(), SecretError> {
+    if os_keychain_suppressed() {
+        return Err(SecretError::KeychainError(
+            "OS keychain access suppressed (cfg!(test) or IRONCLAW_DISABLE_OS_KEYCHAIN)"
+                .to_string(),
+        ));
+    }
+    platform::store_master_key(key).await
+}
+
+/// Delete the master key from the OS keychain (suppressed in tests/headless).
+pub async fn delete_master_key() -> Result<(), SecretError> {
+    if os_keychain_suppressed() {
+        return Err(SecretError::KeychainError(
+            "OS keychain access suppressed (cfg!(test) or IRONCLAW_DISABLE_OS_KEYCHAIN)"
+                .to_string(),
+        ));
+    }
+    platform::delete_master_key().await
+}
 
 /// Parse a hex string to bytes.
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
@@ -314,5 +367,25 @@ mod tests {
     fn test_hex_to_bytes_invalid() {
         assert!(hex_to_bytes("abc").is_err()); // Odd length
         assert!(hex_to_bytes("gg").is_err()); // Invalid chars
+    }
+
+    // Regression: under a test build the real OS keychain must never be
+    // consulted — touching it pops a macOS Keychain auth dialog / blocks on a
+    // locked Linux Secret Service and derails `cargo test`. `cfg!(test)` is
+    // unconditionally true here, so the guard short-circuits before any
+    // platform keychain call (no env manipulation needed — keeps this test
+    // race-free under parallel execution).
+    #[tokio::test]
+    async fn os_keychain_access_is_suppressed_under_test_build() {
+        assert!(
+            os_keychain_suppressed(),
+            "cfg!(test) must suppress OS keychain access"
+        );
+        // Reads behave as "no key present"; writes fail closed — without
+        // reaching the platform keychain (which would prompt).
+        assert!(get_master_key().await.is_err());
+        assert!(!has_master_key().await);
+        assert!(store_master_key(&[0u8; 32]).await.is_err());
+        assert!(delete_master_key().await.is_err());
     }
 }

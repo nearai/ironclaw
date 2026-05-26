@@ -220,6 +220,26 @@ async fn fetch_snapshot_rejects_projection_payload_thread_mismatch() {
 }
 
 #[tokio::test]
+async fn fetch_snapshot_rejects_capability_activity_thread_mismatch() {
+    let requested = projection_scope("thread-a");
+    let manager = EventStreamManager::new(
+        Arc::new(ActivityThreadMismatchProjectionService),
+        Arc::new(AllowAllProjectionAccessPolicy),
+        Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
+        Arc::new(InMemoryProjectionUpdateSource::new(8)),
+        Arc::new(NoExposureProjectionRedactionValidator),
+        Arc::new(InMemoryOutboundStateStore::default()),
+    );
+
+    let error = manager
+        .fetch_snapshot(fetch_request(requested))
+        .await
+        .expect_err("foreign activity thread payload rejected");
+
+    assert!(matches!(error, ProjectionStreamError::AccessDenied));
+}
+
+#[tokio::test]
 async fn fetch_snapshot_rejects_redaction_failure() {
     let scope = projection_scope("thread-a");
     let manager = EventStreamManager::new(
@@ -267,6 +287,23 @@ async fn fetch_snapshot_maps_projection_snapshot_errors() {
             },
             ProjectionStreamError::InvalidRequest {
                 reason: "projection rebase required outside subscribe flow",
+            },
+        ),
+        (
+            ProjectionError::TurnEventRebaseRequired {
+                requested: ironclaw_turns::EventCursor(0),
+                earliest: ironclaw_turns::EventCursor(5),
+            },
+            ProjectionStreamError::InvalidRequest {
+                reason: "turn event projection rebase required outside subscribe flow",
+            },
+        ),
+        (
+            ProjectionError::MissingProjectionMetadata {
+                field: ironclaw_event_projections::MissingMetadataField::OwnerUserId,
+            },
+            ProjectionStreamError::InvalidRequest {
+                reason: "projection metadata missing on lifecycle event",
             },
         ),
     ] {

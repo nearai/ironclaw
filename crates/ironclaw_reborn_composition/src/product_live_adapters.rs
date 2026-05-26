@@ -14,8 +14,8 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use ironclaw_host_api::{
-    CapabilityId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId, MountView, RuntimeKind,
-    TrustClass, UserId,
+    CapabilityId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId, InvocationId,
+    MountView, RuntimeKind, TrustClass, UserId,
 };
 use ironclaw_host_runtime::{
     CapabilitySurfacePolicy, HostRuntime, SurfaceKind, VisibleCapabilityRequest,
@@ -43,7 +43,10 @@ use ironclaw_turns::{
     },
 };
 
-use crate::RebornServices;
+use crate::{
+    RebornServices,
+    projection::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore},
+};
 
 #[derive(Debug, Error)]
 pub enum ProductLivePlannedRuntimeAdapterError {
@@ -57,14 +60,24 @@ pub enum ProductLivePlannedRuntimeAdapterError {
 
 /// In-memory capability I/O staging used by the product-live planned runtime adapters.
 ///
+/// Also records bounded display previews for product composition. Local-dev WebUI wires
+/// this preview store into projection today; production durable/live fanout still needs
+/// an entrypoint-level hook to pass the same store into its projection services.
+///
 /// Inputs and results are keyed by run-scoped refs so provider tool-call payloads and
 /// runtime outputs cannot be read across loop runs. Staged refs are consumed on successful read.
 /// Each store is capped at 1024 staged refs and 4 MiB of serialized JSON; callers should still
 /// prune entries when a run completes to clear refs that were staged but never consumed.
-#[derive(Default)]
 pub struct ProductLiveCapabilityIo {
     inputs: Mutex<HashMap<String, StagedCapabilityInput>>,
     results: Mutex<HashMap<String, StagedCapabilityResult>>,
+    display_previews: Arc<CapabilityDisplayPreviewStore>,
+}
+
+impl Default for ProductLiveCapabilityIo {
+    fn default() -> Self {
+        Self::new(Arc::new(CapabilityDisplayPreviewStore::default()))
+    }
 }
 
 const PRODUCT_LIVE_CAPABILITY_IO_MAX_STAGED_REFS: usize = 1024;
@@ -85,6 +98,14 @@ struct StagedCapabilityResult {
 }
 
 impl ProductLiveCapabilityIo {
+    pub(crate) fn new(display_previews: Arc<CapabilityDisplayPreviewStore>) -> Self {
+        Self {
+            inputs: Mutex::new(HashMap::new()),
+            results: Mutex::new(HashMap::new()),
+            display_previews,
+        }
+    }
+
     /// Stages provider tool-call input for one loop run and returns its run-scoped ref.
     pub fn stage_input(
         &self,
@@ -159,6 +180,7 @@ impl ProductLiveCapabilityIo {
             .lock()
             .map_err(|_| capability_io_internal_error())?
             .retain(|_, result| result.run_id != run_id);
+        self.display_previews.prune_run(run_id);
         Ok(())
     }
 }
@@ -192,7 +214,14 @@ impl LoopCapabilityInputResolver for ProductLiveCapabilityIo {
         run_context: &LoopRunContext,
         tool_call: &ProviderToolCall,
     ) -> Result<CapabilityInputRef, AgentLoopHostError> {
-        self.stage_input(run_context, tool_call.arguments.clone())
+        let input_ref = self.stage_input(run_context, tool_call.arguments.clone())?;
+        self.display_previews.record_input(
+            &run_context.run_id.to_string(),
+            &input_ref,
+            &tool_call.name,
+            &tool_call.arguments,
+        );
+        Ok(input_ref)
     }
 }
 
@@ -201,6 +230,8 @@ impl LoopCapabilityResultWriter for ProductLiveCapabilityIo {
     async fn write_capability_result(
         &self,
         run_context: &LoopRunContext,
+        input_ref: &CapabilityInputRef,
+        invocation_id: InvocationId,
         _capability_id: &CapabilityId,
         output: serde_json::Value,
     ) -> Result<LoopResultRef, AgentLoopHostError> {
@@ -227,10 +258,20 @@ impl LoopCapabilityResultWriter for ProductLiveCapabilityIo {
             result_ref.as_str().to_string(),
             StagedCapabilityResult {
                 run_id: run_context.run_id.to_string(),
-                output,
+                output: output.clone(),
                 byte_len,
             },
         );
+        self.display_previews
+            .record_result(CapabilityDisplayPreviewResult {
+                run_id: &run_context.run_id.to_string(),
+                input_ref,
+                invocation_id,
+                capability_id: _capability_id,
+                result_ref: result_ref.as_str(),
+                output: &output,
+                output_bytes: byte_len.try_into().unwrap_or(u64::MAX),
+            });
         Ok(result_ref)
     }
 }
@@ -700,4 +741,112 @@ impl CapabilitySurfaceProfileResolver for StaticCapabilitySurfaceResolver {
 /// Convenience constructor for a capability allow-set.
 pub fn capability_allowlist(ids: impl IntoIterator<Item = CapabilityId>) -> CapabilityAllowSet {
     CapabilityAllowSet::allowlist(ids)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_host_api::{AgentId, InvocationId, TenantId, ThreadId};
+    use ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver;
+    use ironclaw_turns::{
+        RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
+    };
+
+    #[tokio::test]
+    async fn capability_io_records_read_file_display_preview() {
+        let io = ProductLiveCapabilityIo::default();
+        let run_context = loop_run_context().await;
+        let tool_call = ProviderToolCall {
+            provider_id: "provider".to_string(),
+            provider_model_id: "model".to_string(),
+            turn_id: Some("turn_1".to_string()),
+            id: "call_1".to_string(),
+            name: "read_file".to_string(),
+            arguments: serde_json::json!({"path": "src/main.rs", "api_key": "sk-secret"}),
+            response_reasoning: None,
+            reasoning: None,
+            signature: None,
+        };
+        let input_ref = io
+            .register_provider_tool_call_input(&run_context, &tool_call)
+            .await
+            .expect("input staged");
+        let invocation_id = InvocationId::new();
+        io.write_capability_result(
+            &run_context,
+            &input_ref,
+            invocation_id,
+            &CapabilityId::new("builtin.read_file").unwrap(),
+            serde_json::json!({"content": "fn main() {}"}),
+        )
+        .await
+        .expect("result staged");
+
+        let record = io
+            .display_previews
+            .record_for_invocation(invocation_id)
+            .expect("preview recorded");
+        assert_eq!(record.title, "read_file");
+        assert_eq!(record.subtitle.as_deref(), Some("src/main.rs"));
+        assert!(
+            record
+                .input_summary
+                .as_deref()
+                .is_some_and(|summary| summary.contains("path: src/main.rs"))
+        );
+        assert_eq!(record.output_preview.as_deref(), Some("fn main() {}"));
+        assert_eq!(record.output_kind.as_deref(), Some("text"));
+        let rendered = serde_json::to_string(&record.input_summary).unwrap();
+        assert!(!rendered.contains("sk-secret"));
+    }
+
+    #[tokio::test]
+    async fn capability_io_prunes_display_preview_with_run() {
+        let io = ProductLiveCapabilityIo::default();
+        let run_context = loop_run_context().await;
+        let input_ref = io
+            .stage_input(&run_context, serde_json::json!({"text": "ok"}))
+            .expect("input staged");
+        let invocation_id = InvocationId::new();
+        io.write_capability_result(
+            &run_context,
+            &input_ref,
+            invocation_id,
+            &CapabilityId::new("demo.echo").unwrap(),
+            serde_json::json!({"reply": "ok"}),
+        )
+        .await
+        .expect("result staged");
+        assert!(
+            io.display_previews
+                .record_for_invocation(invocation_id)
+                .is_some()
+        );
+
+        io.prune_run(&run_context).expect("run pruned");
+        assert!(
+            io.display_previews
+                .record_for_invocation(invocation_id)
+                .is_none()
+        );
+    }
+
+    async fn loop_run_context() -> LoopRunContext {
+        let resolved = default_planned_run_profile_resolver()
+            .unwrap()
+            .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+            .await
+            .unwrap();
+        LoopRunContext::new(
+            TurnScope::new(
+                TenantId::new("preview-tenant").unwrap(),
+                Some(AgentId::new("preview-agent").unwrap()),
+                None,
+                ThreadId::new("preview-thread").unwrap(),
+            ),
+            TurnId::new(),
+            TurnRunId::new(),
+            resolved,
+        )
+    }
 }

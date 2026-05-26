@@ -1695,6 +1695,12 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             ],
         },
         BoundaryRule {
+            // Product-facing projection reducers consume typed domain events.
+            // `ironclaw_turns` is intentionally allowed here for
+            // `TurnLifecycleEvent`-derived read models such as pending gates;
+            // projection crates must still stay below product/runtime
+            // composition and must not import root `src/` or legacy engine
+            // pending-gate types.
             crate_name: "ironclaw_event_projections",
             forbidden: vec![
                 "ironclaw",

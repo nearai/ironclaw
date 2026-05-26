@@ -9,6 +9,7 @@
 
 mod crypto;
 mod filesystem_store;
+pub mod keychain;
 mod legacy_store;
 
 pub use filesystem_store::{FilesystemCredentialBroker, FilesystemSecretStore};

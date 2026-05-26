@@ -171,6 +171,9 @@ pub fn target_matches_pattern(target: &NetworkTarget, pattern: &NetworkTargetPat
 fn host_matches_pattern(host: &str, pattern: &str) -> bool {
     let host = host.to_ascii_lowercase();
     let pattern = pattern.to_ascii_lowercase();
+    if pattern == "*" {
+        return true;
+    }
     if let Some(suffix) = pattern.strip_prefix("*.") {
         let suffix_with_dot = format!(".{suffix}");
         let Some(prefix) = host.strip_suffix(&suffix_with_dot) else {

@@ -6,41 +6,158 @@ use std::{
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_authorization::FilesystemCapabilityLeaseStore;
 use ironclaw_authorization::GrantAuthorizer;
+#[cfg(not(feature = "libsql"))]
 use ironclaw_authorization::InMemoryCapabilityLeaseStore;
+#[cfg(feature = "libsql")]
+use ironclaw_events::{DurableAuditLog, DurableEventLog};
+#[cfg(not(feature = "libsql"))]
+use ironclaw_events::{
+    DurableAuditLog, DurableEventLog, InMemoryDurableAuditLog, InMemoryDurableEventLog,
+};
 use ironclaw_extensions::ExtensionRegistry;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_filesystem::RootFilesystem;
+#[cfg(feature = "libsql")]
+use ironclaw_filesystem::{
+    BackendCapabilities, BackendId, BackendKind, Capability, CompositeRootFilesystem, ContentKind,
+    IndexPolicy, LibSqlRootFilesystem, MountDescriptor, StorageClass,
+};
 use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
+use ironclaw_host_api::runtime_policy::FilesystemBackendKind;
 use ironclaw_host_api::{
-    EffectKind, MountAlias, MountGrant, MountPermissions, MountView, PackageId, VirtualPath,
+    EffectKind, HostPath, MountPermissions, MountView, PackageId, VirtualPath,
 };
+#[cfg(feature = "libsql")]
+use ironclaw_host_api::{MountAlias, MountGrant};
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostRuntimeServices,
     builtin_first_party_handlers, builtin_first_party_package,
 };
+#[cfg(feature = "libsql")]
+use ironclaw_loop_support::FilesystemCheckpointStateStore;
 use ironclaw_processes::ProcessServices;
 use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
 use ironclaw_resources::InMemoryResourceGovernor;
+#[cfg(feature = "libsql")]
+use ironclaw_resources::{FilesystemResourceGovernorStore, PersistentResourceGovernor};
+#[cfg(feature = "libsql")]
+use ironclaw_run_state::{FilesystemApprovalRequestStore, FilesystemRunStateStore};
+#[cfg(not(feature = "libsql"))]
 use ironclaw_run_state::{InMemoryApprovalRequestStore, InMemoryRunStateStore};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_secrets::FilesystemSecretStore;
+#[cfg(feature = "libsql")]
+use ironclaw_threads::FilesystemSessionThreadService;
+#[cfg(not(feature = "libsql"))]
 use ironclaw_threads::InMemorySessionThreadService;
+use ironclaw_threads::SessionThreadService;
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
+#[cfg(feature = "libsql")]
+use ironclaw_turns::FilesystemTurnStateStore;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_turns::InMemoryRunProfileResolver;
+use ironclaw_turns::{CheckpointStateStore, DefaultTurnCoordinator, LoopCheckpointStore};
+#[cfg(not(feature = "libsql"))]
 use ironclaw_turns::{
-    DefaultTurnCoordinator, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
-    InMemoryTurnStateStore,
+    InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore, InMemoryTurnStateStore,
 };
 
-use crate::input::RebornStorageInput;
+use crate::input::{RebornRuntimeProcessBinding, RebornStorageInput};
+use crate::local_dev_mounts::{skill_context_mount_view, workspace_mount_view};
 use crate::{
     RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
     RebornFacadeReadiness, RebornProductAuthServicePorts, RebornProductAuthServices,
     RebornReadiness, RebornReadinessState,
 };
+
+#[cfg(feature = "libsql")]
+pub(crate) type LocalDevRootFilesystem = CompositeRootFilesystem;
+#[cfg(not(feature = "libsql"))]
+pub(crate) type LocalDevRootFilesystem = LocalFilesystem;
+
+type LocalDevWorkspaceFilesystems = (
+    Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
+    Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
+    MountView,
+);
+
+#[cfg(feature = "libsql")]
+pub(crate) type LocalDevTurnStateStore = FilesystemTurnStateStore<LocalDevRootFilesystem>;
+#[cfg(not(feature = "libsql"))]
+pub(crate) type LocalDevTurnStateStore = InMemoryTurnStateStore;
+
+#[cfg(feature = "libsql")]
+type LocalDevResourceGovernor =
+    PersistentResourceGovernor<FilesystemResourceGovernorStore<LocalDevRootFilesystem>>;
+#[cfg(not(feature = "libsql"))]
+type LocalDevResourceGovernor = InMemoryResourceGovernor;
+
+#[cfg(feature = "libsql")]
+type LocalDevRunStateStore = FilesystemRunStateStore<LocalDevRootFilesystem>;
+#[cfg(not(feature = "libsql"))]
+type LocalDevRunStateStore = InMemoryRunStateStore;
+
+#[cfg(feature = "libsql")]
+pub(crate) type LocalDevApprovalRequestStore =
+    FilesystemApprovalRequestStore<LocalDevRootFilesystem>;
+#[cfg(not(feature = "libsql"))]
+pub(crate) type LocalDevApprovalRequestStore = InMemoryApprovalRequestStore;
+
+#[cfg(feature = "libsql")]
+pub(crate) type LocalDevCapabilityLeaseStore =
+    FilesystemCapabilityLeaseStore<LocalDevRootFilesystem>;
+#[cfg(not(feature = "libsql"))]
+pub(crate) type LocalDevCapabilityLeaseStore = InMemoryCapabilityLeaseStore;
+
+#[cfg(feature = "libsql")]
+type LocalDevProcessServices = ProcessServices<
+    ironclaw_processes::FilesystemProcessStore<LocalDevRootFilesystem>,
+    ironclaw_processes::FilesystemProcessResultStore<LocalDevRootFilesystem>,
+>;
+#[cfg(not(feature = "libsql"))]
+type LocalDevProcessServices = ProcessServices<
+    ironclaw_processes::InMemoryProcessStore,
+    ironclaw_processes::InMemoryProcessResultStore,
+>;
+
+fn apply_runtime_process_binding<F, G, S, R>(
+    services: HostRuntimeServices<F, G, S, R>,
+    binding: RebornRuntimeProcessBinding,
+) -> HostRuntimeServices<F, G, S, R>
+where
+    F: ironclaw_filesystem::RootFilesystem + 'static,
+    G: ironclaw_resources::ResourceGovernor + 'static,
+    S: ironclaw_processes::ProcessStore + 'static,
+    R: ironclaw_processes::ProcessResultStore + 'static,
+{
+    match binding {
+        RebornRuntimeProcessBinding::None => services,
+        RebornRuntimeProcessBinding::TenantSandbox { process_port } => {
+            services.with_tenant_sandbox_process_port(process_port)
+        }
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub(crate) fn apply_production_runtime_process_binding<F, G, S, R>(
+    services: HostRuntimeServices<F, G, S, R>,
+    binding: RebornRuntimeProcessBinding,
+) -> HostRuntimeServices<F, G, S, R>
+where
+    F: ironclaw_filesystem::RootFilesystem + 'static,
+    G: ironclaw_resources::ResourceGovernor + 'static,
+    S: ironclaw_processes::ProcessStore + 'static,
+    R: ironclaw_processes::ProcessResultStore + 'static,
+{
+    match binding {
+        RebornRuntimeProcessBinding::None => services,
+        RebornRuntimeProcessBinding::TenantSandbox { process_port } => {
+            services.with_production_tenant_sandbox_process_port(process_port)
+        }
+    }
+}
 
 pub struct RebornServices {
     pub host_runtime: Option<Arc<dyn ironclaw_host_runtime::HostRuntime>>,
@@ -51,16 +168,28 @@ pub struct RebornServices {
 }
 
 pub(crate) struct RebornLocalRuntimeServices {
-    pub(crate) approval_requests: Arc<InMemoryApprovalRequestStore>,
-    pub(crate) capability_leases: Arc<InMemoryCapabilityLeaseStore>,
-    pub(crate) turn_state: Arc<InMemoryTurnStateStore>,
-    pub(crate) checkpoint_state_store: Arc<InMemoryCheckpointStateStore>,
-    pub(crate) loop_checkpoint_store: Arc<InMemoryLoopCheckpointStore>,
-    pub(crate) thread_service: Arc<InMemorySessionThreadService>,
+    pub(crate) approval_requests: Arc<LocalDevApprovalRequestStore>,
+    pub(crate) capability_leases: Arc<LocalDevCapabilityLeaseStore>,
+    pub(crate) turn_state: Arc<LocalDevTurnStateStore>,
+    pub(crate) checkpoint_state_store: Arc<dyn CheckpointStateStore>,
+    pub(crate) loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
+    pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) skill_mounts: MountView,
+    pub(crate) skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
+    pub(crate) workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     pub(crate) workspace_mounts: MountView,
-    pub(crate) skill_filesystem: Arc<ScopedFilesystem<LocalFilesystem>>,
-    pub(crate) workspace_filesystem: Arc<ScopedFilesystem<LocalFilesystem>>,
+    pub(crate) event_log: Arc<dyn DurableEventLog>,
+    pub(crate) audit_log: Arc<dyn DurableAuditLog>,
+}
+
+struct RebornLocalDevStoreGraph {
+    run_state: Arc<LocalDevRunStateStore>,
+    approval_requests: Arc<LocalDevApprovalRequestStore>,
+    capability_leases: Arc<LocalDevCapabilityLeaseStore>,
+    turn_state: Arc<LocalDevTurnStateStore>,
+    local_runtime: Arc<RebornLocalRuntimeServices>,
+    resource_governor: Arc<LocalDevResourceGovernor>,
+    process_services: LocalDevProcessServices,
 }
 
 impl std::fmt::Debug for RebornServices {
@@ -141,12 +270,14 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         profile,
         storage,
         runtime_policy,
+        runtime_process_binding,
         product_auth_ports,
         ..
     } = input;
     let RebornStorageInput::LocalDev {
         root,
         workspace_root,
+        host_home_root,
     } = storage
     else {
         return Err(RebornBuildError::InvalidConfig {
@@ -162,61 +293,47 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     })?;
     let root = canonicalize_local_dev_path(&root, "storage root")?;
     let workspace_root = canonicalize_local_dev_path(&workspace_root, "workspace root")?;
-    validate_local_dev_workspace_skill_isolation(&root, &workspace_root)?;
-    let mut filesystem = LocalFilesystem::new();
-    let projects_root = ironclaw_host_api::VirtualPath::new("/projects").map_err(|error| {
-        RebornBuildError::InvalidConfig {
-            reason: error.to_string(),
+    let include_host_home = runtime_policy.as_ref().is_some_and(|policy| {
+        policy.filesystem_backend == FilesystemBackendKind::HostWorkspaceAndHome
+    });
+    let host_home_root = match (include_host_home, host_home_root) {
+        (true, Some(path)) => Some(LocalDevHostHomeRoot {
+            canonical_root: canonicalize_local_dev_host_home_root(&path)?,
+            raw_alias: path,
+        }),
+        (true, None) => {
+            return Err(RebornBuildError::InvalidConfig {
+                reason: "local-dev-yolo host home access requires a confirmed host home root"
+                    .to_string(),
+            });
         }
-    })?;
-    let workspace_virtual_root = ironclaw_host_api::VirtualPath::new("/projects/workspace")
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: error.to_string(),
-        })?;
-    filesystem.mount_local(
-        projects_root,
-        ironclaw_host_api::HostPath::from_path_buf(root),
-    )?;
-    filesystem.mount_local(
-        workspace_virtual_root,
-        ironclaw_host_api::HostPath::from_path_buf(workspace_root),
-    )?;
-
-    let filesystem = Arc::new(filesystem);
-    let skill_mounts = local_dev_skill_mount_view()?;
-    let workspace_mounts = local_dev_workspace_mount_view()?;
-    let skill_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        (false, Some(_)) => {
+            return Err(RebornBuildError::InvalidConfig {
+                reason:
+                    "confirmed host home root was supplied but the resolved runtime policy does not allow host home access"
+                        .to_string(),
+            });
+        }
+        (false, None) => None,
+    };
+    validate_local_dev_workspace_skill_isolation(&root, &workspace_root)?;
+    let filesystem =
+        build_local_dev_root_filesystem(&root, &workspace_root, host_home_root.as_ref()).await?;
+    let (skill_filesystem, workspace_filesystem, runtime_workspace_mounts) =
+        build_workspace_filesystems(Arc::clone(&filesystem), host_home_root.as_ref())?;
+    let store_graph = build_local_dev_store_graph(
         Arc::clone(&filesystem),
-        skill_mounts.clone(),
-    ));
-    let workspace_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
-        Arc::clone(&filesystem),
-        workspace_mounts.clone(),
-    ));
-
-    let run_state = Arc::new(InMemoryRunStateStore::new());
-    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
-    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
-    let turn_state = Arc::new(InMemoryTurnStateStore::default());
-    let local_runtime = Arc::new(RebornLocalRuntimeServices {
-        approval_requests: Arc::clone(&approval_requests),
-        capability_leases: Arc::clone(&capability_leases),
-        turn_state: Arc::clone(&turn_state),
-        checkpoint_state_store: Arc::new(InMemoryCheckpointStateStore::default()),
-        loop_checkpoint_store: Arc::new(InMemoryLoopCheckpointStore::default()),
-        thread_service: Arc::new(InMemorySessionThreadService::default()),
-        skill_mounts,
-        workspace_mounts,
         skill_filesystem,
         workspace_filesystem,
-    });
+        runtime_workspace_mounts,
+    )?;
 
     let mut services = HostRuntimeServices::new(
         Arc::new(builtin_extension_registry()?),
         filesystem,
-        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::clone(&store_graph.resource_governor),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        store_graph.process_services.clone(),
         CapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
     .with_first_party_capabilities(Arc::new(builtin_first_party_registry()?))
@@ -225,20 +342,20 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     .try_with_host_http_egress(ironclaw_network::PolicyNetworkHttpEgress::new(
         ironclaw_network::ReqwestNetworkTransport::default(),
     ))?
-    .with_run_state(Arc::clone(&run_state))
-    .with_approval_requests(Arc::clone(&approval_requests))
-    .with_capability_leases(Arc::clone(&capability_leases))
-    .with_turn_state(Arc::clone(&turn_state));
+    .with_run_state(Arc::clone(&store_graph.run_state))
+    .with_approval_requests(Arc::clone(&store_graph.approval_requests))
+    .with_capability_leases(Arc::clone(&store_graph.capability_leases))
+    .with_turn_state_and_transition_port(Arc::clone(&store_graph.turn_state));
     if let Some(runtime_policy) = runtime_policy {
         services = services.with_runtime_policy(runtime_policy);
     }
-    // TODO(process-port): local runtime policies intentionally use the
-    // LocalHostProcessPort until a non-local process backend is composed.
+    services = apply_runtime_process_binding(services, runtime_process_binding);
 
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
         Arc::new(services.host_runtime_for_local_testing());
-    let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
-        Arc::new(DefaultTurnCoordinator::new(turn_state));
+    let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> = Arc::new(
+        DefaultTurnCoordinator::new(Arc::clone(&store_graph.turn_state)),
+    );
     let product_auth = Some(match product_auth_ports {
         Some(ports) => compose_product_auth_services(ports, turn_coordinator.clone()),
         None => Arc::new(RebornProductAuthServices::local_dev_in_memory(
@@ -254,14 +371,391 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         // the caller does not inject one; readiness tracks the assembled facade.
         product_auth,
         readiness: readiness_for(profile, true, true, product_auth_ready),
-        local_runtime: Some(local_runtime),
+        local_runtime: Some(store_graph.local_runtime),
     })
+}
+
+#[cfg(feature = "libsql")]
+fn build_local_dev_store_graph(
+    filesystem: Arc<LocalDevRootFilesystem>,
+    skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
+    workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
+    workspace_mounts: MountView,
+) -> Result<RebornLocalDevStoreGraph, RebornBuildError> {
+    let scoped_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
+    let event_log = local_dev_event_log(Arc::clone(&filesystem))?;
+    let audit_log = local_dev_audit_log(filesystem)?;
+    let run_state = Arc::new(FilesystemRunStateStore::new(Arc::clone(&scoped_filesystem)));
+    let approval_requests = Arc::new(FilesystemApprovalRequestStore::new(Arc::clone(
+        &scoped_filesystem,
+    )));
+    let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
+        &scoped_filesystem,
+    )));
+    let turn_state = Arc::new(FilesystemTurnStateStore::new(Arc::clone(
+        &scoped_filesystem,
+    )));
+    let checkpoint_state_store: Arc<dyn CheckpointStateStore> = Arc::new(
+        FilesystemCheckpointStateStore::new(Arc::clone(&scoped_filesystem)),
+    );
+    let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_state.clone();
+    let thread_service: Arc<dyn SessionThreadService> = Arc::new(
+        FilesystemSessionThreadService::new(Arc::clone(&scoped_filesystem)),
+    );
+    let skill_mounts =
+        skill_context_mount_view().map_err(|error| RebornBuildError::InvalidConfig {
+            reason: error.to_string(),
+        })?;
+    let local_runtime = Arc::new(RebornLocalRuntimeServices {
+        approval_requests: Arc::clone(&approval_requests),
+        capability_leases: Arc::clone(&capability_leases),
+        turn_state: Arc::clone(&turn_state),
+        checkpoint_state_store,
+        loop_checkpoint_store,
+        thread_service,
+        skill_mounts,
+        skill_filesystem,
+        workspace_filesystem,
+        workspace_mounts,
+        event_log,
+        audit_log,
+    });
+    let resource_governor: Arc<LocalDevResourceGovernor> =
+        Arc::new(PersistentResourceGovernor::new(
+            FilesystemResourceGovernorStore::new(Arc::clone(&scoped_filesystem)),
+        ));
+    let process_services = ProcessServices::filesystem(Arc::clone(&scoped_filesystem));
+
+    Ok(RebornLocalDevStoreGraph {
+        run_state,
+        approval_requests,
+        capability_leases,
+        turn_state,
+        local_runtime,
+        resource_governor,
+        process_services,
+    })
+}
+
+#[cfg(not(feature = "libsql"))]
+fn build_local_dev_store_graph(
+    filesystem: Arc<LocalDevRootFilesystem>,
+    skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
+    workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
+    workspace_mounts: MountView,
+) -> Result<RebornLocalDevStoreGraph, RebornBuildError> {
+    let event_log = local_dev_event_log(Arc::clone(&filesystem))?;
+    let audit_log = local_dev_audit_log(filesystem)?;
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let turn_state = Arc::new(InMemoryTurnStateStore::default());
+    let checkpoint_state_store: Arc<dyn CheckpointStateStore> =
+        Arc::new(InMemoryCheckpointStateStore::default());
+    let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> =
+        Arc::new(InMemoryLoopCheckpointStore::default());
+    let thread_service: Arc<dyn SessionThreadService> =
+        Arc::new(InMemorySessionThreadService::default());
+    let skill_mounts =
+        skill_context_mount_view().map_err(|error| RebornBuildError::InvalidConfig {
+            reason: error.to_string(),
+        })?;
+    let local_runtime = Arc::new(RebornLocalRuntimeServices {
+        approval_requests: Arc::clone(&approval_requests),
+        capability_leases: Arc::clone(&capability_leases),
+        turn_state: Arc::clone(&turn_state),
+        checkpoint_state_store,
+        loop_checkpoint_store,
+        thread_service,
+        skill_mounts,
+        skill_filesystem,
+        workspace_filesystem,
+        workspace_mounts,
+        event_log,
+        audit_log,
+    });
+    let resource_governor: Arc<LocalDevResourceGovernor> =
+        Arc::new(InMemoryResourceGovernor::new());
+    let process_services = ProcessServices::in_memory();
+
+    Ok(RebornLocalDevStoreGraph {
+        run_state,
+        approval_requests,
+        capability_leases,
+        turn_state,
+        local_runtime,
+        resource_governor,
+        process_services,
+    })
+}
+
+#[cfg(feature = "libsql")]
+async fn build_local_dev_root_filesystem(
+    root: &Path,
+    workspace_root: &Path,
+    host_home_root: Option<&LocalDevHostHomeRoot>,
+) -> Result<Arc<LocalDevRootFilesystem>, RebornBuildError> {
+    let db_path = root.join("reborn-local-dev.db");
+    let db = Arc::new(
+        libsql::Builder::new_local(&db_path)
+            .build()
+            .await
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("local-dev libSQL database could not be opened: {error}"),
+            })?,
+    );
+    let database = Arc::new(LibSqlRootFilesystem::new(db));
+    database.run_migrations().await?;
+
+    let local = Arc::new(local_dev_project_filesystem(
+        root,
+        workspace_root,
+        host_home_root,
+    )?);
+    let mut root = CompositeRootFilesystem::new();
+    root.mount(
+        local_dev_mount_descriptor(
+            "/tenants",
+            "local-dev-reborn-state",
+            BackendKind::DatabaseFilesystem,
+            StorageClass::StructuredRecords,
+            ContentKind::StructuredRecord,
+            IndexPolicy::NotIndexed,
+            database.capabilities(),
+        )?,
+        Arc::clone(&database),
+    )?;
+    root.mount(
+        local_dev_mount_descriptor(
+            "/events",
+            "local-dev-events",
+            BackendKind::DatabaseFilesystem,
+            StorageClass::StructuredRecords,
+            ContentKind::StructuredRecord,
+            IndexPolicy::NotIndexed,
+            database.capabilities(),
+        )?,
+        database,
+    )?;
+    root.mount(
+        local_dev_mount_descriptor(
+            "/projects",
+            "local-dev-project-files",
+            BackendKind::LocalFilesystem,
+            StorageClass::FileContent,
+            ContentKind::ProjectFile,
+            IndexPolicy::NotIndexed,
+            local_dev_bytes_capabilities(),
+        )?,
+        local,
+    )?;
+    Ok(Arc::new(root))
+}
+
+#[cfg(not(feature = "libsql"))]
+async fn build_local_dev_root_filesystem(
+    root: &Path,
+    workspace_root: &Path,
+    host_home_root: Option<&LocalDevHostHomeRoot>,
+) -> Result<Arc<LocalDevRootFilesystem>, RebornBuildError> {
+    Ok(Arc::new(local_dev_project_filesystem(
+        root,
+        workspace_root,
+        host_home_root,
+    )?))
+}
+
+fn local_dev_project_filesystem(
+    root: &Path,
+    workspace_root: &Path,
+    host_home_root: Option<&LocalDevHostHomeRoot>,
+) -> Result<LocalFilesystem, RebornBuildError> {
+    let mut filesystem = LocalFilesystem::new();
+    filesystem.mount_local(
+        VirtualPath::new("/projects")?,
+        HostPath::from_path_buf(root.to_path_buf()),
+    )?;
+    filesystem.mount_local(
+        VirtualPath::new("/projects/workspace")?,
+        HostPath::from_path_buf(workspace_root.to_path_buf()),
+    )?;
+    if let Some(host_home_root) = host_home_root {
+        filesystem.mount_local(
+            VirtualPath::new("/projects/host")?,
+            HostPath::from_path_buf(host_home_root.canonical_root.clone()),
+        )?;
+    }
+    Ok(filesystem)
+}
+
+#[cfg(feature = "libsql")]
+fn local_dev_mount_descriptor(
+    virtual_root: &str,
+    backend_id: &str,
+    backend_kind: BackendKind,
+    storage_class: StorageClass,
+    content_kind: ContentKind,
+    index_policy: IndexPolicy,
+    capabilities: BackendCapabilities,
+) -> Result<MountDescriptor, RebornBuildError> {
+    Ok(MountDescriptor {
+        virtual_root: VirtualPath::new(virtual_root)?,
+        backend_id: BackendId::new(backend_id)?,
+        backend_kind,
+        storage_class,
+        content_kind,
+        index_policy,
+        capabilities,
+    })
+}
+
+#[cfg(feature = "libsql")]
+fn local_dev_bytes_capabilities() -> BackendCapabilities {
+    BackendCapabilities::empty()
+        .with(Capability::Read)
+        .with(Capability::Write)
+        .with(Capability::Append)
+        .with(Capability::List)
+        .with(Capability::Stat)
+        .with(Capability::Delete)
+}
+
+#[cfg(feature = "libsql")]
+fn local_dev_scoped_filesystem(
+    filesystem: Arc<LocalDevRootFilesystem>,
+) -> Arc<ScopedFilesystem<LocalDevRootFilesystem>> {
+    crate::wrap_scoped(filesystem)
+}
+
+#[cfg(feature = "libsql")]
+fn local_dev_event_log(
+    filesystem: Arc<LocalDevRootFilesystem>,
+) -> Result<Arc<dyn DurableEventLog>, RebornBuildError> {
+    let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
+        filesystem,
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/events")?,
+            VirtualPath::new("/events")?,
+            MountPermissions::read_write_list_delete(),
+        )])?,
+    ));
+    Ok(Arc::new(
+        ironclaw_reborn_event_store::FilesystemDurableEventLog::new(scoped),
+    ))
+}
+
+#[cfg(feature = "libsql")]
+fn local_dev_audit_log(
+    filesystem: Arc<LocalDevRootFilesystem>,
+) -> Result<Arc<dyn DurableAuditLog>, RebornBuildError> {
+    let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
+        filesystem,
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/events")?,
+            VirtualPath::new("/events")?,
+            MountPermissions::read_write_list_delete(),
+        )])?,
+    ));
+    Ok(Arc::new(
+        ironclaw_reborn_event_store::FilesystemDurableAuditLog::new(scoped),
+    ))
+}
+
+#[cfg(not(feature = "libsql"))]
+fn local_dev_event_log(
+    _filesystem: Arc<LocalDevRootFilesystem>,
+) -> Result<Arc<dyn DurableEventLog>, RebornBuildError> {
+    Ok(Arc::new(InMemoryDurableEventLog::new()))
+}
+
+#[cfg(not(feature = "libsql"))]
+fn local_dev_audit_log(
+    _filesystem: Arc<LocalDevRootFilesystem>,
+) -> Result<Arc<dyn DurableAuditLog>, RebornBuildError> {
+    Ok(Arc::new(InMemoryDurableAuditLog::new()))
 }
 
 fn canonicalize_local_dev_path(path: &Path, label: &str) -> Result<PathBuf, RebornBuildError> {
     std::fs::canonicalize(path).map_err(|_| RebornBuildError::InvalidConfig {
         reason: format!("local-dev {label} could not be resolved"),
     })
+}
+
+struct LocalDevHostHomeRoot {
+    canonical_root: PathBuf,
+    raw_alias: PathBuf,
+}
+
+impl LocalDevHostHomeRoot {
+    fn aliases(&self) -> Vec<&Path> {
+        vec![self.raw_alias.as_path(), self.canonical_root.as_path()]
+    }
+}
+
+/// Build the two ScopedFilesystem views used by local-dev: a read-only workspace view
+/// for skill context, and a read-write workspace view for runtime operations.
+///
+/// When `host_home_root` is present, the runtime view also grants raw host-home aliases
+/// so `/Users/alice`-style paths resolve through the `/host` mount.
+fn build_workspace_filesystems(
+    filesystem: Arc<LocalDevRootFilesystem>,
+    host_home_root: Option<&LocalDevHostHomeRoot>,
+) -> Result<LocalDevWorkspaceFilesystems, RebornBuildError> {
+    let read_only_workspace_mounts = workspace_mount_view(MountPermissions::read_only(), &[])
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: error.to_string(),
+        })?;
+    let host_home_aliases = host_home_root
+        .map(|root| root.aliases())
+        .unwrap_or_default();
+    let runtime_workspace_mounts =
+        workspace_mount_view(MountPermissions::read_write(), &host_home_aliases).map_err(
+            |error| RebornBuildError::InvalidConfig {
+                reason: error.to_string(),
+            },
+        )?;
+    let skill_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(&filesystem),
+        skill_context_mount_view().map_err(|error| RebornBuildError::InvalidConfig {
+            reason: error.to_string(),
+        })?,
+    ));
+    let workspace_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        filesystem,
+        read_only_workspace_mounts,
+    ));
+    Ok((
+        skill_filesystem,
+        workspace_filesystem,
+        runtime_workspace_mounts,
+    ))
+}
+
+fn canonicalize_local_dev_existing_dir(
+    path: &Path,
+    label: &str,
+) -> Result<PathBuf, RebornBuildError> {
+    let path = canonicalize_local_dev_path(path, label)?;
+    let metadata = std::fs::metadata(&path).map_err(|_| RebornBuildError::InvalidConfig {
+        reason: format!("local-dev {label} could not be inspected"),
+    })?;
+    if metadata.is_dir() {
+        Ok(path)
+    } else {
+        Err(RebornBuildError::InvalidConfig {
+            reason: format!("local-dev {label} must be an existing directory"),
+        })
+    }
+}
+
+fn canonicalize_local_dev_host_home_root(path: &Path) -> Result<PathBuf, RebornBuildError> {
+    let path = canonicalize_local_dev_existing_dir(path, "host home root")?;
+    if path.parent().is_none() {
+        return Err(RebornBuildError::InvalidConfig {
+            reason: "local-dev host home root must not be a filesystem root".to_string(),
+        });
+    }
+    Ok(path)
 }
 
 fn validate_local_dev_workspace_skill_isolation(
@@ -289,45 +783,6 @@ fn validate_local_dev_workspace_skill_isolation(
 
 fn paths_overlap(left: &Path, right: &Path) -> bool {
     left == right || left.starts_with(right) || right.starts_with(left)
-}
-
-fn local_dev_skill_mount_view() -> Result<MountView, RebornBuildError> {
-    let grant = |alias: &str, target: &str| -> Result<MountGrant, RebornBuildError> {
-        Ok(MountGrant::new(
-            MountAlias::new(alias).map_err(|error| RebornBuildError::InvalidConfig {
-                reason: error.to_string(),
-            })?,
-            VirtualPath::new(target).map_err(|error| RebornBuildError::InvalidConfig {
-                reason: error.to_string(),
-            })?,
-            MountPermissions::read_only(),
-        ))
-    };
-    MountView::new(vec![
-        grant("/skills", "/projects/skills")?,
-        grant("/tenant-shared/skills", "/projects/tenant-shared/skills")?,
-        grant("/system/skills", "/projects/system/skills")?,
-    ])
-    .map_err(|error| RebornBuildError::InvalidConfig {
-        reason: error.to_string(),
-    })
-}
-
-fn local_dev_workspace_mount_view() -> Result<MountView, RebornBuildError> {
-    MountView::new(vec![MountGrant::new(
-        MountAlias::new("/workspace").map_err(|error| RebornBuildError::InvalidConfig {
-            reason: error.to_string(),
-        })?,
-        VirtualPath::new("/projects/workspace").map_err(|error| {
-            RebornBuildError::InvalidConfig {
-                reason: error.to_string(),
-            }
-        })?,
-        MountPermissions::read_only(),
-    )])
-    .map_err(|error| RebornBuildError::InvalidConfig {
-        reason: error.to_string(),
-    })
 }
 
 fn builtin_extension_registry() -> Result<ExtensionRegistry, RebornBuildError> {
@@ -387,6 +842,7 @@ async fn build_production_shaped(
         production_trust_policy,
         runtime_policy,
         turn_run_wake_notifier,
+        runtime_process_binding,
         required_runtime_backends,
         require_runtime_http_egress,
         require_wasm_credentials,
@@ -403,6 +859,7 @@ async fn build_production_shaped(
         production_trust_policy,
         runtime_policy,
         turn_run_wake_notifier,
+        runtime_process_binding,
         required_runtime_backends,
         require_runtime_http_egress,
         require_wasm_credentials,
@@ -429,10 +886,9 @@ async fn build_production_shaped(
                 production_trust_policy,
                 runtime_policy,
                 turn_run_wake_notifier,
+                runtime_process_binding,
             )?;
-            // TODO(process-port): if production enables FirstParty runtime,
-            // HostRuntimeServices must be given a production process port;
-            // otherwise the LocalHostProcessPort default is rejected.
+            let secret_master_key = resolve_secret_master_key(secret_master_key).await?;
             let context = RebornProductionBuildContext {
                 profile,
                 wiring_config,
@@ -451,10 +907,9 @@ async fn build_production_shaped(
                 production_trust_policy,
                 runtime_policy,
                 turn_run_wake_notifier,
+                runtime_process_binding,
             )?;
-            // TODO(process-port): if production enables FirstParty runtime,
-            // HostRuntimeServices must be given a production process port;
-            // otherwise the LocalHostProcessPort default is rejected.
+            let secret_master_key = resolve_secret_master_key(secret_master_key).await?;
             let context = RebornProductionBuildContext {
                 profile,
                 wiring_config,
@@ -467,10 +922,26 @@ async fn build_production_shaped(
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
+async fn resolve_secret_master_key(
+    explicit: Option<ironclaw_secrets::SecretMaterial>,
+) -> Result<ironclaw_secrets::SecretMaterial, RebornBuildError> {
+    if let Some(master_key) = explicit {
+        Ok(master_key)
+    } else if let Some(master_key) =
+        ironclaw_secrets::keychain::resolve_master_key_material().await?
+    {
+        Ok(master_key)
+    } else {
+        Err(RebornBuildError::MissingSecretMasterKey)
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 struct RebornProductionWiring {
     trust_policy: Arc<HostTrustPolicy>,
     runtime_policy: EffectiveRuntimePolicy,
     turn_run_wake_notifier: Arc<ironclaw_host_runtime::SchedulerTurnRunWakeNotifier>,
+    runtime_process_binding: RebornRuntimeProcessBinding,
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -486,19 +957,34 @@ fn production_wiring(
     trust_policy: Option<Arc<HostTrustPolicy>>,
     runtime_policy: Option<EffectiveRuntimePolicy>,
     turn_run_wake_notifier: Option<Arc<ironclaw_host_runtime::SchedulerTurnRunWakeNotifier>>,
+    runtime_process_binding: RebornRuntimeProcessBinding,
 ) -> Result<RebornProductionWiring, RebornBuildError> {
     let trust_policy = trust_policy.ok_or(RebornBuildError::MissingProductionTrustPolicy)?;
     if !trust_policy.has_sources() {
         return Err(RebornBuildError::EmptyProductionTrustPolicy);
     }
     let runtime_policy = runtime_policy.ok_or(RebornBuildError::MissingRuntimePolicy)?;
+    validate_production_process_binding(&runtime_policy, &runtime_process_binding)?;
     let turn_run_wake_notifier =
         turn_run_wake_notifier.ok_or(RebornBuildError::MissingTurnRunWakeNotifier)?;
     Ok(RebornProductionWiring {
         trust_policy,
         runtime_policy,
         turn_run_wake_notifier,
+        runtime_process_binding,
     })
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn validate_production_process_binding(
+    runtime_policy: &EffectiveRuntimePolicy,
+    binding: &RebornRuntimeProcessBinding,
+) -> Result<(), RebornBuildError> {
+    binding
+        .validate_for_production_policy(runtime_policy)
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: error.to_string(),
+        })
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -591,6 +1077,10 @@ where
     .with_filesystem_turn_state_store(stores.scoped_filesystem)
     .with_run_profile_resolver(planned_run_profile_resolver()?)
     .with_turn_run_wake_notifier(production_wiring.turn_run_wake_notifier);
+    let services = apply_production_runtime_process_binding(
+        services,
+        production_wiring.runtime_process_binding,
+    );
 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
         Arc::new(services.turn_coordinator_for_production()?);
@@ -684,8 +1174,9 @@ mod tests {
     use ironclaw_filesystem::FilesystemError;
     use ironclaw_host_api::{
         CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
-        ExecutionContext, ExtensionId, GrantConstraints, InvocationId, NetworkPolicy, Principal,
-        ResourceEstimate, ResourceScope, RuntimeKind, ScopedPath, TrustClass, UserId,
+        ExecutionContext, ExtensionId, GrantConstraints, InvocationId, MountAlias, MountGrant,
+        NetworkPolicy, Principal, ResourceEstimate, ResourceScope, RuntimeKind, ScopedPath,
+        TrustClass, UserId, VirtualPath,
     };
     use ironclaw_host_runtime::{
         RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind,
@@ -708,6 +1199,63 @@ mod tests {
         assert!(services.product_auth.is_some());
         assert!(services.local_runtime.is_some());
         assert_eq!(services.readiness.state, RebornReadinessState::DevOnly);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn local_dev_services_persist_thread_records_across_rebuilds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("local-dev");
+        let scope = ironclaw_threads::ThreadScope {
+            tenant_id: ironclaw_host_api::TenantId::new("persist-tenant").unwrap(),
+            agent_id: ironclaw_host_api::AgentId::new("persist-agent").unwrap(),
+            project_id: None,
+            owner_user_id: Some(ironclaw_host_api::UserId::new("persist-owner").unwrap()),
+            mission_id: None,
+        };
+        let thread_id = ironclaw_host_api::ThreadId::new("persisted-thread").unwrap();
+
+        let services =
+            build_reborn_services(RebornBuildInput::local_dev("persist-owner", root.clone()))
+                .await
+                .expect("first local-dev services build");
+        services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime")
+            .thread_service
+            .ensure_thread(ironclaw_threads::EnsureThreadRequest {
+                scope: scope.clone(),
+                thread_id: Some(thread_id.clone()),
+                created_by_actor_id: "persist-owner".to_string(),
+                title: Some("Persisted thread".to_string()),
+                metadata_json: None,
+            })
+            .await
+            .expect("persist thread");
+        drop(services);
+
+        let rebuilt =
+            build_reborn_services(RebornBuildInput::local_dev("persist-owner", root.clone()))
+                .await
+                .expect("rebuilt local-dev services");
+        let history = rebuilt
+            .local_runtime
+            .as_ref()
+            .expect("rebuilt local runtime")
+            .thread_service
+            .list_thread_history(ironclaw_threads::ThreadHistoryRequest {
+                scope,
+                thread_id: thread_id.clone(),
+            })
+            .await
+            .expect("read persisted thread");
+
+        assert_eq!(history.thread.thread_id, thread_id);
+        assert!(
+            root.join("reborn-local-dev.db").exists(),
+            "local-dev should use a libSQL database under the local-dev root"
+        );
     }
 
     #[tokio::test]
@@ -1046,3 +1594,5 @@ mod tests {
 
 #[cfg(test)]
 mod auth_tests;
+#[cfg(test)]
+mod local_dev_host_tests;

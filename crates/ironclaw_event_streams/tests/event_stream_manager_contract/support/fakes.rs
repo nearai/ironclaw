@@ -245,6 +245,25 @@ impl EventProjectionService for PayloadThreadMismatchProjectionService {
     }
 }
 
+struct ActivityThreadMismatchProjectionService;
+
+#[async_trait]
+impl EventProjectionService for ActivityThreadMismatchProjectionService {
+    async fn snapshot(
+        &self,
+        request: ProjectionRequest,
+    ) -> Result<ProjectionSnapshot, ProjectionError> {
+        Ok(snapshot_with_activity_thread(&request.scope, 10, "thread-b"))
+    }
+
+    async fn updates(
+        &self,
+        request: ProjectionRequest,
+    ) -> Result<ProjectionReplay, ProjectionError> {
+        Ok(replay_with_activity_thread(&request.scope, 2, 3, "thread-b"))
+    }
+}
+
 struct FailingUpdatesProjectionService {
     error: ProjectionError,
 }
@@ -266,12 +285,22 @@ impl EventProjectionService for FailingUpdatesProjectionService {
             ProjectionError::InvalidRequest { reason } => {
                 ProjectionError::InvalidRequest { reason }
             }
+            ProjectionError::MissingProjectionMetadata { field } => {
+                ProjectionError::MissingProjectionMetadata { field: *field }
+            }
             ProjectionError::RebaseRequired {
                 requested,
                 earliest,
             } => ProjectionError::RebaseRequired {
                 requested: requested.clone(),
                 earliest: earliest.clone(),
+            },
+            ProjectionError::TurnEventRebaseRequired {
+                requested,
+                earliest,
+            } => ProjectionError::TurnEventRebaseRequired {
+                requested: *requested,
+                earliest: *earliest,
             },
             ProjectionError::Source { operation } => ProjectionError::Source { operation },
         };
@@ -293,12 +322,22 @@ impl EventProjectionService for FailingSnapshotProjectionService {
             ProjectionError::InvalidRequest { reason } => {
                 ProjectionError::InvalidRequest { reason }
             }
+            ProjectionError::MissingProjectionMetadata { field } => {
+                ProjectionError::MissingProjectionMetadata { field: *field }
+            }
             ProjectionError::RebaseRequired {
                 requested,
                 earliest,
             } => ProjectionError::RebaseRequired {
                 requested: requested.clone(),
                 earliest: earliest.clone(),
+            },
+            ProjectionError::TurnEventRebaseRequired {
+                requested,
+                earliest,
+            } => ProjectionError::TurnEventRebaseRequired {
+                requested: *requested,
+                earliest: *earliest,
             },
             ProjectionError::Source { operation } => ProjectionError::Source { operation },
         })

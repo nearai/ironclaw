@@ -1025,12 +1025,27 @@ impl Inner {
         kind: TurnEventKind,
         sanitized_reason: Option<String>,
     ) {
+        let blocked_gate = if kind == TurnEventKind::Blocked {
+            record.gate_ref.clone().and_then(|gate_ref| {
+                crate::events::TurnBlockedGateKind::from_status(record.status).map(|gate_kind| {
+                    crate::events::TurnBlockedGateMetadata {
+                        gate_ref,
+                        gate_kind,
+                    }
+                })
+            })
+        } else {
+            None
+        };
         self.events.push(TurnLifecycleEvent {
             cursor: record.event_cursor,
             scope: record.scope.clone(),
+            occurred_at: Some(Utc::now()),
+            owner_user_id: Some(record.actor.user_id.clone()),
             run_id: record.run_id,
             status: record.status,
             kind,
+            blocked_gate,
             sanitized_reason,
         });
         if self.events.len() > self.limits.max_events {

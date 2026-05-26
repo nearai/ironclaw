@@ -10,8 +10,7 @@
 //! Documented test-support substitutions:
 //! - the model gateway is scripted trace replay;
 //! - the capability port is a local recording echo/approval port;
-//! - external network, delivery, OAuth, and sandbox process execution are not
-//!   exercised by this harness.
+//! - external internet, delivery, and OAuth are not exercised by this harness.
 
 #![allow(dead_code)] // Shared by staged Reborn binary-E2E validation ports.
 
@@ -30,24 +29,27 @@ use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     AgentId, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
-    ExtensionId, GrantConstraints, HostPath, MountAlias, MountGrant, MountPermissions, MountView,
-    NetworkPolicy, NetworkScheme, NetworkTargetPattern, PackageId, Principal, ProjectId,
-    ResourceScope, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
-    RuntimeHttpEgressResponse, RuntimeKind, SecretHandle, TenantId, ThreadId, TrustClass, UserId,
-    VirtualPath,
+    ExtensionId, GrantConstraints, HostPath, InvocationId, MountAlias, MountGrant,
+    MountPermissions, MountView, NetworkPolicy, NetworkScheme, NetworkTargetPattern, PackageId,
+    Principal, ProjectId, ResourceScope, RuntimeHttpEgress, RuntimeHttpEgressError,
+    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind, SecretHandle, TenantId,
+    ThreadId, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, CapabilitySurfacePolicy,
-    CapabilitySurfaceVersion as HostRuntimeCapabilitySurfaceVersion, GLOB_CAPABILITY_ID,
-    GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HostRuntime, HostRuntimeServices, JSON_CAPABILITY_ID,
-    LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SurfaceKind, TIME_CAPABILITY_ID,
-    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers, builtin_first_party_package,
+    CapabilitySurfaceVersion as HostRuntimeCapabilitySurfaceVersion, ECHO_CAPABILITY_ID,
+    GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HostRuntime, HostRuntimeServices,
+    JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
+    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SurfaceKind,
+    TIME_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
+    builtin_first_party_package,
 };
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
     HostManagedModelRequest, HostRuntimeLoopCapabilityPortFactory, LoopCapabilityResultWriter,
 };
+use ironclaw_network::{PolicyNetworkHttpEgress, ReqwestNetworkTransport};
 use ironclaw_product_adapters::{
     ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductTriggerReason,
     ProductWorkflow,
@@ -74,6 +76,7 @@ use ironclaw_reborn_composition::{
     build_reborn_services, visible_capability_request_for_run,
 };
 use ironclaw_resources::InMemoryResourceGovernor;
+use ironclaw_secrets::InMemorySecretStore;
 use ironclaw_threads::{
     FilesystemSessionThreadService, SessionThreadService, ThreadHistoryRequest,
     ThreadMessageRecord, ThreadScope,
@@ -449,6 +452,34 @@ impl RebornBinaryE2EHarness {
         .await
     }
 
+    pub async fn with_host_runtime_process_capabilities(
+        conversation_id: &str,
+        model_gateway: RebornTraceReplayModelGateway,
+    ) -> HarnessResult<Self> {
+        let host_runtime = Arc::new(HostRuntimeCapabilityHarness::process_tools().await?);
+        Self::with_model_gateway_capability_mode(
+            conversation_id,
+            model_gateway,
+            HarnessCapabilityMode::HostRuntime(host_runtime),
+            false,
+        )
+        .await
+    }
+
+    pub async fn with_host_runtime_skill_management_capabilities(
+        conversation_id: &str,
+        model_gateway: RebornTraceReplayModelGateway,
+    ) -> HarnessResult<Self> {
+        let host_runtime = Arc::new(HostRuntimeCapabilityHarness::skill_management_tools().await?);
+        Self::with_model_gateway_capability_mode(
+            conversation_id,
+            model_gateway,
+            HarnessCapabilityMode::HostRuntime(host_runtime),
+            false,
+        )
+        .await
+    }
+
     pub async fn with_host_runtime_core_builtin_capabilities_network_policy(
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
@@ -456,6 +487,24 @@ impl RebornBinaryE2EHarness {
     ) -> HarnessResult<Self> {
         let host_runtime = Arc::new(
             HostRuntimeCapabilityHarness::core_builtin_tools_with_network_policy(network_policy)
+                .await?,
+        );
+        Self::with_model_gateway_capability_mode(
+            conversation_id,
+            model_gateway,
+            HarnessCapabilityMode::HostRuntime(host_runtime),
+            false,
+        )
+        .await
+    }
+
+    pub async fn with_host_runtime_core_builtin_capabilities_live_http_egress(
+        conversation_id: &str,
+        model_gateway: RebornTraceReplayModelGateway,
+        network_policy: NetworkPolicy,
+    ) -> HarnessResult<Self> {
+        let host_runtime = Arc::new(
+            HostRuntimeCapabilityHarness::core_builtin_tools_with_live_http_egress(network_policy)
                 .await?,
         );
         Self::with_model_gateway_capability_mode(
@@ -1323,6 +1372,46 @@ impl HostRuntimeCapabilityHarness {
         .await
     }
 
+    async fn process_tools() -> HarnessResult<Self> {
+        Self::new_with_mounts(
+            "reborn-e2e-process-tools",
+            vec![
+                CapabilityId::new(ECHO_CAPABILITY_ID)?,
+                CapabilityId::new(SHELL_CAPABILITY_ID)?,
+            ],
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+                EffectKind::Network,
+                EffectKind::SpawnProcess,
+                EffectKind::ExecuteCode,
+            ],
+            Vec::new(),
+            ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+            UserId::new("reborn-e2e-process-user")?,
+            MountView::default(),
+        )
+        .await
+    }
+
+    async fn skill_management_tools() -> HarnessResult<Self> {
+        Self::new_with_mounts(
+            "reborn-e2e-skill-management-tools",
+            vec![
+                CapabilityId::new(SKILL_LIST_CAPABILITY_ID)?,
+                CapabilityId::new(SKILL_INSTALL_CAPABILITY_ID)?,
+                CapabilityId::new(SKILL_REMOVE_CAPABILITY_ID)?,
+            ],
+            vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
+            Vec::new(),
+            ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+            UserId::new("reborn-e2e-skill-management-user")?,
+            skill_mounts()?,
+        )
+        .await
+    }
+
     async fn new(
         service_label: &'static str,
         capability_ids: Vec<CapabilityId>,
@@ -1330,6 +1419,27 @@ impl HostRuntimeCapabilityHarness {
         secrets: Vec<SecretHandle>,
         provider_id: ExtensionId,
         user_id: UserId,
+    ) -> HarnessResult<Self> {
+        Self::new_with_mounts(
+            service_label,
+            capability_ids,
+            effect_kinds,
+            secrets,
+            provider_id,
+            user_id,
+            workspace_mounts(MountPermissions::read_write_list_delete())?,
+        )
+        .await
+    }
+
+    async fn new_with_mounts(
+        service_label: &'static str,
+        capability_ids: Vec<CapabilityId>,
+        effect_kinds: Vec<EffectKind>,
+        secrets: Vec<SecretHandle>,
+        provider_id: ExtensionId,
+        user_id: UserId,
+        mounts: MountView,
     ) -> HarnessResult<Self> {
         let root = Arc::new(tempfile::tempdir()?);
         let storage_root = root.path().join("local-dev");
@@ -1340,7 +1450,6 @@ impl HostRuntimeCapabilityHarness {
         let runtime = services
             .host_runtime
             .ok_or("local-dev Reborn services missing host runtime")?;
-        let mounts = workspace_mounts(MountPermissions::read_write_list_delete())?;
         Ok(Self {
             runtime,
             io: Arc::new(ProductLiveCapabilityIo::default()),
@@ -1365,16 +1474,43 @@ impl HostRuntimeCapabilityHarness {
     async fn core_builtin_tools_with_network_policy(
         network_policy: NetworkPolicy,
     ) -> HarnessResult<Self> {
-        let root = Arc::new(tempfile::tempdir()?);
-        let storage_root = root.path().join("local-dev");
-        let workspace_root = storage_root.join("workspace");
-        std::fs::create_dir_all(&workspace_root)?;
+        let (root, storage_root, workspace_root) = host_runtime_storage_roots()?;
         let runtime = local_dev_host_runtime_with_http_egress(
             storage_root.clone(),
             Arc::new(RecordingRuntimeHttpEgress::with_body(
                 br#"{"accepted":true}"#.to_vec(),
             )),
         )?;
+        Self::core_builtin_tools_from_runtime(
+            root,
+            workspace_root,
+            runtime,
+            network_policy,
+            UserId::new("reborn-e2e-core-builtins-user")?,
+        )
+    }
+
+    async fn core_builtin_tools_with_live_http_egress(
+        network_policy: NetworkPolicy,
+    ) -> HarnessResult<Self> {
+        let (root, storage_root, workspace_root) = host_runtime_storage_roots()?;
+        let runtime = local_dev_host_runtime_with_live_http_egress(storage_root.clone())?;
+        Self::core_builtin_tools_from_runtime(
+            root,
+            workspace_root,
+            runtime,
+            network_policy,
+            UserId::new("reborn-e2e-core-builtins-live-http-user")?,
+        )
+    }
+
+    fn core_builtin_tools_from_runtime(
+        root: Arc<tempfile::TempDir>,
+        workspace_root: PathBuf,
+        runtime: Arc<dyn HostRuntime>,
+        network_policy: NetworkPolicy,
+        user_id: UserId,
+    ) -> HarnessResult<Self> {
         let mounts = workspace_mounts(MountPermissions::read_write_list_delete())?;
         Ok(Self {
             runtime,
@@ -1398,7 +1534,7 @@ impl HostRuntimeCapabilityHarness {
             network_policy,
             secrets: Vec::new(),
             provider_id: ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
-            user_id: UserId::new("reborn-e2e-core-builtins-user")?,
+            user_id,
             invocations: Arc::new(Mutex::new(Vec::new())),
             results: Arc::new(Mutex::new(Vec::new())),
         })
@@ -1574,6 +1710,14 @@ fn local_dev_host_runtime_with_http_egress(
     local_dev_host_runtime_with_registry_and_http_egress(storage_root, registry, egress)
 }
 
+fn host_runtime_storage_roots() -> HarnessResult<(Arc<tempfile::TempDir>, PathBuf, PathBuf)> {
+    let root = Arc::new(tempfile::tempdir()?);
+    let storage_root = root.path().join("local-dev");
+    let workspace_root = storage_root.join("workspace");
+    std::fs::create_dir_all(&workspace_root)?;
+    Ok((root, storage_root, workspace_root))
+}
+
 fn local_dev_host_runtime_with_registry_and_http_egress(
     storage_root: PathBuf,
     registry: ExtensionRegistry,
@@ -1595,6 +1739,41 @@ fn local_dev_host_runtime_with_registry_and_http_egress(
     )
     .with_first_party_capabilities(Arc::new(builtin_first_party_handlers()?))
     .with_runtime_http_egress(egress)
+    .with_trust_policy(Arc::new(first_party_trust_policy()?));
+
+    Ok(Arc::new(services.host_runtime_for_local_testing()))
+}
+
+fn local_dev_host_runtime_with_live_http_egress(
+    storage_root: PathBuf,
+) -> HarnessResult<Arc<dyn HostRuntime>> {
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(builtin_first_party_package()?)?;
+
+    let mut filesystem = LocalFilesystem::new();
+    filesystem.mount_local(
+        VirtualPath::new("/projects")?,
+        HostPath::from_path_buf(storage_root),
+    )?;
+
+    let services = HostRuntimeServices::new(
+        Arc::new(registry),
+        Arc::new(filesystem),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        HostRuntimeCapabilitySurfaceVersion::new("reborn-app-v1")?,
+    )
+    .with_secret_store(Arc::new(InMemorySecretStore::new()))
+    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers()?))
+    .try_with_host_http_egress(PolicyNetworkHttpEgress::new(ReqwestNetworkTransport::new(
+        Duration::from_secs(2),
+    )))
+    .map_err(|report| {
+        std::io::Error::other(format!(
+            "live HTTP egress production wiring failed: {report:?}"
+        ))
+    })?
     .with_trust_policy(Arc::new(first_party_trust_policy()?));
 
     Ok(Arc::new(services.host_runtime_for_local_testing()))
@@ -1667,12 +1846,20 @@ impl LoopCapabilityResultWriter for RecordingCapabilityResultWriter {
     async fn write_capability_result(
         &self,
         run_context: &LoopRunContext,
+        input_ref: &CapabilityInputRef,
+        invocation_id: InvocationId,
         capability_id: &CapabilityId,
         output: serde_json::Value,
     ) -> Result<LoopResultRef, AgentLoopHostError> {
         let result_ref = self
             .inner
-            .write_capability_result(run_context, capability_id, output.clone())
+            .write_capability_result(
+                run_context,
+                input_ref,
+                invocation_id,
+                capability_id,
+                output.clone(),
+            )
             .await?;
         self.results.lock().unwrap().push(RecordedCapabilityResult {
             capability_id: capability_id.clone(),
@@ -1688,6 +1875,21 @@ fn workspace_mounts(permissions: MountPermissions) -> HarnessResult<MountView> {
         VirtualPath::new("/projects/workspace")?,
         permissions,
     )])?)
+}
+
+fn skill_mounts() -> HarnessResult<MountView> {
+    Ok(MountView::new(vec![
+        MountGrant::new(
+            MountAlias::new("/skills")?,
+            VirtualPath::new("/projects/skills")?,
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/system/skills")?,
+            VirtualPath::new("/projects/system/skills")?,
+            MountPermissions::read_only(),
+        ),
+    ])?)
 }
 
 fn capability_grants(

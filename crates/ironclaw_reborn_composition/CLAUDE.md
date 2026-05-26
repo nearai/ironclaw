@@ -169,12 +169,13 @@ The `serve` subcommand builds a full local-dev `RebornRuntime`, asks
 `build_webui_services(&runtime, None)` for the WebUI bundle, and hands
 the resulting router to the host-owned `ironclaw_reborn_webui_ingress`
 listener lifecycle. The bundle's default projection stream is backed by
-the runtime's process-local in-memory durable event log plus
-`EventStreamManager`, so `/events` and `/ws` no longer advertise routes
-that only return `Unavailable`. That log is intentionally local-dev
-scaffolding for this slice; production durable retention/live fanout
-belongs in the host runtime/event-store follow-up rather than this
-composition facade.
+the runtime-owned durable event log plus `EventStreamManager`, so
+`/events` and `/ws` no longer advertise routes that only return
+`Unavailable`. In local-dev builds with `libsql` enabled, the log and
+runtime state stores sit behind the composed local-dev root filesystem
+(`reborn-local-dev.db` for durable records, `/projects` for workspace
+files). Production durable retention/live fanout still belongs in the
+host runtime/event-store follow-up rather than this composition facade.
 
 ```rust
 // Inside a host-owned ingress crate / binary (NOT in this crate —

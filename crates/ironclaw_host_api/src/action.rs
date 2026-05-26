@@ -92,6 +92,9 @@ fn validate_network_host_pattern(pattern: &str) -> Result<(), crate::HostApiErro
             "host pattern must be non-empty and at most 253 bytes",
         ));
     }
+    if pattern == "*" {
+        return Ok(());
+    }
     if pattern.contains('\0') || pattern.chars().any(char::is_control) {
         return Err(crate::HostApiError::invalid_network_target(
             pattern,

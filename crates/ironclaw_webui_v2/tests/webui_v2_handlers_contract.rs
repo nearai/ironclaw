@@ -16,11 +16,15 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode};
 use http_body_util::BodyExt;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_host_api::{
+    AgentId, CapabilityId, ExtensionId, InvocationId, ProjectId, RuntimeKind, TenantId, ThreadId,
+    UserId,
+};
 use ironclaw_product_adapters::{
-    AdapterInstallationId, ExternalConversationRef, FinalReplyView, ProductAdapterId,
-    ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget, ProductProjectionItem,
-    ProductProjectionState, ProgressKind, ProgressUpdateView, ProjectionCursor,
+    AdapterInstallationId, CapabilityActivityStatusView, CapabilityActivityView,
+    ExternalConversationRef, FinalReplyView, ProductAdapterId, ProductOutboundEnvelope,
+    ProductOutboundPayload, ProductOutboundTarget, ProductProjectionItem, ProductProjectionState,
+    ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
 use ironclaw_product_workflow::{
     ExtensionName, RebornCancelRunResponse, RebornCreateThreadResponse, RebornGetRunStateRequest,
@@ -1035,6 +1039,24 @@ fn make_projection_update_envelope(cursor: &str) -> ProductOutboundEnvelope {
     )
 }
 
+fn make_capability_activity_envelope(cursor: &str) -> ProductOutboundEnvelope {
+    make_outbound_envelope(
+        cursor,
+        ProductOutboundPayload::CapabilityActivity(CapabilityActivityView {
+            invocation_id: InvocationId::new(),
+            thread_id: Some(ThreadId::new("thread-x").expect("thread id")),
+            capability_id: CapabilityId::new("script.echo").expect("capability id"),
+            status: CapabilityActivityStatusView::Running,
+            provider: Some(ExtensionId::new("script").expect("provider id")),
+            runtime: Some(RuntimeKind::Script),
+            process_id: None,
+            output_bytes: None,
+            error_kind: None,
+            updated_at: chrono::Utc::now(),
+        }),
+    )
+}
+
 fn make_outbound_envelope(
     cursor: &str,
     payload: ProductOutboundPayload,
@@ -1137,9 +1159,15 @@ async fn stream_events_emits_typed_browser_events_with_cursor_ids() {
     let envelope_a = make_projection_envelope("cursor:a", "hello");
     let envelope_b = make_tool_progress_envelope("cursor:b");
     let envelope_c = make_projection_update_envelope("cursor:c");
+    let envelope_d = make_capability_activity_envelope("cursor:d");
 
     services.enqueue_stream_events(Ok(RebornStreamEventsResponse {
-        events: vec![envelope_a.clone(), envelope_b.clone(), envelope_c.clone()],
+        events: vec![
+            envelope_a.clone(),
+            envelope_b.clone(),
+            envelope_c.clone(),
+            envelope_d.clone(),
+        ],
     }));
     // Second drain is empty: lets the test observe `after_cursor`
     // advancement on the follow-up call without producing more events.
@@ -1168,7 +1196,7 @@ async fn stream_events_emits_typed_browser_events_with_cursor_ids() {
     let mut bytes = Vec::<u8>::new();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
-        let have_events = bytes.windows(2).filter(|w| *w == b"\n\n").count() >= 3;
+        let have_events = bytes.windows(2).filter(|w| *w == b"\n\n").count() >= 4;
         let saw_second_call = services.stream_events_calls.lock().expect("lock").len() >= 2;
         if have_events && saw_second_call {
             break;
@@ -1190,8 +1218,8 @@ async fn stream_events_emits_typed_browser_events_with_cursor_ids() {
 
     let events = parse_sse_events(&bytes);
     assert!(
-        events.len() >= 3,
-        "expected at least three SSE events, got: {events:?}; raw: {}",
+        events.len() >= 4,
+        "expected at least four SSE events, got: {events:?}; raw: {}",
         String::from_utf8_lossy(&bytes)
     );
 
@@ -1201,6 +1229,8 @@ async fn stream_events_emits_typed_browser_events_with_cursor_ids() {
         serde_json::to_string(envelope_b.projection_cursor()).expect("cursor-b json");
     let cursor_c_json =
         serde_json::to_string(envelope_c.projection_cursor()).expect("cursor-c json");
+    let cursor_d_json =
+        serde_json::to_string(envelope_d.projection_cursor()).expect("cursor-d json");
 
     assert_eq!(events[0].event.as_deref(), Some("final_reply"));
     assert_eq!(events[0].id.as_deref(), Some(cursor_a_json.as_str()));
@@ -1239,8 +1269,20 @@ async fn stream_events_emits_typed_browser_events_with_cursor_ids() {
         event_c_json["state"]["items"][0]["text"]["body"],
         "projection body"
     );
+
+    assert_eq!(events[3].event.as_deref(), Some("capability_activity"));
+    assert_eq!(events[3].id.as_deref(), Some(cursor_d_json.as_str()));
+    let event_d_json: Value =
+        serde_json::from_str(events[3].data.as_deref().expect("data")).expect("event d json");
+    assert_eq!(event_d_json["cursor"], "cursor:d");
+    assert_eq!(event_d_json["type"], "capability_activity");
+    assert_eq!(event_d_json["activity"]["status"], "running");
+    assert_eq!(event_d_json["activity"]["capability_id"], "script.echo");
+    assert!(event_d_json["activity"].get("arguments").is_none());
+    assert!(event_d_json["activity"].get("result").is_none());
     assert_no_adapter_metadata(&event_b_json);
     assert_no_adapter_metadata(&event_c_json);
+    assert_no_adapter_metadata(&event_d_json);
 
     let calls = services.stream_events_calls.lock().expect("lock").clone();
     assert!(
@@ -1250,7 +1292,7 @@ async fn stream_events_emits_typed_browser_events_with_cursor_ids() {
     );
     assert_eq!(
         calls[1].after_cursor.as_ref(),
-        Some(envelope_c.projection_cursor()),
+        Some(envelope_d.projection_cursor()),
         "second poll must advance after_cursor to the last emitted cursor"
     );
 }

@@ -31,14 +31,15 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use ironclaw_events::{DurableEventLog, InMemoryAuditSink, InMemoryDurableEventLog, RuntimeEvent};
-use ironclaw_filesystem::LocalFilesystem;
+use ironclaw_events::{DurableAuditLog, DurableEventLog, InMemoryAuditSink, RuntimeEvent};
 use ironclaw_first_party_extension_ports::{
     FirstPartySkillsExtension, FirstPartySkillsExtensionHandles, SelectableSkillContextSource,
     SkillActivationSelectorConfig, SkillExecutionAdapter,
 };
 use ironclaw_host_api::{
-    AgentId, CapabilityId, InvocationId, ResourceScope, TenantId, ThreadId, UserId,
+    ActionResultSummary, ActionSummary, AgentId, AuditEnvelope, AuditEventId, AuditStage,
+    CapabilityId, CorrelationId, DecisionSummary, EffectKind, InvocationId, ResourceScope,
+    TenantId, ThreadId, UserId,
 };
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
@@ -61,17 +62,19 @@ use ironclaw_reborn::runtime::{
 };
 use ironclaw_reborn::turn_runner::{TurnRunnerWakeSender, TurnRunnerWorkerConfig};
 use ironclaw_threads::{
-    AcceptInboundMessageRequest, EnsureThreadRequest, InMemorySessionThreadService, MessageContent,
-    MessageKind, MessageStatus, SessionThreadService, ThreadHistoryRequest, ThreadScope,
+    AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent, MessageKind, MessageStatus,
+    SessionThreadService, ThreadHistoryRequest, ThreadScope,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey,
-    InMemoryTurnStateStore, ReplyTargetBindingRef, RunProfileResolutionRequest,
-    SanitizedCancelReason, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-    TurnCoordinator, TurnError, TurnEventProjectionSource, TurnRunId, TurnScope, TurnStatus,
+    ReplyTargetBindingRef, RunProfileResolutionRequest, SanitizedCancelReason, SourceBindingRef,
+    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
+    TurnEventProjectionSource, TurnPersistenceSnapshot, TurnRunId, TurnRunRecord, TurnScope,
+    TurnStatus,
     run_profile::{LoopHostMilestoneSink, LoopRunContext, PromptMode},
 };
 
+use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore};
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
 use crate::{RebornBuildError, RebornCompositionProfile, RebornServices, build_reborn_services};
@@ -169,7 +172,7 @@ impl From<DefaultPlannedRuntimeBuildError> for RebornRuntimeError {
 pub struct RebornRuntime {
     services: RebornServices,
     turn_coordinator: Arc<dyn TurnCoordinator>,
-    thread_service: Arc<InMemorySessionThreadService>,
+    thread_service: Arc<dyn SessionThreadService>,
     thread_scope: ThreadScope,
     worker_handle: JoinHandle<()>,
     worker_cancel: CancellationToken,
@@ -190,22 +193,38 @@ pub struct RebornRuntime {
 }
 
 pub(crate) type LocalDevSelectableSkillContextSource =
-    SelectableSkillContextSource<FilesystemSkillBundleSource<LocalFilesystem>>;
+    SelectableSkillContextSource<FilesystemSkillBundleSource<LocalDevRootFilesystem>>;
 type LocalDevSkillExecutionAdapter =
-    SkillExecutionAdapter<FilesystemSkillBundleSource<LocalFilesystem>>;
+    SkillExecutionAdapter<FilesystemSkillBundleSource<LocalDevRootFilesystem>>;
 
-struct InMemoryApprovalTurnRunLocator {
-    turn_state: Arc<InMemoryTurnStateStore>,
+struct LocalDevApprovalTurnRunLocator {
+    turn_state: Arc<LocalDevTurnStateStore>,
 }
 
-impl InMemoryApprovalTurnRunLocator {
-    fn new(turn_state: Arc<InMemoryTurnStateStore>) -> Self {
+impl LocalDevApprovalTurnRunLocator {
+    fn new(turn_state: Arc<LocalDevTurnStateStore>) -> Self {
         Self { turn_state }
+    }
+
+    async fn snapshot(
+        &self,
+    ) -> Result<TurnPersistenceSnapshot, ironclaw_product_workflow::ProductWorkflowError> {
+        #[cfg(feature = "libsql")]
+        {
+            self.turn_state
+                .persistence_snapshot()
+                .await
+                .map_err(|_| approval_turn_locator_unavailable())
+        }
+        #[cfg(not(feature = "libsql"))]
+        {
+            Ok(self.turn_state.persistence_snapshot())
+        }
     }
 }
 
 #[async_trait::async_trait]
-impl ApprovalTurnRunLocator for InMemoryApprovalTurnRunLocator {
+impl ApprovalTurnRunLocator for LocalDevApprovalTurnRunLocator {
     async fn blocked_approval_runs(
         &self,
         scope: &ApprovalInteractionScope,
@@ -217,23 +236,25 @@ impl ApprovalTurnRunLocator for InMemoryApprovalTurnRunLocator {
             scope.thread_id.clone(),
         );
         let actor = TurnActor::new(scope.user_id.clone());
-        let runs = self
-            .turn_state
-            .blocked_approval_runs_for_actor(&turn_scope, &actor)
-            .map_err(
-                |_| ironclaw_product_workflow::ProductWorkflowError::Transient {
-                    reason: "approval turn-run locator unavailable".to_string(),
-                },
-            )?;
-        Ok(runs
-            .into_iter()
+        let snapshot = self.snapshot().await?;
+        let mut runs = snapshot
+            .runs
+            .iter()
+            .filter(|run| {
+                run.scope == turn_scope
+                    && run.status == TurnStatus::BlockedApproval
+                    && run.gate_ref.is_some()
+                    && snapshot_run_actor_matches(&snapshot, run, &actor)
+            })
             .filter_map(|run| {
-                run.gate_ref.map(|gate_ref| ApprovalBlockedTurnRun {
+                run.gate_ref.clone().map(|gate_ref| ApprovalBlockedTurnRun {
                     run_id: run.run_id,
                     gate_ref,
                 })
             })
-            .collect())
+            .collect::<Vec<_>>();
+        runs.sort_by_key(|run| run.run_id.as_uuid());
+        Ok(runs)
     }
 
     async fn approval_run_for_gate(
@@ -248,13 +269,65 @@ impl ApprovalTurnRunLocator for InMemoryApprovalTurnRunLocator {
             scope.thread_id.clone(),
         );
         let actor = TurnActor::new(scope.user_id.clone());
-        self.turn_state
-            .approval_run_for_actor_and_gate(&turn_scope, &actor, gate_ref)
-            .map_err(
-                |_| ironclaw_product_workflow::ProductWorkflowError::Transient {
-                    reason: "approval turn-run locator unavailable".to_string(),
-                },
-            )
+        let snapshot = self.snapshot().await?;
+        let active = snapshot
+            .runs
+            .iter()
+            .find(|run| {
+                run.scope == turn_scope
+                    && run.status == TurnStatus::BlockedApproval
+                    && run.gate_ref.as_ref() == Some(gate_ref)
+                    && snapshot_run_actor_matches(&snapshot, run, &actor)
+            })
+            .map(|run| run.run_id);
+        if active.is_some() {
+            return Ok(active);
+        }
+
+        let mut historical = snapshot
+            .checkpoints
+            .iter()
+            .filter(|checkpoint| {
+                checkpoint.status == TurnStatus::BlockedApproval
+                    && &checkpoint.gate_ref == gate_ref
+                    && checkpoint
+                        .scope
+                        .as_ref()
+                        .is_none_or(|stored| stored == &turn_scope)
+            })
+            .filter_map(|checkpoint| {
+                snapshot
+                    .runs
+                    .iter()
+                    .find(|run| {
+                        run.run_id == checkpoint.run_id
+                            && run.scope == turn_scope
+                            && snapshot_run_actor_matches(&snapshot, run, &actor)
+                    })
+                    .map(|run| run.run_id)
+            })
+            .collect::<Vec<_>>();
+        historical.sort_by_key(|run_id| run_id.as_uuid());
+        historical.dedup();
+        Ok(historical.into_iter().next())
+    }
+}
+
+fn snapshot_run_actor_matches(
+    snapshot: &TurnPersistenceSnapshot,
+    run: &TurnRunRecord,
+    actor: &TurnActor,
+) -> bool {
+    snapshot
+        .turns
+        .iter()
+        .any(|turn| turn.turn_id == run.turn_id && turn.scope == run.scope && turn.actor == *actor)
+}
+
+#[cfg(feature = "libsql")]
+fn approval_turn_locator_unavailable() -> ironclaw_product_workflow::ProductWorkflowError {
+    ironclaw_product_workflow::ProductWorkflowError::Transient {
+        reason: "approval turn-run locator unavailable".to_string(),
     }
 }
 
@@ -558,7 +631,7 @@ impl RebornRuntime {
 
     fn skill_execution_plan_for_run(
         &self,
-        adapter: &SkillExecutionAdapter<FilesystemSkillBundleSource<LocalFilesystem>>,
+        adapter: &SkillExecutionAdapter<FilesystemSkillBundleSource<LocalDevRootFilesystem>>,
         scope: &TurnScope,
         run_id: TurnRunId,
     ) -> Result<RebornSkillExecutionPlan, RebornRuntimeError> {
@@ -782,6 +855,7 @@ pub async fn build_reborn_runtime(
         });
     }
 
+    let trusted_laptop_access = services_input.grants_trusted_laptop_access();
     let owner_id = services_input.owner_id().to_string();
     let mut services = build_reborn_services(services_input).await?;
 
@@ -868,9 +942,8 @@ pub async fn build_reborn_runtime(
         Arc::clone(&loop_checkpoint_store) as Arc<dyn ironclaw_turns::LoopCheckpointStore>,
         thread_scope.clone(),
     ));
-    // Local-dev WebUI projections are process-local today; production fanout
-    // will swap this for a retained durable log owned by the host runtime.
-    let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let event_log = Arc::clone(&local_runtime.event_log);
+    let audit_log = Arc::clone(&local_runtime.audit_log);
     let milestone_thread_scope = ThreadScope {
         owner_user_id: Some(actor_user_id.clone()),
         ..thread_scope.clone()
@@ -882,6 +955,9 @@ pub async fn build_reborn_runtime(
     let milestone_sink: Arc<dyn LoopHostMilestoneSink> = Arc::new(
         DurableLoopHostMilestoneSink::new(Arc::clone(&event_log), milestone_scope),
     );
+    if trusted_laptop_access {
+        append_trusted_laptop_access_audit(&audit_log, &thread_scope, &actor_user_id).await?;
+    }
     let local_dev_capabilities = local_dev::capability_wiring(
         &services,
         actor_user_id.clone(),
@@ -931,7 +1007,7 @@ pub async fn build_reborn_runtime(
         })?;
     let default_run_profile_id = default_resolved_run_profile.profile_id.as_str().to_string();
     let planned_turn_coordinator: Arc<dyn TurnCoordinator> = composition.coordinator.clone();
-    let approval_turn_runs = Arc::new(InMemoryApprovalTurnRunLocator::new(Arc::clone(
+    let approval_turn_runs = Arc::new(LocalDevApprovalTurnRunLocator::new(Arc::clone(
         &turn_state_store,
     )));
     let approval_read_model = Arc::new(RunStateApprovalInteractionReadModel::new(
@@ -961,7 +1037,8 @@ pub async fn build_reborn_runtime(
         Arc::clone(&event_log),
         validated_identity.reply_target_binding_ref.clone(),
     )
-    .with_turn_events(turn_event_source, Arc::clone(&planned_turn_coordinator));
+    .with_turn_events(turn_event_source, Arc::clone(&planned_turn_coordinator))
+    .with_display_previews(Arc::clone(&local_dev_capabilities.display_previews));
     services.turn_coordinator = Some(Arc::clone(&planned_turn_coordinator));
 
     let worker_cancel = CancellationToken::new();
@@ -998,6 +1075,60 @@ pub async fn build_reborn_runtime(
 }
 
 const LOOP_RUN_CAPABILITY_ID: &str = "loop.run";
+const TRUSTED_LAPTOP_ACCESS_AUDIT_KIND: &str = "local_dev_trusted_laptop_access";
+const TRUSTED_LAPTOP_ACCESS_AUDIT_TARGET: &str = "filesystem=host_workspace_and_home;process=local_host;network=direct;secrets=inherited_env;host_home_mount=/host";
+const TRUSTED_LAPTOP_ACCESS_AUDIT_STATUS: &str = "host_home_mounted_read_write";
+
+async fn append_trusted_laptop_access_audit(
+    audit_log: &Arc<dyn DurableAuditLog>,
+    thread_scope: &ThreadScope,
+    actor_user_id: &UserId,
+) -> Result<(), RebornRuntimeError> {
+    let invocation_id = InvocationId::new();
+    audit_log
+        .append(AuditEnvelope {
+            event_id: AuditEventId::new(),
+            correlation_id: CorrelationId::new(),
+            stage: AuditStage::After,
+            timestamp: Utc::now(),
+            tenant_id: thread_scope.tenant_id.clone(),
+            user_id: actor_user_id.clone(),
+            agent_id: Some(thread_scope.agent_id.clone()),
+            project_id: thread_scope.project_id.clone(),
+            mission_id: thread_scope.mission_id.clone(),
+            thread_id: None,
+            invocation_id,
+            process_id: None,
+            approval_request_id: None,
+            extension_id: None,
+            action: ActionSummary {
+                kind: TRUSTED_LAPTOP_ACCESS_AUDIT_KIND.to_string(),
+                target: Some(TRUSTED_LAPTOP_ACCESS_AUDIT_TARGET.to_string()),
+                effects: vec![
+                    EffectKind::ReadFilesystem,
+                    EffectKind::WriteFilesystem,
+                    EffectKind::SpawnProcess,
+                    EffectKind::Network,
+                    EffectKind::UseSecret,
+                ],
+            },
+            decision: DecisionSummary {
+                kind: "allowed".to_string(),
+                reason: None,
+                actor: None,
+            },
+            result: Some(ActionResultSummary {
+                success: true,
+                status: Some(TRUSTED_LAPTOP_ACCESS_AUDIT_STATUS.to_string()),
+                output_bytes: None,
+            }),
+        })
+        .await
+        .map(|_| ())
+        .map_err(|error| RebornRuntimeError::InvalidArgument {
+            reason: format!("could not record trusted laptop access audit event: {error}"),
+        })
+}
 
 struct LocalDevSkillContextSource {
     source: Arc<dyn HostSkillContextSource>,
@@ -1189,10 +1320,11 @@ mod tests {
 
     use async_trait::async_trait;
     use ironclaw_authorization::CapabilityLeaseStore;
+    use ironclaw_events::{EventStreamKey, ReadScope};
     use ironclaw_host_api::{
-        Action, AgentId, ApprovalRequest, ApprovalRequestId, CapabilityId, CorrelationId,
-        EffectKind, InvocationFingerprint, InvocationId, Principal, ResourceEstimate,
-        ResourceScope, TenantId, UserId,
+        Action, AgentId, ApprovalRequest, ApprovalRequestId, AuditStage, CapabilityId,
+        CorrelationId, EffectKind, InvocationFingerprint, InvocationId, Principal,
+        ResourceEstimate, ResourceScope, TenantId, UserId,
         runtime_policy::{
             ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy,
             FilesystemBackendKind, NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -1211,9 +1343,7 @@ mod tests {
     };
     use ironclaw_run_state::ApprovalRequestStore;
     use ironclaw_skills::SkillTrust;
-    use ironclaw_threads::{
-        LoadContextMessagesRequest, MessageKind, SessionThreadService, ThreadHistoryRequest,
-    };
+    use ironclaw_threads::{LoadContextMessagesRequest, MessageKind, ThreadHistoryRequest};
     use ironclaw_turns::{
         AcceptedMessageRef, BlockedReason, IdempotencyKey, ReplyTargetBindingRef, SourceBindingRef,
         SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnId, TurnLeaseToken,
@@ -1231,7 +1361,11 @@ mod tests {
     use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
     use crate::webui::build_webui_services;
 
-    use super::{RebornSkillSourceKind, build_reborn_runtime};
+    use super::{
+        RebornSkillSourceKind, TRUSTED_LAPTOP_ACCESS_AUDIT_KIND,
+        TRUSTED_LAPTOP_ACCESS_AUDIT_STATUS, TRUSTED_LAPTOP_ACCESS_AUDIT_TARGET,
+        build_reborn_runtime,
+    };
 
     fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
         EffectiveRuntimePolicy {
@@ -1515,6 +1649,72 @@ mod tests {
             .lock()
             .expect("recording gateway requests lock poisoned")
             .len()
+    }
+
+    #[tokio::test]
+    async fn local_dev_yolo_records_trusted_laptop_access_audit_event() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let host_home = root.path().join("host-home");
+        std::fs::create_dir_all(&host_home).expect("host home");
+        let mut policy = local_dev_runtime_policy();
+        policy.requested_profile = RuntimeProfile::LocalYolo;
+        policy.resolved_profile = RuntimeProfile::LocalYolo;
+        policy.filesystem_backend = FilesystemBackendKind::HostWorkspaceAndHome;
+        policy.network_mode = NetworkMode::Direct;
+        policy.secret_mode = SecretMode::InheritedEnv;
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev_with_profile(
+                crate::RebornCompositionProfile::LocalDevYolo,
+                "runtime-yolo-audit-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(policy)
+            .with_local_dev_confirmed_host_home_root(host_home),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-yolo-audit-tenant".to_string(),
+            agent_id: "runtime-yolo-audit-agent".to_string(),
+            source_binding_id: "runtime-yolo-audit-source".to_string(),
+            reply_target_binding_id: "runtime-yolo-audit-reply".to_string(),
+        });
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let stream = EventStreamKey::new(
+            runtime.thread_scope.tenant_id.clone(),
+            runtime.actor_user_id.clone(),
+            Some(runtime.thread_scope.agent_id.clone()),
+        );
+        let replay = runtime
+            .services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime")
+            .audit_log
+            .read_after_cursor(&stream, &ReadScope::any(), None, 10)
+            .await
+            .expect("audit replay");
+
+        let audit = replay
+            .entries
+            .iter()
+            .map(|entry| &entry.record)
+            .find(|record| record.action.kind == TRUSTED_LAPTOP_ACCESS_AUDIT_KIND)
+            .expect("trusted laptop access audit event");
+        assert_eq!(audit.stage, AuditStage::After);
+        assert_eq!(
+            audit.action.target.as_deref(),
+            Some(TRUSTED_LAPTOP_ACCESS_AUDIT_TARGET)
+        );
+        assert_eq!(
+            audit
+                .result
+                .as_ref()
+                .and_then(|result| result.status.as_deref()),
+            Some(TRUSTED_LAPTOP_ACCESS_AUDIT_STATUS)
+        );
+        assert_eq!(audit.decision.kind, "allowed");
+        runtime.shutdown().await.expect("shutdown");
     }
 
     #[tokio::test]
@@ -2559,7 +2759,9 @@ mod tests {
         assert!(
             stream.events.iter().all(|event| matches!(
                 event.payload(),
-                ProductOutboundPayload::ProjectionSnapshot { .. }
+                ProductOutboundPayload::CapabilityActivity(_)
+                    | ProductOutboundPayload::CapabilityDisplayPreview(_)
+                    | ProductOutboundPayload::ProjectionSnapshot { .. }
                     | ProductOutboundPayload::ProjectionUpdate { .. }
             )),
             "webui bundle should expose only projection stream events"
