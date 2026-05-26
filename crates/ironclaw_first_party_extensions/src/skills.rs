@@ -12,7 +12,7 @@ use ironclaw_host_api::{MountView, ResourceScope, RuntimeDispatchErrorKind};
 use ironclaw_skills::{
     InstalledSkillMetadataSource, SkillInstallFile, SkillInstallRequest, SkillInstallSource,
     SkillManagementContext, SkillManagementError, SkillManagementErrorKind, SkillRemoveRequest,
-    SkillSummary, install_skill, list_skills, remove_skill,
+    install_skill, list_skills, remove_skill, skill_summary_json,
 };
 use serde_json::{Value, json};
 
@@ -211,18 +211,6 @@ fn management_context(
         mounts.clone(),
         request.scope.clone(),
     ))
-}
-
-fn skill_summary_json(skill: &SkillSummary) -> Value {
-    json!({
-        "name": skill.name,
-        "version": skill.version,
-        "description": skill.description,
-        "source": skill.source.as_str(),
-        "keywords": skill.keywords,
-        "tags": skill.tags,
-        "requires_skills": skill.requires_skills,
-    })
 }
 
 fn input_error() -> SkillManagementCapabilityError {

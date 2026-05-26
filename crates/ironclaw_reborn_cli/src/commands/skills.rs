@@ -1,5 +1,9 @@
 use clap::{Args, Subcommand};
-use ironclaw_reborn_composition::{RebornSkillListResult, build_reborn_local_skill_catalog};
+use ironclaw_reborn_composition::{
+    RebornSkillSummary, list_reborn_local_skills, reborn_skill_summary_json,
+};
+use ironclaw_reborn_config::{RebornBootConfig, RebornProfile};
+use std::path::PathBuf;
 
 use crate::context::RebornCliContext;
 
@@ -36,15 +40,14 @@ impl SkillsCommand {
 
 impl SkillsListCommand {
     fn execute(self, context: RebornCliContext) -> anyhow::Result<()> {
-        let config = crate::runtime::build_skill_catalog_config(context.boot_config())?;
-        let catalog = build_reborn_local_skill_catalog(&config.owner_id, &config.local_dev_root)?;
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?;
-        let result = runtime.block_on(catalog.list())?;
+        let config = build_skill_list_config(context.boot_config())?;
+        let skills = crate::runtime::block_on_cli(list_reborn_local_skills(
+            config.owner_id.clone(),
+            config.local_dev_root.clone(),
+        ))?;
 
         if self.json {
-            let mut output = skills_json(&result);
+            let mut output = skills_json(&skills);
             if self.verbose {
                 output["details"] = serde_json::json!({
                     "profile": config.profile.to_string(),
@@ -58,7 +61,7 @@ impl SkillsListCommand {
         }
 
         println!("IronClaw Reborn skills");
-        println!("configured: {}", result.count);
+        println!("configured: {}", skills.len());
         println!("source: reborn-local-dev");
 
         if self.verbose {
@@ -71,31 +74,99 @@ impl SkillsListCommand {
             println!("owner_id: {}", config.owner_id);
         }
 
-        for skill in result.skills {
-            println!("- {} ({})", skill.name, skill.source.as_str());
-            if !skill.description.is_empty() {
-                println!("  description: {}", skill.description);
-            }
+        for skill in skills {
+            print_skill(&skill, self.verbose);
         }
 
         Ok(())
     }
 }
 
-fn skills_json(result: &RebornSkillListResult) -> serde_json::Value {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SkillListConfig {
+    owner_id: String,
+    local_dev_root: PathBuf,
+    profile: RebornProfile,
+}
+
+fn build_skill_list_config(config: &RebornBootConfig) -> anyhow::Result<SkillListConfig> {
+    let config_file = crate::runtime::read_config_file(config)?;
+    let profile = crate::runtime::effective_profile(config, config_file.as_ref())?;
+    match profile {
+        RebornProfile::LocalDev | RebornProfile::LocalDevYolo => {}
+        RebornProfile::Production | RebornProfile::MigrationDryRun => {
+            anyhow::bail!(
+                "ironclaw-reborn skills currently supports profile=local-dev or profile=local-dev-yolo; got profile={profile}"
+            );
+        }
+    }
+    Ok(SkillListConfig {
+        owner_id: crate::runtime::default_owner_id(config_file.as_ref()).to_string(),
+        local_dev_root: config.home().path().join("local-dev"),
+        profile,
+    })
+}
+
+fn print_skill(skill: &RebornSkillSummary, verbose: bool) {
+    println!(
+        "- {} ({})",
+        terminal_safe_text(&skill.name),
+        skill.source.as_str()
+    );
+    if !skill.description.is_empty() {
+        println!("  description: {}", terminal_safe_text(&skill.description));
+    }
+    if verbose {
+        if !skill.version.is_empty() {
+            println!("  version: {}", terminal_safe_text(&skill.version));
+        }
+        print_list_field("keywords", &skill.keywords);
+        print_list_field("tags", &skill.tags);
+        print_list_field("requires_skills", &skill.requires_skills);
+    }
+}
+
+fn print_list_field(label: &str, values: &[String]) {
+    if values.is_empty() {
+        return;
+    }
+    let safe_values = values
+        .iter()
+        .map(|value| terminal_safe_text(value))
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    if !safe_values.is_empty() {
+        println!("  {label}: {}", safe_values.join(", "));
+    }
+}
+
+fn terminal_safe_text(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn skills_json(skills: &[RebornSkillSummary]) -> serde_json::Value {
     serde_json::json!({
-        "configured": result.count,
-        "skills": result.skills.iter().map(|skill| {
-            serde_json::json!({
-                "name": skill.name,
-                "version": skill.version,
-                "description": skill.description,
-                "source": skill.source.as_str(),
-                "keywords": skill.keywords,
-                "tags": skill.tags,
-                "requires_skills": skill.requires_skills,
-            })
-        }).collect::<Vec<_>>(),
+        "configured": skills.len(),
+        "skills": skills.iter().map(reborn_skill_summary_json).collect::<Vec<_>>(),
         "source": "reborn-local-dev",
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_safe_text_replaces_control_characters() {
+        assert_eq!(
+            terminal_safe_text("safe\nforged: row\u{1b}[31m"),
+            "safe forged: row [31m"
+        );
+    }
 }

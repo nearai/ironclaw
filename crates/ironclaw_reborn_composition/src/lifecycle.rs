@@ -1,8 +1,9 @@
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
+use crate::local_dev_mounts::skill_management_mount_view;
 use async_trait::async_trait;
-use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::{InvocationId, MountView, ResourceScope, UserId};
+use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
+use ironclaw_host_api::{HostPath, InvocationId, MountView, ResourceScope, UserId, VirtualPath};
 use ironclaw_product_workflow::{
     LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
     LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
@@ -37,7 +38,7 @@ impl RebornLocalSkillManagementPort {
         }
     }
 
-    fn skill_context(&self) -> Result<SkillManagementContext, ProductWorkflowError> {
+    fn skill_context(&self) -> Result<SkillManagementContext, RebornLocalSkillManagementError> {
         let scope = ResourceScope::local_default(self.owner_user_id.clone(), InvocationId::new())
             .map_err(invalid_skill_context)?;
         Ok(SkillManagementContext::new(
@@ -49,29 +50,27 @@ impl RebornLocalSkillManagementPort {
 
     pub(crate) async fn list(
         &self,
-    ) -> Result<Vec<ironclaw_skills::SkillSummary>, ProductWorkflowError> {
+    ) -> Result<Vec<ironclaw_skills::SkillSummary>, RebornLocalSkillManagementError> {
         let context = self.skill_context()?;
-        list_skills(&context).await.map_err(map_skill_error)
+        Ok(list_skills(&context).await?)
     }
 
     pub(crate) async fn search(
         &self,
         query: &str,
         limit: usize,
-    ) -> Result<ironclaw_skills::SkillSearchResult, ProductWorkflowError> {
+    ) -> Result<ironclaw_skills::SkillSearchResult, RebornLocalSkillManagementError> {
         let context = self.skill_context()?;
-        search_skills(&context, SkillSearchRequest { query, limit })
-            .await
-            .map_err(map_skill_error)
+        Ok(search_skills(&context, SkillSearchRequest { query, limit }).await?)
     }
 
     async fn install(
         &self,
         name: Option<&str>,
         content: &str,
-    ) -> Result<ironclaw_skills::SkillInstallResult, ProductWorkflowError> {
+    ) -> Result<ironclaw_skills::SkillInstallResult, RebornLocalSkillManagementError> {
         let context = self.skill_context()?;
-        install_skill(
+        Ok(install_skill(
             &context,
             SkillInstallRequest {
                 name,
@@ -81,23 +80,84 @@ impl RebornLocalSkillManagementPort {
                 source_url: None,
             },
         )
-        .await
-        .map_err(map_skill_error)
+        .await?)
     }
 
     async fn remove(
         &self,
         name: &str,
-    ) -> Result<ironclaw_skills::SkillRemoveResult, ProductWorkflowError> {
+    ) -> Result<ironclaw_skills::SkillRemoveResult, RebornLocalSkillManagementError> {
         let context = self.skill_context()?;
-        remove_skill(&context, SkillRemoveRequest { name })
-            .await
-            .map_err(map_skill_error)
+        Ok(remove_skill(&context, SkillRemoveRequest { name }).await?)
     }
 }
 
-fn invalid_skill_context(error: impl std::fmt::Display) -> ProductWorkflowError {
-    ProductWorkflowError::InvalidBindingRequest {
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum RebornLocalSkillManagementError {
+    #[error("invalid skill management context: {reason}")]
+    InvalidContext { reason: String },
+    #[error("skill management failed: {0:?}")]
+    Skill(SkillManagementError),
+}
+
+impl From<SkillManagementError> for RebornLocalSkillManagementError {
+    fn from(error: SkillManagementError) -> Self {
+        Self::Skill(error)
+    }
+}
+
+pub(crate) fn build_local_skill_management_port<F>(
+    owner_user_id: UserId,
+    filesystem: Arc<F>,
+) -> Result<Arc<RebornLocalSkillManagementPort>, crate::RebornBuildError>
+where
+    F: RootFilesystem + 'static,
+{
+    let skill_management_mounts =
+        skill_management_mount_view().map_err(|error| crate::RebornBuildError::InvalidConfig {
+            reason: error.to_string(),
+        })?;
+    let filesystem: Arc<dyn RootFilesystem> = filesystem;
+    Ok(Arc::new(RebornLocalSkillManagementPort::new(
+        owner_user_id,
+        filesystem,
+        skill_management_mounts,
+    )))
+}
+
+pub(crate) fn build_existing_local_dev_skill_management_port(
+    owner_id: impl Into<String>,
+    local_dev_storage_root: impl Into<PathBuf>,
+) -> Result<Option<Arc<RebornLocalSkillManagementPort>>, crate::RebornBuildError> {
+    let owner_id = owner_id.into();
+    let local_dev_storage_root = local_dev_storage_root.into();
+    if !local_dev_storage_root.try_exists().map_err(|error| {
+        crate::RebornBuildError::InvalidConfig {
+            reason: format!("local-dev skill storage root could not be inspected: {error}"),
+        }
+    })? {
+        return Ok(None);
+    }
+    if !local_dev_storage_root.is_dir() {
+        return Err(crate::RebornBuildError::InvalidConfig {
+            reason: "local-dev skill storage root is not a directory".to_string(),
+        });
+    }
+
+    let mut filesystem = LocalFilesystem::new();
+    filesystem.mount_local(
+        VirtualPath::new("/projects")?,
+        HostPath::from_path_buf(local_dev_storage_root),
+    )?;
+    let owner_user_id =
+        UserId::new(owner_id).map_err(|error| crate::RebornBuildError::InvalidConfig {
+            reason: error.to_string(),
+        })?;
+    build_local_skill_management_port(owner_user_id, Arc::new(filesystem)).map(Some)
+}
+
+fn invalid_skill_context(error: impl std::fmt::Display) -> RebornLocalSkillManagementError {
+    RebornLocalSkillManagementError::InvalidContext {
         reason: error.to_string(),
     }
 }
@@ -121,7 +181,8 @@ impl RebornLocalLifecycleFacade {
                 let result = self
                     .skill_management
                     .search(&query, SKILL_SEARCH_RESULT_LIMIT)
-                    .await?;
+                    .await
+                    .map_err(map_local_skill_management_error)?;
                 let matched_skills = result
                     .skills
                     .into_iter()
@@ -143,7 +204,8 @@ impl RebornLocalLifecycleFacade {
                 let installed = self
                     .skill_management
                     .install(name.as_ref().map(LifecyclePackageId::as_str), &content)
-                    .await?;
+                    .await
+                    .map_err(map_local_skill_management_error)?;
                 Ok(response_with_payload(
                     Some(skill_package_ref(&installed.name)?),
                     LifecyclePhase::Installed,
@@ -158,7 +220,8 @@ impl RebornLocalLifecycleFacade {
                 let removed = self
                     .skill_management
                     .remove(package_ref.id.as_str())
-                    .await?;
+                    .await
+                    .map_err(map_local_skill_management_error)?;
                 Ok(response_with_payload(
                     Some(skill_package_ref(&removed.name)?),
                     LifecyclePhase::Removed,
@@ -262,6 +325,17 @@ fn map_skill_error(error: SkillManagementError) -> ProductWorkflowError {
         SkillManagementErrorKind::Resource => ProductWorkflowError::Transient {
             reason: "skill management resource unavailable".to_string(),
         },
+    }
+}
+
+fn map_local_skill_management_error(
+    error: RebornLocalSkillManagementError,
+) -> ProductWorkflowError {
+    match error {
+        RebornLocalSkillManagementError::InvalidContext { reason } => {
+            ProductWorkflowError::InvalidBindingRequest { reason }
+        }
+        RebornLocalSkillManagementError::Skill(error) => map_skill_error(error),
     }
 }
 

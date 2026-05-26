@@ -67,7 +67,7 @@ pub use management::{
     SkillInstallFile, SkillInstallRequest, SkillInstallResult, SkillInstallSource,
     SkillManagementContext, SkillManagementError, SkillManagementErrorKind, SkillRemoveRequest,
     SkillRemoveResult, SkillSearchRequest, SkillSearchResult, SkillSource as ManagedSkillSource,
-    SkillSummary, install_skill, list_skills, remove_skill, search_skills,
+    SkillSummary, install_skill, list_skills, remove_skill, search_skills, skill_summary_json,
 };
 pub use parser::{ParsedSkill, SkillParseError, parse_skill_md};
 pub use selector::{

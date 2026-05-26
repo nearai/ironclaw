@@ -220,9 +220,11 @@ When `serve --confirm-host-access` grants trusted-laptop access, `serve` refuses
 
 ### `skills list`
 
-Reports configured Reborn skills without resolving Reborn home, reading v1 skill discovery paths, or creating directories.
-
-The Reborn skill catalog is not wired yet, so the command currently reports an explicit empty surface:
+Reports configured Reborn local-dev skills from `<reborn-home>/local-dev/skills`
+and `<reborn-home>/local-dev/system/skills` through the Reborn composition
+skill listing function. It does not read v1 skill discovery paths, and a missing
+local-dev storage root is reported as an empty skill list without creating
+directories.
 
 ```bash
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- skills list
@@ -232,9 +234,17 @@ cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- skills list --verbo
 
 Expected fields include:
 
-- `configured: 0`
-- `status: not-wired`
-- `v1_state: not-used`
+- `configured: <count>`
+- `source: reborn-local-dev`
+- per-skill `name`, `source`, and `description` in text output
+- per-skill `name`, `version`, `description`, `source`, `keywords`, `tags`,
+  and `requires_skills` in JSON output
+
+`--verbose` adds the resolved `profile`, `reborn_home`, `local_dev_root`, and
+`owner_id`; text output also includes per-skill `version`, `keywords`, `tags`,
+and `requires_skills` when present. `skills list` currently supports
+`local-dev` and `local-dev-yolo` profiles and rejects `production` /
+`migration-dry-run` until those catalog backends are wired.
 
 ## State and config root
 

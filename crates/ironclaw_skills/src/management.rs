@@ -169,6 +169,18 @@ impl SkillSource {
     }
 }
 
+pub fn skill_summary_json(skill: &SkillSummary) -> serde_json::Value {
+    serde_json::json!({
+        "name": skill.name,
+        "version": skill.version,
+        "description": skill.description,
+        "source": skill.source.as_str(),
+        "keywords": skill.keywords,
+        "tags": skill.tags,
+        "requires_skills": skill.requires_skills,
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkillInstallSource {
     User,

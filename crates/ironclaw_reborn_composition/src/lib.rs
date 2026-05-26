@@ -39,7 +39,7 @@ mod projection;
 mod readiness;
 mod runtime;
 mod runtime_input;
-mod skill_catalog;
+mod skill_listing;
 mod webui;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_body_limit;
@@ -63,6 +63,10 @@ pub use error::RebornBuildError;
 pub use factory::{RebornServices, build_reborn_services};
 pub use gsuite::{bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers};
 pub use input::{RebornBuildInput, RebornRuntimeProcessBinding};
+pub use ironclaw_skills::{
+    ManagedSkillSource as RebornSkillSource, SkillSummary as RebornSkillSummary,
+    skill_summary_json as reborn_skill_summary_json,
+};
 #[cfg(feature = "root-llm-provider")]
 pub use llm_catalog::{
     RebornLlmCatalogError, resolve_against_registry, resolve_llm_selection_against_catalog,
@@ -94,10 +98,7 @@ pub use runtime_input::{
 };
 #[cfg(feature = "root-llm-provider")]
 pub use runtime_input::{RebornLlmConfig, ResolvedRebornLlm};
-pub use skill_catalog::{
-    RebornLocalSkillCatalog, RebornSkillCatalogError, RebornSkillListResult, RebornSkillSource,
-    RebornSkillSummary, build_reborn_local_skill_catalog,
-};
+pub use skill_listing::{RebornSkillListError, list_reborn_local_skills};
 pub use webui::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]
 pub use webui_rate_limit::RateLimitConfigError;

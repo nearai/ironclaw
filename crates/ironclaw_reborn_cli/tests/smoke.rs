@@ -172,7 +172,7 @@ fn hooks_list_json_verbose_includes_status_details() {
 }
 
 #[test]
-fn skills_list_reports_reborn_skill_catalog() {
+fn skills_list_reports_reborn_skill_data() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
     write_reborn_skill(&reborn_home, "catalog-helper", "catalog helper");
@@ -209,10 +209,10 @@ fn skills_list_reports_reborn_skill_catalog() {
 }
 
 #[test]
-fn skills_list_verbose_reports_reborn_skill_catalog_details() {
+fn skills_list_verbose_reports_reborn_skill_details() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
-    write_reborn_skill(&reborn_home, "verbose-helper", "verbose helper");
+    write_verbose_reborn_skill(&reborn_home, "verbose-helper", "verbose helper");
 
     let output = Command::new(reborn_bin())
         .arg("skills")
@@ -233,10 +233,20 @@ fn skills_list_verbose_reports_reborn_skill_catalog_details() {
     assert!(stdout.contains("reborn_home:"), "stdout: {stdout}");
     assert!(stdout.contains("local_dev_root:"), "stdout: {stdout}");
     assert!(stdout.contains("owner_id: reborn-cli"), "stdout: {stdout}");
+    assert!(stdout.contains("version: 1.2.3"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("keywords: catalog, helper"),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("tags: local-dev"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("requires_skills: companion-helper"),
+        "stdout: {stdout}"
+    );
 }
 
 #[test]
-fn skills_list_json_reports_reborn_skill_catalog() {
+fn skills_list_json_reports_reborn_skill_data() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
     write_reborn_skill(&reborn_home, "json-helper", "json helper");
@@ -268,6 +278,35 @@ fn skills_list_json_reports_reborn_skill_catalog() {
     assert!(json.get("truncated").is_none(), "json: {json}");
     assert!(json.get("status").is_none(), "json: {json}");
     assert!(json.get("v1_state").is_none(), "json: {json}");
+}
+
+#[test]
+fn skills_list_rejects_unsupported_profiles() {
+    for profile in ["production", "migration-dry-run"] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let output = Command::new(reborn_bin())
+            .arg("skills")
+            .arg("list")
+            .env_clear()
+            .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
+            .env("IRONCLAW_REBORN_PROFILE", profile)
+            .output()
+            .expect("ironclaw-reborn skills list should run");
+
+        assert!(
+            !output.status.success(),
+            "skills list should reject profile={profile}"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("ironclaw-reborn skills currently supports profile=local-dev"),
+            "stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains(&format!("profile={profile}")),
+            "stderr: {stderr}"
+        );
+    }
 }
 
 #[test]
@@ -399,6 +438,29 @@ fn write_reborn_skill(reborn_home: &std::path::Path, name: &str, description: &s
     std::fs::write(
         skill_dir.join("SKILL.md"),
         format!("---\nname: {name}\ndescription: {description}\n---\nUse {name}.\n"),
+    )
+    .expect("skill file");
+}
+
+fn write_verbose_reborn_skill(reborn_home: &std::path::Path, name: &str, description: &str) {
+    let skill_dir = reborn_home.join("local-dev/skills").join(name);
+    std::fs::create_dir_all(&skill_dir).expect("skill dir");
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        format!(
+            r#"---
+name: {name}
+version: "1.2.3"
+description: {description}
+activation:
+  keywords: ["catalog", "helper"]
+  tags: ["local-dev"]
+requires:
+  skills: ["companion-helper"]
+---
+Use {name}.
+"#
+        ),
     )
     .expect("skill file");
 }
