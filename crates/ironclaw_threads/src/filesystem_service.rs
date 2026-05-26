@@ -255,7 +255,10 @@ where
             {
                 continue;
             }
-            if preview_invocation_id(message.content.as_deref())? == Some(invocation_id) {
+            if CapabilityDisplayPreviewEnvelope::invocation_id_from_json(message.content.as_deref())
+                .map_err(SessionThreadError::Serialization)?
+                == Some(invocation_id)
+            {
                 return Ok(Some(message));
             }
         }
@@ -1393,20 +1396,6 @@ fn is_model_visible(status: MessageStatus) -> bool {
 
 fn is_model_context_visible(message: &ThreadMessageRecord) -> bool {
     is_model_visible(message.status) && message.kind != MessageKind::CapabilityDisplayPreview
-}
-
-fn preview_invocation_id(
-    content: Option<&str>,
-) -> Result<Option<InvocationId>, SessionThreadError> {
-    let Some(content) = content else {
-        return Ok(None);
-    };
-    let preview = serde_json::from_str::<CapabilityDisplayPreviewEnvelope>(content)
-        .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
-    preview
-        .validate()
-        .map_err(SessionThreadError::Serialization)?;
-    Ok(Some(preview.invocation_id))
 }
 
 fn capability_display_preview_message_id(

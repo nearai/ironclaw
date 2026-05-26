@@ -93,6 +93,17 @@ impl CapabilityDisplayPreviewEnvelope {
         )?;
         Ok(())
     }
+
+    pub(crate) fn invocation_id_from_json(
+        content: Option<&str>,
+    ) -> Result<Option<InvocationId>, String> {
+        let Some(content) = content else {
+            return Ok(None);
+        };
+        let preview = serde_json::from_str::<Self>(content).map_err(|error| error.to_string())?;
+        preview.validate()?;
+        Ok(Some(preview.invocation_id))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
