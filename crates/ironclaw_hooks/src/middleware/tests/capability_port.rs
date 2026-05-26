@@ -309,19 +309,50 @@ async fn invoke_capability_batch_arguments_digest_is_stable_at_middleware_bounda
     let dispatcher = dispatcher_with_capturing_hook(hook.clone());
     let wrapped = HookedLoopCapabilityPort::new(inner.clone(), dispatcher, tenant());
 
+    // Two entries of the same fixture: exercises the merged-batch preflight
+    // per-entry digest computation while also pinning the O(1)-batch
+    // property — the inner port must see exactly one batched call.
     let batch = CapabilityBatchInvocation {
-        invocations: vec![snapshot_fixture_invocation()],
+        invocations: vec![snapshot_fixture_invocation(), snapshot_fixture_invocation()],
         stop_on_first_suspension: false,
     };
     let outcome = wrapped.invoke_capability_batch(batch).await.expect("ok");
 
-    assert_eq!(outcome.outcomes.len(), 1);
-    assert!(matches!(
-        outcome.outcomes[0],
-        CapabilityOutcome::Completed(_)
-    ));
+    assert_eq!(outcome.outcomes.len(), 2);
+    assert!(
+        outcome
+            .outcomes
+            .iter()
+            .all(|o| matches!(o, CapabilityOutcome::Completed(_)))
+    );
 
-    assert_hook_observed_snapshot_digest(&hook, "invoke_capability_batch");
+    // The hook runs once per entry, so both entries must be digested and
+    // each must match the pinned snapshot — a batch-only digest regression
+    // (e.g. dropping/swapping per-entry fields) would shift one of these.
+    let captured = hook.captured();
+    assert_eq!(
+        captured.len(),
+        2,
+        "hook must observe one BeforeCapability context per batch entry"
+    );
+    for digest in &captured {
+        assert_eq!(
+            digest_hex(digest),
+            SNAPSHOT_FIXTURE_DIGEST_HEX,
+            "arguments_digest observed through invoke_capability_batch shifted; \
+             this is a hook-visible wire-contract break"
+        );
+    }
+
+    // The allowed batch must reach the inner port as a single batched call,
+    // not degrade into N sequential invocations.
+    let batch_calls = inner.batch_calls();
+    assert_eq!(
+        batch_calls.len(),
+        1,
+        "allowed batch must reach inner as exactly one batched call"
+    );
+    assert_eq!(batch_calls[0].len(), 2, "both entries batched together");
 }
 
 /// Distinct inputs must produce distinct digests (sanity check; the
