@@ -50,43 +50,26 @@ pub(super) fn batch_policy_kind(policy: BatchPolicy) -> BatchPolicyKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum CapabilityOutcomeBucket {
-    Result,
-    Denied,
-    Gated,
-    Failed,
-}
-
-pub(super) fn capability_outcome_bucket(outcome: &CapabilityOutcome) -> CapabilityOutcomeBucket {
-    match outcome {
-        CapabilityOutcome::Completed(_) | CapabilityOutcome::SpawnedChildRun { .. } => {
-            CapabilityOutcomeBucket::Result
-        }
-        CapabilityOutcome::Denied(_) => CapabilityOutcomeBucket::Denied,
-        CapabilityOutcome::ApprovalRequired { .. }
-        | CapabilityOutcome::AuthRequired { .. }
-        | CapabilityOutcome::ResourceBlocked { .. }
-        | CapabilityOutcome::AwaitDependentRun { .. }
-        // SpawnedProcess: treated as gated — it is a non-completing, non-failing, non-denied
-        // outcome that defers completion to a background process. Grouped with gated to avoid
-        // treating it as completed or failed in batch accounting.
-        | CapabilityOutcome::SpawnedProcess(_) => CapabilityOutcomeBucket::Gated,
-        CapabilityOutcome::Failed(_) => CapabilityOutcomeBucket::Failed,
-    }
-}
-
 pub(super) fn capability_batch_counts(outcomes: &[CapabilityOutcome]) -> (u32, u32, u32, u32) {
     let mut result_count = 0;
     let mut denied_count = 0;
     let mut gated_count = 0;
     let mut failed_count = 0;
     for outcome in outcomes {
-        match capability_outcome_bucket(outcome) {
-            CapabilityOutcomeBucket::Result => result_count += 1,
-            CapabilityOutcomeBucket::Denied => denied_count += 1,
-            CapabilityOutcomeBucket::Gated => gated_count += 1,
-            CapabilityOutcomeBucket::Failed => failed_count += 1,
+        match outcome {
+            CapabilityOutcome::Completed(_) | CapabilityOutcome::SpawnedChildRun { .. } => {
+                result_count += 1
+            }
+            CapabilityOutcome::Denied(_) => denied_count += 1,
+            CapabilityOutcome::ApprovalRequired { .. }
+            | CapabilityOutcome::AuthRequired { .. }
+            | CapabilityOutcome::ResourceBlocked { .. }
+            | CapabilityOutcome::AwaitDependentRun { .. }
+            // SpawnedProcess: treated as gated — it is a non-completing, non-failing, non-denied
+            // outcome that defers completion to a background process. Grouped with gated to avoid
+            // treating it as completed or failed in batch accounting.
+            | CapabilityOutcome::SpawnedProcess(_) => gated_count += 1,
+            CapabilityOutcome::Failed(_) => failed_count += 1,
         }
     }
     (result_count, denied_count, gated_count, failed_count)

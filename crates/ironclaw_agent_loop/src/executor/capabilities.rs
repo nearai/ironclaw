@@ -19,13 +19,12 @@ use crate::{
 };
 
 use super::{
-    AgentLoopExecutorError, BatchStep, CancelCheck, CapabilityOutcomeBucket,
-    CapabilitySurfaceIndex, CheckpointStage, ExecutorStage, GateInput, GateStage,
-    MAX_CAPABILITY_RETRIES, StageContext, TurnCompletedStep, append_capability_error_ref,
-    append_capability_result_ref, append_capability_safe_summary_ref, batch_policy_kind,
-    cancelled_exit, capability_batch_counts, capability_error_class, capability_failure_kind,
-    capability_host_error, capability_invocation_from_candidate, capability_is_visible,
-    capability_outcome_bucket, capability_summary, failed_exit, honor_retry_alteration,
+    AgentLoopExecutorError, BatchStep, CancelCheck, CapabilitySurfaceIndex, CheckpointStage,
+    ExecutorStage, GateInput, GateStage, MAX_CAPABILITY_RETRIES, StageContext, TurnCompletedStep,
+    append_capability_error_ref, append_capability_result_ref, append_capability_safe_summary_ref,
+    batch_policy_kind, cancelled_exit, capability_batch_counts, capability_error_class,
+    capability_failure_kind, capability_host_error, capability_invocation_from_candidate,
+    capability_is_visible, capability_summary, failed_exit, honor_retry_alteration,
     push_call_signature_once, push_completed_result, sanitized_strategy_summary,
 };
 
@@ -170,12 +169,30 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             // checkpoint.
             let mut pending_outcomes = Vec::new();
             for (call, outcome) in visible_calls.into_iter().zip(outcomes) {
-                if capability_outcome_bucket(&outcome) == CapabilityOutcomeBucket::Result {
-                    push_call_signature_once(&mut state, &mut signatures, &call)?;
-                    self.record_completing_outcome(ctx, &mut state, &call, outcome)
+                match outcome {
+                    CapabilityOutcome::Completed(result) => {
+                        push_call_signature_once(&mut state, &mut signatures, &call)?;
+                        append_capability_result_ref(ctx.host, &call, &result).await?;
+                        push_completed_result(&mut state, result);
+                    }
+                    CapabilityOutcome::SpawnedChildRun {
+                        result_ref,
+                        safe_summary,
+                        ..
+                    } => {
+                        push_call_signature_once(&mut state, &mut signatures, &call)?;
+                        append_spawned_child_result(
+                            ctx.host,
+                            &mut state,
+                            &call,
+                            result_ref,
+                            safe_summary,
+                        )
                         .await?;
-                } else {
-                    pending_outcomes.push((call, outcome));
+                    }
+                    other => {
+                        pending_outcomes.push((call, other));
+                    }
                 }
             }
             for (call, outcome) in pending_outcomes {
@@ -275,13 +292,21 @@ impl CapabilityStage {
         call: CapabilityCallCandidate,
         outcome: CapabilityOutcome,
     ) -> Result<BatchStep, AgentLoopExecutorError> {
-        if capability_outcome_bucket(&outcome) == CapabilityOutcomeBucket::Result {
-            self.record_completing_outcome(ctx, &mut state, &call, outcome)
-                .await?;
-            return Ok(BatchStep::Continue(Box::new(state)));
-        }
-
         match outcome {
+            CapabilityOutcome::Completed(result) => {
+                append_capability_result_ref(ctx.host, &call, &result).await?;
+                push_completed_result(&mut state, result);
+                Ok(BatchStep::Continue(Box::new(state)))
+            }
+            CapabilityOutcome::SpawnedChildRun {
+                result_ref,
+                safe_summary,
+                ..
+            } => {
+                append_spawned_child_result(ctx.host, &mut state, &call, result_ref, safe_summary)
+                    .await?;
+                Ok(BatchStep::Continue(Box::new(state)))
+            }
             CapabilityOutcome::ApprovalRequired { gate_ref, .. } => {
                 GateStage
                     .process(
@@ -371,31 +396,6 @@ impl CapabilityStage {
                 self.handle_capability_error(ctx, state, call, summary)
                     .await
             }
-            CapabilityOutcome::Completed(_) | CapabilityOutcome::SpawnedChildRun { .. } => {
-                unreachable!("completion outcomes returned before gated/error handling")
-            }
-        }
-    }
-
-    async fn record_completing_outcome(
-        &self,
-        ctx: StageContext<'_>,
-        state: &mut LoopExecutionState,
-        call: &CapabilityCallCandidate,
-        outcome: CapabilityOutcome,
-    ) -> Result<(), AgentLoopExecutorError> {
-        match outcome {
-            CapabilityOutcome::Completed(result) => {
-                append_capability_result_ref(ctx.host, call, &result).await?;
-                push_completed_result(state, result);
-                Ok(())
-            }
-            CapabilityOutcome::SpawnedChildRun {
-                result_ref,
-                safe_summary,
-                ..
-            } => append_spawned_child_result(ctx.host, state, call, result_ref, safe_summary).await,
-            _ => unreachable!("record_completing_outcome called for non-completing outcome"),
         }
     }
 

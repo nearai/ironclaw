@@ -399,7 +399,7 @@ mod reborn_support_tests {
         CancelRunRequest, CancelRunResponse, GetRunStateRequest, LoopMessageRef,
         ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
         RunProfileVersion, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnCoordinator,
-        TurnError, TurnId, TurnRunId, TurnRunState, TurnStatus,
+        TurnError, TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
         events::EventCursor,
         run_profile::{
             CapabilityBatchInvocation, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
