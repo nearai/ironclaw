@@ -1,7 +1,7 @@
 # Reborn Product Auth Contract
 
 - **Status:** contract and composition seam
-- **Issue:** #3289 / #3810 / #3811 / #3812 / #3883
+- **Issue:** #3289 / #3810 / #3811 / #3812 / #3883 / #3884
 - **Crate:** `crates/ironclaw_auth`
 - **Composition:** `ironclaw_reborn_composition::RebornProductAuthServices`
 
@@ -15,10 +15,11 @@ providers, extensions, MCP servers, WASM tools/channels, and future identity
 login flows.
 
 This slice is contract-first. It defines Reborn-native vocabulary and fake
-services, #3811 adds a Reborn composition seam, and #3812 adds callback
-completion handling for host-mounted Reborn OAuth callback routes. It does not
-migrate production extension setup routes, CLI/setup flows, durable secret
-storage, token refresh execution, or runtime credential injection.
+services, #3811 adds a Reborn composition seam, #3812 adds callback completion
+handling for host-mounted Reborn OAuth callback routes, and #3884 adds the
+product-auth token refresh and cleanup lifecycle contract. It does not migrate
+production extension setup routes, CLI/setup flows, durable secret storage,
+runtime HTTP injection, or runtime credential injection.
 
 Behavior may remain compatible with legacy UX. Code paths must not mingle V1
 components with Reborn components: V1 route handlers, pending maps, extension
@@ -33,9 +34,9 @@ manager authority, and V1 secret stores are inventory evidence only.
 | `AuthFlowManager` | scoped flow records, callback consumption, terminal state | provider HTTP, extension activation, turn replay |
 | `AuthInteractionService` | redacted auth-required projections and secure manual-token submit | secret persistence internals or model-visible token transport |
 | `CredentialSetupService` | create/update account records from OAuth/manual setup results | durable encryption or runtime injection |
-| `CredentialAccountService` | account metadata, ownership, grants, status, redacted projections | raw access/refresh token material |
+| `CredentialAccountService` | account metadata, ownership, grants, status, redacted projections, refresh lifecycle reports | raw access/refresh token material or raw provider diagnostics |
 | `AuthProviderClient` | one-shot OAuth provider exchange/refresh vocabulary over host egress | product workflow or route state |
-| `SecretCleanupService` | ownership-aware uninstall/deactivate cleanup reports | deleting reusable/shared accounts by default |
+| `SecretCleanupService` | ownership-aware uninstall/deactivate cleanup and quarantine reports | deleting reusable/shared accounts by default |
 
 Low-level encrypted storage, leases, host-mediated HTTP credential injection,
 approval interaction UI, and no-exposure enforcement remain owned by their
@@ -45,6 +46,11 @@ respective Reborn substrate contracts.
 auth ports above. WebUI/setup/extension surfaces should call this bundle once
 routes are migrated instead of reconstructing auth-flow stores, credential
 stores, provider clients, or cleanup services locally.
+Refresh and lifecycle cleanup callers should enter through
+`RebornProductAuthServices::refresh_credential_account` and
+`RebornProductAuthServices::cleanup_credentials_for_lifecycle`, which delegate
+to injected Reborn-native product-auth ports. Production profiles must inject
+real durable/provider implementations; local-dev may use the in-memory fake.
 
 Host-owned OAuth callback routes should parse and validate their HTTP input,
 derive hashes for opaque state/code/verifier values, then call
@@ -231,6 +237,47 @@ state, or V1 secret stores as product authority.
 
 ---
 
+## Token Refresh
+
+Token refresh is requested through `CredentialAccountService::refresh_account`
+and provider work is delegated to `AuthProviderClient::refresh_token`:
+
+```text
+CredentialRefreshRequest {
+  AuthProductScope,
+  provider,
+  account_id,
+  requester_extension?
+}
+
+OAuthProviderRefreshRequest {
+  provider,
+  account_id,
+  refresh_secret handle,
+  ProviderScope[]
+}
+```
+
+Rules:
+
+- Product/WebUI/extension callers must not perform raw provider HTTP, read
+  refresh-token values, or infer refresh authority from an account id alone.
+- Product callers enter through `RebornProductAuthServices`, not by
+  reconstructing credential stores, provider clients, or refresh state locally.
+- Refresh revalidates scope, provider, account status, ownership, and requester
+  grants before provider exchange.
+- One-shot provider refresh input is not serializable and redacts the refresh
+  handle in debug output.
+- Successful refresh stores returned secret handles and returns a
+  `CredentialRefreshReport` with a redacted account projection plus stable
+  recovery state.
+- Refresh failures that mean the user/operator must act become
+  `refresh_failed` account status and `reauthorize_required` recovery state.
+  Reports and errors must not contain provider response bodies, backend details,
+  secret handles, host paths, raw tokens, or leases.
+
+---
+
 ## Cleanup
 
 Cleanup is ownership-aware:
@@ -240,8 +287,14 @@ Cleanup is ownership-aware:
 | `deactivate` | retain account metadata, remove active visibility/grants | remove extension grant/visibility only |
 | `uninstall` | revoke/delete/tombstone owned account and grants | keep account, remove extension grant/visibility |
 
-Reports contain account ids only, never secret handles or backend detail
-strings.
+Cleanup must be idempotent. Partial cleanup failures are reported as stable
+quarantine categories, such as `revoke_failed`, `grant_revoke_failed`,
+`tombstone_failed`, or `backend_unavailable`, and the affected account is left
+unchanged for explicit follow-up. Reports contain account ids and stable
+categories only, never secret handles or backend detail strings.
+Product callers enter through `RebornProductAuthServices` so lifecycle
+surfaces do not depend on V1 extension-manager cleanup or route-local secret
+authority.
 
 ---
 
@@ -257,11 +310,11 @@ strings.
 | Extension/channel setup token storage | `src/extensions/manager.rs` | `CredentialSetupService`, `CredentialAccountService` | Contracted; migration deferred |
 | MCP OAuth/DCR/discovery/refresh | `src/tools/mcp/auth.rs` | `AuthFlowManager`, `AuthProviderClient`, `CredentialAccountService` | Inventory only |
 | HTTP credential injection | `src/tools/builtin/http.rs`, `src/tools/wasm/credential_injector.rs` | Secret broker/session and host-mediated egress | Out of scope for first slice |
-| Token refresh before use | `src/auth/mod.rs` | broker/session/pre-injection behavior with status projection | Status vocabulary contracted |
+| Token refresh before use | `src/auth/mod.rs` | `CredentialAccountService::refresh_account`, `AuthProviderClient::refresh_token`, broker/session/pre-injection behavior with status projection | Product-auth refresh lifecycle contracted; production egress/storage deferred |
 | Admin secrets UI | `src/channels/web/handlers/secrets.rs` | `CredentialAccountService` plus secret repository/broker | Inventory only |
 | Model-facing secret tools | `src/tools/builtin/secrets_tools.rs` | redacted account projections and authorized management actions | Inventory only |
 | Setup wizard credential entry | `src/setup/wizard.rs` | setup/admin surface over `CredentialSetupService` | Inventory only |
-| Extension uninstall/deactivate cleanup | `src/extensions/manager.rs` | `SecretCleanupService` | Contracted with fake tests |
+| Extension uninstall/deactivate cleanup | `src/extensions/manager.rs` | `SecretCleanupService` | Ownership-aware cleanup and quarantine reporting contracted; V1 manager cleanup not reused |
 
 ---
 
@@ -277,6 +330,11 @@ strings.
 - credential recovery states for configured, missing, pending setup, inactive,
   expired, refresh-failed, revoked, ambiguous, and unauthorized accounts;
 - explicit account-choice validation and shared-admin grant filtering;
-- extension-owned owner validation and deactivate/uninstall cleanup behavior;
+- refresh success, recoverable refresh failure, redaction, and refresh
+  scope/provider/grant revalidation through both auth-contract and composition
+  facade entrypoints;
+- extension-owned owner validation, deactivate/uninstall cleanup behavior,
+  idempotent cleanup, and quarantine reporting through both auth-contract and
+  composition facade entrypoints;
 - serde validation for newtypes and snake_case wire enums;
 - serialization checks proving raw code/verifier/token material is absent.

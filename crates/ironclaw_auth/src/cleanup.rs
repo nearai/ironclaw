@@ -29,6 +29,26 @@ pub struct SecretCleanupReport {
     pub retained_accounts: Vec<CredentialAccountId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub removed_grants: Vec<CredentialAccountId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quarantined_accounts: Vec<SecretCleanupQuarantine>,
+}
+
+/// Stable redacted cleanup quarantine category.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretCleanupQuarantineReason {
+    RevokeFailed,
+    GrantRevokeFailed,
+    TombstoneFailed,
+    BackendUnavailable,
+}
+
+/// Redacted cleanup diagnostic. It names only the affected account and stable
+/// failure category, never backend strings, secret handles, or host paths.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecretCleanupQuarantine {
+    pub account_id: CredentialAccountId,
+    pub reason: SecretCleanupQuarantineReason,
 }
 
 #[async_trait]

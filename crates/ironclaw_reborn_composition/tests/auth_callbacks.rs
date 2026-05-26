@@ -10,8 +10,9 @@ use ironclaw_auth::{
     AuthFlowKind, AuthProductError, AuthProductScope, AuthProviderClient, AuthProviderId,
     AuthSessionId, AuthSurface, AuthorizationCodeHash, CredentialAccountLabel,
     InMemoryAuthProductServices, LifecyclePackageRef, NewAuthFlow, OAuthAuthorizationCode,
-    OAuthAuthorizationUrl, OAuthProviderCallbackRequest, OAuthProviderExchange, OpaqueStateHash,
-    PkceVerifierHash, PkceVerifierSecret, ProviderScope,
+    OAuthAuthorizationUrl, OAuthProviderCallbackRequest, OAuthProviderExchange,
+    OAuthProviderRefresh, OAuthProviderRefreshRequest, OpaqueStateHash, PkceVerifierHash,
+    PkceVerifierSecret, ProviderScope,
 };
 use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
 use ironclaw_reborn_composition::{
@@ -60,6 +61,13 @@ impl AuthProviderClient for FailingProviderClient {
     ) -> Result<OAuthProviderExchange, AuthProductError> {
         Err(self.error.clone())
     }
+
+    async fn refresh_token(
+        &self,
+        _request: OAuthProviderRefreshRequest,
+    ) -> Result<OAuthProviderRefresh, AuthProductError> {
+        Err(self.error.clone())
+    }
 }
 
 #[derive(Default)]
@@ -81,6 +89,14 @@ impl AuthProviderClient for CountingProviderClient {
     ) -> Result<OAuthProviderExchange, AuthProductError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Err(AuthProductError::TokenExchangeFailed)
+    }
+
+    async fn refresh_token(
+        &self,
+        _request: OAuthProviderRefreshRequest,
+    ) -> Result<OAuthProviderRefresh, AuthProductError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Err(AuthProductError::RefreshFailed)
     }
 }
 

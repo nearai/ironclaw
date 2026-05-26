@@ -48,9 +48,9 @@ mod webui_serve;
 mod webui_ws_origin;
 
 pub use auth::{
-    RebornAuthContinuationDispatcher, RebornOAuthCallbackError, RebornOAuthCallbackOutcome,
-    RebornOAuthCallbackRequest, RebornOAuthCallbackResponse, RebornProductAuthServicePorts,
-    RebornProductAuthServices,
+    RebornAuthContinuationDispatcher, RebornCredentialLifecycleError, RebornOAuthCallbackError,
+    RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest, RebornOAuthCallbackResponse,
+    RebornProductAuthServicePorts, RebornProductAuthServices,
 };
 pub use error::RebornBuildError;
 pub use factory::{RebornServices, build_reborn_services};

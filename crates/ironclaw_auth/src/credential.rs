@@ -373,6 +373,44 @@ impl CredentialAccountChoiceRequest {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialRefreshRequest {
+    pub scope: AuthProductScope,
+    pub provider: AuthProviderId,
+    pub account_id: CredentialAccountId,
+    pub requester_extension: Option<ExtensionId>,
+}
+
+impl CredentialRefreshRequest {
+    pub fn new(
+        scope: AuthProductScope,
+        provider: AuthProviderId,
+        account_id: CredentialAccountId,
+    ) -> Self {
+        Self {
+            scope,
+            provider,
+            account_id,
+            requester_extension: None,
+        }
+    }
+
+    pub fn for_extension(mut self, extension_id: ExtensionId) -> Self {
+        self.requester_extension = Some(extension_id);
+        self
+    }
+}
+
+/// Adapter-safe refresh result. It carries the updated redacted account plus
+/// the stable recovery state after refresh. It never carries backend error
+/// strings, secret handles, or provider response bodies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialRefreshReport {
+    pub account: CredentialAccountProjection,
+    pub recovery: CredentialRecoveryProjection,
+    pub refreshed: bool,
+}
+
 /// Input used to create or update an account from an OAuth/manual setup result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewCredentialAccount {
@@ -439,6 +477,11 @@ pub trait CredentialAccountService: Send + Sync {
         &self,
         request: CredentialAccountChoiceRequest,
     ) -> Result<CredentialAccountProjection, AuthProductError>;
+
+    async fn refresh_account(
+        &self,
+        request: CredentialRefreshRequest,
+    ) -> Result<CredentialRefreshReport, AuthProductError>;
 }
 
 #[async_trait]

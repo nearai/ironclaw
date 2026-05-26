@@ -21,7 +21,8 @@ mod provider;
 mod scope;
 
 pub use cleanup::{
-    SecretCleanupAction, SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
+    SecretCleanupAction, SecretCleanupQuarantine, SecretCleanupQuarantineReason,
+    SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
 };
 pub use credential::{
     CredentialAccount, CredentialAccountChoiceRequest, CredentialAccountListPage,
@@ -29,7 +30,8 @@ pub use credential::{
     CredentialAccountSelectionRequest, CredentialAccountService, CredentialAccountStatus,
     CredentialAccountUpdate, CredentialOwnership, CredentialRecoveryKind,
     CredentialRecoveryProjection, CredentialRecoveryReason, CredentialRecoveryRequest,
-    CredentialRecoveryState, CredentialSetupService, NewCredentialAccount,
+    CredentialRecoveryState, CredentialRefreshReport, CredentialRefreshRequest,
+    CredentialSetupService, NewCredentialAccount,
 };
 pub use error::{AuthErrorCode, AuthProductError};
 pub use fakes::InMemoryAuthProductServices;
@@ -59,7 +61,7 @@ pub use oauth::{
 };
 pub use provider::{
     AuthProviderClient, OAuthAuthorizationCode, OAuthProviderCallbackRequest,
-    OAuthProviderExchange, PkceVerifierSecret,
+    OAuthProviderExchange, OAuthProviderRefresh, OAuthProviderRefreshRequest, PkceVerifierSecret,
 };
 pub use scope::{AuthProductScope, AuthSurface};
 

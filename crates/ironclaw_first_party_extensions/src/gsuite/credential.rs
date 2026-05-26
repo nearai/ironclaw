@@ -110,7 +110,8 @@ mod tests {
         CredentialAccount, CredentialAccountChoiceRequest, CredentialAccountLabel,
         CredentialAccountListPage, CredentialAccountListRequest, CredentialAccountProjection,
         CredentialOwnership, CredentialRecoveryProjection, CredentialRecoveryRequest,
-        InMemoryAuthProductServices, NewCredentialAccount,
+        CredentialRefreshReport, CredentialRefreshRequest, InMemoryAuthProductServices,
+        NewCredentialAccount,
     };
     use ironclaw_host_api::{InvocationId, UserId};
 
@@ -245,6 +246,13 @@ mod tests {
             _request: CredentialAccountChoiceRequest,
         ) -> Result<CredentialAccountProjection, AuthProductError> {
             unreachable!("Google credential resolver tests use unique selection")
+        }
+
+        async fn refresh_account(
+            &self,
+            _request: CredentialRefreshRequest,
+        ) -> Result<CredentialRefreshReport, AuthProductError> {
+            unreachable!("Google credential resolver tests do not refresh accounts")
         }
     }
 }

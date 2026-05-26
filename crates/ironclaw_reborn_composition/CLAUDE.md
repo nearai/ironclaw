@@ -10,6 +10,11 @@
 - Product auth composition must use `ironclaw_auth` trait-shaped ports. Do not
   wire product auth through V1 OAuth routes, V1 pending maps, V1
   `ExtensionManager`, V1 secret stores, or route-local raw HTTP clients.
+- Product auth refresh and lifecycle cleanup callers should use
+  `RebornProductAuthServices::refresh_credential_account` and
+  `cleanup_credentials_for_lifecycle`. Do not reconstruct credential stores,
+  provider clients, V1 extension cleanup, or route-local secret authority at
+  the call site.
 - OAuth callback routes should only parse/validate HTTP input and call
   `RebornProductAuthServices::handle_oauth_callback`; the handler must claim
   the scoped flow/state/provider through `AuthFlowManager` before exchanging
