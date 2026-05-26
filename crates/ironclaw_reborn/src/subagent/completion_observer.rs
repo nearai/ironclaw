@@ -14,7 +14,7 @@ use ironclaw_threads::{
 use ironclaw_turns::{
     GateRef, IdempotencyKey, ResumeTurnPrecondition, ResumeTurnRequest, TurnActor,
     TurnCommittedEventObserver, TurnCoordinator, TurnError, TurnEventKind, TurnLifecycleEvent,
-    TurnRunId, TurnRunRecord, TurnRunState, TurnSpawnTreeStateStore, TurnStatus,
+    TurnRunRecord, TurnRunState, TurnSpawnTreeStateStore, TurnStatus,
     run_profile::{AgentLoopHostError, LoopRunContext, sanitize_model_visible_text},
 };
 
@@ -1103,6 +1103,30 @@ mod tests {
         let turn_state_store = Arc::new(RecordingTurnStateStore::default());
         let result_ref = LoopResultRef::new("result:subagent.nonterminal").unwrap();
         let result_writer = Arc::new(RecordingResultWriter::new(result_ref));
+        let state = TurnRunState {
+            scope: context.scope.clone(),
+            actor: None,
+            turn_id: context.turn_id,
+            run_id: context.run_id,
+            status: TurnStatus::Running,
+            accepted_message_ref: AcceptedMessageRef::new(format!("msg-{}", context.run_id))
+                .unwrap(),
+            source_binding_ref: SourceBindingRef::new(format!("source-{}", context.run_id))
+                .unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new(format!(
+                "reply-{}",
+                context.run_id
+            ))
+            .unwrap(),
+            resolved_run_profile_id: RunProfileId::new("default").unwrap(),
+            resolved_run_profile_version: RunProfileVersion::new(1),
+            resolved_model_route: None,
+            received_at: chrono::Utc::now(),
+            checkpoint_id: None,
+            gate_ref: None,
+            failure: None,
+            event_cursor: EventCursor(1),
+        };
         let observer = SubagentCompletionObserver::new(
             Arc::new(BoundedSubagentGateResolutionStore::new()),
             Arc::new(InMemoryBoundedSubagentGoalStore::new()),
@@ -1110,16 +1134,15 @@ mod tests {
             result_writer.clone(),
             Arc::new(RecordingCoordinator::default()),
             Arc::new(InMemorySessionThreadService::default()),
+        )
+        .unwrap();
+
+        let error = observer.observe_committed_state(state).await.unwrap_err();
+
+        assert!(
+            matches!(error, TurnError::InvalidRequest { ref reason } if reason.contains("non-terminal status")),
+            "non-terminal status must be rejected, got {error:?}"
         );
-
-        observer
-            .handle_terminal_state(
-                &turn_state_for_context(&context, TurnStatus::Running),
-                TurnEventKind::RunnerHeartbeat,
-            )
-            .await
-            .unwrap();
-
         assert!(turn_state_store.releases().is_empty());
         assert!(result_writer.writes().is_empty());
     }
@@ -1569,7 +1592,8 @@ mod tests {
             result_writer.clone(),
             Arc::new(RecordingCoordinator::default()),
             thread_service,
-        );
+        )
+        .unwrap();
 
         observer
             .handle_terminal(&TurnLifecycleEvent {
@@ -1876,8 +1900,6 @@ mod tests {
             .record_awaited_child(AwaitedChildSetRecord {
                 gate_ref: gate_ref.clone(),
                 parent_run_context,
-                parent_scope: parent_scope.clone(),
-                parent_run_id,
                 tree_root_run_id: parent_run_id,
                 child_scope: child_scope.clone(),
                 child_run_id,
@@ -1885,10 +1907,10 @@ mod tests {
                 source_binding_ref: SourceBindingRef::new("subagent-source:blocking").unwrap(),
                 reply_target_binding_ref: ReplyTargetBindingRef::new("subagent-reply:blocking")
                     .unwrap(),
-                flavor_id: "general".to_string(),
+                subagent_kind: SubagentKindId::new("general").unwrap(),
                 spawn_capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
                     .unwrap(),
-                background_result_ref: Some(result_ref.clone()),
+                result_ref: result_ref.clone(),
                 mode: SpawnSubagentMode::Blocking,
             })
             .await
@@ -1927,7 +1949,7 @@ mod tests {
         assert_eq!(resumed[0].gate_resolution_ref, gate_ref);
         assert_eq!(
             resumed[0].precondition,
-            ResumeTurnPrecondition::AwaitDependentRunGate,
+            ResumeTurnPrecondition::BlockedDependentRunGate,
         );
         assert_eq!(
             turn_state_store.releases(),
@@ -2023,8 +2045,6 @@ mod tests {
             .record_awaited_child(AwaitedChildSetRecord {
                 gate_ref,
                 parent_run_context,
-                parent_scope,
-                parent_run_id,
                 tree_root_run_id: parent_run_id,
                 child_scope: child_scope.clone(),
                 child_run_id,
@@ -2032,10 +2052,10 @@ mod tests {
                 source_binding_ref: SourceBindingRef::new("subagent-source:unbound").unwrap(),
                 reply_target_binding_ref: ReplyTargetBindingRef::new("subagent-reply:unbound")
                     .unwrap(),
-                flavor_id: "general".to_string(),
+                subagent_kind: SubagentKindId::new("general").unwrap(),
                 spawn_capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
                     .unwrap(),
-                background_result_ref: Some(result_ref.clone()),
+                result_ref: result_ref.clone(),
                 mode: SpawnSubagentMode::Blocking,
             })
             .await

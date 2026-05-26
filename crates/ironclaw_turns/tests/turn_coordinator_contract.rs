@@ -34,9 +34,10 @@ use ironclaw_turns::{
     run_profile::{CapabilityOutcome, LoopGateKind, LoopModelRouteSnapshot},
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
-        ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecordModelRouteSnapshotRequest, RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse,
-        TurnRunTransitionPort, TurnRunnerOutcome,
+        ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, EventPublishingTurnRunTransitionPort,
+        FailRunRequest, HeartbeatRequest, RecordModelRouteSnapshotRequest,
+        RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, TurnRunTransitionPort,
+        TurnRunnerOutcome,
     },
 };
 
