@@ -1,9 +1,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::runtime_policy::ProcessBackendKind;
+use ironclaw_host_api::runtime_policy::{
+    EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode, SecretMode,
+};
 use ironclaw_host_runtime::{SchedulerTurnRunWakeNotifier, TenantSandboxProcessPort};
 use ironclaw_trust::HostTrustPolicy;
 
@@ -91,19 +93,20 @@ pub(crate) enum RebornStorageInput {
     LocalDev {
         root: PathBuf,
         workspace_root: Option<PathBuf>,
+        host_home_root: Option<PathBuf>,
     },
     #[cfg(feature = "libsql")]
     Libsql {
         db: Arc<libsql::Database>,
         path_or_url: String,
         auth_token: Option<ironclaw_secrets::SecretMaterial>,
-        secret_master_key: ironclaw_secrets::SecretMaterial,
+        secret_master_key: Option<ironclaw_secrets::SecretMaterial>,
     },
     #[cfg(feature = "postgres")]
     Postgres {
         pool: deadpool_postgres::Pool,
         url: ironclaw_secrets::SecretMaterial,
-        secret_master_key: ironclaw_secrets::SecretMaterial,
+        secret_master_key: Option<ironclaw_secrets::SecretMaterial>,
     },
 }
 
@@ -146,6 +149,7 @@ impl RebornBuildInput {
             RebornStorageInput::LocalDev {
                 root,
                 workspace_root: None,
+                host_home_root: None,
             },
         )
     }
@@ -159,6 +163,31 @@ impl RebornBuildInput {
             *root = Some(workspace_root);
         }
         self
+    }
+
+    pub fn with_local_dev_confirmed_host_home_root(mut self, host_home_root: PathBuf) -> Self {
+        if let RebornStorageInput::LocalDev {
+            host_home_root: root,
+            ..
+        } = &mut self.storage
+        {
+            *root = Some(host_home_root);
+        }
+        self
+    }
+
+    pub fn requires_local_dev_confirmed_host_home_root(&self) -> bool {
+        self.runtime_policy.as_ref().is_some_and(|policy| {
+            policy.filesystem_backend == FilesystemBackendKind::HostWorkspaceAndHome
+        })
+    }
+
+    pub fn grants_trusted_laptop_access(&self) -> bool {
+        self.runtime_policy.as_ref().is_some_and(|policy| {
+            policy.filesystem_backend == FilesystemBackendKind::HostWorkspaceAndHome
+                || policy.network_mode == NetworkMode::Direct
+                || policy.secret_mode == SecretMode::InheritedEnv
+        })
     }
 
     #[cfg(feature = "libsql")]
@@ -177,7 +206,27 @@ impl RebornBuildInput {
                 db,
                 path_or_url: path_or_url.into(),
                 auth_token,
-                secret_master_key,
+                secret_master_key: Some(secret_master_key),
+            },
+        )
+    }
+
+    #[cfg(feature = "libsql")]
+    pub fn libsql_with_resolved_secret_master_key(
+        profile: RebornCompositionProfile,
+        owner_id: impl Into<String>,
+        db: Arc<libsql::Database>,
+        path_or_url: impl Into<String>,
+        auth_token: Option<ironclaw_secrets::SecretMaterial>,
+    ) -> Self {
+        Self::new(
+            profile,
+            owner_id,
+            RebornStorageInput::Libsql {
+                db,
+                path_or_url: path_or_url.into(),
+                auth_token,
+                secret_master_key: None,
             },
         )
     }
@@ -196,7 +245,25 @@ impl RebornBuildInput {
             RebornStorageInput::Postgres {
                 pool,
                 url,
-                secret_master_key,
+                secret_master_key: Some(secret_master_key),
+            },
+        )
+    }
+
+    #[cfg(feature = "postgres")]
+    pub fn postgres_with_resolved_secret_master_key(
+        profile: RebornCompositionProfile,
+        owner_id: impl Into<String>,
+        pool: deadpool_postgres::Pool,
+        url: ironclaw_secrets::SecretMaterial,
+    ) -> Self {
+        Self::new(
+            profile,
+            owner_id,
+            RebornStorageInput::Postgres {
+                pool,
+                url,
+                secret_master_key: None,
             },
         )
     }

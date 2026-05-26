@@ -23,9 +23,10 @@ use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator,
     GetRunStateRequest, IdempotencyKey, InMemoryTurnStateStore, InMemoryTurnStateStoreLimits,
     NoopTurnRunWakeNotifier, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse,
-    RunProfileRequest, SanitizedCancelReason, SourceBindingRef, SubmitTurnRequest,
-    SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunState, TurnRunWake,
-    TurnRunWakeNotifier, TurnRunWakeNotifyError, TurnRunnerId, TurnScope, TurnStateStore,
+    RunProfileRequest, SanitizedCancelReason, SourceBindingRef, SpawnTreeReservation,
+    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator,
+    TurnError, TurnRunId, TurnRunRecord, TurnRunState, TurnRunWake, TurnRunWakeNotifier,
+    TurnRunWakeNotifyError, TurnRunnerId, TurnScope, TurnSpawnTreeStateStore, TurnStateStore,
     TurnStatus,
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
@@ -299,6 +300,59 @@ impl TurnStateStore for DurableLikeTurnStore {
 
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
         self.inner.get_run_state(request).await
+    }
+}
+
+#[async_trait]
+impl TurnSpawnTreeStateStore for DurableLikeTurnStore {
+    async fn submit_child_turn(
+        &self,
+        request: SubmitChildRunRequest,
+        admission_policy: &dyn ironclaw_turns::TurnAdmissionPolicy,
+        run_profile_resolver: &dyn ironclaw_turns::RunProfileResolver,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        self.inner
+            .submit_child_turn(request, admission_policy, run_profile_resolver)
+            .await
+    }
+
+    async fn children_of(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+    ) -> Result<Vec<TurnRunRecord>, TurnError> {
+        self.inner.children_of(scope, run_id).await
+    }
+
+    async fn get_run_record(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+    ) -> Result<Option<TurnRunRecord>, TurnError> {
+        self.inner.get_run_record(scope, run_id).await
+    }
+
+    async fn reserve_tree_descendants(
+        &self,
+        scope: &TurnScope,
+        root_run_id: TurnRunId,
+        delta: u32,
+        cap: u32,
+    ) -> Result<SpawnTreeReservation, TurnError> {
+        self.inner
+            .reserve_tree_descendants(scope, root_run_id, delta, cap)
+            .await
+    }
+
+    async fn release_tree_descendants(
+        &self,
+        scope: &TurnScope,
+        root_run_id: TurnRunId,
+        delta: u32,
+    ) -> Result<(), TurnError> {
+        self.inner
+            .release_tree_descendants(scope, root_run_id, delta)
+            .await
     }
 }
 
@@ -1332,6 +1386,10 @@ fn submit_turn_request(thread: &str, idempotency_key: &str) -> SubmitTurnRequest
         requested_run_profile: Some(RunProfileRequest::new("default").unwrap()),
         idempotency_key: IdempotencyKey::new(idempotency_key).unwrap(),
         received_at: Utc::now(),
+        requested_run_id: None,
+        parent_run_id: None,
+        subagent_depth: 0,
+        spawn_tree_root_run_id: None,
     }
 }
 

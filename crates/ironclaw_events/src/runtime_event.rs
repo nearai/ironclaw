@@ -1,6 +1,6 @@
 use chrono::Utc;
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, ProcessId, ResourceScope, RuntimeKind, Timestamp,
+    CapabilityId, ExtensionId, InvocationId, ProcessId, ResourceScope, RuntimeKind, Timestamp,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -38,6 +38,9 @@ pub enum RuntimeEventKind {
     RuntimeSelected,
     DispatchSucceeded,
     DispatchFailed,
+    CapabilityActivityRequested,
+    CapabilityActivitySucceeded,
+    CapabilityActivityFailed,
     ModelStarted,
     ModelCompleted,
     ModelFailed,
@@ -79,6 +82,8 @@ pub struct RuntimeEvent {
     pub timestamp: Timestamp,
     pub kind: RuntimeEventKind,
     pub scope: ResourceScope,
+    /// Parent run invocation id when this event represents nested activity.
+    pub parent_invocation_id: Option<InvocationId>,
     pub capability_id: CapabilityId,
     pub provider: Option<ExtensionId>,
     pub runtime: Option<RuntimeKind>,
@@ -111,6 +116,8 @@ struct RuntimeEventWire {
     timestamp: Timestamp,
     kind: RuntimeEventKind,
     scope: ResourceScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent_invocation_id: Option<InvocationId>,
     capability_id: CapabilityId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     provider: Option<ExtensionId>,
@@ -150,6 +157,7 @@ impl Serialize for RuntimeEvent {
             timestamp: self.timestamp,
             kind: self.kind,
             scope: self.scope.clone(),
+            parent_invocation_id: self.parent_invocation_id,
             capability_id: self.capability_id.clone(),
             provider: self.provider.clone(),
             runtime: self.runtime,
@@ -181,6 +189,7 @@ impl<'de> Deserialize<'de> for RuntimeEvent {
             timestamp: wire.timestamp,
             kind: wire.kind,
             scope: wire.scope,
+            parent_invocation_id: wire.parent_invocation_id,
             capability_id: wire.capability_id,
             provider: wire.provider,
             runtime: wire.runtime,
@@ -491,6 +500,7 @@ impl RuntimeEvent {
             timestamp: Utc::now(),
             kind: payload.kind,
             scope: payload.scope,
+            parent_invocation_id: None,
             capability_id: payload.capability_id,
             provider: payload.provider,
             runtime: payload.runtime,
@@ -503,6 +513,42 @@ impl RuntimeEvent {
             hook_decision: payload.hook_decision,
             hook_failure_category: payload.hook_failure_category,
             hook_failure_disposition: payload.hook_failure_disposition,
+        }
+    }
+
+    pub fn capability_activity_requested(
+        scope: ResourceScope,
+        capability_id: CapabilityId,
+    ) -> Self {
+        Self {
+            kind: RuntimeEventKind::CapabilityActivityRequested,
+            ..Self::dispatch_requested(scope, capability_id)
+        }
+    }
+
+    pub fn capability_activity_succeeded(
+        scope: ResourceScope,
+        capability_id: CapabilityId,
+        provider: ExtensionId,
+        runtime: RuntimeKind,
+        output_bytes: u64,
+    ) -> Self {
+        Self {
+            kind: RuntimeEventKind::CapabilityActivitySucceeded,
+            ..Self::dispatch_succeeded(scope, capability_id, provider, runtime, output_bytes)
+        }
+    }
+
+    pub fn capability_activity_failed(
+        scope: ResourceScope,
+        capability_id: CapabilityId,
+        provider: Option<ExtensionId>,
+        runtime: Option<RuntimeKind>,
+        error_kind: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind: RuntimeEventKind::CapabilityActivityFailed,
+            ..Self::dispatch_failed(scope, capability_id, provider, runtime, error_kind)
         }
     }
 

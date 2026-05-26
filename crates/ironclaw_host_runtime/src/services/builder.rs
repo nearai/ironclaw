@@ -727,7 +727,12 @@ where
         let runtime_http_egress = Arc::new(
             crate::HostHttpEgressService::new(network, SharedSecretStore(secret_store))
                 .with_network_policy_store(Arc::clone(&self.network_policy_store))
-                .with_secret_injection_store(Arc::clone(&self.secret_injection_store)),
+                .with_secret_injection_store(Arc::clone(&self.secret_injection_store))
+                .with_unsafe_raw_diagnostics_allowed(
+                    crate::runtime_policy_allows_unsafe_raw_http_diagnostics(
+                        self.runtime_policy.as_ref(),
+                    ),
+                ),
         );
         Ok(self.with_host_http_egress_service(runtime_http_egress))
     }

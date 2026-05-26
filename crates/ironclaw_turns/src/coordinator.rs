@@ -1,15 +1,20 @@
 use async_trait::async_trait;
+use chrono::Utc;
 use std::{
+    collections::HashSet,
     fmt,
     panic::{AssertUnwindSafe, catch_unwind},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 use tracing::debug;
+
+const MAX_DELIVERED_EVENT_CURSORS: usize = 4096;
 
 use crate::{
     AdmissionRejection, CancelRunRequest, CancelRunResponse, GetRunStateRequest,
     InMemoryRunProfileResolver, ResumeTurnRequest, ResumeTurnResponse, RunProfileResolver,
-    SubmitTurnRequest, SubmitTurnResponse, TurnError, TurnRunId, TurnRunState, TurnScope,
+    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnError, TurnEventKind,
+    TurnEventSink, TurnLifecycleEvent, TurnRunId, TurnRunState, TurnScope, TurnSpawnTreeStateStore,
     TurnStateStore, TurnStatus, events::EventCursor,
 };
 
@@ -65,6 +70,10 @@ impl TurnAdmissionPolicy for AllowAllTurnAdmissionPolicy {
 
 #[async_trait]
 pub trait TurnCoordinator: Send + Sync {
+    /// Mint a run id without side effects. This intentionally has no default
+    /// implementation so every coordinator opts into prepared-run semantics.
+    async fn prepare_turn(&self, scope: TurnScope) -> Result<TurnRunId, TurnError>;
+
     async fn submit_turn(
         &self,
         request: SubmitTurnRequest,
@@ -80,11 +89,23 @@ pub trait TurnCoordinator: Send + Sync {
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError>;
 }
 
+#[async_trait]
+pub trait TurnSpawnTreePort: Send + Sync {
+    /// Submit a child run by deriving lineage from the persisted parent and
+    /// holding the spawn-tree reservation around the underlying turn submit.
+    async fn submit_child_run(
+        &self,
+        request: SubmitChildRunRequest,
+    ) -> Result<SubmitTurnResponse, TurnError>;
+}
+
 pub struct DefaultTurnCoordinator<S: ?Sized> {
     store: Arc<S>,
     admission_policy: Arc<dyn TurnAdmissionPolicy>,
     run_profile_resolver: Arc<dyn RunProfileResolver>,
     wake_notifier: Arc<dyn TurnRunWakeNotifier>,
+    event_sink: Option<Arc<dyn TurnEventSink>>,
+    delivered_event_cursors: Mutex<HashSet<EventCursor>>,
 }
 
 impl<S> DefaultTurnCoordinator<S>
@@ -97,6 +118,8 @@ where
             admission_policy: Arc::new(AllowAllTurnAdmissionPolicy),
             run_profile_resolver: Arc::new(InMemoryRunProfileResolver::default()),
             wake_notifier: Arc::new(NoopTurnRunWakeNotifier),
+            event_sink: None,
+            delivered_event_cursors: Mutex::new(HashSet::new()),
         }
     }
 
@@ -113,6 +136,32 @@ where
     pub fn with_wake_notifier(mut self, notifier: Arc<dyn TurnRunWakeNotifier>) -> Self {
         self.wake_notifier = notifier;
         self
+    }
+
+    pub fn with_event_sink(mut self, sink: Arc<dyn TurnEventSink>) -> Self {
+        self.event_sink = Some(sink);
+        self
+    }
+
+    fn claim_event_cursor_for_publish(&self, cursor: EventCursor) -> bool {
+        if self.event_sink.is_none() {
+            return false;
+        }
+        match self.delivered_event_cursors.lock() {
+            Ok(mut delivered) => {
+                if delivered.len() >= MAX_DELIVERED_EVENT_CURSORS {
+                    delivered.clear();
+                }
+                delivered.insert(cursor)
+            }
+            Err(poisoned) => {
+                let mut delivered = poisoned.into_inner();
+                if delivered.len() >= MAX_DELIVERED_EVENT_CURSORS {
+                    delivered.clear();
+                }
+                delivered.insert(cursor)
+            }
+        }
     }
 }
 
@@ -157,16 +206,35 @@ fn notify_queued_run_best_effort(notifier: &dyn TurnRunWakeNotifier, wake: TurnR
     }
 }
 
+async fn publish_turn_event_best_effort(
+    sink: Option<&Arc<dyn TurnEventSink>>,
+    event: TurnLifecycleEvent,
+) {
+    let Some(sink) = sink else {
+        return;
+    };
+    if let Err(error) = sink.publish(event).await {
+        debug!(error = %error, "turn lifecycle event sink publish failed");
+    }
+}
+
 #[async_trait]
 impl<S> TurnCoordinator for DefaultTurnCoordinator<S>
 where
     S: TurnStateStore + ?Sized + 'static,
 {
+    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        Ok(TurnRunId::new())
+    }
+
     async fn submit_turn(
         &self,
         request: SubmitTurnRequest,
     ) -> Result<SubmitTurnResponse, TurnError> {
         let scope = request.scope.clone();
+        let event_scope = request.scope.clone();
+        let actor = request.actor.clone();
+        let occurred_at = request.received_at;
         let response = self
             .store
             .submit_turn(
@@ -190,6 +258,29 @@ where
             "turn coordinator accepted turn with resolved run profile"
         );
         notify_queued_run_best_effort(self.wake_notifier.as_ref(), submit_wake(scope, &response));
+        let SubmitTurnResponse::Accepted {
+            run_id,
+            status,
+            event_cursor,
+            ..
+        } = &response;
+        if self.claim_event_cursor_for_publish(*event_cursor) {
+            publish_turn_event_best_effort(
+                self.event_sink.as_ref(),
+                TurnLifecycleEvent {
+                    cursor: *event_cursor,
+                    scope: event_scope,
+                    occurred_at: Some(occurred_at),
+                    owner_user_id: Some(actor.user_id),
+                    run_id: *run_id,
+                    status: *status,
+                    kind: TurnEventKind::Submitted,
+                    blocked_gate: None,
+                    sanitized_reason: None,
+                },
+            )
+            .await;
+        }
         Ok(response)
     }
 
@@ -198,13 +289,36 @@ where
         request: ResumeTurnRequest,
     ) -> Result<ResumeTurnResponse, TurnError> {
         let scope = request.scope.clone();
+        let actor = request.actor.clone();
         let response = self.store.resume_turn(request).await?;
-        notify_queued_run_best_effort(self.wake_notifier.as_ref(), resume_wake(scope, &response));
+        notify_queued_run_best_effort(
+            self.wake_notifier.as_ref(),
+            resume_wake(scope.clone(), &response),
+        );
+        if self.claim_event_cursor_for_publish(response.event_cursor) {
+            publish_turn_event_best_effort(
+                self.event_sink.as_ref(),
+                TurnLifecycleEvent {
+                    cursor: response.event_cursor,
+                    scope,
+                    occurred_at: Some(Utc::now()),
+                    owner_user_id: Some(actor.user_id),
+                    run_id: response.run_id,
+                    status: response.status,
+                    kind: TurnEventKind::Resumed,
+                    blocked_gate: None,
+                    sanitized_reason: None,
+                },
+            )
+            .await;
+        }
         Ok(response)
     }
 
     async fn cancel_run(&self, request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
         let scope = request.scope.clone();
+        let actor = request.actor.clone();
+        let reason = request.reason;
         let response = self.store.request_cancel(request).await?;
         // Wake on `CancelRequested` (the cooperative case) AND on any terminal
         // transition. Registered handles otherwise rely solely on the polling
@@ -213,8 +327,31 @@ where
         if response.status == TurnStatus::CancelRequested || response.status.is_terminal() {
             notify_queued_run_best_effort(
                 self.wake_notifier.as_ref(),
-                cancel_wake(scope, &response),
+                cancel_wake(scope.clone(), &response),
             );
+        }
+        if !response.already_terminal && self.claim_event_cursor_for_publish(response.event_cursor)
+        {
+            let kind = if response.status == TurnStatus::CancelRequested {
+                TurnEventKind::CancelRequested
+            } else {
+                TurnEventKind::Cancelled
+            };
+            publish_turn_event_best_effort(
+                self.event_sink.as_ref(),
+                TurnLifecycleEvent {
+                    cursor: response.event_cursor,
+                    scope,
+                    occurred_at: Some(Utc::now()),
+                    owner_user_id: Some(actor.user_id),
+                    run_id: response.run_id,
+                    status: response.status,
+                    kind,
+                    blocked_gate: None,
+                    sanitized_reason: Some(reason.category().to_string()),
+                },
+            )
+            .await;
         }
         Ok(response)
     }
@@ -225,10 +362,33 @@ where
 }
 
 #[async_trait]
+impl<S> TurnSpawnTreePort for DefaultTurnCoordinator<S>
+where
+    S: TurnSpawnTreeStateStore + ?Sized + 'static,
+{
+    async fn submit_child_run(
+        &self,
+        request: SubmitChildRunRequest,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        self.store
+            .submit_child_turn(
+                request,
+                self.admission_policy.as_ref(),
+                self.run_profile_resolver.as_ref(),
+            )
+            .await
+    }
+}
+
+#[async_trait]
 impl<C> TurnCoordinator for Arc<C>
 where
     C: TurnCoordinator + ?Sized,
 {
+    async fn prepare_turn(&self, scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        self.as_ref().prepare_turn(scope).await
+    }
+
     async fn submit_turn(
         &self,
         request: SubmitTurnRequest,
@@ -249,5 +409,18 @@ where
 
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
         self.as_ref().get_run_state(request).await
+    }
+}
+
+#[async_trait]
+impl<C> TurnSpawnTreePort for Arc<C>
+where
+    C: TurnSpawnTreePort + ?Sized,
+{
+    async fn submit_child_run(
+        &self,
+        request: SubmitChildRunRequest,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        self.as_ref().submit_child_run(request).await
     }
 }

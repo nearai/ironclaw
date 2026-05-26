@@ -7,9 +7,11 @@ use std::{
 use ironclaw_authorization::FilesystemCapabilityLeaseStore;
 use ironclaw_authorization::GrantAuthorizer;
 #[cfg(feature = "libsql")]
-use ironclaw_events::DurableEventLog;
+use ironclaw_events::{DurableAuditLog, DurableEventLog};
 #[cfg(not(feature = "libsql"))]
-use ironclaw_events::{DurableEventLog, InMemoryDurableEventLog};
+use ironclaw_events::{
+    DurableAuditLog, DurableEventLog, InMemoryDurableAuditLog, InMemoryDurableEventLog,
+};
 use ironclaw_extensions::ExtensionRegistry;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_filesystem::RootFilesystem;
@@ -21,10 +23,12 @@ use ironclaw_filesystem::{
 use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
+use ironclaw_host_api::runtime_policy::FilesystemBackendKind;
 use ironclaw_host_api::{
-    EffectKind, HostPath, MountAlias, MountGrant, MountPermissions, MountView, PackageId,
-    VirtualPath,
+    EffectKind, HostPath, MountPermissions, MountView, PackageId, VirtualPath,
 };
+#[cfg(feature = "libsql")]
+use ironclaw_host_api::{MountAlias, MountGrant};
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostRuntimeServices,
     builtin_first_party_handlers, builtin_first_party_package,
@@ -59,6 +63,7 @@ use ironclaw_turns::{
 };
 
 use crate::input::{RebornRuntimeProcessBinding, RebornStorageInput};
+use crate::local_dev_mounts::{skill_context_mount_view, workspace_mount_view};
 use crate::{
     RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
     RebornFacadeReadiness, RebornProductAuthServicePorts, RebornProductAuthServices,
@@ -69,6 +74,12 @@ use crate::{
 pub(crate) type LocalDevRootFilesystem = CompositeRootFilesystem;
 #[cfg(not(feature = "libsql"))]
 pub(crate) type LocalDevRootFilesystem = LocalFilesystem;
+
+type LocalDevWorkspaceFilesystems = (
+    Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
+    Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
+    MountView,
+);
 
 #[cfg(feature = "libsql")]
 pub(crate) type LocalDevTurnStateStore = FilesystemTurnStateStore<LocalDevRootFilesystem>;
@@ -154,7 +165,9 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     pub(crate) workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
+    pub(crate) workspace_mounts: MountView,
     pub(crate) event_log: Arc<dyn DurableEventLog>,
+    pub(crate) audit_log: Arc<dyn DurableAuditLog>,
 }
 
 struct RebornLocalDevStoreGraph {
@@ -253,6 +266,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     let RebornStorageInput::LocalDev {
         root,
         workspace_root,
+        host_home_root,
     } = storage
     else {
         return Err(RebornBuildError::InvalidConfig {
@@ -268,20 +282,39 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     })?;
     let root = canonicalize_local_dev_path(&root, "storage root")?;
     let workspace_root = canonicalize_local_dev_path(&workspace_root, "workspace root")?;
+    let include_host_home = runtime_policy.as_ref().is_some_and(|policy| {
+        policy.filesystem_backend == FilesystemBackendKind::HostWorkspaceAndHome
+    });
+    let host_home_root = match (include_host_home, host_home_root) {
+        (true, Some(path)) => Some(LocalDevHostHomeRoot {
+            canonical_root: canonicalize_local_dev_host_home_root(&path)?,
+            raw_alias: path,
+        }),
+        (true, None) => {
+            return Err(RebornBuildError::InvalidConfig {
+                reason: "local-dev-yolo host home access requires a confirmed host home root"
+                    .to_string(),
+            });
+        }
+        (false, Some(_)) => {
+            return Err(RebornBuildError::InvalidConfig {
+                reason:
+                    "confirmed host home root was supplied but the resolved runtime policy does not allow host home access"
+                        .to_string(),
+            });
+        }
+        (false, None) => None,
+    };
     validate_local_dev_workspace_skill_isolation(&root, &workspace_root)?;
-    let filesystem = build_local_dev_root_filesystem(&root, &workspace_root).await?;
-    let skill_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
-        Arc::clone(&filesystem),
-        local_dev_skill_mount_view()?,
-    ));
-    let workspace_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
-        Arc::clone(&filesystem),
-        local_dev_workspace_mount_view()?,
-    ));
+    let filesystem =
+        build_local_dev_root_filesystem(&root, &workspace_root, host_home_root.as_ref()).await?;
+    let (skill_filesystem, workspace_filesystem, runtime_workspace_mounts) =
+        build_workspace_filesystems(Arc::clone(&filesystem), host_home_root.as_ref())?;
     let store_graph = build_local_dev_store_graph(
         Arc::clone(&filesystem),
         skill_filesystem,
         workspace_filesystem,
+        runtime_workspace_mounts,
     )?;
 
     let mut services = HostRuntimeServices::new(
@@ -339,9 +372,11 @@ fn build_local_dev_store_graph(
     filesystem: Arc<LocalDevRootFilesystem>,
     skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
+    workspace_mounts: MountView,
 ) -> Result<RebornLocalDevStoreGraph, RebornBuildError> {
     let scoped_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
-    let event_log = local_dev_event_log(filesystem)?;
+    let event_log = local_dev_event_log(Arc::clone(&filesystem))?;
+    let audit_log = local_dev_audit_log(filesystem)?;
     let run_state = Arc::new(FilesystemRunStateStore::new(Arc::clone(&scoped_filesystem)));
     let approval_requests = Arc::new(FilesystemApprovalRequestStore::new(Arc::clone(
         &scoped_filesystem,
@@ -363,7 +398,9 @@ fn build_local_dev_store_graph(
         thread_service,
         skill_filesystem,
         workspace_filesystem,
+        workspace_mounts,
         event_log,
+        audit_log,
     });
     let resource_governor: Arc<LocalDevResourceGovernor> =
         Arc::new(PersistentResourceGovernor::new(
@@ -388,8 +425,10 @@ fn build_local_dev_store_graph(
     filesystem: Arc<LocalDevRootFilesystem>,
     skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
+    workspace_mounts: MountView,
 ) -> Result<RebornLocalDevStoreGraph, RebornBuildError> {
-    let event_log = local_dev_event_log(filesystem)?;
+    let event_log = local_dev_event_log(Arc::clone(&filesystem))?;
+    let audit_log = local_dev_audit_log(filesystem)?;
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
     let turn_state = Arc::new(InMemoryTurnStateStore::default());
@@ -406,7 +445,9 @@ fn build_local_dev_store_graph(
         thread_service,
         skill_filesystem,
         workspace_filesystem,
+        workspace_mounts,
         event_log,
+        audit_log,
     });
     let resource_governor: Arc<LocalDevResourceGovernor> =
         Arc::new(InMemoryResourceGovernor::new());
@@ -426,6 +467,7 @@ fn build_local_dev_store_graph(
 async fn build_local_dev_root_filesystem(
     root: &Path,
     workspace_root: &Path,
+    host_home_root: Option<&LocalDevHostHomeRoot>,
 ) -> Result<Arc<LocalDevRootFilesystem>, RebornBuildError> {
     let db_path = root.join("reborn-local-dev.db");
     let db = Arc::new(
@@ -439,7 +481,11 @@ async fn build_local_dev_root_filesystem(
     let database = Arc::new(LibSqlRootFilesystem::new(db));
     database.run_migrations().await?;
 
-    let local = Arc::new(local_dev_project_filesystem(root, workspace_root)?);
+    let local = Arc::new(local_dev_project_filesystem(
+        root,
+        workspace_root,
+        host_home_root,
+    )?);
     let mut root = CompositeRootFilesystem::new();
     root.mount(
         local_dev_mount_descriptor(
@@ -484,16 +530,19 @@ async fn build_local_dev_root_filesystem(
 async fn build_local_dev_root_filesystem(
     root: &Path,
     workspace_root: &Path,
+    host_home_root: Option<&LocalDevHostHomeRoot>,
 ) -> Result<Arc<LocalDevRootFilesystem>, RebornBuildError> {
     Ok(Arc::new(local_dev_project_filesystem(
         root,
         workspace_root,
+        host_home_root,
     )?))
 }
 
 fn local_dev_project_filesystem(
     root: &Path,
     workspace_root: &Path,
+    host_home_root: Option<&LocalDevHostHomeRoot>,
 ) -> Result<LocalFilesystem, RebornBuildError> {
     let mut filesystem = LocalFilesystem::new();
     filesystem.mount_local(
@@ -504,6 +553,12 @@ fn local_dev_project_filesystem(
         VirtualPath::new("/projects/workspace")?,
         HostPath::from_path_buf(workspace_root.to_path_buf()),
     )?;
+    if let Some(host_home_root) = host_home_root {
+        filesystem.mount_local(
+            VirtualPath::new("/projects/host")?,
+            HostPath::from_path_buf(host_home_root.canonical_root.clone()),
+        )?;
+    }
     Ok(filesystem)
 }
 
@@ -563,6 +618,23 @@ fn local_dev_event_log(
     ))
 }
 
+#[cfg(feature = "libsql")]
+fn local_dev_audit_log(
+    filesystem: Arc<LocalDevRootFilesystem>,
+) -> Result<Arc<dyn DurableAuditLog>, RebornBuildError> {
+    let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
+        filesystem,
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/events")?,
+            VirtualPath::new("/events")?,
+            MountPermissions::read_write_list_delete(),
+        )])?,
+    ));
+    Ok(Arc::new(
+        ironclaw_reborn_event_store::FilesystemDurableAuditLog::new(scoped),
+    ))
+}
+
 #[cfg(not(feature = "libsql"))]
 fn local_dev_event_log(
     _filesystem: Arc<LocalDevRootFilesystem>,
@@ -570,10 +642,94 @@ fn local_dev_event_log(
     Ok(Arc::new(InMemoryDurableEventLog::new()))
 }
 
+#[cfg(not(feature = "libsql"))]
+fn local_dev_audit_log(
+    _filesystem: Arc<LocalDevRootFilesystem>,
+) -> Result<Arc<dyn DurableAuditLog>, RebornBuildError> {
+    Ok(Arc::new(InMemoryDurableAuditLog::new()))
+}
+
 fn canonicalize_local_dev_path(path: &Path, label: &str) -> Result<PathBuf, RebornBuildError> {
     std::fs::canonicalize(path).map_err(|_| RebornBuildError::InvalidConfig {
         reason: format!("local-dev {label} could not be resolved"),
     })
+}
+
+struct LocalDevHostHomeRoot {
+    canonical_root: PathBuf,
+    raw_alias: PathBuf,
+}
+
+impl LocalDevHostHomeRoot {
+    fn aliases(&self) -> Vec<&Path> {
+        vec![self.raw_alias.as_path(), self.canonical_root.as_path()]
+    }
+}
+
+/// Build the two ScopedFilesystem views used by local-dev: a read-only workspace view
+/// for skill context, and a read-write workspace view for runtime operations.
+///
+/// When `host_home_root` is present, the runtime view also grants raw host-home aliases
+/// so `/Users/alice`-style paths resolve through the `/host` mount.
+fn build_workspace_filesystems(
+    filesystem: Arc<LocalDevRootFilesystem>,
+    host_home_root: Option<&LocalDevHostHomeRoot>,
+) -> Result<LocalDevWorkspaceFilesystems, RebornBuildError> {
+    let read_only_workspace_mounts = workspace_mount_view(MountPermissions::read_only(), &[])
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: error.to_string(),
+        })?;
+    let host_home_aliases = host_home_root
+        .map(|root| root.aliases())
+        .unwrap_or_default();
+    let runtime_workspace_mounts =
+        workspace_mount_view(MountPermissions::read_write(), &host_home_aliases).map_err(
+            |error| RebornBuildError::InvalidConfig {
+                reason: error.to_string(),
+            },
+        )?;
+    let skill_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(&filesystem),
+        skill_context_mount_view().map_err(|error| RebornBuildError::InvalidConfig {
+            reason: error.to_string(),
+        })?,
+    ));
+    let workspace_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        filesystem,
+        read_only_workspace_mounts,
+    ));
+    Ok((
+        skill_filesystem,
+        workspace_filesystem,
+        runtime_workspace_mounts,
+    ))
+}
+
+fn canonicalize_local_dev_existing_dir(
+    path: &Path,
+    label: &str,
+) -> Result<PathBuf, RebornBuildError> {
+    let path = canonicalize_local_dev_path(path, label)?;
+    let metadata = std::fs::metadata(&path).map_err(|_| RebornBuildError::InvalidConfig {
+        reason: format!("local-dev {label} could not be inspected"),
+    })?;
+    if metadata.is_dir() {
+        Ok(path)
+    } else {
+        Err(RebornBuildError::InvalidConfig {
+            reason: format!("local-dev {label} must be an existing directory"),
+        })
+    }
+}
+
+fn canonicalize_local_dev_host_home_root(path: &Path) -> Result<PathBuf, RebornBuildError> {
+    let path = canonicalize_local_dev_existing_dir(path, "host home root")?;
+    if path.parent().is_none() {
+        return Err(RebornBuildError::InvalidConfig {
+            reason: "local-dev host home root must not be a filesystem root".to_string(),
+        });
+    }
+    Ok(path)
 }
 
 fn validate_local_dev_workspace_skill_isolation(
@@ -601,45 +757,6 @@ fn validate_local_dev_workspace_skill_isolation(
 
 fn paths_overlap(left: &Path, right: &Path) -> bool {
     left == right || left.starts_with(right) || right.starts_with(left)
-}
-
-fn local_dev_skill_mount_view() -> Result<MountView, RebornBuildError> {
-    let grant = |alias: &str, target: &str| -> Result<MountGrant, RebornBuildError> {
-        Ok(MountGrant::new(
-            MountAlias::new(alias).map_err(|error| RebornBuildError::InvalidConfig {
-                reason: error.to_string(),
-            })?,
-            VirtualPath::new(target).map_err(|error| RebornBuildError::InvalidConfig {
-                reason: error.to_string(),
-            })?,
-            MountPermissions::read_only(),
-        ))
-    };
-    MountView::new(vec![
-        grant("/skills", "/projects/skills")?,
-        grant("/tenant-shared/skills", "/projects/tenant-shared/skills")?,
-        grant("/system/skills", "/projects/system/skills")?,
-    ])
-    .map_err(|error| RebornBuildError::InvalidConfig {
-        reason: error.to_string(),
-    })
-}
-
-fn local_dev_workspace_mount_view() -> Result<MountView, RebornBuildError> {
-    MountView::new(vec![MountGrant::new(
-        MountAlias::new("/workspace").map_err(|error| RebornBuildError::InvalidConfig {
-            reason: error.to_string(),
-        })?,
-        VirtualPath::new("/projects/workspace").map_err(|error| {
-            RebornBuildError::InvalidConfig {
-                reason: error.to_string(),
-            }
-        })?,
-        MountPermissions::read_only(),
-    )])
-    .map_err(|error| RebornBuildError::InvalidConfig {
-        reason: error.to_string(),
-    })
 }
 
 fn builtin_extension_registry() -> Result<ExtensionRegistry, RebornBuildError> {
@@ -745,6 +862,7 @@ async fn build_production_shaped(
                 turn_run_wake_notifier,
                 runtime_process_binding,
             )?;
+            let secret_master_key = resolve_secret_master_key(secret_master_key).await?;
             let context = RebornProductionBuildContext {
                 profile,
                 wiring_config,
@@ -765,6 +883,7 @@ async fn build_production_shaped(
                 turn_run_wake_notifier,
                 runtime_process_binding,
             )?;
+            let secret_master_key = resolve_secret_master_key(secret_master_key).await?;
             let context = RebornProductionBuildContext {
                 profile,
                 wiring_config,
@@ -773,6 +892,21 @@ async fn build_production_shaped(
             };
             build_postgres_production(context, pool, url, secret_master_key).await
         }
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+async fn resolve_secret_master_key(
+    explicit: Option<ironclaw_secrets::SecretMaterial>,
+) -> Result<ironclaw_secrets::SecretMaterial, RebornBuildError> {
+    if let Some(master_key) = explicit {
+        Ok(master_key)
+    } else if let Some(master_key) =
+        ironclaw_secrets::keychain::resolve_master_key_material().await?
+    {
+        Ok(master_key)
+    } else {
+        Err(RebornBuildError::MissingSecretMasterKey)
     }
 }
 
@@ -1014,8 +1148,9 @@ mod tests {
     use ironclaw_filesystem::FilesystemError;
     use ironclaw_host_api::{
         CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
-        ExecutionContext, ExtensionId, GrantConstraints, InvocationId, NetworkPolicy, Principal,
-        ResourceEstimate, ResourceScope, RuntimeKind, ScopedPath, TrustClass, UserId,
+        ExecutionContext, ExtensionId, GrantConstraints, InvocationId, MountAlias, MountGrant,
+        NetworkPolicy, Principal, ResourceEstimate, ResourceScope, RuntimeKind, ScopedPath,
+        TrustClass, UserId, VirtualPath,
     };
     use ironclaw_host_runtime::{
         RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind,
@@ -1433,3 +1568,5 @@ mod tests {
 
 #[cfg(test)]
 mod auth_tests;
+#[cfg(test)]
+mod local_dev_host_tests;

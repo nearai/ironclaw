@@ -184,6 +184,7 @@ pub const RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED: &str = "response_bod
 pub enum RuntimeHttpEgressReasonCode {
     CredentialUnavailable,
     RequestDenied,
+    PolicyDenied,
     NetworkError,
     ResponseError,
     ResponseBodyLimitExceeded,
@@ -241,6 +242,9 @@ impl RuntimeHttpEgressError {
             {
                 RuntimeHttpEgressReasonCode::ResponseBodyLimitExceeded
             }
+            Self::Network { reason, .. } if reason == "policy_denied" => {
+                RuntimeHttpEgressReasonCode::PolicyDenied
+            }
             Self::Network { .. } => RuntimeHttpEgressReasonCode::NetworkError,
             Self::Response { .. } => RuntimeHttpEgressReasonCode::ResponseError,
         }
@@ -251,6 +255,7 @@ impl RuntimeHttpEgressError {
         match self.reason_code() {
             RuntimeHttpEgressReasonCode::CredentialUnavailable => "credential_unavailable",
             RuntimeHttpEgressReasonCode::RequestDenied => "request_denied",
+            RuntimeHttpEgressReasonCode::PolicyDenied => "policy_denied",
             RuntimeHttpEgressReasonCode::NetworkError => "network_error",
             RuntimeHttpEgressReasonCode::ResponseError => "response_error",
             RuntimeHttpEgressReasonCode::ResponseBodyLimitExceeded => {

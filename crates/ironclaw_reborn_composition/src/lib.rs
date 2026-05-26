@@ -21,9 +21,11 @@
 mod auth;
 mod error;
 mod factory;
+mod gsuite;
 mod input;
 #[cfg(feature = "root-llm-provider")]
 mod llm_catalog;
+mod local_dev_mounts;
 mod local_runtime_profile;
 mod product_live_adapters;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -52,6 +54,7 @@ pub use auth::{
 };
 pub use error::RebornBuildError;
 pub use factory::{RebornServices, build_reborn_services};
+pub use gsuite::{bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers};
 pub use input::{RebornBuildInput, RebornRuntimeProcessBinding};
 #[cfg(feature = "root-llm-provider")]
 pub use llm_catalog::{
@@ -59,8 +62,9 @@ pub use llm_catalog::{
     resolve_reborn_runtime_llm,
 };
 pub use local_runtime_profile::{
-    RebornLocalRuntimeProfileError, local_dev_runtime_policy, local_dev_yolo_runtime_policy,
-    local_runtime_build_input,
+    RebornLocalRuntimeProfileError, RebornLocalRuntimeProfileOptions, local_dev_runtime_policy,
+    local_dev_yolo_runtime_policy, local_runtime_build_input,
+    local_runtime_build_input_with_options,
 };
 pub use product_live_adapters::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
@@ -369,7 +373,9 @@ where
 
 #[derive(Debug, Error)]
 pub enum RebornCompositionError {
-    #[error("reborn production composition requires explicit secret master key")]
+    #[error(
+        "reborn production composition requires a configured or keychain-resolvable secret master key"
+    )]
     MissingSecretMasterKey,
     #[error("reborn mount view construction failed: {0}")]
     Mount(#[from] ironclaw_host_api::HostApiError),
@@ -555,7 +561,18 @@ async fn build_filesystem_secret_store<F>(
 where
     F: RootFilesystem + 'static,
 {
-    let crypto = secrets_crypto(master_key)?;
+    let crypto = secrets_crypto(master_key).await?;
+    build_filesystem_secret_store_with_crypto(scoped_filesystem, crypto)
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn build_filesystem_secret_store_with_crypto<F>(
+    scoped_filesystem: Arc<ScopedFilesystem<F>>,
+    crypto: Arc<SecretsCrypto>,
+) -> Result<Arc<SharedSecretStore>, RebornCompositionError>
+where
+    F: RootFilesystem + 'static,
+{
     let store = FilesystemSecretStore::new(scoped_filesystem, crypto);
     // The FS-stored master-key sentinel was removed alongside the tenant-aware
     // ScopedFilesystem rework — see filesystem_store.rs. Master-key
@@ -565,11 +582,26 @@ where
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-fn secrets_crypto(
+async fn secrets_crypto(
     master_key: Option<SecretMaterial>,
 ) -> Result<Arc<SecretsCrypto>, RebornCompositionError> {
-    let master_key = master_key.ok_or(RebornCompositionError::MissingSecretMasterKey)?;
+    let master_key = resolve_composition_secret_master_key(master_key).await?;
     Ok(Arc::new(SecretsCrypto::new(master_key)?))
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+async fn resolve_composition_secret_master_key(
+    explicit: Option<SecretMaterial>,
+) -> Result<SecretMaterial, RebornCompositionError> {
+    if let Some(master_key) = explicit {
+        Ok(master_key)
+    } else if let Some(master_key) =
+        ironclaw_secrets::keychain::resolve_master_key_material().await?
+    {
+        Ok(master_key)
+    } else {
+        Err(RebornCompositionError::MissingSecretMasterKey)
+    }
 }
 
 // TODO(#3571): remove this adapter when the host-runtime services builder

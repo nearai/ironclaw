@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{HostApiError, MountAlias, ScopedPath, VirtualPath};
+use crate::{HostApiError, MountAlias, ScopedPath, VirtualPath, path_matches_alias};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MountPermissions {
@@ -122,6 +122,19 @@ impl MountView {
             .map(|(virtual_path, _grant)| virtual_path)
     }
 
+    /// Build a scoped path against this already-authorized mount view.
+    ///
+    /// `ScopedPath::new` rejects raw host-looking paths by default. A local
+    /// single-user mount may intentionally use a raw host path as an alias; in
+    /// that case the alias itself is the authority boundary, so parsing needs
+    /// the mount view.
+    pub fn scoped_path(&self, value: impl Into<String>) -> Result<ScopedPath, HostApiError> {
+        ScopedPath::new_with_allowed_raw_host_aliases(
+            value.into(),
+            self.mounts.iter().map(|mount| mount.alias.as_str()),
+        )
+    }
+
     pub fn resolve_with_grant(
         &self,
         path: &ScopedPath,
@@ -162,5 +175,5 @@ impl MountView {
 }
 
 fn alias_matches(alias: &str, path: &str) -> bool {
-    path == alias || path.starts_with(&format!("{alias}/"))
+    path_matches_alias(alias, path)
 }

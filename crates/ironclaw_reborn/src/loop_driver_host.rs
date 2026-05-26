@@ -1951,6 +1951,13 @@ fn turn_error_to_host_error(error: TurnError) -> AgentLoopHostError {
             "checkpoint state write conflicted with current turn state",
             &error,
         ),
+        TurnError::CapacityExceeded { .. } => ironclaw_loop_support::raw_agent_loop_host_error(
+            "checkpoint_state",
+            "write",
+            AgentLoopHostErrorKind::Unavailable,
+            "checkpoint state store capacity was exceeded",
+            &error,
+        ),
         TurnError::InvalidTransition { .. } => ironclaw_loop_support::raw_agent_loop_host_error(
             "checkpoint_state",
             "write",
@@ -2382,5 +2389,44 @@ mod tests {
         let cap = Duration::from_millis(50);
         assert_eq!(adaptive_poll_interval(base, cap, 0), cap);
         assert_eq!(adaptive_poll_interval(base, cap, 10), cap);
+    }
+}
+
+#[cfg(test)]
+mod turn_error_to_host_error_tests {
+    use super::*;
+    use ironclaw_turns::{TurnCapacityResource, TurnError};
+
+    #[test]
+    fn capacity_exceeded_maps_to_unavailable() {
+        let error = turn_error_to_host_error(TurnError::capacity_exceeded(
+            TurnCapacityResource::SpawnTreeDescendants,
+            3,
+        ));
+        assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
+    }
+
+    #[test]
+    fn conflict_maps_to_checkpoint_rejected() {
+        let error = turn_error_to_host_error(TurnError::Conflict {
+            reason: "checkpoint conflict".to_string(),
+        });
+        assert_eq!(error.kind, AgentLoopHostErrorKind::CheckpointRejected);
+    }
+
+    #[test]
+    fn scope_not_found_maps_to_checkpoint_rejected() {
+        let error = turn_error_to_host_error(TurnError::ScopeNotFound);
+        assert_eq!(error.kind, AgentLoopHostErrorKind::CheckpointRejected);
+    }
+
+    #[test]
+    fn invalid_transition_maps_to_checkpoint_rejected() {
+        use ironclaw_turns::TurnStatus;
+        let error = turn_error_to_host_error(TurnError::InvalidTransition {
+            from: TurnStatus::Running,
+            to: TurnStatus::Completed,
+        });
+        assert_eq!(error.kind, AgentLoopHostErrorKind::CheckpointRejected);
     }
 }

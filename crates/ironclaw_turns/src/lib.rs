@@ -39,18 +39,20 @@ pub use checkpoint_state::{
 pub use coordinator::{
     AllowAllTurnAdmissionPolicy, DefaultTurnCoordinator, NoopTurnRunWakeNotifier,
     TurnAdmissionPolicy, TurnCoordinator, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError,
+    TurnSpawnTreePort,
 };
 pub use events::{
-    EventCursor, InMemoryTurnEventSink, TurnEventKind, TurnEventPage, TurnEventProjectionCursor,
+    EventCursor, InMemoryTurnEventSink, MAX_TURN_EVENT_PROJECTION_LIMIT, TurnBlockedGateKind,
+    TurnBlockedGateMetadata, TurnEventKind, TurnEventPage, TurnEventProjectionCursor,
     TurnEventProjectionError, TurnEventProjectionRequest, TurnEventProjectionService,
     TurnEventProjectionSnapshot, TurnEventProjectionSource, TurnEventSink, TurnLifecycleEvent,
 };
 pub use filesystem_store::FilesystemTurnStateStore;
 pub use ids::{
-    AcceptedMessageRef, GateRef, IdempotencyKey, LoopDiagnosticRef, LoopExitId, LoopGateRef,
-    LoopMessageRef, LoopResultRef, LoopUsageSummaryRef, ReplyTargetBindingRef, RunProfileId,
-    RunProfileRequest, RunProfileVersion, SourceBindingRef, TurnCheckpointId, TurnId,
-    TurnLeaseToken, TurnRunId, TurnRunnerId,
+    AcceptedMessageRef, CapabilityActivityId, GateRef, IdempotencyKey, LoopDiagnosticRef,
+    LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef, LoopUsageSummaryRef,
+    ReplyTargetBindingRef, RunProfileId, RunProfileRequest, RunProfileVersion, SourceBindingRef,
+    TurnCheckpointId, TurnId, TurnLeaseToken, TurnRunId, TurnRunnerId,
 };
 pub use loop_exit::{
     BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
@@ -62,7 +64,7 @@ pub use loop_exit::{
 pub use memory::{InMemoryTurnStateStore, InMemoryTurnStateStoreLimits};
 pub use request::{
     CancelRunRequest, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
-    SubmitTurnRequest, TurnTimestamp,
+    SubmitChildRunRequest, SubmitTurnRequest, TurnTimestamp,
 };
 pub use response::{CancelRunResponse, ResumeTurnResponse, SubmitTurnResponse, ThreadBusy};
 pub use run_profile::{
@@ -81,11 +83,12 @@ pub use run_profile::{
 pub use scope::{TurnActor, TurnScope};
 pub use status::{
     AdmissionRejection, AdmissionRejectionReason, BlockedReason, SanitizedCancelReason,
-    SanitizedFailure, TurnError, TurnErrorCategory, TurnRunProfile, TurnRunState, TurnStatus,
+    SanitizedFailure, TurnCapacityResource, TurnError, TurnErrorCategory, TurnRunProfile,
+    TurnRunState, TurnStatus,
 };
 pub use store::{
-    TurnActiveLockKey, TurnActiveLockRecord, TurnCheckpointRecord, TurnIdempotencyErrorReplay,
-    TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind, TurnIdempotencyRecord,
-    TurnIdempotencyReplay, TurnLockVersion, TurnPersistenceSnapshot, TurnRecord, TurnRunRecord,
-    TurnStateStore,
+    SpawnTreeReservation, SpawnTreeReservationKey, TurnActiveLockKey, TurnActiveLockRecord,
+    TurnCheckpointRecord, TurnIdempotencyErrorReplay, TurnIdempotencyOperationKind,
+    TurnIdempotencyOutcomeKind, TurnIdempotencyRecord, TurnIdempotencyReplay, TurnLockVersion,
+    TurnPersistenceSnapshot, TurnRecord, TurnRunRecord, TurnSpawnTreeStateStore, TurnStateStore,
 };

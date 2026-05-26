@@ -400,7 +400,8 @@ fn should_settle_ack(ack: &ProductInboundAck) -> bool {
 }
 
 fn turn_error_is_retryable(error: &TurnError) -> bool {
-    matches!(error.adapter_status_code(), 429 | 503)
+    !matches!(error.category(), TurnErrorCategory::CapacityExceeded)
+        && matches!(error.adapter_status_code(), 429 | 503)
 }
 
 fn rejection_kind_for_turn_error(error: &TurnError) -> ProductRejectionKind {
@@ -420,6 +421,7 @@ fn rejection_kind_for_turn_error(error: &TurnError) -> ProductRejectionKind {
         },
         TurnErrorCategory::ThreadBusy
         | TurnErrorCategory::InvalidRequest
+        | TurnErrorCategory::CapacityExceeded
         | TurnErrorCategory::Unavailable
         | TurnErrorCategory::Conflict => ProductRejectionKind::PolicyDenied,
     }
@@ -563,6 +565,20 @@ mod tests {
             admission_policy,
             ProductInboundAck::Rejected(rejection)
                 if rejection.kind == ProductRejectionKind::AccessDenied
+        ));
+
+        let capacity_exceeded =
+            terminal_ack_for_error(&ProductWorkflowError::TurnSubmissionFailed {
+                error: TurnError::capacity_exceeded(
+                    ironclaw_turns::TurnCapacityResource::SpawnTreeDescendants,
+                    4,
+                ),
+            })
+            .expect("capacity failures are terminal policy outcomes");
+        assert!(matches!(
+            capacity_exceeded,
+            ProductInboundAck::Rejected(rejection)
+                if rejection.kind == ProductRejectionKind::PolicyDenied
         ));
     }
 

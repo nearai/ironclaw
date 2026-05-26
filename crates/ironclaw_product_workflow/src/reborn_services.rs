@@ -382,6 +382,10 @@ impl RebornServicesApi for RebornServices {
             requested_run_profile: None,
             idempotency_key: client_action_id.clone(),
             received_at: Utc::now(),
+            requested_run_id: None,
+            parent_run_id: None,
+            subagent_depth: 0,
+            spawn_tree_root_run_id: None,
         };
 
         self.record_skill_activation_message(&scope, &accepted_message_ref, &content)?;
@@ -1242,6 +1246,12 @@ fn map_turn_error(error: TurnError) -> RebornServicesError {
             RebornServicesErrorKind::Busy,
             429,
             true,
+        ),
+        ironclaw_turns::TurnErrorCategory::CapacityExceeded => (
+            RebornServicesErrorCode::RateLimited,
+            RebornServicesErrorKind::Busy,
+            429,
+            false,
         ),
         ironclaw_turns::TurnErrorCategory::ScopeNotFound => (
             RebornServicesErrorCode::NotFound,

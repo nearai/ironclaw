@@ -399,7 +399,7 @@ mod reborn_support_tests {
         CancelRunRequest, CancelRunResponse, GetRunStateRequest, LoopMessageRef,
         ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
         RunProfileVersion, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnCoordinator,
-        TurnError, TurnId, TurnRunId, TurnRunState, TurnStatus,
+        TurnError, TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
         events::EventCursor,
         run_profile::{
             CapabilityBatchInvocation, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
@@ -2391,6 +2391,10 @@ mod reborn_support_tests {
 
     #[async_trait]
     impl TurnCoordinator for DryRunCapturingTurnCoordinator {
+        async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+            Ok(TurnRunId::new())
+        }
+
         async fn submit_turn(
             &self,
             request: SubmitTurnRequest,

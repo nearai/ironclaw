@@ -67,6 +67,10 @@ struct CapturingTurnCoordinator {
 
 #[async_trait]
 impl TurnCoordinator for CapturingTurnCoordinator {
+    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        Ok(TurnRunId::new())
+    }
+
     async fn submit_turn(
         &self,
         request: SubmitTurnRequest,
@@ -128,6 +132,10 @@ impl ScriptedTurnCoordinator {
 
 #[async_trait]
 impl TurnCoordinator for ScriptedTurnCoordinator {
+    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        Ok(TurnRunId::new())
+    }
+
     async fn submit_turn(
         &self,
         request: SubmitTurnRequest,

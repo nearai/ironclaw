@@ -29,9 +29,14 @@ use crate::{
     TenantSandboxProcessPort,
 };
 
+mod broker;
 mod container_identity;
+mod mounts;
 mod scope_key;
 
+use mounts::RebornSandboxMountSources;
+
+pub use broker::{RebornSandboxNetworkBroker, RebornSandboxSecretBroker};
 pub use container_identity::{RebornSandboxContainerIdentity, RebornSandboxWorkspaceMode};
 pub use scope_key::RebornSandboxScopeKey;
 
@@ -69,12 +74,15 @@ impl ContainerWorkdir {
 #[derive(Debug, Clone)]
 pub struct RebornSandboxConfig {
     workspace_root: PathBuf,
+    mount_sources: RebornSandboxMountSources,
     image: String,
     default_timeout: Duration,
     memory_bytes: u64,
     cpu_shares: u32,
     max_output_bytes: usize,
     disable_network: bool,
+    network_broker: Option<RebornSandboxNetworkBroker>,
+    secret_broker: Option<RebornSandboxSecretBroker>,
     container_identity: RebornSandboxContainerIdentity,
 }
 
@@ -82,6 +90,7 @@ impl RebornSandboxConfig {
     pub fn new(workspace_root: impl Into<PathBuf>) -> Self {
         Self {
             workspace_root: workspace_root.into(),
+            mount_sources: RebornSandboxMountSources::default(),
             image: std::env::var("IRONCLAW_REBORN_SANDBOX_IMAGE")
                 .or_else(|_| std::env::var("IRONCLAW_SANDBOX_IMAGE"))
                 .unwrap_or_else(|_| DEFAULT_IMAGE.to_string()),
@@ -90,6 +99,8 @@ impl RebornSandboxConfig {
             cpu_shares: DEFAULT_CPU_SHARES,
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
             disable_network: true,
+            network_broker: None,
+            secret_broker: None,
             container_identity: RebornSandboxContainerIdentity::image_default(),
         }
     }
@@ -109,6 +120,53 @@ impl RebornSandboxConfig {
         self
     }
 
+    pub fn with_network_broker_proxy_url(
+        mut self,
+        proxy_url: impl Into<String>,
+    ) -> Result<Self, RuntimeProcessError> {
+        self.network_broker = Some(RebornSandboxNetworkBroker::new(proxy_url)?);
+        Ok(self)
+    }
+
+    pub fn with_network_broker_port(mut self, port: u16) -> Self {
+        self.network_broker = Some(RebornSandboxNetworkBroker::from_port(port));
+        self
+    }
+
+    pub fn with_network_broker_unix_socket(
+        mut self,
+        host_socket: impl Into<PathBuf>,
+    ) -> Result<Self, RuntimeProcessError> {
+        self.network_broker = Some(RebornSandboxNetworkBroker::unix_socket(host_socket)?);
+        Ok(self)
+    }
+
+    pub fn with_secret_broker_url(
+        mut self,
+        broker_url: impl Into<String>,
+    ) -> Result<Self, RuntimeProcessError> {
+        self.secret_broker = Some(RebornSandboxSecretBroker::new(broker_url)?);
+        Ok(self)
+    }
+
+    pub fn with_secret_broker_unix_socket(
+        mut self,
+        host_socket: impl Into<PathBuf>,
+    ) -> Result<Self, RuntimeProcessError> {
+        self.secret_broker = Some(RebornSandboxSecretBroker::unix_socket(host_socket)?);
+        Ok(self)
+    }
+
+    pub fn with_local_mount_source(
+        mut self,
+        virtual_root: ironclaw_host_api::VirtualPath,
+        host_root: impl Into<PathBuf>,
+    ) -> Result<Self, RuntimeProcessError> {
+        self.mount_sources
+            .add_local_source(virtual_root, host_root)?;
+        Ok(self)
+    }
+
     pub fn with_container_identity(mut self, identity: RebornSandboxContainerIdentity) -> Self {
         self.container_identity = identity;
         self
@@ -122,6 +180,40 @@ impl RebornSandboxConfig {
         self.container_identity =
             RebornSandboxContainerIdentity::configured_user(user, workspace_mode);
         self
+    }
+
+    fn container_network_mode(&self) -> Option<String> {
+        if self.disable_network
+            && !self
+                .network_broker
+                .as_ref()
+                .is_some_and(RebornSandboxNetworkBroker::requires_docker_network)
+        {
+            Some("none".to_string())
+        } else {
+            None
+        }
+    }
+
+    fn command_env(
+        &self,
+        extra_env: HashMap<String, String>,
+    ) -> Result<Vec<String>, RuntimeProcessError> {
+        let mut env = validate_env(extra_env)?;
+        broker::push_broker_env(
+            self.network_broker.as_ref(),
+            self.secret_broker.as_ref(),
+            &mut env,
+        )?;
+        Ok(env)
+    }
+
+    fn append_broker_binds(&self, binds: &mut Vec<String>) -> Result<(), RuntimeProcessError> {
+        broker::append_broker_binds(
+            self.network_broker.as_ref(),
+            self.secret_broker.as_ref(),
+            binds,
+        )
     }
 }
 
@@ -138,6 +230,8 @@ impl std::fmt::Debug for RebornScopedSandboxCommandTransport {
             .field("workspace_root", &self.config.workspace_root)
             .field("image", &self.config.image)
             .field("disable_network", &self.config.disable_network)
+            .field("network_broker", &self.config.network_broker)
+            .field("secret_broker", &self.config.secret_broker)
             .field("container_identity", &self.config.container_identity)
             .finish_non_exhaustive()
     }
@@ -231,39 +325,9 @@ impl RebornScopedSandboxCommandTransport {
             scope_key.container_name_prefix(),
             uuid::Uuid::new_v4()
         );
-        let env = validate_env(request.extra_env)?;
-        let container_user = self.config.container_identity.container_user()?;
-        let binds = vec![format!(
-            "{}:{CONTAINER_WORKSPACE_ROOT}:rw",
-            workspace.display()
-        )];
-        let host_config = HostConfig {
-            binds: Some(binds),
-            memory: Some(self.config.memory_bytes as i64),
-            cpu_shares: Some(self.config.cpu_shares as i64),
-            auto_remove: Some(false),
-            network_mode: self.config.disable_network.then(|| "none".to_string()),
-            cap_drop: Some(vec!["ALL".to_string()]),
-            security_opt: Some(vec!["no-new-privileges:true".to_string()]),
-            readonly_rootfs: Some(true),
-            tmpfs: Some(
-                [("/tmp".to_string(), "size=512M".to_string())]
-                    .into_iter()
-                    .collect(),
-            ),
-            ..Default::default()
-        };
-        let container_config = Config {
-            image: Some(self.config.image.clone()),
-            cmd: Some(vec!["sh".to_string(), "-c".to_string(), request.command]),
-            working_dir: Some(workdir.into_string()),
-            env: Some(env),
-            host_config: Some(host_config),
-            user: container_user,
-            attach_stdout: Some(false),
-            attach_stderr: Some(false),
-            ..Default::default()
-        };
+        let launch = self
+            .container_launch_config(request, workspace, workdir)
+            .await?;
 
         let created = self
             .docker
@@ -272,7 +336,7 @@ impl RebornScopedSandboxCommandTransport {
                     name: container_name.clone(),
                     platform: None,
                 }),
-                container_config,
+                launch,
             )
             .await
             .map_err(|error| {
@@ -319,6 +383,52 @@ impl RebornScopedSandboxCommandTransport {
             .await;
         result
     }
+
+    async fn container_launch_config(
+        &self,
+        request: CommandExecutionRequest,
+        workspace: &Path,
+        workdir: ContainerWorkdir,
+    ) -> Result<Config<String>, RuntimeProcessError> {
+        let env = self.config.command_env(request.extra_env)?;
+        let container_user = self.config.container_identity.container_user()?;
+        let mut binds = self
+            .config
+            .mount_sources
+            .prepare_container_binds(workspace, request.mounts.as_ref())
+            .await?
+            .into_iter()
+            .map(|bind| bind.into_docker_bind())
+            .collect::<Vec<_>>();
+        self.config.append_broker_binds(&mut binds)?;
+        let host_config = HostConfig {
+            binds: Some(binds),
+            memory: Some(self.config.memory_bytes as i64),
+            cpu_shares: Some(self.config.cpu_shares as i64),
+            auto_remove: Some(false),
+            network_mode: self.config.container_network_mode(),
+            cap_drop: Some(vec!["ALL".to_string()]),
+            security_opt: Some(vec!["no-new-privileges:true".to_string()]),
+            readonly_rootfs: Some(true),
+            tmpfs: Some(
+                [("/tmp".to_string(), "size=512M".to_string())]
+                    .into_iter()
+                    .collect(),
+            ),
+            ..Default::default()
+        };
+        Ok(Config {
+            image: Some(self.config.image.clone()),
+            cmd: Some(vec!["sh".to_string(), "-c".to_string(), request.command]),
+            working_dir: Some(workdir.into_string()),
+            env: Some(env),
+            host_config: Some(host_config),
+            user: container_user,
+            attach_stdout: Some(false),
+            attach_stderr: Some(false),
+            ..Default::default()
+        })
+    }
 }
 
 #[async_trait]
@@ -328,16 +438,6 @@ impl SandboxCommandTransport for RebornScopedSandboxCommandTransport {
         request: CommandExecutionRequest,
     ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
         reject_nul("sandbox command", &request.command)?;
-        if request
-            .mounts
-            .as_ref()
-            .is_some_and(|mounts| !mounts.mounts.is_empty())
-        {
-            return Err(RuntimeProcessError::ExecutionFailed(
-                "scoped mounts are not supported by the Reborn Docker command sandbox yet"
-                    .to_string(),
-            ));
-        }
 
         let workspace = self.prepare_workspace(&request.scope).await?;
         let workdir = Self::resolve_container_workdir(request.workdir.as_deref())?;
@@ -518,6 +618,7 @@ fn validate_relative_workdir(path: &Path) -> Result<(), RuntimeProcessError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
 
     #[test]
     fn relative_workdir_rejects_escape() {
@@ -555,5 +656,273 @@ mod tests {
 
         assert_eq!(private.container_identity.workspace_mode(), 0o700);
         assert_eq!(group_shared.container_identity.workspace_mode(), 0o770);
+    }
+
+    #[test]
+    fn default_sandbox_disables_ambient_network_and_secret_affordance() {
+        let config = RebornSandboxConfig::new("/tmp/reborn-sandbox");
+        let env = config.command_env(HashMap::new()).unwrap();
+
+        assert_eq!(config.container_network_mode(), Some("none".to_string()));
+        assert!(env.contains(&"IRONCLAW_REBORN_NETWORK_MODE=disabled".to_string()));
+        assert!(env.contains(&"IRONCLAW_REBORN_SECRET_MODE=disabled".to_string()));
+    }
+
+    #[test]
+    fn network_broker_exposes_proxy_env_without_none_network_mode() {
+        let config = RebornSandboxConfig::new("/tmp/reborn-sandbox")
+            .with_network_broker_proxy_url("http://broker.internal:8181")
+            .unwrap();
+        let env = config.command_env(HashMap::new()).unwrap();
+
+        assert_eq!(config.container_network_mode(), None);
+        assert!(env.contains(&"IRONCLAW_REBORN_NETWORK_MODE=brokered".to_string()));
+        assert!(
+            env.contains(&"IRONCLAW_REBORN_HTTP_PROXY=http://broker.internal:8181".to_string())
+        );
+        assert!(env.contains(&"http_proxy=http://broker.internal:8181".to_string()));
+        assert!(env.contains(&"https_proxy=http://broker.internal:8181".to_string()));
+        assert!(env.contains(&"HTTP_PROXY=http://broker.internal:8181".to_string()));
+        assert!(env.contains(&"HTTPS_PROXY=http://broker.internal:8181".to_string()));
+    }
+
+    #[test]
+    fn network_broker_port_uses_docker_host_gateway_proxy_url() {
+        let config = RebornSandboxConfig::new("/tmp/reborn-sandbox").with_network_broker_port(8181);
+        let env = config.command_env(HashMap::new()).unwrap();
+        let proxy_url = format!("http://{}:8181", broker::docker_host_gateway());
+
+        assert!(env.contains(&format!("IRONCLAW_REBORN_HTTP_PROXY={proxy_url}")));
+        assert!(env.contains(&format!("http_proxy={proxy_url}")));
+    }
+
+    #[test]
+    fn unix_socket_network_broker_preserves_none_network_mode_and_mounts_socket() {
+        let config = RebornSandboxConfig::new("/tmp/reborn-sandbox")
+            .with_network_broker_unix_socket("/tmp/reborn-http-broker.sock")
+            .unwrap();
+        let env = config.command_env(HashMap::new()).unwrap();
+        let mut binds = Vec::new();
+        config.append_broker_binds(&mut binds).unwrap();
+
+        assert_eq!(config.container_network_mode(), Some("none".to_string()));
+        assert!(env.contains(&"IRONCLAW_REBORN_NETWORK_MODE=brokered".to_string()));
+        assert!(env.contains(
+            &"IRONCLAW_REBORN_HTTP_BROKER_SOCKET=/tmp/ironclaw-http-broker.sock".to_string()
+        ));
+        assert!(
+            env.contains(&"IRONCLAW_REBORN_HTTP_BROKER_URL=http://ironclaw-broker".to_string())
+        );
+        assert_eq!(
+            binds,
+            vec!["/tmp/reborn-http-broker.sock:/tmp/ironclaw-http-broker.sock:rw".to_string()]
+        );
+    }
+
+    #[test]
+    fn secret_broker_exposes_endpoint_without_secret_material() {
+        let config = RebornSandboxConfig::new("/tmp/reborn-sandbox")
+            .with_secret_broker_url("https://broker.internal/secrets")
+            .unwrap();
+        let env = config.command_env(HashMap::new()).unwrap();
+
+        assert!(env.contains(&"IRONCLAW_REBORN_SECRET_MODE=brokered".to_string()));
+        assert!(env.contains(
+            &"IRONCLAW_REBORN_SECRET_BROKER_URL=https://broker.internal/secrets".to_string()
+        ));
+        assert!(
+            env.iter()
+                .all(|entry| !entry.contains("sk-") && !entry.contains("token="))
+        );
+    }
+
+    #[test]
+    fn unix_socket_secret_broker_exposes_socket_without_secret_material() {
+        let config = RebornSandboxConfig::new("/tmp/reborn-sandbox")
+            .with_secret_broker_unix_socket("/tmp/reborn-secret-broker.sock")
+            .unwrap();
+        let env = config.command_env(HashMap::new()).unwrap();
+        let mut binds = Vec::new();
+        config.append_broker_binds(&mut binds).unwrap();
+
+        assert!(env.contains(&"IRONCLAW_REBORN_SECRET_MODE=brokered".to_string()));
+        assert!(env.contains(
+            &"IRONCLAW_REBORN_SECRET_BROKER_SOCKET=/tmp/ironclaw-secret-broker.sock".to_string()
+        ));
+        assert!(
+            env.iter()
+                .all(|entry| !entry.contains("sk-") && !entry.contains("token="))
+        );
+        assert_eq!(
+            binds,
+            vec!["/tmp/reborn-secret-broker.sock:/tmp/ironclaw-secret-broker.sock:rw".to_string()]
+        );
+    }
+
+    #[test]
+    fn broker_env_rejects_all_reserved_user_overrides() {
+        let config = RebornSandboxConfig::new("/tmp/reborn-sandbox")
+            .with_network_broker_proxy_url("http://broker.internal:8181")
+            .unwrap()
+            .with_secret_broker_url("https://broker.internal/secrets")
+            .unwrap();
+        for key in broker::RESERVED_BROKER_ENV_KEYS {
+            let error = config
+                .command_env(HashMap::from([(
+                    (*key).to_string(),
+                    "caller-controlled".to_string(),
+                )]))
+                .unwrap_err();
+
+            assert!(format!("{error}").contains("reserved"), "{key}");
+        }
+    }
+
+    #[test]
+    fn broker_urls_reject_credentials_fragments_control_characters_and_non_http_schemes() {
+        assert!(RebornSandboxNetworkBroker::new("unix:///tmp/broker.sock").is_err());
+        assert!(RebornSandboxSecretBroker::new("https://broker.internal/\nsecrets").is_err());
+        assert!(RebornSandboxSecretBroker::new("https://token@broker.internal/secrets").is_err());
+        assert!(RebornSandboxSecretBroker::new("https://broker.internal/secrets#token").is_err());
+        assert!(
+            RebornSandboxSecretBroker::new("https://broker.internal/secrets?token=abc").is_err()
+        );
+        assert!(RebornSandboxNetworkBroker::unix_socket("relative.sock").is_err());
+        assert!(RebornSandboxSecretBroker::unix_socket("/tmp/bad:path.sock").is_err());
+        assert!(RebornSandboxNetworkBroker::unix_socket("/tmp/bad\npath.sock").is_err());
+        assert!(RebornSandboxSecretBroker::unix_socket("/tmp/bad\tpath.sock").is_err());
+    }
+
+    #[tokio::test]
+    async fn container_launch_config_applies_unix_socket_broker_env_binds_and_none_network() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let network_socket = temp.path().join("network-broker.sock");
+        let secret_socket = temp.path().join("secret-broker.sock");
+        let config = RebornSandboxConfig::new(temp.path().join("workspaces"))
+            .with_network_broker_unix_socket(&network_socket)
+            .unwrap()
+            .with_secret_broker_unix_socket(&secret_socket)
+            .unwrap();
+        let transport = RebornScopedSandboxCommandTransport::new(
+            Docker::connect_with_local_defaults().unwrap(),
+            config,
+        );
+        let launch = transport
+            .container_launch_config(
+                CommandExecutionRequest {
+                    scope: ResourceScope::system(),
+                    mounts: None,
+                    command: "true".to_string(),
+                    workdir: None,
+                    timeout_secs: Some(1),
+                    extra_env: HashMap::new(),
+                },
+                &workspace,
+                ContainerWorkdir::workspace_root(),
+            )
+            .await
+            .unwrap();
+        let host_config = launch.host_config.unwrap();
+        let binds = host_config.binds.unwrap();
+        let env = launch.env.unwrap();
+
+        assert_eq!(host_config.network_mode, Some("none".to_string()));
+        assert!(env.contains(
+            &"IRONCLAW_REBORN_HTTP_BROKER_SOCKET=/tmp/ironclaw-http-broker.sock".to_string()
+        ));
+        assert!(env.contains(
+            &"IRONCLAW_REBORN_SECRET_BROKER_SOCKET=/tmp/ironclaw-secret-broker.sock".to_string()
+        ));
+        assert!(binds.contains(&format!("{}:/workspace:rw", workspace.display())));
+        assert!(binds.contains(&format!(
+            "{}:/tmp/ironclaw-http-broker.sock:rw",
+            network_socket.display()
+        )));
+        assert!(binds.contains(&format!(
+            "{}:/tmp/ironclaw-secret-broker.sock:rw",
+            secret_socket.display()
+        )));
+    }
+
+    #[tokio::test]
+    async fn container_launch_config_applies_http_proxy_broker_env_and_drops_none_network() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let config = RebornSandboxConfig::new(temp.path().join("workspaces"))
+            .with_network_broker_proxy_url("http://broker.internal:8181")
+            .unwrap();
+        let transport = RebornScopedSandboxCommandTransport::new(
+            Docker::connect_with_local_defaults().unwrap(),
+            config,
+        );
+        let launch = transport
+            .container_launch_config(
+                CommandExecutionRequest {
+                    scope: ResourceScope::system(),
+                    mounts: None,
+                    command: "true".to_string(),
+                    workdir: None,
+                    timeout_secs: Some(1),
+                    extra_env: HashMap::new(),
+                },
+                &workspace,
+                ContainerWorkdir::workspace_root(),
+            )
+            .await
+            .unwrap();
+        let host_config = launch.host_config.unwrap();
+        let binds = host_config.binds.unwrap();
+        let env = launch.env.unwrap();
+
+        assert_eq!(host_config.network_mode, None);
+        assert!(env.contains(&"IRONCLAW_REBORN_NETWORK_MODE=brokered".to_string()));
+        assert!(env.contains(&"http_proxy=http://broker.internal:8181".to_string()));
+        assert!(env.contains(&"HTTPS_PROXY=http://broker.internal:8181".to_string()));
+        assert!(binds.contains(&format!("{}:/workspace:rw", workspace.display())));
+        assert!(
+            binds
+                .iter()
+                .all(|bind| !bind.contains("ironclaw-http-broker.sock"))
+        );
+    }
+
+    #[tokio::test]
+    async fn run_command_rejects_unconfigured_scoped_mount_before_container_create() {
+        let temp = tempfile::tempdir().unwrap();
+        let docker = Docker::connect_with_local_defaults().unwrap();
+        let transport = RebornScopedSandboxCommandTransport::new(
+            docker,
+            RebornSandboxConfig::new(temp.path().join("workspaces")),
+        );
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workspace").unwrap(),
+            VirtualPath::new("/projects/app").unwrap(),
+            process_read_only_permissions(),
+        )])
+        .unwrap();
+
+        let error = transport
+            .run_command(CommandExecutionRequest {
+                scope: ResourceScope::system(),
+                mounts: Some(mounts),
+                command: "true".to_string(),
+                workdir: None,
+                timeout_secs: Some(1),
+                extra_env: HashMap::new(),
+            })
+            .await
+            .unwrap_err();
+
+        assert!(format!("{error}").contains("no trusted sandbox mount source"));
+    }
+
+    fn process_read_only_permissions() -> MountPermissions {
+        MountPermissions {
+            execute: true,
+            ..MountPermissions::read_only()
+        }
     }
 }

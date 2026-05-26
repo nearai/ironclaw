@@ -32,7 +32,8 @@ use ironclaw_turns::{
     CancelRunResponse, DefaultTurnCoordinator, EventCursor, GateRef, GetRunStateRequest,
     InMemoryTurnStateStore, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
     ResumeTurnResponse, RunProfileId, RunProfileVersion, SourceBindingRef, SubmitTurnRequest,
-    SubmitTurnResponse, TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnStatus,
+    SubmitTurnResponse, TurnCapacityResource, TurnCoordinator, TurnError, TurnId, TurnRunId,
+    TurnRunState, TurnScope, TurnStatus,
 };
 use serde_json::json;
 
@@ -219,6 +220,10 @@ impl FakeTurnCoordinator {
 
 #[async_trait]
 impl TurnCoordinator for FakeTurnCoordinator {
+    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        Ok(TurnRunId::new())
+    }
+
     async fn submit_turn(
         &self,
         request: SubmitTurnRequest,
@@ -1201,6 +1206,34 @@ async fn submit_turn_rejects_missing_thread_before_turn_submission() {
 
     assert_eq!(err.code, RebornServicesErrorCode::NotFound);
     assert_eq!(err.status_code, 404);
+    assert_eq!(coordinator.submission_count(), 0);
+}
+
+#[tokio::test]
+async fn submit_turn_maps_capacity_exceeded_to_non_retryable_rate_limit() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::with_submit_error(
+        TurnError::capacity_exceeded(TurnCapacityResource::SubmitTurn, 1),
+    ));
+    let services = RebornServices::new(threads, coordinator.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let err = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-capacity",
+                "thread_id": "thread-alpha",
+                "content": "capacity denied"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("capacity error must map through facade");
+
+    assert_eq!(err.code, RebornServicesErrorCode::RateLimited);
+    assert_eq!(err.status_code, 429);
+    assert!(!err.retryable);
     assert_eq!(coordinator.submission_count(), 0);
 }
 
