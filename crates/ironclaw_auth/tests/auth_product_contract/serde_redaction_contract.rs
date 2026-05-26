@@ -34,6 +34,31 @@ fn serde_contracts_are_validated_snake_case_and_redacted() {
     assert!(rendered.contains("turn_gate_resume"));
     assert!(!rendered.contains("raw prompt"));
 
+    let selection_challenge = AuthChallenge::AccountSelectionRequired {
+        provider: provider(),
+        accounts: vec![CredentialAccountProjection {
+            id: ironclaw_auth::CredentialAccountId::new(),
+            provider: provider(),
+            label: label("work"),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            secret_handle_count: 2,
+        }],
+    };
+    let challenge_wire = serde_json::to_value(&selection_challenge).expect("serialize challenge");
+    assert_eq!(
+        challenge_wire["type"],
+        serde_json::json!("account_selection_required")
+    );
+    assert_eq!(
+        challenge_wire["accounts"][0]["label"],
+        serde_json::json!("work")
+    );
+    assert!(challenge_wire.get("account_ids").is_none());
+    assert!(!challenge_wire.to_string().contains("github-work-secret"));
+
     let submit_result = SecretSubmitResult {
         account_id: ironclaw_auth::CredentialAccountId::new(),
         status: CredentialAccountStatus::Configured,
@@ -44,6 +69,42 @@ fn serde_contracts_are_validated_snake_case_and_redacted() {
     let round_trip: SecretSubmitResult =
         serde_json::from_str(&submit_result_json).expect("deserialize result");
     assert_eq!(round_trip, submit_result);
+}
+
+#[test]
+fn backend_failures_are_reported_as_stable_sanitized_codes() {
+    let backend_sentinel = "RAW_PROVIDER_ERROR_SENTINEL /host/private sk-live-secret lease-123";
+    for error in [
+        AuthProductError::BackendUnavailable,
+        AuthProductError::TokenExchangeFailed,
+        AuthProductError::RefreshFailed,
+    ] {
+        let rendered = error.to_string();
+        let serialized_code = serde_json::to_string(&error.code()).expect("serialize error code");
+        assert!(!rendered.contains(backend_sentinel));
+        assert!(!rendered.contains("RAW_PROVIDER_ERROR_SENTINEL"));
+        assert!(!rendered.contains("/host/private"));
+        assert!(!rendered.contains("sk-live-secret"));
+        assert!(!rendered.contains("lease-123"));
+        assert!(!serialized_code.contains(backend_sentinel));
+        assert!(!serialized_code.contains("RAW_PROVIDER_ERROR_SENTINEL"));
+        assert!(!serialized_code.contains("/host/private"));
+        assert!(!serialized_code.contains("sk-live-secret"));
+        assert!(!serialized_code.contains("lease-123"));
+    }
+
+    assert_eq!(
+        serde_json::to_value(AuthProductError::BackendUnavailable.code()).expect("serialize"),
+        serde_json::json!("backend_unavailable")
+    );
+    assert_eq!(
+        serde_json::to_value(AuthProductError::TokenExchangeFailed.code()).expect("serialize"),
+        serde_json::json!("token_exchange_failed")
+    );
+    assert_eq!(
+        serde_json::to_value(AuthProductError::RefreshFailed.code()).expect("serialize"),
+        serde_json::json!("refresh_failed")
+    );
 }
 
 #[tokio::test]

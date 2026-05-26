@@ -1,7 +1,7 @@
 # Reborn Product Auth Contract
 
 - **Status:** contract and composition seam
-- **Issue:** #3289 / #3810 / #3811 / #3812 / #3882
+- **Issue:** #3289 / #3810 / #3811 / #3812 / #3882 / #3883
 - **Crate:** `crates/ironclaw_auth`
 - **Composition:** `ironclaw_reborn_composition::RebornProductAuthServices`
 
@@ -18,8 +18,8 @@ This slice is contract-first. It defines Reborn-native vocabulary and fake
 services, #3811 adds a Reborn composition seam, #3812 adds callback completion
 handling for host-mounted Reborn OAuth callback routes, and #3882 adds the
 composition-facing manual-token secure-submit entrypoint. It does not migrate
-production extension setup routes, CLI/setup flows, durable secret storage, or
-runtime credential injection.
+production extension setup routes, CLI/setup flows, durable secret storage,
+token refresh execution, or runtime credential injection.
 
 Behavior may remain compatible with legacy UX. Code paths must not mingle V1
 components with Reborn components: V1 route handlers, pending maps, extension
@@ -153,8 +153,22 @@ Rules:
 - `extension_owned` accounts require `owner_extension`.
 - Model/tool requests may express provider/capability intent, but cannot invent
   or bind arbitrary account ids.
+- Recovery projections return stable UI-safe states:
+  `configured`, `setup_required`, `reauthorize_required`, and
+  `account_selection_required`.
+- Account-selection challenges and recovery projections carry redacted account
+  projections, not loose account-id lists.
+- Recovery reasons are stable categories only: missing accounts, pending setup,
+  expired credentials, refresh failures, revoked credentials, inactive accounts,
+  ambiguous account choices, and missing requester grants. Backend errors,
+  provider response bodies, host paths, state tokens, secret names, leases, and
+  raw tokens must not appear in recovery projections.
 - If policy cannot choose a unique configured account, return
   `account_selection_required` instead of guessing.
+- Explicit account choice must go through `select_configured_account`, which
+  revalidates scope, provider, configured status, ownership, and requester
+  grants before returning a redacted projection. A raw `CredentialAccountId` is
+  never authority by itself.
 - Admin/shared credentials must be explicit accounts/grants, not implicit
   `default` fallback authority.
 - Account updates must name the target `CredentialAccountId` and preserve the
@@ -278,6 +292,9 @@ strings.
   raw-token exposure in debug output, serialized responses/errors, or account
   projections;
 - missing, refresh-failed, single-account, and multi-account selection states;
+- credential recovery states for configured, missing, pending setup, inactive,
+  expired, refresh-failed, revoked, ambiguous, and unauthorized accounts;
+- explicit account-choice validation and shared-admin grant filtering;
 - extension-owned owner validation and deactivate/uninstall cleanup behavior;
 - serde validation for newtypes and snake_case wire enums;
 - serialization checks proving raw code/verifier/token material is absent.

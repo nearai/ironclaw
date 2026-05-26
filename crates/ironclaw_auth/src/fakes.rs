@@ -8,17 +8,18 @@ use ironclaw_host_api::{ExtensionId, SecretHandle};
 use crate::{
     AuthChallenge, AuthContinuationEvent, AuthFlowId, AuthFlowManager, AuthFlowRecord,
     AuthFlowStatus, AuthInteractionId, AuthInteractionService, AuthProductError,
-    AuthProviderClient, CredentialAccount, CredentialAccountId, CredentialAccountListPage,
-    CredentialAccountListRequest, CredentialAccountMutation, CredentialAccountProjection,
-    CredentialAccountSelectionRequest, CredentialAccountService, CredentialAccountStatus,
-    CredentialAccountUpdateBinding, CredentialOwnership, CredentialSetupService,
-    ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount, OAuthCallbackClaimRequest,
-    OAuthCallbackFailureInput, OAuthCallbackInput, OAuthProviderCallbackRequest,
-    OAuthProviderExchange, ProviderCallbackOutcome, SecretCleanupAction, SecretCleanupReport,
-    SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest, SecretSubmitResult,
-    cleanup::SecretCleanupAction::Deactivate, flow::credential_status_for_completed_flow,
-    interaction::PendingSecretInteraction, provider::validate_provider_callback_request,
-    scope_matches,
+    AuthProviderClient, CredentialAccount, CredentialAccountChoiceRequest, CredentialAccountId,
+    CredentialAccountListPage, CredentialAccountListRequest, CredentialAccountMutation,
+    CredentialAccountProjection, CredentialAccountSelectionRequest, CredentialAccountService,
+    CredentialAccountStatus, CredentialAccountUpdateBinding, CredentialOwnership,
+    CredentialRecoveryKind, CredentialRecoveryProjection, CredentialRecoveryReason,
+    CredentialRecoveryRequest, CredentialSetupService, ManualTokenSetupRequest, NewAuthFlow,
+    NewCredentialAccount, OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
+    OAuthProviderCallbackRequest, OAuthProviderExchange, ProviderCallbackOutcome,
+    SecretCleanupAction, SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
+    SecretSubmitRequest, SecretSubmitResult, cleanup::SecretCleanupAction::Deactivate,
+    flow::credential_status_for_completed_flow, interaction::PendingSecretInteraction,
+    provider::validate_provider_callback_request, scope_matches,
 };
 
 #[derive(Default)]
@@ -353,7 +354,9 @@ impl CredentialAccountService for InMemoryAuthProductServices {
         let selectable = configured
             .iter()
             .copied()
-            .filter(|account| account_is_selectable_for_requester(account, &request))
+            .filter(|account| {
+                account_is_authorized_for_requester(account, request.requester_extension.as_ref())
+            })
             .map(CredentialAccount::projection)
             .collect::<Vec<_>>();
         match selectable.as_slice() {
@@ -361,6 +364,119 @@ impl CredentialAccountService for InMemoryAuthProductServices {
             [account] => Ok(account.clone()),
             _ => Err(AuthProductError::AccountSelectionRequired),
         }
+    }
+
+    async fn project_credential_recovery(
+        &self,
+        request: CredentialRecoveryRequest,
+    ) -> Result<CredentialRecoveryProjection, AuthProductError> {
+        let state = self.lock_state();
+        let mut accounts = state
+            .accounts
+            .values()
+            .filter(|account| {
+                scope_matches(&request.scope, &account.scope)
+                    && account.provider == request.provider
+            })
+            .collect::<Vec<_>>();
+        accounts.sort_by_key(|account| account.id);
+
+        if accounts.is_empty() {
+            return Ok(CredentialRecoveryProjection {
+                provider: request.provider,
+                kind: CredentialRecoveryKind::SetupRequired,
+                reason: CredentialRecoveryReason::NoAccount,
+                selected_account: None,
+                choices: Vec::new(),
+            });
+        }
+
+        let mut authorized = accounts
+            .iter()
+            .copied()
+            .filter(|account| {
+                account_is_authorized_for_requester(account, request.requester_extension.as_ref())
+            })
+            .collect::<Vec<_>>();
+        if authorized.is_empty() {
+            return Ok(CredentialRecoveryProjection {
+                provider: request.provider,
+                kind: CredentialRecoveryKind::SetupRequired,
+                reason: CredentialRecoveryReason::NoAuthorizedAccount,
+                selected_account: None,
+                choices: Vec::new(),
+            });
+        }
+        authorized.sort_by_key(|account| account.id);
+
+        let configured = authorized
+            .iter()
+            .copied()
+            .filter(|account| account.status == CredentialAccountStatus::Configured)
+            .collect::<Vec<_>>();
+        match configured.as_slice() {
+            [account] => {
+                return Ok(CredentialRecoveryProjection {
+                    provider: request.provider,
+                    kind: CredentialRecoveryKind::Configured,
+                    reason: CredentialRecoveryReason::Configured,
+                    selected_account: Some(account.projection()),
+                    choices: Vec::new(),
+                });
+            }
+            [_, ..] => {
+                return Ok(CredentialRecoveryProjection {
+                    provider: request.provider,
+                    kind: CredentialRecoveryKind::AccountSelectionRequired,
+                    reason: CredentialRecoveryReason::AmbiguousAccount,
+                    selected_account: None,
+                    choices: configured
+                        .iter()
+                        .map(|account| account.projection())
+                        .collect(),
+                });
+            }
+            [] => {}
+        }
+
+        if authorized.len() > 1 {
+            return Ok(CredentialRecoveryProjection {
+                provider: request.provider,
+                kind: CredentialRecoveryKind::AccountSelectionRequired,
+                reason: CredentialRecoveryReason::AmbiguousAccount,
+                selected_account: None,
+                choices: authorized
+                    .iter()
+                    .map(|account| account.projection())
+                    .collect(),
+            });
+        }
+
+        Ok(recovery_projection_for_single_account(
+            request.provider,
+            authorized[0],
+        ))
+    }
+
+    async fn select_configured_account(
+        &self,
+        request: CredentialAccountChoiceRequest,
+    ) -> Result<CredentialAccountProjection, AuthProductError> {
+        let state = self.lock_state();
+        let account = state
+            .accounts
+            .get(&request.account_id)
+            .ok_or(AuthProductError::CredentialMissing)?;
+        if !scope_matches(&request.scope, &account.scope) || account.provider != request.provider {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if account.status != CredentialAccountStatus::Configured {
+            return Err(AuthProductError::CredentialMissing);
+        }
+        if !account_is_authorized_for_requester(account, request.requester_extension.as_ref()) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        Ok(account.projection())
     }
 }
 
@@ -841,23 +957,67 @@ fn validate_update_authority_fields(
     Ok(())
 }
 
-fn account_is_selectable_for_requester(
+fn recovery_projection_for_single_account(
+    provider: crate::AuthProviderId,
     account: &CredentialAccount,
-    request: &CredentialAccountSelectionRequest,
+) -> CredentialRecoveryProjection {
+    let (kind, reason) = match account.status {
+        CredentialAccountStatus::Configured => (
+            CredentialRecoveryKind::Configured,
+            CredentialRecoveryReason::Configured,
+        ),
+        CredentialAccountStatus::PendingSetup => (
+            CredentialRecoveryKind::SetupRequired,
+            CredentialRecoveryReason::PendingSetup,
+        ),
+        CredentialAccountStatus::Missing => (
+            CredentialRecoveryKind::SetupRequired,
+            CredentialRecoveryReason::AccountMissing,
+        ),
+        CredentialAccountStatus::Inactive => (
+            CredentialRecoveryKind::SetupRequired,
+            CredentialRecoveryReason::AccountInactive,
+        ),
+        CredentialAccountStatus::Expired => (
+            CredentialRecoveryKind::ReauthorizeRequired,
+            CredentialRecoveryReason::AccountExpired,
+        ),
+        CredentialAccountStatus::RefreshFailed => (
+            CredentialRecoveryKind::ReauthorizeRequired,
+            CredentialRecoveryReason::RefreshFailed,
+        ),
+        CredentialAccountStatus::Revoked => (
+            CredentialRecoveryKind::ReauthorizeRequired,
+            CredentialRecoveryReason::AccountRevoked,
+        ),
+    };
+    let selected_account =
+        (kind == CredentialRecoveryKind::Configured).then(|| account.projection());
+    let choices = if kind == CredentialRecoveryKind::Configured {
+        Vec::new()
+    } else {
+        vec![account.projection()]
+    };
+    CredentialRecoveryProjection {
+        provider,
+        kind,
+        reason,
+        selected_account,
+        choices,
+    }
+}
+
+fn account_is_authorized_for_requester(
+    account: &CredentialAccount,
+    requester_extension: Option<&ironclaw_host_api::ExtensionId>,
 ) -> bool {
     match account.ownership {
         CredentialOwnership::UserReusable => true,
-        CredentialOwnership::ExtensionOwned => {
-            account
-                .owner_extension
-                .as_ref()
-                .is_some_and(|owner_extension| {
-                    request.requester_extension.as_ref() == Some(owner_extension)
-                })
-        }
-        CredentialOwnership::SharedAdminManaged => request
-            .requester_extension
+        CredentialOwnership::ExtensionOwned => account
+            .owner_extension
             .as_ref()
+            .is_some_and(|owner_extension| requester_extension == Some(owner_extension)),
+        CredentialOwnership::SharedAdminManaged => requester_extension
             .is_some_and(|requester| account.granted_extensions.contains(requester)),
         CredentialOwnership::System => false,
     }
