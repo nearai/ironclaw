@@ -24,7 +24,6 @@ use super::{
 
 pub const SKILL_LIST_CAPABILITY_ID: &str = "builtin.skill_list";
 pub const SKILL_INSTALL_CAPABILITY_ID: &str = "builtin.skill_install";
-pub const SKILL_INSTALL_URL_CAPABILITY_ID: &str = "builtin.skill_install_url";
 pub const SKILL_REMOVE_CAPABILITY_ID: &str = "builtin.skill_remove";
 
 pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
@@ -38,14 +37,7 @@ pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
         )?,
         first_party_capability_manifest(
             SKILL_INSTALL_CAPABILITY_ID,
-            "Install a SKILL.md document into the current user's Reborn skill root",
-            vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
-            PermissionMode::Ask,
-            resource_profile(),
-        )?,
-        first_party_capability_manifest(
-            SKILL_INSTALL_URL_CAPABILITY_ID,
-            "Fetch and install an HTTPS SKILL.md or skill bundle URL into the current user's Reborn skill root",
+            "Install a SKILL.md document, HTTPS SKILL.md URL, ZIP bundle, or GitHub skill repository/tree into the current user's Reborn skill root",
             vec![
                 EffectKind::ReadFilesystem,
                 EffectKind::WriteFilesystem,
@@ -76,10 +68,6 @@ pub(super) fn insert_handlers(
         CapabilityId::new(SKILL_INSTALL_CAPABILITY_ID)?,
         handler.clone(),
     );
-    registry.insert_handler(
-        CapabilityId::new(SKILL_INSTALL_URL_CAPABILITY_ID)?,
-        handler.clone(),
-    );
     registry.insert_handler(CapabilityId::new(SKILL_REMOVE_CAPABILITY_ID)?, handler);
     Ok(())
 }
@@ -95,9 +83,7 @@ impl FirstPartyCapabilityHandler for SkillManagementToolHandler {
         let started = Instant::now();
         let kind = match request.capability_id.as_str() {
             SKILL_LIST_CAPABILITY_ID => SkillManagementCapabilityKind::List,
-            SKILL_INSTALL_CAPABILITY_ID | SKILL_INSTALL_URL_CAPABILITY_ID => {
-                SkillManagementCapabilityKind::Install
-            }
+            SKILL_INSTALL_CAPABILITY_ID => SkillManagementCapabilityKind::Install,
             SKILL_REMOVE_CAPABILITY_ID => SkillManagementCapabilityKind::Remove,
             _ => {
                 return Err(FirstPartyCapabilityError::new(
@@ -144,15 +130,15 @@ async fn skill_install_input(
         .get("url")
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty());
-    match (request.capability_id.as_str(), has_content, url) {
-        (SKILL_INSTALL_CAPABILITY_ID, true, None)
+    match (has_content, url) {
+        (true, None)
             if !object.contains_key("files")
                 && !object.contains_key("source")
                 && !object.contains_key("source_url") =>
         {
             Ok(request.input.clone())
         }
-        (SKILL_INSTALL_URL_CAPABILITY_ID, false, Some(url)) => {
+        (false, Some(url)) => {
             let payload = fetch_skill_url_payload(request, url, usage).await?;
             let mut rewritten = Map::new();
             if let Some(name) = object.get("name").cloned() {
