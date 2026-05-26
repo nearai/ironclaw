@@ -52,6 +52,14 @@ mod binding;
 mod driver;
 mod port;
 mod ship_gate;
+mod trust;
+
+pub use trust::{
+    AlwaysTrustNearAccessKeyVerifier, BindingKey, BindingStatus, EnrollmentState,
+    InMemoryTrustStore, NearAccessKeyVerifier, NonceSource, SignedChallenge, TrustChallenge,
+    TrustEnrollment, TrustError, TrustKind, TrustRegistrar, TrustStore, TrustedSignerBinding,
+    VerifiedControl,
+};
 
 pub use binding::{
     AttestedGateBinding, AttestedGateBindingStore, BindingError, InMemoryAttestedGateBindingStore,

@@ -5060,6 +5060,9 @@ dependencies = [
  "k256",
  "secrecy",
  "serde",
+ "sha3 0.10.9",
+ "subtle",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]
