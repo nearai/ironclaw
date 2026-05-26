@@ -564,6 +564,7 @@ mod tests {
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
+            expected_tx_hash: None,
             failure: None,
             event_cursor: EventCursor(1),
         }

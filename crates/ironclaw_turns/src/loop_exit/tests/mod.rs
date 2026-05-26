@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    BlockedReason, GateRef, SanitizedFailure, TurnCheckpointId, TurnStatus,
+    ApprovedTxHashRef, BlockedReason, GateRef, SanitizedFailure, TurnCheckpointId, TurnStatus,
     runner::TurnRunnerOutcome,
 };
 use serde_json::json;
@@ -338,6 +338,7 @@ fn blocked_exit_maps_to_block_run_outcome_with_verified_checkpoint_and_gate_ref(
     let decision = LoopExit::Blocked(LoopBlocked {
         kind: LoopBlockedKind::Approval,
         gate_ref: loop_gate_ref,
+        expected_tx_hash: None,
         checkpoint_id,
         state_ref: state_ref.clone(),
         exit_id: exit_id("exit:blocked"),
@@ -370,6 +371,7 @@ fn blocked_exit_requires_host_verified_gate_and_checkpoint_before_trusted_mappin
     let decision = LoopExit::Blocked(LoopBlocked {
         kind: LoopBlockedKind::Approval,
         gate_ref: loop_gate_ref("gate:approval-gate"),
+        expected_tx_hash: None,
         checkpoint_id: TurnCheckpointId::new(),
         state_ref: checkpoint_state_ref(),
         exit_id: exit_id("exit:unverified-blocked"),
@@ -385,6 +387,91 @@ fn blocked_exit_requires_host_verified_gate_and_checkpoint_before_trusted_mappin
         failure_evidence_verified: false,
     });
 
+    assert_eq!(
+        decision.violation.unwrap().category(),
+        "unverified_blocked_evidence"
+    );
+    assert!(matches!(
+        decision.mapping,
+        LoopExitMapping::RecoveryRequired { .. }
+    ));
+}
+
+#[test]
+fn blocked_attested_validation_mapping() {
+    // Shared validation policy: host-verified blocked evidence so we exercise
+    // the `to_blocked_reason` mapping/validation rather than the unverified
+    // fail-closed branch.
+    let policy = || LoopExitValidationPolicy {
+        require_final_checkpoint: false,
+        allow_no_reply_completion: false,
+        final_checkpoint_verified: false,
+        host_cancellation_observed: false,
+        invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
+        completion_refs_verified: false,
+        blocked_evidence_verified: true,
+        failure_evidence_verified: false,
+    };
+
+    // 1. Attested + expected_tx_hash present -> maps to BlockedReason::Attested.
+    let checkpoint_id = TurnCheckpointId::new();
+    let attested_gate = loop_gate_ref("gate:attested-gate");
+    let gate_ref = GateRef::new(attested_gate.as_str()).unwrap();
+    let state_ref = checkpoint_state_ref();
+    let expected_tx_hash = ApprovedTxHashRef::new("approved-tx-hash-1").unwrap();
+    let decision = LoopExit::Blocked(LoopBlocked {
+        kind: LoopBlockedKind::Attested,
+        gate_ref: attested_gate,
+        expected_tx_hash: Some(expected_tx_hash.clone()),
+        checkpoint_id,
+        state_ref: state_ref.clone(),
+        exit_id: exit_id("exit:blocked-attested"),
+    })
+    .validate(policy());
+    assert_eq!(decision.violation, None);
+    assert_eq!(
+        decision.mapping,
+        TurnRunnerOutcome::Blocked {
+            checkpoint_id,
+            state_ref,
+            reason: BlockedReason::Attested {
+                gate_ref,
+                expected_tx_hash,
+            },
+        }
+        .into()
+    );
+
+    // 2. Attested + expected_tx_hash absent -> unverified blocked evidence.
+    let decision = LoopExit::Blocked(LoopBlocked {
+        kind: LoopBlockedKind::Attested,
+        gate_ref: loop_gate_ref("gate:attested-missing-binding"),
+        expected_tx_hash: None,
+        checkpoint_id: TurnCheckpointId::new(),
+        state_ref: checkpoint_state_ref(),
+        exit_id: exit_id("exit:attested-missing-binding"),
+    })
+    .validate(policy());
+    assert_eq!(
+        decision.violation.unwrap().category(),
+        "unverified_blocked_evidence"
+    );
+    assert!(matches!(
+        decision.mapping,
+        LoopExitMapping::RecoveryRequired { .. }
+    ));
+
+    // 3. Standard (non-attested) kind carrying a stray expected_tx_hash ->
+    //    unverified blocked evidence.
+    let decision = LoopExit::Blocked(LoopBlocked {
+        kind: LoopBlockedKind::Approval,
+        gate_ref: loop_gate_ref("gate:approval-stray-binding"),
+        expected_tx_hash: Some(ApprovedTxHashRef::new("stray-binding").unwrap()),
+        checkpoint_id: TurnCheckpointId::new(),
+        state_ref: checkpoint_state_ref(),
+        exit_id: exit_id("exit:approval-stray-binding"),
+    })
+    .validate(policy());
     assert_eq!(
         decision.violation.unwrap().category(),
         "unverified_blocked_evidence"
@@ -751,6 +838,7 @@ fn blocked_variants_map_to_correct_blocked_reason() {
         let decision = LoopExit::Blocked(LoopBlocked {
             kind,
             gate_ref: lg,
+            expected_tx_hash: None,
             checkpoint_id,
             state_ref: state_ref.clone(),
             exit_id: exit_id("exit:blocked-variant"),
@@ -764,6 +852,9 @@ fn blocked_variants_map_to_correct_blocked_reason() {
             LoopBlockedKind::Approval => BlockedReason::Approval { gate_ref },
             LoopBlockedKind::Auth => BlockedReason::Auth { gate_ref },
             LoopBlockedKind::Resource => BlockedReason::Resource { gate_ref },
+            // Attested is exercised separately in the attested-resume contract
+            // tests; this loop only covers the non-attested kinds.
+            LoopBlockedKind::Attested => unreachable!("attested kind not iterated here"),
         };
 
         assert_eq!(decision.violation, None);
@@ -872,6 +963,8 @@ fn terminal_statuses_release_lock_and_non_terminal_keep_it() {
         TurnStatus::BlockedApproval,
         TurnStatus::BlockedAuth,
         TurnStatus::BlockedResource,
+        TurnStatus::BlockedAttested,
+        TurnStatus::AttestedResolved,
         TurnStatus::CancelRequested,
         TurnStatus::Cancelled,
         TurnStatus::Completed,
@@ -884,6 +977,8 @@ fn terminal_statuses_release_lock_and_non_terminal_keep_it() {
             TurnStatus::BlockedApproval => (false, true),
             TurnStatus::BlockedAuth => (false, true),
             TurnStatus::BlockedResource => (false, true),
+            TurnStatus::BlockedAttested => (false, true),
+            TurnStatus::AttestedResolved => (false, true),
             TurnStatus::CancelRequested => (false, true),
             TurnStatus::Cancelled => (true, false),
             TurnStatus::Completed => (true, false),

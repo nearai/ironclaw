@@ -577,6 +577,10 @@ impl RebornServicesApi for RebornServices {
                             &binding_id,
                         )?,
                         idempotency_key: client_action_id,
+                        // Attested-signing resumes are wired in a later PR; this
+                        // WebUI gate-resolution path resumes approval/auth/
+                        // resource gates only.
+                        attestation: None,
                     })
                     .await
                     .map_err(map_turn_error)?;

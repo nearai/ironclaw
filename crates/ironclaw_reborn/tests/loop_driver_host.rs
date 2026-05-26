@@ -1541,6 +1541,7 @@ async fn turn_runner_blocks_on_approval_then_coordinator_resume_completes_same_r
             source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
             idempotency_key: IdempotencyKey::new("resume-approval-once").unwrap(),
+            attestation: None,
         })
         .await
         .unwrap();
@@ -6024,6 +6025,7 @@ impl AgentLoopDriver for ApprovalBlockThenFinalReplyDriver {
         Ok(LoopExit::Blocked(LoopBlocked {
             kind: LoopBlockedKind::Approval,
             gate_ref: LoopGateRef::new("gate:approval-resume-e2e").unwrap(),
+            expected_tx_hash: None,
             checkpoint_id: ironclaw_turns::TurnCheckpointId::new(),
             state_ref: LoopCheckpointStateRef::new("checkpoint:approval-resume-state").unwrap(),
             exit_id: LoopExitId::new("exit:approval-resume-blocked").unwrap(),
@@ -6334,6 +6336,7 @@ impl HostFixture {
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
+            expected_tx_hash: None,
             failure: None,
             event_cursor: EventCursor(1),
         };

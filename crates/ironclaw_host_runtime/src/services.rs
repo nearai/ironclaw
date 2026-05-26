@@ -64,7 +64,7 @@ use ironclaw_scripts::{ScriptError, ScriptExecutionRequest, ScriptExecutor, Scri
 use ironclaw_secrets::{InMemorySecretStore, SecretStore};
 use ironclaw_trust::{HostTrustPolicy, TrustPolicy};
 use ironclaw_turns::{
-    DefaultTurnCoordinator, FilesystemTurnStateStore, InMemoryTurnStateStore,
+    AttestedResumePort, DefaultTurnCoordinator, FilesystemTurnStateStore, InMemoryTurnStateStore,
     NoopTurnRunWakeNotifier, RunProfileResolver, TurnRunWakeNotifier, TurnStateStore,
     runner::TurnRunTransitionPort,
 };
@@ -892,8 +892,30 @@ where
     where
         FsBackend: RootFilesystem + 'static,
     {
-        let store = Arc::new(FilesystemTurnStateStore::new(scoped_filesystem));
-        self.with_turn_state_and_transition_port(store)
+        self.with_filesystem_turn_state_store_with_attested_port(scoped_filesystem, None)
+    }
+
+    /// Like [`Self::with_filesystem_turn_state_store`], but injects the
+    /// `AttestedResumePort` used to validate `BlockedAttested` resumes.
+    ///
+    /// Production composition uses this when an attested-signing verifier is
+    /// available; the port is carried through the filesystem store into every
+    /// transient in-memory store built inside the CAS apply loop, so attested
+    /// resumes reach the verifier instead of failing closed. Passing `None`
+    /// keeps attested resumes failing closed (`port not configured`).
+    pub fn with_filesystem_turn_state_store_with_attested_port<FsBackend>(
+        self,
+        scoped_filesystem: Arc<ScopedFilesystem<FsBackend>>,
+        attested_resume_port: Option<Arc<dyn AttestedResumePort>>,
+    ) -> Self
+    where
+        FsBackend: RootFilesystem + 'static,
+    {
+        let mut store = FilesystemTurnStateStore::new(scoped_filesystem);
+        if let Some(port) = attested_resume_port {
+            store = store.with_attested_resume_port(port);
+        }
+        self.with_turn_state_and_transition_port(Arc::new(store))
     }
 
     pub fn with_turn_run_wake_notifier<T>(mut self, notifier: Arc<T>) -> Self

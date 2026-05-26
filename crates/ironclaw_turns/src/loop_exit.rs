@@ -292,7 +292,10 @@ impl LoopExit {
         match self {
             Self::Completed(exit) => validate_completed_exit(exit_id, exit, policy),
             Self::Blocked(exit) if policy.blocked_evidence_verified => {
-                match exit.kind.to_blocked_reason(exit.gate_ref) {
+                match exit
+                    .kind
+                    .to_blocked_reason(exit.gate_ref, exit.expected_tx_hash)
+                {
                     Ok(reason) => LoopExitValidationDecision::trusted(
                         exit_id,
                         TurnRunnerOutcome::Blocked {
@@ -377,6 +380,13 @@ pub enum LoopCompletionKind {
 pub struct LoopBlocked {
     pub kind: LoopBlockedKind,
     pub gate_ref: LoopGateRef,
+    /// Opaque expected-transaction-hash binding, required for
+    /// [`LoopBlockedKind::Attested`] and absent for every other kind. A missing
+    /// binding for an attested block (or a present one for a non-attested
+    /// block) is a driver protocol violation surfaced as unverified blocked
+    /// evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_tx_hash: Option<crate::ApprovedTxHashRef>,
     pub checkpoint_id: TurnCheckpointId,
     pub state_ref: LoopCheckpointStateRef,
     pub exit_id: LoopExitId,
@@ -388,16 +398,38 @@ pub enum LoopBlockedKind {
     Approval,
     Auth,
     Resource,
+    Attested,
 }
 
 impl LoopBlockedKind {
-    fn to_blocked_reason(self, gate_ref: LoopGateRef) -> Result<BlockedReason, ()> {
+    fn to_blocked_reason(
+        self,
+        gate_ref: LoopGateRef,
+        expected_tx_hash: Option<crate::ApprovedTxHashRef>,
+    ) -> Result<BlockedReason, ()> {
         let gate_ref = GateRef::new(gate_ref.as_str()).map_err(|_| ())?;
-        Ok(match self {
-            Self::Approval => BlockedReason::Approval { gate_ref },
-            Self::Auth => BlockedReason::Auth { gate_ref },
-            Self::Resource => BlockedReason::Resource { gate_ref },
-        })
+        match self {
+            Self::Approval | Self::Auth | Self::Resource => {
+                // A non-attested block must not carry an attested binding.
+                if expected_tx_hash.is_some() {
+                    return Err(());
+                }
+                Ok(match self {
+                    Self::Approval => BlockedReason::Approval { gate_ref },
+                    Self::Auth => BlockedReason::Auth { gate_ref },
+                    Self::Resource => BlockedReason::Resource { gate_ref },
+                    Self::Attested => unreachable!("matched non-attested arm"),
+                })
+            }
+            Self::Attested => {
+                // An attested block must carry the expected-tx-hash binding.
+                let expected_tx_hash = expected_tx_hash.ok_or(())?;
+                Ok(BlockedReason::Attested {
+                    gate_ref,
+                    expected_tx_hash,
+                })
+            }
+        }
     }
 }
 

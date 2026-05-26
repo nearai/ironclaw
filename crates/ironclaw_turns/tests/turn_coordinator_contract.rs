@@ -12,21 +12,23 @@ use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, AllowAllTurnAdmissionPolicy,
-    BlockedReason, CancelRunRequest, DefaultTurnCoordinator, GateRef, GetRunStateRequest,
-    IdempotencyKey, InMemoryRunProfileResolver, InMemoryTurnEventSink, InMemoryTurnStateStore,
-    InMemoryTurnStateStoreLimits, LoopCheckpointStateRef, LoopExitMapping, LoopGateRef,
-    ReplyTargetBindingRef, ResolvedRunProfile, ResumeTurnRequest, RunProfileId, RunProfileRequest,
-    RunProfileResolutionError, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
-    SanitizedCancelReason, SanitizedFailure, SourceBindingRef, StaticTurnAdmissionLimitProvider,
-    SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor, TurnAdmissionAxisKind,
-    TurnAdmissionBucketKind, TurnAdmissionBucketScope, TurnAdmissionCapacityDenial,
-    TurnAdmissionClass, TurnAdmissionPolicy, TurnCheckpointId, TurnCoordinator, TurnError,
-    TurnErrorCategory, TurnEventKind, TurnEventProjectionCursor, TurnEventProjectionError,
-    TurnEventProjectionRequest, TurnEventProjectionService, TurnEventSink,
-    TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind, TurnIdempotencyRecord,
-    TurnIdempotencyReplay, TurnLeaseToken, TurnLifecycleEvent, TurnLockVersion, TurnRunId,
-    TurnRunProfile, TurnRunState, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError,
-    TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
+    ApprovedTxHashRef, AttestationClaimRef, AttestedResumePort, AttestedResumeRejection,
+    AttestedResumeRequest, BlockedReason, CancelRunRequest, DefaultTurnCoordinator, GateRef,
+    GetRunStateRequest, IdempotencyKey, InMemoryRunProfileResolver, InMemoryTurnEventSink,
+    InMemoryTurnStateStore, InMemoryTurnStateStoreLimits, LoopCheckpointStateRef, LoopExitMapping,
+    LoopGateRef, ReplyTargetBindingRef, ResolvedRunProfile, ResumeTurnRequest, ResumeTurnResponse,
+    RunProfileId, RunProfileRequest, RunProfileResolutionError, RunProfileResolutionRequest,
+    RunProfileResolver, RunProfileVersion, SanitizedCancelReason, SanitizedFailure,
+    SourceBindingRef, StaticTurnAdmissionLimitProvider, SubmitTurnRequest, SubmitTurnResponse,
+    ThreadBusy, TurnActor, TurnAdmissionAxisKind, TurnAdmissionBucketKind,
+    TurnAdmissionBucketScope, TurnAdmissionCapacityDenial, TurnAdmissionClass, TurnAdmissionPolicy,
+    TurnCheckpointId, TurnCoordinator, TurnError, TurnErrorCategory, TurnEventKind,
+    TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
+    TurnEventProjectionService, TurnEventSink, TurnIdempotencyOperationKind,
+    TurnIdempotencyOutcomeKind, TurnIdempotencyRecord, TurnIdempotencyReplay, TurnLeaseToken,
+    TurnLifecycleEvent, TurnLockVersion, TurnRunId, TurnRunProfile, TurnRunState, TurnRunWake,
+    TurnRunWakeNotifier, TurnRunWakeNotifyError, TurnRunnerId, TurnScope, TurnStateStore,
+    TurnStatus,
     events::EventCursor,
     run_profile::LoopModelRouteSnapshot,
     runner::{
@@ -173,6 +175,7 @@ async fn turn_lifecycle_projection_replays_submit_block_resume_complete_without_
             )
             .unwrap(),
             idempotency_key: IdempotencyKey::new("idem-turn-events-resume").unwrap(),
+            attestation: None,
         })
         .await
         .unwrap();
@@ -793,6 +796,7 @@ async fn resume_turn_wakes_runner_for_same_run_after_requeue() {
             source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
+            attestation: None,
         })
         .await
         .unwrap();
@@ -918,6 +922,7 @@ async fn resume_turn_ignores_wake_notification_panic_after_requeue() {
             source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
+            attestation: None,
         })
         .await
         .unwrap();
@@ -1943,6 +1948,7 @@ async fn blocked_resume_and_recovery_required_keep_existing_admission_reservatio
             source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
+            attestation: None,
         })
         .await
         .unwrap();
@@ -2149,6 +2155,7 @@ async fn resume_updates_persisted_run_binding_refs_and_replay_envelope() {
         source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
         reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
         idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
+        attestation: None,
     };
 
     let resumed = coordinator
@@ -2468,6 +2475,7 @@ async fn idempotency_persistence_snapshot_retains_each_operation_kind_capacity()
             source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
+            attestation: None,
         })
         .await
         .unwrap();
@@ -2565,6 +2573,7 @@ async fn idempotency_replay_helpers_require_matching_operation_kind() {
             source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
+            attestation: None,
         })
         .await
         .unwrap();
@@ -3408,6 +3417,7 @@ async fn blocked_run_persists_checkpoint_and_keeps_same_thread_lock_until_resume
         source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
         reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
         idempotency_key: IdempotencyKey::new("idem-resume-a").unwrap(),
+        attestation: None,
     };
     let resumed = coordinator
         .resume_turn(resume_request.clone())
@@ -3415,7 +3425,17 @@ async fn blocked_run_persists_checkpoint_and_keeps_same_thread_lock_until_resume
         .unwrap();
     let event_count_after_resume = store.events().len();
     let duplicate = coordinator.resume_turn(resume_request).await.unwrap();
-    assert_eq!(duplicate, resumed);
+    // The duplicate is a cached idempotency replay: identical to the original
+    // except it is flagged `replayed` so callers never re-fire a side effect.
+    assert!(!resumed.replayed);
+    assert!(duplicate.replayed);
+    assert_eq!(
+        duplicate,
+        ResumeTurnResponse {
+            replayed: true,
+            ..resumed.clone()
+        }
+    );
     assert_eq!(store.events().len(), event_count_after_resume);
     assert_eq!(resumed.status, TurnStatus::Queued);
 }
@@ -3464,6 +3484,7 @@ async fn resume_turn_from_foreign_actor_is_denied_without_requeueing_run() {
             source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-resume-foreign-actor").unwrap(),
+            attestation: None,
         })
         .await
         .unwrap_err();
@@ -3605,6 +3626,7 @@ async fn resume_turn_with_wrong_gate_resolution_ref_is_invalid_request() {
             source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-resume-wrong-gate").unwrap(),
+            attestation: None,
         })
         .await
         .unwrap_err();
@@ -3928,6 +3950,124 @@ fn assert_no_forbidden_turn_event_content(label: &str, serialized: &str, forbidd
     }
 }
 
+/// Accepting attested-resume port for cancellation tests: it never rejects and
+/// performs no crypto/chain work, so it is safe to drive the resume transition
+/// into `AttestedResolved`.
+struct AcceptingAttestedResumePort;
+
+impl AttestedResumePort for AcceptingAttestedResumePort {
+    fn verify_attested_resume(
+        &self,
+        _request: AttestedResumeRequest<'_>,
+    ) -> Result<(), AttestedResumeRejection> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn cancel_run_for_blocked_attested_and_attested_resolved() {
+    // 1. A run still parked in BlockedAttested cancels instantly to Cancelled,
+    //    exactly like the other blocked reasons.
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+    let request = submit_request("thread-cancel-blocked-attested", "idem-cba-submit");
+    let run_id = accepted_run_id(&coordinator.submit_turn(request.clone()).await.unwrap());
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(request.scope.clone()),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref: block_state_ref(),
+            reason: BlockedReason::Attested {
+                gate_ref: GateRef::new("gate-cba").unwrap(),
+                expected_tx_hash: ApprovedTxHashRef::new("approved-cba").unwrap(),
+            },
+        })
+        .await
+        .unwrap();
+    let cancelled = coordinator
+        .cancel_run(cancel_request(
+            "thread-cancel-blocked-attested",
+            run_id,
+            "idem-cba-cancel",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(cancelled.status, TurnStatus::Cancelled);
+    assert!(!cancelled.already_terminal);
+
+    // 2. A run that has already resumed into AttestedResolved (signer
+    //    continuation may be mid-flight) takes the two-phase cancel path and
+    //    transitions to CancelRequested rather than terminating immediately.
+    let port = Arc::new(AcceptingAttestedResumePort);
+    let store = Arc::new(InMemoryTurnStateStore::default().with_attested_resume_port(port));
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+    let request = submit_request("thread-cancel-attested-resolved", "idem-car-submit");
+    let run_id = accepted_run_id(&coordinator.submit_turn(request.clone()).await.unwrap());
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(request.scope.clone()),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref: block_state_ref(),
+            reason: BlockedReason::Attested {
+                gate_ref: GateRef::new("gate-car").unwrap(),
+                expected_tx_hash: ApprovedTxHashRef::new("approved-car").unwrap(),
+            },
+        })
+        .await
+        .unwrap();
+    let resumed = coordinator
+        .resume_turn(ResumeTurnRequest {
+            scope: request.scope.clone(),
+            actor: actor(),
+            run_id,
+            gate_resolution_ref: GateRef::new("gate-car").unwrap(),
+            source_binding_ref: SourceBindingRef::new("source-car-resume").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-car-resume").unwrap(),
+            idempotency_key: IdempotencyKey::new("idem-car-resume").unwrap(),
+            attestation: Some(AttestationClaimRef::new("claim-car").unwrap()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(resumed.status, TurnStatus::AttestedResolved);
+
+    let cancel_requested = coordinator
+        .cancel_run(cancel_request(
+            "thread-cancel-attested-resolved",
+            run_id,
+            "idem-car-cancel",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(cancel_requested.status, TurnStatus::CancelRequested);
+    assert!(!cancel_requested.already_terminal);
+}
+
 fn coordinator() -> (
     DefaultTurnCoordinator<InMemoryTurnStateStore>,
     Arc<InMemoryTurnStateStore>,
@@ -4103,6 +4243,7 @@ impl TurnRunTransitionPort for AtomicLoopExitPort {
             received_at: received_at(),
             checkpoint_id: None,
             gate_ref: None,
+            expected_tx_hash: None,
             failure: None,
             event_cursor: EventCursor(1),
         })

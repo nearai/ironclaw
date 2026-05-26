@@ -83,6 +83,13 @@ where
     filesystem: Arc<ScopedFilesystem<F>>,
     limits: InMemoryTurnStateStoreLimits,
     admission_limit_provider: Arc<dyn TurnAdmissionLimitProvider>,
+    /// Injected verifier for `BlockedAttested` resumes. Threaded into every
+    /// transient `InMemoryTurnStateStore` built inside the CAS apply closure.
+    /// `None` means attested resumes fail closed ("port not configured"),
+    /// matching the in-memory store. Without this field the per-mutation
+    /// transient store dropped the port and attested resumes through the
+    /// production filesystem store always failed closed.
+    attested_resume_port: Option<Arc<dyn crate::AttestedResumePort>>,
 }
 
 impl<F> FilesystemTurnStateStore<F>
@@ -94,6 +101,7 @@ where
             filesystem,
             limits: InMemoryTurnStateStoreLimits::default(),
             admission_limit_provider: Arc::new(AllowAllTurnAdmissionLimitProvider),
+            attested_resume_port: None,
         }
     }
 
@@ -107,6 +115,17 @@ where
         admission_limit_provider: Arc<dyn TurnAdmissionLimitProvider>,
     ) -> Self {
         self.admission_limit_provider = admission_limit_provider;
+        self
+    }
+
+    /// Inject the verifier used to validate `BlockedAttested` resumes.
+    ///
+    /// The port is propagated into every transient in-memory store the CAS
+    /// apply loop materializes, so attested resumes routed through the
+    /// filesystem store reach the verifier instead of failing closed. Mirrors
+    /// [`InMemoryTurnStateStore::with_attested_resume_port`].
+    pub fn with_attested_resume_port(mut self, port: Arc<dyn crate::AttestedResumePort>) -> Self {
+        self.attested_resume_port = Some(port);
         self
     }
 
@@ -149,11 +168,21 @@ where
         &self,
         snapshot: TurnPersistenceSnapshot,
     ) -> Result<InMemoryTurnStateStore, TurnError> {
-        InMemoryTurnStateStore::from_persistence_snapshot_with_admission_limit_provider(
-            snapshot,
-            self.limits,
-            self.admission_limit_provider.clone(),
-        )
+        let store =
+            InMemoryTurnStateStore::from_persistence_snapshot_with_admission_limit_provider(
+                snapshot,
+                self.limits,
+                self.admission_limit_provider.clone(),
+            )?;
+        // Carry the attested-resume verifier into the transient store so an
+        // attested resume routed through the filesystem store reaches the
+        // injected port instead of failing closed. Without this, the per-
+        // mutation transient store dropped the port entirely.
+        let store = match &self.attested_resume_port {
+            Some(port) => store.with_attested_resume_port(port.clone()),
+            None => store,
+        };
+        Ok(store)
     }
 
     /// Read-modify-write the snapshot with optimistic CAS and bounded retry.

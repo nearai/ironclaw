@@ -193,6 +193,18 @@ bounded_ref!(AcceptedMessageRef, "accepted_message_ref");
 bounded_ref!(SourceBindingRef, "source_binding_ref");
 bounded_ref!(ReplyTargetBindingRef, "reply_target_binding_ref");
 bounded_ref!(GateRef, "gate_ref");
+// Untrusted wire claim carried on a resume request for an attested-signing gate.
+// `ironclaw_turns` never verifies this value; it is forwarded opaquely to the
+// injected `AttestedResumePort` (whose implementation lives outside this
+// crypto-free crate). It is a bounded reference only — never a chain,
+// WebAuthn, or secret type.
+bounded_ref!(AttestationClaimRef, "attestation_claim_ref");
+// Opaque expected-transaction-hash binding persisted on an attested-signing
+// gate. Mirrors the signing crate's `ApprovedTxHash` as metadata only: it is a
+// bounded reference defined IN turns so the crate stays crypto-free and never
+// depends on `ironclaw_signing_provider`. Resume forwards it to the port so the
+// port can bind the untrusted claim to the approved hash.
+bounded_ref!(ApprovedTxHashRef, "approved_tx_hash_ref");
 bounded_ref!(IdempotencyKey, "idempotency_key");
 bounded_ref!(RunProfileRequest, "run_profile_request");
 bounded_ref!(RunProfileId, "run_profile_id");

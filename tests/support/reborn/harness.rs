@@ -944,6 +944,7 @@ impl RebornBinaryE2EHarness {
                 source_binding_ref: SourceBindingRef::new("src:resume")?,
                 reply_target_binding_ref: ReplyTargetBindingRef::new("reply:resume")?,
                 idempotency_key: IdempotencyKey::new(idempotency_key.into())?,
+                attestation: None,
             })
             .await?;
         if response.status != TurnStatus::Queued {

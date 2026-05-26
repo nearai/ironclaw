@@ -979,6 +979,9 @@ impl CanonicalAgentLoopExecutor {
                 Ok(BatchStep::Exit(LoopExit::Blocked(LoopBlocked {
                     kind: blocked_kind(kind),
                     gate_ref,
+                    // The executor raises approval/auth/resource gates only;
+                    // attested-signing blocks are produced elsewhere.
+                    expected_tx_hash: None,
                     checkpoint_id: checked.checkpoint_id,
                     state_ref: checked.state_ref,
                     exit_id: exit_id(host, "blocked")?,
