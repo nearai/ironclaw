@@ -160,6 +160,7 @@ pub trait TurnRunTransitionPort: Send + Sync {
 pub struct EventPublishingTurnRunTransitionPort {
     inner: Arc<dyn TurnRunTransitionPort>,
     sink: Option<Arc<dyn TurnEventSink>>,
+    // arch-exempt: optional_arc, observer is genuinely optional for helper/contract tests that exercise the port without subagent integration; production wiring in `ironclaw_reborn::runtime` always supplies one via `with_required_observer`. Tracked under the subagent-spawn epic.
     required_observer: Option<Arc<dyn TurnCommittedEventObserver>>,
 }
 
