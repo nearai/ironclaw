@@ -58,13 +58,8 @@ pub trait SessionThreadService: Send + Sync {
 
     async fn append_capability_display_preview(
         &self,
-        _request: AppendCapabilityDisplayPreviewRequest,
-    ) -> Result<ThreadMessageRecord, SessionThreadError> {
-        Err(SessionThreadError::Backend(
-            "append_capability_display_preview is not implemented by this SessionThreadService backend"
-                .to_string(),
-        ))
-    }
+        request: AppendCapabilityDisplayPreviewRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError>;
 
     async fn update_assistant_draft(
         &self,

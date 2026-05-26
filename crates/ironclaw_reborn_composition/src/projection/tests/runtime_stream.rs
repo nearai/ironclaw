@@ -130,7 +130,9 @@ async fn webui_event_stream_enriches_activity_with_display_preview_from_store() 
         output: &serde_json::json!({"content": "fn main() {}"}),
         output_bytes: 64,
     });
-    display_previews.attach_timeline_message_id(invocation_id, "timeline-message-1".to_string());
+    let timeline_message_id = ironclaw_threads::ThreadMessageId::new();
+    let timeline_message_id_string = timeline_message_id.to_string();
+    display_previews.attach_timeline_message_id(invocation_id, timeline_message_id);
     let event_log = Arc::new(InMemoryDurableEventLog::new());
     event_log
         .append(RuntimeEvent::dispatch_succeeded(
@@ -171,7 +173,7 @@ async fn webui_event_stream_enriches_activity_with_display_preview_from_store() 
                         && preview.subtitle.as_deref() == Some("src/main.rs")
                         && preview.input_summary.as_deref().is_some_and(|summary| summary.contains("path: src/main.rs"))
                         && preview.output_preview.as_deref() == Some("fn main() {}")
-                        && preview.timeline_message_id.as_deref() == Some("timeline-message-1")
+                        && preview.timeline_message_id.as_deref() == Some(timeline_message_id_string.as_str())
                         && preview.result_ref.as_deref() == Some("result:preview-output")
                         && preview.output_bytes == Some(64)
             )

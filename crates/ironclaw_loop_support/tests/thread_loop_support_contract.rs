@@ -22,8 +22,9 @@ use ironclaw_loop_support::{
 use ironclaw_skills::SkillTrust;
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
-    AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextMessage, ContextMessages,
-    ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest, InMemorySessionThreadService,
+    AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
+    AppendToolResultReferenceRequest, ContextMessage, ContextMessages, ContextWindow,
+    CreateSummaryArtifactRequest, EnsureThreadRequest, InMemorySessionThreadService,
     LoadContextMessagesRequest, MessageContent, MessageKind, MessageStatus,
     ProviderToolCallReferenceEnvelope, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
     SessionThreadError, SessionThreadRecord, SessionThreadService, SummaryArtifact, ThreadHistory,
@@ -3379,6 +3380,13 @@ impl SessionThreadService for GatedFinalizeThreadService {
         self.inner.append_tool_result_reference(request).await
     }
 
+    async fn append_capability_display_preview(
+        &self,
+        request: AppendCapabilityDisplayPreviewRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        self.inner.append_capability_display_preview(request).await
+    }
+
     async fn update_assistant_draft(
         &self,
         request: UpdateAssistantDraftRequest,
@@ -3503,6 +3511,13 @@ impl SessionThreadService for StaticContextThreadService {
         _request: AppendToolResultReferenceRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         panic!("static context service does not append tool result references")
+    }
+
+    async fn append_capability_display_preview(
+        &self,
+        _request: AppendCapabilityDisplayPreviewRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("static context service does not append capability display previews")
     }
 
     async fn update_assistant_draft(

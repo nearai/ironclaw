@@ -45,6 +45,7 @@ use ironclaw_filesystem::{
 use ironclaw_host_api::{HostApiError, InvocationId, ResourceScope, ScopedPath, ThreadId};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 use crate::identifiers::SummaryArtifactId;
 use crate::{
@@ -237,6 +238,28 @@ where
         }
         messages.sort_by_key(|message| message.sequence);
         Ok(messages)
+    }
+
+    async fn find_capability_display_preview_message(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        turn_run_id: &str,
+        invocation_id: InvocationId,
+    ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        let messages = self.list_thread_messages(scope, thread_id).await?;
+        for message in messages {
+            if message.kind != MessageKind::CapabilityDisplayPreview
+                || message.status != MessageStatus::Finalized
+                || message.turn_run_id.as_deref() != Some(turn_run_id)
+            {
+                continue;
+            }
+            if preview_invocation_id(message.content.as_deref())? == Some(invocation_id) {
+                return Ok(Some(message));
+            }
+        }
+        Ok(None)
     }
 
     async fn list_thread_summaries(
@@ -846,24 +869,29 @@ where
             .validate()
             .map_err(SessionThreadError::Serialization)?;
         let existing = self
-            .list_thread_messages(&request.scope, &request.thread_id)
+            .find_capability_display_preview_message(
+                &request.scope,
+                &request.thread_id,
+                &request.turn_run_id,
+                request.preview.invocation_id,
+            )
             .await?;
-        if let Some(existing) = existing.into_iter().find(|message| {
-            message.kind == MessageKind::CapabilityDisplayPreview
-                && message.status == MessageStatus::Finalized
-                && message.turn_run_id.as_deref() == Some(request.turn_run_id.as_str())
-                && preview_invocation_id(message.content.as_deref())
-                    == Some(request.preview.invocation_id)
-        }) {
+        if let Some(existing) = existing {
             return Ok(existing);
         }
+        let message_id = capability_display_preview_message_id(
+            &request.scope,
+            &request.thread_id,
+            &request.turn_run_id,
+            request.preview.invocation_id,
+        )?;
         let content = serde_json::to_string(&request.preview)
             .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
         let sequence = self
             .reserve_sequence(&request.scope, &request.thread_id)
             .await?;
         let message = ThreadMessageRecord {
-            message_id: ThreadMessageId::new(),
+            message_id,
             thread_id: request.thread_id.clone(),
             sequence,
             kind: MessageKind::CapabilityDisplayPreview,
@@ -890,10 +918,16 @@ where
         .await
         {
             Ok(()) => Ok(message),
-            Err(PutError::VersionMismatch) => Err(SessionThreadError::Backend(format!(
-                "filesystem CAS Absent rejected new capability display preview at {}",
-                path.as_str()
-            ))),
+            Err(PutError::VersionMismatch) => self
+                .read_message_versioned(&request.scope, &request.thread_id, message_id)
+                .await?
+                .map(|(existing, _)| existing)
+                .ok_or_else(|| {
+                    SessionThreadError::Backend(format!(
+                        "filesystem CAS Absent rejected new capability display preview at {} but no existing message could be read",
+                        path.as_str()
+                    ))
+                }),
             Err(PutError::Other(error)) => Err(error),
         }
     }
@@ -1361,10 +1395,46 @@ fn is_model_context_visible(message: &ThreadMessageRecord) -> bool {
     is_model_visible(message.status) && message.kind != MessageKind::CapabilityDisplayPreview
 }
 
-fn preview_invocation_id(content: Option<&str>) -> Option<InvocationId> {
-    let preview = serde_json::from_str::<CapabilityDisplayPreviewEnvelope>(content?).ok()?;
-    preview.validate().ok()?;
-    Some(preview.invocation_id)
+fn preview_invocation_id(
+    content: Option<&str>,
+) -> Result<Option<InvocationId>, SessionThreadError> {
+    let Some(content) = content else {
+        return Ok(None);
+    };
+    let preview = serde_json::from_str::<CapabilityDisplayPreviewEnvelope>(content)
+        .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
+    preview
+        .validate()
+        .map_err(SessionThreadError::Serialization)?;
+    Ok(Some(preview.invocation_id))
+}
+
+fn capability_display_preview_message_id(
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+    turn_run_id: &str,
+    invocation_id: InvocationId,
+) -> Result<ThreadMessageId, SessionThreadError> {
+    #[derive(Serialize)]
+    struct PreviewMessageKey<'a> {
+        scope: &'a ThreadScope,
+        thread_id: &'a ThreadId,
+        turn_run_id: &'a str,
+        invocation_id: InvocationId,
+    }
+    let key = serde_json::to_vec(&PreviewMessageKey {
+        scope,
+        thread_id,
+        turn_run_id,
+        invocation_id,
+    })
+    .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
+    let digest = Sha256::digest(&key);
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Ok(ThreadMessageId::from_uuid(Uuid::from_bytes(bytes)))
 }
 
 const REDACTED_SUMMARY_CONTENT: &str = "[redacted]";

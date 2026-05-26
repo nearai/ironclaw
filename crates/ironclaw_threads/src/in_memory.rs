@@ -348,14 +348,18 @@ impl SessionThreadService for InMemorySessionThreadService {
             .map_err(SessionThreadError::Serialization)?;
         let mut state = self.state.lock().await;
         let thread = get_thread_mut(&mut state, &request.scope, &request.thread_id)?;
-        if let Some(existing) = thread.messages.iter().find(|message| {
-            message.kind == MessageKind::CapabilityDisplayPreview
-                && message.status == MessageStatus::Finalized
-                && message.turn_run_id.as_deref() == Some(request.turn_run_id.as_str())
-                && preview_invocation_id(message.content.as_deref())
-                    == Some(request.preview.invocation_id)
-        }) {
-            return Ok(existing.clone());
+        for message in thread.messages.iter() {
+            if message.kind != MessageKind::CapabilityDisplayPreview
+                || message.status != MessageStatus::Finalized
+                || message.turn_run_id.as_deref() != Some(request.turn_run_id.as_str())
+            {
+                continue;
+            }
+            if preview_invocation_id(message.content.as_deref())?
+                == Some(request.preview.invocation_id)
+            {
+                return Ok(message.clone());
+            }
         }
         let content = serde_json::to_string(&request.preview)
             .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
@@ -778,8 +782,16 @@ fn is_model_context_visible(message: &ThreadMessageRecord) -> bool {
     is_model_visible(message.status) && message.kind != MessageKind::CapabilityDisplayPreview
 }
 
-fn preview_invocation_id(content: Option<&str>) -> Option<InvocationId> {
-    let preview = serde_json::from_str::<CapabilityDisplayPreviewEnvelope>(content?).ok()?;
-    preview.validate().ok()?;
-    Some(preview.invocation_id)
+fn preview_invocation_id(
+    content: Option<&str>,
+) -> Result<Option<InvocationId>, SessionThreadError> {
+    let Some(content) = content else {
+        return Ok(None);
+    };
+    let preview = serde_json::from_str::<CapabilityDisplayPreviewEnvelope>(content)
+        .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
+    preview
+        .validate()
+        .map_err(SessionThreadError::Serialization)?;
+    Ok(Some(preview.invocation_id))
 }

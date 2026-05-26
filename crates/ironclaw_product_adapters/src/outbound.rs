@@ -823,6 +823,53 @@ mod tests {
     }
 
     #[test]
+    fn capability_display_preview_view_rejects_unbounded_timeline_message_id() {
+        let json = serde_json::json!({
+            "timeline_message_id": "x".repeat(PROJECTION_ITEM_ID_MAX_BYTES + 1),
+            "invocation_id": InvocationId::new(),
+            "thread_id": "thread-tool-preview",
+            "capability_id": "builtin.read_file",
+            "status": "completed",
+            "title": "read_file",
+            "subtitle": "src/main.rs",
+            "input_summary": "path: src/main.rs",
+            "output_summary": "read file",
+            "output_preview": "fn main() {}",
+            "output_kind": "text",
+            "output_bytes": 12,
+            "result_ref": "result:tool-output",
+            "truncated": false,
+            "updated_at": Utc::now(),
+        });
+
+        assert!(serde_json::from_value::<CapabilityDisplayPreviewView>(json).is_err());
+    }
+
+    #[test]
+    fn capability_display_preview_view_deserializes_without_timeline_message_id() {
+        let json = serde_json::json!({
+            "invocation_id": InvocationId::new(),
+            "thread_id": "thread-tool-preview",
+            "capability_id": "builtin.read_file",
+            "status": "completed",
+            "title": "read_file",
+            "subtitle": "src/main.rs",
+            "input_summary": "path: src/main.rs",
+            "output_summary": "read file",
+            "output_preview": "fn main() {}",
+            "output_kind": "text",
+            "output_bytes": 12,
+            "result_ref": "result:tool-output",
+            "truncated": false,
+            "updated_at": Utc::now(),
+        });
+
+        let view = serde_json::from_value::<CapabilityDisplayPreviewView>(json)
+            .expect("old preview payload deserializes");
+        assert!(view.timeline_message_id.is_none());
+    }
+
+    #[test]
     fn capability_display_preview_view_rejects_unbounded_preview() {
         let json = serde_json::json!({
             "invocation_id": InvocationId::new(),

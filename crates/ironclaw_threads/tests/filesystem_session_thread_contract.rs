@@ -170,6 +170,75 @@ async fn filesystem_store_persists_preview_history_while_hiding_it_from_context(
     assert!(direct_context.messages.is_empty());
 }
 
+#[tokio::test]
+async fn filesystem_preview_append_retries_converge_on_one_message() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-preview-race", "alice");
+    let service = Arc::new(FilesystemSessionThreadService::new(scoped));
+    let scope = scope("fs-preview-race");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-fs-preview-race").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let invocation_id = InvocationId::new();
+
+    let left = {
+        let service = Arc::clone(&service);
+        let scope = scope.clone();
+        let thread_id = thread.thread_id.clone();
+        async move {
+            service
+                .append_capability_display_preview(AppendCapabilityDisplayPreviewRequest {
+                    scope,
+                    thread_id,
+                    turn_run_id: "run-race".into(),
+                    preview: preview_envelope(invocation_id),
+                })
+                .await
+        }
+    };
+    let right = {
+        let service = Arc::clone(&service);
+        let scope = scope.clone();
+        let thread_id = thread.thread_id.clone();
+        async move {
+            service
+                .append_capability_display_preview(AppendCapabilityDisplayPreviewRequest {
+                    scope,
+                    thread_id,
+                    turn_run_id: "run-race".into(),
+                    preview: preview_envelope(invocation_id),
+                })
+                .await
+        }
+    };
+
+    let (left, right) = tokio::join!(left, right);
+    let left = left.unwrap();
+    let right = right.unwrap();
+    assert_eq!(left.message_id, right.message_id);
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope,
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    let preview_count = history
+        .messages
+        .iter()
+        .filter(|message| message.kind == MessageKind::CapabilityDisplayPreview)
+        .count();
+    assert_eq!(preview_count, 1);
+}
+
 /// Regression for the ScopedFilesystem migration: two stores share one
 /// underlying [`RootFilesystem`] but each is constructed with a
 /// [`MountView`] whose `/threads` alias resolves to a different
