@@ -1,9 +1,10 @@
-use std::{path::Component, path::Path};
-
 use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
 use ironclaw_host_api::ScopedPath;
 
-use crate::{INSTALL_METADATA_FILE_NAME, InstalledSkillMetadata, MAX_INSTALL_METADATA_BYTES};
+use crate::{
+    INSTALL_METADATA_FILE_NAME, InstalledSkillMetadata, MAX_INSTALL_METADATA_BYTES,
+    normalize_safe_relative_path,
+};
 
 use super::{
     SKILL_FILE_NAME, SkillInstallSource, SkillManagementContext, SkillManagementError,
@@ -12,8 +13,8 @@ use super::{
 };
 
 pub const MAX_INSTALL_BUNDLE_FILES: usize = 256;
-pub(super) const MAX_INSTALL_BUNDLE_FILE_BYTES: usize = 2 * 1024 * 1024;
-const MAX_INSTALL_BUNDLE_TOTAL_BYTES: usize = 20 * 1024 * 1024;
+pub const MAX_INSTALL_BUNDLE_FILE_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_INSTALL_BUNDLE_TOTAL_BYTES: usize = 20 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SkillInstallFile<'a> {
@@ -146,7 +147,14 @@ pub(super) async fn read_install_metadata_bytes(
         .await
     {
         Ok(Some(bytes)) => Ok(Some(bytes)),
-        Ok(None) => Ok(Some(Vec::new())),
+        Ok(None) => {
+            tracing::warn!(
+                scoped_path = %metadata_path,
+                max_bytes = MAX_INSTALL_METADATA_BYTES,
+                "skill install metadata sidecar exceeded bounded read limit; treating as installed"
+            );
+            Ok(Some(Vec::new()))
+        }
         Err(FilesystemError::NotFound { .. }) => Ok(None),
         Err(error) => Err(filesystem_error(error)),
     }
@@ -190,35 +198,19 @@ fn normalize_install_relative_path(path: &str) -> Result<String, SkillManagement
         ));
     }
 
-    let mut parts = Vec::new();
-    for component in Path::new(path).components() {
-        match component {
-            Component::Normal(part) => {
-                let part = part.to_str().ok_or_else(|| {
-                    SkillManagementError::new(SkillManagementErrorKind::InvalidInput)
-                })?;
-                if part.is_empty() {
-                    return Err(SkillManagementError::new(
-                        SkillManagementErrorKind::InvalidInput,
-                    ));
-                }
-                parts.push(part);
-            }
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(SkillManagementError::new(
-                    SkillManagementErrorKind::InvalidInput,
-                ));
-            }
-        }
-    }
-
-    if parts.is_empty() || parts == [SKILL_FILE_NAME] || parts == [INSTALL_METADATA_FILE_NAME] {
+    let normalized = normalize_safe_relative_path(std::path::Path::new(path))
+        .map_err(|_| SkillManagementError::new(SkillManagementErrorKind::InvalidInput))?;
+    if normalized == std::path::Path::new(SKILL_FILE_NAME)
+        || normalized == std::path::Path::new(INSTALL_METADATA_FILE_NAME)
+    {
         return Err(SkillManagementError::new(
             SkillManagementErrorKind::InvalidInput,
         ));
     }
-    Ok(parts.join("/"))
+    normalized
+        .to_str()
+        .map(str::to_string)
+        .ok_or_else(|| SkillManagementError::new(SkillManagementErrorKind::InvalidInput))
 }
 
 fn scoped_parent(path: &ScopedPath) -> Result<Option<ScopedPath>, SkillManagementError> {

@@ -11,7 +11,7 @@ use ironclaw_host_api::{
     CapabilityId, EffectKind, HostApiError, PermissionMode, ResourceUsage, RuntimeDispatchErrorKind,
 };
 use ironclaw_skills::InstalledSkillMetadataSource;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
@@ -154,11 +154,10 @@ async fn skill_install_input(
         }
         (SKILL_INSTALL_URL_CAPABILITY_ID, false, Some(url)) => {
             let payload = fetch_skill_url_payload(request, url, usage).await?;
-            let mut rewritten = object.clone();
-            rewritten.remove("url");
-            rewritten.remove("files");
-            rewritten.remove("source");
-            rewritten.remove("source_url");
+            let mut rewritten = Map::new();
+            if let Some(name) = object.get("name").cloned() {
+                rewritten.insert("name".to_string(), name);
+            }
             rewritten.insert("content".to_string(), Value::String(payload.content));
             rewritten.insert(
                 "source".to_string(),

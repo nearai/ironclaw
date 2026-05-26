@@ -349,9 +349,10 @@ where
                     SkillBundleSourceError::FileNotFound => SkillBundleSourceError::BundleNotFound,
                     other => other,
                 })?;
-            self.validated_manifests
-                .lock()
-                .insert(skill_md_path.clone());
+            let mut validated_manifests = self.validated_manifests.lock();
+            if !validated_manifests.contains(&skill_md_path) {
+                validated_manifests.insert(skill_md_path.clone());
+            }
         }
         let scoped_path = bundle_scoped_path(root.root(), bundle_id, path)?;
         self.read_bounded(&scope, &scoped_path, self.max_bundle_file_bytes)

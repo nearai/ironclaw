@@ -731,6 +731,8 @@ async fn builtin_skill_install_rejects_hidden_url_install_fields() {
     }
 }
 
+// URL-install coverage stays in this integration file because these cases assert
+// the first-party runtime dispatch path, not only the URL parser helpers.
 #[tokio::test]
 async fn builtin_skill_install_url_fetches_through_host_runtime_egress() {
     let temp = tempfile::tempdir().unwrap();
@@ -748,7 +750,7 @@ async fn builtin_skill_install_url_fetches_through_host_runtime_egress() {
     let installed = invoke_with_context(
         &runtime,
         SKILL_INSTALL_URL_CAPABILITY_ID,
-        json!({"url": "https://api.example.test/skills/fetched-helper/SKILL.md"}),
+        json!({"url": "https://raw.githubusercontent.com/Pika-Labs/Pika-Skills/main/fetched-helper/SKILL.md"}),
         context.clone(),
     )
     .await
@@ -769,7 +771,7 @@ async fn builtin_skill_install_url_fetches_through_host_runtime_egress() {
     assert_eq!(requests[0].method, NetworkMethod::Get);
     assert_eq!(
         requests[0].url,
-        "https://api.example.test/skills/fetched-helper/SKILL.md"
+        "https://raw.githubusercontent.com/Pika-Labs/Pika-Skills/main/fetched-helper/SKILL.md"
     );
     assert_eq!(requests[0].response_body_limit, Some(10 * 1024 * 1024));
     assert_eq!(requests[0].timeout_ms, Some(10_000));
@@ -795,7 +797,7 @@ async fn builtin_skill_install_url_ignores_caller_supplied_hidden_bundle_files()
         &runtime,
         SKILL_INSTALL_URL_CAPABILITY_ID,
         json!({
-            "url": "https://api.example.test/skills/fetched.md",
+            "url": "https://raw.githubusercontent.com/Pika-Labs/Pika-Skills/main/fetched.md",
             "files": [{
                 "path": "references/injected.md",
                 "bytes": [35, 32, 73, 110, 106, 101, 99, 116, 101, 100, 10],
@@ -820,6 +822,46 @@ async fn builtin_skill_install_url_ignores_caller_supplied_hidden_bundle_files()
 }
 
 #[tokio::test]
+async fn builtin_skill_install_url_serializes_concurrent_fetches_from_same_url() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
+        b"---\nname: concurrent-helper\ndescription: fetched skill\n---\nFetched prompt.\n"
+            .to_vec(),
+    ));
+    let runtime = runtime_with_filesystem_and_http_egress(filesystem, Arc::clone(&egress));
+    let context = execution_context_with_mounts_and_network(
+        [SKILL_INSTALL_URL_CAPABILITY_ID],
+        mounts,
+        http_test_policy(),
+    );
+    let url =
+        "https://raw.githubusercontent.com/Pika-Labs/Pika-Skills/main/concurrent-helper/SKILL.md";
+
+    let (first, second) = tokio::join!(
+        invoke_with_context(
+            &runtime,
+            SKILL_INSTALL_URL_CAPABILITY_ID,
+            json!({"url": url}),
+            context.clone(),
+        ),
+        invoke_with_context(
+            &runtime,
+            SKILL_INSTALL_URL_CAPABILITY_ID,
+            json!({"url": url}),
+            context,
+        )
+    );
+    let mut outcomes = [first.map(|_| ()), second.map(|_| ())];
+    outcomes.sort_by_key(|result| result.is_err());
+
+    assert!(outcomes[0].is_ok());
+    assert_eq!(outcomes[1], Err(RuntimeFailureKind::OperationFailed));
+    assert_eq!(egress.requests().len(), 2);
+    assert!(temp.path().join("concurrent-helper/SKILL.md").exists());
+}
+
+#[tokio::test]
 async fn builtin_skill_install_url_installs_zip_bundle_supporting_files() {
     let temp = tempfile::tempdir().unwrap();
     let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
@@ -839,7 +881,7 @@ async fn builtin_skill_install_url_installs_zip_bundle_supporting_files() {
     let installed = invoke_with_context(
         &runtime,
         SKILL_INSTALL_URL_CAPABILITY_ID,
-        json!({"url": "https://api.example.test/skills/zip-helper.zip"}),
+        json!({"url": "https://codeload.github.com/Pika-Labs/Pika-Skills/legacy.zip/main"}),
         execution_context_with_mounts_and_network(
             [SKILL_INSTALL_URL_CAPABILITY_ID],
             mounts,
@@ -1161,7 +1203,7 @@ async fn builtin_skill_install_url_rejects_github_tree_directory_fanout() {
     .unwrap_err();
 
     assert_eq!(error, RuntimeFailureKind::OutputTooLarge);
-    assert_eq!(egress.requests().len(), 66);
+    assert_eq!(egress.requests().len(), 24);
 }
 
 #[tokio::test]
@@ -1239,7 +1281,7 @@ async fn builtin_skill_install_url_rejects_invalid_zip_bundles() {
         let actual = invoke_with_context(
             &runtime,
             SKILL_INSTALL_URL_CAPABILITY_ID,
-            json!({"url": "https://api.example.test/skills/invalid.zip"}),
+            json!({"url": "https://codeload.github.com/Pika-Labs/Pika-Skills/legacy.zip/invalid"}),
             execution_context_with_mounts_and_network(
                 [SKILL_INSTALL_URL_CAPABILITY_ID],
                 mounts,
@@ -1252,6 +1294,33 @@ async fn builtin_skill_install_url_rejects_invalid_zip_bundles() {
         assert_eq!(actual, expected);
         assert!(temp.path().read_dir().unwrap().next().is_none());
     }
+}
+
+#[tokio::test]
+async fn builtin_skill_install_url_rejects_truncated_zip_bytes() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
+        b"PK\x03\x04truncated".to_vec(),
+    ));
+    let runtime = runtime_with_filesystem_and_http_egress(filesystem, Arc::clone(&egress));
+
+    let error = invoke_with_context(
+        &runtime,
+        SKILL_INSTALL_URL_CAPABILITY_ID,
+        json!({"url": "https://codeload.github.com/Pika-Labs/Pika-Skills/legacy.zip/truncated"}),
+        execution_context_with_mounts_and_network(
+            [SKILL_INSTALL_URL_CAPABILITY_ID],
+            mounts,
+            http_test_policy(),
+        ),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::OperationFailed);
+    assert_eq!(egress.requests().len(), 1);
+    assert!(temp.path().read_dir().unwrap().next().is_none());
 }
 
 #[tokio::test]
@@ -1305,6 +1374,121 @@ async fn builtin_skill_install_url_rejects_invalid_github_api_responses() {
 }
 
 #[tokio::test]
+async fn builtin_skill_install_url_rejects_github_tree_file_response() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
+    let commit_sha = "abcdef0123456789abcdef0123456789abcdef01";
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_url_bodies(BTreeMap::from([
+        (
+            "https://api.github.com/repos/Pika-Labs/Pika-Skills/git/matching-refs/heads/main"
+                .to_string(),
+            (200, br#"[{"ref":"refs/heads/main"}]"#.to_vec()),
+        ),
+        (
+            "https://api.github.com/repos/Pika-Labs/Pika-Skills/commits?sha=main&per_page=1"
+                .to_string(),
+            (
+                200,
+                br#"[{"sha":"abcdef0123456789abcdef0123456789abcdef01"}]"#.to_vec(),
+            ),
+        ),
+        (
+            format!("https://api.github.com/repos/Pika-Labs/Pika-Skills/contents/SKILL.md?ref={commit_sha}"),
+            (
+                200,
+                br#"{"type":"file","path":"SKILL.md","download_url":"https://raw.githubusercontent.com/Pika-Labs/Pika-Skills/main/SKILL.md"}"#.to_vec(),
+            ),
+        ),
+    ])));
+    let runtime = runtime_with_filesystem_and_http_egress(filesystem, Arc::clone(&egress));
+
+    let error = invoke_with_context(
+        &runtime,
+        SKILL_INSTALL_URL_CAPABILITY_ID,
+        json!({"url": "https://github.com/Pika-Labs/Pika-Skills/tree/main/SKILL.md"}),
+        execution_context_with_mounts_and_network(
+            [SKILL_INSTALL_URL_CAPABILITY_ID],
+            mounts,
+            http_test_policy(),
+        ),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert!(temp.path().read_dir().unwrap().next().is_none());
+}
+
+#[tokio::test]
+async fn builtin_skill_install_url_rejects_github_blob_download_url_host_mismatch() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_url_bodies(BTreeMap::from([
+        (
+            "https://api.github.com/repos/Pika-Labs/Pika-Skills/git/matching-refs/heads/main"
+                .to_string(),
+            (200, br#"[{"ref":"refs/heads/main"}]"#.to_vec()),
+        ),
+        (
+            "https://api.github.com/repos/Pika-Labs/Pika-Skills/contents/SKILL.md?ref=main"
+                .to_string(),
+            (
+                200,
+                br#"{"type":"file","download_url":"https://api.github.com/repos/Pika-Labs/Pika-Skills/contents/secret"}"#.to_vec(),
+            ),
+        ),
+    ])));
+    let runtime = runtime_with_filesystem_and_http_egress(filesystem, Arc::clone(&egress));
+
+    let error = invoke_with_context(
+        &runtime,
+        SKILL_INSTALL_URL_CAPABILITY_ID,
+        json!({"url": "https://github.com/Pika-Labs/Pika-Skills/blob/main/SKILL.md"}),
+        execution_context_with_mounts_and_network(
+            [SKILL_INSTALL_URL_CAPABILITY_ID],
+            mounts,
+            http_test_policy(),
+        ),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert_eq!(egress.requests().len(), 2);
+}
+
+#[tokio::test]
+async fn builtin_skill_install_url_rejects_malformed_github_paths_before_fetch() {
+    for url in [
+        "https://github.com/%24%7BINJECTION%7D/Pika-Skills",
+        "https://github.com/Pika-Labs/Pika-Skills/releases",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
+        let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
+            b"---\nname: fetched-helper\n---\nFetched prompt.\n".to_vec(),
+        ));
+        let runtime = runtime_with_filesystem_and_http_egress(filesystem, Arc::clone(&egress));
+
+        let error = invoke_with_context(
+            &runtime,
+            SKILL_INSTALL_URL_CAPABILITY_ID,
+            json!({"url": url}),
+            execution_context_with_mounts_and_network(
+                [SKILL_INSTALL_URL_CAPABILITY_ID],
+                mounts,
+                http_test_policy(),
+            ),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, RuntimeFailureKind::InvalidInput);
+        assert!(egress.requests().is_empty());
+    }
+}
+
+#[tokio::test]
 async fn builtin_skill_install_url_rejects_ambiguous_content_and_url_before_fetch() {
     for content in [
         json!("---\nname: pasted-helper\n---\nPasted prompt.\n"),
@@ -1321,7 +1505,7 @@ async fn builtin_skill_install_url_rejects_ambiguous_content_and_url_before_fetc
             &runtime,
             SKILL_INSTALL_URL_CAPABILITY_ID,
             json!({
-                "url": "https://api.example.test/skills/fetched-helper/SKILL.md",
+                "url": "https://raw.githubusercontent.com/Pika-Labs/Pika-Skills/main/fetched-helper/SKILL.md",
                 "content": content
             }),
             execution_context_with_mounts_and_network(
@@ -1365,6 +1549,124 @@ async fn builtin_skill_install_url_rejects_non_https_url_before_fetch() {
 }
 
 #[tokio::test]
+async fn builtin_skill_install_url_rejects_empty_input_before_fetch() {
+    for input in [json!({}), json!({"name": "missing-url"})] {
+        let temp = tempfile::tempdir().unwrap();
+        let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
+        let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
+            b"---\nname: fetched-helper\n---\nFetched prompt.\n".to_vec(),
+        ));
+        let runtime = runtime_with_filesystem_and_http_egress(filesystem, Arc::clone(&egress));
+
+        let error = invoke_with_context(
+            &runtime,
+            SKILL_INSTALL_URL_CAPABILITY_ID,
+            input,
+            execution_context_with_mounts_and_network(
+                [SKILL_INSTALL_URL_CAPABILITY_ID],
+                mounts,
+                http_test_policy(),
+            ),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, RuntimeFailureKind::InvalidInput);
+        assert!(egress.requests().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn builtin_skill_install_url_rejects_whitespace_url_before_fetch() {
+    for url in ["", "   "] {
+        let temp = tempfile::tempdir().unwrap();
+        let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
+        let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
+            b"---\nname: fetched-helper\n---\nFetched prompt.\n".to_vec(),
+        ));
+        let runtime = runtime_with_filesystem_and_http_egress(filesystem, Arc::clone(&egress));
+
+        let error = invoke_with_context(
+            &runtime,
+            SKILL_INSTALL_URL_CAPABILITY_ID,
+            json!({"url": url}),
+            execution_context_with_mounts_and_network(
+                [SKILL_INSTALL_URL_CAPABILITY_ID],
+                mounts,
+                http_test_policy(),
+            ),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, RuntimeFailureKind::InvalidInput);
+        assert!(egress.requests().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn builtin_skill_install_url_rejects_credentials_in_url_before_fetch() {
+    for url in [
+        "https://user@raw.githubusercontent.com/Pika-Labs/Pika-Skills/main/SKILL.md",
+        "https://user:pass@raw.githubusercontent.com/Pika-Labs/Pika-Skills/main/SKILL.md",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
+        let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
+            b"---\nname: fetched-helper\n---\nFetched prompt.\n".to_vec(),
+        ));
+        let runtime = runtime_with_filesystem_and_http_egress(filesystem, Arc::clone(&egress));
+
+        let error = invoke_with_context(
+            &runtime,
+            SKILL_INSTALL_URL_CAPABILITY_ID,
+            json!({"url": url}),
+            execution_context_with_mounts_and_network(
+                [SKILL_INSTALL_URL_CAPABILITY_ID],
+                mounts,
+                http_test_policy(),
+            ),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, RuntimeFailureKind::InvalidInput);
+        assert!(egress.requests().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn builtin_skill_install_url_rejects_disallowed_hosts_before_fetch() {
+    for url in [
+        "https://169.254.169.254/latest/meta-data",
+        "https://internal.service.local/skills/SKILL.md",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
+        let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
+            b"---\nname: fetched-helper\n---\nFetched prompt.\n".to_vec(),
+        ));
+        let runtime = runtime_with_filesystem_and_http_egress(filesystem, Arc::clone(&egress));
+
+        let error = invoke_with_context(
+            &runtime,
+            SKILL_INSTALL_URL_CAPABILITY_ID,
+            json!({"url": url}),
+            execution_context_with_mounts_and_network(
+                [SKILL_INSTALL_URL_CAPABILITY_ID],
+                mounts,
+                http_test_policy(),
+            ),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, RuntimeFailureKind::InvalidInput);
+        assert!(egress.requests().is_empty());
+    }
+}
+
+#[tokio::test]
 async fn builtin_skill_install_url_fails_closed_when_runtime_egress_is_missing() {
     let temp = tempfile::tempdir().unwrap();
     let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
@@ -1373,7 +1675,7 @@ async fn builtin_skill_install_url_fails_closed_when_runtime_egress_is_missing()
     let error = invoke_with_context(
         &runtime,
         SKILL_INSTALL_URL_CAPABILITY_ID,
-        json!({"url": "https://api.example.test/skills/fetched-helper/SKILL.md"}),
+        json!({"url": "https://raw.githubusercontent.com/Pika-Labs/Pika-Skills/main/fetched-helper/SKILL.md"}),
         execution_context_with_mounts_and_network(
             [SKILL_INSTALL_URL_CAPABILITY_ID],
             mounts,
@@ -1404,7 +1706,7 @@ async fn builtin_skill_install_url_rejects_non_success_url_response() {
     let error = invoke_with_context(
         &runtime,
         SKILL_INSTALL_URL_CAPABILITY_ID,
-        json!({"url": "https://api.example.test/skills/missing/SKILL.md"}),
+        json!({"url": "https://raw.githubusercontent.com/Pika-Labs/Pika-Skills/main/missing/SKILL.md"}),
         context.clone(),
     )
     .await
@@ -1429,7 +1731,7 @@ async fn builtin_skill_install_url_rejects_invalid_utf8_url_response() {
     let error = invoke_with_context(
         &runtime,
         SKILL_INSTALL_URL_CAPABILITY_ID,
-        json!({"url": "https://api.example.test/skills/binary/SKILL.md"}),
+        json!({"url": "https://raw.githubusercontent.com/Pika-Labs/Pika-Skills/main/binary/SKILL.md"}),
         execution_context_with_mounts_and_network(
             [SKILL_INSTALL_URL_CAPABILITY_ID],
             mounts,
@@ -1498,7 +1800,7 @@ async fn builtin_skill_install_url_maps_runtime_egress_errors_by_reason() {
         let actual = invoke_with_context(
             &runtime,
             SKILL_INSTALL_URL_CAPABILITY_ID,
-            json!({"url": "https://api.example.test/skills/fetched-helper/SKILL.md"}),
+            json!({"url": "https://raw.githubusercontent.com/Pika-Labs/Pika-Skills/main/fetched-helper/SKILL.md"}),
             execution_context_with_mounts_and_network(
                 [SKILL_INSTALL_URL_CAPABILITY_ID],
                 mounts,
@@ -1529,7 +1831,7 @@ async fn builtin_skill_install_url_accounts_wall_clock_time() {
             ),
             capability_id(SKILL_INSTALL_URL_CAPABILITY_ID),
             ResourceEstimate::default(),
-            json!({"url": "https://api.example.test/skills/slow-helper/SKILL.md"}),
+            json!({"url": "https://raw.githubusercontent.com/Pika-Labs/Pika-Skills/main/slow-helper/SKILL.md"}),
             trust_decision(),
         ))
         .await

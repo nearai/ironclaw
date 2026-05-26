@@ -1,6 +1,7 @@
 use std::path::{Component, Path, PathBuf};
 
 use ironclaw_host_api::RuntimeDispatchErrorKind;
+use ironclaw_skills::normalize_safe_relative_path;
 
 use crate::FirstPartyCapabilityError;
 
@@ -65,15 +66,15 @@ impl BundleCollector {
                 FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
             })?);
         } else {
-            self.files.push(SkillUrlPayloadFile {
-                path: relative.to_path_buf(),
-                contents: bytes,
-            });
-            if self.files.len() > ironclaw_skills::MAX_INSTALL_BUNDLE_FILES {
+            if self.files.len() >= ironclaw_skills::MAX_INSTALL_BUNDLE_FILES {
                 return Err(FirstPartyCapabilityError::new(
                     RuntimeDispatchErrorKind::OutputTooLarge,
                 ));
             }
+            self.files.push(SkillUrlPayloadFile {
+                path: relative.to_path_buf(),
+                contents: bytes,
+            });
         }
         Ok(())
     }
@@ -103,24 +104,8 @@ impl BundleCollector {
 }
 
 pub(super) fn normalize_archive_path(path: &Path) -> Result<PathBuf, FirstPartyCapabilityError> {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(part) => normalized.push(part),
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(FirstPartyCapabilityError::new(
-                    RuntimeDispatchErrorKind::InputEncode,
-                ));
-            }
-        }
-    }
-    if normalized.as_os_str().is_empty() {
-        return Err(FirstPartyCapabilityError::new(
-            RuntimeDispatchErrorKind::InputEncode,
-        ));
-    }
-    Ok(normalized)
+    normalize_safe_relative_path(path)
+        .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode))
 }
 
 pub(super) fn strip_common_archive_root(paths: &[PathBuf]) -> Option<PathBuf> {

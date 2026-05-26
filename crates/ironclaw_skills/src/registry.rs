@@ -14,7 +14,7 @@
 //! Uses async I/O throughout to avoid blocking the tokio runtime.
 
 use std::collections::HashSet;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
@@ -28,7 +28,10 @@ use crate::parser::{
 use crate::types::{
     GatingRequirements, LoadedSkill, MAX_PROMPT_FILE_SIZE, SkillSource, SkillTrust,
 };
-use crate::validation::{normalize_line_endings, normalize_skill_identifier};
+use crate::validation::{
+    SafeRelativePathError, normalize_line_endings, normalize_safe_relative_path,
+    normalize_skill_identifier,
+};
 
 /// Maximum total number of skills that can be discovered across all sources.
 /// Shared across workspace, user, and installed directories.
@@ -219,28 +222,16 @@ fn validate_install_relative_path(path: &Path) -> Result<PathBuf, SkillRegistryE
         });
     }
 
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(part) => normalized.push(part),
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(SkillRegistryError::WriteError {
-                    path: path.display().to_string(),
-                    reason: "install bundle path may not escape the skill directory".to_string(),
-                });
+    normalize_safe_relative_path(path).map_err(|error| SkillRegistryError::WriteError {
+        path: path.display().to_string(),
+        reason: match error {
+            SafeRelativePathError::Traversal => {
+                "install bundle path may not escape the skill directory"
             }
+            _ => "install bundle path must be safe relative ASCII",
         }
-    }
-
-    if normalized.as_os_str().is_empty() {
-        return Err(SkillRegistryError::WriteError {
-            path: path.display().to_string(),
-            reason: "install bundle path normalized to empty".to_string(),
-        });
-    }
-
-    Ok(normalized)
+        .to_string(),
+    })
 }
 
 impl SkillRegistry {
@@ -311,7 +302,7 @@ impl SkillRegistry {
                     0,
                 )
                 .await;
-            self.absorb(skills, &mut seen, &mut loaded_names, "workspace");
+            self.absorb(skills, &mut seen, &mut loaded_names, "user");
         }
 
         // 2. User skills
@@ -338,7 +329,7 @@ impl SkillRegistry {
                     0,
                 )
                 .await;
-            self.absorb(skills, &mut seen, &mut loaded_names, "workspace or user");
+            self.absorb(skills, &mut seen, &mut loaded_names, "installed");
         }
 
         // 4. Bundled skills (compiled into binary, lowest priority)

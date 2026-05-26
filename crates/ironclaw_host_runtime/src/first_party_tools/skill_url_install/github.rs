@@ -11,9 +11,11 @@ use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest};
 use super::{
     MAX_GITHUB_CONTENT_API_REQUESTS, MAX_GITHUB_CONTENT_API_RESPONSE_BYTES,
     MAX_GITHUB_PATH_SEGMENTS, SkillUrlPayload, bundle::BundleCollector,
-    bundle::normalize_archive_path, fetch_url_bytes, fetch_url_bytes_with_headers,
-    fetch_url_response, validate_derived_fetch_url, zip_bundle::extract_skill_bundle_blocking,
+    bundle::normalize_archive_path, fetch_url_bytes, fetch_url_response, validate_skill_url,
+    zip_bundle::extract_skill_bundle_blocking,
 };
+
+const MAX_GITHUB_API_REQUESTS: usize = 24;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GitHubRepoRef {
@@ -61,13 +63,32 @@ struct GitHubContentFile {
     download_url: Option<String>,
 }
 
+#[derive(Debug, Default)]
+struct GitHubApiBudget {
+    calls: usize,
+}
+
+impl GitHubApiBudget {
+    fn consume(&mut self) -> Result<(), FirstPartyCapabilityError> {
+        if self.calls >= MAX_GITHUB_API_REQUESTS {
+            return Err(FirstPartyCapabilityError::new(
+                RuntimeDispatchErrorKind::OutputTooLarge,
+            ));
+        }
+        self.calls += 1;
+        Ok(())
+    }
+}
+
 pub(super) async fn fetch_payload_if_supported(
     request: &FirstPartyCapabilityRequest,
     parsed: &url::Url,
     usage: &mut ResourceUsage,
 ) -> Result<Option<SkillUrlPayload>, FirstPartyCapabilityError> {
+    let mut api_budget = GitHubApiBudget::default();
     if let Some(blob) = parse_github_blob_ref(parsed) {
-        let raw_url = resolve_github_blob_download_url(request, blob, usage).await?;
+        let raw_url =
+            resolve_github_blob_download_url(request, blob, usage, &mut api_budget).await?;
         let bytes = fetch_url_bytes(request, &raw_url, usage).await?;
         return Ok(Some(SkillUrlPayload {
             content: String::from_utf8(bytes).map_err(|_| {
@@ -79,9 +100,15 @@ pub(super) async fn fetch_payload_if_supported(
     }
 
     if let Some(repo) = parse_github_repo_ref(parsed) {
-        return fetch_github_repo_payload(request, parsed.as_str(), repo, usage)
+        return fetch_github_repo_payload(request, parsed.as_str(), repo, usage, &mut api_budget)
             .await
             .map(Some);
+    }
+
+    if parsed.host_str() == Some("github.com") {
+        return Err(FirstPartyCapabilityError::new(
+            RuntimeDispatchErrorKind::InputEncode,
+        ));
     }
 
     Ok(None)
@@ -175,7 +202,7 @@ fn build_github_api_base_url(
     repo: &str,
 ) -> Result<url::Url, FirstPartyCapabilityError> {
     validate_github_repo_components(owner, repo)?;
-    validate_derived_fetch_url(&format!("https://api.github.com/repos/{owner}/{repo}"))
+    validate_skill_url(&format!("https://api.github.com/repos/{owner}/{repo}"))
 }
 
 fn build_github_contents_url(
@@ -186,7 +213,12 @@ fn build_github_contents_url(
 ) -> Result<url::Url, FirstPartyCapabilityError> {
     let mut url = build_github_api_base_url(owner, repo)?;
     {
-        let mut segments = url.path_segments_mut().map_err(|_| {
+        let mut segments = url.path_segments_mut().map_err(|error| {
+            tracing::debug!(
+                ?error,
+                url_context = "github_contents",
+                "failed to build GitHub URL path"
+            );
             FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
         })?;
         segments.push("contents");
@@ -207,9 +239,14 @@ fn build_github_raw_url(
     path: &Path,
 ) -> Result<url::Url, FirstPartyCapabilityError> {
     validate_github_repo_components(owner, repo)?;
-    let mut url = validate_derived_fetch_url("https://raw.githubusercontent.com")?;
+    let mut url = validate_skill_url("https://raw.githubusercontent.com")?;
     {
-        let mut segments = url.path_segments_mut().map_err(|_| {
+        let mut segments = url.path_segments_mut().map_err(|error| {
+            tracing::debug!(
+                ?error,
+                url_context = "github_raw",
+                "failed to build GitHub URL path"
+            );
             FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
         })?;
         segments.push(owner);
@@ -238,7 +275,12 @@ fn build_github_matching_refs_url(
     }
     let mut url = build_github_api_base_url(owner, repo)?;
     {
-        let mut segments = url.path_segments_mut().map_err(|_| {
+        let mut segments = url.path_segments_mut().map_err(|error| {
+            tracing::debug!(
+                ?error,
+                url_context = "github_matching_refs",
+                "failed to build GitHub URL path"
+            );
             FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
         })?;
         segments.push("git");
@@ -266,19 +308,19 @@ async fn fetch_github_api_json<T: for<'de> Deserialize<'de>>(
     request: &FirstPartyCapabilityRequest,
     url: &url::Url,
     usage: &mut ResourceUsage,
+    api_budget: &mut GitHubApiBudget,
 ) -> Result<T, FirstPartyCapabilityError> {
-    let bytes = fetch_url_bytes_with_headers(request, url, usage, github_api_headers()).await?;
-    serde_json::from_slice(&bytes).map_err(|_| {
-        FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
-            .with_usage(usage.clone())
-    })
+    let (value, _) = fetch_github_api_json_with_body_len(request, url, usage, api_budget).await?;
+    Ok(value)
 }
 
 async fn fetch_github_api_json_with_body_len<T: for<'de> Deserialize<'de>>(
     request: &FirstPartyCapabilityRequest,
     url: &url::Url,
     usage: &mut ResourceUsage,
+    api_budget: &mut GitHubApiBudget,
 ) -> Result<(T, u64), FirstPartyCapabilityError> {
+    api_budget.consume()?;
     let response = fetch_url_response(request, url, usage, github_api_headers()).await?;
     if !(200..300).contains(&response.status) {
         return Err(
@@ -294,14 +336,49 @@ async fn fetch_github_api_json_with_body_len<T: for<'de> Deserialize<'de>>(
     Ok((value, body_len))
 }
 
+async fn fetch_github_contents_dir(
+    request: &FirstPartyCapabilityRequest,
+    url: &url::Url,
+    usage: &mut ResourceUsage,
+    api_budget: &mut GitHubApiBudget,
+) -> Result<(Vec<GitHubContentFile>, u64), FirstPartyCapabilityError> {
+    api_budget.consume()?;
+    let response = fetch_url_response(request, url, usage, github_api_headers()).await?;
+    if !(200..300).contains(&response.status) {
+        return Err(
+            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+                .with_usage(usage.clone()),
+        );
+    }
+    if response
+        .body
+        .iter()
+        .copied()
+        .find(|byte| !byte.is_ascii_whitespace())
+        .is_none_or(|byte| byte != b'[')
+    {
+        return Err(FirstPartyCapabilityError::new(
+            RuntimeDispatchErrorKind::InputEncode,
+        ));
+    }
+    let body_len = response.body.len() as u64;
+    let value = serde_json::from_slice(&response.body).map_err(|_| {
+        FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+            .with_usage(usage.clone())
+    })?;
+    Ok((value, body_len))
+}
+
 async fn resolve_github_default_branch(
     request: &FirstPartyCapabilityRequest,
     owner: &str,
     repo: &str,
     usage: &mut ResourceUsage,
+    api_budget: &mut GitHubApiBudget,
 ) -> Result<String, FirstPartyCapabilityError> {
     let api_url = build_github_api_base_url(owner, repo)?;
-    let meta: GitHubRepoMetadata = fetch_github_api_json(request, &api_url, usage).await?;
+    let meta: GitHubRepoMetadata =
+        fetch_github_api_json(request, &api_url, usage, api_budget).await?;
     meta.default_branch
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed))
@@ -313,10 +390,16 @@ async fn resolve_github_ref_commit_sha(
     repo: &str,
     git_ref: &str,
     usage: &mut ResourceUsage,
+    api_budget: &mut GitHubApiBudget,
 ) -> Result<String, FirstPartyCapabilityError> {
     let mut commits_url = build_github_api_base_url(owner, repo)?;
     {
-        let mut segments = commits_url.path_segments_mut().map_err(|_| {
+        let mut segments = commits_url.path_segments_mut().map_err(|error| {
+            tracing::debug!(
+                ?error,
+                url_context = "github_commits",
+                "failed to build GitHub URL path"
+            );
             FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
         })?;
         segments.push("commits");
@@ -327,7 +410,7 @@ async fn resolve_github_ref_commit_sha(
         .append_pair("per_page", "1");
 
     let commits: Vec<GitHubCommitListItem> =
-        fetch_github_api_json(request, &commits_url, usage).await?;
+        fetch_github_api_json(request, &commits_url, usage, api_budget).await?;
     let sha = commits
         .first()
         .map(|commit| commit.sha.as_str())
@@ -347,6 +430,7 @@ async fn resolve_github_ref_from_segments(
     repo: &str,
     segments: &[String],
     usage: &mut ResourceUsage,
+    api_budget: &mut GitHubApiBudget,
 ) -> Result<(String, Vec<String>), FirstPartyCapabilityError> {
     if segments.is_empty() || segments.len() > MAX_GITHUB_PATH_SEGMENTS {
         return Err(FirstPartyCapabilityError::new(
@@ -356,7 +440,8 @@ async fn resolve_github_ref_from_segments(
     for namespace in ["heads", "tags"] {
         let mut candidates = Vec::new();
         let refs_url = build_github_matching_refs_url(owner, repo, namespace, &segments[0])?;
-        let refs: Vec<GitHubRefItem> = fetch_github_api_json(request, &refs_url, usage).await?;
+        let refs: Vec<GitHubRefItem> =
+            fetch_github_api_json(request, &refs_url, usage, api_budget).await?;
         let prefix = format!("refs/{namespace}/");
         for item in refs {
             let Some(git_ref) = item.git_ref.strip_prefix(&prefix) else {
@@ -389,28 +474,30 @@ async fn resolve_github_tree_request(
     request: &FirstPartyCapabilityRequest,
     repo: GitHubRepoRequest,
     usage: &mut ResourceUsage,
+    api_budget: &mut GitHubApiBudget,
 ) -> Result<GitHubRepoRef, FirstPartyCapabilityError> {
     validate_github_repo_components(&repo.owner, &repo.repo)?;
-    let branch = match repo.tree_segments {
-        Some(segments) => {
-            let (candidate_ref, remaining) = resolve_github_ref_from_segments(
-                request,
-                &repo.owner,
-                &repo.repo,
-                &segments,
-                usage,
-            )
-            .await?;
-            let candidate_subdir = (!remaining.is_empty()).then(|| remaining.join("/"));
-            return Ok(GitHubRepoRef {
-                owner: repo.owner,
-                repo: repo.repo,
-                branch: candidate_ref,
-                subdir: candidate_subdir,
-            });
-        }
-        None => resolve_github_default_branch(request, &repo.owner, &repo.repo, usage).await?,
-    };
+    if let Some(segments) = repo.tree_segments {
+        let (candidate_ref, remaining) = resolve_github_ref_from_segments(
+            request,
+            &repo.owner,
+            &repo.repo,
+            &segments,
+            usage,
+            api_budget,
+        )
+        .await?;
+        let candidate_subdir = (!remaining.is_empty()).then(|| remaining.join("/"));
+        return Ok(GitHubRepoRef {
+            owner: repo.owner,
+            repo: repo.repo,
+            branch: candidate_ref,
+            subdir: candidate_subdir,
+        });
+    }
+
+    let branch =
+        resolve_github_default_branch(request, &repo.owner, &repo.repo, usage, api_budget).await?;
 
     Ok(GitHubRepoRef {
         owner: repo.owner,
@@ -424,6 +511,7 @@ async fn resolve_github_blob_download_url(
     request: &FirstPartyCapabilityRequest,
     blob: GitHubBlobRequest,
     usage: &mut ResourceUsage,
+    api_budget: &mut GitHubApiBudget,
 ) -> Result<url::Url, FirstPartyCapabilityError> {
     validate_github_repo_components(&blob.owner, &blob.repo)?;
     if blob.blob_segments.len() < 2 || blob.blob_segments.len() > MAX_GITHUB_PATH_SEGMENTS {
@@ -437,6 +525,7 @@ async fn resolve_github_blob_download_url(
         &blob.repo,
         &blob.blob_segments,
         usage,
+        api_budget,
     )
     .await?;
     if remaining.is_empty() {
@@ -451,7 +540,8 @@ async fn resolve_github_blob_download_url(
         Some(&candidate_path),
         &candidate_ref,
     )?;
-    let metadata: GitHubContentFile = fetch_github_api_json(request, &contents_url, usage).await?;
+    let metadata: GitHubContentFile =
+        fetch_github_api_json(request, &contents_url, usage, api_budget).await?;
     if metadata.entry_type != "file" {
         return Err(FirstPartyCapabilityError::new(
             RuntimeDispatchErrorKind::OperationFailed,
@@ -462,7 +552,13 @@ async fn resolve_github_blob_download_url(
             RuntimeDispatchErrorKind::OperationFailed,
         ));
     };
-    validate_derived_fetch_url(&download_url)
+    let parsed = validate_skill_url(&download_url)?;
+    if parsed.host_str() != Some("raw.githubusercontent.com") {
+        return Err(FirstPartyCapabilityError::new(
+            RuntimeDispatchErrorKind::InputEncode,
+        ));
+    }
+    Ok(parsed)
 }
 
 async fn fetch_github_repo_payload(
@@ -470,16 +566,30 @@ async fn fetch_github_repo_payload(
     source_url: &str,
     repo_request: GitHubRepoRequest,
     usage: &mut ResourceUsage,
+    api_budget: &mut GitHubApiBudget,
 ) -> Result<SkillUrlPayload, FirstPartyCapabilityError> {
-    let repo = resolve_github_tree_request(request, repo_request, usage).await?;
-    let commit_sha =
-        resolve_github_ref_commit_sha(request, &repo.owner, &repo.repo, &repo.branch, usage)
-            .await?;
+    let repo = resolve_github_tree_request(request, repo_request, usage, api_budget).await?;
+    let commit_sha = resolve_github_ref_commit_sha(
+        request,
+        &repo.owner,
+        &repo.repo,
+        &repo.branch,
+        usage,
+        api_budget,
+    )
+    .await?;
     if repo.subdir.is_some() {
-        return fetch_github_contents_bundle_payload(request, source_url, repo, &commit_sha, usage)
-            .await;
+        return fetch_github_contents_bundle_payload(
+            request,
+            source_url,
+            repo,
+            &commit_sha,
+            usage,
+            api_budget,
+        )
+        .await;
     }
-    let archive_url = validate_derived_fetch_url(&format!(
+    let archive_url = validate_skill_url(&format!(
         "https://codeload.github.com/{}/{}/legacy.zip/{}",
         repo.owner, repo.repo, commit_sha
     ))?;
@@ -503,6 +613,7 @@ async fn fetch_github_contents_bundle_payload(
     repo: GitHubRepoRef,
     commit_sha: &str,
     usage: &mut ResourceUsage,
+    api_budget: &mut GitHubApiBudget,
 ) -> Result<SkillUrlPayload, FirstPartyCapabilityError> {
     let root_subdir = repo
         .subdir
@@ -510,6 +621,11 @@ async fn fetch_github_contents_bundle_payload(
         .ok_or_else(|| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed))?;
     let root_path = normalize_archive_path(Path::new(root_subdir))?;
     let root_dir = normalized_archive_path_to_string(&root_path)?;
+    if !root_dir.split('/').all(is_safe_github_component) {
+        return Err(FirstPartyCapabilityError::new(
+            RuntimeDispatchErrorKind::InputEncode,
+        ));
+    }
     let mut directories = VecDeque::from([root_path.clone()]);
     let mut visited_directories = 0usize;
     let mut contents_response_bytes = 0u64;
@@ -526,8 +642,8 @@ async fn fetch_github_contents_bundle_payload(
         let directory_path = normalized_archive_path_to_string(&directory)?;
         let contents_url =
             build_github_contents_url(&repo.owner, &repo.repo, Some(&directory_path), commit_sha)?;
-        let (entries, response_bytes): (Vec<GitHubContentFile>, u64) =
-            fetch_github_api_json_with_body_len(request, &contents_url, usage).await?;
+        let (entries, response_bytes) =
+            fetch_github_contents_dir(request, &contents_url, usage, api_budget).await?;
         contents_response_bytes = contents_response_bytes
             .checked_add(response_bytes)
             .ok_or_else(|| {

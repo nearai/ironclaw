@@ -63,10 +63,11 @@ pub use install_metadata::{
     MAX_INSTALL_METADATA_BYTES,
 };
 pub use management::{
-    MAX_INSTALL_BUNDLE_FILES, SkillInstallFile, SkillInstallRequest, SkillInstallResult,
-    SkillInstallSource, SkillManagementContext, SkillManagementError, SkillManagementErrorKind,
-    SkillRemoveRequest, SkillRemoveResult, SkillSource as ManagedSkillSource, SkillSummary,
-    install_skill, list_skills, remove_skill,
+    MAX_INSTALL_BUNDLE_FILE_BYTES, MAX_INSTALL_BUNDLE_FILES, MAX_INSTALL_BUNDLE_TOTAL_BYTES,
+    SkillInstallFile, SkillInstallRequest, SkillInstallResult, SkillInstallSource,
+    SkillManagementContext, SkillManagementError, SkillManagementErrorKind, SkillRemoveRequest,
+    SkillRemoveResult, SkillSource as ManagedSkillSource, SkillSummary, install_skill, list_skills,
+    remove_skill,
 };
 pub use parser::{ParsedSkill, SkillParseError, parse_skill_md};
 pub use selector::{
@@ -74,8 +75,9 @@ pub use selector::{
     skill_token_cost,
 };
 pub use validation::{
-    escape_skill_content, escape_xml_attr, normalize_line_endings, validate_credential_name,
-    validate_credential_spec, validate_path_pattern, validate_skill_name,
+    SafeRelativePathError, escape_skill_content, escape_xml_attr, normalize_line_endings,
+    normalize_safe_relative_path, validate_credential_name, validate_credential_spec,
+    validate_path_pattern, validate_skill_name,
 };
 
 #[cfg(feature = "catalog")]

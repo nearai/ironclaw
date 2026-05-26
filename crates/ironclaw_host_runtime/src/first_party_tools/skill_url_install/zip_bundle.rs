@@ -156,15 +156,15 @@ pub(super) fn extract_skill_bundle(
             })?);
             continue;
         }
-        extra_files.push(SkillUrlPayloadFile {
-            path: relative.to_path_buf(),
-            contents,
-        });
-        if extra_files.len() > ironclaw_skills::MAX_INSTALL_BUNDLE_FILES {
+        if extra_files.len() >= ironclaw_skills::MAX_INSTALL_BUNDLE_FILES {
             return Err(FirstPartyCapabilityError::new(
                 RuntimeDispatchErrorKind::OutputTooLarge,
             ));
         }
+        extra_files.push(SkillUrlPayloadFile {
+            path: relative.to_path_buf(),
+            contents,
+        });
     }
 
     let skill_md = skill_md

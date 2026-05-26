@@ -15,7 +15,10 @@ mod install_bundle;
 #[cfg(test)]
 mod tests;
 
-pub use install_bundle::{MAX_INSTALL_BUNDLE_FILES, SkillInstallFile};
+pub use install_bundle::{
+    MAX_INSTALL_BUNDLE_FILE_BYTES, MAX_INSTALL_BUNDLE_FILES, MAX_INSTALL_BUNDLE_TOTAL_BYTES,
+    SkillInstallFile,
+};
 
 use install_bundle::{
     install_metadata_source, installed_skill_source, publish_skill_install,

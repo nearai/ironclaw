@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 
 use ironclaw_host_api::{
-    NetworkMethod, NetworkPolicy, ResourceUsage, RuntimeDispatchErrorKind, RuntimeHttpEgressError,
-    RuntimeHttpEgressReasonCode, RuntimeHttpEgressRequest, RuntimeKind,
+    NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern, ResourceUsage,
+    RuntimeDispatchErrorKind, RuntimeHttpEgressError, RuntimeHttpEgressReasonCode,
+    RuntimeHttpEgressRequest, RuntimeKind,
 };
 
 use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest};
@@ -13,12 +14,18 @@ mod zip_bundle;
 
 const SKILL_URL_RESPONSE_BODY_LIMIT_BYTES: u64 = 10 * 1024 * 1024;
 const SKILL_URL_FETCH_TIMEOUT_MS: u32 = 10_000;
-const MAX_ZIP_ENTRY_BYTES: u64 = 2 * 1024 * 1024;
-const MAX_TOTAL_UNZIPPED_BYTES: u64 = 20 * 1024 * 1024;
+const MAX_ZIP_ENTRY_BYTES: u64 = ironclaw_skills::MAX_INSTALL_BUNDLE_FILE_BYTES as u64;
+const MAX_TOTAL_UNZIPPED_BYTES: u64 = ironclaw_skills::MAX_INSTALL_BUNDLE_TOTAL_BYTES as u64;
 const MAX_GITHUB_PATH_SEGMENTS: usize = 8;
 const MAX_GITHUB_CONTENT_API_REQUESTS: usize = 64;
 const MAX_GITHUB_CONTENT_API_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_ZIP_FILE_ENTRIES: usize = ironclaw_skills::MAX_INSTALL_BUNDLE_FILES * 4;
+const ALLOWED_SKILL_URL_HOSTS: [&str; 4] = [
+    "api.github.com",
+    "codeload.github.com",
+    "github.com",
+    "raw.githubusercontent.com",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SkillUrlPayload {
@@ -110,7 +117,7 @@ pub(super) async fn fetch_url_response(
         url: url.to_string(),
         headers,
         body: Vec::new(),
-        network_policy: NetworkPolicy::default(),
+        network_policy: skill_url_network_policy(),
         credential_injections: Vec::new(),
         response_body_limit: Some(SKILL_URL_RESPONSE_BODY_LIMIT_BYTES),
         timeout_ms: Some(SKILL_URL_FETCH_TIMEOUT_MS),
@@ -136,11 +143,17 @@ pub(super) async fn fetch_url_response(
 fn validate_skill_url(url: &str) -> Result<url::Url, FirstPartyCapabilityError> {
     let parsed = url::Url::parse(url)
         .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode))?;
-    if parsed.scheme() != "https"
-        || parsed.host_str().is_none()
-        || !parsed.username().is_empty()
-        || parsed.password().is_some()
-    {
+    if parsed.scheme() != "https" || !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(FirstPartyCapabilityError::new(
+            RuntimeDispatchErrorKind::InputEncode,
+        ));
+    }
+    let Some(host) = parsed.host_str() else {
+        return Err(FirstPartyCapabilityError::new(
+            RuntimeDispatchErrorKind::InputEncode,
+        ));
+    };
+    if !ALLOWED_SKILL_URL_HOSTS.contains(&host) {
         return Err(FirstPartyCapabilityError::new(
             RuntimeDispatchErrorKind::InputEncode,
         ));
@@ -148,8 +161,19 @@ fn validate_skill_url(url: &str) -> Result<url::Url, FirstPartyCapabilityError> 
     Ok(parsed)
 }
 
-fn validate_derived_fetch_url(url: &str) -> Result<url::Url, FirstPartyCapabilityError> {
-    validate_skill_url(url)
+fn skill_url_network_policy() -> NetworkPolicy {
+    NetworkPolicy {
+        allowed_targets: ALLOWED_SKILL_URL_HOSTS
+            .iter()
+            .map(|host| NetworkTargetPattern {
+                scheme: Some(NetworkScheme::Https),
+                host_pattern: (*host).to_string(),
+                port: None,
+            })
+            .collect(),
+        deny_private_ip_ranges: true,
+        max_egress_bytes: Some(SKILL_URL_RESPONSE_BODY_LIMIT_BYTES),
+    }
 }
 
 fn skill_url_fetch_error(
