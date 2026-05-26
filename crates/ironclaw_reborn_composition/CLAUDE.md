@@ -15,6 +15,11 @@
   the scoped flow/state/provider through `AuthFlowManager` before exchanging
   provider material through `AuthProviderClient`, then complete the flow and
   emit typed continuations.
+- The first WebUI-mounted OAuth route keeps raw PKCE verifiers in a bounded,
+  expiring process-local cache because `ironclaw_auth` durable records may
+  store hashes only. Do not treat that route as multi-replica/restart-safe
+  until a host-owned encrypted verifier store or equivalent sticky callback
+  mechanism is wired.
 - Blocked run-state approval/auth gate rendering and resume belongs to #3094;
   keep this crate's #3811 auth seam reusable by that layer without implementing
   a second gate-resolution path.
@@ -85,8 +90,10 @@ Inbound order (outer → inner → handler):
    descriptors at composition time and enforces the declared
    `RateLimitPolicy` with a sliding window. Authenticated WebUI/product
    auth start routes use `RateLimitScope::PerCaller`; the public OAuth
-   callback uses `RateLimitScope::PerRoute`. Composition fails closed if
-   a future descriptor declares an unsupported scope.
+   callback uses `RateLimitScope::PerIp` backed by host-injected
+   `ConnectInfo<SocketAddr>`, never `X-Forwarded-For` / `X-Real-IP`.
+   Composition fails closed if a future descriptor declares an unsupported
+   scope.
 9. `webui_v2_router(WebUiV2State::new(bundle.api))` — the nine v2
    handlers from `ironclaw_webui_v2` (create-thread, list-threads,
    send-message, get-timeline, stream-events SSE, stream-events WS,
@@ -113,7 +120,7 @@ Reborn-native product-auth OAuth surface:
   `RebornProductAuthServices::handle_oauth_callback`. The route never
   exchanges provider tokens, activates extensions, resumes turns, or
   writes secrets directly. Its descriptor declares `NoBody` and a
-  per-route public callback rate limit.
+  transport-peer-IP public callback rate limit.
 - Raw `state`, OAuth authorization codes, PKCE verifiers, provider
   token handles, provider bodies, and host paths must not be logged or
   serialized by the route. Responses use the sanitized product-auth

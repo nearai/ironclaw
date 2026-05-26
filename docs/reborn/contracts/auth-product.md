@@ -118,6 +118,12 @@ Rules:
   redacted metadata only.
 - Raw OAuth state, authorization code, PKCE verifier, access token, refresh
   token, and provider response bodies must not be serialized or projected.
+- The first mounted WebUI OAuth route keeps the raw PKCE verifier in a bounded,
+  expiring process-local cache keyed by `AuthFlowId`, while the durable flow
+  record stores only the verifier hash. This is a single-instance first-slice
+  constraint: multi-replica or restart-surviving deployments must introduce a
+  host-owned encrypted verifier store or equivalent sticky callback mechanism
+  before treating the route as HA-safe.
 - Public callbacks must validate and claim the scoped flow/state/provider/PKCE
   hash before exchanging raw code/verifier through non-serializable one-shot
   provider inputs and completing the flow.

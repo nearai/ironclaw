@@ -106,19 +106,22 @@ pub async fn serve_webui_v2(opts: RebornWebuiServeOptions) -> Result<(), RebornW
         let _ = tx.send(bound);
     }
 
-    axum::serve(listener, router)
-        .with_graceful_shutdown(async move {
-            // If the host drops the sender without firing, treat that
-            // as "shutdown requested" so the serve loop returns
-            // cleanly rather than running forever.
-            let _ = shutdown.await;
-            tracing::info!(
-                target = "ironclaw::reborn::webui_ingress",
-                "WebChat v2 graceful shutdown signal received",
-            );
-        })
-        .await
-        .map_err(RebornWebuiServeError::Serve)
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        // If the host drops the sender without firing, treat that
+        // as "shutdown requested" so the serve loop returns
+        // cleanly rather than running forever.
+        let _ = shutdown.await;
+        tracing::info!(
+            target = "ironclaw::reborn::webui_ingress",
+            "WebChat v2 graceful shutdown signal received",
+        );
+    })
+    .await
+    .map_err(RebornWebuiServeError::Serve)
 }
 
 /// Authenticator that compares the bearer token from the request

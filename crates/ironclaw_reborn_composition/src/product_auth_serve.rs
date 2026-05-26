@@ -83,6 +83,10 @@ pub(crate) struct ProductAuthRouteState {
     tenant_id: TenantId,
     default_agent_id: Option<AgentId>,
     default_project_id: Option<ProjectId>,
+    // First-slice WebUI OAuth stores the raw PKCE verifier process-locally
+    // because `AuthFlowRecord` deliberately serializes hashes only. Production
+    // HA must replace this with a host-owned encrypted verifier store before
+    // routing callbacks across replicas or restarts.
     pkce_verifiers: Arc<Mutex<LruCache<AuthFlowId, StoredPkceVerifier>>>,
 }
 

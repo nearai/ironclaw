@@ -15,9 +15,12 @@
 //!   use route/global/IP buckets that do not need caller identity.
 //! - **Supported scopes:** `PerCaller` for authenticated routes and
 //!   `PerRoute` / `PerIp` / `Global` for public callback-style routes
-//!   that have no authenticated caller extension yet. `PerTenant`
-//!   remains an explicit `Err` at composition time so a future policy
-//!   change cannot silently degrade enforcement.
+//!   that have no authenticated caller extension yet. `PerIp` uses the
+//!   transport peer address injected by the host-owned ingress
+//!   (`ConnectInfo<SocketAddr>`); it never trusts `X-Forwarded-For` or
+//!   `X-Real-IP` headers. `PerTenant` remains an explicit `Err` at
+//!   composition time so a future policy change cannot silently degrade
+//!   enforcement.
 //! - **Sharded LRU eviction** — counters live in 16 independent
 //!   `Mutex<LruCache>` shards picked by a hash of the resolved bucket key.
 //!   Each shard is capped at 512 entries (16 × 512 = 8192-entry total
@@ -31,12 +34,13 @@
 //!   the type allows it) records no counters and never returns 429.
 
 use std::hash::{Hash, Hasher};
+use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use axum::extract::{Request, State};
-use axum::http::{HeaderMap, Method, StatusCode};
+use axum::extract::{ConnectInfo, Request, State};
+use axum::http::{Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use ironclaw_host_api::ingress::{IngressRouteDescriptor, RateLimitPolicy, RateLimitScope};
@@ -240,7 +244,16 @@ fn request_counter_key(
         }
         RateLimitScope::PerRoute => format!("route\x1f{}", route.route_id),
         RateLimitScope::PerIp => {
-            format!("ip\x1f{}", rate_limit_key_from_headers(request.headers()))
+            let Some(connect_info) = request.extensions().get::<ConnectInfo<SocketAddr>>() else {
+                tracing::debug!(
+                    target = "ironclaw::reborn::webui_rate_limit",
+                    route_id = %route.route_id,
+                    "per-ip rate-limit reached without host-provided ConnectInfo — \
+                     host ingress must inject transport peer addresses",
+                );
+                return Err(CounterKeyError::Misconfigured);
+            };
+            format!("peer_ip\x1f{}", connect_info.0.ip())
         }
         RateLimitScope::Global => "global".to_string(),
         RateLimitScope::PerTenant => {
@@ -264,33 +277,6 @@ fn request_counter_key(
         route_idx,
         bucket_key,
     })
-}
-
-/// Extract a public callback rate-limit bucket from proxy headers.
-///
-/// This mirrors the legacy web OAuth limiter: prefer the first parseable
-/// `X-Forwarded-For` entry, then `X-Real-IP`, then a shared `"unknown"` bucket
-/// when no usable address is present.
-fn rate_limit_key_from_headers(headers: &HeaderMap) -> String {
-    let x_forwarded_for = headers
-        .get("x-forwarded-for")
-        .and_then(|value| value.to_str().ok())
-        .into_iter()
-        .flat_map(|value| value.split(','))
-        .map(str::trim)
-        .find_map(|candidate| candidate.parse::<std::net::IpAddr>().ok())
-        .map(|ip| ip.to_string());
-
-    if let Some(ip) = x_forwarded_for {
-        return ip;
-    }
-
-    headers
-        .get("x-real-ip")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse::<std::net::IpAddr>().ok())
-        .map(|ip| ip.to_string())
-        .unwrap_or_else(|| "unknown".to_string())
 }
 
 /// Build the `(method, path)` → route index lookup for one request.
@@ -443,6 +429,19 @@ mod tests {
         }
     }
 
+    fn limited_route_with_scope(scope: RateLimitScope) -> RouteLimit {
+        RouteLimit {
+            route_id: "test.route".into(),
+            method: Method::GET,
+            segments: parse_pattern("/api/test"),
+            policy: ResolvedPolicy::Limited {
+                scope,
+                max_requests: 2,
+                window: Duration::from_secs(60),
+            },
+        }
+    }
+
     fn consume(state: &RateLimitState, caller: &WebUiAuthenticatedCaller) -> bool {
         let key = CounterKey {
             route_idx: 0,
@@ -569,5 +568,38 @@ mod tests {
                 assert!(matches!(scope, RateLimitScope::PerTenant));
             }
         }
+    }
+
+    #[test]
+    fn per_ip_uses_host_peer_address_not_forwarded_headers() {
+        let route = limited_route_with_scope(RateLimitScope::PerIp);
+        let mut request = Request::builder()
+            .method(Method::GET)
+            .uri("/api/test")
+            .header("x-forwarded-for", "198.51.100.10")
+            .header("x-real-ip", "198.51.100.11")
+            .body(axum::body::Body::empty())
+            .expect("request");
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([203, 0, 113, 10], 443))));
+
+        let key = request_counter_key(0, &route, &request).expect("counter key");
+        assert_eq!(key.bucket_key, "peer_ip\x1f203.0.113.10");
+    }
+
+    #[test]
+    fn per_ip_without_host_peer_address_fails_closed() {
+        let route = limited_route_with_scope(RateLimitScope::PerIp);
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/api/test")
+            .body(axum::body::Body::empty())
+            .expect("request");
+
+        assert!(matches!(
+            request_counter_key(0, &route, &request),
+            Err(CounterKeyError::Misconfigured)
+        ));
     }
 }

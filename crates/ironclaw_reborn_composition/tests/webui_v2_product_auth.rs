@@ -2,10 +2,12 @@
 
 #![cfg(feature = "webui-v2-beta")]
 
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use axum::body::{Body, to_bytes};
+use axum::extract::ConnectInfo;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_auth::{
@@ -280,6 +282,45 @@ fn callback_uri(
     .replace(' ', "")
 }
 
+fn callback_peer(last_octet: u8) -> SocketAddr {
+    SocketAddr::from(([203, 0, 113, last_octet], 443))
+}
+
+fn callback_request(uri: String) -> Request<Body> {
+    callback_request_with_options(uri, Body::empty(), callback_peer(10), None)
+}
+
+fn callback_request_with_body(uri: String, body: Body) -> Request<Body> {
+    callback_request_with_options(uri, body, callback_peer(10), None)
+}
+
+fn callback_request_from_peer(uri: String, peer: SocketAddr) -> Request<Body> {
+    callback_request_with_options(uri, Body::empty(), peer, None)
+}
+
+fn callback_request_from_peer_with_xff(
+    uri: String,
+    peer: SocketAddr,
+    x_forwarded_for: &'static str,
+) -> Request<Body> {
+    callback_request_with_options(uri, Body::empty(), peer, Some(x_forwarded_for))
+}
+
+fn callback_request_with_options(
+    uri: String,
+    body: Body,
+    peer: SocketAddr,
+    x_forwarded_for: Option<&'static str>,
+) -> Request<Body> {
+    let mut builder = Request::builder().method(Method::GET).uri(uri);
+    if let Some(value) = x_forwarded_for {
+        builder = builder.header("x-forwarded-for", value);
+    }
+    let mut request = builder.body(body).expect("request");
+    request.extensions_mut().insert(ConnectInfo(peer));
+    request
+}
+
 async fn read_body_string(response: axum::response::Response) -> String {
     let bytes = to_bytes(response.into_body(), 64 * 1024)
         .await
@@ -406,17 +447,13 @@ async fn product_auth_oauth_routes_create_flow_and_complete_callback() {
 
     let callback_response = app
         .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri(callback_uri(
-                    &started.flow_id,
-                    &started.invocation_id,
-                    USER,
-                    "route-state-secret",
-                    "&thread_id=thread-auth-1&session_id=web-session-1&provider=github&account_label=work%20github&code=route-auth-code&scopes=repo",
-                ))
-                .body(Body::empty())
-                .expect("request"),
+            callback_request(callback_uri(
+                &started.flow_id,
+                &started.invocation_id,
+                USER,
+                "route-state-secret",
+                "&thread_id=thread-auth-1&session_id=web-session-1&provider=github&account_label=work%20github&code=route-auth-code&scopes=repo",
+            )),
         )
         .await
         .expect("oneshot");
@@ -447,19 +484,13 @@ async fn product_auth_callback_provider_denial_is_sanitized() {
     .await;
 
     let response = app
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri(callback_uri(
-                    &started.flow_id,
-                    &started.invocation_id,
-                    USER,
-                    "provider-denied-state",
-                    "&error=access_denied",
-                ))
-                .body(Body::empty())
-                .expect("request"),
-        )
+        .oneshot(callback_request(callback_uri(
+            &started.flow_id,
+            &started.invocation_id,
+            USER,
+            "provider-denied-state",
+            "&error=access_denied",
+        )))
         .await
         .expect("oneshot");
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -476,19 +507,13 @@ async fn product_auth_callback_unknown_flow_is_sanitized() {
     let flow_id = uuid::Uuid::new_v4().to_string();
     let invocation_id = ironclaw_host_api::InvocationId::new().to_string();
     let response = app
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri(callback_uri(
-                    &flow_id,
-                    &invocation_id,
-                    USER,
-                    "unknown-flow-state",
-                    "&error=access_denied",
-                ))
-                .body(Body::empty())
-                .expect("request"),
-        )
+        .oneshot(callback_request(callback_uri(
+            &flow_id,
+            &invocation_id,
+            USER,
+            "unknown-flow-state",
+            "&error=access_denied",
+        )))
         .await
         .expect("oneshot");
 
@@ -505,19 +530,16 @@ async fn product_auth_callback_rejects_request_body() {
     let flow_id = uuid::Uuid::new_v4().to_string();
     let invocation_id = ironclaw_host_api::InvocationId::new().to_string();
     let response = app
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri(callback_uri(
-                    &flow_id,
-                    &invocation_id,
-                    USER,
-                    "callback-body-state",
-                    "&error=access_denied",
-                ))
-                .body(Body::from("body-not-allowed"))
-                .expect("request"),
-        )
+        .oneshot(callback_request_with_body(
+            callback_uri(
+                &flow_id,
+                &invocation_id,
+                USER,
+                "callback-body-state",
+                "&error=access_denied",
+            ),
+            Body::from("body-not-allowed"),
+        ))
         .await
         .expect("oneshot");
 
@@ -526,44 +548,84 @@ async fn product_auth_callback_rejects_request_body() {
 }
 
 #[tokio::test]
-async fn product_auth_callback_has_ip_scoped_rate_limit() {
+async fn product_auth_callback_has_peer_ip_scoped_rate_limit() {
     let (app, dispatcher) = build_app_with_product_auth();
-    let make_request = |ip: &'static str| {
+    let make_request = |peer: SocketAddr| {
         let flow_id = uuid::Uuid::new_v4().to_string();
         let invocation_id = ironclaw_host_api::InvocationId::new().to_string();
-        Request::builder()
-            .method(Method::GET)
-            .header("x-forwarded-for", ip)
-            .uri(callback_uri(
+        callback_request_from_peer(
+            callback_uri(
                 &flow_id,
                 &invocation_id,
                 USER,
                 "callback-rate-state",
                 "&error=access_denied",
-            ))
-            .body(Body::empty())
-            .expect("request")
+            ),
+            peer,
+        )
     };
+    let first_peer = callback_peer(10);
+    let second_peer = callback_peer(11);
 
     for _ in 0..120 {
         let response = app
             .clone()
-            .oneshot(make_request("203.0.113.10"))
+            .oneshot(make_request(first_peer))
             .await
             .expect("oneshot");
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
     let response = app
         .clone()
-        .oneshot(make_request("203.0.113.10"))
+        .oneshot(make_request(first_peer))
         .await
         .expect("oneshot");
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     let response = app
-        .oneshot(make_request("203.0.113.11"))
+        .oneshot(make_request(second_peer))
         .await
         .expect("oneshot");
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(dispatcher.events().is_empty());
+}
+
+#[tokio::test]
+async fn product_auth_callback_rate_limit_ignores_spoofed_forwarded_headers() {
+    let (app, dispatcher) = build_app_with_product_auth();
+    let peer = callback_peer(20);
+    let make_request = |xff: &'static str| {
+        let flow_id = uuid::Uuid::new_v4().to_string();
+        let invocation_id = ironclaw_host_api::InvocationId::new().to_string();
+        callback_request_from_peer_with_xff(
+            callback_uri(
+                &flow_id,
+                &invocation_id,
+                USER,
+                "callback-rate-state",
+                "&error=access_denied",
+            ),
+            peer,
+            xff,
+        )
+    };
+
+    for index in 0..120 {
+        let response = app
+            .clone()
+            .oneshot(make_request(if index % 2 == 0 {
+                "198.51.100.10"
+            } else {
+                "198.51.100.11"
+            }))
+            .await
+            .expect("oneshot");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+    let response = app
+        .oneshot(make_request("198.51.100.12"))
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     assert!(dispatcher.events().is_empty());
 }
 
@@ -587,19 +649,13 @@ async fn product_auth_callback_provider_exchange_failure_is_sanitized() {
     .await;
 
     let response = app
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri(callback_uri(
-                    &started.flow_id,
-                    &started.invocation_id,
-                    USER,
-                    "exchange-failed-state",
-                    "&provider=github&account_label=work%20github&code=exchange-failed-code&scopes=repo",
-                ))
-                .body(Body::empty())
-                .expect("request"),
-        )
+        .oneshot(callback_request(callback_uri(
+            &started.flow_id,
+            &started.invocation_id,
+            USER,
+            "exchange-failed-state",
+            "&provider=github&account_label=work%20github&code=exchange-failed-code&scopes=repo",
+        )))
         .await
         .expect("oneshot");
 
@@ -618,19 +674,13 @@ async fn product_auth_callback_cross_scope_failure_is_sanitized() {
     let started = start_oauth_flow(&app, "wrong-scope-state", "wrong-scope-pkce", json!({})).await;
 
     let callback_response = app
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri(callback_uri(
-                    &started.flow_id,
-                    &started.invocation_id,
-                    "bob",
-                    "wrong-scope-state",
-                    "&provider=github&account_label=work%20github&code=wrong-scope-code",
-                ))
-                .body(Body::empty())
-                .expect("request"),
-        )
+        .oneshot(callback_request(callback_uri(
+            &started.flow_id,
+            &started.invocation_id,
+            "bob",
+            "wrong-scope-state",
+            "&provider=github&account_label=work%20github&code=wrong-scope-code",
+        )))
         .await
         .expect("oneshot");
     assert_eq!(callback_response.status(), StatusCode::FORBIDDEN);
@@ -648,19 +698,13 @@ async fn product_auth_callback_malformed_flow_id_uses_sanitized_error() {
     let invocation_id = ironclaw_host_api::InvocationId::new().to_string();
 
     let response = app
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri(callback_uri(
-                    "not-a-flow-id",
-                    &invocation_id,
-                    USER,
-                    "malformed-flow-state",
-                    "&provider=github&account_label=work%20github&code=malformed-flow-code",
-                ))
-                .body(Body::empty())
-                .expect("request"),
-        )
+        .oneshot(callback_request(callback_uri(
+            "not-a-flow-id",
+            &invocation_id,
+            USER,
+            "malformed-flow-state",
+            "&provider=github&account_label=work%20github&code=malformed-flow-code",
+        )))
         .await
         .expect("oneshot");
 
