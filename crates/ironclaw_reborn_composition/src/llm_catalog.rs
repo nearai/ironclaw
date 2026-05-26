@@ -218,12 +218,12 @@ fn validate_selection(
     provider: &ProviderDefinition,
     catalog_index: usize,
 ) -> Result<(), RebornLlmCatalogError> {
-    if let Some(env) = selection.api_key_env.as_deref() {
-        if reject_inline_secret("llm.<slot>.api_key_env", env).is_err() || !is_env_var_name(env) {
-            return Err(RebornLlmCatalogError::ApiKeyEnvInvalid {
-                provider: provider.id.clone(),
-            });
-        }
+    if let Some(env) = selection.api_key_env.as_deref()
+        && (reject_inline_secret("llm.<slot>.api_key_env", env).is_err() || !is_env_var_name(env))
+    {
+        return Err(RebornLlmCatalogError::ApiKeyEnvInvalid {
+            provider: provider.id.clone(),
+        });
     }
     if let Some(base_url) = selection.base_url.as_deref() {
         validate_catalog_text(provider, catalog_index, "selection_base_url", base_url)?;
