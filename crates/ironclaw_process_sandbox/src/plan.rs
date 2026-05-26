@@ -312,7 +312,6 @@ fn validate_plan(plan: &SandboxProcessPlan) -> Result<(), SandboxPlanError> {
     validate_env_has_no_raw_sensitive_values(&plan.run.env, &placeholders)?;
 
     let runtime_hosts = plan.network.runtime_allowed_hosts();
-    let mut seen = HashSet::new();
     for binding in &plan.credentials {
         binding.validate()?;
         let approved_host = binding.approved_host.to_ascii_lowercase();
@@ -321,6 +320,22 @@ fn validate_plan(plan: &SandboxProcessPlan) -> Result<(), SandboxPlanError> {
                 host: binding.approved_host.clone(),
             });
         }
+        validate_placeholder_env(plan, binding)?;
+    }
+    validate_unique_credential_targets(&plan.credentials)?;
+
+    if !plan.credentials.is_empty() {
+        validate_credentialed_run_policy(plan)?;
+    }
+
+    Ok(())
+}
+
+pub(crate) fn validate_unique_credential_targets(
+    bindings: &[SandboxCredentialBinding],
+) -> Result<(), SandboxPlanError> {
+    let mut seen = HashSet::new();
+    for binding in bindings {
         if !seen.insert((
             binding.approved_host.to_ascii_lowercase(),
             binding.header_name(),
@@ -330,13 +345,7 @@ fn validate_plan(plan: &SandboxProcessPlan) -> Result<(), SandboxPlanError> {
                 header: binding.header_name(),
             });
         }
-        validate_placeholder_env(plan, binding)?;
     }
-
-    if !plan.credentials.is_empty() {
-        validate_credentialed_run_policy(plan)?;
-    }
-
     Ok(())
 }
 

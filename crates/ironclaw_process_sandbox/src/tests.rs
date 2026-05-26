@@ -347,6 +347,25 @@ fn broker_policy_rejects_missing_required_secret() {
 }
 
 #[test]
+fn broker_policy_rejects_duplicate_credential_targets() {
+    let mut plan = sample_plan();
+    let mut duplicate = plan.credentials[0].clone();
+    duplicate.approved_host = "API.NOTION.COM".to_string();
+    duplicate.target = RuntimeCredentialTarget::Header {
+        name: "authorization".to_string(),
+        prefix: Some("Bearer ".to_string()),
+    };
+    plan.credentials.push(duplicate);
+
+    let error = SandboxBrokerPolicy::new(plan.credentials).unwrap_err();
+
+    assert!(matches!(
+        error,
+        SandboxPlanError::DuplicateCredentialTarget { .. }
+    ));
+}
+
+#[test]
 fn broker_redacts_secret_values_from_error_paths() {
     let plan = sample_plan();
     let policy = SandboxBrokerPolicy::new(plan.credentials).unwrap();

@@ -4,7 +4,7 @@ use ironclaw_host_api::{RuntimeCredentialTarget, SecretHandle};
 use secrecy::{ExposeSecret, SecretString};
 use thiserror::Error;
 
-use crate::{SandboxCredentialBinding, SandboxPlanError};
+use crate::{SandboxCredentialBinding, SandboxPlanError, plan::validate_unique_credential_targets};
 
 #[derive(Debug, Clone)]
 pub struct BrokerHeaderRewrite {
@@ -37,6 +37,7 @@ impl SandboxBrokerPolicy {
         for binding in &policy.bindings {
             binding.validate()?;
         }
+        validate_unique_credential_targets(&policy.bindings)?;
         Ok(policy)
     }
 

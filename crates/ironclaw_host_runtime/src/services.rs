@@ -80,7 +80,7 @@ use crate::{
     RuntimeBackendHealth, RuntimeProcessPort, TenantSandboxProcessPort, TurnRunExecutor,
     TurnRunScheduler, TurnRunSchedulerConfig, plan_capability,
 };
-use process_executor::{ProcessExecutorRouter, RuntimeDispatchProcessExecutor};
+use process_executor::{HostProcessExecutor, RuntimeDispatchProcessExecutor};
 
 type SharedRuntimeHttpEgress = Arc<Mutex<Option<Arc<dyn RuntimeHttpEgress>>>>;
 
@@ -322,17 +322,10 @@ where
     /// stores, cancellation registry, result store, and runtime health graph.
     fn build_host_runtime(&self) -> DefaultHostRuntime {
         let dispatcher: Arc<dyn CapabilityDispatcher> = Arc::new(self.runtime_dispatcher());
-        let process_executor = Arc::new(
-            ProcessExecutorRouter::new(Arc::new(RuntimeDispatchProcessExecutor::new(Arc::clone(
-                &dispatcher,
-            ))))
-            .with_optional_route(
-                RuntimeKind::System,
-                ironclaw_process_sandbox::PROCESS_SANDBOX_CAPABILITY_ID,
-                self.process_sandbox_executor.clone(),
-                "missing_process_sandbox_executor",
-            ),
-        );
+        let process_executor = Arc::new(HostProcessExecutor::new(
+            Arc::new(RuntimeDispatchProcessExecutor::new(Arc::clone(&dispatcher))),
+            self.process_sandbox_executor.clone(),
+        ));
         let lifecycle_process_store = Arc::clone(&self.process_lifecycle_store);
         let process_store: Arc<dyn ProcessStore> = lifecycle_process_store.clone();
         let result_failure_cleanup_store = Arc::clone(&lifecycle_process_store);

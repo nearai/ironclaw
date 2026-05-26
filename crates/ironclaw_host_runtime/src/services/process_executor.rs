@@ -9,45 +9,34 @@ use ironclaw_processes::{
 };
 
 #[derive(Clone)]
-pub(super) struct ProcessExecutorRouter {
+pub(super) struct HostProcessExecutor {
     dispatch_executor: Arc<dyn ProcessExecutor>,
-    routes: Vec<ProcessExecutorRoute>,
+    process_sandbox_executor: Option<Arc<dyn ProcessExecutor>>,
 }
 
-impl ProcessExecutorRouter {
-    pub(super) fn new(dispatch_executor: Arc<dyn ProcessExecutor>) -> Self {
+impl HostProcessExecutor {
+    pub(super) fn new(
+        dispatch_executor: Arc<dyn ProcessExecutor>,
+        process_sandbox_executor: Option<Arc<dyn ProcessExecutor>>,
+    ) -> Self {
         Self {
             dispatch_executor,
-            routes: Vec::new(),
+            process_sandbox_executor,
         }
-    }
-
-    pub(super) fn with_optional_route(
-        mut self,
-        runtime: RuntimeKind,
-        capability_id: impl Into<String>,
-        executor: Option<Arc<dyn ProcessExecutor>>,
-        missing_error_kind: &'static str,
-    ) -> Self {
-        self.routes.push(ProcessExecutorRoute {
-            runtime,
-            capability_id: capability_id.into(),
-            executor,
-            missing_error_kind,
-        });
-        self
     }
 }
 
 #[async_trait]
-impl ProcessExecutor for ProcessExecutorRouter {
+impl ProcessExecutor for HostProcessExecutor {
     async fn execute(
         &self,
         request: ProcessExecutionRequest,
     ) -> Result<ProcessExecutionResult, ProcessExecutionError> {
-        if let Some(route) = self.matching_route(&request) {
-            let Some(executor) = &route.executor else {
-                return Err(ProcessExecutionError::new(route.missing_error_kind));
+        if is_process_sandbox_request(&request) {
+            let Some(executor) = &self.process_sandbox_executor else {
+                return Err(ProcessExecutionError::new(
+                    "missing_process_sandbox_executor",
+                ));
             };
             return executor.execute(request).await;
         }
@@ -55,21 +44,9 @@ impl ProcessExecutor for ProcessExecutorRouter {
     }
 }
 
-impl ProcessExecutorRouter {
-    fn matching_route(&self, request: &ProcessExecutionRequest) -> Option<&ProcessExecutorRoute> {
-        self.routes.iter().find(|route| {
-            route.runtime == request.runtime
-                && route.capability_id.as_str() == request.capability_id.as_str()
-        })
-    }
-}
-
-#[derive(Clone)]
-struct ProcessExecutorRoute {
-    runtime: RuntimeKind,
-    capability_id: String,
-    executor: Option<Arc<dyn ProcessExecutor>>,
-    missing_error_kind: &'static str,
+fn is_process_sandbox_request(request: &ProcessExecutionRequest) -> bool {
+    request.runtime == RuntimeKind::System
+        && request.capability_id.as_str() == ironclaw_process_sandbox::PROCESS_SANDBOX_CAPABILITY_ID
 }
 
 #[derive(Clone)]
@@ -177,18 +154,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn process_executor_router_sends_routed_capability_to_configured_executor() {
+    async fn host_process_executor_sends_sandbox_capability_to_configured_executor() {
         let dispatch = Arc::new(RecordingProcessExecutor::new("dispatch"));
         let sandbox = Arc::new(RecordingProcessExecutor::new("sandbox"));
-        let router = ProcessExecutorRouter::new(dispatch.clone() as Arc<dyn ProcessExecutor>)
-            .with_optional_route(
-                RuntimeKind::System,
-                "system.process_sandbox.run",
-                Some(sandbox.clone() as Arc<dyn ProcessExecutor>),
-                "missing_process_sandbox_executor",
-            );
+        let executor = HostProcessExecutor::new(
+            dispatch.clone() as Arc<dyn ProcessExecutor>,
+            Some(sandbox.clone() as Arc<dyn ProcessExecutor>),
+        );
 
-        let result = router
+        let result = executor
             .execute(sample_process_request(
                 "system.process_sandbox.run",
                 RuntimeKind::System,
@@ -202,18 +176,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn process_executor_router_keeps_unrouted_processes_on_dispatch_executor() {
+    async fn host_process_executor_keeps_unrouted_processes_on_dispatch_executor() {
         let dispatch = Arc::new(RecordingProcessExecutor::new("dispatch"));
         let sandbox = Arc::new(RecordingProcessExecutor::new("sandbox"));
-        let router = ProcessExecutorRouter::new(dispatch.clone() as Arc<dyn ProcessExecutor>)
-            .with_optional_route(
-                RuntimeKind::System,
-                "system.process_sandbox.run",
-                Some(sandbox.clone() as Arc<dyn ProcessExecutor>),
-                "missing_process_sandbox_executor",
-            );
+        let executor = HostProcessExecutor::new(
+            dispatch.clone() as Arc<dyn ProcessExecutor>,
+            Some(sandbox.clone() as Arc<dyn ProcessExecutor>),
+        );
 
-        let result = router
+        let result = executor
             .execute(sample_process_request(
                 "demo.background",
                 RuntimeKind::Script,
@@ -227,17 +198,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn process_executor_router_fails_routed_capability_when_unconfigured() {
+    async fn host_process_executor_fails_sandbox_capability_when_unconfigured() {
         let dispatch = Arc::new(RecordingProcessExecutor::new("dispatch"));
-        let router = ProcessExecutorRouter::new(dispatch.clone() as Arc<dyn ProcessExecutor>)
-            .with_optional_route(
-                RuntimeKind::System,
-                "system.process_sandbox.run",
-                None,
-                "missing_process_sandbox_executor",
-            );
+        let executor = HostProcessExecutor::new(dispatch.clone() as Arc<dyn ProcessExecutor>, None);
 
-        let error = router
+        let error = executor
             .execute(sample_process_request(
                 "system.process_sandbox.run",
                 RuntimeKind::System,
