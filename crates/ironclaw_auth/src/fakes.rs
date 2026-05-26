@@ -11,13 +11,14 @@ use crate::{
     AuthProviderClient, CredentialAccount, CredentialAccountId, CredentialAccountListPage,
     CredentialAccountListRequest, CredentialAccountMutation, CredentialAccountProjection,
     CredentialAccountSelectionRequest, CredentialAccountService, CredentialAccountStatus,
-    CredentialOwnership, CredentialSetupService, ManualTokenSetupRequest, NewAuthFlow,
-    NewCredentialAccount, OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
-    OAuthProviderCallbackRequest, OAuthProviderExchange, ProviderCallbackOutcome,
-    SecretCleanupAction, SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
-    SecretSubmitRequest, SecretSubmitResult, cleanup::SecretCleanupAction::Deactivate,
-    flow::credential_status_for_completed_flow, interaction::PendingSecretInteraction,
-    provider::validate_provider_callback_request, scope_matches,
+    CredentialAccountUpdateBinding, CredentialOwnership, CredentialSetupService,
+    ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount, OAuthCallbackClaimRequest,
+    OAuthCallbackFailureInput, OAuthCallbackInput, OAuthProviderCallbackRequest,
+    OAuthProviderExchange, ProviderCallbackOutcome, SecretCleanupAction, SecretCleanupReport,
+    SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest, SecretSubmitResult,
+    cleanup::SecretCleanupAction::Deactivate, flow::credential_status_for_completed_flow,
+    interaction::PendingSecretInteraction, provider::validate_provider_callback_request,
+    scope_matches,
 };
 
 #[derive(Default)]
@@ -394,13 +395,22 @@ impl AuthInteractionService for InMemoryAuthProductServices {
         request: ManualTokenSetupRequest,
     ) -> Result<AuthChallenge, AuthProductError> {
         let interaction_id = AuthInteractionId::new();
-        self.lock_state().interactions.insert(
+        let mut state = self.lock_state();
+        if let Some(binding) = &request.update_binding {
+            let account = state
+                .accounts
+                .get(&binding.account_id)
+                .ok_or(AuthProductError::CredentialMissing)?;
+            validate_manual_token_update_binding(account, &request, binding)?;
+        }
+        state.interactions.insert(
             interaction_id,
             PendingSecretInteraction {
                 scope: request.scope,
                 provider: request.provider.clone(),
                 label: request.label.clone(),
                 continuation: request.continuation,
+                update_binding: request.update_binding,
                 expires_at: request.expires_at,
             },
         );
@@ -435,25 +445,12 @@ impl AuthInteractionService for InMemoryAuthProductServices {
             .interactions
             .remove(&request.interaction_id)
             .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
-        let account = create_account_in_state(
-            &mut state,
-            NewCredentialAccount {
-                scope: pending.scope,
-                provider: pending.provider,
-                label: pending.label,
-                status: credential_status_for_completed_flow(),
-                ownership: CredentialOwnership::UserReusable,
-                owner_extension: None,
-                granted_extensions: Vec::new(),
-                access_secret: Some(generated_secret_handle("manual-access")?),
-                refresh_secret: None,
-                scopes: Vec::new(),
-            },
-        )?;
+        let continuation = pending.continuation.clone();
+        let account = create_or_update_manual_token_account(&mut state, pending)?;
         Ok(SecretSubmitResult {
             account_id: account.id,
             status: account.status,
-            continuation: pending.continuation,
+            continuation,
         })
     }
 }
@@ -675,6 +672,51 @@ fn update_account_from_request(
     Ok(account.clone())
 }
 
+fn create_or_update_manual_token_account(
+    state: &mut AuthState,
+    pending: PendingSecretInteraction,
+) -> Result<CredentialAccount, AuthProductError> {
+    let account_request = manual_token_account_request(&pending)?;
+    match pending.update_binding {
+        Some(binding) => {
+            let now = Utc::now();
+            let account = state
+                .accounts
+                .get_mut(&binding.account_id)
+                .ok_or(AuthProductError::CredentialMissing)?;
+            validate_account_update_target(account, &account_request)?;
+            update_account_from_request(account, account_request, now)
+        }
+        None => create_account_in_state(state, account_request),
+    }
+}
+
+fn manual_token_account_request(
+    pending: &PendingSecretInteraction,
+) -> Result<NewCredentialAccount, AuthProductError> {
+    let (ownership, owner_extension, granted_extensions) = match &pending.update_binding {
+        Some(binding) => (
+            binding.ownership,
+            binding.owner_extension.clone(),
+            binding.granted_extensions.clone(),
+        ),
+        None => (CredentialOwnership::UserReusable, None, Vec::new()),
+    };
+
+    Ok(NewCredentialAccount {
+        scope: pending.scope.clone(),
+        provider: pending.provider.clone(),
+        label: pending.label.clone(),
+        status: credential_status_for_completed_flow(),
+        ownership,
+        owner_extension,
+        granted_extensions,
+        access_secret: Some(generated_secret_handle("manual-access")?),
+        refresh_secret: None,
+        scopes: Vec::new(),
+    })
+}
+
 fn update_account_from_exchange(
     account: &mut CredentialAccount,
     exchange: &OAuthProviderExchange,
@@ -713,17 +755,45 @@ fn validate_flow_update_binding(
     account: &CredentialAccount,
     request: &NewAuthFlow,
 ) -> Result<(), AuthProductError> {
-    if !scope_matches(&request.scope, &account.scope) {
-        return Err(AuthProductError::CrossScopeDenied);
-    }
-    if account.provider != request.provider {
-        return Err(AuthProductError::invalid_request(
-            "auth flow update target provider mismatch",
-        ));
-    }
     let Some(binding) = request.update_binding.as_ref() else {
         return Ok(());
     };
+    validate_scoped_update_binding(
+        account,
+        &request.scope,
+        &request.provider,
+        binding,
+        "auth flow update target provider mismatch",
+    )
+}
+
+fn validate_manual_token_update_binding(
+    account: &CredentialAccount,
+    request: &ManualTokenSetupRequest,
+    binding: &CredentialAccountUpdateBinding,
+) -> Result<(), AuthProductError> {
+    validate_scoped_update_binding(
+        account,
+        &request.scope,
+        &request.provider,
+        binding,
+        "manual token update target provider mismatch",
+    )
+}
+
+fn validate_scoped_update_binding(
+    account: &CredentialAccount,
+    scope: &crate::AuthProductScope,
+    provider: &crate::AuthProviderId,
+    binding: &CredentialAccountUpdateBinding,
+    provider_mismatch_reason: &'static str,
+) -> Result<(), AuthProductError> {
+    if !scope_matches(scope, &account.scope) {
+        return Err(AuthProductError::CrossScopeDenied);
+    }
+    if &account.provider != provider {
+        return Err(AuthProductError::invalid_request(provider_mismatch_reason));
+    }
     validate_bound_update_authority(account, binding)
 }
 

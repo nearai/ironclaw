@@ -10,6 +10,7 @@ async fn manual_token_submit_is_secure_scoped_and_rejects_invalid_inputs() {
             provider: provider(),
             label: label("manual github"),
             continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
             expires_at: Utc::now() + Duration::minutes(5),
         })
         .await
@@ -86,6 +87,7 @@ async fn manual_token_submit_consumes_interaction_once() {
             provider: provider(),
             label: label("manual github"),
             continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
             expires_at: Utc::now() + Duration::minutes(5),
         })
         .await
@@ -134,6 +136,7 @@ async fn manual_token_submit_rejects_control_characters_without_consuming_intera
             provider: provider(),
             label: label("manual github"),
             continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
             expires_at: Utc::now() + Duration::minutes(5),
         })
         .await
@@ -178,6 +181,7 @@ async fn expired_manual_token_interaction_fails_closed() {
             provider: provider(),
             label: label("manual github"),
             continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
             expires_at: Utc::now() - Duration::seconds(1),
         })
         .await
@@ -197,4 +201,99 @@ async fn expired_manual_token_interaction_fails_closed() {
         .await
         .expect_err("expired");
     assert_eq!(expired, AuthProductError::UnknownOrExpiredFlow);
+}
+
+#[tokio::test]
+async fn manual_token_submit_can_update_bound_account() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+    let account = services
+        .create_account(account_request(
+            owner.clone(),
+            "old manual github",
+            CredentialAccountStatus::Expired,
+        ))
+        .await
+        .expect("existing account");
+    let challenge = services
+        .request_secret_input(ManualTokenSetupRequest {
+            scope: owner.clone(),
+            provider: provider(),
+            label: label("updated manual github"),
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: Some(update_binding(&account)),
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .expect("manual update challenge");
+    let interaction_id = match challenge {
+        AuthChallenge::ManualTokenRequired { interaction_id, .. } => interaction_id,
+        other => panic!("unexpected challenge {other:?}"),
+    };
+
+    let result = services
+        .submit_manual_token(
+            &owner,
+            SecretSubmitRequest {
+                interaction_id,
+                secret: secret("ghp_updated_token"),
+            },
+        )
+        .await
+        .expect("manual update submit");
+
+    assert_eq!(result.account_id, account.id);
+    assert_eq!(result.status, CredentialAccountStatus::Configured);
+    let updated = services
+        .get_account(&owner, account.id)
+        .await
+        .expect("account lookup")
+        .expect("updated account");
+    assert_eq!(updated.id, account.id);
+    assert_eq!(updated.label, label("updated manual github"));
+    assert_eq!(updated.status, CredentialAccountStatus::Configured);
+    assert!(updated.access_secret.is_some());
+    assert_eq!(updated.created_at, account.created_at);
+    assert!(updated.updated_at >= account.updated_at);
+
+    let accounts = services
+        .list_accounts(CredentialAccountListRequest::new(owner, provider()).with_limit(10))
+        .await
+        .expect("list accounts");
+    assert_eq!(accounts.accounts.len(), 1);
+    assert_eq!(accounts.accounts[0].id, account.id);
+}
+
+#[tokio::test]
+async fn manual_token_update_binding_is_scope_checked_before_challenge() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+    let account = services
+        .create_account(account_request(
+            owner.clone(),
+            "manual github",
+            CredentialAccountStatus::Expired,
+        ))
+        .await
+        .expect("existing account");
+
+    let error = services
+        .request_secret_input(ManualTokenSetupRequest {
+            scope: scope("bob"),
+            provider: provider(),
+            label: label("attacker manual github"),
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: Some(update_binding(&account)),
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .expect_err("cross-scope update binding is rejected before challenge");
+
+    assert_eq!(error, AuthProductError::CrossScopeDenied);
+    let accounts = services
+        .list_accounts(CredentialAccountListRequest::new(owner, provider()).with_limit(10))
+        .await
+        .expect("list accounts");
+    assert_eq!(accounts.accounts.len(), 1);
+    assert_eq!(accounts.accounts[0].id, account.id);
 }
