@@ -2,9 +2,10 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ironclaw_event_projections::{
-    EventProjectionService, ProjectionCursor, ProjectionError, ProjectionReplay, ProjectionRequest,
-    ProjectionScope, ProjectionSnapshot, RunProjectionStatus, RunStatusProjection, ThreadTimeline,
-    TimelineEntry, TimelineEntryKind,
+    CapabilityActivityProjection, CapabilityActivityStatus, EventProjectionService,
+    ProjectionCursor, ProjectionError, ProjectionReplay, ProjectionRequest, ProjectionScope,
+    ProjectionSnapshot, RunProjectionStatus, RunStatusProjection, ThreadTimeline, TimelineEntry,
+    TimelineEntryKind,
 };
 use ironclaw_event_streams::{
     AllowAllProjectionAccessPolicy, EventStreamManager, InMemoryProjectionStreamAdmissionPolicy,

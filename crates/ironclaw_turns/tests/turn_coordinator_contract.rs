@@ -1,7 +1,7 @@
 use std::{
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc,
     },
     task::{Context, Poll},
@@ -12,28 +12,33 @@ use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, AllowAllTurnAdmissionPolicy,
-    BlockedReason, CancelRunRequest, DefaultTurnCoordinator, GateRef, GetRunStateRequest,
-    IdempotencyKey, InMemoryRunProfileResolver, InMemoryTurnEventSink, InMemoryTurnStateStore,
-    InMemoryTurnStateStoreLimits, LoopCheckpointStateRef, LoopExitMapping, LoopGateRef,
+    BlockedReason, CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator,
+    DefaultTurnLifecycleEventBus, GateRef, GetRunStateRequest, IdempotencyKey,
+    InMemoryRunProfileResolver, InMemoryTurnEventSink, InMemoryTurnStateStore,
+    InMemoryTurnStateStoreLimits, LifecyclePublicationErrorPort, LifecyclePublishingTurnStateStore,
+    LoopBlockedKind, LoopCheckpointStateRef, LoopExitMapping, LoopGateRef, LoopResultRef,
     ReplyTargetBindingRef, ResolvedRunProfile, ResumeTurnRequest, RunProfileId, RunProfileRequest,
     RunProfileResolutionError, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
     SanitizedCancelReason, SanitizedFailure, SourceBindingRef, StaticTurnAdmissionLimitProvider,
-    SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor, TurnAdmissionAxisKind,
-    TurnAdmissionBucketKind, TurnAdmissionBucketScope, TurnAdmissionCapacityDenial,
-    TurnAdmissionClass, TurnAdmissionPolicy, TurnCheckpointId, TurnCoordinator, TurnError,
-    TurnErrorCategory, TurnEventKind, TurnEventProjectionCursor, TurnEventProjectionError,
-    TurnEventProjectionRequest, TurnEventProjectionService, TurnEventSink,
+    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
+    TurnAdmissionAxisKind, TurnAdmissionBucketKind, TurnAdmissionBucketScope,
+    TurnAdmissionCapacityDenial, TurnAdmissionClass, TurnAdmissionPolicy, TurnCapacityResource,
+    TurnCheckpointId, TurnCommittedEventObserver, TurnCoordinator, TurnError, TurnErrorCategory,
+    TurnEventKind, TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
+    TurnEventProjectionService, TurnEventSink, TurnIdempotencyErrorReplay,
     TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind, TurnIdempotencyRecord,
-    TurnIdempotencyReplay, TurnLeaseToken, TurnLifecycleEvent, TurnLockVersion, TurnRunId,
-    TurnRunProfile, TurnRunState, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError,
-    TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
+    TurnIdempotencyReplay, TurnLeaseToken, TurnLifecycleEvent, TurnLifecycleEventBus,
+    TurnLockVersion, TurnRunId, TurnRunProfile, TurnRunState, TurnRunWake, TurnRunWakeNotifier,
+    TurnRunWakeNotifyError, TurnRunnerId, TurnScope, TurnSpawnTreePort, TurnSpawnTreeStateStore,
+    TurnStateStore, TurnStatus,
     events::EventCursor,
-    run_profile::LoopModelRouteSnapshot,
+    run_profile::{CapabilityOutcome, LoopGateKind, LoopModelRouteSnapshot},
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
         ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecordModelRouteSnapshotRequest, RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse,
-        TurnRunTransitionPort, TurnRunnerOutcome,
+        RecordModelRouteSnapshotRequest, RecordRecoveryRequiredRequest,
+        RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, TurnRunTransitionPort,
+        TurnRunnerOutcome,
     },
 };
 
@@ -90,6 +95,20 @@ fn approval_blocked_mapping(
     })
 }
 
+fn dependent_blocked_mapping(
+    checkpoint_id: TurnCheckpointId,
+    state_ref: LoopCheckpointStateRef,
+    gate_ref: &LoopGateRef,
+) -> LoopExitMapping {
+    LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Blocked {
+        checkpoint_id,
+        state_ref,
+        reason: BlockedReason::AwaitDependentRun {
+            gate_ref: GateRef::new(gate_ref.as_str()).unwrap(),
+        },
+    })
+}
+
 struct BlockingRunProfileResolver {
     started: mpsc::Sender<()>,
 }
@@ -123,7 +142,1629 @@ fn turn_scope_agent_id_is_optional() {
     assert_eq!(scope.agent_id, None);
 }
 
+#[test]
+fn subagent_capability_outcomes_round_trip_with_suspension_semantics() {
+    let child_run_id = TurnRunId::new();
+    let result_ref = LoopResultRef::new("result:child").unwrap();
+    let spawned = CapabilityOutcome::SpawnedChildRun {
+        child_run_id,
+        result_ref: result_ref.clone(),
+        safe_summary: "spawned in background".to_string(),
+    };
+    let spawned_json = serde_json::to_value(&spawned).unwrap();
+    assert_eq!(
+        spawned_json,
+        serde_json::json!({
+            "spawned_child_run": {
+                "child_run_id": child_run_id,
+                "result_ref": result_ref,
+                "safe_summary": "spawned in background"
+            }
+        })
+    );
+    assert!(!spawned.is_suspension());
+    assert_eq!(
+        serde_json::from_value::<CapabilityOutcome>(spawned_json).unwrap(),
+        spawned
+    );
+
+    let gate_ref = LoopGateRef::new("gate:dependent-run").unwrap();
+    let result_ref = LoopResultRef::new("result:dependent-run").unwrap();
+    let awaiting = CapabilityOutcome::AwaitDependentRun {
+        gate_ref: gate_ref.clone(),
+        result_ref: result_ref.clone(),
+        safe_summary: "waiting on child".to_string(),
+    };
+    let awaiting_json = serde_json::to_value(&awaiting).unwrap();
+    assert_eq!(
+        awaiting_json,
+        serde_json::json!({
+            "await_dependent_run": {
+                "gate_ref": gate_ref,
+                "result_ref": result_ref,
+                "safe_summary": "waiting on child"
+            }
+        })
+    );
+    assert!(awaiting.is_suspension());
+    assert_eq!(
+        serde_json::from_value::<CapabilityOutcome>(awaiting_json).unwrap(),
+        awaiting
+    );
+}
+
+#[test]
+fn subagent_gate_and_blocked_wire_contracts_are_stable() {
+    let gate_kind = serde_json::to_value(LoopGateKind::AwaitDependentRun).unwrap();
+    assert_eq!(gate_kind, serde_json::json!("await_dependent_run"));
+    assert_eq!(
+        serde_json::from_value::<LoopGateKind>(gate_kind).unwrap(),
+        LoopGateKind::AwaitDependentRun
+    );
+
+    let blocked_kind = serde_json::to_value(LoopBlockedKind::AwaitDependentRun).unwrap();
+    assert_eq!(blocked_kind, serde_json::json!("await_dependent_run"));
+    assert_eq!(
+        serde_json::from_value::<LoopBlockedKind>(blocked_kind).unwrap(),
+        LoopBlockedKind::AwaitDependentRun
+    );
+
+    let status = serde_json::to_value(TurnStatus::BlockedDependentRun).unwrap();
+    assert_eq!(status, serde_json::json!("BlockedDependentRun"));
+    assert!(!TurnStatus::BlockedDependentRun.is_terminal());
+    assert!(TurnStatus::BlockedDependentRun.keeps_active_lock());
+    assert_eq!(
+        serde_json::from_value::<TurnStatus>(status).unwrap(),
+        TurnStatus::BlockedDependentRun
+    );
+
+    let gate_ref = GateRef::new("gate-dependent-run").unwrap();
+    let reason = BlockedReason::AwaitDependentRun {
+        gate_ref: gate_ref.clone(),
+    };
+    let reason_json = serde_json::to_value(&reason).unwrap();
+    assert_eq!(
+        reason_json,
+        serde_json::json!({"AwaitDependentRun": {"gate_ref": gate_ref}})
+    );
+    assert_eq!(reason.status(), TurnStatus::BlockedDependentRun);
+    assert_eq!(reason.gate_ref(), &gate_ref);
+    assert_eq!(
+        serde_json::from_value::<BlockedReason>(reason_json).unwrap(),
+        reason
+    );
+    assert_eq!(
+        serde_json::from_value::<BlockedReason>(
+            serde_json::json!({"DependentRun": {"gate_ref": gate_ref}})
+        )
+        .unwrap(),
+        reason
+    );
+}
+
+#[test]
+fn submit_turn_request_lineage_defaults_for_legacy_json() {
+    let request: SubmitTurnRequest = serde_json::from_value(serde_json::json!({
+        "scope": scope("thread-legacy-request"),
+        "actor": actor(),
+        "accepted_message_ref": "message-legacy-request",
+        "source_binding_ref": "source-web",
+        "reply_target_binding_ref": "reply-web",
+        "requested_run_profile": "default",
+        "idempotency_key": "idem-legacy-request",
+        "received_at": received_at()
+    }))
+    .unwrap();
+
+    assert_eq!(request.requested_run_id, None);
+    assert_eq!(request.parent_run_id, None);
+    assert_eq!(request.subagent_depth, 0);
+    assert_eq!(request.spawn_tree_root_run_id, None);
+}
+
 #[tokio::test]
+async fn prepare_turn_mints_ids_without_side_effects_and_submit_binds_requested_id() {
+    let (coordinator, store) = coordinator();
+    let scope = scope("thread-prepared-run");
+    let first = coordinator.prepare_turn(scope.clone()).await.unwrap();
+    let second = coordinator.prepare_turn(scope.clone()).await.unwrap();
+    assert_ne!(first, second);
+    assert!(matches!(
+        coordinator
+            .get_run_state(GetRunStateRequest {
+                scope: scope.clone(),
+                run_id: first
+            })
+            .await,
+        Err(TurnError::ScopeNotFound)
+    ));
+
+    let mut request = submit_request("thread-prepared-run", "idem-prepared-run");
+    request.requested_run_id = Some(first);
+    let response = coordinator.submit_turn(request.clone()).await.unwrap();
+    assert_eq!(accepted_run_id(&response), first);
+    assert!(
+        store
+            .get_run_record(&request.scope, first)
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    let mut collision = submit_request("thread-prepared-collision", "idem-prepared-collision");
+    collision.requested_run_id = Some(first);
+    let err = coordinator.submit_turn(collision).await.unwrap_err();
+    assert!(matches!(err, TurnError::Conflict { .. }));
+}
+
+#[tokio::test]
+async fn children_of_get_run_record_and_tree_reservation_are_scope_checked() {
+    let (coordinator, store) = coordinator();
+    let parent = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-parent", "idem-parent"))
+            .await
+            .unwrap(),
+    );
+    let child_scope = scope("thread-child");
+    let child_a_id = TurnRunId::new();
+    accepted_run_id(
+        &coordinator
+            .submit_child_run(child_run_request(
+                scope("thread-parent"),
+                parent,
+                "thread-child",
+                child_a_id,
+                "idem-child-a",
+                3,
+            ))
+            .await
+            .unwrap(),
+    );
+    let child_b_id = TurnRunId::new();
+    accepted_run_id(
+        &coordinator
+            .submit_child_run(child_run_request(
+                scope("thread-parent"),
+                parent,
+                "thread-child-b",
+                child_b_id,
+                "idem-child-b",
+                3,
+            ))
+            .await
+            .unwrap(),
+    );
+
+    let children = store
+        .children_of(&scope("thread-parent"), parent)
+        .await
+        .unwrap();
+    let child_ids = children
+        .iter()
+        .map(|child| child.run_id)
+        .collect::<Vec<_>>();
+    assert_eq!(children.len(), 2);
+    assert!(child_ids.contains(&child_a_id));
+    assert!(child_ids.contains(&child_b_id));
+    assert!(
+        children
+            .iter()
+            .all(|child| child.parent_run_id == Some(parent))
+    );
+    assert!(children.iter().all(|child| child.subagent_depth == 1));
+    let foreign_scope = TurnScope::new(
+        TenantId::new("tenant2").unwrap(),
+        Some(AgentId::new("agent1").unwrap()),
+        Some(ProjectId::new("project1").unwrap()),
+        ThreadId::new("thread-parent").unwrap(),
+    );
+    assert_eq!(
+        store.children_of(&foreign_scope, parent).await.unwrap(),
+        Vec::new()
+    );
+    assert_eq!(
+        store.children_of(&child_scope, parent).await.unwrap(),
+        Vec::new()
+    );
+    assert_eq!(
+        store
+            .children_of(&scope("thread-parent"), TurnRunId::new())
+            .await
+            .unwrap(),
+        Vec::new()
+    );
+    assert!(
+        store
+            .get_run_record(&child_scope, child_a_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        store
+            .get_run_record(&scope("thread-parent"), child_b_id)
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(matches!(
+        store
+            .reserve_tree_descendants(&child_scope, child_a_id, 1, 3)
+            .await,
+        Err(TurnError::InvalidRequest { .. })
+    ));
+    assert!(matches!(
+        store
+            .release_tree_descendants(&child_scope, child_a_id, 1)
+            .await,
+        Err(TurnError::InvalidRequest { .. })
+    ));
+
+    assert_eq!(
+        store
+            .persistence_snapshot()
+            .spawn_tree_reservations
+            .iter()
+            .find(|reservation| reservation.root_run_id == parent)
+            .map(|reservation| reservation.descendant_count),
+        Some(2)
+    );
+    assert!(matches!(
+        store
+            .reserve_tree_descendants(&scope("thread-parent"), parent, 2, 3)
+            .await,
+        Err(TurnError::CapacityExceeded { .. })
+    ));
+    store
+        .release_tree_descendants(&scope("thread-parent"), parent, 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .reserve_tree_descendants(&scope("thread-child-b"), parent, 1, 3)
+            .await
+            .unwrap()
+            .descendant_count,
+        2
+    );
+    assert!(matches!(
+        store
+            .reserve_tree_descendants(&scope("thread-child"), parent, 2, 3)
+            .await,
+        Err(TurnError::CapacityExceeded { .. })
+    ));
+}
+
+#[tokio::test]
+async fn spawn_tree_port_submits_child_with_computed_lineage_and_reservation() {
+    let (coordinator, store) = coordinator();
+    let parent = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-spawn-parent", "idem-spawn-parent"))
+            .await
+            .unwrap(),
+    );
+    let child_id = coordinator
+        .prepare_turn(scope("thread-spawn-child"))
+        .await
+        .unwrap();
+
+    let child = coordinator
+        .submit_child_run(child_run_request(
+            scope("thread-spawn-parent"),
+            parent,
+            "thread-spawn-child",
+            child_id,
+            "idem-spawn-child",
+            2,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(accepted_run_id(&child), child_id);
+    let child_record = store
+        .get_run_record(&scope("thread-spawn-child"), child_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(child_record.parent_run_id, Some(parent));
+    assert_eq!(child_record.subagent_depth, 1);
+    assert_eq!(child_record.spawn_tree_root_run_id, Some(parent));
+    assert_eq!(
+        store
+            .persistence_snapshot()
+            .spawn_tree_reservations
+            .iter()
+            .find(|reservation| reservation.root_run_id == parent)
+            .map(|reservation| reservation.descendant_count),
+        Some(1)
+    );
+}
+
+#[tokio::test]
+async fn spawn_tree_port_idempotency_replay_does_not_reserve_again() {
+    let (coordinator, store) = coordinator();
+    let parent = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-spawn-replay-parent",
+                "idem-spawn-replay-parent",
+            ))
+            .await
+            .unwrap(),
+    );
+    let child_id = coordinator
+        .prepare_turn(scope("thread-spawn-replay-child"))
+        .await
+        .unwrap();
+    let request = child_run_request(
+        scope("thread-spawn-replay-parent"),
+        parent,
+        "thread-spawn-replay-child",
+        child_id,
+        "idem-spawn-replay-child",
+        1,
+    );
+
+    let first = coordinator.submit_child_run(request.clone()).await.unwrap();
+    let replay = coordinator.submit_child_run(request).await.unwrap();
+
+    assert_eq!(accepted_run_id(&first), child_id);
+    assert_eq!(accepted_run_id(&replay), child_id);
+    assert_eq!(
+        store
+            .persistence_snapshot()
+            .spawn_tree_reservations
+            .iter()
+            .find(|reservation| reservation.root_run_id == parent)
+            .map(|reservation| reservation.descendant_count),
+        Some(1)
+    );
+}
+
+#[tokio::test]
+async fn spawn_tree_port_releases_reservation_when_child_submit_fails() {
+    let (coordinator, store) = coordinator();
+    let parent = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-spawn-rollback-parent",
+                "idem-spawn-rollback-parent",
+            ))
+            .await
+            .unwrap(),
+    );
+    coordinator
+        .submit_turn(submit_request(
+            "thread-spawn-rollback-child",
+            "idem-spawn-rollback-busy-child-thread",
+        ))
+        .await
+        .unwrap();
+    let child_id = coordinator
+        .prepare_turn(scope("thread-spawn-rollback-child"))
+        .await
+        .unwrap();
+
+    let error = coordinator
+        .submit_child_run(child_run_request(
+            scope("thread-spawn-rollback-parent"),
+            parent,
+            "thread-spawn-rollback-child",
+            child_id,
+            "idem-spawn-rollback-child",
+            2,
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, TurnError::ThreadBusy(_)));
+    assert!(
+        store
+            .persistence_snapshot()
+            .spawn_tree_reservations
+            .is_empty()
+    );
+    assert!(
+        store
+            .get_run_record(&scope("thread-spawn-rollback-child"), child_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn spawn_tree_port_rejects_missing_parent_depth_overflow_and_capacity_exceeded() {
+    use ironclaw_turns::{InMemoryTurnStateStoreLimits, TurnPersistenceSnapshot};
+
+    let (coordinator, store) = coordinator();
+    let missing_parent = coordinator
+        .submit_child_run(child_run_request(
+            scope("thread-spawn-missing-parent"),
+            TurnRunId::new(),
+            "thread-spawn-missing-child",
+            TurnRunId::new(),
+            "idem-spawn-missing-child",
+            1,
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(missing_parent, TurnError::ScopeNotFound));
+
+    let parent = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-spawn-cap-parent",
+                "idem-spawn-cap-parent",
+            ))
+            .await
+            .unwrap(),
+    );
+    let first_child = coordinator
+        .prepare_turn(scope("thread-spawn-cap-child-a"))
+        .await
+        .unwrap();
+    coordinator
+        .submit_child_run(child_run_request(
+            scope("thread-spawn-cap-parent"),
+            parent,
+            "thread-spawn-cap-child-a",
+            first_child,
+            "idem-spawn-cap-child-a",
+            1,
+        ))
+        .await
+        .unwrap();
+    let capacity_error = coordinator
+        .submit_child_run(child_run_request(
+            scope("thread-spawn-cap-parent"),
+            parent,
+            "thread-spawn-cap-child-b",
+            TurnRunId::new(),
+            "idem-spawn-cap-child-b",
+            1,
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(capacity_error, TurnError::CapacityExceeded { .. }));
+
+    let depth_parent = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-spawn-depth-parent",
+                "idem-spawn-depth-parent",
+            ))
+            .await
+            .unwrap(),
+    );
+    let mut snapshot: TurnPersistenceSnapshot = store.persistence_snapshot();
+    if let Some(run) = snapshot
+        .runs
+        .iter_mut()
+        .find(|record| record.run_id == depth_parent)
+    {
+        run.subagent_depth = u32::MAX;
+    }
+    let depth_store = Arc::new(
+        InMemoryTurnStateStore::from_persistence_snapshot(
+            snapshot,
+            InMemoryTurnStateStoreLimits::default(),
+        )
+        .unwrap(),
+    );
+    let depth_coordinator = DefaultTurnCoordinator::new(depth_store);
+    let depth_error = depth_coordinator
+        .submit_child_run(child_run_request(
+            scope("thread-spawn-depth-parent"),
+            depth_parent,
+            "thread-spawn-depth-child",
+            TurnRunId::new(),
+            "idem-spawn-depth-child",
+            1,
+        ))
+        .await
+        .unwrap_err();
+    match depth_error {
+        TurnError::InvalidRequest { reason } => {
+            assert!(reason.contains("subagent depth would overflow"));
+        }
+        other => panic!("expected InvalidRequest, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn submit_turn_rejects_child_lineage_fields() {
+    let (coordinator, store) = coordinator();
+    let parent = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-lineage-parent",
+                "idem-lineage-parent",
+            ))
+            .await
+            .unwrap(),
+    );
+
+    let child_run_id = TurnRunId::new();
+    let mut child_shape = submit_request("thread-lineage-child", "idem-lineage-child");
+    child_shape.requested_run_id = Some(child_run_id);
+    child_shape.parent_run_id = Some(parent);
+    child_shape.subagent_depth = 1;
+    child_shape.spawn_tree_root_run_id = Some(parent);
+    let err = coordinator
+        .submit_turn(child_shape.clone())
+        .await
+        .unwrap_err();
+    match err {
+        TurnError::InvalidRequest { reason } => {
+            assert!(reason.contains("submit_child_turn"));
+        }
+        other => panic!("expected InvalidRequest, got {other:?}"),
+    }
+    assert!(
+        store
+            .get_run_record(&child_shape.scope, child_run_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let mut top_level_with_depth =
+        submit_request("thread-lineage-top-depth", "idem-lineage-top-depth");
+    top_level_with_depth.subagent_depth = 1;
+    assert!(matches!(
+        coordinator.submit_turn(top_level_with_depth).await,
+        Err(TurnError::InvalidRequest { .. })
+    ));
+
+    let mut top_level_with_root =
+        submit_request("thread-lineage-top-root", "idem-lineage-top-root");
+    top_level_with_root.spawn_tree_root_run_id = Some(parent);
+    assert!(matches!(
+        coordinator.submit_turn(top_level_with_root).await,
+        Err(TurnError::InvalidRequest { .. })
+    ));
+}
+
+#[tokio::test]
+async fn blocked_dependent_run_can_resume_and_cancel_directly() {
+    let (coordinator, store) = coordinator();
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-dependent", "idem-dependent"))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let gate_ref = LoopGateRef::new("gate:dependent-run").unwrap();
+    apply_test_loop_exit(
+        store.as_ref(),
+        run_id,
+        runner_id,
+        lease_token,
+        dependent_blocked_mapping(TurnCheckpointId::new(), block_state_ref(), &gate_ref),
+    )
+    .await
+    .unwrap();
+
+    let resumed = coordinator
+        .resume_turn(ResumeTurnRequest {
+            scope: scope("thread-dependent"),
+            actor: actor(),
+            run_id,
+            gate_resolution_ref: GateRef::new(gate_ref.as_str()).unwrap(),
+            source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
+            idempotency_key: IdempotencyKey::new("idem-dependent-resume").unwrap(),
+            precondition: ironclaw_turns::ResumeTurnPrecondition::BlockedDependentRunGate,
+        })
+        .await
+        .unwrap();
+    assert_eq!(resumed.status, TurnStatus::Queued);
+
+    let cancel_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-dependent-cancel",
+                "idem-dependent-cancel",
+            ))
+            .await
+            .unwrap(),
+    );
+    let cancel_runner_id = TurnRunnerId::new();
+    let cancel_lease = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: cancel_runner_id,
+            lease_token: cancel_lease,
+            scope_filter: Some(scope("thread-dependent-cancel")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let cancel_gate_ref = LoopGateRef::new("gate:dependent-run-cancel").unwrap();
+    apply_test_loop_exit(
+        store.as_ref(),
+        cancel_run_id,
+        cancel_runner_id,
+        cancel_lease,
+        dependent_blocked_mapping(TurnCheckpointId::new(), block_state_ref(), &cancel_gate_ref),
+    )
+    .await
+    .unwrap();
+
+    let cancelled = coordinator
+        .cancel_run(cancel_request(
+            "thread-dependent-cancel",
+            cancel_run_id,
+            "idem-dependent-cancel-public",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(cancelled.status, TurnStatus::Cancelled);
+    assert!(!cancelled.already_terminal);
+}
+
+#[tokio::test]
+async fn default_turn_coordinator_publishes_lifecycle_events_to_sink() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let sink = Arc::new(InMemoryTurnEventSink::default());
+    let store = lifecycle_publishing_store(store, None, Some(sink.clone()));
+    let coordinator = DefaultTurnCoordinator::new(store);
+    let response = coordinator
+        .submit_turn(submit_request("thread-event-sink", "idem-event-sink"))
+        .await
+        .unwrap();
+
+    let run_id = accepted_run_id(&response);
+    let events = sink.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].kind, TurnEventKind::Submitted);
+    assert_eq!(events[0].run_id, run_id);
+    assert_eq!(events[0].status, TurnStatus::Queued);
+}
+
+#[tokio::test]
+async fn default_turn_coordinator_dedupes_idempotency_replay_events_by_cursor() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let sink = Arc::new(InMemoryTurnEventSink::default());
+    let publishing_store = lifecycle_publishing_store(store.clone(), None, Some(sink.clone()));
+    let coordinator = DefaultTurnCoordinator::new(publishing_store);
+
+    let submit = submit_request("thread-event-replay-submit", "idem-event-replay-submit");
+    coordinator.submit_turn(submit.clone()).await.unwrap();
+    coordinator.submit_turn(submit).await.unwrap();
+    assert_eq!(
+        sink.events()
+            .iter()
+            .filter(|event| event.kind == TurnEventKind::Submitted)
+            .count(),
+        1
+    );
+
+    let resume_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-event-replay-resume",
+                "idem-event-replay-resume-submit",
+            ))
+            .await
+            .unwrap(),
+    );
+    let resume_runner_id = TurnRunnerId::new();
+    let resume_lease = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: resume_runner_id,
+            lease_token: resume_lease,
+            scope_filter: Some(scope("thread-event-replay-resume")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let resume_gate_ref = LoopGateRef::new("gate:event-replay-resume").unwrap();
+    apply_test_loop_exit(
+        store.as_ref(),
+        resume_run_id,
+        resume_runner_id,
+        resume_lease,
+        dependent_blocked_mapping(TurnCheckpointId::new(), block_state_ref(), &resume_gate_ref),
+    )
+    .await
+    .unwrap();
+    let resume = ResumeTurnRequest {
+        scope: scope("thread-event-replay-resume"),
+        actor: actor(),
+        run_id: resume_run_id,
+        gate_resolution_ref: GateRef::new(resume_gate_ref.as_str()).unwrap(),
+        source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
+        idempotency_key: IdempotencyKey::new("idem-event-replay-resume").unwrap(),
+        precondition: ironclaw_turns::ResumeTurnPrecondition::BlockedDependentRunGate,
+    };
+    coordinator.resume_turn(resume.clone()).await.unwrap();
+    coordinator.resume_turn(resume).await.unwrap();
+    assert_eq!(
+        sink.events()
+            .iter()
+            .filter(|event| event.kind == TurnEventKind::Resumed)
+            .count(),
+        1
+    );
+
+    let cancel_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-event-replay-cancel",
+                "idem-event-replay-cancel-submit",
+            ))
+            .await
+            .unwrap(),
+    );
+    let cancel = cancel_request(
+        "thread-event-replay-cancel",
+        cancel_run_id,
+        "idem-event-replay-cancel",
+    );
+    coordinator.cancel_run(cancel.clone()).await.unwrap();
+    coordinator.cancel_run(cancel).await.unwrap();
+    assert_eq!(
+        sink.events()
+            .iter()
+            .filter(|event| event.kind == TurnEventKind::Cancelled)
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn default_turn_coordinator_does_not_publish_cancel_event_for_terminal_retry() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let sink = Arc::new(InMemoryTurnEventSink::default());
+    let publishing_store = lifecycle_publishing_store(store.clone(), None, Some(sink.clone()));
+    let coordinator = DefaultTurnCoordinator::new(publishing_store);
+    let response = coordinator
+        .submit_turn(submit_request(
+            "thread-terminal-cancel-retry",
+            "idem-terminal-cancel-retry",
+        ))
+        .await
+        .unwrap();
+
+    let run_id = accepted_run_id(&response);
+    complete_queued_run(&store, run_id, "thread-terminal-cancel-retry").await;
+    let events_before_retry = sink.events();
+    let retry = coordinator
+        .cancel_run(cancel_request(
+            "thread-terminal-cancel-retry",
+            run_id,
+            "idem-terminal-cancel-retry",
+        ))
+        .await
+        .unwrap();
+
+    assert!(retry.already_terminal);
+    assert_eq!(retry.status, TurnStatus::Completed);
+    assert_eq!(sink.events(), events_before_retry);
+}
+
+#[tokio::test]
+async fn event_publishing_transition_port_publishes_blocked_and_terminal_events() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let sink = Arc::new(InMemoryTurnEventSink::default());
+    let transition_port = lifecycle_publishing_store(store, None, Some(sink.clone()));
+    let coordinator = DefaultTurnCoordinator::new(transition_port.clone());
+
+    let blocked_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-transition-blocked",
+                "idem-transition-blocked",
+            ))
+            .await
+            .unwrap(),
+    );
+    let blocked_runner_id = TurnRunnerId::new();
+    let blocked_lease = TurnLeaseToken::new();
+    transition_port
+        .claim_next_run(ClaimRunRequest {
+            runner_id: blocked_runner_id,
+            lease_token: blocked_lease,
+            scope_filter: Some(scope("thread-transition-blocked")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    apply_test_loop_exit(
+        transition_port.as_ref(),
+        blocked_run_id,
+        blocked_runner_id,
+        blocked_lease,
+        dependent_blocked_mapping(
+            TurnCheckpointId::new(),
+            block_state_ref(),
+            &LoopGateRef::new("gate:transition-dependent").unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+
+    let completed_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-transition-completed",
+                "idem-transition-completed",
+            ))
+            .await
+            .unwrap(),
+    );
+    let completed_runner_id = TurnRunnerId::new();
+    let completed_lease = TurnLeaseToken::new();
+    transition_port
+        .claim_next_run(ClaimRunRequest {
+            runner_id: completed_runner_id,
+            lease_token: completed_lease,
+            scope_filter: Some(scope("thread-transition-completed")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    apply_test_loop_exit(
+        transition_port.as_ref(),
+        completed_run_id,
+        completed_runner_id,
+        completed_lease,
+        completed_mapping(),
+    )
+    .await
+    .unwrap();
+
+    let events = sink.events();
+    assert!(events.iter().any(|event| {
+        event.run_id == blocked_run_id
+            && event.kind == TurnEventKind::Blocked
+            && event.status == TurnStatus::BlockedDependentRun
+    }));
+    assert!(events.iter().any(|event| {
+        event.run_id == completed_run_id
+            && event.kind == TurnEventKind::Completed
+            && event.status == TurnStatus::Completed
+    }));
+}
+
+#[tokio::test]
+async fn event_publishing_transition_port_publishes_recovered_lease_events() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let sink = Arc::new(InMemoryTurnEventSink::default());
+    let transition_port = lifecycle_publishing_store(store, None, Some(sink.clone()));
+    let coordinator = DefaultTurnCoordinator::new(transition_port.clone());
+
+    let empty = transition_port
+        .recover_expired_leases(RecoverExpiredLeasesRequest {
+            now: Utc::now() + ChronoDuration::seconds(120),
+            scope_filter: None,
+        })
+        .await
+        .unwrap();
+    assert!(empty.recovered.is_empty());
+    assert!(sink.events().is_empty());
+
+    let first = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-recover-event-a",
+                "idem-recover-event-a",
+            ))
+            .await
+            .unwrap(),
+    );
+    let second = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-recover-event-b",
+                "idem-recover-event-b",
+            ))
+            .await
+            .unwrap(),
+    );
+    for scope_filter in [
+        Some(scope("thread-recover-event-a")),
+        Some(scope("thread-recover-event-b")),
+    ] {
+        transition_port
+            .claim_next_run(ClaimRunRequest {
+                runner_id: TurnRunnerId::new(),
+                lease_token: TurnLeaseToken::new(),
+                scope_filter,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    let recovered = transition_port
+        .recover_expired_leases(RecoverExpiredLeasesRequest {
+            now: Utc::now() + ChronoDuration::seconds(120),
+            scope_filter: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(recovered.recovered.len(), 2);
+    let events = sink.events();
+    let recovered_events = events
+        .iter()
+        .filter(|event| {
+            event.kind == TurnEventKind::RecoveryRequired
+                && event.sanitized_reason.as_deref() == Some("lease_expired")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(recovered_events.len(), 2);
+    assert!(recovered_events.iter().any(|event| event.run_id == first));
+    assert!(recovered_events.iter().any(|event| event.run_id == second));
+}
+
+#[tokio::test]
+async fn event_publishing_transition_port_does_not_fail_committed_claim_on_sink_error() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let transition_port =
+        lifecycle_publishing_store(store, None, Some(Arc::new(FailingTurnEventSink)));
+    let coordinator = DefaultTurnCoordinator::new(transition_port.clone());
+    coordinator
+        .submit_turn(submit_request(
+            "thread-claim-sink-failure",
+            "idem-claim-sink-failure",
+        ))
+        .await
+        .unwrap();
+
+    let claimed = transition_port
+        .claim_next_run(ClaimRunRequest {
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: Some(scope("thread-claim-sink-failure")),
+        })
+        .await
+        .unwrap()
+        .expect("sink failure must not hide a committed claim");
+
+    assert_eq!(claimed.state.status, TurnStatus::Running);
+}
+
+#[tokio::test]
+async fn event_publishing_transition_port_required_observer_sees_terminal_state_without_sink() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let observer = Arc::new(RecordingCommittedEventObserver::default());
+    let transition_port = lifecycle_publishing_store(
+        store,
+        Some(Arc::clone(&observer) as Arc<dyn TurnCommittedEventObserver>),
+        None,
+    );
+    let coordinator = DefaultTurnCoordinator::new(transition_port.clone());
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-required-observer",
+                "idem-required-observer",
+            ))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    transition_port
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope("thread-required-observer")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    let completed = apply_test_loop_exit(
+        transition_port.as_ref(),
+        run_id,
+        runner_id,
+        lease_token,
+        completed_mapping(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(completed.status, TurnStatus::Completed);
+    let observed_events = observer.events();
+    assert!(
+        observed_events
+            .iter()
+            .any(|event| event.run_id == run_id && event.status == TurnStatus::Completed),
+        "required observer should see terminal Completed state without sink",
+    );
+}
+
+#[tokio::test]
+async fn event_publishing_transition_port_returns_committed_claim_after_required_observer_error() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let observer = Arc::new(FailFirstRecordingCommittedEventObserver::failing_on(
+        TurnStatus::Running,
+    ));
+    let transition_port = lifecycle_publishing_store(
+        store,
+        Some(Arc::clone(&observer) as Arc<dyn TurnCommittedEventObserver>),
+        None,
+    );
+    let coordinator = DefaultTurnCoordinator::new(transition_port.clone());
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-required-observer-claim",
+                "idem-required-observer-claim",
+            ))
+            .await
+            .unwrap(),
+    );
+
+    let claimed = transition_port
+        .claim_next_run(ClaimRunRequest {
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: Some(scope("thread-required-observer-claim")),
+        })
+        .await
+        .unwrap()
+        .expect("observer failure must not hide a committed claim");
+
+    assert_eq!(claimed.state.run_id, run_id);
+    assert_eq!(claimed.state.status, TurnStatus::Running);
+    let observed_events = observer.events();
+    assert_eq!(observed_events.len(), 1);
+    assert_eq!(observed_events[0].run_id, run_id);
+}
+
+#[tokio::test]
+async fn event_publishing_transition_port_preserves_lease_expired_recovery_reason() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let sink = Arc::new(InMemoryTurnEventSink::default());
+    let transition_port = lifecycle_publishing_store(store.clone(), None, Some(sink.clone()));
+    let coordinator = DefaultTurnCoordinator::new(transition_port.clone());
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-recovery-sink", "idem-recovery-sink"))
+            .await
+            .unwrap(),
+    );
+    transition_port
+        .claim_next_run(ClaimRunRequest {
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: Some(scope("thread-recovery-sink")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let lease_expires_at = store
+        .persistence_snapshot()
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .unwrap()
+        .lease_expires_at
+        .unwrap();
+
+    transition_port
+        .recover_expired_leases(RecoverExpiredLeasesRequest {
+            now: lease_expires_at + ChronoDuration::milliseconds(1),
+            scope_filter: Some(scope("thread-recovery-sink")),
+        })
+        .await
+        .unwrap();
+
+    assert!(sink.events().iter().any(|event| {
+        event.run_id == run_id
+            && event.kind == TurnEventKind::RecoveryRequired
+            && event.sanitized_reason.as_deref() == Some("lease_expired")
+    }));
+}
+
+#[tokio::test]
+async fn event_publishing_transition_port_attempts_all_recovered_events_after_sink_error() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let sink = Arc::new(FailFirstRecordingTurnEventSink::default());
+    let transition_port = lifecycle_publishing_store(store.clone(), None, Some(sink.clone()));
+    let coordinator = DefaultTurnCoordinator::new(transition_port.clone());
+    let first_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-recovery-batch-a",
+                "idem-recovery-batch-a",
+            ))
+            .await
+            .unwrap(),
+    );
+    let second_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-recovery-batch-b",
+                "idem-recovery-batch-b",
+            ))
+            .await
+            .unwrap(),
+    );
+    transition_port
+        .claim_next_run(ClaimRunRequest {
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: Some(scope("thread-recovery-batch-a")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    transition_port
+        .claim_next_run(ClaimRunRequest {
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: Some(scope("thread-recovery-batch-b")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let lease_expires_at = store
+        .persistence_snapshot()
+        .runs
+        .iter()
+        .filter_map(|record| record.lease_expires_at)
+        .min()
+        .unwrap();
+
+    transition_port
+        .recover_expired_leases(RecoverExpiredLeasesRequest {
+            now: lease_expires_at + ChronoDuration::milliseconds(1),
+            scope_filter: None,
+        })
+        .await
+        .unwrap();
+
+    let events = sink.events();
+    assert!(events.iter().any(|event| event.run_id == first_run_id));
+    assert!(events.iter().any(|event| event.run_id == second_run_id));
+}
+
+#[tokio::test]
+async fn event_publishing_transition_port_attempts_all_recovered_events_after_observer_error() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let observer = Arc::new(FailFirstRecordingCommittedEventObserver::failing_on(
+        TurnStatus::RecoveryRequired,
+    ));
+    let transition_port = lifecycle_publishing_store(
+        store.clone(),
+        Some(Arc::clone(&observer) as Arc<dyn TurnCommittedEventObserver>),
+        None,
+    );
+    let coordinator = DefaultTurnCoordinator::new(transition_port.clone());
+    let first_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-recovery-observer-a",
+                "idem-recovery-observer-a",
+            ))
+            .await
+            .unwrap(),
+    );
+    let second_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-recovery-observer-b",
+                "idem-recovery-observer-b",
+            ))
+            .await
+            .unwrap(),
+    );
+    transition_port
+        .claim_next_run(ClaimRunRequest {
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: Some(scope("thread-recovery-observer-a")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    transition_port
+        .claim_next_run(ClaimRunRequest {
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: Some(scope("thread-recovery-observer-b")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let lease_expires_at = store
+        .persistence_snapshot()
+        .runs
+        .iter()
+        .filter_map(|record| record.lease_expires_at)
+        .min()
+        .unwrap();
+
+    transition_port
+        .recover_expired_leases(RecoverExpiredLeasesRequest {
+            now: lease_expires_at + ChronoDuration::milliseconds(1),
+            scope_filter: None,
+        })
+        .await
+        .unwrap();
+
+    let observed_events = observer.events();
+    assert!(
+        observed_events
+            .iter()
+            .any(|event| event.run_id == first_run_id)
+    );
+    assert!(
+        observed_events
+            .iter()
+            .any(|event| event.run_id == second_run_id)
+    );
+    assert!(
+        observed_events
+            .iter()
+            .any(|event| event.status == TurnStatus::RecoveryRequired)
+    );
+}
+
+#[tokio::test]
+async fn default_turn_coordinator_cancel_event_uses_committed_run_owner() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let sink = Arc::new(InMemoryTurnEventSink::default());
+    let store = lifecycle_publishing_store(store, None, Some(sink.clone()));
+    let coordinator = DefaultTurnCoordinator::new(store);
+    let mut request = submit_request("thread-cancel-owner", "idem-cancel-owner-submit");
+    request.actor = TurnActor::new(UserId::new("user-run-owner").unwrap());
+    let run_id = accepted_run_id(&coordinator.submit_turn(request).await.unwrap());
+
+    coordinator
+        .cancel_run(CancelRunRequest {
+            scope: scope("thread-cancel-owner"),
+            actor: TurnActor::new(UserId::new("user-run-owner").unwrap()),
+            run_id,
+            reason: SanitizedCancelReason::OperatorRequested,
+            idempotency_key: IdempotencyKey::new("idem-cancel-owner").unwrap(),
+        })
+        .await
+        .unwrap();
+
+    let cancel_event = sink
+        .events()
+        .into_iter()
+        .find(|event| event.run_id == run_id && event.kind == TurnEventKind::Cancelled)
+        .expect("terminal cancel event should be published");
+    assert_eq!(
+        cancel_event
+            .owner_user_id
+            .as_ref()
+            .map(|user| user.as_str()),
+        Some("user-run-owner")
+    );
+}
+
+#[test]
+fn cancel_run_response_serialization_omits_internal_actor() {
+    let response = CancelRunResponse {
+        run_id: TurnRunId::new(),
+        status: TurnStatus::Cancelled,
+        event_cursor: EventCursor(3),
+        already_terminal: false,
+        actor: Some(TurnActor::new(UserId::new("user-run-owner").unwrap())),
+    };
+
+    let encoded = serde_json::to_value(&response).unwrap();
+
+    assert!(encoded.get("actor").is_none());
+}
+
+#[tokio::test]
+async fn default_turn_coordinator_required_observer_sees_terminal_cancel() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let observer = Arc::new(RecordingCommittedEventObserver::default());
+    let store = lifecycle_publishing_store(
+        store,
+        Some(Arc::clone(&observer) as Arc<dyn TurnCommittedEventObserver>),
+        None,
+    );
+    let coordinator = DefaultTurnCoordinator::new(store);
+    let mut request = submit_request(
+        "thread-required-cancel-observer",
+        "idem-required-cancel-observer-submit",
+    );
+    request.actor = TurnActor::new(UserId::new("user-run-owner").unwrap());
+    let run_id = accepted_run_id(&coordinator.submit_turn(request).await.unwrap());
+
+    coordinator
+        .cancel_run(CancelRunRequest {
+            scope: scope("thread-required-cancel-observer"),
+            actor: TurnActor::new(UserId::new("user-run-owner").unwrap()),
+            run_id,
+            reason: SanitizedCancelReason::OperatorRequested,
+            idempotency_key: IdempotencyKey::new("idem-required-cancel-observer").unwrap(),
+        })
+        .await
+        .unwrap();
+
+    let observed_events = observer.events();
+    assert_eq!(observed_events.len(), 1);
+    assert_eq!(observed_events[0].run_id, run_id);
+    assert_eq!(observed_events[0].kind, TurnEventKind::Cancelled);
+    assert_eq!(
+        observed_events[0]
+            .owner_user_id
+            .as_ref()
+            .map(|user| user.as_str()),
+        Some("user-run-owner")
+    );
+}
+
+#[tokio::test]
+async fn lifecycle_publishing_store_propagates_required_observer_error_on_submit() {
+    let raw_store = Arc::new(InMemoryTurnStateStore::default());
+    let observer = Arc::new(FailFirstEventKindObserver::failing_on(
+        TurnEventKind::Submitted,
+    ));
+    let notifier = Arc::new(RecordingWakeNotifier::default());
+    let publishing_store = lifecycle_publishing_store(
+        Arc::clone(&raw_store),
+        Some(Arc::clone(&observer) as Arc<dyn TurnCommittedEventObserver>),
+        None,
+    );
+    let publication_error_port: Arc<dyn LifecyclePublicationErrorPort> = publishing_store.clone();
+    let coordinator = DefaultTurnCoordinator::new(publishing_store)
+        .with_wake_notifier(notifier.clone())
+        .with_lifecycle_publication_error_port(publication_error_port);
+
+    let error = coordinator
+        .submit_turn(submit_request(
+            "thread-required-submit-error",
+            "idem-required-submit-error",
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, TurnError::Unavailable { .. }));
+    let observed_events = observer.events();
+    assert_eq!(observed_events.len(), 1);
+    assert_eq!(observed_events[0].kind, TurnEventKind::Submitted);
+    assert_eq!(raw_store.persistence_snapshot().runs.len(), 1);
+    assert_eq!(
+        notifier.wakes().len(),
+        1,
+        "committed submit must wake runner before propagating observer failure",
+    );
+}
+
+#[tokio::test]
+async fn lifecycle_publishing_store_propagates_required_observer_error_on_resume() {
+    let raw_store = Arc::new(InMemoryTurnStateStore::default());
+    let bus = Arc::new(DefaultTurnLifecycleEventBus::new());
+    let publishing_store = Arc::new(LifecyclePublishingTurnStateStore::new(
+        Arc::clone(&raw_store),
+        bus.clone(),
+    ));
+    let notifier = Arc::new(RecordingWakeNotifier::default());
+    let publication_error_port: Arc<dyn LifecyclePublicationErrorPort> = publishing_store.clone();
+    let coordinator = DefaultTurnCoordinator::new(Arc::clone(&publishing_store))
+        .with_wake_notifier(notifier.clone())
+        .with_lifecycle_publication_error_port(publication_error_port);
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-required-resume-error",
+                "idem-required-resume-error-submit",
+            ))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    publishing_store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope("thread-required-resume-error")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let gate_ref = LoopGateRef::new("gate:required-resume-error").unwrap();
+    apply_test_loop_exit(
+        publishing_store.as_ref(),
+        run_id,
+        runner_id,
+        lease_token,
+        dependent_blocked_mapping(TurnCheckpointId::new(), block_state_ref(), &gate_ref),
+    )
+    .await
+    .unwrap();
+
+    let observer = Arc::new(FailFirstEventKindObserver::failing_on(
+        TurnEventKind::Resumed,
+    ));
+    bus.subscribe_required(Arc::clone(&observer) as Arc<dyn TurnCommittedEventObserver>)
+        .unwrap();
+    notifier.clear();
+    let error = coordinator
+        .resume_turn(ResumeTurnRequest {
+            scope: scope("thread-required-resume-error"),
+            actor: actor(),
+            run_id,
+            gate_resolution_ref: GateRef::new(gate_ref.as_str()).unwrap(),
+            source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
+            idempotency_key: IdempotencyKey::new("idem-required-resume-error").unwrap(),
+            precondition: ironclaw_turns::ResumeTurnPrecondition::BlockedDependentRunGate,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, TurnError::Unavailable { .. }));
+    let observed_events = observer.events();
+    assert_eq!(observed_events.len(), 1);
+    assert_eq!(observed_events[0].kind, TurnEventKind::Resumed);
+    let resumed = raw_store
+        .get_run_state(GetRunStateRequest {
+            scope: scope("thread-required-resume-error"),
+            run_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(resumed.status, TurnStatus::Queued);
+    assert_eq!(
+        notifier.wakes().len(),
+        1,
+        "committed resume must wake runner before propagating observer failure",
+    );
+}
+
+#[tokio::test]
+async fn lifecycle_publishing_store_publishes_child_submit_event() {
+    let raw_store = Arc::new(InMemoryTurnStateStore::default());
+    let sink = Arc::new(InMemoryTurnEventSink::default());
+    let publishing_store = lifecycle_publishing_store(raw_store, None, Some(sink.clone()));
+    let coordinator = DefaultTurnCoordinator::new(publishing_store);
+    let parent = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-lifecycle-child-parent",
+                "idem-lifecycle-child-parent",
+            ))
+            .await
+            .unwrap(),
+    );
+    let child_id = coordinator
+        .prepare_turn(scope("thread-lifecycle-child"))
+        .await
+        .unwrap();
+
+    coordinator
+        .submit_child_run(child_run_request(
+            scope("thread-lifecycle-child-parent"),
+            parent,
+            "thread-lifecycle-child",
+            child_id,
+            "idem-lifecycle-child",
+            2,
+        ))
+        .await
+        .unwrap();
+
+    assert!(sink.events().iter().any(|event| {
+        event.run_id == child_id
+            && event.kind == TurnEventKind::Submitted
+            && event.scope == scope("thread-lifecycle-child")
+            && event.status == TurnStatus::Queued
+    }));
+}
+
+#[tokio::test]
+async fn lifecycle_publishing_store_publishes_failed_run_event() {
+    let raw_store = Arc::new(InMemoryTurnStateStore::default());
+    let sink = Arc::new(InMemoryTurnEventSink::default());
+    let transition_port = lifecycle_publishing_store(raw_store, None, Some(sink.clone()));
+    let coordinator = DefaultTurnCoordinator::new(transition_port.clone());
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-lifecycle-failed",
+                "idem-lifecycle-failed",
+            ))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    transition_port
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope("thread-lifecycle-failed")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    transition_port
+        .fail_run(FailRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            failure: SanitizedFailure::new("model_failure").unwrap(),
+        })
+        .await
+        .unwrap();
+
+    assert!(sink.events().iter().any(|event| {
+        event.run_id == run_id
+            && event.kind == TurnEventKind::Failed
+            && event.status == TurnStatus::Failed
+            && event.sanitized_reason.as_deref() == Some("model_failure")
+    }));
+}
+
+#[tokio::test]
+async fn lifecycle_publishing_store_publishes_record_recovery_required_event() {
+    let raw_store = Arc::new(InMemoryTurnStateStore::default());
+    let sink = Arc::new(InMemoryTurnEventSink::default());
+    let transition_port = lifecycle_publishing_store(raw_store, None, Some(sink.clone()));
+    let coordinator = DefaultTurnCoordinator::new(transition_port.clone());
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-lifecycle-recovery",
+                "idem-lifecycle-recovery",
+            ))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    transition_port
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope("thread-lifecycle-recovery")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    transition_port
+        .record_recovery_required(RecordRecoveryRequiredRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            failure: SanitizedFailure::new("driver_timeout").unwrap(),
+        })
+        .await
+        .unwrap();
+
+    assert!(sink.events().iter().any(|event| {
+        event.run_id == run_id
+            && event.kind == TurnEventKind::RecoveryRequired
+            && event.status == TurnStatus::RecoveryRequired
+            && event.sanitized_reason.as_deref() == Some("driver_timeout")
+    }));
+}
+
+#[tokio::test]
+
 async fn turn_lifecycle_projection_replays_submit_block_resume_complete_without_raw_refs() {
     let (coordinator, store) = coordinator();
     let mut request = submit_request("thread-turn-events", "idem-turn-events-submit");
@@ -200,6 +1841,7 @@ async fn turn_lifecycle_projection_replays_submit_block_resume_complete_without_
     let snapshot = projection
         .snapshot(TurnEventProjectionRequest {
             scope: request.scope.clone(),
+            owner_user_id: None,
             after: None,
             limit: 10,
         })
@@ -236,6 +1878,7 @@ async fn turn_lifecycle_projection_replays_submit_block_resume_complete_without_
     let foreign = projection
         .updates(TurnEventProjectionRequest {
             scope: scope("thread-foreign-turn-events"),
+            owner_user_id: None,
             after: Some(snapshot.next_cursor.clone()),
             limit: 10,
         })
@@ -308,6 +1951,7 @@ async fn turn_lifecycle_projection_replays_failed_terminal_with_sanitized_reason
     let snapshot = projection
         .snapshot(TurnEventProjectionRequest {
             scope: request.scope.clone(),
+            owner_user_id: None,
             after: None,
             limit: 10,
         })
@@ -413,6 +2057,7 @@ async fn turn_lifecycle_projection_replays_cancelled_terminal_without_raw_refs()
     let snapshot = projection
         .snapshot(TurnEventProjectionRequest {
             scope: request.scope.clone(),
+            owner_user_id: None,
             after: None,
             limit: 10,
         })
@@ -515,6 +2160,7 @@ async fn turn_lifecycle_projection_requires_rebase_for_pruned_or_fabricated_curs
     let pruned_origin = projection
         .snapshot(TurnEventProjectionRequest {
             scope: request.scope.clone(),
+            owner_user_id: None,
             after: Some(origin),
             limit: 10,
         })
@@ -528,6 +2174,7 @@ async fn turn_lifecycle_projection_requires_rebase_for_pruned_or_fabricated_curs
     let fabricated = projection
         .updates(TurnEventProjectionRequest {
             scope: request.scope.clone(),
+            owner_user_id: None,
             after: Some(TurnEventProjectionCursor::for_scope(
                 request.scope.clone(),
                 EventCursor(999),
@@ -1709,6 +3356,183 @@ async fn terminal_record_pruning_bounds_released_admission_reservations() {
 }
 
 #[tokio::test]
+async fn terminal_root_with_tree_reservation_survives_terminal_pruning() {
+    let store = Arc::new(InMemoryTurnStateStore::with_limits(
+        InMemoryTurnStateStoreLimits {
+            max_terminal_records: 1,
+            ..InMemoryTurnStateStoreLimits::default()
+        },
+    ));
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+    let parent_scope = scope("thread-tree-root-pruned");
+    let parent_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-tree-root-pruned",
+                "idem-tree-root-pruned",
+            ))
+            .await
+            .unwrap(),
+    );
+
+    store
+        .reserve_tree_descendants(&parent_scope, parent_run_id, 1, 3)
+        .await
+        .unwrap();
+    complete_queued_run(&store, parent_run_id, "thread-tree-root-pruned").await;
+
+    for index in 0..3 {
+        let thread = format!("thread-terminal-churn-{index}");
+        let run_id = accepted_run_id(
+            &coordinator
+                .submit_turn(submit_request(
+                    &thread,
+                    &format!("idem-terminal-churn-{index}"),
+                ))
+                .await
+                .unwrap(),
+        );
+        complete_queued_run(&store, run_id, &thread).await;
+    }
+
+    assert!(
+        store
+            .get_run_record(&parent_scope, parent_run_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        store
+            .reserve_tree_descendants(&scope("thread-child-after-prune"), parent_run_id, 1, 3)
+            .await
+            .unwrap()
+            .descendant_count,
+        2
+    );
+    assert!(
+        store
+            .persistence_snapshot()
+            .spawn_tree_reservations
+            .iter()
+            .any(|reservation| reservation.root_run_id == parent_run_id)
+    );
+}
+
+#[tokio::test]
+async fn terminal_root_release_does_not_duplicate_pruning_queue() {
+    let store = Arc::new(InMemoryTurnStateStore::with_limits(
+        InMemoryTurnStateStoreLimits {
+            max_terminal_records: 1,
+            ..InMemoryTurnStateStoreLimits::default()
+        },
+    ));
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+    let parent_scope = scope("thread-tree-root-release");
+    let parent_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-tree-root-release",
+                "idem-tree-root-release",
+            ))
+            .await
+            .unwrap(),
+    );
+
+    store
+        .reserve_tree_descendants(&parent_scope, parent_run_id, 1, 3)
+        .await
+        .unwrap();
+    complete_queued_run(&store, parent_run_id, "thread-tree-root-release").await;
+    store
+        .release_tree_descendants(&parent_scope, parent_run_id, 1)
+        .await
+        .unwrap();
+
+    assert!(
+        store
+            .get_run_record(&parent_scope, parent_run_id)
+            .await
+            .unwrap()
+            .is_some(),
+        "release must not enqueue the same terminal run twice and prune it immediately"
+    );
+}
+
+#[tokio::test]
+async fn releasing_old_reserved_terminal_root_keeps_newer_terminal_record() {
+    let store = Arc::new(InMemoryTurnStateStore::with_limits(
+        InMemoryTurnStateStoreLimits {
+            max_terminal_records: 1,
+            ..InMemoryTurnStateStoreLimits::default()
+        },
+    ));
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+    let parent_scope = scope("thread-tree-root-release-after-churn");
+    let parent_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-tree-root-release-after-churn",
+                "idem-tree-root-release-after-churn",
+            ))
+            .await
+            .unwrap(),
+    );
+
+    store
+        .reserve_tree_descendants(&parent_scope, parent_run_id, 1, 3)
+        .await
+        .unwrap();
+    complete_queued_run(
+        &store,
+        parent_run_id,
+        "thread-tree-root-release-after-churn",
+    )
+    .await;
+
+    let newer_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-newer-terminal",
+                "idem-newer-terminal",
+            ))
+            .await
+            .unwrap(),
+    );
+    complete_queued_run(&store, newer_run_id, "thread-newer-terminal").await;
+    assert!(
+        store
+            .get_run_record(&parent_scope, parent_run_id)
+            .await
+            .unwrap()
+            .is_some(),
+        "reservation should keep the old terminal root through churn"
+    );
+
+    store
+        .release_tree_descendants(&parent_scope, parent_run_id, 1)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store
+            .get_run_record(&parent_scope, parent_run_id)
+            .await
+            .unwrap(),
+        None,
+        "old terminal root should be pruned when its reservation clears"
+    );
+    assert!(
+        store
+            .get_run_record(&scope("thread-newer-terminal"), newer_run_id)
+            .await
+            .unwrap()
+            .is_some(),
+        "newer retained terminal record should not be evicted by old-root release"
+    );
+}
+
+#[tokio::test]
 async fn actor_user_capacity_uses_submitting_actor_not_thread_scope() {
     let limits = StaticTurnAdmissionLimitProvider::default()
         .with_total_limit(TurnAdmissionAxisKind::ActorUser, 1);
@@ -2107,8 +3931,98 @@ async fn runner_claim_and_block_update_persistent_run_lock_and_checkpoint_record
     assert_eq!(checkpoint.checkpoint_id, checkpoint_id);
     assert_eq!(checkpoint.run_id, run_id);
     assert_eq!(checkpoint.sequence, 1);
-    assert_eq!(checkpoint.gate_ref, gate_ref);
+    assert_eq!(checkpoint.gate_ref, gate_ref.clone());
     assert_eq!(checkpoint.state_ref, state_ref);
+
+    let blocked_event = store
+        .events()
+        .into_iter()
+        .find(|event| event.kind == TurnEventKind::Blocked && event.run_id == run_id)
+        .unwrap();
+    assert_eq!(blocked_event.owner_user_id, Some(actor().user_id));
+    assert!(blocked_event.occurred_at.is_some());
+    let blocked_gate = blocked_event.blocked_gate.unwrap();
+    assert_eq!(blocked_gate.gate_ref, gate_ref);
+    assert_eq!(
+        blocked_gate.gate_kind,
+        ironclaw_turns::TurnBlockedGateKind::Approval
+    );
+}
+
+async fn block_run_with_reason_yields_expected_blocked_gate(
+    thread_id: &str,
+    idem_key: &str,
+    reason_builder: impl Fn(GateRef) -> BlockedReason,
+    expected_kind: ironclaw_turns::TurnBlockedGateKind,
+    gate_ref_str: &str,
+) {
+    let (coordinator, store) = coordinator();
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(thread_id, idem_key))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    let gate_ref = GateRef::new(gate_ref_str).unwrap();
+    let state_ref = LoopCheckpointStateRef::new("checkpoint:reason-block-state").unwrap();
+    store
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref,
+            reason: reason_builder(gate_ref.clone()),
+        })
+        .await
+        .unwrap();
+
+    let blocked_event = store
+        .events()
+        .into_iter()
+        .find(|event| event.kind == TurnEventKind::Blocked && event.run_id == run_id)
+        .expect("block_run emits a Blocked lifecycle event");
+    let blocked_gate = blocked_event
+        .blocked_gate
+        .expect("block_run sets blocked_gate metadata for the reason");
+    assert_eq!(blocked_gate.gate_ref, gate_ref);
+    assert_eq!(blocked_gate.gate_kind, expected_kind);
+}
+
+#[tokio::test]
+async fn block_run_auth_emits_blocked_event_with_auth_gate_kind() {
+    block_run_with_reason_yields_expected_blocked_gate(
+        "thread-block-auth",
+        "idem-submit-auth",
+        |gate_ref| BlockedReason::Auth { gate_ref },
+        ironclaw_turns::TurnBlockedGateKind::Auth,
+        "auth-gate",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn block_run_resource_emits_blocked_event_with_resource_gate_kind() {
+    block_run_with_reason_yields_expected_blocked_gate(
+        "thread-block-resource",
+        "idem-submit-resource",
+        |gate_ref| BlockedReason::Resource { gate_ref },
+        ironclaw_turns::TurnBlockedGateKind::Resource,
+        "resource-gate",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -2422,6 +4336,33 @@ async fn submit_turn_idempotency_replays_same_admission_rejection() {
         ))
     );
     assert!(store.events().is_empty());
+}
+
+#[test]
+fn capacity_exceeded_idempotency_replay_preserves_resource_and_cap() {
+    let scope = scope("thread-capacity-replay");
+    let key = IdempotencyKey::new("idem-capacity-replay").unwrap();
+    let record = TurnIdempotencyRecord {
+        scope,
+        operation: TurnIdempotencyOperationKind::Submit,
+        key,
+        turn_id: None,
+        run_id: None,
+        outcome: TurnIdempotencyOutcomeKind::CapacityExceeded,
+        replay: TurnIdempotencyReplay::Error(TurnIdempotencyErrorReplay::from_error(
+            &TurnError::capacity_exceeded(TurnCapacityResource::SpawnTreeDescendants, 3),
+        )),
+        created_at: Utc::now(),
+        expires_at: None,
+    };
+
+    assert_eq!(
+        record.replay_submit(),
+        Some(Err(TurnError::CapacityExceeded {
+            resource: TurnCapacityResource::SpawnTreeDescendants,
+            cap: 3,
+        }))
+    );
 }
 
 #[tokio::test]
@@ -3932,9 +5873,12 @@ async fn in_memory_event_sink_retains_a_bounded_tail() {
         sink.publish(TurnLifecycleEvent {
             cursor: EventCursor(cursor),
             scope: scope("thread-a"),
+            occurred_at: None,
+            owner_user_id: None,
             run_id: TurnRunId::new(),
             status: TurnStatus::Queued,
             kind: TurnEventKind::Submitted,
+            blocked_gate: None,
             sanitized_reason: None,
         })
         .await
@@ -4005,12 +5949,236 @@ fn assert_no_forbidden_turn_event_content(label: &str, serialized: &str, forbidd
     }
 }
 
+#[test]
+fn turn_capacity_resource_wire_shape_is_stable() {
+    assert_eq!(
+        serde_json::to_value(TurnCapacityResource::SpawnTreeDescendants).unwrap(),
+        serde_json::json!("spawn_tree_descendants")
+    );
+    assert_eq!(
+        serde_json::to_value(TurnCapacityResource::SubmitTurn).unwrap(),
+        serde_json::json!("submit_turn")
+    );
+    // #[serde(other)] catch-all maps unknown forward variants to Replayed so a
+    // future producer adding a new resource cannot brick idempotency replay
+    // for an older consumer.
+    let unknown: TurnCapacityResource =
+        serde_json::from_value(serde_json::json!("unknown_future_variant")).unwrap();
+    assert_eq!(unknown, TurnCapacityResource::Replayed);
+    assert_eq!(
+        serde_json::to_value(TurnCapacityResource::Replayed).unwrap(),
+        serde_json::json!("replayed")
+    );
+}
+
+#[test]
+fn turn_blocked_gate_kind_await_dependent_run_maps_from_status_and_round_trips_wire() {
+    use ironclaw_turns::TurnBlockedGateKind;
+
+    assert_eq!(
+        TurnBlockedGateKind::from_status(TurnStatus::BlockedDependentRun),
+        Some(TurnBlockedGateKind::AwaitDependentRun)
+    );
+
+    let wire = serde_json::to_value(TurnBlockedGateKind::AwaitDependentRun).unwrap();
+    assert_eq!(wire, serde_json::json!("await_dependent_run"));
+    assert_eq!(
+        serde_json::from_value::<TurnBlockedGateKind>(wire).unwrap(),
+        TurnBlockedGateKind::AwaitDependentRun
+    );
+}
+
+#[tokio::test]
+async fn prepare_turn_with_requested_id_from_mismatched_scope_is_rejected() {
+    let (coordinator, _store) = coordinator();
+    let prepared = coordinator
+        .prepare_turn(scope("thread-prepared-origin"))
+        .await
+        .unwrap();
+
+    let mut request = submit_request("thread-prepared-submit", "idem-prepared-submit");
+    request.requested_run_id = Some(prepared);
+    let error = coordinator.submit_turn(request).await.unwrap_err();
+
+    assert!(matches!(error, TurnError::Unauthorized));
+}
+
+#[tokio::test]
+async fn any_blocked_gate_resume_does_not_resume_dependent_run_gate() {
+    let (coordinator, store) = coordinator();
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-dependent-resume",
+                "idem-dependent-resume",
+            ))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let gate_ref = GateRef::new("gate-dependent-resume").unwrap();
+    store
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref: block_state_ref(),
+            reason: BlockedReason::AwaitDependentRun {
+                gate_ref: gate_ref.clone(),
+            },
+        })
+        .await
+        .unwrap();
+
+    let err = coordinator
+        .resume_turn(ResumeTurnRequest {
+            scope: scope("thread-dependent-resume"),
+            actor: actor(),
+            run_id,
+            gate_resolution_ref: gate_ref.clone(),
+            precondition: ironclaw_turns::ResumeTurnPrecondition::AnyBlockedGate,
+            source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
+            idempotency_key: IdempotencyKey::new("idem-dependent-resume-any").unwrap(),
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        err,
+        TurnError::InvalidTransition {
+            from: TurnStatus::BlockedDependentRun,
+            to: TurnStatus::Queued,
+        }
+    );
+    let state = coordinator
+        .get_run_state(GetRunStateRequest {
+            scope: scope("thread-dependent-resume"),
+            run_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(state.status, TurnStatus::BlockedDependentRun);
+    assert_eq!(state.gate_ref, Some(gate_ref));
+}
+
+#[tokio::test]
+async fn release_tree_descendants_rejects_over_release() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+
+    let root = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-tree-root", "idem-tree-root"))
+            .await
+            .unwrap(),
+    );
+    let owner_scope = scope("thread-tree-root");
+    store
+        .reserve_tree_descendants(&owner_scope, root, 2, 8)
+        .await
+        .unwrap();
+
+    let err = store
+        .release_tree_descendants(&owner_scope, root, 3)
+        .await
+        .unwrap_err();
+    match err {
+        TurnError::InvalidRequest { reason } => {
+            assert!(reason.contains("exceeds current reservation count"));
+        }
+        other => panic!("expected InvalidRequest, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn reserve_tree_descendants_rejects_zero_delta() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+    let owner_scope = scope("thread-tree-zero-reservation");
+
+    let root = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-tree-zero-reservation",
+                "idem-tree-zero-reservation",
+            ))
+            .await
+            .unwrap(),
+    );
+
+    let err = store
+        .reserve_tree_descendants(&owner_scope, root, 0, 8)
+        .await
+        .unwrap_err();
+    match err {
+        TurnError::InvalidRequest { reason } => {
+            assert!(reason.contains("greater than zero"));
+        }
+        other => panic!("expected InvalidRequest, got {other:?}"),
+    }
+    assert!(
+        store
+            .persistence_snapshot()
+            .spawn_tree_reservations
+            .is_empty()
+    );
+}
+
 fn coordinator() -> (
     DefaultTurnCoordinator<InMemoryTurnStateStore>,
     Arc<InMemoryTurnStateStore>,
 ) {
     let store = Arc::new(InMemoryTurnStateStore::default());
     (DefaultTurnCoordinator::new(store.clone()), store)
+}
+
+fn lifecycle_publishing_store(
+    store: Arc<InMemoryTurnStateStore>,
+    required_observer: Option<Arc<dyn TurnCommittedEventObserver>>,
+    best_effort_sink: Option<Arc<dyn TurnEventSink>>,
+) -> Arc<LifecyclePublishingTurnStateStore<InMemoryTurnStateStore>> {
+    let bus = Arc::new(DefaultTurnLifecycleEventBus::new());
+    if let Some(observer) = required_observer {
+        bus.subscribe_required(observer).unwrap();
+    }
+    if let Some(sink) = best_effort_sink {
+        bus.subscribe_best_effort(sink).unwrap();
+    }
+    Arc::new(LifecyclePublishingTurnStateStore::new(store, bus))
+}
+
+async fn complete_queued_run(store: &InMemoryTurnStateStore, run_id: TurnRunId, thread: &str) {
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope(thread)),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .complete_run(CompleteRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+        })
+        .await
+        .unwrap();
 }
 
 fn submit_request(thread: &str, idempotency_key: &str) -> SubmitTurnRequest {
@@ -4023,6 +6191,34 @@ fn submit_request(thread: &str, idempotency_key: &str) -> SubmitTurnRequest {
         requested_run_profile: Some(RunProfileRequest::new("default").unwrap()),
         idempotency_key: IdempotencyKey::new(idempotency_key).unwrap(),
         received_at: received_at(),
+        requested_run_id: None,
+        parent_run_id: None,
+        subagent_depth: 0,
+        spawn_tree_root_run_id: None,
+    }
+}
+
+fn child_run_request(
+    parent_scope: TurnScope,
+    parent_run_id: TurnRunId,
+    child_thread: &str,
+    child_run_id: TurnRunId,
+    idempotency_key: &str,
+    spawn_tree_descendant_cap: u32,
+) -> SubmitChildRunRequest {
+    SubmitChildRunRequest {
+        parent_scope,
+        parent_run_id,
+        child_scope: scope(child_thread),
+        actor: actor(),
+        accepted_message_ref: AcceptedMessageRef::new(format!("message-{child_thread}")).unwrap(),
+        source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
+        requested_run_profile: Some(RunProfileRequest::new("default").unwrap()),
+        idempotency_key: IdempotencyKey::new(idempotency_key).unwrap(),
+        received_at: received_at(),
+        requested_run_id: Some(child_run_id),
+        spawn_tree_descendant_cap,
     }
 }
 
@@ -4089,6 +6285,211 @@ struct FailingWakeNotifier;
 impl TurnRunWakeNotifier for FailingWakeNotifier {
     fn notify_queued_run(&self, _wake: TurnRunWake) -> Result<(), TurnRunWakeNotifyError> {
         Err(TurnRunWakeNotifyError::DeliveryUnavailable)
+    }
+}
+
+struct FailingTurnEventSink;
+
+#[async_trait::async_trait]
+impl TurnEventSink for FailingTurnEventSink {
+    async fn publish(&self, _event: TurnLifecycleEvent) -> Result<(), TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "test event sink unavailable".to_string(),
+        })
+    }
+}
+
+#[derive(Default)]
+struct RecordingCommittedEventObserver {
+    events: Mutex<Vec<TurnLifecycleEvent>>,
+}
+
+impl RecordingCommittedEventObserver {
+    fn events(&self) -> Vec<TurnLifecycleEvent> {
+        self.events.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl TurnCommittedEventObserver for RecordingCommittedEventObserver {
+    fn observes_state(&self, state: &TurnRunState) -> bool {
+        state.status.is_terminal()
+    }
+
+    fn observes_event(&self, event: &TurnLifecycleEvent) -> bool {
+        event.status.is_terminal()
+    }
+
+    async fn observe_committed_state(&self, state: TurnRunState) -> Result<(), TurnError> {
+        self.events
+            .lock()
+            .unwrap()
+            .push(event_from_state_for_recording(&state));
+        Ok(())
+    }
+
+    async fn observe_committed_event(&self, event: TurnLifecycleEvent) -> Result<(), TurnError> {
+        self.events.lock().unwrap().push(event);
+        Ok(())
+    }
+}
+
+struct FailFirstEventKindObserver {
+    events: Mutex<Vec<TurnLifecycleEvent>>,
+    failed: AtomicBool,
+    fail_kind: TurnEventKind,
+}
+
+impl FailFirstEventKindObserver {
+    fn failing_on(fail_kind: TurnEventKind) -> Self {
+        Self {
+            events: Mutex::new(Vec::new()),
+            failed: AtomicBool::new(false),
+            fail_kind,
+        }
+    }
+
+    fn events(&self) -> Vec<TurnLifecycleEvent> {
+        self.events.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl TurnCommittedEventObserver for FailFirstEventKindObserver {
+    fn observes_event(&self, event: &TurnLifecycleEvent) -> bool {
+        event.kind == self.fail_kind
+    }
+
+    async fn observe_committed_state(&self, _state: TurnRunState) -> Result<(), TurnError> {
+        Ok(())
+    }
+
+    async fn observe_committed_event(&self, event: TurnLifecycleEvent) -> Result<(), TurnError> {
+        self.events.lock().unwrap().push(event);
+        if !self.failed.swap(true, Ordering::SeqCst) {
+            return Err(TurnError::Unavailable {
+                reason: "test committed event observer failed".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct FailFirstRecordingCommittedEventObserver {
+    events: Mutex<Vec<TurnLifecycleEvent>>,
+    failed: AtomicBool,
+    fail_status: Option<TurnStatus>,
+}
+
+impl FailFirstRecordingCommittedEventObserver {
+    fn failing_on(status: TurnStatus) -> Self {
+        Self {
+            events: Mutex::new(Vec::new()),
+            failed: AtomicBool::new(false),
+            fail_status: Some(status),
+        }
+    }
+
+    fn events(&self) -> Vec<TurnLifecycleEvent> {
+        self.events.lock().unwrap().clone()
+    }
+
+    fn should_fail_for_status(&self, status: TurnStatus) -> bool {
+        match self.fail_status {
+            Some(fail_status) => fail_status == status,
+            None => true,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl TurnCommittedEventObserver for FailFirstRecordingCommittedEventObserver {
+    fn observes_state(&self, state: &TurnRunState) -> bool {
+        match self.fail_status {
+            Some(fail_status) => fail_status == state.status,
+            None => true,
+        }
+    }
+
+    fn observes_event(&self, event: &TurnLifecycleEvent) -> bool {
+        match self.fail_status {
+            Some(fail_status) => fail_status == event.status,
+            None => true,
+        }
+    }
+
+    async fn observe_committed_state(&self, state: TurnRunState) -> Result<(), TurnError> {
+        let should_fail_for_status = self.should_fail_for_status(state.status);
+        self.events
+            .lock()
+            .unwrap()
+            .push(event_from_state_for_recording(&state));
+        if should_fail_for_status && !self.failed.swap(true, Ordering::SeqCst) {
+            return Err(TurnError::Unavailable {
+                reason: "test committed observer failed".to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    async fn observe_committed_event(&self, event: TurnLifecycleEvent) -> Result<(), TurnError> {
+        let should_fail_for_status = self.should_fail_for_status(event.status);
+        self.events.lock().unwrap().push(event);
+        if should_fail_for_status && !self.failed.swap(true, Ordering::SeqCst) {
+            return Err(TurnError::Unavailable {
+                reason: "test committed observer failed".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+fn event_from_state_for_recording(state: &TurnRunState) -> TurnLifecycleEvent {
+    let kind = match state.status {
+        TurnStatus::Running => TurnEventKind::RunnerClaimed,
+        TurnStatus::BlockedApproval
+        | TurnStatus::BlockedAuth
+        | TurnStatus::BlockedResource
+        | TurnStatus::BlockedDependentRun => TurnEventKind::Blocked,
+        TurnStatus::Completed => TurnEventKind::Completed,
+        TurnStatus::Cancelled => TurnEventKind::Cancelled,
+        TurnStatus::Failed => TurnEventKind::Failed,
+        TurnStatus::RecoveryRequired => TurnEventKind::RecoveryRequired,
+        TurnStatus::Queued | TurnStatus::CancelRequested => TurnEventKind::RunnerHeartbeat,
+    };
+    let sanitized_reason = state
+        .failure
+        .as_ref()
+        .map(|failure| failure.category().to_string());
+    TurnLifecycleEvent::from_run_state(state, kind, sanitized_reason)
+}
+
+#[derive(Default)]
+struct FailFirstRecordingTurnEventSink {
+    attempts: Mutex<Vec<TurnLifecycleEvent>>,
+    failed_recovery: AtomicBool,
+}
+
+impl FailFirstRecordingTurnEventSink {
+    fn events(&self) -> Vec<TurnLifecycleEvent> {
+        self.attempts.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl TurnEventSink for FailFirstRecordingTurnEventSink {
+    async fn publish(&self, event: TurnLifecycleEvent) -> Result<(), TurnError> {
+        let mut attempts = self.attempts.lock().unwrap();
+        let should_fail = event.kind == TurnEventKind::RecoveryRequired
+            && !self.failed_recovery.swap(true, Ordering::SeqCst);
+        attempts.push(event);
+        if should_fail {
+            return Err(TurnError::Unavailable {
+                reason: "test event sink first publish failed".to_string(),
+            });
+        }
+        Ok(())
     }
 }
 

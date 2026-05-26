@@ -1,20 +1,38 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, OnceLock},
+    sync::{Arc, LazyLock, Mutex, Weak},
 };
 
 use crate::{MAX_PROMPT_FILE_SIZE, normalize_line_endings, parse_skill_md, validate_skill_name};
+use async_trait::async_trait;
 use ironclaw_filesystem::{
-    DirEntry, FileType, FilesystemError, FilesystemOperation, RootFilesystem, ScopedFilesystem,
+    BackendCapabilities, DirEntry, FileStat, FileType, FilesystemError, RootFilesystem,
+    ScopedFilesystem,
 };
-use ironclaw_host_api::{HostApiError, MountView, ResourceScope, ScopedPath};
-use tokio::sync::{Mutex, OwnedMutexGuard};
+use ironclaw_host_api::{HostApiError, MountView, ResourceScope, ScopedPath, VirtualPath};
 
-const USER_SKILLS_ROOT: &str = "/skills";
+mod install_bundle;
+#[cfg(test)]
+mod tests;
+
+pub use install_bundle::{
+    MAX_INSTALL_BUNDLE_FILE_BYTES, MAX_INSTALL_BUNDLE_FILES, MAX_INSTALL_BUNDLE_TOTAL_BYTES,
+    SkillInstallFile,
+};
+
+use install_bundle::{
+    install_metadata_source, installed_skill_source, publish_skill_install,
+    read_install_metadata_bytes, validate_install_bundle_files,
+};
+
+pub(super) const USER_SKILLS_ROOT: &str = "/skills";
 const SYSTEM_SKILLS_ROOT: &str = "/system/skills";
-const SKILL_FILE_NAME: &str = "SKILL.md";
+pub(super) const SKILL_FILE_NAME: &str = "SKILL.md";
 const SKILL_SEARCH_ENTRY_SCAN_LIMIT: usize = 250;
-static SKILL_WRITE_LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
+type SkillMutationLock = Arc<tokio::sync::Mutex<()>>;
+
+static SKILL_MUTATION_LOCKS: LazyLock<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkillManagementErrorKind {
@@ -55,9 +73,8 @@ impl SkillManagementError {
 
 #[derive(Clone)]
 pub struct SkillManagementContext {
-    filesystem: Arc<ScopedFilesystem<dyn RootFilesystem>>,
+    filesystem: Arc<ScopedFilesystem<SkillManagementRootFilesystem>>,
     scope: ResourceScope,
-    write_lock_namespace: String,
 }
 
 impl SkillManagementContext {
@@ -66,12 +83,61 @@ impl SkillManagementContext {
         mounts: MountView,
         scope: ResourceScope,
     ) -> Self {
-        let write_lock_namespace = skill_write_lock_namespace(&mounts, &scope);
         Self {
-            filesystem: Arc::new(ScopedFilesystem::with_fixed_view(filesystem, mounts)),
+            filesystem: Arc::new(ScopedFilesystem::with_fixed_view(
+                Arc::new(SkillManagementRootFilesystem { inner: filesystem }),
+                mounts,
+            )),
             scope,
-            write_lock_namespace,
         }
+    }
+}
+
+#[derive(Clone)]
+struct SkillManagementRootFilesystem {
+    inner: Arc<dyn RootFilesystem>,
+}
+
+#[async_trait]
+impl RootFilesystem for SkillManagementRootFilesystem {
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn list_dir_bounded(
+        &self,
+        path: &VirtualPath,
+        max_entries: usize,
+    ) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir_bounded(path, max_entries).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn read_file_bounded(
+        &self,
+        path: &VirtualPath,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, FilesystemError> {
+        self.inner.read_file_bounded(path, max_bytes).await
+    }
+
+    async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
+        self.inner.write_file(path, bytes).await
+    }
+
+    async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.create_dir_all(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
     }
 }
 
@@ -90,6 +156,7 @@ pub struct SkillSummary {
 pub enum SkillSource {
     System,
     User,
+    Installed,
 }
 
 impl SkillSource {
@@ -97,20 +164,31 @@ impl SkillSource {
         match self {
             Self::System => "system",
             Self::User => "user",
+            Self::Installed => "installed",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillInstallSource {
+    User,
+    InstalledUrl,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SkillInstallRequest<'a> {
     pub name: Option<&'a str>,
     pub content: &'a str,
+    pub files: &'a [SkillInstallFile<'a>],
+    pub source: SkillInstallSource,
+    pub source_url: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillInstallResult {
     pub name: String,
     pub scoped_path: String,
+    pub source: SkillSource,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -231,11 +309,25 @@ pub async fn install_skill(
             SkillManagementErrorKind::InvalidInput,
         ));
     }
+    validate_install_bundle_files(request.files)?;
 
     let skill_name = parsed.manifest.name;
+    let mutation_lock = skill_mutation_lock(&skill_name);
+    let _mutation_guard = mutation_lock.lock().await;
     let skill_dir = skill_root_scoped_path(USER_SKILLS_ROOT, &skill_name)?;
     let skill_path = skill_scoped_path(USER_SKILLS_ROOT, &skill_name, SKILL_FILE_NAME)?;
-    let _guard = skill_write_lock(context, &skill_path).await;
+
+    log_skill_filesystem_phase("stat_existing_dir", &skill_name, &skill_dir);
+    if stat_optional(context, &skill_dir).await?.is_some() {
+        tracing::debug!(
+            skill_name = %skill_name,
+            scoped_path = %skill_dir,
+            "skill install rejected existing skill directory"
+        );
+        return Err(SkillManagementError::new(
+            SkillManagementErrorKind::Conflict,
+        ));
+    }
 
     log_skill_filesystem_phase("stat_existing", &skill_name, &skill_path);
     if stat_optional(context, &skill_path).await?.is_some() {
@@ -249,43 +341,26 @@ pub async fn install_skill(
         ));
     }
 
-    log_skill_filesystem_phase("create_dir_all", &skill_name, &skill_dir);
-    context
-        .filesystem
-        .create_dir_all(&context.scope, &skill_dir)
-        .await
-        .or_else(|error| match error {
-            FilesystemError::Unsupported {
-                operation: FilesystemOperation::CreateDirAll,
-                ..
-            } => {
-                log_skill_filesystem_phase("create_dir_all_unsupported", &skill_name, &skill_dir);
-                Ok(())
-            }
-            other => Err(other),
-        })
-        .map_err(|error| {
-            log_skill_filesystem_phase("create_dir_all_failed", &skill_name, &skill_dir);
-            filesystem_error(error)
-        })?;
-    log_skill_filesystem_phase("write_file", &skill_name, &skill_path);
-    context
-        .filesystem
-        .write_file(&context.scope, &skill_path, normalized.as_bytes())
-        .await
-        .map_err(|error| {
-            log_skill_filesystem_phase("write_file_failed", &skill_name, &skill_path);
-            filesystem_error(error)
-        })?;
+    publish_skill_install(
+        context,
+        &skill_name,
+        &normalized,
+        request.files,
+        request.source,
+        request.source_url,
+    )
+    .await?;
     tracing::debug!(
         skill_name = %skill_name,
         scoped_path = %skill_path,
+        bundle_file_count = request.files.len(),
         "skill install completed"
     );
 
     Ok(SkillInstallResult {
         name: skill_name.clone(),
         scoped_path: format!("{USER_SKILLS_ROOT}/{skill_name}/{SKILL_FILE_NAME}"),
+        source: installed_skill_source(request.source),
     })
 }
 
@@ -305,9 +380,10 @@ pub async fn remove_skill(
             SkillManagementErrorKind::InvalidInput,
         ));
     }
+    let mutation_lock = skill_mutation_lock(request.name);
+    let _mutation_guard = mutation_lock.lock().await;
     let skill_dir = skill_root_scoped_path(USER_SKILLS_ROOT, request.name)?;
     let skill_path = skill_scoped_path(USER_SKILLS_ROOT, request.name, SKILL_FILE_NAME)?;
-    let _guard = skill_write_lock(context, &skill_path).await;
     log_skill_filesystem_phase("stat_existing", request.name, &skill_path);
     if stat_optional(context, &skill_path).await?.is_none() {
         tracing::debug!(
@@ -333,40 +409,18 @@ pub async fn remove_skill(
     })
 }
 
-async fn skill_write_lock(
-    context: &SkillManagementContext,
-    skill_path: &ScopedPath,
-) -> OwnedMutexGuard<()> {
-    let key = format!("{}:{}", context.write_lock_namespace, skill_path);
-    let lock = {
-        let registry = SKILL_WRITE_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
-        let mut locks = registry.lock().await;
-        locks
-            .entry(key)
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone()
-    };
-    lock.lock_owned().await
-}
+fn skill_mutation_lock(skill_name: &str) -> SkillMutationLock {
+    let mut guard = SKILL_MUTATION_LOCKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.retain(|_, weak| weak.strong_count() > 0);
+    if let Some(existing) = guard.get(skill_name).and_then(Weak::upgrade) {
+        return existing;
+    }
 
-fn skill_write_lock_namespace(mounts: &MountView, scope: &ResourceScope) -> String {
-    let user_root = ScopedPath::new(USER_SKILLS_ROOT)
-        .ok()
-        .and_then(|path| mounts.resolve(&path).ok())
-        .map(|path| path.as_str().to_string())
-        .unwrap_or_else(|| USER_SKILLS_ROOT.to_string());
-    format!(
-        "tenant={};user={};agent={};project={};root={}",
-        scope.tenant_id.as_str(),
-        scope.user_id.as_str(),
-        scope.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
-        scope
-            .project_id
-            .as_ref()
-            .map(|id| id.as_str())
-            .unwrap_or(""),
-        user_root,
-    )
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    guard.insert(skill_name.to_string(), Arc::downgrade(&lock));
+    lock
 }
 
 #[tracing::instrument(
@@ -479,22 +533,22 @@ async fn list_skill_root_entries_with(
         }
         None => context.filesystem.list_dir(&context.scope, &root).await,
     };
-    match result {
-        Ok(entries) => Ok(entries),
+    Ok(match result {
+        Ok(entries) => entries,
         Err(FilesystemError::NotFound { .. }) => {
             tracing::debug!("skill management skill root not found");
-            Ok(Vec::new())
+            Vec::new()
         }
         Err(FilesystemError::PermissionDenied { .. }) => {
             tracing::debug!("skill management skill root permission denied");
-            Ok(Vec::new())
+            Vec::new()
         }
         Err(error) if is_unmounted_scoped_root(&error) => {
             tracing::debug!("skill management skill root is not mounted");
-            Ok(Vec::new())
+            Vec::new()
         }
-        Err(error) => Err(filesystem_error(error)),
-    }
+        Err(error) => return Err(filesystem_error(error)),
+    })
 }
 
 fn skill_matches_query(skill: &SkillSummary, normalized_query: &str) -> bool {
@@ -527,6 +581,7 @@ async fn read_skill_summary(
         skill_name = %parsed.manifest.name,
         "skill management parsed skill summary"
     );
+    let source = skill_source_with_install_metadata(context, path, source).await?;
     Ok(Some(SkillSummary {
         name: parsed.manifest.name,
         version: parsed.manifest.version,
@@ -571,6 +626,35 @@ fn skill_scoped_path(
             format!("invalid skill path: {error}"),
         )
     })
+}
+
+async fn skill_source_with_install_metadata(
+    context: &SkillManagementContext,
+    skill_path: &ScopedPath,
+    default_source: SkillSource,
+) -> Result<SkillSource, SkillManagementError> {
+    if default_source != SkillSource::User {
+        return Ok(default_source);
+    }
+    let Some(bytes) = read_install_metadata_bytes(context, skill_path).await? else {
+        return Ok(default_source);
+    };
+    Ok(install_metadata_source(default_source, &bytes))
+}
+
+fn scoped_sibling(
+    path: &ScopedPath,
+    sibling: &str,
+) -> Result<Option<ScopedPath>, SkillManagementError> {
+    let Some((parent, _)) = path.as_str().rsplit_once('/') else {
+        return Ok(None);
+    };
+    if parent.is_empty() {
+        return Ok(None);
+    }
+    ScopedPath::new(format!("{parent}/{sibling}"))
+        .map(Some)
+        .map_err(|_| SkillManagementError::new(SkillManagementErrorKind::InvalidInput))
 }
 
 async fn stat_optional(
@@ -662,368 +746,5 @@ fn filesystem_error(error: FilesystemError) -> SkillManagementError {
             SkillManagementError::new(SkillManagementErrorKind::FilesystemDenied)
         }
         _ => SkillManagementError::new(SkillManagementErrorKind::FilesystemDenied),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ironclaw_filesystem::InMemoryBackend;
-    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, VirtualPath};
-
-    #[tokio::test]
-    async fn install_list_and_remove_user_skills_through_scoped_mounts() {
-        let filesystem = Arc::new(InMemoryBackend::default());
-        write_file(
-            filesystem.as_ref(),
-            "/projects/system/skills/system-helper/SKILL.md",
-            skill_md(
-                "system-helper",
-                "system skill description",
-                "SYSTEM_SKILL_PROMPT",
-            ),
-        )
-        .await;
-        let context = skill_management_context(filesystem.clone(), skill_mounts());
-
-        let installed = install_skill(
-            &context,
-            SkillInstallRequest {
-                name: None,
-                content: &skill_md(
-                    "local-helper",
-                    "local skill description",
-                    "LOCAL_SKILL_PROMPT",
-                ),
-            },
-        )
-        .await
-        .unwrap();
-        assert_eq!(installed.name, "local-helper");
-        assert_eq!(
-            installed.scoped_path,
-            "/skills/local-helper/SKILL.md".to_string()
-        );
-
-        let listed = list_skills(&context).await.unwrap();
-        assert_eq!(listed.len(), 2);
-        assert!(
-            listed
-                .iter()
-                .any(|skill| skill.name == "system-helper" && skill.source == SkillSource::System)
-        );
-        assert!(
-            listed
-                .iter()
-                .any(|skill| skill.name == "local-helper" && skill.source == SkillSource::User)
-        );
-
-        let removed = remove_skill(
-            &context,
-            SkillRemoveRequest {
-                name: "local-helper",
-            },
-        )
-        .await
-        .unwrap();
-        assert_eq!(removed.name, "local-helper");
-        assert_eq!(list_skills(&context).await.unwrap().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn install_rejects_name_mismatch() {
-        let filesystem = Arc::new(InMemoryBackend::default());
-        let context = skill_management_context(filesystem, skill_mounts());
-
-        let error = install_skill(
-            &context,
-            SkillInstallRequest {
-                name: Some("expected"),
-                content: &skill_md("actual", "description", "PROMPT"),
-            },
-        )
-        .await
-        .unwrap_err();
-
-        assert_eq!(error.kind(), SkillManagementErrorKind::InvalidInput);
-    }
-
-    #[tokio::test]
-    async fn install_preserves_parse_error_context() {
-        let filesystem = Arc::new(InMemoryBackend::default());
-        let context = skill_management_context(filesystem, skill_mounts());
-
-        let error = install_skill(
-            &context,
-            SkillInstallRequest {
-                name: None,
-                content: "---\nname: broken\ndescription: [\n---\nPROMPT",
-            },
-        )
-        .await
-        .unwrap_err();
-
-        assert_eq!(error.kind(), SkillManagementErrorKind::InvalidInput);
-        assert!(
-            error
-                .reason()
-                .expect("parse failure should carry context")
-                .contains("skill content failed to parse")
-        );
-    }
-
-    #[tokio::test]
-    async fn list_treats_unmounted_optional_skill_root_as_empty() {
-        let filesystem = Arc::new(InMemoryBackend::default());
-        write_file(
-            filesystem.as_ref(),
-            "/projects/skills/local-helper/SKILL.md",
-            skill_md("local-helper", "local skill description", "PROMPT"),
-        )
-        .await;
-        let context = skill_management_context(filesystem, user_skill_mounts());
-
-        let listed = list_skills(&context).await.unwrap();
-
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].name, "local-helper");
-        assert_eq!(listed[0].source, SkillSource::User);
-    }
-
-    #[tokio::test]
-    async fn search_skills_returns_bounded_matches_with_truncation() {
-        let filesystem = Arc::new(InMemoryBackend::default());
-        for index in 0..4 {
-            write_file(
-                filesystem.as_ref(),
-                &format!("/projects/skills/local-{index}/SKILL.md"),
-                skill_md(
-                    &format!("local-{index}"),
-                    "shared search description",
-                    "PROMPT",
-                ),
-            )
-            .await;
-        }
-        let context = skill_management_context(filesystem, skill_mounts());
-
-        let result = search_skills(
-            &context,
-            SkillSearchRequest {
-                query: "shared",
-                limit: 2,
-            },
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(result.skills.len(), 2);
-        assert!(result.truncated);
-    }
-
-    #[tokio::test]
-    async fn search_skills_zero_limit_returns_empty_truncated_result() {
-        let filesystem = Arc::new(InMemoryBackend::default());
-        write_file(
-            filesystem.as_ref(),
-            "/projects/skills/local-helper/SKILL.md",
-            skill_md("local-helper", "shared search description", "PROMPT"),
-        )
-        .await;
-        let context = skill_management_context(filesystem, skill_mounts());
-
-        let result = search_skills(
-            &context,
-            SkillSearchRequest {
-                query: "",
-                limit: 0,
-            },
-        )
-        .await
-        .unwrap();
-
-        assert!(result.skills.is_empty());
-        assert!(result.truncated);
-    }
-
-    #[tokio::test]
-    async fn search_skills_empty_query_returns_all_matching_skills() {
-        let filesystem = Arc::new(InMemoryBackend::default());
-        for name in ["alpha-helper", "beta-helper"] {
-            write_file(
-                filesystem.as_ref(),
-                &format!("/projects/skills/{name}/SKILL.md"),
-                skill_md(name, "shared search description", "PROMPT"),
-            )
-            .await;
-        }
-        let context = skill_management_context(filesystem, skill_mounts());
-
-        let result = search_skills(
-            &context,
-            SkillSearchRequest {
-                query: "",
-                limit: 10,
-            },
-        )
-        .await
-        .unwrap();
-
-        let names = result
-            .skills
-            .iter()
-            .map(|skill| skill.name.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(names, vec!["alpha-helper", "beta-helper"]);
-        assert!(!result.truncated);
-    }
-
-    #[tokio::test]
-    async fn search_skills_propagates_filesystem_error() {
-        let context = skill_management_context(Arc::new(FailingListBackend), skill_mounts());
-
-        let error = search_skills(
-            &context,
-            SkillSearchRequest {
-                query: "",
-                limit: 10,
-            },
-        )
-        .await
-        .unwrap_err();
-
-        assert_eq!(error.kind(), SkillManagementErrorKind::InvalidSkill);
-    }
-
-    #[tokio::test]
-    async fn search_skills_stops_after_entry_scan_budget() {
-        let filesystem = Arc::new(InMemoryBackend::default());
-        for index in 0..=SKILL_SEARCH_ENTRY_SCAN_LIMIT {
-            write_file(
-                filesystem.as_ref(),
-                &format!("/projects/skills/local-{index:03}/SKILL.md"),
-                skill_md(
-                    &format!("local-{index:03}"),
-                    "non matching description",
-                    "PROMPT",
-                ),
-            )
-            .await;
-        }
-        let context = skill_management_context(filesystem, skill_mounts());
-
-        let result = search_skills(
-            &context,
-            SkillSearchRequest {
-                query: "absent-query",
-                limit: 50,
-            },
-        )
-        .await
-        .unwrap();
-
-        assert!(result.skills.is_empty());
-        assert!(result.truncated);
-    }
-
-    #[tokio::test]
-    async fn remove_rejects_system_skill() {
-        let filesystem = Arc::new(InMemoryBackend::default());
-        write_file(
-            filesystem.as_ref(),
-            "/projects/system/skills/system-helper/SKILL.md",
-            skill_md("system-helper", "system skill description", "PROMPT"),
-        )
-        .await;
-        let context = skill_management_context(filesystem, skill_mounts());
-
-        let error = remove_skill(
-            &context,
-            SkillRemoveRequest {
-                name: "system-helper",
-            },
-        )
-        .await
-        .unwrap_err();
-
-        assert_eq!(error.kind(), SkillManagementErrorKind::NotFound);
-    }
-
-    async fn write_file(root: &InMemoryBackend, path: &str, body: String) {
-        root.write_file(&VirtualPath::new(path).unwrap(), body.as_bytes())
-            .await
-            .unwrap();
-    }
-
-    fn skill_mounts() -> MountView {
-        MountView::new(vec![
-            MountGrant::new(
-                MountAlias::new("/skills").unwrap(),
-                VirtualPath::new("/projects/skills").unwrap(),
-                MountPermissions::read_write_list_delete(),
-            ),
-            MountGrant::new(
-                MountAlias::new("/system/skills").unwrap(),
-                VirtualPath::new("/projects/system/skills").unwrap(),
-                MountPermissions::read_only(),
-            ),
-        ])
-        .unwrap()
-    }
-
-    fn user_skill_mounts() -> MountView {
-        MountView::new(vec![MountGrant::new(
-            MountAlias::new("/skills").unwrap(),
-            VirtualPath::new("/projects/skills").unwrap(),
-            MountPermissions::read_write_list_delete(),
-        )])
-        .unwrap()
-    }
-
-    fn skill_management_context(
-        filesystem: Arc<dyn RootFilesystem>,
-        mounts: MountView,
-    ) -> SkillManagementContext {
-        SkillManagementContext::new(filesystem, mounts, ResourceScope::system())
-    }
-
-    fn skill_md(name: &str, description: &str, prompt: &str) -> String {
-        format!("---\nname: {name}\ndescription: {description}\n---\n{prompt}\n")
-    }
-
-    struct FailingListBackend;
-
-    #[async_trait::async_trait]
-    impl RootFilesystem for FailingListBackend {
-        async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-            Err(FilesystemError::Backend {
-                path: path.clone(),
-                operation: FilesystemOperation::ListDir,
-                reason: "list failed".to_string(),
-            })
-        }
-
-        async fn list_dir_bounded(
-            &self,
-            path: &VirtualPath,
-            _max_entries: usize,
-        ) -> Result<Vec<DirEntry>, FilesystemError> {
-            Err(FilesystemError::Backend {
-                path: path.clone(),
-                operation: FilesystemOperation::ListDir,
-                reason: "bounded list failed".to_string(),
-            })
-        }
-
-        async fn stat(
-            &self,
-            path: &VirtualPath,
-        ) -> Result<ironclaw_filesystem::FileStat, FilesystemError> {
-            Err(FilesystemError::Backend {
-                path: path.clone(),
-                operation: FilesystemOperation::Stat,
-                reason: "stat failed".to_string(),
-            })
-        }
     }
 }

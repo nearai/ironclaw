@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+#[cfg(test)]
 use ironclaw_filesystem::LocalFilesystem;
+use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{InvocationId, MountView, ResourceScope, UserId};
 use ironclaw_product_workflow::{
     LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
@@ -10,8 +12,9 @@ use ironclaw_product_workflow::{
     LifecycleSkillSource, LifecycleSkillSummary, ProductWorkflowError,
 };
 use ironclaw_skills::{
-    SkillInstallRequest, SkillManagementContext, SkillManagementError, SkillManagementErrorKind,
-    SkillRemoveRequest, SkillSearchRequest, install_skill, remove_skill, search_skills,
+    SkillInstallRequest, SkillInstallSource, SkillManagementContext, SkillManagementError,
+    SkillManagementErrorKind, SkillRemoveRequest, SkillSearchRequest, install_skill, remove_skill,
+    search_skills,
 };
 
 const SKILL_SEARCH_RESULT_LIMIT: usize = 50;
@@ -19,14 +22,14 @@ const SKILL_SEARCH_RESULT_LIMIT: usize = 50;
 #[derive(Clone)]
 pub(crate) struct RebornLocalSkillManagementPort {
     owner_user_id: UserId,
-    filesystem: Arc<LocalFilesystem>,
+    filesystem: Arc<dyn RootFilesystem>,
     skill_management_mounts: MountView,
 }
 
 impl RebornLocalSkillManagementPort {
     pub(crate) fn new(
         owner_user_id: UserId,
-        filesystem: Arc<LocalFilesystem>,
+        filesystem: Arc<dyn RootFilesystem>,
         skill_management_mounts: MountView,
     ) -> Self {
         Self {
@@ -63,9 +66,18 @@ impl RebornLocalSkillManagementPort {
         content: &str,
     ) -> Result<ironclaw_skills::SkillInstallResult, ProductWorkflowError> {
         let context = self.skill_context()?;
-        install_skill(&context, SkillInstallRequest { name, content })
-            .await
-            .map_err(map_skill_error)
+        install_skill(
+            &context,
+            SkillInstallRequest {
+                name,
+                content,
+                files: &[],
+                source: SkillInstallSource::User,
+                source_url: None,
+            },
+        )
+        .await
+        .map_err(map_skill_error)
     }
 
     async fn remove(
@@ -209,7 +221,8 @@ fn skill_summary(
         description: skill.description,
         source: match skill.source {
             ironclaw_skills::ManagedSkillSource::System => LifecycleSkillSource::System,
-            ironclaw_skills::ManagedSkillSource::User => LifecycleSkillSource::User,
+            ironclaw_skills::ManagedSkillSource::User
+            | ironclaw_skills::ManagedSkillSource::Installed => LifecycleSkillSource::User,
         },
         keywords: skill.keywords,
         tags: skill.tags,

@@ -206,6 +206,7 @@ pub(super) fn gate_tool_result_summary(kind: GateKind, outcome: &'static str) ->
         GateKind::Approval => "approval",
         GateKind::Auth => "auth",
         GateKind::Resource => "resource",
+        GateKind::AwaitDependentRun => "await_dependent_run",
     };
     format!("{gate} gate {outcome}")
 }

@@ -5,9 +5,9 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_host_api::{
     AgentId, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
-    ExecutionContext, ExtensionId, GrantConstraints, MountAlias, MountGrant, MountPermissions,
-    MountView, NetworkPolicy, NetworkTargetPattern, Principal, RuntimeKind, TenantId, ThreadId,
-    TrustClass, UserId, VirtualPath,
+    ExecutionContext, ExtensionId, GrantConstraints, InvocationId, MountAlias, MountGrant,
+    MountPermissions, MountView, NetworkPolicy, NetworkTargetPattern, Principal, RuntimeKind,
+    TenantId, ThreadId, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     CapabilitySurfacePolicy, ECHO_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
@@ -18,9 +18,10 @@ use ironclaw_loop_support::{
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
     HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError, HostManagedModelError,
     HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelRequest,
-    HostManagedModelResponse, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
-    ProductLiveCancellationProbe, RunCancellationFactory, RunCancellationHandle,
-    loop_driver_execution_extension_id, verify_product_live_cancellation_probe,
+    HostManagedModelResponse, JsonSpawnSubagentInputCodec, LoopCapabilityInputResolver,
+    LoopCapabilityResultWriter, ProductLiveCancellationProbe, RunCancellationFactory,
+    RunCancellationHandle, loop_driver_execution_extension_id,
+    verify_product_live_cancellation_probe,
 };
 use ironclaw_reborn::{
     loop_exit_applier::ThreadCheckpointLoopExitEvidencePort,
@@ -28,6 +29,11 @@ use ironclaw_reborn::{
     planned_driver_factory::default_planned_run_profile_resolver,
     runtime::{
         DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, build_product_live_planned_runtime,
+    },
+    subagent::{
+        flavors::StaticSubagentDefinitionResolver,
+        gate_resolution::BoundedSubagentGateResolutionStore,
+        goal_store::InMemoryBoundedSubagentGoalStore,
     },
 };
 use ironclaw_reborn_composition::{
@@ -37,7 +43,7 @@ use ironclaw_reborn_composition::{
     RebornServices, build_reborn_services, capability_allowlist,
     visible_capability_request_for_run,
 };
-use ironclaw_threads::{InMemorySessionThreadService, ThreadScope};
+use ironclaw_threads::{InMemorySessionThreadService, SessionThreadService, ThreadScope};
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use ironclaw_turns::{
     CheckpointStateStore, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
@@ -68,6 +74,8 @@ async fn capability_io_resolves_staged_inputs_and_materializes_run_scoped_result
     let result_ref = io
         .write_capability_result(
             &run_context,
+            &input_ref,
+            InvocationId::new(),
             &capability_id("demo.echo"),
             serde_json::json!({ "reply": "hello" }),
         )
@@ -91,6 +99,18 @@ async fn capability_io_resolves_staged_inputs_and_materializes_run_scoped_result
         .expect_err("staged input refs should be consumed on successful read");
     io.result_for_ref(&run_context, &result_ref)
         .expect_err("staged result refs should be consumed on successful read");
+
+    io.update_capability_result(
+        &run_context,
+        &result_ref,
+        serde_json::json!({ "reply": "terminal" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        io.result_for_ref(&run_context, &result_ref).unwrap(),
+        serde_json::json!({ "reply": "terminal" })
+    );
 }
 
 #[tokio::test]
@@ -114,6 +134,8 @@ async fn capability_io_rejects_cross_run_input_and_result_refs() {
     let result_ref = io
         .write_capability_result(
             &first_run,
+            &input_ref,
+            InvocationId::new(),
             &capability_id("demo.echo"),
             serde_json::json!({ "reply": "first" }),
         )
@@ -142,6 +164,8 @@ async fn capability_io_prunes_refs_for_terminal_runs_without_cross_run_loss() {
     let first_result = io
         .write_capability_result(
             &first_run,
+            &first_input,
+            InvocationId::new(),
             &capability_id("demo.echo"),
             serde_json::json!({ "reply": "first" }),
         )
@@ -150,6 +174,8 @@ async fn capability_io_prunes_refs_for_terminal_runs_without_cross_run_loss() {
     let second_result = io
         .write_capability_result(
             &second_run,
+            &second_input,
+            InvocationId::new(),
             &capability_id("demo.echo"),
             serde_json::json!({ "reply": "second" }),
         )
@@ -220,7 +246,13 @@ async fn capability_io_enforces_staging_entry_and_byte_caps() {
 
     let oversized_result = serde_json::json!("x".repeat(4 * 1024 * 1024));
     let byte_error = ProductLiveCapabilityIo::default()
-        .write_capability_result(&run_context, &capability_id("demo.echo"), oversized_result)
+        .write_capability_result(
+            &run_context,
+            &CapabilityInputRef::new("input:oversized-result").unwrap(),
+            InvocationId::new(),
+            &capability_id("demo.echo"),
+            oversized_result,
+        )
         .await
         .expect_err("staging must enforce a serialized-byte cap");
     assert_eq!(
@@ -1166,7 +1198,7 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
     let loop_checkpoint_for_evidence: Arc<dyn LoopCheckpointStore> = loop_checkpoint_store.clone();
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         turn_state,
-        thread_service: Arc::clone(&thread_service),
+        thread_service: Arc::clone(&thread_service) as Arc<dyn SessionThreadService>,
         thread_scope: thread_scope.clone(),
         model_gateway: Arc::new(StubModelGateway),
         checkpoint_state_store: checkpoint_state_store as Arc<dyn CheckpointStateStore>,
@@ -1174,6 +1206,14 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
         milestone_sink,
         capability_factory: adapters.capability_factory,
         capability_surface_resolver: adapters.capability_surface_resolver,
+        capability_result_writer: adapters.capability_result_writer,
+        subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
+        subagent_gate_store: Arc::new(BoundedSubagentGateResolutionStore::new()),
+        subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
+        subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(
+            adapters.capability_input_resolver,
+        )),
+        subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
         loop_exit_evidence: Arc::new(ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
             thread_service,
             turn_state_for_evidence,
@@ -1189,6 +1229,7 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
         model_policy_guard: Some(adapters.model_policy_guard),
         model_budget_accountant: Some(adapters.model_budget_accountant),
         safety_context: Some(adapters.safety_context),
+        turn_event_sink: None,
     })
     .expect("adapter bundle should satisfy the product-live readiness gate");
 
@@ -1548,6 +1589,8 @@ impl LoopCapabilityResultWriter for UnusedCapabilityIo {
     async fn write_capability_result(
         &self,
         _run_context: &LoopRunContext,
+        _input_ref: &CapabilityInputRef,
+        _invocation_id: InvocationId,
         _capability_id: &CapabilityId,
         _output: serde_json::Value,
     ) -> Result<LoopResultRef, AgentLoopHostError> {

@@ -108,6 +108,7 @@ fn snapshot(scope: &ProjectionScope, cursor: u64) -> ProjectionSnapshot {
             )],
         },
         runs: vec![run_status(scope, cursor)],
+        capability_activities: vec![capability_activity(scope, cursor)],
         next_cursor: ProjectionCursor::for_scope(scope.clone(), EventCursor::new(cursor)),
         truncated: false,
     }
@@ -115,12 +116,28 @@ fn snapshot(scope: &ProjectionScope, cursor: u64) -> ProjectionSnapshot {
 
 fn snapshot_for_thread(scope: &ProjectionScope, cursor: u64, thread: &str) -> ProjectionSnapshot {
     let mut snapshot = snapshot(scope, cursor);
-    let thread_id = Some(ThreadId::new(thread).unwrap());
+    let thread_id = Some(ThreadId::new(thread).expect("valid test thread id"));
     for entry in &mut snapshot.timeline.entries {
         entry.thread_id = thread_id.clone();
     }
     for run in &mut snapshot.runs {
         run.thread_id = thread_id.clone();
+    }
+    for activity in &mut snapshot.capability_activities {
+        activity.thread_id = thread_id.clone();
+    }
+    snapshot
+}
+
+fn snapshot_with_activity_thread(
+    scope: &ProjectionScope,
+    cursor: u64,
+    thread: &str,
+) -> ProjectionSnapshot {
+    let mut snapshot = snapshot(scope, cursor);
+    let thread_id = Some(ThreadId::new(thread).unwrap());
+    for activity in &mut snapshot.capability_activities {
+        activity.thread_id = thread_id.clone();
     }
     snapshot
 }
@@ -132,7 +149,9 @@ fn replay(scope: &ProjectionScope, cursor: u64, next: u64) -> ProjectionReplay {
             cursor,
             TimelineEntryKind::DispatchSucceeded,
         )],
+        capability_activity_transitions: Vec::new(),
         runs: vec![run_status(scope, next)],
+        capability_activities: vec![capability_activity(scope, next)],
         next_cursor: ProjectionCursor::for_scope(scope.clone(), EventCursor::new(next)),
         truncated: false,
     }
@@ -151,6 +170,9 @@ fn replay_with_error_kind(
     for run in &mut replay.runs {
         run.error_kind = Some(error_kind.to_string());
     }
+    for activity in &mut replay.capability_activities {
+        activity.error_kind = Some(error_kind.to_string());
+    }
     replay
 }
 
@@ -168,6 +190,37 @@ fn replay_for_thread(
     for run in &mut replay.runs {
         run.thread_id = thread_id.clone();
     }
+    for activity in &mut replay.capability_activities {
+        activity.thread_id = thread_id.clone();
+    }
+    replay
+}
+
+fn replay_with_activity_thread(
+    scope: &ProjectionScope,
+    cursor: u64,
+    next: u64,
+    thread: &str,
+) -> ProjectionReplay {
+    let mut replay = replay(scope, cursor, next);
+    let thread_id = Some(ThreadId::new(thread).unwrap());
+    for activity in &mut replay.capability_activities {
+        activity.thread_id = thread_id.clone();
+    }
+    replay
+}
+
+fn replay_with_activity_transition_thread(
+    scope: &ProjectionScope,
+    cursor: u64,
+    next: u64,
+    thread: &str,
+) -> ProjectionReplay {
+    let mut replay = replay(scope, cursor, next);
+    let mut transition = capability_activity(scope, next);
+    transition.thread_id = Some(ThreadId::new(thread).expect("valid test thread id"));
+    transition.status = CapabilityActivityStatus::Started;
+    replay.capability_activity_transitions = vec![transition];
     replay
 }
 
@@ -203,6 +256,23 @@ fn run_status(scope: &ProjectionScope, cursor: u64) -> RunStatusProjection {
         provider: Some(ExtensionId::new("script").unwrap()),
         runtime: Some(RuntimeKind::Script),
         process_id: None,
+        error_kind: None,
+        last_cursor: EventCursor::new(cursor),
+        updated_at: chrono::Utc::now(),
+    }
+}
+
+fn capability_activity(scope: &ProjectionScope, cursor: u64) -> CapabilityActivityProjection {
+    CapabilityActivityProjection {
+        invocation_id: InvocationId::new(),
+        run_id: None,
+        capability_id: CapabilityId::new("script.echo").unwrap(),
+        thread_id: scope.read_scope.thread_id.clone(),
+        status: CapabilityActivityStatus::Completed,
+        provider: Some(ExtensionId::new("script").unwrap()),
+        runtime: Some(RuntimeKind::Script),
+        process_id: None,
+        output_bytes: Some(12),
         error_kind: None,
         last_cursor: EventCursor::new(cursor),
         updated_at: chrono::Utc::now(),

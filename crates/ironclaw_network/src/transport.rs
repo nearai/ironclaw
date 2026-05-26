@@ -83,7 +83,7 @@ impl ReqwestNetworkTransport {
         let client = builder
             .build()
             .map_err(|error| NetworkHttpError::Transport {
-                reason: error.to_string(),
+                reason: reqwest_error_diagnostic(&error),
                 request_bytes,
                 response_bytes: 0,
             })?;
@@ -154,7 +154,7 @@ impl NetworkHttpTransport for ReqwestNetworkTransport {
             req = req.header(name, value);
         }
         let response = req.send().map_err(|error| NetworkHttpError::Transport {
-            reason: error.to_string(),
+            reason: reqwest_error_diagnostic(&error),
             request_bytes,
             response_bytes: 0,
         })?;
@@ -233,6 +233,10 @@ fn reqwest_method(method: NetworkMethod) -> reqwest::Method {
         NetworkMethod::Delete => reqwest::Method::DELETE,
         NetworkMethod::Head => reqwest::Method::HEAD,
     }
+}
+
+fn reqwest_error_diagnostic(error: &reqwest::Error) -> String {
+    format!("{error:?}")
 }
 
 #[cfg(test)]

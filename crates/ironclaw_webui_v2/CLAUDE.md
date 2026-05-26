@@ -149,6 +149,28 @@ The per-poll ownership probe goes through `SessionThreadService::read_thread`
 (metadata-only) rather than `list_thread_history`, so an active stream does
 not reload the full message transcript every second.
 
+`capability_activity` SSE frames are projection-derived lifecycle metadata for
+tool/capability execution. They expose only the safe activity DTO
+(`invocation_id`, `capability_id`, status, provider/runtime/process metadata,
+byte counts, sanitized error kind, timestamp) and must not carry raw tool
+arguments, raw results, command strings, host paths, or provider payloads.
+
+`capability_display_preview` SSE frames are separate sanitized display artifacts
+for WebUI tool blocks. They may carry bounded summaries/previews only: summaries
+are capped at 2 KiB and output previews at 16 KiB or 120 lines, whichever comes
+first. They are not source-of-truth tool results. Full output remains behind the
+scoped `result_ref` fetch path; SSE must never carry raw unbounded args/results.
+Preview generation belongs in the Reborn product/composition layer, using
+staged input/result-ref or transcript evidence where available, not in low-level
+capability ports.
+
+Snapshot/replay drains bound activity fan-out per projection item so every
+emitted SSE cursor remains resumable through `Last-Event-ID`; when the folded
+activity set is larger than the bound, the stream splits the overflow across
+resumable projection cursors. Partial cursors carry the runtime item watermark
+and delivered payload count, so reconnect drains continue from the same folded
+item when it is stable and restart that item when the folded head changes.
+
 The browser resumes via `Last-Event-ID` on auto-reconnect; the handler
 prefers that header over the `?after_cursor=` query parameter, falling
 back to the projection origin when neither is supplied.

@@ -30,6 +30,9 @@ pub const PLANNED_DRIVER_DEFAULT_VERSION: u64 = 1;
 pub const PLANNED_DRIVER_CHECKPOINT_SCHEMA_ID: &str = CHECKPOINT_SCHEMA_ID;
 pub const PLANNED_DRIVER_CHECKPOINT_SCHEMA_VERSION: u64 = 1;
 pub const PLANNED_DEFAULT_PROFILE_ID: &str = "reborn-planned-default";
+pub const SUBAGENT_PLANNED_DRIVER_ID: &str = "reborn:planned-subagent";
+pub const SUBAGENT_PLANNED_PROFILE_ID: &str = "reborn-planned-subagent";
+pub const SUBAGENT_CAPABILITY_SURFACE_PROFILE_ID: &str = "subagent_tools";
 
 pub struct DefaultPlannedDriverBuild {
     pub driver: Arc<dyn AgentLoopDriver>,
@@ -82,6 +85,10 @@ pub fn planned_default_profile_id() -> Result<RunProfileId, String> {
     RunProfileId::new(PLANNED_DEFAULT_PROFILE_ID)
 }
 
+pub fn subagent_planned_profile_id() -> Result<RunProfileId, String> {
+    RunProfileId::new(SUBAGENT_PLANNED_PROFILE_ID)
+}
+
 pub fn planned_driver_default_version() -> RunProfileVersion {
     RunProfileVersion::new(PLANNED_DRIVER_DEFAULT_VERSION)
 }
@@ -98,6 +105,14 @@ pub fn planned_driver_descriptor() -> Result<AgentLoopDriverDescriptor, String> 
         )
 }
 
+pub fn subagent_planned_driver_descriptor() -> Result<AgentLoopDriverDescriptor, String> {
+    AgentLoopDriverDescriptor::new(SUBAGENT_PLANNED_DRIVER_ID, planned_driver_default_version())?
+        .with_checkpoint_schema(
+            PLANNED_DRIVER_CHECKPOINT_SCHEMA_ID,
+            planned_driver_checkpoint_schema_version(),
+        )
+}
+
 pub fn default_planned_driver(
     family_registry: Arc<LoopFamilyRegistry>,
 ) -> Result<DefaultPlannedDriverBuild, AgentLoopDriverError> {
@@ -107,6 +122,24 @@ pub fn default_planned_driver(
         }
     })?;
     let descriptor = planned_driver_descriptor()
+        .map_err(|reason| AgentLoopDriverError::InvalidRequest { reason })?;
+    let executor = Arc::new(CanonicalAgentLoopExecutor);
+    let driver = PlannedDriver::from_family_with_descriptor(family, executor, descriptor.clone())?;
+    Ok(DefaultPlannedDriverBuild {
+        driver: Arc::new(driver),
+        descriptor,
+    })
+}
+
+pub fn subagent_planned_driver(
+    family_registry: Arc<LoopFamilyRegistry>,
+) -> Result<DefaultPlannedDriverBuild, AgentLoopDriverError> {
+    let family = family_registry
+        .get(&LoopFamilyId::SUBAGENT)
+        .ok_or_else(|| AgentLoopDriverError::InvalidRequest {
+            reason: "subagent loop family is not registered".to_string(),
+        })?;
+    let descriptor = subagent_planned_driver_descriptor()
         .map_err(|reason| AgentLoopDriverError::InvalidRequest { reason })?;
     let executor = Arc::new(CanonicalAgentLoopExecutor);
     let driver = PlannedDriver::from_family_with_descriptor(family, executor, descriptor.clone())?;
@@ -133,6 +166,20 @@ pub fn register_default_planned_driver(
     family_registry: Arc<LoopFamilyRegistry>,
 ) -> Result<LoopDriverRegistryKey, DefaultPlannedDriverRegistrationError> {
     let build = default_planned_driver(family_registry)?;
+    registry
+        .register_driver(
+            build.driver,
+            planned_driver_requirements(),
+            DriverKind::Production,
+        )
+        .map_err(Into::into)
+}
+
+pub fn register_subagent_planned_driver(
+    registry: &mut DriverRegistry,
+    family_registry: Arc<LoopFamilyRegistry>,
+) -> Result<LoopDriverRegistryKey, DefaultPlannedDriverRegistrationError> {
+    let build = subagent_planned_driver(family_registry)?;
     registry
         .register_driver(
             build.driver,
@@ -172,16 +219,43 @@ pub fn planned_default_profile_definition() -> Result<RunProfileDefinition, RunP
     ))
 }
 
+pub fn subagent_planned_profile_definition() -> Result<RunProfileDefinition, RunProfileRegistryError>
+{
+    let descriptor = subagent_planned_driver_descriptor()
+        .map_err(|reason| RunProfileRegistryError::InvalidProfile { reason })?;
+    let profile_id = subagent_planned_profile_id()
+        .map_err(|reason| RunProfileRegistryError::InvalidProfile { reason })?;
+    let checkpoint_schema_id = planned_driver_checkpoint_schema_id()
+        .map_err(|reason| RunProfileRegistryError::InvalidProfile { reason })?;
+    let capability_surface_profile_id =
+        CapabilitySurfaceProfileId::new(SUBAGENT_CAPABILITY_SURFACE_PROFILE_ID)
+            .map_err(|reason| RunProfileRegistryError::InvalidProfile { reason })?;
+    Ok(RunProfileDefinition::interactive_like(
+        profile_id,
+        descriptor,
+        checkpoint_schema_id,
+        planned_driver_checkpoint_schema_version(),
+        capability_surface_profile_id,
+    ))
+}
+
 pub fn register_default_planned_profile(
     registry: &mut InMemoryRunProfileRegistry,
 ) -> Result<(), RunProfileRegistryError> {
     registry.register(planned_default_profile_definition()?)
 }
 
+pub fn register_subagent_planned_profile(
+    registry: &mut InMemoryRunProfileRegistry,
+) -> Result<(), RunProfileRegistryError> {
+    registry.register(subagent_planned_profile_definition()?)
+}
+
 pub fn default_planned_run_profile_resolver()
 -> Result<InMemoryRunProfileResolver, RunProfileRegistryError> {
     let mut registry = InMemoryRunProfileRegistry::with_builtin_profiles();
     register_default_planned_profile(&mut registry)?;
+    register_subagent_planned_profile(&mut registry)?;
     let implicit_default = planned_default_profile_id()
         .map_err(|reason| RunProfileRegistryError::InvalidProfile { reason })?;
     Ok(InMemoryRunProfileResolver::new_with_implicit_default(
@@ -241,6 +315,23 @@ mod tests {
     }
 
     #[test]
+    fn register_subagent_planned_driver_uses_subagent_identity() {
+        let mut registry = DriverRegistry::new();
+        let key = register_subagent_planned_driver(
+            &mut registry,
+            build_loop_family_registry().expect("family registry should build"),
+        )
+        .expect("subagent planned driver should register");
+
+        assert_eq!(key.id.as_str(), SUBAGENT_PLANNED_DRIVER_ID);
+        assert_eq!(key.version, planned_driver_default_version());
+        assert_eq!(
+            key.checkpoint_schema_id.as_ref().map(|id| id.as_str()),
+            Some(PLANNED_DRIVER_CHECKPOINT_SCHEMA_ID)
+        );
+    }
+
+    #[test]
     fn key_collision_with_textonly_is_impossible() {
         let mut registry = DriverRegistry::new();
         let text_only_key = register_default_text_only_driver(
@@ -257,6 +348,20 @@ mod tests {
         assert_ne!(text_only_key, planned_key);
         assert_eq!(text_only_key.id.as_str(), "reborn:text-only-model-reply");
         assert_eq!(planned_key.id.as_str(), PLANNED_DRIVER_DEFAULT_ID);
+    }
+
+    #[test]
+    fn default_and_subagent_planned_driver_keys_do_not_collide() {
+        let mut registry = DriverRegistry::new();
+        let families = build_loop_family_registry().expect("family registry should build");
+        let default_key = register_default_planned_driver(&mut registry, Arc::clone(&families))
+            .expect("default planned driver should register");
+        let subagent_key = register_subagent_planned_driver(&mut registry, families)
+            .expect("subagent planned driver should register");
+
+        assert_ne!(default_key, subagent_key);
+        assert_eq!(default_key.id.as_str(), PLANNED_DRIVER_DEFAULT_ID);
+        assert_eq!(subagent_key.id.as_str(), SUBAGENT_PLANNED_DRIVER_ID);
     }
 
     #[tokio::test]
@@ -286,6 +391,28 @@ mod tests {
                 .as_ref()
                 .map(|id| id.as_str()),
             Some(PLANNED_DRIVER_CHECKPOINT_SCHEMA_ID)
+        );
+    }
+
+    #[tokio::test]
+    async fn subagent_profile_resolves_to_subagent_planned_driver() {
+        let mut registry = InMemoryRunProfileRegistry::with_builtin_profiles();
+        register_subagent_planned_profile(&mut registry).expect("profile should register");
+        let resolver = InMemoryRunProfileResolver::new(registry);
+        let snapshot = resolver
+            .resolve_run_profile(
+                RunProfileResolutionRequest::interactive_default().with_requested_run_profile(
+                    RunProfileRequest::new(SUBAGENT_PLANNED_PROFILE_ID).unwrap(),
+                ),
+            )
+            .await
+            .expect("profile should resolve");
+
+        assert_eq!(snapshot.profile_id.as_str(), SUBAGENT_PLANNED_PROFILE_ID);
+        assert_eq!(snapshot.loop_driver.id.as_str(), SUBAGENT_PLANNED_DRIVER_ID);
+        assert_eq!(
+            snapshot.capability_surface_profile_id.as_str(),
+            SUBAGENT_CAPABILITY_SURFACE_PROFILE_ID
         );
     }
 

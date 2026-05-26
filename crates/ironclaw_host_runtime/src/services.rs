@@ -488,7 +488,7 @@ fn local_only_runtime_policy_reason(policy: &EffectiveRuntimePolicy) -> Option<&
     }
     if matches!(
         policy.filesystem_backend,
-        FilesystemBackendKind::HostWorkspace
+        FilesystemBackendKind::HostWorkspace | FilesystemBackendKind::HostWorkspaceAndHome
     ) {
         return Some("host_workspace_filesystem");
     }

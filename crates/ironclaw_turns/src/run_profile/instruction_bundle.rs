@@ -13,8 +13,9 @@ use crate::LoopMessageRef;
 
 use super::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityDescriptorView, LoopContextBundle,
-    LoopContextMessage, LoopContextSnippet, LoopModelMessage, LoopRunContext,
-    PromptSkillContextMetadata, VisibleCapabilitySurface, skill_snippet_model_message_ref,
+    LoopContextMessage, LoopContextSnippet, LoopInlineMessage, LoopInlineMessageRole,
+    LoopModelMessage, LoopRunContext, PromptSkillContextMetadata, VisibleCapabilitySurface,
+    skill_snippet_model_message_ref,
 };
 
 /// Stable fingerprint for an instruction bundle rebuild.
@@ -94,6 +95,8 @@ pub struct InstructionBundleRequest {
     pub visible_surface: Option<VisibleCapabilitySurface>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub safety_context: Option<InstructionSafetyContext>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inline_messages: Vec<LoopInlineMessage>,
 }
 
 /// Host-built instruction bundle materialized in memory for model-port resolution.
@@ -215,6 +218,20 @@ impl InstructionBundleBuilder {
                 .as_str()
                 .as_bytes(),
         );
+
+        if !request.inline_messages.is_empty() {
+            requires_materialization_store = true;
+        }
+        for (ordinal, message) in request.inline_messages.into_iter().enumerate() {
+            push_inline_message(
+                &mut messages,
+                &mut materialized_messages,
+                &mut fingerprint,
+                ordinal,
+                message,
+                &mut synthetic_refs,
+            )?;
+        }
 
         if !request.context_bundle.identity_messages.is_empty() {
             requires_materialization_store = true;
@@ -482,6 +499,39 @@ fn push_safety_context(
         content_ref,
     });
     Ok(())
+}
+
+fn push_inline_message(
+    messages: &mut Vec<LoopModelMessage>,
+    materialized_messages: &mut Vec<InstructionBundleMaterializedMessage>,
+    fingerprint: &mut Sha256,
+    ordinal: usize,
+    message: LoopInlineMessage,
+    synthetic_refs: &mut SyntheticMessageRefRegistry,
+) -> Result<(), AgentLoopHostError> {
+    let role = inline_role(message.role).to_string();
+    let safe_body =
+        validate_model_safe_text(message.safe_body.as_str().to_string(), "inline prompt body")?;
+    let content_ref = synthetic_message_ref("inline", &role, &safe_body, ordinal, synthetic_refs)?;
+    feed_field(fingerprint, b"section", b"inline");
+    feed_field(fingerprint, b"ref", content_ref.as_str().as_bytes());
+    feed_field(fingerprint, b"role", role.as_bytes());
+    feed_field(fingerprint, b"body", safe_body.as_bytes());
+    materialized_messages.push(InstructionBundleMaterializedMessage {
+        role: role.clone(),
+        content_ref: content_ref.clone(),
+        safe_content: safe_body,
+    });
+    messages.push(LoopModelMessage { role, content_ref });
+    Ok(())
+}
+
+fn inline_role(role: LoopInlineMessageRole) -> &'static str {
+    match role {
+        LoopInlineMessageRole::System => "system",
+        LoopInlineMessageRole::User => "user",
+        LoopInlineMessageRole::Assistant => "assistant",
+    }
 }
 
 fn push_visible_surface(

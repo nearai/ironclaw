@@ -49,7 +49,8 @@ pub fn build_webui_services(
     let mut api = ProductRebornServices::new(
         runtime.webui_thread_service(),
         runtime.webui_turn_coordinator(),
-    );
+    )
+    .with_approval_interactions(runtime.webui_approval_interaction_service());
     if let Some(skill_activation_source) = runtime.webui_skill_activation_source() {
         let activation_recorder = Arc::clone(&skill_activation_source);
         let activation_clearer = skill_activation_source;

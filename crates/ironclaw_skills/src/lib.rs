@@ -37,6 +37,7 @@
 //! controls tool access via capability leases.
 
 pub mod gating;
+pub mod install_metadata;
 pub mod management;
 mod parser;
 mod selector;
@@ -57,11 +58,16 @@ pub use types::{
 };
 
 pub use gating::{GatingResult, check_requirements, check_requirements_sync};
+pub use install_metadata::{
+    INSTALL_METADATA_FILE_NAME, InstalledSkillMetadata, InstalledSkillMetadataSource,
+    MAX_INSTALL_METADATA_BYTES,
+};
 pub use management::{
-    SkillInstallRequest, SkillInstallResult, SkillManagementContext, SkillManagementError,
-    SkillManagementErrorKind, SkillRemoveRequest, SkillRemoveResult, SkillSearchRequest,
-    SkillSearchResult, SkillSource as ManagedSkillSource, SkillSummary, install_skill, list_skills,
-    remove_skill, search_skills,
+    MAX_INSTALL_BUNDLE_FILE_BYTES, MAX_INSTALL_BUNDLE_FILES, MAX_INSTALL_BUNDLE_TOTAL_BYTES,
+    SkillInstallFile, SkillInstallRequest, SkillInstallResult, SkillInstallSource,
+    SkillManagementContext, SkillManagementError, SkillManagementErrorKind, SkillRemoveRequest,
+    SkillRemoveResult, SkillSearchRequest, SkillSearchResult, SkillSource as ManagedSkillSource,
+    SkillSummary, install_skill, list_skills, remove_skill, search_skills,
 };
 pub use parser::{ParsedSkill, SkillParseError, parse_skill_md};
 pub use selector::{
@@ -69,8 +75,9 @@ pub use selector::{
     skill_token_cost,
 };
 pub use validation::{
-    escape_skill_content, escape_xml_attr, normalize_line_endings, validate_credential_name,
-    validate_credential_spec, validate_path_pattern, validate_skill_name,
+    SafeRelativePathError, escape_skill_content, escape_xml_attr, normalize_line_endings,
+    normalize_safe_relative_path, validate_credential_name, validate_credential_spec,
+    validate_path_pattern, validate_skill_name,
 };
 
 #[cfg(feature = "catalog")]

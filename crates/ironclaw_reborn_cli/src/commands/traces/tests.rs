@@ -694,6 +694,7 @@ fn opt_in_persists_invite_code_when_set() {
 
 #[test]
 fn queue_status_diagnostics_reports_invite_code_configured() {
+    let _global_lock = lock_global_policy_for_test();
     let runtime_scope = format!("trace-cli-invite-diagnostic-scope-{}", Uuid::new_v4());
     let _global_policy_restore = TracePolicyFileRestore::new(policy_path());
     let _runtime_policy_restore = TracePolicyFileRestore::new(

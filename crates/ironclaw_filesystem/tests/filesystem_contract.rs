@@ -65,6 +65,42 @@ async fn bounded_read_returns_none_without_materializing_oversized_local_file() 
 }
 
 #[tokio::test]
+async fn local_put_absent_rejects_existing_file_without_overwrite() {
+    let storage = tempdir().unwrap();
+    std::fs::create_dir_all(storage.path().join("project1")).unwrap();
+
+    let mut root = LocalFilesystem::new();
+    root.mount_local(
+        VirtualPath::new("/projects").unwrap(),
+        HostPath::from_path_buf(storage.path().to_path_buf()),
+    )
+    .unwrap();
+    let path = VirtualPath::new("/projects/project1/checkpoint.json").unwrap();
+
+    root.put(
+        &path,
+        Entry::bytes(b"first".to_vec()),
+        CasExpectation::Absent,
+    )
+    .await
+    .unwrap();
+    let err = root
+        .put(
+            &path,
+            Entry::bytes(b"second".to_vec()),
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, FilesystemError::VersionMismatch { .. }));
+    assert_eq!(
+        std::fs::read(storage.path().join("project1/checkpoint.json")).unwrap(),
+        b"first"
+    );
+}
+
+#[tokio::test]
 async fn scoped_write_is_denied_on_read_only_mount() {
     let storage = tempdir().unwrap();
     std::fs::create_dir_all(storage.path().join("project1")).unwrap();

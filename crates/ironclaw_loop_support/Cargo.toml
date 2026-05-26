@@ -15,6 +15,7 @@ async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 dashmap = "6"
 futures = "0.3"
+hex = "0.4.3"
 parking_lot = "0.12"
 tracing = "0.1"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
@@ -22,6 +23,7 @@ ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime", version = "0.1.0" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
 ironclaw_resources = { path = "../ironclaw_resources", version = "0.1.0" }
+ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.2" }
 ironclaw_skills = { path = "../ironclaw_skills", version = "0.3.0", default-features = false }
 ironclaw_memory = { path = "../ironclaw_memory", version = "0.1.0" }
 ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0" }
@@ -30,9 +32,11 @@ rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+uuid = { version = "1", features = ["v5"] }
 
 [dev-dependencies]
 ironclaw_trust = { path = "../ironclaw_trust", version = "0.1.0" }
 rust_decimal_macros = "1"
+tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt"] }
 tracing-test = { version = "0.2", features = ["no-env-filter"] }

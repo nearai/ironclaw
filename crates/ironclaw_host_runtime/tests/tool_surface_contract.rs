@@ -447,6 +447,63 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
     assert_schema_has_property(&surface, "builtin.grep", "pattern");
     assert_schema_has_property(&surface, "builtin.skill_install", "content");
     assert_schema_has_property(&surface, "builtin.skill_install", "name");
+    assert_schema_has_property(&surface, "builtin.skill_install_url", "url");
+    assert_schema_has_property(&surface, "builtin.skill_install_url", "name");
+
+    let skill_install_schema = &surface
+        .capabilities
+        .iter()
+        .find(|capability| capability.descriptor.id == capability_id("builtin.skill_install"))
+        .expect("builtin.skill_install should be visible")
+        .descriptor
+        .parameters_schema;
+    let skill_install_validator =
+        jsonschema::validator_for(skill_install_schema).expect("skill_install schema is valid");
+
+    skill_install_validator
+        .validate(&json!({
+            "content": "---\nname: pasted-skill\n---\n\nUse multiline Markdown.\n"
+        }))
+        .expect("skill_install should accept multiline SKILL.md content");
+    assert!(
+        skill_install_validator
+            .validate(&json!({"name": "pasted-skill"}))
+            .is_err(),
+        "skill_install content remains required"
+    );
+    assert!(
+        skill_install_validator
+            .validate(&json!({
+                "url": "https://example.test/SKILL.md",
+                "content": "---\nname: pasted-skill\n---\n\nUse multiline Markdown.\n"
+            }))
+            .is_err(),
+        "skill_install should reject URL input"
+    );
+
+    let skill_install_url_schema = &surface
+        .capabilities
+        .iter()
+        .find(|capability| capability.descriptor.id == capability_id("builtin.skill_install_url"))
+        .expect("builtin.skill_install_url should be visible")
+        .descriptor
+        .parameters_schema;
+    let skill_install_url_validator = jsonschema::validator_for(skill_install_url_schema)
+        .expect("skill_install_url schema is valid");
+    skill_install_url_validator
+        .validate(&json!({
+            "url": "https://example.test/SKILL.md"
+        }))
+        .expect("skill_install_url should accept a SKILL.md URL");
+    assert!(
+        skill_install_url_validator
+            .validate(&json!({
+                "url": "https://example.test/SKILL.md",
+                "content": "---\nname: pasted-skill\n---\n\nUse multiline Markdown.\n"
+            }))
+            .is_err(),
+        "skill_install_url should reject ambiguous content plus url input"
+    );
 }
 
 #[tokio::test]

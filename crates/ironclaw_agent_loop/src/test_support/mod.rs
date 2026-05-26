@@ -394,6 +394,20 @@ pub enum ScriptedCapabilityOutcome {
         /// Gate ref.
         gate_ref: String,
     },
+    /// Dependent-run gate.
+    AwaitDependentRun {
+        /// Gate ref.
+        gate_ref: String,
+        /// Result ref updated when the dependent run completes.
+        result_ref: String,
+    },
+    /// Spawned child run result.
+    SpawnedChildRun {
+        /// Child run id.
+        child_run_id: TurnRunId,
+        /// Result ref.
+        result_ref: String,
+    },
     /// Failed result.
     Failed {
         /// Error kind string consumed by the executor classifier.
@@ -932,6 +946,23 @@ fn scripted_capability_outcome(
                 safe_summary: "resource blocked".to_string(),
             })
         }
+        ScriptedCapabilityOutcome::AwaitDependentRun {
+            gate_ref,
+            result_ref,
+        } => Ok(CapabilityOutcome::AwaitDependentRun {
+            gate_ref: loop_gate_ref(&gate_ref),
+            result_ref: loop_result_ref(&result_ref),
+            safe_summary: "await dependent run".to_string(),
+        }),
+        ScriptedCapabilityOutcome::SpawnedChildRun {
+            child_run_id,
+            result_ref,
+        } => Ok(CapabilityOutcome::SpawnedChildRun {
+            child_run_id,
+            result_ref: LoopResultRef::new(result_ref)
+                .unwrap_or_else(|error| panic!("test result ref should be valid: {error}")),
+            safe_summary: "spawned child run".to_string(),
+        }),
         ScriptedCapabilityOutcome::Failed { error_kind } => {
             Ok(CapabilityOutcome::Failed(CapabilityFailure {
                 error_kind,
@@ -957,8 +988,10 @@ fn scripted_failure_kind(kind: &str) -> CapabilityFailureKind {
         "cancelled" => CapabilityFailureKind::Cancelled,
         "dispatcher" => CapabilityFailureKind::Dispatcher,
         "input_invalid" | "invalid_input" => CapabilityFailureKind::InvalidInput,
+        "invalid_output" => CapabilityFailureKind::InvalidOutput,
         "missing_runtime" => CapabilityFailureKind::MissingRuntime,
         "network" => CapabilityFailureKind::Network,
+        "operation_failed" => CapabilityFailureKind::OperationFailed,
         "output_too_large" => CapabilityFailureKind::OutputTooLarge,
         "policy_denied" => CapabilityFailureKind::PolicyDenied,
         "process" => CapabilityFailureKind::Process,
@@ -981,6 +1014,11 @@ fn loop_message_ref(value: &str) -> LoopMessageRef {
 
 fn loop_gate_ref(value: &str) -> LoopGateRef {
     LoopGateRef::new(value).unwrap_or_else(|error| panic!("test gate ref should be valid: {error}"))
+}
+
+fn loop_result_ref(value: &str) -> LoopResultRef {
+    LoopResultRef::new(value)
+        .unwrap_or_else(|error| panic!("test result ref should be valid: {error}"))
 }
 
 fn safe_ref_suffix(value: &str) -> String {

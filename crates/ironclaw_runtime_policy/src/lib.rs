@@ -24,9 +24,11 @@
 //!   requires `OrgPolicyConstraints::admin_approves_dedicated_yolo = true`.
 //! - **Hosted multi-tenant boundary**: `Local*` profiles never resolve under
 //!   `HostedMultiTenant`, and the produced policy never selects
-//!   `FilesystemBackendKind::HostWorkspace` or `ProcessBackendKind::LocalHost`
-//!   under `HostedMultiTenant`. The compatibility matrix prevents this at the
-//!   `(deployment, profile)` step before the backend mapping runs.
+//!   `FilesystemBackendKind::HostWorkspace`,
+//!   `FilesystemBackendKind::HostWorkspaceAndHome`, or
+//!   `ProcessBackendKind::LocalHost` under `HostedMultiTenant`. The
+//!   compatibility matrix prevents this at the `(deployment, profile)` step
+//!   before the backend mapping runs.
 //!
 //! ## Determinism and audit
 //!

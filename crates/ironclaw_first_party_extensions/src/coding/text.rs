@@ -1,7 +1,7 @@
 use super::CodingCapabilityError;
 
 use super::{
-    guest_error,
+    operation_error,
     types::{FileEncoding, FuzzyMatch, LineEnding, MatchMethod},
 };
 
@@ -11,7 +11,7 @@ pub(super) fn reject_binary_probe(bytes: &[u8]) -> Result<(), CodingCapabilityEr
     }
     let probe_len = bytes.len().min(8192);
     if bytes[..probe_len].contains(&0) {
-        return Err(guest_error());
+        return Err(operation_error());
     }
     Ok(())
 }
@@ -21,14 +21,14 @@ pub(super) fn decode_text(
 ) -> Result<(String, FileEncoding, LineEnding), CodingCapabilityError> {
     let encoding = detect_encoding(bytes);
     let raw = match encoding {
-        FileEncoding::Utf8 => String::from_utf8(bytes.to_vec()).map_err(|_| guest_error())?,
+        FileEncoding::Utf8 => String::from_utf8(bytes.to_vec()).map_err(|_| operation_error())?,
         FileEncoding::Utf16Le => {
             let data = bytes.get(2..).unwrap_or_default();
             let units = data
                 .chunks_exact(2)
                 .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
                 .collect::<Vec<_>>();
-            String::from_utf16(&units).map_err(|_| guest_error())?
+            String::from_utf16(&units).map_err(|_| operation_error())?
         }
     };
     let line_ending = detect_line_ending(&raw);
@@ -98,13 +98,13 @@ pub(super) fn replace_content(
         let mut search_offset = 0usize;
         while let Some(item) = find_match_from(content, old_string, search_offset) {
             if item.end <= item.start {
-                return Err(guest_error());
+                return Err(operation_error());
             }
             search_offset = item.end;
             matches.push((item.start, item.end));
         }
         if matches.len() != match_count {
-            return Err(guest_error());
+            return Err(operation_error());
         }
         let mut rebuilt = String::with_capacity(content.len());
         let mut last = 0usize;
@@ -116,7 +116,7 @@ pub(super) fn replace_content(
         rebuilt.push_str(&content[last..]);
         Ok((rebuilt, match_count))
     } else {
-        let item = find_match(content, old_string).ok_or_else(guest_error)?;
+        let item = find_match(content, old_string).ok_or_else(operation_error)?;
         let mut rebuilt =
             String::with_capacity(content.len() - (item.end - item.start) + new_string.len());
         rebuilt.push_str(&content[..item.start]);

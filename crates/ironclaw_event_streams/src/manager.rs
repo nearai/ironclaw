@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use ironclaw_event_projections::{
-    EventProjectionService, ProjectionCursor, ProjectionError, ProjectionRequest, ProjectionScope,
+    EventCursor, EventProjectionService, ProjectionCursor, ProjectionError, ProjectionRequest,
+    ProjectionScope, ProjectionSnapshot,
 };
 use ironclaw_host_api::ThreadId;
 use ironclaw_outbound::{
@@ -95,16 +96,9 @@ impl EventStreamManager {
         .await?;
         validate_actor_stream_user(&request.actor, request.view, &request.scope)?;
         validate_product_thread_view(request.view, &request.target, &request.scope)?;
-        let snapshot = self
-            .projection
-            .snapshot(ProjectionRequest {
-                scope: request.scope.clone(),
-                after: None,
-                limit: request.limit,
-            })
-            .await
-            .map_err(map_projection_error)?;
-        let envelope = ProductProjectionEnvelope::ThreadSnapshot(snapshot);
+        let envelope = self
+            .snapshot_envelope(&request.scope, request.limit, true)
+            .await?;
         validate_stream_envelope(&envelope, request.view, &request.target, &request.scope)?;
         self.validation_cache
             .validate(self.redaction_validator.as_ref(), &envelope)?;
@@ -153,7 +147,7 @@ impl EventStreamManager {
         let live_floor_cursor = match request.after_cursor.clone() {
             None => {
                 let snapshot_envelope = self
-                    .snapshot_envelope(&request.scope, request.limit)
+                    .snapshot_envelope(&request.scope, request.limit, true)
                     .await?;
                 validate_stream_envelope(
                     &snapshot_envelope,
@@ -202,7 +196,7 @@ impl EventStreamManager {
                 }
                 Err(ProjectionError::RebaseRequired { .. }) => {
                     let snapshot_envelope = self
-                        .snapshot_envelope(&request.scope, request.limit)
+                        .snapshot_envelope(&request.scope, request.limit, false)
                         .await?;
                     validate_stream_envelope(
                         &snapshot_envelope,
@@ -302,13 +296,61 @@ impl EventStreamManager {
         &self,
         scope: &ProjectionScope,
         limit: usize,
+        allow_rebase_baseline: bool,
     ) -> Result<ProductProjectionEnvelope, ProjectionStreamError> {
+        let after = None;
+        self.snapshot_envelope_after(scope, limit, after, allow_rebase_baseline)
+            .await
+    }
+
+    async fn snapshot_envelope_after(
+        &self,
+        scope: &ProjectionScope,
+        limit: usize,
+        after: Option<ProjectionCursor>,
+        allow_rebase_baseline: bool,
+    ) -> Result<ProductProjectionEnvelope, ProjectionStreamError> {
+        match self.load_snapshot(scope, limit, after).await {
+            Ok(snapshot) => Ok(ProductProjectionEnvelope::ThreadSnapshot(snapshot)),
+            Err(ProjectionError::RebaseRequired { earliest, .. }) if allow_rebase_baseline => {
+                self.snapshot_envelope_at_rebase_cursor(scope, limit, *earliest)
+                    .await
+            }
+            Err(error) => Err(map_projection_error(error)),
+        }
+    }
+
+    async fn load_snapshot(
+        &self,
+        scope: &ProjectionScope,
+        limit: usize,
+        after: Option<ProjectionCursor>,
+    ) -> Result<ProjectionSnapshot, ProjectionError> {
         self.projection
             .snapshot(ProjectionRequest {
                 scope: scope.clone(),
-                after: None,
+                after,
                 limit,
             })
+            .await
+    }
+
+    async fn snapshot_envelope_at_rebase_cursor(
+        &self,
+        scope: &ProjectionScope,
+        limit: usize,
+        earliest: ProjectionCursor,
+    ) -> Result<ProductProjectionEnvelope, ProjectionStreamError> {
+        if earliest.scope != *scope {
+            return Err(ProjectionStreamError::InvalidRequest {
+                reason: "projection rebase cursor scope mismatch",
+            });
+        }
+        let before_earliest = ProjectionCursor::for_scope(
+            earliest.scope,
+            EventCursor::new(earliest.runtime.as_u64().saturating_sub(1)),
+        );
+        self.load_snapshot(scope, limit, Some(before_earliest))
             .await
             .map(ProductProjectionEnvelope::ThreadSnapshot)
             .map_err(map_projection_error)
@@ -502,11 +544,18 @@ fn validate_product_thread_payload(
         runs.iter()
             .all(|run| run.thread_id.as_ref() == Some(thread_id))
     };
+    let all_capability_activities_match =
+        |activities: &[ironclaw_event_projections::CapabilityActivityProjection]| {
+            activities
+                .iter()
+                .all(|activity| activity.thread_id.as_ref() == Some(thread_id))
+        };
 
     match envelope {
         ProductProjectionEnvelope::ThreadSnapshot(snapshot) => {
             if all_thread_entries_match(&snapshot.timeline.entries)
                 && all_run_statuses_match(&snapshot.runs)
+                && all_capability_activities_match(&snapshot.capability_activities)
             {
                 Ok(())
             } else {
@@ -514,7 +563,11 @@ fn validate_product_thread_payload(
             }
         }
         ProductProjectionEnvelope::ThreadUpdates(replay) => {
-            if all_thread_entries_match(&replay.updates) && all_run_statuses_match(&replay.runs) {
+            if all_thread_entries_match(&replay.updates)
+                && all_run_statuses_match(&replay.runs)
+                && all_capability_activities_match(&replay.capability_activities)
+                && all_capability_activities_match(&replay.capability_activity_transitions)
+            {
                 Ok(())
             } else {
                 Err(ProjectionStreamError::AccessDenied)
@@ -586,8 +639,16 @@ fn map_projection_error(error: ProjectionError) -> ProjectionStreamError {
         ProjectionError::InvalidRequest { reason } => {
             ProjectionStreamError::InvalidRequest { reason }
         }
+        ProjectionError::MissingProjectionMetadata { .. } => {
+            ProjectionStreamError::InvalidRequest {
+                reason: "projection metadata missing on lifecycle event",
+            }
+        }
         ProjectionError::RebaseRequired { .. } => ProjectionStreamError::InvalidRequest {
             reason: "projection rebase required outside subscribe flow",
+        },
+        ProjectionError::TurnEventRebaseRequired { .. } => ProjectionStreamError::InvalidRequest {
+            reason: "turn event projection rebase required outside subscribe flow",
         },
         ProjectionError::Source { .. } => ProjectionStreamError::Source,
     }

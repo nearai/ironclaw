@@ -21,13 +21,15 @@ use ironclaw_loop_support::{
     EmptyLoopCapabilityPort, HostIdentityContextSource, HostInputQueue, HostManagedModelGateway,
     HostQueueLoopInputPort, HostSkillContextSource, LoopCapabilityInputResolver,
     RunCancellationFactory, RunCancellationObservationKind, RunStateLoopCancellationPort,
-    ThreadBackedLoopContextPort, ThreadBackedLoopTranscriptPort, TurnStateRunCancellationFactory,
+    SubagentLoopPromptPort, SubagentPromptComposer, ThreadBackedLoopContextPort,
+    ThreadBackedLoopTranscriptPort, TurnStateRunCancellationFactory,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 
 use crate::driver_registry::{DriverRequirements, LoopDriverRegistryKey, RequirementLevel};
 use crate::hook_gate_refs::HookGateInvocationScopePort;
 use crate::model_routes::{ModelRouteError, ModelRouteResolver, ModelSlot};
+use crate::planned_driver_factory::SUBAGENT_PLANNED_PROFILE_ID;
 use crate::text_loop_driver::{TEXT_ONLY_DRIVER_ID, TEXT_ONLY_DRIVER_VERSION};
 
 mod config;
@@ -802,6 +804,7 @@ where
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
     input_queue: Option<Arc<dyn HostInputQueue>>,
     profiled_capabilities: Option<ProfiledCapabilityHostRuntime>,
+    subagent_prompt_composer: Option<SubagentPromptComposer>,
     driver_requirements: HashMap<LoopDriverRegistryKey, DriverRequirements>,
 }
 
@@ -861,6 +864,7 @@ where
             identity_context_source: None,
             input_queue: None,
             profiled_capabilities: None,
+            subagent_prompt_composer: None,
             driver_requirements: HashMap::new(),
         }
     }
@@ -1079,6 +1083,11 @@ where
             capability_factory,
             surface_resolver,
         });
+        self
+    }
+
+    pub fn with_subagent_prompt_composer(mut self, composer: SubagentPromptComposer) -> Self {
+        self.subagent_prompt_composer = Some(composer);
         self
     }
 
@@ -1302,6 +1311,19 @@ where
                 .with_materialization_sink(sink)
                 .with_bundle_authority(prompt_authority.clone(), run_context.clone()),
             );
+        }
+        if run_context.resolved_run_profile.profile_id.as_str() == SUBAGENT_PLANNED_PROFILE_ID {
+            let Some(composer) = self.subagent_prompt_composer.clone() else {
+                return Err(RebornLoopDriverHostError::InvalidRequest {
+                    reason: "subagent prompt composer is required for subagent run profile"
+                        .to_string(),
+                });
+            };
+            prompt = Arc::new(SubagentLoopPromptPort::new(
+                prompt,
+                run_context.clone(),
+                composer,
+            ));
         }
         let input: Arc<dyn LoopInputPort> = match self.input_queue.as_ref() {
             Some(queue) => Arc::new(HostQueueLoopInputPort::new(
@@ -1839,6 +1861,13 @@ fn is_legacy_text_only_driver_key(key: &LoopDriverRegistryKey) -> bool {
 }
 
 fn model_route_error_to_host_error(error: ModelRouteError) -> RebornLoopDriverHostError {
+    tracing::warn!(
+        component = "model_route",
+        operation = "resolve_route",
+        error = %error,
+        error_debug = ?error,
+        "model route error mapped to safe host error"
+    );
     RebornLoopDriverHostError::InvalidRequest {
         reason: format!("model route resolution failed: {}", error.kind().as_str()),
     }
@@ -1847,6 +1876,13 @@ fn model_route_error_to_host_error(error: ModelRouteError) -> RebornLoopDriverHo
 fn capability_resolve_error_to_host_error(
     error: CapabilityResolveError,
 ) -> RebornLoopDriverHostError {
+    tracing::warn!(
+        component = "capability_surface_profile",
+        operation = "resolve_profile",
+        error = %error,
+        error_debug = ?error,
+        "capability surface resolution error mapped to safe host error"
+    );
     let reason = match error {
         CapabilityResolveError::Unavailable { .. } => "capability surface profile is unavailable",
         CapabilityResolveError::Internal { .. } => {
@@ -1901,39 +1937,72 @@ fn validate_thread_scope(
 }
 
 fn turn_error_to_host_error(error: TurnError) -> AgentLoopHostError {
-    match error {
-        TurnError::Unauthorized => AgentLoopHostError::new(
+    match &error {
+        TurnError::Unauthorized => ironclaw_loop_support::raw_agent_loop_host_error(
+            "checkpoint_state",
+            "access",
             AgentLoopHostErrorKind::Unauthorized,
             "checkpoint state access was unauthorized",
+            &error,
         ),
-        TurnError::InvalidRequest { .. } => AgentLoopHostError::new(
+        TurnError::InvalidRequest { .. } => ironclaw_loop_support::raw_agent_loop_host_error(
+            "checkpoint_state",
+            "request",
             AgentLoopHostErrorKind::InvalidInvocation,
             "checkpoint state request is invalid",
+            &error,
         ),
-        TurnError::Unavailable { .. } => AgentLoopHostError::new(
+        TurnError::Unavailable { .. } => ironclaw_loop_support::raw_agent_loop_host_error(
+            "checkpoint_state",
+            "store",
             AgentLoopHostErrorKind::Unavailable,
             "checkpoint state store is unavailable",
+            &error,
         ),
-        TurnError::ScopeNotFound => AgentLoopHostError::new(
+        TurnError::ScopeNotFound => ironclaw_loop_support::raw_agent_loop_host_error(
+            "checkpoint_state",
+            "scope_lookup",
             AgentLoopHostErrorKind::CheckpointRejected,
             "checkpoint state scope was not found for this loop run",
+            &error,
         ),
-        TurnError::Conflict { .. } => AgentLoopHostError::new(
+        TurnError::Conflict { .. } => ironclaw_loop_support::raw_agent_loop_host_error(
+            "checkpoint_state",
+            "write",
             AgentLoopHostErrorKind::CheckpointRejected,
             "checkpoint state write conflicted with current turn state",
+            &error,
         ),
-        TurnError::InvalidTransition { .. } => AgentLoopHostError::new(
+        TurnError::CapacityExceeded { .. } => ironclaw_loop_support::raw_agent_loop_host_error(
+            "checkpoint_state",
+            "write",
+            AgentLoopHostErrorKind::Unavailable,
+            "checkpoint state store capacity was exceeded",
+            &error,
+        ),
+        TurnError::InvalidTransition { .. } => ironclaw_loop_support::raw_agent_loop_host_error(
+            "checkpoint_state",
+            "write",
             AgentLoopHostErrorKind::CheckpointRejected,
             "checkpoint state write was invalid for current turn state",
+            &error,
         ),
-        TurnError::LeaseMismatch => AgentLoopHostError::new(
+        TurnError::LeaseMismatch => ironclaw_loop_support::raw_agent_loop_host_error(
+            "checkpoint_state",
+            "write",
             AgentLoopHostErrorKind::CheckpointRejected,
             "checkpoint state write lease no longer matches current run",
+            &error,
         ),
-        TurnError::ThreadBusy(_) | TurnError::AdmissionRejected(_) => AgentLoopHostError::new(
-            AgentLoopHostErrorKind::Unavailable,
-            "checkpoint state store returned unsupported turn admission status",
-        ),
+        TurnError::ThreadBusy(_) | TurnError::AdmissionRejected(_) => {
+            ironclaw_loop_support::raw_agent_loop_host_error(
+                "checkpoint_state",
+                "admission",
+                AgentLoopHostErrorKind::Unavailable,
+                "checkpoint state store returned unsupported turn admission status",
+                &error,
+            )
+        }
     }
 }
 
@@ -2342,5 +2411,44 @@ mod tests {
         let cap = Duration::from_millis(50);
         assert_eq!(adaptive_poll_interval(base, cap, 0), cap);
         assert_eq!(adaptive_poll_interval(base, cap, 10), cap);
+    }
+}
+
+#[cfg(test)]
+mod turn_error_to_host_error_tests {
+    use super::*;
+    use ironclaw_turns::{TurnCapacityResource, TurnError};
+
+    #[test]
+    fn capacity_exceeded_maps_to_unavailable() {
+        let error = turn_error_to_host_error(TurnError::capacity_exceeded(
+            TurnCapacityResource::SpawnTreeDescendants,
+            3,
+        ));
+        assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
+    }
+
+    #[test]
+    fn conflict_maps_to_checkpoint_rejected() {
+        let error = turn_error_to_host_error(TurnError::Conflict {
+            reason: "checkpoint conflict".to_string(),
+        });
+        assert_eq!(error.kind, AgentLoopHostErrorKind::CheckpointRejected);
+    }
+
+    #[test]
+    fn scope_not_found_maps_to_checkpoint_rejected() {
+        let error = turn_error_to_host_error(TurnError::ScopeNotFound);
+        assert_eq!(error.kind, AgentLoopHostErrorKind::CheckpointRejected);
+    }
+
+    #[test]
+    fn invalid_transition_maps_to_checkpoint_rejected() {
+        use ironclaw_turns::TurnStatus;
+        let error = turn_error_to_host_error(TurnError::InvalidTransition {
+            from: TurnStatus::Running,
+            to: TurnStatus::Completed,
+        });
+        assert_eq!(error.kind, AgentLoopHostErrorKind::CheckpointRejected);
     }
 }
