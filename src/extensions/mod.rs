@@ -84,6 +84,12 @@ pub struct RegistryEntry {
     /// Extension version (semver), if known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// When true, this entry is omitted from default-discovery surfaces
+    /// (agent prompt's `Activatable Integrations`, settings catalog). It is
+    /// still installable by explicit name. See `ExtensionManifest::hidden`
+    /// for the motivation (issue #3533).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
 }
 
 /// Where the extension binary or server lives.
@@ -1029,6 +1035,7 @@ mod tests {
             fallback_source: None,
             auth_hint: AuthHint::Dcr,
             version: None,
+            hidden: false,
         };
         let sr = SearchResult {
             entry,
@@ -1059,6 +1066,7 @@ mod tests {
             fallback_source: None,
             auth_hint: AuthHint::None,
             version: None,
+            hidden: false,
         };
         let sr = SearchResult {
             entry,

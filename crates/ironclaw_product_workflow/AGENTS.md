@@ -6,6 +6,7 @@
 - Read `Cargo.toml` for actual dependencies and feature shape.
 - Use these local contracts as the source of truth before changing behavior:
 - `tests/product_workflow_contract.rs`
+- `tests/approval_interaction_contract.rs`
 - `tests/inbound_turn_contract.rs`
 - `tests/webui_inbound_contract.rs`
 - `tests/reborn_services_contract.rs`

@@ -23,6 +23,7 @@ mod error;
 mod factory;
 mod gsuite;
 mod input;
+mod lifecycle;
 #[cfg(feature = "root-llm-provider")]
 mod llm_catalog;
 mod local_dev_mounts;

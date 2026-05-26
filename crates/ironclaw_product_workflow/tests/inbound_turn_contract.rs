@@ -598,6 +598,7 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(Arc::new(
             ProductLiveCapabilityIo::default(),
         ))),
+        subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
         loop_exit_evidence: Arc::new(
             ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
                 Arc::new(thread_service.clone()),
@@ -617,6 +618,7 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         model_response_observer: None,
         safety_context: Some(test_safety_context()),
+        turn_event_sink: None,
     })
     .expect("product-live runtime should build");
 
@@ -768,6 +770,7 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(Arc::new(
             ProductLiveCapabilityIo::default(),
         ))),
+        subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
         // Product-live composition must bind the applier evidence to the
         // runtime cancellation source even if the supplied evidence is not.
         loop_exit_evidence: Arc::new(ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
@@ -786,6 +789,7 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         model_response_observer: None,
         safety_context: Some(test_safety_context()),
+        turn_event_sink: None,
     })
     .expect("product-live runtime should build");
 
@@ -951,6 +955,7 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(Arc::new(
             ProductLiveCapabilityIo::default(),
         ))),
+        subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
         loop_exit_evidence: Arc::new(ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
             Arc::new(InMemorySessionThreadService::default()),
             Arc::new(InMemoryTurnStateStore::default()) as Arc<dyn TurnStateStore>,
@@ -967,6 +972,7 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         model_response_observer: None,
         safety_context: Some(test_safety_context()),
+        turn_event_sink: None,
     }) {
         Ok(_) => panic!("product-live readiness must reject inert cancellation"),
         Err(error) => error,

@@ -1,10 +1,9 @@
 use std::sync::Arc;
 
 use ironclaw_event_projections::{
-    EventProjectionService, ProjectionCursor, ProjectionError, ProjectionRequest, ProjectionScope,
-    ProjectionSnapshot,
+    EventCursor, EventProjectionService, ProjectionCursor, ProjectionError, ProjectionRequest,
+    ProjectionScope, ProjectionSnapshot,
 };
-use ironclaw_events::EventCursor;
 use ironclaw_host_api::ThreadId;
 use ironclaw_outbound::{
     OutboundError, OutboundPushCandidate, OutboundPushTargetRequest, OutboundStateStore,

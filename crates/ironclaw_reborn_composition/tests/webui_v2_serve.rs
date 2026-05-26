@@ -20,10 +20,10 @@ use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_workflow::{
-    ExtensionName, RebornCancelRunResponse, RebornCreateThreadResponse, RebornGetRunStateRequest,
-    RebornGetRunStateResponse, RebornListThreadsResponse, RebornResolveGateResponse,
-    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSetupExtensionResponse, RebornSetupExtensionStatus, RebornStreamEventsRequest,
+    ExtensionName, LifecyclePhase, RebornCancelRunResponse, RebornCreateThreadResponse,
+    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListThreadsResponse,
+    RebornResolveGateResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornSetupExtensionResponse, RebornStreamEventsRequest,
     RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
     RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
     WebUiCreateThreadRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
@@ -202,7 +202,9 @@ impl RebornServicesApi for StubServices {
     ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
         Ok(RebornSetupExtensionResponse {
             extension_name,
-            status: RebornSetupExtensionStatus::NotImplemented,
+            phase: LifecyclePhase::UnsupportedOrLegacy,
+            blockers: Vec::new(),
+            package_ref: None,
             payload: None,
         })
     }
@@ -911,7 +913,7 @@ async fn list_threads_returns_facade_response_with_empty_default() {
 }
 
 #[tokio::test]
-async fn setup_extension_returns_not_implemented_status_via_facade() {
+async fn setup_extension_returns_lifecycle_projection_via_facade() {
     let (app, _services) = build_app();
     let response = app
         .oneshot(
@@ -928,8 +930,12 @@ async fn setup_extension_returns_not_implemented_status_via_facade() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = read_body_string(response).await;
     assert!(
-        body.contains("\"status\":\"not_implemented\""),
-        "setup_extension must surface the skeleton status, got: {body}",
+        body.contains("\"phase\":\"unsupported_or_legacy\""),
+        "setup_extension must surface lifecycle phase, got: {body}",
+    );
+    assert!(
+        !body.contains("\"status\""),
+        "setup_extension must not surface legacy status aliases, got: {body}",
     );
     assert!(
         body.contains("\"extension_name\":\"telegram\""),

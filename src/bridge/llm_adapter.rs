@@ -110,8 +110,20 @@ impl LlmBackend for LlmBridgeAdapter {
         sanitize_tool_messages(&mut chat_messages);
 
         // Convert actions to tool definitions
+        //
+        // In disabled-CodeAct mode the model has no Python escape hatch, so
+        // every callable action MUST be reachable via the provider's
+        // structured `tool_calls` interface. Filtering down to
+        // `emits_full_schema_tool()` in that mode would leave compact-info
+        // actions (e.g. `mission_create`, `gmail_send`, `notion_search`)
+        // visible in the prompt as "available" but absent from the provider
+        // tool list — i.e. unreachable. The prompt builder mirrors this by
+        // omitting the "Enabled Tools" section when CodeAct is disabled
+        // (see `prompt::build_codeact_system_prompt_inner`). PR #3665 review.
         let tools: Vec<ToolDefinition> = if config.force_text {
             vec![] // No tools when forcing text
+        } else if ironclaw_engine::executor::prompt::codeact_disabled() {
+            actions.iter().map(action_def_to_tool_def).collect()
         } else {
             actions
                 .iter()
@@ -515,6 +527,12 @@ fn extract_code_block(text: &str) -> Option<String> {
 }
 
 fn text_response_from_cleaned_text(cleaned_text: String) -> LlmResponse {
+    if ironclaw_engine::executor::prompt::codeact_disabled() {
+        if cleaned_text.trim().is_empty() {
+            return LlmResponse::Text(EMPTY_CLEANED_RESPONSE_FALLBACK.to_string());
+        }
+        return LlmResponse::Text(cleaned_text);
+    }
     match extract_code_block(&cleaned_text) {
         Some(code) => LlmResponse::Code {
             code,
@@ -1129,15 +1147,27 @@ mod tests {
         assert_eq!(models[0], None);
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn complete_with_tools_only_emits_full_schema_provider_tools() {
+        // Both this test and `complete_emits_compact_actions_when_codeact_disabled`
+        // read the process-global `IRONCLAW_DISABLE_CODEACT` env var. Serialize
+        // via lock_env() and pin the value here so the other test setting
+        // `=true` can't leak across when `cargo test` runs them in parallel.
+        let _guard = crate::config::helpers::lock_env();
+        let original = std::env::var_os("IRONCLAW_DISABLE_CODEACT");
+        // SAFETY: serialized via lock_env().
+        unsafe {
+            std::env::remove_var("IRONCLAW_DISABLE_CODEACT");
+        }
+
         let state = Arc::new(CapturingProviderState::default());
         let provider: Arc<dyn LlmProvider> = Arc::new(CapturingProvider {
             state: state.clone(),
         });
         let adapter = LlmBridgeAdapter::new(provider, None);
 
-        adapter
+        let result = adapter
             .complete(
                 &[ThreadMessage::user("hi")],
                 &[
@@ -1162,8 +1192,18 @@ mod tests {
                 ],
                 &LlmCallConfig::default(),
             )
-            .await
-            .unwrap();
+            .await;
+
+        // SAFETY: serialized via lock_env().
+        unsafe {
+            if let Some(value) = original {
+                std::env::set_var("IRONCLAW_DISABLE_CODEACT", value);
+            } else {
+                std::env::remove_var("IRONCLAW_DISABLE_CODEACT");
+            }
+        }
+
+        result.unwrap();
 
         let tool_definitions = state.tool_definitions.lock().await;
         let emitted = tool_definitions.last().expect("tool completion request");
@@ -1173,6 +1213,78 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(names, vec!["http"]);
+    }
+
+    /// PR #3665 review (serrrfirat). Disabled-CodeAct mode strips the Python
+    /// escape hatch, so any callable action MUST be reachable via the
+    /// provider's structured `tool_calls`. Filtering down to FullSchema in
+    /// that mode left compact actions (`mission_create`, `gmail_send`, ...)
+    /// visible in the prompt but absent from the provider tool list — i.e.
+    /// unreachable. This test pins the relaxed filter.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn complete_emits_compact_actions_when_codeact_disabled() {
+        let _guard = crate::config::helpers::lock_env();
+        let original = std::env::var_os("IRONCLAW_DISABLE_CODEACT");
+        // SAFETY: serialized via lock_env().
+        unsafe {
+            std::env::set_var("IRONCLAW_DISABLE_CODEACT", "true");
+        }
+
+        let state = Arc::new(CapturingProviderState::default());
+        let provider: Arc<dyn LlmProvider> = Arc::new(CapturingProvider {
+            state: state.clone(),
+        });
+        let adapter = LlmBridgeAdapter::new(provider, None);
+
+        let result = adapter
+            .complete(
+                &[ThreadMessage::user("hi")],
+                &[
+                    ActionDef {
+                        name: "http".into(),
+                        description: "fetch".into(),
+                        parameters_schema: serde_json::json!({"type": "object"}),
+                        effects: vec![EffectType::ReadExternal],
+                        requires_approval: false,
+                        model_tool_surface: ModelToolSurface::FullSchema,
+                        discovery: None,
+                    },
+                    ActionDef {
+                        name: "mission_create".into(),
+                        description: "create mission".into(),
+                        parameters_schema: serde_json::json!({"type": "object"}),
+                        effects: vec![EffectType::WriteLocal],
+                        requires_approval: false,
+                        model_tool_surface: ModelToolSurface::CompactToolInfo,
+                        discovery: None,
+                    },
+                ],
+                &LlmCallConfig::default(),
+            )
+            .await;
+
+        // SAFETY: serialized via lock_env().
+        unsafe {
+            if let Some(value) = original {
+                std::env::set_var("IRONCLAW_DISABLE_CODEACT", value);
+            } else {
+                std::env::remove_var("IRONCLAW_DISABLE_CODEACT");
+            }
+        }
+
+        result.expect("adapter.complete should succeed");
+
+        let tool_definitions = state.tool_definitions.lock().await;
+        let emitted = tool_definitions.last().expect("tool completion request");
+        let mut names: Vec<&str> = emitted.iter().map(|t| t.name.as_str()).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["http", "mission_create"],
+            "disabled-CodeAct must emit BOTH FullSchema and CompactToolInfo actions \
+             — otherwise compact actions are unreachable"
+        );
     }
 
     // ── extract_code_block tests ────────────────────────────

@@ -1,0 +1,21 @@
+[package]
+name = "ironclaw_oauth"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Shared OAuth callback server, landing pages, and host-binding utilities used by every IronClaw OAuth flow"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[package.metadata.dist]
+dist = false
+
+[dependencies]
+ironclaw_common = { path = "../ironclaw_common", version = "0.4.1" }
+
+thiserror = "2"
+tokio = { version = "1", features = ["io-util", "net", "time", "macros", "rt"] }
+urlencoding = "2"

@@ -1213,6 +1213,7 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(
             adapters.capability_input_resolver,
         )),
+        subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
         loop_exit_evidence: Arc::new(ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
             thread_service,
             turn_state_for_evidence,
@@ -1229,6 +1230,7 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
         model_budget_accountant: Some(adapters.model_budget_accountant),
         model_response_observer: None,
         safety_context: Some(adapters.safety_context),
+        turn_event_sink: None,
     })
     .expect("adapter bundle should satisfy the product-live readiness gate");
 

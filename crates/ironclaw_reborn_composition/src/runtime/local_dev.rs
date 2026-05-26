@@ -672,7 +672,7 @@ fn local_dev_skill_management_capability_ids() -> impl Iterator<Item = &'static 
         })
 }
 
-fn local_dev_grant_constraints(
+pub(super) fn local_dev_grant_constraints(
     capability_id: &str,
     workspace_mounts: &MountView,
     skill_mounts: &MountView,

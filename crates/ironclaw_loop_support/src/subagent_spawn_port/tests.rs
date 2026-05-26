@@ -464,6 +464,7 @@ impl TurnStateStore for StaticTurnStateStore {
             status: TurnStatus::CancelRequested,
             event_cursor: EventCursor(3),
             already_terminal: false,
+            actor: None,
         })
     }
 

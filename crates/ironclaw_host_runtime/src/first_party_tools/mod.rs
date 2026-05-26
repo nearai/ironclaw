@@ -11,6 +11,7 @@ mod json;
 mod schemas;
 mod shell;
 mod skill_management;
+mod skill_url_install;
 mod spawn_subagent;
 mod time;
 
@@ -42,7 +43,8 @@ pub use http::HTTP_CAPABILITY_ID;
 pub use json::JSON_CAPABILITY_ID;
 pub use shell::SHELL_CAPABILITY_ID;
 pub use skill_management::{
-    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
+    SKILL_INSTALL_CAPABILITY_ID, SKILL_INSTALL_URL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
+    SKILL_REMOVE_CAPABILITY_ID,
 };
 pub use spawn_subagent::SPAWN_SUBAGENT_CAPABILITY_ID;
 pub use time::TIME_CAPABILITY_ID;
