@@ -2945,6 +2945,150 @@ async fn host_runtime_services_health_fails_closed_for_unregistered_required_run
 }
 
 #[tokio::test]
+async fn host_runtime_routes_system_process_sandbox_to_configured_executor() {
+    let process_services = ProcessServices::in_memory();
+    let result_store = process_services.result_store();
+    let sandbox_executor = Arc::new(RecordingSandboxProcessExecutor::default());
+    let runtime = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        process_services,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_process_sandbox_executor(Arc::clone(&sandbox_executor))
+    .host_runtime_for_local_testing();
+    let scope = sample_scope(InvocationId::new());
+    let process_id = ProcessId::new();
+
+    let handle = runtime
+        .spawn_process(process_sandbox_start(process_id, scope.clone()))
+        .await
+        .unwrap();
+
+    assert_eq!(handle.process_id, process_id);
+    assert_eq!(handle.capability_id, process_sandbox_capability_id());
+    wait_for_sandbox_process_result(&sandbox_executor, &scope, process_id, result_store.as_ref())
+        .await;
+}
+
+#[tokio::test]
+async fn host_runtime_spawn_process_sandbox_routes_approved_request_to_configured_executor() {
+    let process_services = ProcessServices::in_memory();
+    let result_store = process_services.result_store();
+    let sandbox_executor = Arc::new(RecordingSandboxProcessExecutor::default());
+    let runtime = HostRuntimeServices::new(
+        Arc::new(registry_with_host_bundled_manifest(
+            PROCESS_SANDBOX_MANIFEST,
+        )),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        process_services,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "system.process_sandbox",
+        process_sandbox_authority_effects(),
+    )))
+    .with_process_sandbox_executor(Arc::clone(&sandbox_executor))
+    .host_runtime_for_local_testing();
+    let scope = sample_scope(InvocationId::new());
+
+    let outcome = runtime
+        .spawn_capability(process_sandbox_runtime_request_for_scope(scope.clone()))
+        .await
+        .unwrap();
+
+    let process_id = match outcome {
+        RuntimeCapabilityOutcome::SpawnedProcess(handle) => {
+            assert_eq!(handle.capability_id, process_sandbox_capability_id());
+            handle.process_id
+        }
+        other => panic!("expected spawned process, got {other:?}"),
+    };
+    wait_for_sandbox_process_result(&sandbox_executor, &scope, process_id, result_store.as_ref())
+        .await;
+}
+
+#[tokio::test]
+async fn host_runtime_spawn_process_sandbox_blocks_for_approval_before_executor() {
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let process_services = ProcessServices::in_memory();
+    let result_store = process_services.result_store();
+    let sandbox_executor = Arc::new(RecordingSandboxProcessExecutor::default());
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_host_bundled_manifest(
+            PROCESS_SANDBOX_MANIFEST,
+        )),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ApprovalThenGrantAuthorizer),
+        process_services,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "system.process_sandbox",
+        process_sandbox_authority_effects(),
+    )))
+    .with_run_state(Arc::clone(&run_state))
+    .with_approval_requests(Arc::clone(&approval_requests))
+    .with_capability_leases(Arc::clone(&capability_leases))
+    .with_process_sandbox_executor(Arc::clone(&sandbox_executor));
+    let runtime = services.host_runtime_for_local_testing();
+    let scope = sample_scope(InvocationId::new());
+    let context = execution_context_without_grants_for_scope(scope.clone());
+    let input = process_sandbox_input();
+    let estimate = process_sandbox_estimate();
+
+    let blocked = runtime
+        .spawn_capability(RuntimeCapabilityRequest::new(
+            context.clone(),
+            process_sandbox_capability_id(),
+            estimate.clone(),
+            input.clone(),
+            process_sandbox_trust_decision(),
+        ))
+        .await
+        .unwrap();
+
+    let approval_request_id = match blocked {
+        RuntimeCapabilityOutcome::ApprovalRequired(gate) => {
+            assert_eq!(gate.capability_id, process_sandbox_capability_id());
+            gate.approval_request_id
+        }
+        other => panic!("expected approval gate, got {other:?}"),
+    };
+    assert!(
+        sandbox_executor.requests().is_empty(),
+        "process sandbox executor must not run before approval"
+    );
+
+    approve_spawn_for_services(&services, &scope, approval_request_id, None).await;
+    let resumed = runtime
+        .resume_spawn_capability(RuntimeCapabilityResumeRequest::new(
+            context,
+            approval_request_id,
+            process_sandbox_capability_id(),
+            estimate,
+            input,
+            process_sandbox_trust_decision(),
+        ))
+        .await
+        .unwrap();
+
+    let process_id = match resumed {
+        RuntimeCapabilityOutcome::SpawnedProcess(handle) => handle.process_id,
+        other => panic!("expected spawned process after approval, got {other:?}"),
+    };
+    wait_for_sandbox_process_result(&sandbox_executor, &scope, process_id, result_store.as_ref())
+        .await;
+}
+
+#[tokio::test]
 async fn host_runtime_services_installs_builtin_obligation_handler_with_audit_sink() {
     let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
     let filesystem = Arc::new(LocalFilesystem::new());
@@ -5139,6 +5283,33 @@ async fn approve_dispatch_for_services(
         .unwrap()
 }
 
+async fn approve_spawn_for_services(
+    services: &InMemoryHostRuntimeServices,
+    scope: &ResourceScope,
+    approval_request_id: ApprovalRequestId,
+    expires_at: Option<Timestamp>,
+) -> ironclaw_authorization::CapabilityLease {
+    services
+        .approval_resolver()
+        .expect("approval resolver should be configured")
+        .approve_spawn(
+            scope,
+            approval_request_id,
+            LeaseApproval {
+                issued_by: Principal::HostRuntime,
+                allowed_effects: process_sandbox_authority_effects(),
+                mounts: MountView::default(),
+                network: NetworkPolicy::default(),
+                secrets: Vec::new(),
+                resource_ceiling: None,
+                expires_at,
+                max_invocations: Some(1),
+            },
+        )
+        .await
+        .unwrap()
+}
+
 struct SentinelApprovalAuthorizer;
 
 #[async_trait]
@@ -5203,6 +5374,35 @@ impl TrustAwareCapabilityDispatchAuthorizer for ApprovalThenGrantAuthorizer {
         } else {
             GrantAuthorizer::new()
                 .authorize_dispatch_with_trust(context, descriptor, estimate, trust_decision)
+                .await
+        }
+    }
+
+    async fn authorize_spawn_with_trust(
+        &self,
+        context: &ExecutionContext,
+        descriptor: &CapabilityDescriptor,
+        estimate: &ResourceEstimate,
+        trust_decision: &TrustDecision,
+    ) -> Decision {
+        if context.grants.grants.is_empty() {
+            Decision::RequireApproval {
+                request: ApprovalRequest {
+                    id: ApprovalRequestId::new(),
+                    correlation_id: context.correlation_id,
+                    requested_by: Principal::Extension(context.extension_id.clone()),
+                    action: Box::new(Action::SpawnCapability {
+                        capability: descriptor.id.clone(),
+                        estimated_resources: estimate.clone(),
+                    }),
+                    invocation_fingerprint: None,
+                    reason: "spawn approval required".to_string(),
+                    reusable_scope: None,
+                },
+            }
+        } else {
+            GrantAuthorizer::new()
+                .authorize_spawn_with_trust(context, descriptor, estimate, trust_decision)
                 .await
         }
     }
@@ -5918,6 +6118,30 @@ impl ProcessExecutor for BackgroundExecutor {
     }
 }
 
+#[derive(Default)]
+struct RecordingSandboxProcessExecutor {
+    requests: std::sync::Mutex<Vec<ProcessExecutionRequest>>,
+}
+
+impl RecordingSandboxProcessExecutor {
+    fn requests(&self) -> Vec<ProcessExecutionRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl ProcessExecutor for RecordingSandboxProcessExecutor {
+    async fn execute(
+        &self,
+        request: ProcessExecutionRequest,
+    ) -> Result<ProcessExecutionResult, ironclaw_processes::ProcessExecutionError> {
+        self.requests.lock().unwrap().push(request);
+        Ok(ProcessExecutionResult {
+            output: json!({"executor": "process_sandbox"}),
+        })
+    }
+}
+
 struct FailingSpawnManager;
 
 #[async_trait]
@@ -5959,6 +6183,29 @@ async fn wait_for_status(
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     panic!("process {process_id} did not reach {status:?}");
+}
+
+async fn wait_for_sandbox_process_result(
+    executor: &RecordingSandboxProcessExecutor,
+    scope: &ResourceScope,
+    process_id: ProcessId,
+    result_store: &dyn ProcessResultStore,
+) {
+    for _ in 0..100 {
+        let requests = executor.requests();
+        if let Some(request) = requests.first()
+            && request.process_id == process_id
+            && request.capability_id == process_sandbox_capability_id()
+            && request.runtime == RuntimeKind::System
+            && let Some(result) = result_store.get(scope, process_id).await.unwrap()
+        {
+            assert_eq!(result.status, ProcessStatus::Completed);
+            assert_eq!(result.output, Some(json!({"executor": "process_sandbox"})));
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("process sandbox executor did not complete process {process_id}");
 }
 
 async fn wait_for_result_store_attempt(store: &FailingProcessResultStore, attempt: &'static str) {
@@ -6080,6 +6327,15 @@ fn registry_with_manifest(manifest: &str) -> ExtensionRegistry {
     registry_with_manifests(&[manifest])
 }
 
+fn registry_with_host_bundled_manifest(manifest: &str) -> ExtensionRegistry {
+    let mut registry = ExtensionRegistry::new();
+    let manifest = parse_manifest_from_source(manifest, ManifestSource::HostBundled);
+    let root = VirtualPath::new(format!("/system/extensions/{}", manifest.id.as_str())).unwrap();
+    let package = ExtensionPackage::from_manifest(manifest, root).unwrap();
+    registry.insert(package).unwrap();
+    registry
+}
+
 fn registry_with_builtin_first_party_package() -> ExtensionRegistry {
     let mut registry = ExtensionRegistry::new();
     registry
@@ -6101,13 +6357,12 @@ fn registry_with_manifests(manifests: &[&str]) -> ExtensionRegistry {
 }
 
 fn parse_manifest(manifest: &str) -> ExtensionManifest {
+    parse_manifest_from_source(manifest, ManifestSource::InstalledLocal)
+}
+
+fn parse_manifest_from_source(manifest: &str, source: ManifestSource) -> ExtensionManifest {
     let manifest = legacy_capability_fixture_to_v2(manifest);
-    ExtensionManifest::parse(
-        &manifest,
-        ManifestSource::InstalledLocal,
-        &HostPortCatalog::empty(),
-    )
-    .unwrap()
+    ExtensionManifest::parse(&manifest, source, &HostPortCatalog::empty()).unwrap()
 }
 
 fn execution_context_without_grants() -> ExecutionContext {
@@ -6162,6 +6417,18 @@ fn execution_context_with_dispatch_grant_for_scope(
     capability: CapabilityId,
     scope: ResourceScope,
 ) -> ExecutionContext {
+    execution_context_with_effect_grants_for_scope(
+        capability,
+        scope,
+        vec![EffectKind::DispatchCapability, EffectKind::Network],
+    )
+}
+
+fn execution_context_with_effect_grants_for_scope(
+    capability: CapabilityId,
+    scope: ResourceScope,
+    allowed_effects: Vec<EffectKind>,
+) -> ExecutionContext {
     let context = ExecutionContext {
         invocation_id: scope.invocation_id,
         correlation_id: CorrelationId::new(),
@@ -6176,7 +6443,7 @@ fn execution_context_with_dispatch_grant_for_scope(
         extension_id: ExtensionId::new("caller").unwrap(),
         runtime: RuntimeKind::Wasm,
         trust: TrustClass::UserTrusted,
-        grants: capability_grants(capability),
+        grants: capability_grants_with_effects(capability, allowed_effects),
         mounts: MountView::default(),
         resource_scope: scope,
     };
@@ -6185,6 +6452,16 @@ fn execution_context_with_dispatch_grant_for_scope(
 }
 
 fn capability_grants(capability: CapabilityId) -> CapabilitySet {
+    capability_grants_with_effects(
+        capability,
+        vec![EffectKind::DispatchCapability, EffectKind::Network],
+    )
+}
+
+fn capability_grants_with_effects(
+    capability: CapabilityId,
+    allowed_effects: Vec<EffectKind>,
+) -> CapabilitySet {
     let mut grants = CapabilitySet::default();
     grants.grants.push(CapabilityGrant {
         id: CapabilityGrantId::new(),
@@ -6192,7 +6469,7 @@ fn capability_grants(capability: CapabilityId) -> CapabilitySet {
         grantee: Principal::Extension(ExtensionId::new("caller").unwrap()),
         issued_by: Principal::HostRuntime,
         constraints: GrantConstraints {
-            allowed_effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
+            allowed_effects,
             mounts: MountView::default(),
             network: NetworkPolicy::default(),
             secrets: Vec::new(),
@@ -6231,10 +6508,14 @@ fn local_manifest_trust_policy(
 }
 
 fn trust_decision_with_dispatch_authority() -> TrustDecision {
+    trust_decision_with_authority(vec![EffectKind::DispatchCapability, EffectKind::Network])
+}
+
+fn trust_decision_with_authority(allowed_effects: Vec<EffectKind>) -> TrustDecision {
     TrustDecision {
         effective_trust: EffectiveTrustClass::user_trusted(),
         authority_ceiling: AuthorityCeiling {
-            allowed_effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
+            allowed_effects,
             max_resource_ceiling: None,
         },
         provenance: TrustProvenance::Default,
@@ -6366,6 +6647,58 @@ fn process_start(
     }
 }
 
+fn process_sandbox_start(process_id: ProcessId, scope: ResourceScope) -> ProcessStart {
+    let invocation_id = scope.invocation_id;
+    ProcessStart {
+        process_id,
+        parent_process_id: None,
+        invocation_id,
+        scope,
+        extension_id: ExtensionId::new("system.process_sandbox").unwrap(),
+        capability_id: process_sandbox_capability_id(),
+        runtime: RuntimeKind::System,
+        grants: CapabilitySet::default(),
+        mounts: MountView::default(),
+        estimated_resources: ResourceEstimate::default(),
+        resource_reservation_id: None,
+        input: process_sandbox_input(),
+    }
+}
+
+fn process_sandbox_runtime_request_for_scope(scope: ResourceScope) -> RuntimeCapabilityRequest {
+    RuntimeCapabilityRequest::new(
+        execution_context_with_effect_grants_for_scope(
+            process_sandbox_capability_id(),
+            scope,
+            process_sandbox_authority_effects(),
+        ),
+        process_sandbox_capability_id(),
+        process_sandbox_estimate(),
+        process_sandbox_input(),
+        process_sandbox_trust_decision(),
+    )
+}
+
+fn process_sandbox_estimate() -> ResourceEstimate {
+    ResourceEstimate {
+        process_count: Some(1),
+        concurrency_slots: Some(1),
+        ..ResourceEstimate::default()
+    }
+}
+
+fn process_sandbox_input() -> serde_json::Value {
+    json!({"run": {"command": "echo", "args": ["ok"]}})
+}
+
+fn process_sandbox_authority_effects() -> Vec<EffectKind> {
+    vec![EffectKind::ExecuteCode, EffectKind::SpawnProcess]
+}
+
+fn process_sandbox_trust_decision() -> TrustDecision {
+    trust_decision_with_authority(process_sandbox_authority_effects())
+}
+
 fn script_extension_id() -> ExtensionId {
     ExtensionId::new("script").unwrap()
 }
@@ -6376,6 +6709,10 @@ fn script_capability_id() -> CapabilityId {
 
 fn mcp_capability_id() -> CapabilityId {
     CapabilityId::new("mcp.search").unwrap()
+}
+
+fn process_sandbox_capability_id() -> CapabilityId {
+    CapabilityId::new("system.process_sandbox.run").unwrap()
 }
 
 struct WasmRuntimeFixture {
@@ -6643,6 +6980,25 @@ id = "script.echo"
 description = "Echo through Script"
 effects = ["dispatch_capability"]
 default_permission = "allow"
+parameters_schema = { type = "object" }
+"#;
+
+const PROCESS_SANDBOX_MANIFEST: &str = r#"
+id = "system.process_sandbox"
+name = "Process Sandbox"
+version = "0.1.0"
+description = "System process sandbox runtime"
+trust = "system_requested"
+
+[runtime]
+kind = "system"
+service = "process_sandbox"
+
+[[capabilities]]
+id = "system.process_sandbox.run"
+description = "Run a process inside the system sandbox backend"
+effects = ["execute_code", "spawn_process"]
+default_permission = "ask"
 parameters_schema = { type = "object" }
 "#;
 

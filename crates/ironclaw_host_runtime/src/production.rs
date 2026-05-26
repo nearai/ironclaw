@@ -20,6 +20,7 @@ use ironclaw_authorization::{CapabilityLeaseStore, TrustAwareCapabilityDispatchA
 use ironclaw_capabilities::{
     CapabilityHost, CapabilityInvocationError, CapabilityInvocationRequest,
     CapabilityInvocationResult, CapabilityObligationHandler, CapabilityResumeRequest,
+    CapabilitySpawnRequest, CapabilitySpawnResult,
 };
 use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_host_api::{
@@ -29,7 +30,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_processes::{
     ProcessCancellationRegistry, ProcessError, ProcessHost, ProcessManager, ProcessResultStore,
-    ProcessStatus, ProcessStore,
+    ProcessStart, ProcessStatus, ProcessStore,
 };
 use ironclaw_run_state::{
     ApprovalRequestStore, RunStateApprovalStore, RunStateError, RunStateStore, RunStatus,
@@ -263,6 +264,28 @@ impl DefaultHostRuntime {
     pub fn with_builtin_obligation_handler(self) -> Self {
         self.with_obligation_handler(Arc::new(BuiltinObligationHandler::new()))
     }
+
+    /// Spawns an already-authorized process request through the configured
+    /// process manager.
+    pub async fn spawn_process(
+        &self,
+        start: ProcessStart,
+    ) -> Result<crate::RuntimeProcessHandle, HostRuntimeError> {
+        let Some(process_manager) = &self.process_manager else {
+            return Err(HostRuntimeError::Unavailable {
+                reason: "process manager unavailable".to_string(),
+            });
+        };
+        let capability_id = start.capability_id.clone();
+        let record = process_manager
+            .spawn(start)
+            .await
+            .map_err(unavailable_from_process_error)?;
+        Ok(crate::RuntimeProcessHandle {
+            process_id: record.process_id,
+            capability_id,
+        })
+    }
 }
 
 #[async_trait]
@@ -336,6 +359,77 @@ impl HostRuntime for DefaultHostRuntime {
                     error_kind = failure_kind_from(&error).as_str(),
                     idempotency_key = idempotency_key.as_deref().unwrap_or(""),
                     "capability invocation failed"
+                );
+                self.translate_invocation_error(error, capability_id, scope, invocation_id)
+                    .await
+            }
+        }
+    }
+
+    async fn spawn_capability(
+        &self,
+        request: RuntimeCapabilityRequest,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        let RuntimeCapabilityRequest {
+            mut context,
+            capability_id,
+            estimate,
+            input,
+            idempotency_key,
+            trust_decision: _caller_trust_decision,
+        } = request;
+        let scope = context.resource_scope.clone();
+        let invocation_id = context.invocation_id;
+        let idempotency_key = idempotency_key.map(|key| key.as_str().to_string());
+        if let Some(key) = idempotency_key.as_deref() {
+            tracing::debug!(
+                capability_id = %capability_id,
+                idempotency_key = %key,
+                "capability spawn accepted advisory idempotency key (not yet enforced)"
+            );
+        }
+
+        if let Err(error) = self.enforce_runtime_policy(&capability_id) {
+            tracing::debug!(
+                capability_id = %capability_id,
+                runtime_policy_error_kind = error.kind(),
+                "capability runtime policy rejected spawn before process start"
+            );
+            return Ok(runtime_policy_failure(capability_id, error));
+        }
+
+        let trust_decision = match self.evaluate_invocation_trust(&capability_id) {
+            Ok(host_decision) => host_decision,
+            Err(error) => {
+                tracing::debug!(
+                    capability_id = %capability_id,
+                    trust_error_kind = error.kind(),
+                    "capability trust evaluation failed before spawn"
+                );
+                return Ok(trust_evaluation_failure(capability_id, error));
+            }
+        };
+        context.trust = trust_decision.effective_trust.class();
+
+        let host = self.capability_host();
+        let spawn = CapabilitySpawnRequest {
+            context,
+            capability_id: capability_id.clone(),
+            estimate,
+            input,
+            trust_decision,
+        };
+
+        match host.spawn_json(spawn).await {
+            Ok(result) => Ok(RuntimeCapabilityOutcome::SpawnedProcess(
+                spawned_process_outcome_from(result, capability_id),
+            )),
+            Err(error) => {
+                tracing::debug!(
+                    capability_id = %capability_id,
+                    error_kind = failure_kind_from(&error).as_str(),
+                    idempotency_key = idempotency_key.as_deref().unwrap_or(""),
+                    "capability spawn failed"
                 );
                 self.translate_invocation_error(error, capability_id, scope, invocation_id)
                     .await
@@ -426,6 +520,94 @@ impl HostRuntime for DefaultHostRuntime {
                     error_kind = failure_kind_from(&error).as_str(),
                     idempotency_key = idempotency_key.as_deref().unwrap_or(""),
                     "capability resume failed"
+                );
+                Ok(RuntimeCapabilityOutcome::Failed(failure_from(
+                    error,
+                    capability_id,
+                )))
+            }
+        }
+    }
+
+    async fn resume_spawn_capability(
+        &self,
+        request: RuntimeCapabilityResumeRequest,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        let RuntimeCapabilityResumeRequest {
+            mut context,
+            approval_request_id,
+            capability_id,
+            estimate,
+            input,
+            idempotency_key,
+            trust_decision: _caller_trust_decision,
+        } = request;
+        let idempotency_key = idempotency_key.map(|key| key.as_str().to_string());
+        if let Some(key) = idempotency_key.as_deref() {
+            tracing::debug!(
+                capability_id = %capability_id,
+                approval_request_id = %approval_request_id,
+                idempotency_key = %key,
+                "capability spawn resume accepted advisory idempotency key (not yet enforced)"
+            );
+        }
+
+        if let Err(error) = self.enforce_runtime_policy(&capability_id) {
+            tracing::debug!(
+                capability_id = %capability_id,
+                runtime_policy_error_kind = error.kind(),
+                "capability runtime policy rejected spawn resume before process start"
+            );
+            self.fail_matching_blocked_resume_on_preflight_error(
+                &context,
+                &capability_id,
+                approval_request_id,
+                error.kind(),
+            )
+            .await;
+            return Ok(runtime_policy_failure(capability_id, error));
+        }
+
+        let trust_decision = match self.evaluate_invocation_trust(&capability_id) {
+            Ok(host_decision) => host_decision,
+            Err(error) => {
+                tracing::debug!(
+                    capability_id = %capability_id,
+                    trust_error_kind = error.kind(),
+                    "capability trust evaluation failed before spawn resume"
+                );
+                self.fail_matching_blocked_resume_on_preflight_error(
+                    &context,
+                    &capability_id,
+                    approval_request_id,
+                    error.kind(),
+                )
+                .await;
+                return Ok(trust_evaluation_failure(capability_id, error));
+            }
+        };
+        context.trust = trust_decision.effective_trust.class();
+
+        let host = self.capability_host();
+        let resume = CapabilityResumeRequest {
+            context,
+            approval_request_id,
+            capability_id: capability_id.clone(),
+            estimate,
+            input,
+            trust_decision,
+        };
+
+        match host.resume_spawn_json(resume).await {
+            Ok(result) => Ok(RuntimeCapabilityOutcome::SpawnedProcess(
+                spawned_process_outcome_from(result, capability_id),
+            )),
+            Err(error) => {
+                tracing::debug!(
+                    capability_id = %capability_id,
+                    error_kind = failure_kind_from(&error).as_str(),
+                    idempotency_key = idempotency_key.as_deref().unwrap_or(""),
+                    "capability spawn resume failed"
                 );
                 Ok(RuntimeCapabilityOutcome::Failed(failure_from(
                     error,
@@ -1052,6 +1234,16 @@ fn completed_outcome_from(
         capability_id,
         output: result.dispatch.output,
         usage: result.dispatch.usage,
+    }
+}
+
+fn spawned_process_outcome_from(
+    result: CapabilitySpawnResult,
+    capability_id: CapabilityId,
+) -> crate::RuntimeProcessHandle {
+    crate::RuntimeProcessHandle {
+        process_id: result.process.process_id,
+        capability_id,
     }
 }
 
