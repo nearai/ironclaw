@@ -13,6 +13,7 @@ use ironclaw_host_runtime::{
     RuntimeBlockedReason, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
     RuntimeCapabilityRequest, RuntimeFailureKind,
 };
+use ironclaw_process_sandbox::{SandboxProcessPlan, ValidatedSandboxProcessPlan};
 use ironclaw_turns::{
     CapabilityActivityId, LoopGateRef, LoopResultRef,
     run_profile::{
@@ -1020,6 +1021,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             .input_resolver
             .resolve_capability_input(&self.run_context, &request.input_ref)
             .await?;
+        let input = host_runtime_input_for_capability(&request.capability_id, input)?;
         let invocation_context = invocation_context_from_visible(
             &self.visible_request.context,
             &self.run_context,
@@ -1039,40 +1041,36 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             capability_id: request.capability_id.clone(),
         })
         .await?;
-        let outcome = match self
-            .runtime
-            .invoke_capability(
-                RuntimeCapabilityRequest::new(
-                    invocation_context,
-                    request.capability_id,
-                    capability.estimate,
-                    input,
-                    trust_decision,
-                )
-                .with_idempotency_key(idempotency_key.clone()),
-            )
-            .await
-        {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                let host_error = host_runtime_error(error);
-                let terminal_milestone = LoopHostMilestoneKind::CapabilityFailed {
-                    activity_id: capability_activity_id,
-                    capability_id: requested_capability_id.clone(),
-                    provider: Some(provider),
-                    runtime: Some(runtime),
-                    reason_kind: capability_failure_kind(host_error.kind.as_str())?,
-                };
-                guard.commit();
-                return self
-                    .complete_terminal_milestone(
-                        &idempotency_key,
-                        Err(host_error),
-                        Some(terminal_milestone),
-                    )
-                    .await;
-            }
-        };
+        let runtime_request = RuntimeCapabilityRequest::new(
+            invocation_context,
+            request.capability_id,
+            capability.estimate,
+            input,
+            trust_decision,
+        )
+        .with_idempotency_key(idempotency_key.clone());
+        let outcome =
+            match dispatch_runtime_capability(self.runtime.as_ref(), runtime_request).await {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    let host_error = host_runtime_error(error);
+                    let terminal_milestone = LoopHostMilestoneKind::CapabilityFailed {
+                        activity_id: capability_activity_id,
+                        capability_id: requested_capability_id.clone(),
+                        provider: Some(provider),
+                        runtime: Some(runtime),
+                        reason_kind: capability_failure_kind(host_error.kind.as_str())?,
+                    };
+                    guard.commit();
+                    return self
+                        .complete_terminal_milestone(
+                            &idempotency_key,
+                            Err(host_error),
+                            Some(terminal_milestone),
+                        )
+                        .await;
+                }
+            };
         guard.commit();
         self.finish_runtime_outcome(
             &idempotency_key,
@@ -1108,6 +1106,52 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             stopped_on_suspension,
         })
     }
+}
+
+async fn dispatch_runtime_capability(
+    runtime: &(dyn HostRuntime + Send + Sync),
+    request: RuntimeCapabilityRequest,
+) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+    if is_process_sandbox_capability(&request.capability_id) {
+        runtime.spawn_capability(request).await
+    } else {
+        runtime.invoke_capability(request).await
+    }
+}
+
+fn host_runtime_input_for_capability(
+    capability_id: &CapabilityId,
+    input: serde_json::Value,
+) -> Result<serde_json::Value, AgentLoopHostError> {
+    if is_process_sandbox_capability(capability_id) {
+        let plan = serde_json::from_value::<SandboxProcessPlan>(input).map_err(|_| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "process sandbox capability input must be a SandboxProcessPlan",
+            )
+        })?;
+        let plan = ValidatedSandboxProcessPlan::new(plan).map_err(|_| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "process sandbox capability input failed SandboxProcessPlan validation",
+            )
+        })?;
+        return serde_json::to_value(plan.into_plan()).map_err(|error| {
+            let safe_summary = error.to_string();
+            crate::raw_agent_loop_host_error(
+                "capability_runtime_input",
+                "serialize_process_sandbox_plan",
+                AgentLoopHostErrorKind::Internal,
+                safe_summary,
+                error,
+            )
+        });
+    }
+    Ok(input)
+}
+
+fn is_process_sandbox_capability(capability_id: &CapabilityId) -> bool {
+    capability_id.as_str() == ironclaw_process_sandbox::PROCESS_SANDBOX_CAPABILITY_ID
 }
 
 fn provider_schema_is_usable(schema: &serde_json::Value) -> bool {
@@ -3263,6 +3307,129 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn process_sandbox_capability_invocation_uses_spawn_with_validated_plan() {
+        let capability_id =
+            CapabilityId::new(ironclaw_process_sandbox::PROCESS_SANDBOX_CAPABILITY_ID)
+                .expect("valid capability id");
+        let provider_id = ExtensionId::new("system.process_sandbox").expect("valid provider id");
+        let mut context = execution_context("thread-process-sandbox-spawn");
+        let run_context = loop_run_context(&context).await;
+        let loop_driver_extension =
+            loop_driver_execution_extension_id(&run_context).expect("valid extension id");
+        let effects = vec![EffectKind::ExecuteCode, EffectKind::SpawnProcess];
+        context.grants.grants.push(capability_grant_with_effects(
+            &capability_id,
+            &loop_driver_extension,
+            effects.clone(),
+        ));
+
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![
+            visible_capability_with_runtime_effects(
+                capability_id.clone(),
+                provider_id.clone(),
+                RuntimeKind::System,
+                effects.clone(),
+            ),
+        ]));
+        let visible_request = visible_request(context).with_provider_trust(
+            std::collections::BTreeMap::from([(provider_id, trust_decision_with_effects(effects))]),
+        );
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            runtime.clone(),
+            visible_request,
+            Arc::new(ProcessSandboxPlanInputResolver),
+            Arc::new(StaticResultWriter),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: surface.version,
+                capability_id: capability_id.clone(),
+                input_ref: CapabilityInputRef::new("input:process-sandbox-plan")
+                    .expect("valid input ref"),
+            })
+            .await
+            .expect("process sandbox invocation succeeds");
+
+        assert!(matches!(outcome, CapabilityOutcome::SpawnedProcess(_)));
+        assert!(
+            runtime.take_requests().is_empty(),
+            "process sandbox capability must not use foreground invoke"
+        );
+        let spawn_requests = runtime.take_spawn_requests();
+        assert_eq!(spawn_requests.len(), 1);
+        assert_eq!(spawn_requests[0].capability_id, capability_id);
+        assert_eq!(
+            serde_json::from_value::<SandboxProcessPlan>(spawn_requests[0].input.clone())
+                .expect("spawn input is a typed sandbox process plan")
+                .run
+                .command,
+            "echo"
+        );
+    }
+
+    #[tokio::test]
+    async fn process_sandbox_capability_rejects_invalid_plan_before_runtime_spawn() {
+        let capability_id =
+            CapabilityId::new(ironclaw_process_sandbox::PROCESS_SANDBOX_CAPABILITY_ID)
+                .expect("valid capability id");
+        let provider_id = ExtensionId::new("system.process_sandbox").expect("valid provider id");
+        let mut context = execution_context("thread-process-sandbox-invalid-plan");
+        let run_context = loop_run_context(&context).await;
+        let loop_driver_extension =
+            loop_driver_execution_extension_id(&run_context).expect("valid extension id");
+        let effects = vec![EffectKind::ExecuteCode, EffectKind::SpawnProcess];
+        context.grants.grants.push(capability_grant_with_effects(
+            &capability_id,
+            &loop_driver_extension,
+            effects.clone(),
+        ));
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![
+            visible_capability_with_runtime_effects(
+                capability_id.clone(),
+                provider_id.clone(),
+                RuntimeKind::System,
+                effects.clone(),
+            ),
+        ]));
+        let visible_request = visible_request(context).with_provider_trust(
+            std::collections::BTreeMap::from([(provider_id, trust_decision_with_effects(effects))]),
+        );
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            runtime.clone(),
+            visible_request,
+            Arc::new(InvalidProcessSandboxPlanInputResolver),
+            Arc::new(StaticResultWriter),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+
+        let error = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: surface.version,
+                capability_id,
+                input_ref: CapabilityInputRef::new("input:invalid-process-sandbox-plan")
+                    .expect("valid input ref"),
+            })
+            .await
+            .expect_err("invalid process sandbox plan must fail before runtime dispatch");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert!(runtime.take_requests().is_empty());
+        assert!(runtime.take_spawn_requests().is_empty());
+    }
+
+    #[tokio::test]
     async fn invocation_context_rejects_same_scope_elevated_grant() {
         let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
         let mut context = execution_context("thread-elevated-grant");
@@ -3577,13 +3744,21 @@ mod tests {
         capability_id: &CapabilityId,
         grantee: &ExtensionId,
     ) -> CapabilityGrant {
+        capability_grant_with_effects(capability_id, grantee, vec![EffectKind::DispatchCapability])
+    }
+
+    fn capability_grant_with_effects(
+        capability_id: &CapabilityId,
+        grantee: &ExtensionId,
+        allowed_effects: Vec<EffectKind>,
+    ) -> CapabilityGrant {
         CapabilityGrant {
             id: CapabilityGrantId::new(),
             capability: capability_id.clone(),
             grantee: Principal::Extension(grantee.clone()),
             issued_by: Principal::HostRuntime,
             constraints: GrantConstraints {
-                allowed_effects: vec![EffectKind::DispatchCapability],
+                allowed_effects,
                 mounts: MountView::default(),
                 network: NetworkPolicy::default(),
                 secrets: Vec::new(),
@@ -3595,10 +3770,14 @@ mod tests {
     }
 
     fn dispatch_trust_decision() -> TrustDecision {
+        trust_decision_with_effects(vec![EffectKind::DispatchCapability])
+    }
+
+    fn trust_decision_with_effects(allowed_effects: Vec<EffectKind>) -> TrustDecision {
         TrustDecision {
             effective_trust: EffectiveTrustClass::user_trusted(),
             authority_ceiling: AuthorityCeiling {
-                allowed_effects: vec![EffectKind::DispatchCapability],
+                allowed_effects,
                 max_resource_ceiling: None,
             },
             provenance: TrustProvenance::Default,
@@ -3607,15 +3786,29 @@ mod tests {
     }
 
     fn visible_capability(id: CapabilityId, provider: ExtensionId) -> VisibleCapability {
+        visible_capability_with_runtime_effects(
+            id,
+            provider,
+            RuntimeKind::FirstParty,
+            vec![EffectKind::DispatchCapability],
+        )
+    }
+
+    fn visible_capability_with_runtime_effects(
+        id: CapabilityId,
+        provider: ExtensionId,
+        runtime: RuntimeKind,
+        effects: Vec<EffectKind>,
+    ) -> VisibleCapability {
         VisibleCapability {
             descriptor: CapabilityDescriptor {
                 id,
                 provider,
-                runtime: RuntimeKind::FirstParty,
+                runtime,
                 trust_ceiling: TrustClass::UserTrusted,
                 description: "demo capability".to_string(),
                 parameters_schema: serde_json::json!({"type":"object"}),
-                effects: vec![EffectKind::DispatchCapability],
+                effects,
                 default_permission: PermissionMode::Allow,
                 runtime_credentials: Vec::new(),
                 resource_profile: None,
@@ -3700,6 +3893,7 @@ mod tests {
     struct RecordingHostRuntime {
         capabilities: Vec<VisibleCapability>,
         requests: Mutex<Vec<RuntimeCapabilityRequest>>,
+        spawn_requests: Mutex<Vec<RuntimeCapabilityRequest>>,
     }
 
     impl RecordingHostRuntime {
@@ -3707,11 +3901,19 @@ mod tests {
             Self {
                 capabilities,
                 requests: Mutex::new(Vec::new()),
+                spawn_requests: Mutex::new(Vec::new()),
             }
         }
 
         fn take_requests(&self) -> Vec<RuntimeCapabilityRequest> {
             self.requests.lock().expect("requests lock").clone()
+        }
+
+        fn take_spawn_requests(&self) -> Vec<RuntimeCapabilityRequest> {
+            self.spawn_requests
+                .lock()
+                .expect("spawn requests lock")
+                .clone()
         }
     }
 
@@ -3735,6 +3937,22 @@ mod tests {
                     },
                 },
             )))
+        }
+
+        async fn spawn_capability(
+            &self,
+            request: RuntimeCapabilityRequest,
+        ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+            self.spawn_requests
+                .lock()
+                .expect("spawn requests lock")
+                .push(request.clone());
+            Ok(RuntimeCapabilityOutcome::SpawnedProcess(
+                ironclaw_host_runtime::RuntimeProcessHandle {
+                    process_id: ironclaw_host_api::ProcessId::new(),
+                    capability_id: request.capability_id,
+                },
+            ))
         }
 
         async fn resume_capability(
@@ -3886,6 +4104,41 @@ mod tests {
             _input_ref: &CapabilityInputRef,
         ) -> Result<serde_json::Value, AgentLoopHostError> {
             Ok(serde_json::json!({"ok": true}))
+        }
+    }
+
+    struct ProcessSandboxPlanInputResolver;
+
+    #[async_trait]
+    impl LoopCapabilityInputResolver for ProcessSandboxPlanInputResolver {
+        async fn resolve_capability_input(
+            &self,
+            _run_context: &LoopRunContext,
+            _input_ref: &CapabilityInputRef,
+        ) -> Result<serde_json::Value, AgentLoopHostError> {
+            Ok(serde_json::json!({
+                "run": {
+                    "command": "echo",
+                    "args": ["ok"]
+                }
+            }))
+        }
+    }
+
+    struct InvalidProcessSandboxPlanInputResolver;
+
+    #[async_trait]
+    impl LoopCapabilityInputResolver for InvalidProcessSandboxPlanInputResolver {
+        async fn resolve_capability_input(
+            &self,
+            _run_context: &LoopRunContext,
+            _input_ref: &CapabilityInputRef,
+        ) -> Result<serde_json::Value, AgentLoopHostError> {
+            Ok(serde_json::json!({
+                "run": {
+                    "command": ""
+                }
+            }))
         }
     }
 
