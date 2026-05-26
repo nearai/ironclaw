@@ -686,7 +686,7 @@ pub async fn build_reborn_runtime(
         poll,
         identity,
         skill_context_source: configured_skill_context_source,
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         model_gateway_override,
     } = input;
 
@@ -763,7 +763,7 @@ pub async fn build_reborn_runtime(
 
     #[cfg(feature = "root-llm-provider")]
     let model_gateway = {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(gateway) = model_gateway_override {
             gateway
         } else {
@@ -772,7 +772,7 @@ pub async fn build_reborn_runtime(
                 None => build_stub_gateway(),
             }
         }
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-support")))]
         {
             match llm {
                 Some(cfg) => build_llm_gateway(cfg)?,
@@ -782,13 +782,13 @@ pub async fn build_reborn_runtime(
     };
     #[cfg(not(feature = "root-llm-provider"))]
     let model_gateway = {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(gateway) = model_gateway_override {
             gateway
         } else {
             build_stub_gateway()
         }
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-support")))]
         {
             build_stub_gateway()
         }

@@ -55,6 +55,12 @@ postgres = [
     "ironclaw_resources/postgres",
     "ironclaw_run_state/postgres",
 ]
+# Expose hooks that production builds keep private but integration
+# tests in `tests/*.rs` need (e.g. injecting a recording/replay
+# `HostManagedModelGateway` via `RebornRuntimeInput::with_model_gateway_override`).
+# Off by default; enable with `cargo test --features test-support` (and
+# whatever feature surface the test crate also requires, e.g. `webui-v2-beta`).
+test-support = []
 
 [dependencies]
 async-trait = "0.1"
