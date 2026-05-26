@@ -12,6 +12,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_product_adapters::{
     CapabilityActivityStatusView, ProductOutboundEnvelope, ProductOutboundPayload,
+    ProductProjectionItem,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor as TurnEventCursor,

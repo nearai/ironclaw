@@ -737,6 +737,11 @@ impl TurnStateStore for InMemoryTurnStateStore {
         delta: u32,
         cap: u32,
     ) -> Result<SpawnTreeReservation, TurnError> {
+        if delta == 0 {
+            return Err(TurnError::InvalidRequest {
+                reason: "reservation delta must be greater than zero".to_string(),
+            });
+        }
         let mut inner = self.lock_inner()?;
         let Some(root) = inner.records.get(&root_run_id) else {
             return Err(TurnError::ScopeNotFound);
@@ -1505,21 +1510,16 @@ impl Inner {
             if record.scope != request.scope {
                 return Err(TurnError::ScopeNotFound);
             }
-            if !matches!(
-                record.status,
-                TurnStatus::BlockedApproval
-                    | TurnStatus::BlockedAuth
-                    | TurnStatus::BlockedResource
-                    | TurnStatus::BlockedDependentRun
-            ) {
-                return Err(TurnError::InvalidTransition {
-                    from: record.status,
-                    to: TurnStatus::Queued,
-                });
-            }
-            if let Some(required) = request.precondition.required_status()
-                && record.status != required
-            {
+            let resumable_status = match request.precondition.required_status() {
+                Some(required) => record.status == required,
+                None => matches!(
+                    record.status,
+                    TurnStatus::BlockedApproval
+                        | TurnStatus::BlockedAuth
+                        | TurnStatus::BlockedResource
+                ),
+            };
+            if !resumable_status {
                 return Err(TurnError::InvalidTransition {
                     from: record.status,
                     to: TurnStatus::Queued,

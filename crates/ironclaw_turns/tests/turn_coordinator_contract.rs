@@ -524,7 +524,7 @@ async fn blocked_dependent_run_can_resume_and_cancel_directly() {
             source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-dependent-resume").unwrap(),
-            precondition: ironclaw_turns::ResumeTurnPrecondition::AnyBlockedGate,
+            precondition: ironclaw_turns::ResumeTurnPrecondition::BlockedDependentRunGate,
         })
         .await
         .unwrap();
@@ -646,7 +646,7 @@ async fn default_turn_coordinator_dedupes_idempotency_replay_events_by_cursor() 
         source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
         reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
         idempotency_key: IdempotencyKey::new("idem-event-replay-resume").unwrap(),
-        precondition: ironclaw_turns::ResumeTurnPrecondition::AnyBlockedGate,
+        precondition: ironclaw_turns::ResumeTurnPrecondition::BlockedDependentRunGate,
     };
     coordinator.resume_turn(resume.clone()).await.unwrap();
     coordinator.resume_turn(resume).await.unwrap();
@@ -5094,14 +5094,93 @@ fn turn_blocked_gate_kind_await_dependent_run_maps_from_status_and_round_trips_w
 async fn prepare_turn_rejects_cross_scope_submission_of_prepared_run_id() {
     let (coordinator, _store) = coordinator();
     let prepared_scope = scope("thread-prepared-cross-scope");
-    let prepared = coordinator.prepare_turn(prepared_scope).await.unwrap();
+    let prepared = coordinator
+        .prepare_turn(prepared_scope.clone())
+        .await
+        .unwrap();
 
     // Submit the prepared run id under a different thread scope; coordinator
-    // must reject before delegating to the store.
+    // must reject before delegating to the store, without consuming the
+    // prepared id's original scope binding.
     let mut cross_scope = submit_request("thread-other-scope", "idem-cross-scope");
     cross_scope.requested_run_id = Some(prepared);
     let err = coordinator.submit_turn(cross_scope).await.unwrap_err();
     assert!(matches!(err, TurnError::Unauthorized));
+
+    let mut original_scope = submit_request("thread-prepared-cross-scope", "idem-original-scope");
+    original_scope.requested_run_id = Some(prepared);
+    let accepted = coordinator.submit_turn(original_scope).await.unwrap();
+    assert_eq!(accepted_run_id(&accepted), prepared);
+}
+
+#[tokio::test]
+async fn any_blocked_gate_resume_does_not_resume_dependent_run_gate() {
+    let (coordinator, store) = coordinator();
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-dependent-resume",
+                "idem-dependent-resume",
+            ))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let gate_ref = GateRef::new("gate-dependent-resume").unwrap();
+    store
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref: block_state_ref(),
+            reason: BlockedReason::DependentRun {
+                gate_ref: gate_ref.clone(),
+            },
+        })
+        .await
+        .unwrap();
+
+    let err = coordinator
+        .resume_turn(ResumeTurnRequest {
+            scope: scope("thread-dependent-resume"),
+            actor: actor(),
+            run_id,
+            gate_resolution_ref: gate_ref.clone(),
+            precondition: ironclaw_turns::ResumeTurnPrecondition::AnyBlockedGate,
+            source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
+            idempotency_key: IdempotencyKey::new("idem-dependent-resume-any").unwrap(),
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        err,
+        TurnError::InvalidTransition {
+            from: TurnStatus::BlockedDependentRun,
+            to: TurnStatus::Queued,
+        }
+    );
+    let state = coordinator
+        .get_run_state(GetRunStateRequest {
+            scope: scope("thread-dependent-resume"),
+            run_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(state.status, TurnStatus::BlockedDependentRun);
+    assert_eq!(state.gate_ref, Some(gate_ref));
 }
 
 #[tokio::test]
@@ -5131,6 +5210,40 @@ async fn release_tree_descendants_rejects_over_release() {
         }
         other => panic!("expected InvalidRequest, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn reserve_tree_descendants_rejects_zero_delta() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+    let owner_scope = scope("thread-tree-zero-reservation");
+
+    let root = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-tree-zero-reservation",
+                "idem-tree-zero-reservation",
+            ))
+            .await
+            .unwrap(),
+    );
+
+    let err = store
+        .reserve_tree_descendants(&owner_scope, root, 0, 8)
+        .await
+        .unwrap_err();
+    match err {
+        TurnError::InvalidRequest { reason } => {
+            assert!(reason.contains("greater than zero"));
+        }
+        other => panic!("expected InvalidRequest, got {other:?}"),
+    }
+    assert!(
+        store
+            .persistence_snapshot()
+            .spawn_tree_reservations
+            .is_empty()
+    );
 }
 
 #[tokio::test]

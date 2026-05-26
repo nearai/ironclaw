@@ -175,17 +175,21 @@ where
 
 #[cfg(feature = "filesystem-goal-store")]
 fn goal_path(scope: &TurnScope, run_id: TurnRunId) -> Result<ScopedPath, SubagentGoalStoreError> {
-    let agent_id = scope.agent_id.as_ref().map_or("_", |id| id.as_str());
-    let project_id = scope.project_id.as_ref().map_or("_", |id| id.as_str());
-    ScopedPath::new(format!(
-        "/turns/subagent-goals/{}/{}/{}/{}/{}.json",
-        scope.tenant_id.as_str(),
-        agent_id,
-        project_id,
-        scope.thread_id.as_str(),
-        run_id.as_uuid()
-    ))
-    .map_err(|error| SubagentGoalStoreError::Backend {
+    let mut path = String::from("/turns/subagent-goals");
+    if let Some(agent_id) = &scope.agent_id {
+        path.push_str("/agents/");
+        path.push_str(agent_id.as_str());
+    }
+    if let Some(project_id) = &scope.project_id {
+        path.push_str("/projects/");
+        path.push_str(project_id.as_str());
+    }
+    path.push_str("/threads/");
+    path.push_str(scope.thread_id.as_str());
+    path.push('/');
+    path.push_str(&run_id.as_uuid().to_string());
+    path.push_str(".json");
+    ScopedPath::new(path).map_err(|error| SubagentGoalStoreError::Backend {
         reason: format!("invalid subagent goal path: {error}"),
     })
 }
@@ -594,6 +598,27 @@ mod tests {
     async fn filesystem_goal_store_satisfies_subagent_goal_contract() {
         let store = FilesystemSubagentGoalStore::new(scoped_goal_filesystem());
         assert_goal_store_contract(&store).await;
+    }
+
+    #[cfg(feature = "filesystem-goal-store")]
+    #[test]
+    fn filesystem_goal_path_uses_alias_relative_named_scope_axes() {
+        let owner_scope = scope("thread-goal-path");
+        let run_id = TurnRunId::new();
+
+        let path = goal_path(&owner_scope, run_id).unwrap();
+
+        assert_eq!(
+            path.as_str(),
+            format!(
+                "/turns/subagent-goals/agents/agent-alpha/projects/project-alpha/threads/thread-goal-path/{}.json",
+                run_id.as_uuid()
+            )
+        );
+        assert!(
+            !path.as_str().contains("tenant-alpha"),
+            "resource scope already supplies tenant isolation"
+        );
     }
 
     #[cfg(feature = "filesystem-goal-store")]

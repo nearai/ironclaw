@@ -8,6 +8,8 @@ use std::{
 };
 use tracing::debug;
 
+const MAX_DELIVERED_EVENT_CURSORS: usize = 4096;
+
 use crate::{
     AdmissionRejection, CancelRunRequest, CancelRunResponse, GetRunStateRequest,
     InMemoryRunProfileResolver, ResumeTurnRequest, ResumeTurnResponse, RunProfileResolver,
@@ -138,9 +140,23 @@ where
     }
 
     fn claim_event_cursor_for_publish(&self, cursor: EventCursor) -> bool {
+        if self.event_sink.is_none() {
+            return false;
+        }
         match self.delivered_event_cursors.lock() {
-            Ok(mut delivered) => delivered.insert(cursor),
-            Err(poisoned) => poisoned.into_inner().insert(cursor),
+            Ok(mut delivered) => {
+                if delivered.len() >= MAX_DELIVERED_EVENT_CURSORS {
+                    delivered.clear();
+                }
+                delivered.insert(cursor)
+            }
+            Err(poisoned) => {
+                let mut delivered = poisoned.into_inner();
+                if delivered.len() >= MAX_DELIVERED_EVENT_CURSORS {
+                    delivered.clear();
+                }
+                delivered.insert(cursor)
+            }
         }
     }
 
@@ -152,12 +168,20 @@ where
         prepared.insert(run_id, scope);
     }
 
-    fn consume_prepared_run_id(&self, run_id: TurnRunId) -> Option<TurnScope> {
+    fn prepared_run_id_scope(&self, run_id: TurnRunId) -> Option<TurnScope> {
+        let prepared = match self.prepared_run_id_scopes.lock() {
+            Ok(prepared) => prepared,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        prepared.get(&run_id).cloned()
+    }
+
+    fn forget_prepared_run_id(&self, run_id: TurnRunId) {
         let mut prepared = match self.prepared_run_id_scopes.lock() {
             Ok(prepared) => prepared,
             Err(poisoned) => poisoned.into_inner(),
         };
-        prepared.remove(&run_id)
+        prepared.remove(&run_id);
     }
 }
 
@@ -231,15 +255,15 @@ where
     ) -> Result<SubmitTurnResponse, TurnError> {
         // If the caller passed a run id that came out of prepare_turn, verify
         // it is being submitted under the same scope it was prepared under.
-        // Reservations are consumed on the first submit attempt; a second
-        // attempt with the same id falls back to the store's duplicate-bound
-        // check.
+        // Keep the reservation through failed store submissions so a retry
+        // cannot rebind the prepared id under a different scope.
         if let Some(requested) = request.requested_run_id
-            && let Some(prepared_scope) = self.consume_prepared_run_id(requested)
+            && let Some(prepared_scope) = self.prepared_run_id_scope(requested)
             && prepared_scope != request.scope
         {
             return Err(TurnError::Unauthorized);
         }
+        let requested_run_id = request.requested_run_id;
         let scope = request.scope.clone();
         let event_scope = request.scope.clone();
         let actor = request.actor.clone();
@@ -252,6 +276,9 @@ where
                 self.run_profile_resolver.as_ref(),
             )
             .await?;
+        if let Some(requested) = requested_run_id {
+            self.forget_prepared_run_id(requested);
+        }
         let SubmitTurnResponse::Accepted {
             run_id,
             status,

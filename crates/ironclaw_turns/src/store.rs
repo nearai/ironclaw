@@ -139,11 +139,11 @@ pub struct TurnRunRecord {
     pub last_heartbeat_at: Option<TurnTimestamp>,
     pub claim_count: u64,
     pub received_at: TurnTimestamp,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_run_id: Option<TurnRunId>,
     #[serde(default)]
     pub subagent_depth: u32,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawn_tree_root_run_id: Option<TurnRunId>,
 }
 

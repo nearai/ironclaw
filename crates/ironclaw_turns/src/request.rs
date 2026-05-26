@@ -18,6 +18,7 @@ pub enum ResumeTurnPrecondition {
     BlockedApprovalGate,
     BlockedAuthGate,
     BlockedResourceGate,
+    BlockedDependentRunGate,
 }
 
 impl ResumeTurnPrecondition {
@@ -31,6 +32,7 @@ impl ResumeTurnPrecondition {
             Self::BlockedApprovalGate => Some(TurnStatus::BlockedApproval),
             Self::BlockedAuthGate => Some(TurnStatus::BlockedAuth),
             Self::BlockedResourceGate => Some(TurnStatus::BlockedResource),
+            Self::BlockedDependentRunGate => Some(TurnStatus::BlockedDependentRun),
         }
     }
 }
