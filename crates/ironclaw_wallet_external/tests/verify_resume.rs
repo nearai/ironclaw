@@ -10,8 +10,10 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use ironclaw_attestation::{
-    ApprovedTxHash, AttestedSigningGrant, GrantKey, InMemorySealedGrantStore, SealedGrantStore,
+    ApprovedTxHash, AttestedSigningGrant, ClaimedGrant, GrantError, GrantKey,
+    InMemorySealedGrantStore, SealedGrantStore,
 };
 use ironclaw_signing_provider::{
     ActorId, ChainId, GateRef, KeyOrAccountId, RunId, ScopeId, SigningContext, SigningProof,
@@ -86,6 +88,25 @@ fn ctx_for(account: &str, chain: &str) -> SigningContext {
         gate_ref: GateRef::new("gate:abc"),
         chain_id: ChainId::new(chain),
         key_or_account_id: KeyOrAccountId::new(account),
+    }
+}
+
+/// A [`SealedGrantStore`] whose `claim` always returns [`GrantError::Backend`],
+/// exercising the `map_grant_error` arm that maps backend failures onto
+/// [`SigningProviderError::Provider`] (distinct from the fail-closed
+/// `GrantClaimFailed` that replay/missing collapse to).
+struct BackendErrorGrantStore;
+
+#[async_trait]
+impl SealedGrantStore for BackendErrorGrantStore {
+    async fn seal(&self, _grant: AttestedSigningGrant) -> Result<(), GrantError> {
+        Ok(())
+    }
+
+    async fn claim(&self, _key: &GrantKey) -> Result<ClaimedGrant, GrantError> {
+        Err(GrantError::Backend {
+            reason: "simulated backend failure".to_string(),
+        })
     }
 }
 
@@ -327,6 +348,183 @@ async fn solana_bad_signature_bytes_is_proof_invalid() {
         .await
         .expect_err("bad solana signature must fail closed");
     assert!(matches!(err, SigningProviderError::ProofInvalid { .. }));
+}
+
+#[tokio::test]
+async fn solana_missing_public_key_is_proof_invalid() {
+    // A Solana proof carries the ed25519 public key the signature verifies
+    // against; `verify_resume` rejects a missing one before any signature work
+    // (PRESERVE: the proof must carry the signer public key). All other Solana
+    // tests supply `public_key: Some(..)`, so this guards the `None` branch.
+    let store = Arc::new(InMemorySealedGrantStore::new());
+    let provider = InjectedSigningProvider::new(store.clone());
+
+    let key = solana_key();
+    let pubkey = solana_pubkey(&key);
+    let account = lower_hex(&pubkey);
+    let ctx = ctx_for(&account, "solana:mainnet");
+    let hash = ApprovedTxHash::from_bytes([5u8; 32]);
+    seal_grant(&store, &ctx, hash).await;
+
+    let sig = key.sign(hash.as_bytes());
+    let payload = InjectedProofPayload {
+        scheme: InjectedScheme::Solana,
+        approved_tx_hash: hash,
+        claimed_signer: account.clone(),
+        signature: sig.to_bytes().to_vec(),
+        // The defining condition under test: no public key.
+        public_key: None,
+    };
+    let proof = SigningProof::InjectedProof(encode_injected_proof(&payload));
+
+    let err = provider
+        .verify_resume(&ctx, &hash, &proof)
+        .await
+        .expect_err("solana proof missing public_key must fail closed");
+    assert!(matches!(err, SigningProviderError::ProofInvalid { .. }));
+}
+
+#[tokio::test]
+async fn evm_wrong_signature_length_is_proof_invalid() {
+    // EVM `verify_signer_over_hash` rejects any signature that is not exactly 65
+    // bytes (r ∥ s ∥ v). A short signature must fail closed as `ProofInvalid`.
+    let store = Arc::new(InMemorySealedGrantStore::new());
+    let provider = InjectedSigningProvider::new(store.clone());
+
+    let key = evm_key();
+    let account = format!("0x{}", lower_hex(&evm_address(&key)));
+    let ctx = ctx_for(&account, "eip155:1");
+    let hash = ApprovedTxHash::from_bytes([7u8; 32]);
+    seal_grant(&store, &ctx, hash).await;
+
+    // Truncate a real signature to 64 bytes (drop the v byte): wrong length.
+    let mut sig = evm_personal_sign(&key, hash.as_bytes());
+    sig.truncate(64);
+    let payload = InjectedProofPayload {
+        scheme: InjectedScheme::Evm,
+        approved_tx_hash: hash,
+        claimed_signer: account.clone(),
+        signature: sig,
+        public_key: None,
+    };
+    let proof = SigningProof::InjectedProof(encode_injected_proof(&payload));
+
+    let err = provider
+        .verify_resume(&ctx, &hash, &proof)
+        .await
+        .expect_err("non-65-byte evm signature must fail closed");
+    assert!(matches!(err, SigningProviderError::ProofInvalid { .. }));
+}
+
+#[tokio::test]
+async fn evm_invalid_recovery_v_byte_is_proof_invalid() {
+    // `recovery_id_from_v` accepts only v ∈ {0,1,27,28,>=35}. A v byte of 2
+    // (between the raw and legacy forms) must reject as `ProofInvalid`.
+    let store = Arc::new(InMemorySealedGrantStore::new());
+    let provider = InjectedSigningProvider::new(store.clone());
+
+    let key = evm_key();
+    let account = format!("0x{}", lower_hex(&evm_address(&key)));
+    let ctx = ctx_for(&account, "eip155:1");
+    let hash = ApprovedTxHash::from_bytes([7u8; 32]);
+    seal_grant(&store, &ctx, hash).await;
+
+    let mut sig = evm_personal_sign(&key, hash.as_bytes());
+    // Overwrite the v byte with an invalid value (2 is in no accepted range).
+    sig[64] = 2;
+    let payload = InjectedProofPayload {
+        scheme: InjectedScheme::Evm,
+        approved_tx_hash: hash,
+        claimed_signer: account.clone(),
+        signature: sig,
+        public_key: None,
+    };
+    let proof = SigningProof::InjectedProof(encode_injected_proof(&payload));
+
+    let err = provider
+        .verify_resume(&ctx, &hash, &proof)
+        .await
+        .expect_err("invalid recovery v byte must fail closed");
+    assert!(matches!(err, SigningProviderError::ProofInvalid { .. }));
+}
+
+#[tokio::test]
+async fn solana_wrong_signature_length_is_proof_invalid() {
+    // Solana `verify_signer_over_hash` rejects any signature that is not exactly
+    // 64 bytes. A short signature must fail closed as `ProofInvalid`.
+    let store = Arc::new(InMemorySealedGrantStore::new());
+    let provider = InjectedSigningProvider::new(store.clone());
+
+    let key = solana_key();
+    let pubkey = solana_pubkey(&key);
+    let account = lower_hex(&pubkey);
+    let ctx = ctx_for(&account, "solana:mainnet");
+    let hash = ApprovedTxHash::from_bytes([5u8; 32]);
+    seal_grant(&store, &ctx, hash).await;
+
+    // Truncate a real 64-byte ed25519 signature to 63 bytes: wrong length.
+    let sig = key.sign(hash.as_bytes());
+    let mut sig_bytes = sig.to_bytes().to_vec();
+    sig_bytes.truncate(63);
+    let payload = InjectedProofPayload {
+        scheme: InjectedScheme::Solana,
+        approved_tx_hash: hash,
+        claimed_signer: account.clone(),
+        signature: sig_bytes,
+        public_key: Some(pubkey.to_vec()),
+    };
+    let proof = SigningProof::InjectedProof(encode_injected_proof(&payload));
+
+    let err = provider
+        .verify_resume(&ctx, &hash, &proof)
+        .await
+        .expect_err("non-64-byte solana signature must fail closed");
+    assert!(matches!(err, SigningProviderError::ProofInvalid { .. }));
+}
+
+#[test]
+fn decode_injected_proof_rejects_odd_length_hex() {
+    // The `hex_bytes` serde deserializer rejects odd-length hex (an incomplete
+    // byte). `decode_injected_proof` must surface this as `ProofInvalid`, never
+    // panic. The `signature` field carries a 3-nibble (odd) hex string.
+    let json = format!(
+        r#"{{"scheme":"evm","approved_tx_hash":{},"claimed_signer":"0x00","signature":"abc"}}"#,
+        zero_hash_json_array()
+    );
+    let err = ironclaw_wallet_external::decode_injected_proof(json.as_bytes())
+        .expect_err("odd-length hex signature must reject");
+    assert!(matches!(err, SigningProviderError::ProofInvalid { .. }));
+}
+
+#[tokio::test]
+async fn backend_grant_error_maps_to_provider_error() {
+    // `map_grant_error` maps `GrantError::Backend` onto
+    // `SigningProviderError::Provider` (a retryable/operational class), distinct
+    // from the fail-closed `GrantClaimFailed` that replay/missing collapse to. A
+    // grant store whose `claim` always returns `Backend` exercises that arm
+    // through the full `verify_resume` path.
+    let store = Arc::new(BackendErrorGrantStore);
+    let provider = InjectedSigningProvider::new(store);
+
+    let key = evm_key();
+    let account = format!("0x{}", lower_hex(&evm_address(&key)));
+    let ctx = ctx_for(&account, "eip155:1");
+    let hash = ApprovedTxHash::from_bytes([7u8; 32]);
+
+    let payload = InjectedProofPayload {
+        scheme: InjectedScheme::Evm,
+        approved_tx_hash: hash,
+        claimed_signer: account.clone(),
+        signature: evm_personal_sign(&key, hash.as_bytes()),
+        public_key: None,
+    };
+    let proof = SigningProof::InjectedProof(encode_injected_proof(&payload));
+
+    let err = provider
+        .verify_resume(&ctx, &hash, &proof)
+        .await
+        .expect_err("backend grant error must surface");
+    assert!(matches!(err, SigningProviderError::Provider { .. }));
 }
 
 #[tokio::test]
