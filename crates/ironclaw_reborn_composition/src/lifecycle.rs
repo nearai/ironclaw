@@ -144,7 +144,6 @@ impl RebornLocalExtensionManagementPort {
         package_ref: LifecyclePackageRef,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let available = self.catalog.resolve(&package_ref)?;
-        materialize_available_extension(self.filesystem.as_ref(), &available).await?;
         let manifest_hash =
             ManifestHash::new(sha256_digest_token(available.manifest_toml.as_bytes()))
                 .map_err(map_extension_installation_error)?;
@@ -169,13 +168,11 @@ impl RebornLocalExtensionManagementPort {
             &contracts,
         )
         .map_err(map_extension_installation_error)?;
-        self.installation_store
-            .upsert_manifest(manifest_record)
-            .await
-            .map_err(map_extension_installation_error)?;
-        let installation = ExtensionInstallation::new(
+        let installation_id =
             ExtensionInstallationId::new(available.package.id.as_str().to_string())
-                .map_err(map_extension_installation_error)?,
+                .map_err(map_extension_installation_error)?;
+        let installation = ExtensionInstallation::new(
+            installation_id,
             available.package.id.clone(),
             ExtensionActivationState::Installed,
             ExtensionManifestRef::new(available.package.id.clone(), Some(manifest_hash)),
@@ -183,25 +180,59 @@ impl RebornLocalExtensionManagementPort {
             chrono::Utc::now(),
         )
         .map_err(map_extension_installation_error)?;
-        self.installation_store
+        let previous_package = {
+            let mut lifecycle = self.lifecycle_service.lock().await;
+            let previous_package = lifecycle
+                .registry()
+                .get_extension(&available.package.id)
+                .cloned();
+            if previous_package.is_some() {
+                lifecycle
+                    .update(available.package.clone())
+                    .await
+                    .map_err(map_extension_error)?;
+            } else {
+                lifecycle
+                    .install(available.package.clone())
+                    .await
+                    .map_err(map_extension_error)?;
+            }
+            previous_package
+        };
+        if let Err(error) =
+            materialize_available_extension(self.filesystem.as_ref(), &available).await
+        {
+            self.rollback_lifecycle_install(&available.package.id, previous_package)
+                .await;
+            return Err(error);
+        }
+        if let Err(error) = self
+            .installation_store
+            .upsert_manifest(manifest_record)
+            .await
+        {
+            let _ = self
+                .delete_materialized_extension_files(&available.package.id)
+                .await;
+            self.rollback_lifecycle_install(&available.package.id, previous_package)
+                .await;
+            return Err(map_extension_installation_error(error));
+        }
+        if let Err(error) = self
+            .installation_store
             .upsert_installation(installation)
             .await
-            .map_err(map_extension_installation_error)?;
-        let mut lifecycle = self.lifecycle_service.lock().await;
-        if lifecycle
-            .registry()
-            .get_extension(&available.package.id)
-            .is_some()
         {
-            lifecycle
-                .update(available.package.clone())
-                .await
-                .map_err(map_extension_error)?;
-        } else {
-            lifecycle
-                .install(available.package.clone())
-                .await
-                .map_err(map_extension_error)?;
+            let _ = self
+                .installation_store
+                .delete_manifest(&available.package.id)
+                .await;
+            let _ = self
+                .delete_materialized_extension_files(&available.package.id)
+                .await;
+            self.rollback_lifecycle_install(&available.package.id, previous_package)
+                .await;
+            return Err(map_extension_installation_error(error));
         }
         Ok(response_with_payload(
             Some(package_ref),
@@ -223,10 +254,6 @@ impl RebornLocalExtensionManagementPort {
             .await
             .map_err(map_extension_installation_error)?;
         let mut lifecycle = self.lifecycle_service.lock().await;
-        lifecycle
-            .enable(&extension_id)
-            .await
-            .map_err(map_extension_error)?;
         let package = lifecycle
             .registry()
             .get_extension(&extension_id)
@@ -235,6 +262,10 @@ impl RebornLocalExtensionManagementPort {
                 reason: format!("extension {} is not installed", extension_id.as_str()),
             })?;
         replace_active_extension(&self.active_registry, package)?;
+        lifecycle.enable(&extension_id).await.map_err(|error| {
+            remove_active_extension(&self.active_registry, &extension_id);
+            map_extension_error(error)
+        })?;
         Ok(response_with_payload(
             Some(package_ref),
             LifecyclePhase::Active,
@@ -247,6 +278,8 @@ impl RebornLocalExtensionManagementPort {
         package_ref: LifecyclePackageRef,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let (extension_id, installation_id) = extension_ids_from_package_ref(&package_ref)?;
+        self.delete_materialized_extension_files(&extension_id)
+            .await?;
         self.installation_store
             .set_activation_state(&installation_id, ExtensionActivationState::Disabled)
             .await
@@ -265,23 +298,41 @@ impl RebornLocalExtensionManagementPort {
             .await
             .map_err(map_extension_error)?;
         remove_active_extension(&self.active_registry, &extension_id);
-        let extension_root =
-            VirtualPath::new(format!("/system/extensions/{}", extension_id.as_str())).map_err(
-                |error| ProductWorkflowError::InvalidBindingRequest {
-                    reason: error.to_string(),
-                },
-            )?;
-        self.filesystem
-            .delete(&extension_root)
-            .await
-            .map_err(|error| ProductWorkflowError::Transient {
-                reason: format!("failed to remove extension files: {error}"),
-            })?;
         Ok(response_with_payload(
             Some(package_ref),
             LifecyclePhase::Removed,
             json!({ "removed": true }),
         ))
+    }
+
+    async fn rollback_lifecycle_install(
+        &self,
+        extension_id: &ExtensionId,
+        previous_package: Option<ironclaw_extensions::ExtensionPackage>,
+    ) {
+        let mut lifecycle = self.lifecycle_service.lock().await;
+        if let Some(package) = previous_package {
+            let _ = lifecycle.update(package).await;
+        } else {
+            let _ = lifecycle.remove(extension_id).await;
+        }
+    }
+
+    async fn delete_materialized_extension_files(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<(), ProductWorkflowError> {
+        let Ok(extension_root) =
+            VirtualPath::new(format!("/system/extensions/{}", extension_id.as_str()))
+        else {
+            return Ok(());
+        };
+        self.filesystem
+            .delete(&extension_root)
+            .await
+            .map_err(|error| ProductWorkflowError::Transient {
+                reason: format!("failed to remove extension files: {error}"),
+            })
     }
 }
 
@@ -448,7 +499,7 @@ fn unsupported_projection(
         package_ref,
         LifecyclePhase::UnsupportedOrLegacy,
         vec![LifecycleReadinessBlocker::runtime(Some(
-            "extension_lifecycle_store_unwired".to_string(),
+            "extension_auth_and_configure_not_yet_wired".to_string(),
         ))?],
     ))
 }
@@ -479,8 +530,16 @@ fn remove_active_extension(active_registry: &SharedExtensionRegistry, extension_
 }
 
 fn map_extension_error(error: ironclaw_extensions::ExtensionError) -> ProductWorkflowError {
-    ProductWorkflowError::InvalidBindingRequest {
-        reason: error.to_string(),
+    match error {
+        ironclaw_extensions::ExtensionError::Filesystem(_)
+        | ironclaw_extensions::ExtensionError::LifecycleEventSink { .. } => {
+            ProductWorkflowError::Transient {
+                reason: error.to_string(),
+            }
+        }
+        _ => ProductWorkflowError::InvalidBindingRequest {
+            reason: error.to_string(),
+        },
     }
 }
 
@@ -673,6 +732,7 @@ mod tests {
     async fn extension_lifecycle_installs_activates_and_removes_catalog_package() {
         let (_dir, storage_root, facade, active_registry) = extension_lifecycle_fixture();
 
+        // safety: test-only lifecycle facade calls; no database transaction is involved.
         let search = facade
             .execute(
                 lifecycle_surface_context(),
@@ -813,6 +873,81 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn extension_install_rejects_skill_package_ref() {
+        let (_dir, _storage_root, facade, _active_registry) = extension_lifecycle_fixture();
+
+        let error = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionInstall {
+                    package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Skill, "fixture")
+                        .expect("valid skill ref"),
+                },
+            )
+            .await
+            .expect_err("extension install rejects non-extension refs");
+
+        assert!(matches!(
+            error,
+            ProductWorkflowError::InvalidBindingRequest { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn extension_auth_and_configure_return_unsupported() {
+        let (_dir, _storage_root, facade, _active_registry) = extension_lifecycle_fixture();
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture").unwrap();
+
+        for action in [
+            LifecycleProductAction::ExtensionAuth {
+                package_ref: package_ref.clone(),
+            },
+            LifecycleProductAction::ExtensionConfigure {
+                package_ref: package_ref.clone(),
+                payload: None,
+            },
+        ] {
+            let response = facade
+                .execute(lifecycle_surface_context(), action)
+                .await
+                .expect("unsupported response");
+            assert_unsupported_extension_response(response);
+        }
+    }
+
+    #[tokio::test]
+    async fn project_package_returns_unsupported() {
+        let (_dir, _storage_root, facade, _active_registry) = extension_lifecycle_fixture();
+        let response = facade
+            .project_package(
+                lifecycle_surface_context(),
+                LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture").unwrap(),
+            )
+            .await
+            .expect("unsupported projection");
+
+        assert_unsupported_extension_response(response);
+    }
+
+    #[tokio::test]
+    async fn skill_only_facade_rejects_extension_search() {
+        let (_dir, _storage_root, facade) = lifecycle_fixture();
+
+        let response = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionSearch {
+                    query: "fixture".to_string(),
+                },
+            )
+            .await
+            .expect("unsupported extension search");
+
+        assert_unsupported_extension_response(response);
+    }
+
     fn lifecycle_surface_context() -> LifecycleProductContext {
         LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
             tenant_id: TenantId::new("lifecycle-tenant").expect("valid tenant"),
@@ -877,6 +1012,15 @@ output_schema_ref = "schemas/write.output.json"
                 },
             ],
         }
+    }
+
+    fn assert_unsupported_extension_response(response: LifecycleProductResponse) {
+        assert_eq!(response.phase, LifecyclePhase::UnsupportedOrLegacy);
+        assert!(response.blockers.iter().any(|blocker| matches!(
+            blocker,
+            LifecycleReadinessBlocker::Runtime { ref_id: Some(ref_id) }
+                if ref_id.as_str() == "extension_auth_and_configure_not_yet_wired"
+        )));
     }
 
     fn extension_lifecycle_fixture() -> (

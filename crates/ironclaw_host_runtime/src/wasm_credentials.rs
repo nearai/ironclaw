@@ -1,4 +1,7 @@
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
 
 use ironclaw_extensions::{ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_host_api::{
@@ -50,15 +53,25 @@ impl HostWasmRuntimeCredentials {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct SharedHostWasmRuntimeCredentials {
     registry: SharedExtensionRegistry,
+    cache: Arc<Mutex<SharedCredentialCache>>,
 }
 
 impl SharedHostWasmRuntimeCredentials {
     pub(crate) fn new(registry: SharedExtensionRegistry) -> Self {
-        Self { registry }
+        Self {
+            registry,
+            cache: Arc::new(Mutex::new(SharedCredentialCache::default())),
+        }
     }
+}
+
+#[derive(Debug, Default)]
+struct SharedCredentialCache {
+    registry_version: Option<u64>,
+    credentials: HostWasmRuntimeCredentials,
 }
 
 impl WasmRuntimeCredentialProvider for SharedHostWasmRuntimeCredentials {
@@ -66,8 +79,16 @@ impl WasmRuntimeCredentialProvider for SharedHostWasmRuntimeCredentials {
         &self,
         request: &WasmRuntimeCredentialRequest,
     ) -> Result<Vec<RuntimeCredentialInjection>, WasmHostError> {
-        wasm_runtime_credentials_from_registry(&self.registry.snapshot())
-            .credential_injections(request)
+        let registry_version = self.registry.version();
+        let mut cache = self
+            .cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if cache.registry_version != Some(registry_version) {
+            cache.credentials = wasm_runtime_credentials_from_registry(&self.registry.snapshot());
+            cache.registry_version = Some(registry_version);
+        }
+        cache.credentials.credential_injections(request)
     }
 }
 
@@ -125,8 +146,9 @@ pub(crate) fn wasm_runtime_credentials_from_registry(
 mod tests {
     use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ManifestSource};
     use ironclaw_host_api::{
-        HostPortCatalog, InvocationId, NetworkMethod, NetworkScheme, NetworkTargetPattern,
-        ProjectId, ResourceScope, RuntimeCredentialTarget, TenantId, UserId, VirtualPath,
+        ExtensionId, HostPortCatalog, InvocationId, NetworkMethod, NetworkScheme,
+        NetworkTargetPattern, ProjectId, ResourceScope, RuntimeCredentialTarget, TenantId, UserId,
+        VirtualPath,
     };
 
     use super::*;
@@ -248,6 +270,80 @@ runtime_credentials = [
                 .credential_injections(&wasm_credential_request(
                     "test-wasm.fetch",
                     "https://uploads.example.test/repos",
+                ))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn shared_credentials_derive_from_active_registry_updates() {
+        let registry = SharedExtensionRegistry::default();
+        let provider = SharedHostWasmRuntimeCredentials::new(registry.clone());
+
+        assert!(
+            provider
+                .credential_injections(&wasm_credential_request(
+                    "test-wasm.fetch",
+                    "https://api.example.test/repos",
+                ))
+                .unwrap()
+                .is_empty()
+        );
+
+        registry
+            .insert(test_package(
+                r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "test-wasm"
+name = "Test WASM"
+version = "0.1.0"
+description = "test"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/test.wasm"
+
+[[capabilities]]
+id = "test-wasm.fetch"
+description = "fetch"
+effects = ["network", "use_secret"]
+default_permission = "ask"
+visibility = "host_internal"
+input_schema_ref = "schemas/test/fetch.input.v1.json"
+output_schema_ref = "schemas/test/fetch.output.v1.json"
+runtime_credentials = [
+  { handle = "api_token", audience = { scheme = "https", host_pattern = "api.example.test" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+"#,
+                "test-wasm",
+            ))
+            .expect("insert package");
+
+        let dynamic_injections = provider
+            .credential_injections(&wasm_credential_request(
+                "test-wasm.fetch",
+                "https://api.example.test/repos",
+            ))
+            .unwrap();
+        let static_credentials = wasm_runtime_credentials_from_registry(&registry.snapshot());
+        let static_injections = static_credentials
+            .credential_injections(&wasm_credential_request(
+                "test-wasm.fetch",
+                "https://api.example.test/repos",
+            ))
+            .unwrap();
+
+        assert_eq!(dynamic_injections, static_injections);
+        assert_eq!(dynamic_injections.len(), 1);
+
+        registry.remove(&ExtensionId::new("test-wasm").unwrap());
+        assert!(
+            provider
+                .credential_injections(&wasm_credential_request(
+                    "test-wasm.fetch",
+                    "https://api.example.test/repos",
                 ))
                 .unwrap()
                 .is_empty()

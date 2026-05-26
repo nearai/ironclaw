@@ -316,7 +316,7 @@ async fn dispatch_payload(
         ProductInboundPayload::Command(cmd) => {
             let context =
                 ProductCommandContext::from_envelope(envelope, action_id, action_fingerprint)?;
-            let command = ProductCommand::from_payload(cmd);
+            let command = ProductCommand::from_payload(cmd)?;
             match command_admission_service.admit(&context, &command).await? {
                 ProductCommandAdmission::Allowed => {}
                 ProductCommandAdmission::Rejected(rejection) => {
@@ -444,7 +444,7 @@ fn terminal_ack_for_error(error: &ProductWorkflowError) -> Option<ProductInbound
         }
         ProductWorkflowError::InvalidBindingRequest { reason } => {
             Some(ProductInboundAck::Rejected(ProductRejection::permanent(
-                ProductRejectionKind::PolicyDenied,
+                ProductRejectionKind::InvalidRequest,
                 reason.clone(),
             )))
         }
@@ -527,6 +527,20 @@ mod tests {
                 if rejection.kind == ProductRejectionKind::PolicyDenied
                     && rejection.disposition()
                         == ironclaw_product_adapters::ProductRejectionDisposition::Permanent
+        ));
+    }
+
+    #[test]
+    fn terminal_ack_for_error_maps_invalid_binding_to_invalid_request() {
+        let ack = terminal_ack_for_error(&ProductWorkflowError::InvalidBindingRequest {
+            reason: "malformed command".to_string(),
+        })
+        .expect("invalid request is terminal");
+
+        assert!(matches!(
+            ack,
+            ProductInboundAck::Rejected(rejection)
+                if rejection.kind == ProductRejectionKind::InvalidRequest
         ));
     }
 

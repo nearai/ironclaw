@@ -2501,7 +2501,7 @@ mod tests {
             setup.blockers.iter().any(|blocker| matches!(
                 blocker,
                 LifecycleReadinessBlocker::Runtime { ref_id: Some(ref_id) }
-                    if ref_id.as_str() == "extension_lifecycle_store_unwired"
+                    if ref_id.as_str() == "extension_auth_and_configure_not_yet_wired"
             )),
             "local webui bundle should use the local lifecycle facade projection"
         );

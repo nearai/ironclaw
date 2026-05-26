@@ -174,8 +174,6 @@ pub fn reborn_runtime_readiness_snapshot() -> RebornRuntimeReadinessSnapshot {
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use std::sync::Arc;
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use async_trait::async_trait;
 use ironclaw_authorization::CapabilityLeaseError;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_authorization::{FilesystemCapabilityLeaseStore, GrantAuthorizer};
@@ -189,7 +187,7 @@ use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{
-    MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, SecretHandle, VirtualPath,
+    MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, VirtualPath,
     runtime_policy::EffectiveRuntimePolicy,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -207,10 +205,7 @@ use ironclaw_resources::{FilesystemResourceGovernorStore, PersistentResourceGove
 use ironclaw_run_state::RunStateError;
 use ironclaw_secrets::SecretError;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_secrets::{
-    FilesystemSecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore,
-    SecretStoreError, SecretsCrypto,
-};
+use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial, SecretStore, SecretsCrypto};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_trust::TrustPolicy;
 use ironclaw_turns::TurnError;
@@ -391,52 +386,16 @@ where
     let filesystem = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&config.database)));
     filesystem.run_migrations().await?;
 
-    let scoped_filesystem = wrap_scoped(Arc::clone(&filesystem));
-    let process_services = ProcessServices::filesystem(Arc::clone(&scoped_filesystem));
-
-    let secret_store =
-        build_filesystem_secret_store(Arc::clone(&scoped_filesystem), config.secret_master_key)
-            .await?;
-
-    let resource_store = FilesystemResourceGovernorStore::new(Arc::clone(&scoped_filesystem));
-    let governor = Arc::new(PersistentResourceGovernor::new(resource_store));
-
-    let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
-        &scoped_filesystem,
-    )));
-
-    let services = HostRuntimeServices::new(
-        Arc::new(ExtensionRegistry::new()),
+    build_production_host_runtime_services(
         filesystem,
-        governor,
-        Arc::new(GrantAuthorizer::new()),
-        process_services,
+        config.event_store,
+        config.secret_master_key,
+        config.trust_policy,
+        config.runtime_policy,
+        config.turn_run_wake_notifier,
         config.surface_version,
     )
-    .with_trust_policy(config.trust_policy)
-    .with_runtime_policy(config.runtime_policy)
-    .with_capability_leases(capability_leases)
-    .with_secret_store(Arc::clone(&secret_store))
-    .with_turn_run_wake_notifier(config.turn_run_wake_notifier)
-    .with_filesystem_run_state(Arc::clone(&scoped_filesystem))
-    .with_filesystem_turn_state_store(Arc::clone(&scoped_filesystem))
-    .with_run_profile_resolver(Arc::new(
-        ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver()?,
-    ))
-    .with_reborn_event_store_config(RebornProfile::Production, config.event_store)
-    .await?;
-
-    // safety: `with_secret_store` is called unconditionally above on the same
-    // builder chain, so `try_with_host_http_egress` can only return a
-    // `Missing(SecretStore)` wiring report if the host-runtime builder API
-    // regresses; treat that as infallible here.
-    let services = services
-        .try_with_host_http_egress(PolicyNetworkHttpEgress::new(
-            ReqwestNetworkTransport::default(),
-        ))
-        .expect("secret_store wired above guarantees host HTTP egress is buildable"); // safety: see comment above
-
-    Ok(services)
+    .await
 }
 
 /// Build production-wired host-runtime services over PostgreSQL-backed substrates.
@@ -456,16 +415,47 @@ where
     let filesystem = Arc::new(PostgresRootFilesystem::new(config.pool.clone()));
     filesystem.run_migrations().await?;
 
+    build_production_host_runtime_services(
+        filesystem,
+        config.event_store,
+        config.secret_master_key,
+        config.trust_policy,
+        config.runtime_policy,
+        config.turn_run_wake_notifier,
+        config.surface_version,
+    )
+    .await
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+async fn build_production_host_runtime_services<F, TPolicy, TWake>(
+    filesystem: Arc<F>,
+    event_store: RebornEventStoreConfig,
+    secret_master_key: Option<SecretMaterial>,
+    trust_policy: Arc<TPolicy>,
+    runtime_policy: EffectiveRuntimePolicy,
+    turn_run_wake_notifier: Arc<TWake>,
+    surface_version: CapabilitySurfaceVersion,
+) -> Result<
+    HostRuntimeServices<
+        F,
+        PersistentResourceGovernor<FilesystemResourceGovernorStore<F>>,
+        FilesystemProcessStore<F>,
+        FilesystemProcessResultStore<F>,
+    >,
+    RebornCompositionError,
+>
+where
+    F: RootFilesystem + 'static,
+    TPolicy: TrustPolicy + 'static,
+    TWake: TurnRunWakeNotifier + 'static,
+{
     let scoped_filesystem = wrap_scoped(Arc::clone(&filesystem));
     let process_services = ProcessServices::filesystem(Arc::clone(&scoped_filesystem));
-
     let secret_store =
-        build_filesystem_secret_store(Arc::clone(&scoped_filesystem), config.secret_master_key)
-            .await?;
-
+        build_filesystem_secret_store(Arc::clone(&scoped_filesystem), secret_master_key).await?;
     let resource_store = FilesystemResourceGovernorStore::new(Arc::clone(&scoped_filesystem));
     let governor = Arc::new(PersistentResourceGovernor::new(resource_store));
-
     let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
         &scoped_filesystem,
     )));
@@ -476,19 +466,19 @@ where
         governor,
         Arc::new(GrantAuthorizer::new()),
         process_services,
-        config.surface_version,
+        surface_version,
     )
-    .with_trust_policy(config.trust_policy)
-    .with_runtime_policy(config.runtime_policy)
+    .with_trust_policy(trust_policy)
+    .with_runtime_policy(runtime_policy)
     .with_capability_leases(capability_leases)
-    .with_secret_store(Arc::clone(&secret_store))
-    .with_turn_run_wake_notifier(config.turn_run_wake_notifier)
+    .with_secret_store_dyn(Arc::clone(&secret_store))
+    .with_turn_run_wake_notifier(turn_run_wake_notifier)
     .with_filesystem_run_state(Arc::clone(&scoped_filesystem))
     .with_filesystem_turn_state_store(Arc::clone(&scoped_filesystem))
     .with_run_profile_resolver(Arc::new(
         ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver()?,
     ))
-    .with_reborn_event_store_config(RebornProfile::Production, config.event_store)
+    .with_reborn_event_store_config(RebornProfile::Production, event_store)
     .await?;
 
     // safety: `with_secret_store` is called unconditionally above on the same
@@ -519,7 +509,7 @@ where
 async fn build_filesystem_secret_store<F>(
     scoped_filesystem: Arc<ScopedFilesystem<F>>,
     master_key: Option<SecretMaterial>,
-) -> Result<Arc<SharedSecretStore>, RebornCompositionError>
+) -> Result<Arc<dyn SecretStore>, RebornCompositionError>
 where
     F: RootFilesystem + 'static,
 {
@@ -528,8 +518,7 @@ where
     // The FS-stored master-key sentinel was removed alongside the tenant-aware
     // ScopedFilesystem rework — see filesystem_store.rs. Master-key
     // correctness is verified on first per-tenant decrypt op.
-    let store: Arc<dyn SecretStore> = Arc::new(store);
-    Ok(Arc::new(SharedSecretStore::new(store)))
+    Ok(Arc::new(store))
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -538,75 +527,6 @@ fn secrets_crypto(
 ) -> Result<Arc<SecretsCrypto>, RebornCompositionError> {
     let master_key = master_key.ok_or(RebornCompositionError::MissingSecretMasterKey)?;
     Ok(Arc::new(SecretsCrypto::new(master_key)?))
-}
-
-// TODO(#3571): remove this adapter when the host-runtime services builder
-// accepts `Arc<dyn SecretStore>` directly. Until then, this newtype lets the
-// composition root pass a single concrete `SecretStore` impl to both the
-// substrate wiring and any future per-store adapters.
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-#[derive(Clone)]
-struct SharedSecretStore {
-    inner: Arc<dyn SecretStore>,
-}
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-impl SharedSecretStore {
-    fn new(inner: Arc<dyn SecretStore>) -> Self {
-        Self { inner }
-    }
-}
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-#[async_trait]
-impl SecretStore for SharedSecretStore {
-    async fn put(
-        &self,
-        scope: ResourceScope,
-        handle: SecretHandle,
-        material: SecretMaterial,
-    ) -> Result<SecretMetadata, SecretStoreError> {
-        self.inner.put(scope, handle, material).await
-    }
-
-    async fn metadata(
-        &self,
-        scope: &ResourceScope,
-        handle: &SecretHandle,
-    ) -> Result<Option<SecretMetadata>, SecretStoreError> {
-        self.inner.metadata(scope, handle).await
-    }
-
-    async fn lease_once(
-        &self,
-        scope: &ResourceScope,
-        handle: &SecretHandle,
-    ) -> Result<SecretLease, SecretStoreError> {
-        self.inner.lease_once(scope, handle).await
-    }
-
-    async fn consume(
-        &self,
-        scope: &ResourceScope,
-        lease_id: SecretLeaseId,
-    ) -> Result<SecretMaterial, SecretStoreError> {
-        self.inner.consume(scope, lease_id).await
-    }
-
-    async fn revoke(
-        &self,
-        scope: &ResourceScope,
-        lease_id: SecretLeaseId,
-    ) -> Result<SecretLease, SecretStoreError> {
-        self.inner.revoke(scope, lease_id).await
-    }
-
-    async fn leases_for_scope(
-        &self,
-        scope: &ResourceScope,
-    ) -> Result<Vec<SecretLease>, SecretStoreError> {
-        self.inner.leases_for_scope(scope).await
-    }
 }
 
 #[cfg(all(test, any(feature = "libsql", feature = "postgres")))]

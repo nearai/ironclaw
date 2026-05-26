@@ -131,10 +131,11 @@ impl ExtensionLifecycleService {
 
     pub async fn enable(&mut self, id: &ExtensionId) -> Result<(), ExtensionError> {
         let package = self.registry.existing_package(id)?.clone();
+        let capability_surface_changed = self.disabled_extensions.contains(id);
         self.emit_lifecycle_event(ExtensionLifecycleEvent::from_package(
             ExtensionLifecycleOperation::Enable,
             &package,
-            true,
+            capability_surface_changed,
         ))
         .await?;
         self.disabled_extensions.remove(id);
@@ -143,10 +144,11 @@ impl ExtensionLifecycleService {
 
     pub async fn disable(&mut self, id: &ExtensionId) -> Result<(), ExtensionError> {
         let package = self.registry.existing_package(id)?.clone();
+        let capability_surface_changed = !self.disabled_extensions.contains(id);
         self.emit_lifecycle_event(ExtensionLifecycleEvent::from_package(
             ExtensionLifecycleOperation::Disable,
             &package,
-            true,
+            capability_surface_changed,
         ))
         .await?;
         self.disabled_extensions.insert(id.clone());
@@ -169,5 +171,99 @@ impl ExtensionLifecycleService {
                 })?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::sync::Mutex;
+
+    use ironclaw_host_api::{HostPortCatalog, VirtualPath};
+
+    use super::*;
+    use crate::{ExtensionManifest, ManifestSource};
+
+    #[tokio::test]
+    async fn enable_and_disable_events_report_surface_change_only_on_state_transition() {
+        let sink = Arc::new(RecordingSink::default());
+        let mut service = ExtensionLifecycleService::new(ExtensionRegistry::new())
+            .with_event_sink(Arc::clone(&sink));
+        let package = test_package("fixture");
+        let extension_id = package.id.clone();
+        service.install(package).await.expect("install");
+
+        service.disable(&extension_id).await.expect("first disable");
+        service
+            .disable(&extension_id)
+            .await
+            .expect("second disable");
+        service.enable(&extension_id).await.expect("first enable");
+        service.enable(&extension_id).await.expect("second enable");
+
+        let events = sink.events.lock().await;
+        let surface_changes = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event.operation,
+                    ExtensionLifecycleOperation::Disable | ExtensionLifecycleOperation::Enable
+                )
+            })
+            .map(|event| event.capability_surface_changed)
+            .collect::<Vec<_>>();
+        assert_eq!(surface_changes, vec![true, false, true, false]);
+    }
+
+    #[derive(Default)]
+    struct RecordingSink {
+        events: Mutex<Vec<ExtensionLifecycleEvent>>,
+    }
+
+    #[async_trait]
+    impl ExtensionLifecycleEventSink for RecordingSink {
+        async fn record_extension_lifecycle_event(
+            &self,
+            event: ExtensionLifecycleEvent,
+        ) -> Result<(), ExtensionError> {
+            self.events.lock().await.push(event);
+            Ok(())
+        }
+    }
+
+    fn test_package(extension_id: &str) -> ExtensionPackage {
+        let manifest = format!(
+            r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "{extension_id}"
+name = "{extension_id}"
+version = "0.1.0"
+description = "test extension"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/{extension_id}.wasm"
+
+[[capabilities]]
+id = "{extension_id}.read"
+description = "read"
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/read.input.json"
+output_schema_ref = "schemas/read.output.json"
+"#
+        );
+        let manifest = ExtensionManifest::parse(
+            &manifest,
+            ManifestSource::HostBundled,
+            &HostPortCatalog::empty(),
+        )
+        .expect("manifest parses");
+        ExtensionPackage::from_manifest(
+            manifest,
+            VirtualPath::new(format!("/system/extensions/{extension_id}")).expect("root"),
+        )
+        .expect("package builds")
     }
 }

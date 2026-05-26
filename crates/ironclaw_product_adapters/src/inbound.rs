@@ -573,6 +573,7 @@ pub enum ProductRejectionKind {
     BindingRequired,
     AccessDenied,
     UnknownInstallation,
+    InvalidRequest,
     PolicyDenied,
 }
 

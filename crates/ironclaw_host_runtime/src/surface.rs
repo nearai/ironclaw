@@ -201,7 +201,10 @@ impl<'a> CapabilityCatalog<'a> {
     }
 
     fn is_model_visible(&self, descriptor: &CapabilityDescriptor) -> bool {
-        self.registry.capability_visibility(&descriptor.id) == Some(CapabilityVisibility::Model)
+        self.registry
+            .capability_visibility(&descriptor.id)
+            .unwrap_or(CapabilityVisibility::Model)
+            == CapabilityVisibility::Model
     }
 }
 
@@ -218,10 +221,7 @@ fn surface_descriptor(
         .and_then(Value::as_str)
         .map(str::to_string)
     else {
-        return Err(HostRuntimeError::invalid_request(format!(
-            "built-in capability {} must publish from an input schema ref",
-            descriptor.id
-        )));
+        return Ok(descriptor);
     };
     descriptor.parameters_schema =
         resolve_builtin_input_schema_ref(&reference).ok_or_else(|| {

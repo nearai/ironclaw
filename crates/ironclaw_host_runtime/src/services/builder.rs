@@ -555,6 +555,15 @@ where
         self
     }
 
+    pub fn with_secret_store_dyn(mut self, secret_store: Arc<dyn SecretStore>) -> Self {
+        self.component_types.secret_store = Some(ProductionComponentType::named(
+            "dyn SecretStore",
+            ProductionImplementationReadiness::ProductionCandidate,
+        ));
+        self.secret_store = Some(secret_store);
+        self
+    }
+
     pub fn with_runtime_http_egress<T>(mut self, runtime_http_egress: Arc<T>) -> Self
     where
         T: RuntimeHttpEgress + 'static,

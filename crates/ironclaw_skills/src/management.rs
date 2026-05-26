@@ -810,6 +810,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_skills_empty_query_returns_all_skills_with_nonzero_limit() {
+        let filesystem = Arc::new(InMemoryBackend::default());
+        for name in ["alpha-helper", "beta-helper"] {
+            write_file(
+                filesystem.as_ref(),
+                &format!("/projects/skills/{name}/SKILL.md"),
+                skill_md(name, "searchable skill", "PROMPT"),
+            )
+            .await;
+        }
+        let context = skill_management_context(filesystem, skill_mounts());
+
+        let result = search_skills(
+            &context,
+            SkillSearchRequest {
+                query: "",
+                limit: 10,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.skills.len(), 2);
+        assert!(!result.truncated);
+    }
+
+    #[test]
+    fn skill_write_lock_namespace_includes_scope_and_resolved_user_root() {
+        let scope = ResourceScope::local_default(
+            ironclaw_host_api::UserId::new("user-a").unwrap(),
+            ironclaw_host_api::InvocationId::new(),
+        )
+        .unwrap();
+        let alternate_scope = ResourceScope::local_default(
+            ironclaw_host_api::UserId::new("user-b").unwrap(),
+            ironclaw_host_api::InvocationId::new(),
+        )
+        .unwrap();
+
+        let namespace = skill_write_lock_namespace(&skill_mounts(), &scope);
+        let alternate_namespace = skill_write_lock_namespace(&skill_mounts(), &alternate_scope);
+
+        assert!(namespace.contains("tenant=default"));
+        assert!(namespace.contains("user=user-a"));
+        assert!(namespace.contains("root=/projects/skills"));
+        assert_ne!(namespace, alternate_namespace);
+    }
+
+    #[tokio::test]
     async fn search_skills_stops_after_scan_budget() {
         let filesystem = Arc::new(InMemoryBackend::default());
         for index in 0..=SKILL_SEARCH_SCAN_LIMIT {

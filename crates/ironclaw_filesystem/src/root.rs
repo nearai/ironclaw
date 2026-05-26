@@ -85,6 +85,22 @@ pub trait RootFilesystem: Send + Sync {
     /// materialized entry bodies.
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError>;
 
+    /// Lists at most `max_entries` direct children of a canonical virtual
+    /// directory.
+    ///
+    /// Backends may override this to stop scanning as soon as the bound is
+    /// reached. The default preserves the bounded contract for existing
+    /// backends by truncating the unbounded listing.
+    async fn list_dir_bounded(
+        &self,
+        path: &VirtualPath,
+        max_entries: usize,
+    ) -> Result<Vec<DirEntry>, FilesystemError> {
+        let mut entries = self.list_dir(path).await?;
+        entries.truncate(max_entries);
+        Ok(entries)
+    }
+
     /// Filtered query over `prefix`. Returns the materialized entries
     /// matching `filter`. Backends without `query` capability return
     /// [`FilesystemError::Unsupported`].
