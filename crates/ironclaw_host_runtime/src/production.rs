@@ -28,6 +28,9 @@ use ironclaw_host_api::{
     PackageSource, ResourceScope, RuntimeDispatchErrorKind, RuntimeKind,
     runtime_policy::EffectiveRuntimePolicy,
 };
+use ironclaw_process_sandbox::{
+    PROCESS_SANDBOX_CAPABILITY_ID, SandboxProcessPlan, ValidatedSandboxProcessPlan,
+};
 use ironclaw_processes::{
     ProcessCancellationRegistry, ProcessError, ProcessHost, ProcessManager, ProcessResultStore,
     ProcessStart, ProcessStatus, ProcessStore,
@@ -357,6 +360,7 @@ impl HostRuntime for DefaultHostRuntime {
             idempotency_key,
             trust_decision: _caller_trust_decision,
         } = request;
+        let input = host_runtime_spawn_input_for_capability(&capability_id, input)?;
         let scope = context.resource_scope.clone();
         let invocation_id = context.invocation_id;
         let idempotency_key = idempotency_key.map(|key| key.as_str().to_string());
@@ -520,6 +524,7 @@ impl HostRuntime for DefaultHostRuntime {
             idempotency_key,
             trust_decision: _caller_trust_decision,
         } = request;
+        let input = host_runtime_spawn_input_for_capability(&capability_id, input)?;
         let idempotency_key = idempotency_key.map(|key| key.as_str().to_string());
         if let Some(key) = idempotency_key.as_deref() {
             tracing::debug!(
@@ -1222,6 +1227,28 @@ fn spawned_process_outcome_from(
         process_id: result.process.process_id,
         capability_id,
     }
+}
+
+fn host_runtime_spawn_input_for_capability(
+    capability_id: &CapabilityId,
+    input: serde_json::Value,
+) -> Result<serde_json::Value, HostRuntimeError> {
+    if capability_id.as_str() != PROCESS_SANDBOX_CAPABILITY_ID {
+        return Ok(input);
+    }
+    let plan = serde_json::from_value::<SandboxProcessPlan>(input).map_err(|_| {
+        HostRuntimeError::invalid_request(
+            "process sandbox capability input must be a SandboxProcessPlan",
+        )
+    })?;
+    let plan = ValidatedSandboxProcessPlan::new(plan).map_err(|_| {
+        HostRuntimeError::invalid_request(
+            "process sandbox capability input failed SandboxProcessPlan validation",
+        )
+    })?;
+    serde_json::to_value(plan.into_plan()).map_err(|_| {
+        HostRuntimeError::invalid_request("validated process sandbox plan could not be serialized")
+    })
 }
 
 fn failure_from(

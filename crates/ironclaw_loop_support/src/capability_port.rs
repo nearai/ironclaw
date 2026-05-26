@@ -3430,6 +3430,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn process_sandbox_capability_rejects_malformed_plan_before_runtime_spawn() {
+        let capability_id =
+            CapabilityId::new(ironclaw_process_sandbox::PROCESS_SANDBOX_CAPABILITY_ID)
+                .expect("valid capability id");
+        let provider_id = ExtensionId::new("system.process_sandbox").expect("valid provider id");
+        let mut context = execution_context("thread-process-sandbox-malformed-plan");
+        let run_context = loop_run_context(&context).await;
+        let loop_driver_extension =
+            loop_driver_execution_extension_id(&run_context).expect("valid extension id");
+        let effects = vec![EffectKind::ExecuteCode, EffectKind::SpawnProcess];
+        context.grants.grants.push(capability_grant_with_effects(
+            &capability_id,
+            &loop_driver_extension,
+            effects.clone(),
+        ));
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![
+            visible_capability_with_runtime_effects(
+                capability_id.clone(),
+                provider_id.clone(),
+                RuntimeKind::System,
+                effects.clone(),
+            ),
+        ]));
+        let visible_request = visible_request(context).with_provider_trust(
+            std::collections::BTreeMap::from([(provider_id, trust_decision_with_effects(effects))]),
+        );
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            runtime.clone(),
+            visible_request,
+            Arc::new(MalformedProcessSandboxPlanInputResolver),
+            Arc::new(StaticResultWriter),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+
+        let error = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: surface.version,
+                capability_id,
+                input_ref: CapabilityInputRef::new("input:malformed-process-sandbox-plan")
+                    .expect("valid input ref"),
+            })
+            .await
+            .expect_err("malformed process sandbox plan must fail before runtime dispatch");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert!(runtime.take_requests().is_empty());
+        assert!(runtime.take_spawn_requests().is_empty());
+    }
+
+    #[tokio::test]
     async fn invocation_context_rejects_same_scope_elevated_grant() {
         let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
         let mut context = execution_context("thread-elevated-grant");
@@ -4138,6 +4193,21 @@ mod tests {
                 "run": {
                     "command": ""
                 }
+            }))
+        }
+    }
+
+    struct MalformedProcessSandboxPlanInputResolver;
+
+    #[async_trait]
+    impl LoopCapabilityInputResolver for MalformedProcessSandboxPlanInputResolver {
+        async fn resolve_capability_input(
+            &self,
+            _run_context: &LoopRunContext,
+            _input_ref: &CapabilityInputRef,
+        ) -> Result<serde_json::Value, AgentLoopHostError> {
+            Ok(serde_json::json!({
+                "not_run": true
             }))
         }
     }
