@@ -12,7 +12,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 fn main() {
-    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()); // safety: build script — Cargo always sets this
     let static_dir = manifest_dir.join("static");
 
     println!("cargo:rerun-if-changed=static");
@@ -56,19 +56,19 @@ fn main() {
         panic!("static/index.html is required");
     }
 
-    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-    fs::write(out_dir.join("assets_generated.rs"), src).expect("write assets_generated.rs");
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap()); // safety: build script — Cargo always sets this
+    fs::write(out_dir.join("assets_generated.rs"), src).expect("write assets_generated.rs"); // safety: build script — fail build on write error
 }
 
 fn collect(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) {
-    for entry in fs::read_dir(dir).expect("read_dir static") {
-        let entry = entry.expect("dir entry");
+    for entry in fs::read_dir(dir).expect("read_dir static") { // safety: build script — fail build on read error
+        let entry = entry.expect("dir entry"); // safety: build script — fail build on bad entry
         let path = entry.path();
-        let file_type = entry.file_type().expect("file type");
+        let file_type = entry.file_type().expect("file type"); // safety: build script — fail build on stat error
         if file_type.is_dir() {
             collect(root, &path, out);
         } else if file_type.is_file() {
-            let rel = path.strip_prefix(root).expect("strip prefix");
+            let rel = path.strip_prefix(root).expect("strip prefix"); // safety: build script — strip_prefix only fails on a logic bug
             // Force forward slashes in the URL key even on Windows hosts.
             let url = rel
                 .components()
