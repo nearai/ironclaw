@@ -397,6 +397,20 @@ impl UnsupportedLifecycleProductFacade {
         })
     }
 
+    pub fn new_static(runtime_ref: &'static str) -> Self {
+        debug_assert!(
+            validate_lifecycle_string(
+                runtime_ref.to_string(),
+                "unsupported lifecycle runtime ref",
+                LIFECYCLE_REF_MAX_BYTES,
+            )
+            .is_ok()
+        );
+        Self {
+            runtime_ref: runtime_ref.to_string(),
+        }
+    }
+
     fn unsupported_projection(
         &self,
         package_ref: Option<LifecyclePackageRef>,

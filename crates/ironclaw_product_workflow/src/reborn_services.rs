@@ -159,11 +159,9 @@ impl RebornServices {
             thread_service,
             turn_coordinator,
             event_stream: None,
-            lifecycle_facade: Arc::new(
-                // SAFETY: this literal is a static, non-empty, control-free lifecycle blocker ref.
-                UnsupportedLifecycleProductFacade::new("reborn_lifecycle_facade_unwired")
-                    .expect("static lifecycle facade ref is valid"),
-            ),
+            lifecycle_facade: Arc::new(UnsupportedLifecycleProductFacade::new_static(
+                "reborn_lifecycle_facade_unwired",
+            )),
             approval_interactions: Arc::new(RejectingApprovalInteractionService),
             skill_activation_recorder: None,
             skill_activation_clearer: None,
