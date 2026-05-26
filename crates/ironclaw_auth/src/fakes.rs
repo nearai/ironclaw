@@ -749,13 +749,12 @@ fn validate_account_update_target(
             "credential account update target provider mismatch",
         ));
     }
-    if account.ownership != request.ownership
-        || account.owner_extension != request.owner_extension
-        || account.granted_extensions != request.granted_extensions
-    {
-        return Err(AuthProductError::CrossScopeDenied);
-    }
-    Ok(())
+    validate_update_authority_fields(
+        account,
+        request.ownership,
+        request.owner_extension.as_ref(),
+        &request.granted_extensions,
+    )
 }
 
 fn validate_flow_update_binding(
@@ -819,9 +818,23 @@ fn validate_bound_update_authority(
     account: &CredentialAccount,
     binding: &crate::CredentialAccountUpdateBinding,
 ) -> Result<(), AuthProductError> {
-    if account.ownership != binding.ownership
-        || account.owner_extension != binding.owner_extension
-        || account.granted_extensions != binding.granted_extensions
+    validate_update_authority_fields(
+        account,
+        binding.ownership,
+        binding.owner_extension.as_ref(),
+        &binding.granted_extensions,
+    )
+}
+
+fn validate_update_authority_fields(
+    account: &CredentialAccount,
+    ownership: CredentialOwnership,
+    owner_extension: Option<&ExtensionId>,
+    granted_extensions: &[ExtensionId],
+) -> Result<(), AuthProductError> {
+    if account.ownership != ownership
+        || account.owner_extension.as_ref() != owner_extension
+        || account.granted_extensions.as_slice() != granted_extensions
     {
         return Err(AuthProductError::CrossScopeDenied);
     }
