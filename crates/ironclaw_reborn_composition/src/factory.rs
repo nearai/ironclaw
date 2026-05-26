@@ -181,11 +181,13 @@ pub(crate) struct RebornLocalRuntimeServices {
     /// `snapshot()` to tests without leaking the concrete type into the
     /// production `BudgetEventSink` boundary.
     pub(crate) in_memory_budget_event_sink: Arc<ironclaw_resources::InMemoryBudgetEventSink>,
-    /// Broadcast sink the projection layer (`src/bridge/budget_events.rs`)
-    /// subscribes to. Composition fans every BudgetEvent through this
-    /// alongside the in-memory sink so tests can still inspect history
-    /// while the binary spawns `spawn_budget_event_projection` against
-    /// this broadcast.
+    /// Broadcast sink production callers can subscribe against once a
+    /// real projection caller lands (review feedback Thermo-Nuclear
+    /// #3: the speculative `src/bridge/budget_events.rs` helper plus
+    /// `AppEvent::Budget` variant were removed pending an owner that
+    /// actually spawns a projection task with shutdown cancellation).
+    /// Composition fans every BudgetEvent through this alongside the
+    /// in-memory sink so tests can still inspect history.
     pub(crate) broadcast_budget_event_sink: Arc<ironclaw_resources::BroadcastBudgetEventSink>,
     /// Approval-gate store used to surface `BudgetApprovalRequired` to a
     /// user. Stays in-memory in local-dev; production composition will
@@ -426,16 +428,12 @@ fn build_local_dev_store_graph(
         broadcast_budget_event_sink,
         budget_gate_store,
     } = build_budget_sinks();
-    // PersistentResourceGovernor does not yet support `with_event_sink` —
-    // governor-emitted `Warned` / `Denied` events won't reach the budget
-    // event sinks on the libsql path. Accountant-emitted events
-    // (`GateOpened`) still flow through `broadcast_budget_event_sink`.
-    // TODO(#3841 follow-up): add event-sink support to
-    // `PersistentResourceGovernor` and wire it here.
-    let resource_governor: Arc<LocalDevResourceGovernor> =
-        Arc::new(PersistentResourceGovernor::new(
-            FilesystemResourceGovernorStore::new(Arc::clone(&scoped_filesystem)),
-        ));
+    let resource_governor: Arc<LocalDevResourceGovernor> = Arc::new(
+        PersistentResourceGovernor::new(FilesystemResourceGovernorStore::new(Arc::clone(
+            &scoped_filesystem,
+        )))
+        .with_event_sink(Arc::clone(&budget_event_sink)),
+    );
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
         turn_state: Arc::clone(&turn_state),
         checkpoint_state_store,

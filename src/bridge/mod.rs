@@ -6,7 +6,6 @@
 
 mod action_discovery;
 mod action_projector;
-mod budget_events;
 mod capability_projector;
 mod cost_guard_gate;
 mod effect_adapter;
@@ -22,7 +21,6 @@ mod tool_surface;
 mod user_facing_errors;
 mod workspace_reader;
 
-pub use budget_events::spawn_budget_event_projection;
 pub use cost_guard_gate::CostGuardBudgetGate;
 pub use workspace_reader::WorkspaceReaderAdapter;
 

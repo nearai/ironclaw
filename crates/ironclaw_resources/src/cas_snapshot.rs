@@ -99,22 +99,20 @@ where
     pub(crate) fn new(
         filesystem: Arc<ScopedFilesystem<F>>,
         path_str: &'static str,
-        scope: ResourceScope,
+        default_scope: ResourceScope,
         worker_thread_name: &'static str,
     ) -> Self {
         Self {
             filesystem,
             path_str,
-            scope,
+            scope: default_scope,
             worker: Arc::new(OnceLock::new()),
             worker_thread_name,
         }
     }
 
     /// Run a read-modify-write transaction against the underlying
-    /// snapshot. The caller's `update` closure mutates the in-memory
-    /// snapshot; on success the encoded snapshot is written back with
-    /// a CAS precondition matching the version observed on read.
+    /// snapshot using the store's default scope.
     ///
     /// Concurrency: same-process writers serialize on a per-path async
     /// lock for the duration of the closure + write. Cross-process
@@ -129,9 +127,29 @@ where
         E: StorageError,
         U: FnOnce(&mut S) -> Result<T, E> + Send + 'static,
     {
+        self.update_with_scope::<S, T, E, U>(self.scope.clone(), update)
+    }
+
+    /// Run a read-modify-write transaction against the underlying
+    /// snapshot using a caller-supplied [`ResourceScope`].
+    ///
+    /// The `ScopedFilesystem` rewrites the snapshot path under the
+    /// supplied scope's tenant/user mount view, so two distinct scopes
+    /// hit separate snapshot files. The same per-path in-process async
+    /// lock + cross-process CAS semantics apply.
+    pub(crate) fn update_with_scope<S, T, E, U>(
+        &self,
+        scope: ResourceScope,
+        update: U,
+    ) -> Result<T, E>
+    where
+        S: Snapshot,
+        T: Send + 'static,
+        E: StorageError,
+        U: FnOnce(&mut S) -> Result<T, E> + Send + 'static,
+    {
         let filesystem = Arc::clone(&self.filesystem);
         let path_str = self.path_str;
-        let scope = self.scope.clone();
         let worker_cell = Arc::clone(&self.worker);
         let worker_name = self.worker_thread_name;
         run_on_worker(&worker_cell, worker_name, move || async move {

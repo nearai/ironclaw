@@ -196,49 +196,6 @@ impl OnboardingStateDto {
     }
 }
 
-/// Wire shape for budget-pipeline events surfaced via SSE.
-///
-/// Lives behind [`AppEvent::Budget`] so the budget feature contributes
-/// exactly one variant to the AppEvent enum — collapsing what would
-/// otherwise be four near-identical variants (review feedback: four
-/// near-identical Budget* variants). Producers: the projection task in
-/// `src/bridge/budget_events.rs` (per `gateway-events.md`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum AppBudgetEvent {
-    /// `utilization >= warn_at` on some dimension. Run still completes;
-    /// UI surfaces a warning chip.
-    Warn {
-        /// Canonical account label (see `ResourceAccount::Display`).
-        account: String,
-        /// Dimension that crossed the threshold (`usd`, `input_tokens`, etc.).
-        dimension: String,
-        /// `[0.0, 1.0+]` — `(usage + reserved + requested) / limit`.
-        utilization: f64,
-        /// When the current period naturally rolls over (`None` for
-        /// `PerInvocation`).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        period_end_iso: Option<String>,
-    },
-    /// `utilization >= pause_at`; an approval gate has been opened. The
-    /// caller resolves the gate by id via the gate-store API.
-    Pause {
-        /// Real `BudgetGateId` written into the gate store — the SSE
-        /// consumer uses this directly to resolve the gate.
-        gate_id: String,
-        account: String,
-        dimension: String,
-        utilization: f64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        period_end_iso: Option<String>,
-    },
-    /// Hard cap exceeded; reservation denied before any provider call.
-    Denied { account: String, dimension: String },
-    /// An account's limits changed (admin action, seeding policy first
-    /// touch, or approval-resolution lift).
-    LimitChanged { account: String },
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AppEvent {
@@ -373,15 +330,6 @@ pub enum AppEvent {
     },
     #[serde(rename = "heartbeat")]
     Heartbeat,
-
-    /// Reborn budget event — projected from
-    /// `ironclaw_resources::BudgetEvent` via the composition-layer
-    /// broadcast sink (#3841 follow-up A2). Wire-stable snake_case
-    /// per `.claude/rules/types.md`. Producer: the projection task in
-    /// `src/bridge/budget_events.rs` (only path that emits this
-    /// variant, per `gateway-events.md`).
-    #[serde(rename = "budget")]
-    Budget(AppBudgetEvent),
 
     // Sandbox job streaming events (worker + Claude Code bridge)
     #[serde(rename = "job_message")]
@@ -762,7 +710,6 @@ impl AppEvent {
             Self::GateResolved { .. } => "gate_resolved",
             Self::Error { .. } => "error",
             Self::Heartbeat => "heartbeat",
-            Self::Budget(_) => "budget",
             Self::JobMessage { .. } => "job_message",
             Self::JobToolUse { .. } => "job_tool_use",
             Self::JobToolResult { .. } => "job_tool_result",

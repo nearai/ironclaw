@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use ironclaw_loop_support::{BudgetSeedingPolicy, GovernorBackedAccountant, ModelCostTable};
-use ironclaw_reborn_config::{BudgetDefaults, BudgetDefaultsError};
+use ironclaw_reborn_config::BudgetDefaults;
 use ironclaw_resources::{
     BudgetEventSink, BudgetGateStore, BudgetPeriod, BudgetThresholds, ResourceGovernor,
 };
@@ -29,15 +29,17 @@ use rust_decimal::Decimal;
 ///    `LlmModelProfilePolicy::build_cost_table()` at startup).
 /// 3. A `BudgetGateStore` (in-memory for local-dev,
 ///    `FilesystemBudgetGateStore` scoped to the tenant for production).
-/// 4. A `BudgetSeedingPolicy` derived from
-///    `BudgetDefaults::compiled_defaults().with_env()` so fresh
-///    user/project accounts pick up the default daily cap on first
-///    model call.
+/// 4. A `BudgetSeedingPolicy` derived from the caller-resolved
+///    [`BudgetDefaults`] so fresh user/project accounts pick up the
+///    default daily cap on first model call.
 /// 5. The configured overestimate factor from the same defaults.
 ///
-/// Returns `Err` only when `BudgetDefaults::with_env()` rejects an
-/// invalid env-var value (parse error, negative USD, etc.) — every
-/// other failure mode is captured by the input substrate handles.
+/// The caller owns the config-layer precedence
+/// (`compiled_defaults -> with_section -> with_env`) and the
+/// `BudgetDefaults::validate()` call. This helper does not read process
+/// env or apply TOML — it only wires the already-resolved defaults into
+/// the accountant. The boundary keeps the wiring helper free of hidden
+/// environment reads (review feedback Thermo-Nuclear #1).
 ///
 /// **Production composition note**: this helper is the single source of
 /// truth for how the accountant gets built. Production runtime
@@ -56,8 +58,8 @@ pub fn build_default_budget_accountant(
     cost_table: Arc<dyn ModelCostTable>,
     gate_store: Arc<dyn BudgetGateStore>,
     event_sink: Arc<dyn BudgetEventSink>,
-) -> Result<Arc<dyn LoopModelBudgetAccountant>, BudgetDefaultsError> {
-    let defaults = BudgetDefaults::compiled_defaults().with_env()?;
+    defaults: &BudgetDefaults,
+) -> Arc<dyn LoopModelBudgetAccountant> {
     let user_daily_usd = Decimal::from_f64_retain(defaults.user_daily_usd).unwrap_or_default();
     let project_daily_usd =
         Decimal::from_f64_retain(defaults.project_daily_usd).unwrap_or_default();
@@ -77,7 +79,7 @@ pub fn build_default_budget_accountant(
         .with_seeding_policy(seeding_policy)
         .with_gate_store(gate_store)
         .with_event_sink(event_sink);
-    Ok(Arc::new(accountant))
+    Arc::new(accountant)
 }
 
 #[cfg(test)]
@@ -101,13 +103,15 @@ mod tests {
         let gate_store: Arc<dyn BudgetGateStore> = Arc::new(InMemoryBudgetGateStore::new());
         let cost_table: Arc<dyn ModelCostTable> = Arc::new(ZeroCostTable);
         let event_sink: Arc<dyn BudgetEventSink> = Arc::new(InMemoryBudgetEventSink::new());
+        let defaults = BudgetDefaults::compiled_defaults();
+        defaults.validate().expect("compiled defaults are valid");
         let accountant = build_default_budget_accountant(
             Arc::clone(&governor),
             cost_table,
             gate_store,
             event_sink,
-        )
-        .expect("budget defaults env-load succeeds");
+            &defaults,
+        );
 
         // Drive one `pre_model_call` to fire the seeding policy.
         let context = test_run_context("tenant-shared-helper", "alice-shared-helper");

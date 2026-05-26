@@ -624,9 +624,11 @@ async fn d1_agent_deny_preserves_user_warn_event() {
 }
 
 /// A2 projection: the broadcast sink emits every BudgetEvent published
-/// by the governor. Subscribers (the production projection task in
-/// `src/bridge/budget_events.rs`) receive Warned / Reserved /
-/// Reconciled events without polling.
+/// by the governor. Subscribers (a future production projection task in
+/// the startup owner — the previous `src/bridge/budget_events.rs`
+/// helper was removed pending a real caller, review feedback
+/// Thermo-Nuclear #3) receive Warned / Reserved / Reconciled events
+/// without polling.
 #[tokio::test]
 async fn broadcast_sink_publishes_events_to_subscribers() {
     let root = tempfile::tempdir().unwrap();

@@ -136,7 +136,9 @@ async fn pump_until_pending_gate(
     );
 
     let store = runtime.budget_gate_store().expect("gate store");
-    let pending = store.list_pending().expect("list pending");
+    let pending = store
+        .list_pending(&ironclaw_host_api::ResourceScope::system())
+        .expect("list pending");
     assert_eq!(
         pending.len(),
         1,
@@ -166,6 +168,7 @@ async fn f3_approval_with_increased_limit_unblocks_retry() {
     };
     let resolved = store
         .resolve(
+            &ironclaw_host_api::ResourceScope::system(),
             gate_id,
             BudgetGateOutcome::Approve {
                 increased_limit: increased.clone(),
@@ -180,7 +183,7 @@ async fn f3_approval_with_increased_limit_unblocks_retry() {
     // through a gate-resolution handler; the test-only accessor mimics
     // that surface.
     runtime
-        .apply_resolved_budget_gate(gate_id)
+        .apply_resolved_budget_gate(&ironclaw_host_api::ResourceScope::system(), gate_id)
         .expect("apply resolved gate");
 
     // Now retry. With the larger cap in place, the reservation
@@ -216,6 +219,7 @@ async fn f4_cancel_keeps_budget_blocked_on_retry() {
     let canceller = ironclaw_host_api::UserId::new("f4-canceller").unwrap();
     let resolved = store
         .resolve(
+            &ironclaw_host_api::ResourceScope::system(),
             gate_id,
             BudgetGateOutcome::Cancel { by: canceller },
             chrono::Utc::now(),
@@ -229,7 +233,7 @@ async fn f4_cancel_keeps_budget_blocked_on_retry() {
     // Applying a cancel is a no-op on the governor (the limit stays
     // tight); calling the helper just confirms it doesn't panic.
     runtime
-        .apply_resolved_budget_gate(gate_id)
+        .apply_resolved_budget_gate(&ironclaw_host_api::ResourceScope::system(), gate_id)
         .expect("apply resolved gate (cancel is a no-op)");
 
     // Retry — the same pause threshold fires, gateway still untouched.
@@ -264,7 +268,7 @@ async fn f5_expiry_marks_gate_terminal_and_keeps_budget_blocked() {
     // without us having to sleep or inject a clock.
     let cutoff = chrono::Utc::now() + chrono::Duration::days(365);
     let expired = store
-        .expire_pending_older_than(cutoff)
+        .expire_pending_older_than(&ironclaw_host_api::ResourceScope::system(), cutoff)
         .expect("expire pending");
     assert_eq!(expired.len(), 1, "exactly one gate should have expired");
     assert!(matches!(
@@ -275,7 +279,9 @@ async fn f5_expiry_marks_gate_terminal_and_keeps_budget_blocked() {
 
     // Confirm the expired gate is no longer pending — before doing
     // a retry that would itself open a fresh gate.
-    let pending_after_expiry = store.list_pending().expect("list pending");
+    let pending_after_expiry = store
+        .list_pending(&ironclaw_host_api::ResourceScope::system())
+        .expect("list pending");
     assert!(
         pending_after_expiry.iter().all(|g| g.id != gate_id),
         "the expired gate must drop out of the pending list — got {pending_after_expiry:?}"
@@ -320,7 +326,9 @@ async fn gate_opened_event_carries_id_that_matches_persisted_gate() {
 
     // The pending gate's id (from the store).
     let store = runtime.budget_gate_store().expect("gate store");
-    let pending = store.list_pending().expect("list pending");
+    let pending = store
+        .list_pending(&ironclaw_host_api::ResourceScope::system())
+        .expect("list pending");
     assert_eq!(pending.len(), 1, "exactly one pending gate after pause");
     let persisted_id = pending[0].id;
 
@@ -372,7 +380,9 @@ async fn pause_in_distinct_runs_produces_distinct_pending_gates() {
     .expect("send finishes");
 
     let store = runtime.budget_gate_store().expect("gate store");
-    let pending = store.list_pending().expect("list pending");
+    let pending = store
+        .list_pending(&ironclaw_host_api::ResourceScope::system())
+        .expect("list pending");
     assert_eq!(
         pending.len(),
         2,

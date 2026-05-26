@@ -16,7 +16,7 @@
 //! in-memory map.
 
 use chrono::{DateTime, Utc};
-use ironclaw_host_api::UserId;
+use ironclaw_host_api::{ResourceScope, UserId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -111,20 +111,38 @@ impl crate::cas_snapshot::StorageError for BudgetGateError {
 }
 
 /// Transactional store for budget approval gates.
+///
+/// Every operation takes the caller's [`ResourceScope`] so a single
+/// shared store instance can naturally route work to the right tenant
+/// path under a multi-tenant deployment. The current
+/// [`InMemoryBudgetGateStore`] is single-snapshot and ignores scope
+/// (suitable for tests / single-tenant local-dev), while the
+/// filesystem-backed store uses the scope to write under the correct
+/// tenant's mount view (review feedback Thermo-Nuclear #2: scope at the
+/// store-operation boundary, not at construction).
 pub trait BudgetGateStore: Send + Sync + std::fmt::Debug {
-    fn open(&self, gate: BudgetApprovalGate) -> Result<(), BudgetGateError>;
+    fn open(&self, scope: &ResourceScope, gate: BudgetApprovalGate) -> Result<(), BudgetGateError>;
     fn resolve(
         &self,
+        scope: &ResourceScope,
         id: BudgetGateId,
         outcome: BudgetGateOutcome,
         at: DateTime<Utc>,
     ) -> Result<BudgetApprovalGate, BudgetGateError>;
     fn expire_pending_older_than(
         &self,
+        scope: &ResourceScope,
         cutoff: DateTime<Utc>,
     ) -> Result<Vec<BudgetApprovalGate>, BudgetGateError>;
-    fn get(&self, id: BudgetGateId) -> Result<Option<BudgetApprovalGate>, BudgetGateError>;
-    fn list_pending(&self) -> Result<Vec<BudgetApprovalGate>, BudgetGateError>;
+    fn get(
+        &self,
+        scope: &ResourceScope,
+        id: BudgetGateId,
+    ) -> Result<Option<BudgetApprovalGate>, BudgetGateError>;
+    fn list_pending(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<BudgetApprovalGate>, BudgetGateError>;
 }
 
 /// In-memory store used by tests and the local-dev runtime. Production
@@ -148,7 +166,11 @@ impl InMemoryBudgetGateStore {
 }
 
 impl BudgetGateStore for InMemoryBudgetGateStore {
-    fn open(&self, gate: BudgetApprovalGate) -> Result<(), BudgetGateError> {
+    fn open(
+        &self,
+        _scope: &ResourceScope,
+        gate: BudgetApprovalGate,
+    ) -> Result<(), BudgetGateError> {
         let mut guard = self.lock();
         guard.insert(gate.id, gate);
         Ok(())
@@ -156,6 +178,7 @@ impl BudgetGateStore for InMemoryBudgetGateStore {
 
     fn resolve(
         &self,
+        _scope: &ResourceScope,
         id: BudgetGateId,
         outcome: BudgetGateOutcome,
         at: DateTime<Utc>,
@@ -181,6 +204,7 @@ impl BudgetGateStore for InMemoryBudgetGateStore {
 
     fn expire_pending_older_than(
         &self,
+        _scope: &ResourceScope,
         cutoff: DateTime<Utc>,
     ) -> Result<Vec<BudgetApprovalGate>, BudgetGateError> {
         let mut guard = self.lock();
@@ -194,12 +218,19 @@ impl BudgetGateStore for InMemoryBudgetGateStore {
         Ok(expired)
     }
 
-    fn get(&self, id: BudgetGateId) -> Result<Option<BudgetApprovalGate>, BudgetGateError> {
+    fn get(
+        &self,
+        _scope: &ResourceScope,
+        id: BudgetGateId,
+    ) -> Result<Option<BudgetApprovalGate>, BudgetGateError> {
         let guard = self.lock();
         Ok(guard.get(&id).cloned())
     }
 
-    fn list_pending(&self) -> Result<Vec<BudgetApprovalGate>, BudgetGateError> {
+    fn list_pending(
+        &self,
+        _scope: &ResourceScope,
+    ) -> Result<Vec<BudgetApprovalGate>, BudgetGateError> {
         let guard = self.lock();
         Ok(guard
             .values()
@@ -242,10 +273,11 @@ mod tests {
     #[test]
     fn open_then_get_returns_pending_gate() {
         let store = InMemoryBudgetGateStore::new();
+        let scope = ResourceScope::system();
         let gate = sample_gate();
         let id = gate.id;
-        store.open(gate.clone()).unwrap();
-        let got = store.get(id).unwrap().unwrap();
+        store.open(&scope, gate.clone()).unwrap();
+        let got = store.get(&scope, id).unwrap().unwrap();
         assert_eq!(got.id, id);
         assert!(matches!(got.status, BudgetGateStatus::Pending));
     }
@@ -253,9 +285,10 @@ mod tests {
     #[test]
     fn approve_resolves_gate_with_increased_limit() {
         let store = InMemoryBudgetGateStore::new();
+        let scope = ResourceScope::system();
         let gate = sample_gate();
         let id = gate.id;
-        store.open(gate).unwrap();
+        store.open(&scope, gate).unwrap();
         let user = UserId::new("alice").unwrap();
         let new_limits = ResourceLimits {
             max_usd: Some(Decimal::from(50)),
@@ -263,6 +296,7 @@ mod tests {
         };
         let resolved = store
             .resolve(
+                &scope,
                 id,
                 BudgetGateOutcome::Approve {
                     increased_limit: new_limits.clone(),
@@ -280,12 +314,14 @@ mod tests {
     #[test]
     fn cancel_resolves_gate_as_cancelled() {
         let store = InMemoryBudgetGateStore::new();
+        let scope = ResourceScope::system();
         let gate = sample_gate();
         let id = gate.id;
-        store.open(gate).unwrap();
+        store.open(&scope, gate).unwrap();
         let user = UserId::new("bob").unwrap();
         let resolved = store
             .resolve(
+                &scope,
                 id,
                 BudgetGateOutcome::Cancel { by: user.clone() },
                 Utc::now(),
@@ -300,19 +336,26 @@ mod tests {
     #[test]
     fn second_resolve_fails_already_resolved() {
         let store = InMemoryBudgetGateStore::new();
+        let scope = ResourceScope::system();
         let gate = sample_gate();
         let id = gate.id;
-        store.open(gate).unwrap();
+        store.open(&scope, gate).unwrap();
         let user = UserId::new("alice").unwrap();
         store
             .resolve(
+                &scope,
                 id,
                 BudgetGateOutcome::Cancel { by: user.clone() },
                 Utc::now(),
             )
             .unwrap();
         let err = store
-            .resolve(id, BudgetGateOutcome::Cancel { by: user }, Utc::now())
+            .resolve(
+                &scope,
+                id,
+                BudgetGateOutcome::Cancel { by: user },
+                Utc::now(),
+            )
             .unwrap_err();
         assert!(matches!(err, BudgetGateError::AlreadyResolved { .. }));
     }
@@ -320,10 +363,12 @@ mod tests {
     #[test]
     fn resolve_unknown_gate_fails_with_unknown() {
         let store = InMemoryBudgetGateStore::new();
+        let scope = ResourceScope::system();
         let user = UserId::new("alice").unwrap();
         let unknown_id = BudgetGateId::new();
         let err = store
             .resolve(
+                &scope,
                 unknown_id,
                 BudgetGateOutcome::Cancel { by: user },
                 Utc::now(),
@@ -335,26 +380,29 @@ mod tests {
     #[test]
     fn expire_pending_older_than_marks_stale_gates_expired() {
         let store = InMemoryBudgetGateStore::new();
+        let scope = ResourceScope::system();
         let mut gate = sample_gate();
         gate.expires_at = Utc::now() - chrono::Duration::hours(1);
         let id = gate.id;
-        store.open(gate).unwrap();
-        let expired = store.expire_pending_older_than(Utc::now()).unwrap();
+        store.open(&scope, gate).unwrap();
+        let expired = store.expire_pending_older_than(&scope, Utc::now()).unwrap();
         assert_eq!(expired.len(), 1);
-        let after = store.get(id).unwrap().unwrap();
+        let after = store.get(&scope, id).unwrap().unwrap();
         assert!(matches!(after.status, BudgetGateStatus::Expired { .. }));
     }
 
     #[test]
     fn list_pending_excludes_resolved_gates() {
         let store = InMemoryBudgetGateStore::new();
+        let scope = ResourceScope::system();
         let pending = sample_gate();
         let resolved = sample_gate();
         let resolved_id = resolved.id;
-        store.open(pending).unwrap();
-        store.open(resolved).unwrap();
+        store.open(&scope, pending).unwrap();
+        store.open(&scope, resolved).unwrap();
         store
             .resolve(
+                &scope,
                 resolved_id,
                 BudgetGateOutcome::Cancel {
                     by: UserId::new("alice").unwrap(),
@@ -362,7 +410,7 @@ mod tests {
                 Utc::now(),
             )
             .unwrap();
-        let pending_list = store.list_pending().unwrap();
+        let pending_list = store.list_pending(&scope).unwrap();
         assert_eq!(pending_list.len(), 1);
         assert_ne!(pending_list[0].id, resolved_id);
     }

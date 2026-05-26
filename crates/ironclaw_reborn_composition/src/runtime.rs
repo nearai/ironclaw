@@ -241,12 +241,14 @@ impl RebornRuntime {
             .map(|rt| Arc::clone(&rt.in_memory_budget_event_sink))
     }
 
-    /// Broadcast sink the binary subscribes against to project budget
-    /// events onto the SSE stream. Production composition calls
-    /// `subscribe()` on this and hands the receiver to
-    /// `spawn_budget_event_projection` (see `src/bridge/budget_events.rs`).
-    /// Exposed unconditionally so the production binary path that
-    /// builds without `test-support` can still wire the projection.
+    /// Broadcast sink the binary will subscribe against once a real
+    /// projection caller lands. Production composition will call
+    /// `subscribe()` on this and spawn a projection task with shutdown
+    /// cancellation in the startup owner. The previous half-wired
+    /// `spawn_budget_event_projection` helper plus `AppEvent::Budget`
+    /// variant were removed (review feedback Thermo-Nuclear #3).
+    /// Exposed unconditionally so future production composition can
+    /// still wire the projection without rebuilding the runtime.
     pub fn broadcast_budget_event_sink(
         &self,
     ) -> Option<Arc<ironclaw_resources::BroadcastBudgetEventSink>> {
@@ -279,6 +281,7 @@ impl RebornRuntime {
     #[cfg(any(test, feature = "test-support"))]
     pub fn apply_resolved_budget_gate(
         &self,
+        scope: &ironclaw_host_api::ResourceScope,
         gate_id: ironclaw_resources::BudgetGateId,
     ) -> Result<ironclaw_resources::BudgetApprovalGate, RebornRuntimeError> {
         let local_runtime = self.services.local_runtime.as_ref().ok_or_else(|| {
@@ -288,7 +291,7 @@ impl RebornRuntime {
         })?;
         let gate = local_runtime
             .budget_gate_store
-            .get(gate_id)
+            .get(scope, gate_id)
             .map_err(|error| RebornRuntimeError::InvalidArgument {
                 reason: format!("budget gate read failed: {error}"),
             })?
@@ -767,6 +770,7 @@ pub async fn build_reborn_runtime(
         poll,
         identity,
         skill_context_source: configured_skill_context_source,
+        budget_defaults,
         #[cfg(any(test, feature = "test-support"))]
         model_gateway_override,
         #[cfg(any(test, feature = "test-support"))]
@@ -888,13 +892,40 @@ pub async fn build_reborn_runtime(
     // override supplies a cost table we deliberately skip the accountant
     // — there's no spend to track and the cascade would never fire.
     //
-    // The accountant is wired with a seeding policy derived from
-    // `BudgetDefaults::compiled_defaults().with_env()` so a fresh user /
-    // project account picks up the default daily cap on the first model
-    // call. Without this seeding step the local-dev governor starts
-    // empty and `reserve_with_outcome_in_state` skips accounts that
-    // have no configured limit — model calls would record usage but
-    // never enforce a cap (review feedback: High #2).
+    // The accountant is wired with a seeding policy derived from the
+    // caller-supplied `BudgetDefaults` (or `compiled_defaults().with_env()`
+    // as the composition-root fallback when no caller pre-resolves them)
+    // so a fresh user / project account picks up the default daily cap on
+    // the first model call. Without this seeding step the local-dev
+    // governor starts empty and `reserve_with_outcome_in_state` skips
+    // accounts that have no configured limit — model calls would record
+    // usage but never enforce a cap (review feedback High #2 + Thermo-
+    // Nuclear #1: defaults resolve once at the composition root with
+    // explicit precedence and a `validate()` call instead of being
+    // re-read by the wiring helper).
+    let resolved_budget_defaults = match budget_defaults {
+        Some(defaults) => {
+            defaults
+                .validate()
+                .map_err(|error| RebornRuntimeError::InvalidArgument {
+                    reason: format!("supplied budget defaults invalid: {error}"),
+                })?;
+            defaults
+        }
+        None => {
+            let defaults = ironclaw_reborn_config::BudgetDefaults::compiled_defaults()
+                .with_env()
+                .map_err(|error| RebornRuntimeError::InvalidArgument {
+                    reason: format!("budget defaults env-override invalid: {error}"),
+                })?;
+            defaults
+                .validate()
+                .map_err(|error| RebornRuntimeError::InvalidArgument {
+                    reason: format!("resolved budget defaults invalid: {error}"),
+                })?;
+            defaults
+        }
+    };
     let model_budget_accountant: Option<
         Arc<dyn ironclaw_turns::run_profile::LoopModelBudgetAccountant>,
     > = match resolved_cost_table {
@@ -913,10 +944,8 @@ pub async fn build_reborn_runtime(
                 cost_table,
                 Arc::clone(&local_runtime.budget_gate_store),
                 event_sink,
-            )
-            .map_err(|error| RebornRuntimeError::InvalidArgument {
-                reason: format!("budget defaults env-override invalid: {error}"),
-            })?;
+                &resolved_budget_defaults,
+            );
             Some(accountant)
         }
         None => None,

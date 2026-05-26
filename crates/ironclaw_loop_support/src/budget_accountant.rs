@@ -187,7 +187,11 @@ impl GovernorBackedAccountant {
     /// sink on success so SSE / audit projections receive the *real*
     /// gate id (the governor's earlier `ApprovalRequested` event does
     /// not — it has no knowledge of the gate store).
-    fn open_approval_gate(&self, needed: &ResourceApprovalNeeded) -> Option<BudgetGateId> {
+    fn open_approval_gate(
+        &self,
+        scope: &ResourceScope,
+        needed: &ResourceApprovalNeeded,
+    ) -> Option<BudgetGateId> {
         let store = self.gate_store.as_ref()?;
         let now = Utc::now();
         let id = BudgetGateId::new();
@@ -198,7 +202,7 @@ impl GovernorBackedAccountant {
             expires_at: now + self.gate_expires_after,
             status: BudgetGateStatus::Pending,
         };
-        if let Err(error) = store.open(gate) {
+        if let Err(error) = store.open(scope, gate) {
             tracing::warn!(
                 ?error,
                 "budget accountant failed to persist pending approval gate; \
@@ -393,8 +397,11 @@ impl LoopModelBudgetAccountant for GovernorBackedAccountant {
                 // wired. The error returned to the run is unchanged so
                 // existing callers still fail closed; the gate is what
                 // lets a user-facing handler (or test) resolve the
-                // approval out-of-band.
-                let _ = self.open_approval_gate(needed.as_ref());
+                // approval out-of-band. We pass the caller's scope so
+                // the store can route the gate to the right tenant
+                // path (review feedback Thermo-Nuclear #2).
+                let scope = self.resource_scope(context);
+                let _ = self.open_approval_gate(&scope, needed.as_ref());
                 Err(LoopModelGatewayError::new(
                     AgentLoopHostErrorKind::BudgetApprovalRequired,
                     format!("budget approval required for {}", needed.dimension),

@@ -1065,6 +1065,12 @@ where
 {
     store: S,
     clock: Arc<dyn Clock>,
+    /// Optional sink that receives `BudgetEvent`s as reservations,
+    /// reconciliations, warnings, and denials happen. Wired by
+    /// composition; defaults to [`NoOpBudgetEventSink`] so the
+    /// governor stays usable without observability (parity with
+    /// [`InMemoryResourceGovernor::with_event_sink`]).
+    event_sink: Arc<dyn BudgetEventSink>,
 }
 
 impl<S> PersistentResourceGovernor<S>
@@ -1075,6 +1081,7 @@ where
         Self {
             store,
             clock: Arc::new(SystemClock),
+            event_sink: Arc::new(NoOpBudgetEventSink),
         }
     }
 
@@ -1082,7 +1089,22 @@ where
     /// mutating operations; if you replace it after construction, in-flight
     /// reservations keep their original anchors.
     pub fn with_clock(store: S, clock: Arc<dyn Clock>) -> Self {
-        Self { store, clock }
+        Self {
+            store,
+            clock,
+            event_sink: Arc::new(NoOpBudgetEventSink),
+        }
+    }
+
+    /// Plug in an audit/SSE sink. Every `reserve`, `reconcile`,
+    /// `release`, warning, and approval/denial emits a [`BudgetEvent`]
+    /// to this sink (parity with
+    /// [`InMemoryResourceGovernor::with_event_sink`]). Calls are
+    /// best-effort and synchronous; sinks must be cheap (forward to a
+    /// `broadcast` channel for SSE).
+    pub fn with_event_sink(mut self, sink: Arc<dyn BudgetEventSink>) -> Self {
+        self.event_sink = sink;
+        self
     }
 
     pub fn try_set_limit(
@@ -1135,7 +1157,13 @@ where
         account: ResourceAccount,
         limits: ResourceLimits,
     ) -> Result<(), ResourceError> {
-        self.try_set_limit(account, limits)
+        let now = self.clock.now();
+        let outcome = self.try_set_limit(account.clone(), limits);
+        if outcome.is_ok() {
+            self.event_sink
+                .emit(BudgetEvent::LimitChanged { account, at: now });
+        }
+        outcome
     }
 
     fn reserve_with_outcome(
@@ -1153,9 +1181,11 @@ where
         reservation_id: ResourceReservationId,
     ) -> Result<ReservationOutcome, ResourceError> {
         let now = self.clock.now();
-        self.store.update(move |snapshot| {
+        let result = self.store.update(move |snapshot| {
             reserve_with_outcome_in_state(&mut snapshot.state, scope, estimate, reservation_id, now)
-        })
+        });
+        emit_reserve_events(self.event_sink.as_ref(), &result, now);
+        result
     }
 
     fn reconcile(
@@ -1164,9 +1194,17 @@ where
         actual: ResourceUsage,
     ) -> Result<ResourceReceipt, ResourceError> {
         let now = self.clock.now();
-        self.store.update(move |snapshot| {
+        let result = self.store.update(move |snapshot| {
             reconcile_in_state(&mut snapshot.state, reservation_id, actual, now)
-        })
+        });
+        if let Ok(receipt) = &result {
+            self.event_sink.emit(BudgetEvent::Reconciled {
+                account: most_specific_account(&receipt.scope),
+                receipt: receipt.clone(),
+                at: now,
+            });
+        }
+        result
     }
 
     fn release(
@@ -1174,8 +1212,17 @@ where
         reservation_id: ResourceReservationId,
     ) -> Result<ResourceReceipt, ResourceError> {
         let now = self.clock.now();
-        self.store
-            .update(move |snapshot| release_in_state(&mut snapshot.state, reservation_id, now))
+        let result = self
+            .store
+            .update(move |snapshot| release_in_state(&mut snapshot.state, reservation_id, now));
+        if let Ok(receipt) = &result {
+            self.event_sink.emit(BudgetEvent::Released {
+                account: most_specific_account(&receipt.scope),
+                receipt: receipt.clone(),
+                at: now,
+            });
+        }
+        result
     }
 
     fn account_snapshot(

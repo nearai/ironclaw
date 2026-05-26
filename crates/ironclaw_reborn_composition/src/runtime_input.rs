@@ -26,6 +26,7 @@ use std::time::Duration;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_loop_support::HostManagedModelGateway;
 use ironclaw_loop_support::HostSkillContextSource;
+use ironclaw_reborn_config::BudgetDefaults;
 
 use crate::input::RebornBuildInput;
 
@@ -212,6 +213,15 @@ pub struct RebornRuntimeInput {
     pub poll: PollSettings,
     pub identity: RebornRuntimeIdentity,
     pub skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
+    /// Pre-resolved budget defaults to seed the model-budget accountant.
+    /// The caller owns the config-layer precedence (compiled -> section
+    /// -> env) and must call [`BudgetDefaults::validate`] before
+    /// supplying. When unset, `build_reborn_runtime` falls back to
+    /// `BudgetDefaults::compiled_defaults().with_env()` + validate so
+    /// existing call sites keep working; new call sites should provide
+    /// a resolved value to avoid the runtime reading process env
+    /// (review feedback Thermo-Nuclear #1).
+    pub budget_defaults: Option<BudgetDefaults>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) model_gateway_override: Option<Arc<dyn HostManagedModelGateway>>,
     /// Cost table to pair with the model-gateway override. Without this,
@@ -237,11 +247,24 @@ impl RebornRuntimeInput {
             poll: PollSettings::default(),
             identity: RebornRuntimeIdentity::default(),
             skill_context_source: None,
+            budget_defaults: None,
             #[cfg(any(test, feature = "test-support"))]
             model_gateway_override: None,
             #[cfg(any(test, feature = "test-support"))]
             model_cost_table_override: None,
         }
+    }
+
+    /// Supply pre-resolved budget defaults. The caller is responsible
+    /// for applying the desired config-layer precedence (compiled,
+    /// TOML, env) and calling [`BudgetDefaults::validate`] before
+    /// passing. Without this, `build_reborn_runtime` falls back to
+    /// `compiled_defaults().with_env()` + validate (review feedback
+    /// Thermo-Nuclear #1: budget defaults belong to the composition
+    /// root, not a wiring helper).
+    pub fn with_budget_defaults(mut self, defaults: BudgetDefaults) -> Self {
+        self.budget_defaults = Some(defaults);
+        self
     }
 
     #[cfg(feature = "root-llm-provider")]
