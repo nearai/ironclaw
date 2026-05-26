@@ -301,7 +301,7 @@ impl PostgresPredicateStateBackend {
         // Silently dropping the oldest sample to make room would weaken cap
         // enforcement and break replay refusal — so we fail closed,
         // matching the in-memory backend's `if !dedup && len >= cap { Err }`.
-        if pre_count as usize >= MAX_SAMPLES_PER_KEY {
+        if pre_count.max(0) as usize >= MAX_SAMPLES_PER_KEY {
             // Roll back so the trim above (which freed aged-out dedup ids)
             // is not committed independently of a rejected record; the
             // caller observes a clean no-write overflow.

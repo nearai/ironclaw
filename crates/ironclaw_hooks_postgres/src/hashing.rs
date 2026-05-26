@@ -11,7 +11,7 @@
 //!   discriminant so an invocation key and a value key that share
 //!   `(hook, tenant, capability)` never collide.
 //!
-//! Length-prefixing every field (4-byte big-endian length ++ bytes)
+//! Length-prefixing every field (8-byte big-endian length ++ bytes)
 //! makes the serialization injective: `("ab", "c")` and `("a", "bc")`
 //! produce distinct digests, closing the classic concatenation-collision
 //! hole that a naive `a ++ b` would leave open.
@@ -27,9 +27,11 @@ const KIND_VALUE: u8 = b'v';
 pub(crate) type Digest = [u8; 32];
 
 fn feed(hasher: &mut blake3::Hasher, field: &[u8]) {
-    // 4-byte length prefix makes the field boundary unambiguous; u32 is
-    // ample for any tenant/capability/field string we will ever see.
-    let len = u32::try_from(field.len()).unwrap_or(u32::MAX);
+    // 8-byte length prefix makes the field boundary unambiguous; u64 makes
+    // the usize->len conversion infallible on all supported platforms (no
+    // saturation corner that could alias two fields differing only beyond
+    // u32::MAX), keeping the serialization strictly injective.
+    let len = field.len() as u64;
     hasher.update(&len.to_be_bytes());
     hasher.update(field);
 }
