@@ -1,0 +1,36 @@
+[package]
+name = "ironclaw_attestation"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Canonical signing-bytes + ApprovedTxHash core for the IronClaw attested-signing substrate (chain-SDK-free, no secrets/webauthn)"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+# Internal workspace crate, never published to crates.io. Setting this lets the
+# cargo-deny `bans` wildcard check pass without an allow-list entry (matches the
+# `ironclaw_turns` convention — this is the PR where the crate is born).
+publish = false
+
+[package.metadata.dist]
+dist = false
+
+[features]
+# Test-only: re-exports the low-level component hasher so the binding test
+# suite can drive per-component tampering. Never enable from production
+# dependents — production callers must use `approved_tx_hash_for`.
+test-internals = []
+
+[dependencies]
+ironclaw_signing_provider = { path = "../ironclaw_signing_provider" }
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+thiserror = "2"
+
+[dev-dependencies]
+# Self dev-dependency enabling `test-internals` so the integration test suite
+# can reach the low-level component hasher (production callers use
+# `approved_tx_hash_for`).
+ironclaw_attestation = { path = ".", features = ["test-internals"] }
+serde_json = "1"
