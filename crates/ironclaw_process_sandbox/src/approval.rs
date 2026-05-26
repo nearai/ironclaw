@@ -1,11 +1,16 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    SandboxCommandPlan, SandboxCredentialBinding, SandboxMount, SandboxPlanError,
+    ProcessSandboxPlanError, SandboxCommandPlan, SandboxCredentialBinding, SandboxMount,
     SandboxProcessPlan,
 };
 use ironclaw_host_api::{RuntimeCredentialTarget, SecretHandle};
 
+/// Sanitized authority summary shown before a sandbox process is approved.
+///
+/// This structure exposes commands, mount destinations, requested network
+/// hosts, and credential aliases/placeholders. It never includes host paths or
+/// raw secret material.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxProcessApprovalSummary {
     pub install_command: Option<Vec<String>>,
@@ -18,7 +23,8 @@ pub struct SandboxProcessApprovalSummary {
 }
 
 impl SandboxProcessApprovalSummary {
-    pub fn from_plan(plan: &SandboxProcessPlan) -> Result<Self, SandboxPlanError> {
+    /// Builds a sanitized approval summary from a validated plan.
+    pub fn from_plan(plan: &SandboxProcessPlan) -> Result<Self, ProcessSandboxPlanError> {
         plan.validate()?;
         Ok(Self {
             install_command: plan
@@ -47,6 +53,7 @@ impl SandboxProcessApprovalSummary {
     }
 }
 
+/// Approval-facing mount description with the logical mount name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxApprovalMount {
     pub name: String,
@@ -64,6 +71,7 @@ impl SandboxApprovalMount {
     }
 }
 
+/// Approval-facing credential description with redacted secret data.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxApprovalCredential {
     pub secret_alias: SecretHandle,

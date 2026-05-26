@@ -27,8 +27,9 @@ pub use docker::{
     SandboxProcessPhase,
 };
 pub use plan::{
-    SandboxCommandPlan, SandboxCredentialBinding, SandboxInstallPlan, SandboxMount, SandboxMounts,
-    SandboxNetworkPlan, SandboxPlanError, SandboxProcessPlan, ValidatedSandboxProcessPlan,
+    ProcessSandboxPlanError, SandboxCommandPlan, SandboxCredentialBinding, SandboxInstallPlan,
+    SandboxMount, SandboxMounts, SandboxNetworkPlan, SandboxProcessPlan,
+    ValidatedSandboxProcessPlan,
 };
 
 #[cfg(test)]

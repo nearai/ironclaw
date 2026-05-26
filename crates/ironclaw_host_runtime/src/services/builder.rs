@@ -11,7 +11,7 @@ use super::{
     DurableEventLog, DurableEventSink, EffectiveRuntimePolicy, EventSink,
     FilesystemApprovalRequestStore, FilesystemResourceGovernorStore, FilesystemRunStateStore,
     FilesystemTurnStateStore, FirstPartyCapabilityRegistry, HostRuntimeServices, McpExecutor,
-    NetworkHttpEgress, PersistentResourceGovernor, ProcessBackendKind,
+    NetworkHttpEgress, PersistentResourceGovernor, ProcessBackendKind, ProcessExecutor,
     ProcessObligationLifecycleStore, ProcessResultStore, ProcessStore, ProductionComponentType,
     ProductionImplementationReadiness, ProductionWiringComponent, ProductionWiringIssueKind,
     ProductionWiringReport, RebornEventStoreConfig, RebornEventStoreError, RebornEventStores,
@@ -64,6 +64,7 @@ where
             wasm_credential_provider,
             runtime_health,
             runtime_policy,
+            process_sandbox_executor,
             script_runtime,
             mcp_runtime,
             first_party_runtime,
@@ -101,6 +102,7 @@ where
             wasm_credential_provider,
             runtime_health,
             runtime_policy,
+            process_sandbox_executor,
             script_runtime,
             mcp_runtime,
             first_party_runtime,
@@ -159,6 +161,7 @@ where
             wasm_credential_provider,
             runtime_health,
             runtime_policy,
+            process_sandbox_executor,
             script_runtime,
             mcp_runtime,
             first_party_runtime,
@@ -206,6 +209,7 @@ where
             wasm_credential_provider,
             runtime_health,
             runtime_policy,
+            process_sandbox_executor,
             script_runtime,
             mcp_runtime,
             first_party_runtime,
@@ -639,6 +643,14 @@ where
         T: RuntimeBackendHealth + 'static,
     {
         self.runtime_health = Some(runtime_health);
+        self
+    }
+
+    pub fn with_process_sandbox_executor<T>(mut self, executor: Arc<T>) -> Self
+    where
+        T: ProcessExecutor + 'static,
+    {
+        self.process_sandbox_executor = Some(executor);
         self
     }
 

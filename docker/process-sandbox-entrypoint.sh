@@ -26,10 +26,18 @@ if [ "${IRONCLAW_EGRESS_LOCKDOWN:-}" = "broker-only" ]; then
   if printf '%s' "${broker_host}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
     broker_ips="${broker_host}"
   else
-    broker_ips="$(getent hosts "${broker_host}" | awk '{print $1}')"
+    broker_ips="$(awk -v host="${broker_host}" '
+      $1 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {
+        for (i = 2; i <= NF; i++) {
+          if ($i == host) {
+            print $1
+          }
+        }
+      }
+    ' /etc/hosts)"
   fi
   if [ -z "${broker_ips}" ]; then
-    echo "failed to resolve broker host" >&2
+    echo "failed to resolve broker host from static container hosts" >&2
     exit 65
   fi
 

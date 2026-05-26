@@ -20,14 +20,16 @@ use serde_json::Value;
 use crate::{
     BrokerRewriteError, DEFAULT_PROCESS_SANDBOX_IMAGE, DockerBrokerConfig,
     DockerProcessSandboxBackend, DockerProcessSandboxConfig, ProcessSandboxBackend,
-    ProcessSandboxError, ProcessSandboxExecutor, SandboxBrokerPolicy, SandboxCommandPlan,
-    SandboxCredentialBinding, SandboxInstallPlan, SandboxMounts, SandboxNetworkPlan,
-    SandboxPlanError, SandboxProcessApprovalSummary, SandboxProcessOutput, SandboxProcessPhase,
-    SandboxProcessPlan, SandboxProcessRequest, SandboxProcessResult, ValidatedSandboxProcessPlan,
+    ProcessSandboxError, ProcessSandboxExecutor, ProcessSandboxPlanError as SandboxPlanError,
+    SandboxBrokerPolicy, SandboxCommandPlan, SandboxCredentialBinding, SandboxInstallPlan,
+    SandboxMounts, SandboxNetworkPlan, SandboxProcessApprovalSummary, SandboxProcessOutput,
+    SandboxProcessPhase, SandboxProcessPlan, SandboxProcessRequest, SandboxProcessResult,
+    ValidatedSandboxProcessPlan,
     docker::{
-        DockerInvocation, DockerRunError, DockerRunOutput, DockerRunner,
+        DockerInvocation, DockerRunError, DockerRunOutput, DockerRunner, broker_host,
         docker_invocation_for_phase,
     },
+    validation::{is_container_absolute_path, validate_header_name, validate_host},
 };
 
 fn sample_plan() -> SandboxProcessPlan {
@@ -310,6 +312,61 @@ fn plan_validation_does_not_reject_sensitive_env_substrings_inside_words() {
 }
 
 #[test]
+fn plan_validation_rejects_common_sensitive_env_names() {
+    for env_name in [
+        "PRIVATE_KEY",
+        "SERVICE_CREDENTIAL",
+        "SIGNING_KEY",
+        "ENCRYPTION_KEY",
+        "SYMMETRIC_KEY",
+        "BEARER_TOKEN",
+    ] {
+        let mut plan = sample_plan();
+        plan.run.env.clear();
+        plan.credentials.clear();
+        plan.network.runtime_hosts.clear();
+        plan.network.direct_egress_lockdown = false;
+        plan.run
+            .env
+            .insert(env_name.to_string(), "raw-secret".to_string());
+
+        let error = plan.validate().unwrap_err();
+
+        assert!(matches!(error, SandboxPlanError::RawSecretEnvValue { .. }));
+    }
+}
+
+#[test]
+fn validation_rejects_invalid_hosts() {
+    for host in [
+        "",
+        "https://api.notion.com",
+        "api.notion.com:443",
+        "api notion",
+    ] {
+        let error = validate_host(host).unwrap_err();
+
+        assert!(matches!(error, SandboxPlanError::InvalidHost { .. }));
+    }
+}
+
+#[test]
+fn validation_rejects_invalid_header_names() {
+    for header in ["", "Authorization Token", "Bad:Header", "Bad(Header)"] {
+        let error = validate_header_name(header).unwrap_err();
+
+        assert_eq!(error, SandboxPlanError::InvalidCredentialTarget);
+    }
+}
+
+#[test]
+fn validation_rejects_invalid_container_paths() {
+    for path in ["/workspace\0x", "/workspace,src=/etc", "/workspace/../etc"] {
+        assert!(!is_container_absolute_path(path), "{path}");
+    }
+}
+
+#[test]
 fn plan_validation_rejects_duplicate_credential_targets() {
     let mut plan = sample_plan();
     let mut duplicate = plan.credentials[0].clone();
@@ -372,7 +429,9 @@ fn docker_args_never_include_secret_material() {
     assert!(joined.contains("NOTION_API_KEY=NOTION_API_KEY"));
     assert!(joined.contains("IRONCLAW_EGRESS_LOCKDOWN=broker-only"));
     assert!(joined.contains("HTTP_PROXY=http://host.docker.internal:4489"));
+    assert!(joined.contains("HTTPS_PROXY=http://host.docker.internal:4489"));
     assert!(joined.contains("http_proxy=http://host.docker.internal:4489"));
+    assert!(joined.contains("https_proxy=http://host.docker.internal:4489"));
     assert!(joined.contains("--add-host\nhost.docker.internal:host-gateway"));
     assert!(joined.contains("--memory\n512m"));
     assert!(joined.contains("--pids-limit\n256"));
@@ -383,6 +442,16 @@ fn docker_args_never_include_secret_material() {
             .container_name
             .starts_with("ironclaw-sandbox-run-")
     );
+}
+
+#[test]
+fn docker_broker_host_parses_proxy_url_hosts() {
+    let host_gateway = broker_host("http://host.docker.internal:4489");
+    let path_host = broker_host("https://broker.local/path");
+
+    assert_eq!(host_gateway, Some("host.docker.internal"));
+    assert_eq!(path_host, Some("broker.local"));
+    assert_eq!(broker_host("broker.local:4489"), None);
 }
 
 #[test]
@@ -582,6 +651,46 @@ fn broker_redacts_secret_values_from_error_paths() {
     let sanitized = policy.sanitize_text("upstream echoed real-notion-secret", &secrets);
 
     assert_eq!(sanitized, "upstream echoed [REDACTED]");
+}
+
+#[test]
+fn broker_redacts_longer_secret_before_embedded_substring() {
+    let policy = SandboxBrokerPolicy::new(Vec::new()).unwrap();
+    let mut secrets = HashMap::new();
+    secrets.insert(
+        SecretHandle::new("short").unwrap(),
+        SecretString::from("token"),
+    );
+    secrets.insert(
+        SecretHandle::new("long").unwrap(),
+        SecretString::from("token-extended"),
+    );
+
+    let sanitized = policy.sanitize_text("upstream echoed token-extended", &secrets);
+
+    assert_eq!(sanitized, "upstream echoed [REDACTED]");
+}
+
+#[test]
+fn broker_policy_allows_empty_bindings() {
+    let policy = SandboxBrokerPolicy::new(Vec::new()).unwrap();
+    let result = policy
+        .rewrite_headers(
+            "api.notion.com",
+            vec![(
+                "Authorization".to_string(),
+                "Bearer placeholder".to_string(),
+            )],
+            &HashMap::new(),
+        )
+        .unwrap();
+
+    let expected_headers = vec![(
+        "Authorization".to_string(),
+        "Bearer placeholder".to_string(),
+    )];
+    assert_eq!(result.headers, expected_headers);
+    assert!(result.rewrites.is_empty());
 }
 
 #[test]

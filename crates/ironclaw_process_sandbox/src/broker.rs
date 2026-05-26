@@ -4,8 +4,15 @@ use ironclaw_host_api::{RuntimeCredentialTarget, SecretHandle};
 use secrecy::{ExposeSecret, SecretString};
 use thiserror::Error;
 
-use crate::{SandboxCredentialBinding, SandboxPlanError, plan::validate_unique_credential_targets};
+use crate::{
+    ProcessSandboxPlanError, SandboxCredentialBinding, plan::validate_unique_credential_targets,
+};
 
+/// Header rewrite performed by the credential broker.
+///
+/// `old_value` is the placeholder-bearing value from the sandbox request. The
+/// replacement secret is retained as `SecretString` so debug output does not
+/// expose raw credential material.
 #[derive(Debug, Clone)]
 pub struct BrokerHeaderRewrite {
     pub name: String,
@@ -14,25 +21,33 @@ pub struct BrokerHeaderRewrite {
     pub secret_alias: SecretHandle,
 }
 
+/// Broker rewrite result containing forwarded headers and audit metadata.
 #[derive(Debug, Clone)]
 pub struct BrokerRewriteResult {
     pub headers: Vec<(String, String)>,
     pub rewrites: Vec<BrokerHeaderRewrite>,
 }
 
+/// Failure returned when a required broker rewrite cannot be completed.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum BrokerRewriteError {
     #[error("required secret {secret_alias} is missing")]
     MissingRequiredSecret { secret_alias: SecretHandle },
 }
 
+/// Credential rewrite policy for brokered sandbox egress.
+///
+/// The policy matches approved hosts and header placeholders, rewrites them to
+/// leased secrets, and provides best-effort redaction for broker-visible error
+/// paths.
 #[derive(Debug, Clone)]
 pub struct SandboxBrokerPolicy {
     bindings: Vec<SandboxCredentialBinding>,
 }
 
 impl SandboxBrokerPolicy {
-    pub fn new(bindings: Vec<SandboxCredentialBinding>) -> Result<Self, SandboxPlanError> {
+    /// Validates and constructs a broker rewrite policy.
+    pub fn new(bindings: Vec<SandboxCredentialBinding>) -> Result<Self, ProcessSandboxPlanError> {
         let policy = Self { bindings };
         for binding in &policy.bindings {
             binding.validate()?;
@@ -41,6 +56,7 @@ impl SandboxBrokerPolicy {
         Ok(policy)
     }
 
+    /// Rewrites approved placeholder headers for the request host.
     pub fn rewrite_headers(
         &self,
         host: &str,
@@ -83,18 +99,20 @@ impl SandboxBrokerPolicy {
         })
     }
 
+    /// Redacts leased secret values from text before returning it to callers.
     pub fn sanitize_text(
         &self,
         text: &str,
         secrets: &HashMap<SecretHandle, SecretString>,
     ) -> String {
-        secrets.values().fold(text.to_string(), |acc, secret| {
-            let value = secret.expose_secret();
-            if value.is_empty() {
-                acc
-            } else {
-                acc.replace(value, "[REDACTED]")
-            }
+        let mut values = secrets
+            .values()
+            .map(|secret| secret.expose_secret())
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>();
+        values.sort_unstable_by_key(|value| std::cmp::Reverse(value.len()));
+        values.into_iter().fold(text.to_string(), |acc, value| {
+            acc.replace(value, "[REDACTED]")
         })
     }
 

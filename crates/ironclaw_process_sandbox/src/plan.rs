@@ -13,6 +13,11 @@ use crate::{
     },
 };
 
+/// Serialized process sandbox request accepted from the host runtime.
+///
+/// The plan describes logical command, mount, network, and credential intent.
+/// It never carries Docker flags, host paths, inherited host environment, or
+/// raw secret values; callers must validate it before handing it to a backend.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxProcessPlan {
     #[serde(default)]
@@ -27,33 +32,42 @@ pub struct SandboxProcessPlan {
 }
 
 impl SandboxProcessPlan {
-    pub fn validate(&self) -> Result<(), SandboxPlanError> {
+    /// Validates the plan before backend execution.
+    pub fn validate(&self) -> Result<(), ProcessSandboxPlanError> {
         validate_plan(self)
     }
 }
 
+/// A sandbox process plan that has passed local validation.
+///
+/// Backends accept this wrapper so validation-sensitive decisions, such as
+/// mount construction and credential broker setup, cannot accidentally consume
+/// untrusted raw plan JSON.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedSandboxProcessPlan {
     plan: SandboxProcessPlan,
 }
 
 impl ValidatedSandboxProcessPlan {
-    pub fn new(plan: SandboxProcessPlan) -> Result<Self, SandboxPlanError> {
+    /// Validates and wraps a raw sandbox process plan.
+    pub fn new(plan: SandboxProcessPlan) -> Result<Self, ProcessSandboxPlanError> {
         validate_plan(&plan)?;
         Ok(Self { plan })
     }
 
+    /// Returns the validated plan without dropping the validation marker.
     pub fn as_plan(&self) -> &SandboxProcessPlan {
         &self.plan
     }
 
+    /// Consumes the marker and returns the underlying plan.
     pub fn into_plan(self) -> SandboxProcessPlan {
         self.plan
     }
 }
 
 impl TryFrom<SandboxProcessPlan> for ValidatedSandboxProcessPlan {
-    type Error = SandboxPlanError;
+    type Error = ProcessSandboxPlanError;
 
     fn try_from(plan: SandboxProcessPlan) -> Result<Self, Self::Error> {
         Self::new(plan)
@@ -68,6 +82,11 @@ impl std::ops::Deref for ValidatedSandboxProcessPlan {
     }
 }
 
+/// Optional setup phase run before the main sandbox command.
+///
+/// `allowed_hosts` records requested install-time network authority. The Docker
+/// MVP currently fails closed when this list is non-empty because install egress
+/// filtering is not yet enforced.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxInstallPlan {
     pub command: SandboxCommandPlan,
@@ -75,6 +94,12 @@ pub struct SandboxInstallPlan {
     pub allowed_hosts: Vec<String>,
 }
 
+/// A single command phase inside the sandbox container.
+///
+/// Commands are serialized as an executable plus argument vector, not a shell
+/// line. Validation rejects empty, shell-word, and option-like executables,
+/// unsafe environment names, relative working directories, and resource limits
+/// above the host caps.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxCommandPlan {
     pub command: String,
@@ -93,17 +118,17 @@ pub struct SandboxCommandPlan {
 }
 
 impl SandboxCommandPlan {
-    pub(crate) fn validate(&self, phase: &'static str) -> Result<(), SandboxPlanError> {
+    pub(crate) fn validate(&self, phase: &'static str) -> Result<(), ProcessSandboxPlanError> {
         if self.command.trim().is_empty() {
-            return Err(SandboxPlanError::EmptyCommand { phase });
+            return Err(ProcessSandboxPlanError::EmptyCommand { phase });
         }
         if self.command.starts_with('-') || self.command.chars().any(char::is_whitespace) {
-            return Err(SandboxPlanError::UnsafeCommand { phase });
+            return Err(ProcessSandboxPlanError::UnsafeCommand { phase });
         }
         if let Some(working_dir) = &self.working_dir
             && !is_container_absolute_path(working_dir)
         {
-            return Err(SandboxPlanError::InvalidContainerPath {
+            return Err(ProcessSandboxPlanError::InvalidContainerPath {
                 path: working_dir.clone(),
             });
         }
@@ -111,7 +136,7 @@ impl SandboxCommandPlan {
             .timeout_ms
             .is_some_and(|timeout_ms| timeout_ms > MAX_TIMEOUT_MS)
         {
-            return Err(SandboxPlanError::TimeoutLimitTooLarge {
+            return Err(ProcessSandboxPlanError::TimeoutLimitTooLarge {
                 phase,
                 max: MAX_TIMEOUT_MS,
             });
@@ -120,7 +145,7 @@ impl SandboxCommandPlan {
             .max_stdout_bytes
             .is_some_and(|limit| limit > MAX_OUTPUT_LIMIT)
         {
-            return Err(SandboxPlanError::OutputLimitTooLarge {
+            return Err(ProcessSandboxPlanError::OutputLimitTooLarge {
                 phase,
                 stream: "stdout",
                 max: MAX_OUTPUT_LIMIT,
@@ -130,7 +155,7 @@ impl SandboxCommandPlan {
             .max_stderr_bytes
             .is_some_and(|limit| limit > MAX_OUTPUT_LIMIT)
         {
-            return Err(SandboxPlanError::OutputLimitTooLarge {
+            return Err(ProcessSandboxPlanError::OutputLimitTooLarge {
                 phase,
                 stream: "stderr",
                 max: MAX_OUTPUT_LIMIT,
@@ -139,13 +164,18 @@ impl SandboxCommandPlan {
         for (name, value) in &self.env {
             validate_env_name(name)?;
             if value.contains('\0') {
-                return Err(SandboxPlanError::InvalidEnvValue { env: name.clone() });
+                return Err(ProcessSandboxPlanError::InvalidEnvValue { env: name.clone() });
             }
         }
         Ok(())
     }
 }
 
+/// Container mount points exposed to the sandbox.
+///
+/// Host paths are supplied only by trusted executor configuration. Plan data
+/// controls the container destinations and whether the workspace is writable;
+/// credentialed runs require tool and cache state to remain read-only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxMounts {
     pub workspace: SandboxMount,
@@ -173,7 +203,7 @@ impl Default for SandboxMounts {
 }
 
 impl SandboxMounts {
-    fn validate(&self) -> Result<(), SandboxPlanError> {
+    fn validate(&self) -> Result<(), ProcessSandboxPlanError> {
         self.workspace.validate()?;
         self.tools.validate()?;
         self.cache.validate()?;
@@ -181,12 +211,16 @@ impl SandboxMounts {
             || self.workspace.container_path == self.cache.container_path
             || self.tools.container_path == self.cache.container_path
         {
-            return Err(SandboxPlanError::DuplicateMountPath);
+            return Err(ProcessSandboxPlanError::DuplicateMountPath);
         }
         Ok(())
     }
 }
 
+/// A single logical sandbox mount destination.
+///
+/// The path is a container path only. Validation rejects system directories,
+/// traversal, NUL bytes, and Docker mount-spec metacharacters.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxMount {
     pub container_path: String,
@@ -195,14 +229,14 @@ pub struct SandboxMount {
 }
 
 impl SandboxMount {
-    fn validate(&self) -> Result<(), SandboxPlanError> {
+    fn validate(&self) -> Result<(), ProcessSandboxPlanError> {
         if !is_container_absolute_path(&self.container_path) {
-            return Err(SandboxPlanError::InvalidContainerPath {
+            return Err(ProcessSandboxPlanError::InvalidContainerPath {
                 path: self.container_path.clone(),
             });
         }
         if is_blocked_container_mount_path(&self.container_path) {
-            return Err(SandboxPlanError::InvalidContainerPath {
+            return Err(ProcessSandboxPlanError::InvalidContainerPath {
                 path: self.container_path.clone(),
             });
         }
@@ -221,6 +255,11 @@ fn is_blocked_container_mount_path(path: &str) -> bool {
             .any(|prefix| path == *prefix || path.starts_with(&format!("{prefix}/")))
 }
 
+/// Runtime network authority requested for the sandbox command.
+///
+/// The Docker MVP allows networked execution only for credentialed brokered
+/// runs with direct egress lockdown. Non-empty runtime hosts without a broker
+/// fail closed until direct host filtering exists.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxNetworkPlan {
     #[serde(default)]
@@ -230,7 +269,7 @@ pub struct SandboxNetworkPlan {
 }
 
 impl SandboxNetworkPlan {
-    fn validate(&self) -> Result<(), SandboxPlanError> {
+    fn validate(&self) -> Result<(), ProcessSandboxPlanError> {
         for host in &self.runtime_hosts {
             validate_host(host)?;
         }
@@ -245,6 +284,11 @@ impl SandboxNetworkPlan {
     }
 }
 
+/// Approved credential placeholder rewrite for brokered runtime egress.
+///
+/// The plan carries a secret handle and placeholder metadata, never raw secret
+/// material. The broker rewrites matching placeholder headers only for the
+/// approved host and validated target.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxCredentialBinding {
     pub handle: SecretHandle,
@@ -258,12 +302,12 @@ pub struct SandboxCredentialBinding {
 }
 
 impl SandboxCredentialBinding {
-    pub(crate) fn validate(&self) -> Result<(), SandboxPlanError> {
+    pub(crate) fn validate(&self) -> Result<(), ProcessSandboxPlanError> {
         validate_host(&self.approved_host)?;
         if self.placeholder_value.trim().is_empty()
             || self.placeholder_value.contains(char::is_whitespace)
         {
-            return Err(SandboxPlanError::InvalidCredentialPlaceholder);
+            return Err(ProcessSandboxPlanError::InvalidCredentialPlaceholder);
         }
         if let Some(env) = &self.placeholder_env {
             validate_env_name(env)?;
@@ -274,11 +318,11 @@ impl SandboxCredentialBinding {
                 if let Some(prefix) = prefix
                     && prefix.contains('\n')
                 {
-                    return Err(SandboxPlanError::InvalidCredentialTarget);
+                    return Err(ProcessSandboxPlanError::InvalidCredentialTarget);
                 }
             }
             RuntimeCredentialTarget::QueryParam { .. } => {
-                return Err(SandboxPlanError::UnsupportedCredentialTarget);
+                return Err(ProcessSandboxPlanError::UnsupportedCredentialTarget);
             }
         }
         Ok(())
@@ -296,8 +340,12 @@ fn default_required() -> bool {
     true
 }
 
+/// Validation errors for raw process sandbox plans.
+///
+/// These errors are intentionally specific so callers and tests can distinguish
+/// policy failures from malformed JSON before a backend is invoked.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum SandboxPlanError {
+pub enum ProcessSandboxPlanError {
     #[error("{phase} command must not be empty")]
     EmptyCommand { phase: &'static str },
     #[error("{phase} command must be a single executable name or path")]
@@ -350,7 +398,7 @@ pub enum SandboxPlanError {
     InvalidPlaceholderEnv { env: String },
 }
 
-fn validate_plan(plan: &SandboxProcessPlan) -> Result<(), SandboxPlanError> {
+fn validate_plan(plan: &SandboxProcessPlan) -> Result<(), ProcessSandboxPlanError> {
     if let Some(install) = &plan.install {
         install.command.validate("install")?;
         for host in &install.allowed_hosts {
@@ -374,7 +422,7 @@ fn validate_plan(plan: &SandboxProcessPlan) -> Result<(), SandboxPlanError> {
         binding.validate()?;
         let approved_host = binding.approved_host.to_ascii_lowercase();
         if !runtime_hosts.contains(&approved_host) {
-            return Err(SandboxPlanError::CredentialHostNotAllowed {
+            return Err(ProcessSandboxPlanError::CredentialHostNotAllowed {
                 host: binding.approved_host.clone(),
             });
         }
@@ -391,14 +439,14 @@ fn validate_plan(plan: &SandboxProcessPlan) -> Result<(), SandboxPlanError> {
 
 pub(crate) fn validate_unique_credential_targets(
     bindings: &[SandboxCredentialBinding],
-) -> Result<(), SandboxPlanError> {
+) -> Result<(), ProcessSandboxPlanError> {
     let mut seen = HashSet::new();
     for binding in bindings {
         if !seen.insert((
             binding.approved_host.to_ascii_lowercase(),
             binding.header_name(),
         )) {
-            return Err(SandboxPlanError::DuplicateCredentialTarget {
+            return Err(ProcessSandboxPlanError::DuplicateCredentialTarget {
                 host: binding.approved_host.clone(),
                 header: binding.header_name(),
             });
@@ -410,30 +458,32 @@ pub(crate) fn validate_unique_credential_targets(
 fn validate_placeholder_env(
     plan: &SandboxProcessPlan,
     binding: &SandboxCredentialBinding,
-) -> Result<(), SandboxPlanError> {
+) -> Result<(), ProcessSandboxPlanError> {
     let Some(env_name) = &binding.placeholder_env else {
         return Ok(());
     };
     match plan.run.env.get(env_name) {
         Some(value) if value == &binding.placeholder_value => Ok(()),
-        Some(_) => Err(SandboxPlanError::InvalidPlaceholderEnv {
+        Some(_) => Err(ProcessSandboxPlanError::InvalidPlaceholderEnv {
             env: env_name.clone(),
         }),
-        None => Err(SandboxPlanError::MissingPlaceholderEnv {
+        None => Err(ProcessSandboxPlanError::MissingPlaceholderEnv {
             env: env_name.clone(),
         }),
     }
 }
 
-fn validate_credentialed_run_policy(plan: &SandboxProcessPlan) -> Result<(), SandboxPlanError> {
+fn validate_credentialed_run_policy(
+    plan: &SandboxProcessPlan,
+) -> Result<(), ProcessSandboxPlanError> {
     if !plan.network.direct_egress_lockdown {
-        return Err(SandboxPlanError::CredentialedRunWithoutLockdown);
+        return Err(ProcessSandboxPlanError::CredentialedRunWithoutLockdown);
     }
     if plan.network.runtime_hosts.is_empty() {
-        return Err(SandboxPlanError::CredentialedRunWithoutRuntimeNetwork);
+        return Err(ProcessSandboxPlanError::CredentialedRunWithoutRuntimeNetwork);
     }
     if plan.mounts.tools.writable || plan.mounts.cache.writable {
-        return Err(SandboxPlanError::WritableStateDuringCredentialedRun);
+        return Err(ProcessSandboxPlanError::WritableStateDuringCredentialedRun);
     }
     Ok(())
 }

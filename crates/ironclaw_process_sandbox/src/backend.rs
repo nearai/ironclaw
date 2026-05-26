@@ -11,9 +11,14 @@ use serde_json::json;
 use thiserror::Error;
 
 use crate::{
-    SandboxPlanError, SandboxProcessPhase, SandboxProcessPlan, ValidatedSandboxProcessPlan,
+    ProcessSandboxPlanError, SandboxProcessPhase, SandboxProcessPlan, ValidatedSandboxProcessPlan,
 };
 
+/// Backend execution request for a validated sandbox process.
+///
+/// The request carries host-owned identity and cancellation state alongside a
+/// validated plan. Backends should use `scope` for audit and resource ownership,
+/// not as a source of extra authority.
 #[derive(Debug, Clone)]
 pub struct SandboxProcessRequest {
     pub process_id: ProcessId,
@@ -22,16 +27,19 @@ pub struct SandboxProcessRequest {
     pub cancellation: ProcessCancellationToken,
 }
 
+/// Completed sandbox process result returned by a backend.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxProcessResult {
     pub output: SandboxProcessOutput,
 }
 
+/// Ordered output from each executed sandbox phase.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SandboxProcessOutput {
     pub phases: Vec<SandboxPhaseOutput>,
 }
 
+/// Serializable output for one install or run phase.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SandboxPhaseOutput {
     pub phase: SandboxProcessPhase,
@@ -43,6 +51,7 @@ pub struct SandboxPhaseOutput {
     pub wall_clock_ms: u64,
 }
 
+/// Stable process sandbox failure kinds exposed through `ProcessExecutor`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessSandboxErrorKind {
     InvalidProcessSandboxPlan,
@@ -53,6 +62,7 @@ pub enum ProcessSandboxErrorKind {
 }
 
 impl ProcessSandboxErrorKind {
+    /// Returns the stable machine-readable error kind string.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::InvalidProcessSandboxPlan => "invalid_process_sandbox_plan",
@@ -70,6 +80,7 @@ impl std::fmt::Display for ProcessSandboxErrorKind {
     }
 }
 
+/// Backend-level sandbox execution error.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("process sandbox execution failed: {kind}")]
 pub struct ProcessSandboxError {
@@ -77,31 +88,42 @@ pub struct ProcessSandboxError {
 }
 
 impl ProcessSandboxError {
+    /// Constructs a sandbox execution error from a stable kind.
     pub fn new(kind: ProcessSandboxErrorKind) -> Self {
         Self { kind }
     }
 }
 
-impl From<SandboxPlanError> for ProcessSandboxError {
-    fn from(_: SandboxPlanError) -> Self {
+impl From<ProcessSandboxPlanError> for ProcessSandboxError {
+    fn from(_: ProcessSandboxPlanError) -> Self {
         Self::new(ProcessSandboxErrorKind::InvalidProcessSandboxPlan)
     }
 }
 
+/// Backend contract for executing validated process sandbox requests.
+///
+/// Implementations own the physical isolation mechanism. They must not accept
+/// raw Docker flags, raw host paths, or raw secret material from plan JSON.
 #[async_trait]
 pub trait ProcessSandboxBackend: Send + Sync {
+    /// Executes the validated sandbox request.
     async fn execute(
         &self,
         request: SandboxProcessRequest,
     ) -> Result<SandboxProcessResult, ProcessSandboxError>;
 }
 
+/// `ProcessExecutor` adapter for the process sandbox backend.
+///
+/// This adapter owns JSON deserialization and validation so generic process
+/// callers receive the same stable error kind for malformed or invalid plans.
 #[derive(Clone)]
 pub struct ProcessSandboxExecutor {
     backend: Arc<dyn ProcessSandboxBackend>,
 }
 
 impl ProcessSandboxExecutor {
+    /// Constructs a process executor over a sandbox backend.
     pub fn new(backend: Arc<dyn ProcessSandboxBackend>) -> Self {
         Self { backend }
     }

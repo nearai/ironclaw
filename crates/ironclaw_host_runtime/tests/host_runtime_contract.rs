@@ -760,6 +760,31 @@ async fn default_runtime_cancel_kills_running_processes_and_cancels_tokens() {
 }
 
 #[tokio::test]
+async fn spawn_process_returns_unavailable_when_process_manager_is_none() {
+    let registry = Arc::new(registry_with_echo_capability());
+    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
+    let runtime = DefaultHostRuntime::new(
+        registry,
+        dispatcher,
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
+    );
+    let context = execution_context_with_dispatch_grant();
+
+    let error = runtime
+        .spawn_process(process_start(&context, ProcessId::new()))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        HostRuntimeError::Unavailable { reason } if reason == "process manager unavailable"
+    ));
+}
+
+#[tokio::test]
 async fn default_runtime_status_includes_running_processes_from_process_store() {
     let registry = Arc::new(registry_with_echo_capability());
     let dispatcher = Arc::new(RecordingDispatcher::default());

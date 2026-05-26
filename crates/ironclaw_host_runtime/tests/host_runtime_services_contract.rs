@@ -2958,7 +2958,7 @@ async fn host_runtime_routes_system_process_sandbox_to_configured_executor() {
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_process_sandbox_executor(Arc::clone(&sandbox_executor))
-    .host_runtime();
+    .host_runtime_for_local_testing();
     let scope = sample_scope(InvocationId::new());
     let process_id = ProcessId::new();
 

@@ -11,16 +11,17 @@ use std::{
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
-    process::Command,
+    process::{Child, Command},
     time,
 };
 
 use crate::{
     DEFAULT_PROCESS_SANDBOX_IMAGE, DEFAULT_STDERR_LIMIT, DEFAULT_STDOUT_LIMIT, DEFAULT_TIMEOUT_MS,
-    ProcessSandboxBackend, ProcessSandboxError, ProcessSandboxErrorKind, SandboxCommandPlan,
-    SandboxPhaseOutput, SandboxPlanError, SandboxProcessOutput, SandboxProcessRequest,
+    ProcessSandboxBackend, ProcessSandboxError, ProcessSandboxErrorKind, ProcessSandboxPlanError,
+    SandboxCommandPlan, SandboxPhaseOutput, SandboxProcessOutput, SandboxProcessRequest,
     SandboxProcessResult, ValidatedSandboxProcessPlan,
     validation::{validate_env_has_no_raw_sensitive_values, validate_env_name},
 };
@@ -32,6 +33,11 @@ const DOCKER_MEMORY_LIMIT: &str = "512m";
 const DOCKER_PIDS_LIMIT: &str = "256";
 const DOCKER_CPU_LIMIT: &str = "2";
 
+/// Trusted Docker backend configuration for the process sandbox.
+///
+/// Host paths and the image name come from host configuration, not from the
+/// runtime-supplied process plan. The backend translates validated logical
+/// plans into a restricted `docker run` invocation.
 #[derive(Debug, Clone)]
 pub struct DockerProcessSandboxConfig {
     pub docker_bin: String,
@@ -43,6 +49,7 @@ pub struct DockerProcessSandboxConfig {
 }
 
 impl DockerProcessSandboxConfig {
+    /// Builds a Docker config with the default binary and sandbox image.
     pub fn new(
         workspace_host_path: impl Into<PathBuf>,
         tools_host_path: impl Into<PathBuf>,
@@ -59,6 +66,11 @@ impl DockerProcessSandboxConfig {
     }
 }
 
+/// Host-side broker configuration used by credentialed sandbox runs.
+///
+/// The proxy URL and CA certificate mount are injected by trusted composition
+/// so container traffic can be pinned to the broker and sanitized before it
+/// leaves the sandbox.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DockerBrokerConfig {
     pub proxy_url: String,
@@ -66,6 +78,7 @@ pub struct DockerBrokerConfig {
     pub ca_cert_container_path: String,
 }
 
+/// Sandbox execution phase represented in Docker invocations and output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SandboxProcessPhase {
@@ -102,8 +115,6 @@ pub(crate) enum DockerRunError {
     #[error("Docker process timed out")]
     Timeout,
 }
-
-use thiserror::Error;
 
 #[async_trait]
 pub(crate) trait DockerRunner: Send + Sync {
@@ -149,15 +160,11 @@ impl DockerRunner for SystemDockerRunner {
         let status = tokio::select! {
             status = child.wait() => status.map_err(|_| DockerRunError::Io)?,
             _ = cancellation.cancelled() => {
-                let _ = child.start_kill();
-                let _ = child.wait().await;
-                cleanup_container(&invocation.docker_bin, &invocation.container_name).await;
+                abort_docker_child(&invocation.docker_bin, &invocation.container_name, &mut child).await;
                 return Err(DockerRunError::Cancelled);
             }
             _ = time::sleep(timeout) => {
-                let _ = child.start_kill();
-                let _ = child.wait().await;
-                cleanup_container(&invocation.docker_bin, &invocation.container_name).await;
+                abort_docker_child(&invocation.docker_bin, &invocation.container_name, &mut child).await;
                 return Err(DockerRunError::Timeout);
             }
         };
@@ -179,6 +186,12 @@ impl DockerRunner for SystemDockerRunner {
             stderr_truncated,
         })
     }
+}
+
+async fn abort_docker_child(docker_bin: &str, container_name: &str, child: &mut Child) {
+    let _ = child.start_kill();
+    let _ = child.wait().await;
+    cleanup_container(docker_bin, container_name).await;
 }
 
 async fn cleanup_container(docker_bin: &str, container_name: &str) {
@@ -217,6 +230,12 @@ where
     }
 }
 
+/// Docker-backed implementation of the process sandbox backend.
+///
+/// The backend enforces the Docker-specific security contract: host-owned
+/// mount roots, configured image only, no host environment inheritance,
+/// resource limits, dropped capabilities, no-new-privileges, and broker-only
+/// egress for credentialed runtime phases.
 #[derive(Clone)]
 pub struct DockerProcessSandboxBackend {
     config: DockerProcessSandboxConfig,
@@ -224,6 +243,7 @@ pub struct DockerProcessSandboxBackend {
 }
 
 impl DockerProcessSandboxBackend {
+    /// Constructs a Docker sandbox backend using the system Docker runner.
     pub fn new(config: DockerProcessSandboxConfig) -> Self {
         Self {
             config,
@@ -313,10 +333,11 @@ pub(crate) fn docker_invocation_for_phase(
     plan: &ValidatedSandboxProcessPlan,
     phase: SandboxProcessPhase,
     command: &SandboxCommandPlan,
-) -> Result<DockerInvocation, SandboxPlanError> {
+) -> Result<DockerInvocation, ProcessSandboxPlanError> {
     let spec = DockerPhaseSpec::new(config, plan, phase, command)?;
     let container_name = next_container_name(phase);
-    let mut args = vec![
+    let mut args = Vec::with_capacity(48 + command.args.len() + command.env.len());
+    args.extend([
         "run".to_string(),
         "--name".to_string(),
         container_name.clone(),
@@ -340,13 +361,13 @@ pub(crate) fn docker_invocation_for_phase(
         "SETUID".to_string(),
         "--cap-add".to_string(),
         "SETGID".to_string(),
-    ];
-    if spec.needs_net_admin {
+    ]);
+    if spec.needs_net_admin() {
         args.push("--cap-add".to_string());
         args.push("NET_ADMIN".to_string());
     }
 
-    args.extend(spec.network_args());
+    args.extend(spec.network_args(config));
     args.extend(spec.mount_args(config, plan)?);
     args.extend(spec.env_args(config, plan)?);
     if let Some(working_dir) = &command.working_dir {
@@ -375,13 +396,9 @@ fn next_container_name(phase: SandboxProcessPhase) -> String {
 
 struct DockerPhaseSpec<'a> {
     command: &'a SandboxCommandPlan,
+    phase: SandboxProcessPhase,
+    has_credentials: bool,
     network_mode: &'static str,
-    lockdown: bool,
-    needs_net_admin: bool,
-    include_broker_ca: bool,
-    broker_add_host: Option<String>,
-    tools_readonly: bool,
-    cache_readonly: bool,
 }
 
 impl<'a> DockerPhaseSpec<'a> {
@@ -390,52 +407,59 @@ impl<'a> DockerPhaseSpec<'a> {
         plan: &ValidatedSandboxProcessPlan,
         phase: SandboxProcessPhase,
         command: &'a SandboxCommandPlan,
-    ) -> Result<Self, SandboxPlanError> {
+    ) -> Result<Self, ProcessSandboxPlanError> {
         let has_credentials = !plan.credentials.is_empty();
         if phase == SandboxProcessPhase::Run && has_credentials && config.broker.is_none() {
-            return Err(SandboxPlanError::CredentialedRunWithoutBroker);
+            return Err(ProcessSandboxPlanError::CredentialedRunWithoutBroker);
         }
         if phase == SandboxProcessPhase::Install && install_needs_network(plan) {
-            return Err(SandboxPlanError::UnenforcedNetworkHosts { phase: "install" });
+            return Err(ProcessSandboxPlanError::UnenforcedNetworkHosts { phase: "install" });
         }
         if phase == SandboxProcessPhase::Run
             && !has_credentials
             && !plan.network.runtime_hosts.is_empty()
         {
-            return Err(SandboxPlanError::UnenforcedNetworkHosts { phase: "run" });
+            return Err(ProcessSandboxPlanError::UnenforcedNetworkHosts { phase: "run" });
         }
         let network_mode = match phase {
             SandboxProcessPhase::Install => "none",
             SandboxProcessPhase::Run if has_credentials => "bridge",
             SandboxProcessPhase::Run => "none",
         };
-        let brokered_run = phase == SandboxProcessPhase::Run && has_credentials;
-        let broker_add_host = if brokered_run {
-            config
-                .broker
-                .as_ref()
-                .and_then(|broker| broker_host_for_add_host(&broker.proxy_url))
-        } else {
-            None
-        };
         Ok(Self {
             command,
+            phase,
+            has_credentials,
             network_mode,
-            lockdown: brokered_run,
-            needs_net_admin: brokered_run,
-            include_broker_ca: brokered_run,
-            broker_add_host,
-            tools_readonly: phase == SandboxProcessPhase::Install || !plan.mounts.tools.writable,
-            cache_readonly: phase == SandboxProcessPhase::Install || !plan.mounts.cache.writable,
         })
     }
 
-    fn network_args(&self) -> Vec<String> {
+    fn brokered_run(&self) -> bool {
+        self.phase == SandboxProcessPhase::Run && self.has_credentials
+    }
+
+    fn needs_net_admin(&self) -> bool {
+        self.brokered_run()
+    }
+
+    fn include_broker_ca(&self) -> bool {
+        self.brokered_run()
+    }
+
+    fn tools_readonly(&self, plan: &ValidatedSandboxProcessPlan) -> bool {
+        self.phase == SandboxProcessPhase::Install || !plan.mounts.tools.writable
+    }
+
+    fn cache_readonly(&self, plan: &ValidatedSandboxProcessPlan) -> bool {
+        self.phase == SandboxProcessPhase::Install || !plan.mounts.cache.writable
+    }
+
+    fn network_args(&self, config: &DockerProcessSandboxConfig) -> Vec<String> {
         let mut args = vec!["--network".to_string(), self.network_mode.to_string()];
-        if let Some(host) = &self.broker_add_host {
+        if let Some(host) = self.broker_add_host(config) {
             args.extend(["--add-host".to_string(), format!("{host}:host-gateway")]);
         }
-        if self.lockdown {
+        if self.brokered_run() {
             args.extend([
                 "--env".to_string(),
                 "IRONCLAW_EGRESS_LOCKDOWN=broker-only".to_string(),
@@ -444,11 +468,19 @@ impl<'a> DockerPhaseSpec<'a> {
         args
     }
 
+    fn broker_add_host(&self, config: &DockerProcessSandboxConfig) -> Option<String> {
+        self.brokered_run().then_some(())?;
+        config
+            .broker
+            .as_ref()
+            .and_then(|broker| broker_host_for_add_host(&broker.proxy_url))
+    }
+
     fn mount_args(
         &self,
         config: &DockerProcessSandboxConfig,
         plan: &ValidatedSandboxProcessPlan,
-    ) -> Result<Vec<String>, SandboxPlanError> {
+    ) -> Result<Vec<String>, ProcessSandboxPlanError> {
         let mut args = Vec::new();
         args.extend(bind_mount_arg(
             &config.workspace_host_path,
@@ -458,14 +490,14 @@ impl<'a> DockerPhaseSpec<'a> {
         args.extend(bind_mount_arg(
             &config.tools_host_path,
             &plan.mounts.tools.container_path,
-            self.tools_readonly,
+            self.tools_readonly(plan),
         )?);
         args.extend(bind_mount_arg(
             &config.cache_host_path,
             &plan.mounts.cache.container_path,
-            self.cache_readonly,
+            self.cache_readonly(plan),
         )?);
-        if self.include_broker_ca
+        if self.include_broker_ca()
             && let Some(broker) = &config.broker
         {
             args.extend(bind_mount_arg(
@@ -481,35 +513,23 @@ impl<'a> DockerPhaseSpec<'a> {
         &self,
         config: &DockerProcessSandboxConfig,
         plan: &ValidatedSandboxProcessPlan,
-    ) -> Result<Vec<String>, SandboxPlanError> {
+    ) -> Result<Vec<String>, ProcessSandboxPlanError> {
         let mut env = self.command.env.clone();
-        if self.include_broker_ca
+        if self.include_broker_ca()
             && let Some(broker) = &config.broker
         {
-            env.insert("HTTP_PROXY".to_string(), broker.proxy_url.clone());
-            env.insert("HTTPS_PROXY".to_string(), broker.proxy_url.clone());
-            env.insert("http_proxy".to_string(), broker.proxy_url.clone());
-            env.insert("https_proxy".to_string(), broker.proxy_url.clone());
-            env.insert(
-                "SSL_CERT_FILE".to_string(),
-                broker.ca_cert_container_path.clone(),
-            );
-            env.insert(
-                "REQUESTS_CA_BUNDLE".to_string(),
-                broker.ca_cert_container_path.clone(),
-            );
-            env.insert(
-                "NODE_EXTRA_CA_CERTS".to_string(),
-                broker.ca_cert_container_path.clone(),
-            );
-            env.insert(
-                "GIT_SSL_CAINFO".to_string(),
-                broker.ca_cert_container_path.clone(),
-            );
-            env.insert(
-                "CURL_CA_BUNDLE".to_string(),
-                broker.ca_cert_container_path.clone(),
-            );
+            for name in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
+                env.insert(name.to_string(), broker.proxy_url.clone());
+            }
+            for name in [
+                "SSL_CERT_FILE",
+                "REQUESTS_CA_BUNDLE",
+                "NODE_EXTRA_CA_CERTS",
+                "GIT_SSL_CAINFO",
+                "CURL_CA_BUNDLE",
+            ] {
+                env.insert(name.to_string(), broker.ca_cert_container_path.clone());
+            }
             env.insert(
                 "IRONCLAW_BROKER_PROXY".to_string(),
                 broker.proxy_url.clone(),
@@ -540,22 +560,25 @@ fn install_needs_network(plan: &ValidatedSandboxProcessPlan) -> bool {
 }
 
 fn is_broker_proxy_env_name(name: &str) -> bool {
-    matches!(name, "http_proxy" | "https_proxy")
+    matches!(
+        name,
+        "HTTP_PROXY" | "HTTPS_PROXY" | "http_proxy" | "https_proxy"
+    )
 }
 
 fn bind_mount_arg(
     host_path: &Path,
     container_path: &str,
     readonly: bool,
-) -> Result<Vec<String>, SandboxPlanError> {
+) -> Result<Vec<String>, ProcessSandboxPlanError> {
     if container_path.contains(',') {
-        return Err(SandboxPlanError::InvalidContainerPath {
+        return Err(ProcessSandboxPlanError::InvalidContainerPath {
             path: container_path.to_string(),
         });
     }
     let host_path = host_path.display().to_string();
     if host_path.contains(',') {
-        return Err(SandboxPlanError::InvalidHostPath { path: host_path });
+        return Err(ProcessSandboxPlanError::InvalidHostPath { path: host_path });
     }
     let mut spec = format!("type=bind,src={},dst={}", host_path, container_path);
     if readonly {
@@ -573,7 +596,7 @@ fn broker_host_for_add_host(proxy_url: &str) -> Option<String> {
     }
 }
 
-fn broker_host(proxy_url: &str) -> Option<&str> {
+pub(crate) fn broker_host(proxy_url: &str) -> Option<&str> {
     let (_, rest) = proxy_url.split_once("://")?;
     let host_port_path = rest.split('/').next().unwrap_or(rest);
     let host = host_port_path.split(':').next().unwrap_or(host_port_path);
