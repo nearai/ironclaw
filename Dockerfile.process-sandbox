@@ -1,0 +1,39 @@
+# Docker process compatibility image for IronClaw Reborn process execution.
+#
+# Build:
+#   docker build -f Dockerfile.process-sandbox -t ironclaw-process-sandbox:dev .
+#
+# The host starts ephemeral containers from this image and mounts only scoped
+# workspace/tool/cache directories. Secrets are not passed as environment
+# values; credentialed runs point HTTP(S)_PROXY at the host broker and install a
+# per-run broker CA.
+
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       ca-certificates \
+       curl \
+       git \
+       jq \
+       openssh-client \
+       build-essential \
+       pkg-config \
+       libssl-dev \
+       python3 python3-pip python3-venv \
+       nodejs npm \
+       iptables \
+       libcap2-bin \
+       tini \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY docker/process-sandbox-entrypoint.sh /usr/local/bin/process-sandbox-entrypoint
+RUN chmod +x /usr/local/bin/process-sandbox-entrypoint \
+    && useradd -m -u 1000 -s /bin/bash sandbox \
+    && mkdir -p /workspace /ironclaw/state/tools /ironclaw/state/cache /ironclaw/broker \
+    && chown -R sandbox:sandbox /workspace /ironclaw
+
+WORKDIR /workspace
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/process-sandbox-entrypoint"]
+CMD ["bash", "-lc", "echo missing command >&2; exit 64"]

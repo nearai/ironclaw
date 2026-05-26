@@ -140,6 +140,7 @@ where
     wasm_credential_provider: Option<Arc<dyn WasmRuntimeCredentialProvider>>,
     runtime_health: Option<Arc<dyn RuntimeBackendHealth>>,
     runtime_policy: Option<EffectiveRuntimePolicy>,
+    process_sandbox_executor: Option<Arc<dyn ProcessExecutor>>,
     script_runtime: Option<Arc<dyn ScriptExecutor>>,
     mcp_runtime: Option<Arc<dyn McpExecutor>>,
     first_party_runtime: Option<Arc<FirstPartyCapabilityRegistry>>,
@@ -200,6 +201,7 @@ where
             wasm_credential_provider: None,
             runtime_health: None,
             runtime_policy: None,
+            process_sandbox_executor: None,
             script_runtime: None,
             mcp_runtime: None,
             first_party_runtime: None,
@@ -239,6 +241,7 @@ where
             },
         }
     }
+
 
     /// Builds a runtime dispatcher with every configured runtime adapter.
     fn runtime_dispatcher(&self) -> RuntimeDispatcher<'static, F, G> {
@@ -318,8 +321,10 @@ where
     /// stores, cancellation registry, result store, and runtime health graph.
     fn build_host_runtime(&self) -> DefaultHostRuntime {
         let dispatcher: Arc<dyn CapabilityDispatcher> = Arc::new(self.runtime_dispatcher());
-        let process_executor =
-            Arc::new(RuntimeDispatchProcessExecutor::new(Arc::clone(&dispatcher)));
+        let process_executor = Arc::new(ProcessExecutorRouter::new(
+            Arc::new(RuntimeDispatchProcessExecutor::new(Arc::clone(&dispatcher))),
+            self.process_sandbox_executor.clone(),
+        ));
         let lifecycle_process_store = Arc::clone(&self.process_lifecycle_store);
         let process_store: Arc<dyn ProcessStore> = lifecycle_process_store.clone();
         let result_failure_cleanup_store = Arc::clone(&lifecycle_process_store);
@@ -570,6 +575,47 @@ impl RuntimeDispatchProcessExecutor {
     pub(crate) fn new(dispatcher: Arc<dyn CapabilityDispatcher>) -> Self {
         Self { dispatcher }
     }
+}
+
+#[derive(Clone)]
+struct ProcessExecutorRouter {
+    dispatch_executor: Arc<dyn ProcessExecutor>,
+    process_sandbox_executor: Option<Arc<dyn ProcessExecutor>>,
+}
+
+impl ProcessExecutorRouter {
+    fn new(
+        dispatch_executor: Arc<dyn ProcessExecutor>,
+        process_sandbox_executor: Option<Arc<dyn ProcessExecutor>>,
+    ) -> Self {
+        Self {
+            dispatch_executor,
+            process_sandbox_executor,
+        }
+    }
+}
+
+#[async_trait]
+impl ProcessExecutor for ProcessExecutorRouter {
+    async fn execute(
+        &self,
+        request: ProcessExecutionRequest,
+    ) -> Result<ProcessExecutionResult, ProcessExecutionError> {
+        if is_process_sandbox_process(&request) {
+            let Some(executor) = &self.process_sandbox_executor else {
+                return Err(ProcessExecutionError::new(
+                    "missing_process_sandbox_executor",
+                ));
+            };
+            return executor.execute(request).await;
+        }
+        self.dispatch_executor.execute(request).await
+    }
+}
+
+fn is_process_sandbox_process(request: &ProcessExecutionRequest) -> bool {
+    request.runtime == RuntimeKind::System
+        && request.capability_id.as_str() == ironclaw_process_sandbox::PROCESS_SANDBOX_CAPABILITY_ID
 }
 
 #[async_trait]

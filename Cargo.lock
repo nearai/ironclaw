@@ -4477,6 +4477,7 @@ dependencies = [
  "ironclaw_mcp",
  "ironclaw_memory",
  "ironclaw_network",
+ "ironclaw_process_sandbox",
  "ironclaw_processes",
  "ironclaw_product_adapter_registry",
  "ironclaw_prompt_envelope",
@@ -4661,6 +4662,21 @@ dependencies = [
  "tokio-postgres",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "ironclaw_process_sandbox"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ironclaw_host_api",
+ "ironclaw_processes",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
