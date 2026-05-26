@@ -170,8 +170,8 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
         // child's result on resume) and a single GateStage step transitions
         // the loop to BlockedDependentRun. Firing one gate step per outcome
         // would create duplicate gate records and race the resume attempts.
-        let coalesce_gate = if !batch.stopped_on_suspension {
-            shared_await_dependent_gate(&visible_calls, &outcomes).map(|(gate, _)| gate)
+        let coalesced_gate_step = if !batch.stopped_on_suspension {
+            shared_await_dependent_gate(&visible_calls, &outcomes)
         } else {
             None
         };
@@ -180,7 +180,6 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             // outcomes before handling any remaining gates so partial parallel
             // progress is durable in any later suspension checkpoint.
             let mut pending_outcomes = Vec::new();
-            let mut coalesced_call: Option<CapabilityCallCandidate> = None;
             for (call, outcome) in visible_calls.into_iter().zip(outcomes) {
                 match outcome {
                     CapabilityOutcome::Completed(result) => {
@@ -207,7 +206,10 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                         gate_ref,
                         result_ref,
                         safe_summary,
-                    } if coalesce_gate.as_ref().is_some_and(|gate| gate == &gate_ref) => {
+                    } if coalesced_gate_step
+                        .as_ref()
+                        .is_some_and(|(gate, _)| gate == &gate_ref) =>
+                    {
                         push_call_signature_once(&mut state, &mut signatures, &call)?;
                         let result = CapabilityResultMessage {
                             result_ref,
@@ -216,9 +218,6 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                         };
                         append_capability_result_ref(ctx.host, &call, &result).await?;
                         push_completed_result(&mut state, result);
-                        if coalesced_call.is_none() {
-                            coalesced_call = Some(call);
-                        }
                     }
                     other => {
                         pending_outcomes.push((call, other));
@@ -243,7 +242,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                     BatchStep::Exit(exit) => return Ok(TurnCompletedStep::Exit(exit)),
                 }
             }
-            if let (Some(shared_gate_ref), Some(first_call)) = (coalesce_gate, coalesced_call) {
+            if let Some((shared_gate_ref, first_call)) = coalesced_gate_step {
                 match GateStage
                     .process(
                         ctx,

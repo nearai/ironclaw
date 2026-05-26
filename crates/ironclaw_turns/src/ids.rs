@@ -249,6 +249,24 @@ impl PartialEq<GateRef> for LoopGateRef {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{GateRef, LoopGateRef};
+
+    #[test]
+    fn gate_ref_eq_loop_gate_ref_matches_exact_gate_string() {
+        let gate_ref = GateRef::new("gate:subagent-test").unwrap();
+        let loop_gate_ref = LoopGateRef::new("gate:subagent-test").unwrap();
+        let other_loop_gate_ref = LoopGateRef::new("gate:subagent-other").unwrap();
+        let other_gate_ref = GateRef::new("gate:subagent-other").unwrap();
+
+        assert_eq!(gate_ref, loop_gate_ref);
+        assert_eq!(loop_gate_ref, gate_ref);
+        assert_ne!(gate_ref, other_loop_gate_ref);
+        assert_ne!(loop_gate_ref, other_gate_ref);
+    }
+}
+
 impl RunProfileId {
     pub fn default_profile() -> Self {
         Self::from_trusted_static("default")
