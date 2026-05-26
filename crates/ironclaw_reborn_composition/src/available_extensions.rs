@@ -13,6 +13,10 @@ const GITHUB_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/github/manifest.toml");
 const GITHUB_WASM_MODULE: &[u8] =
     include_bytes!("../../ironclaw_first_party_extensions/assets/github/wasm/github_tool.wasm");
+const GOOGLE_CALENDAR_MANIFEST: &str =
+    include_str!("../../ironclaw_first_party_extensions/assets/google-calendar/manifest.toml");
+const GMAIL_MANIFEST: &str =
+    include_str!("../../ironclaw_first_party_extensions/assets/gmail/manifest.toml");
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct AvailableExtensionAsset {
@@ -61,7 +65,11 @@ impl AvailableExtensionCatalog {
     }
 
     pub(crate) fn from_first_party_assets() -> Result<Self, ProductWorkflowError> {
-        Ok(Self::from_packages(vec![github_package()?]))
+        Ok(Self::from_packages(vec![
+            github_package()?,
+            google_calendar_package()?,
+            gmail_package()?,
+        ]))
     }
 
     pub(crate) fn extend(&mut self, other: Self) {
@@ -123,38 +131,60 @@ impl AvailableExtensionCatalog {
 }
 
 fn github_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
-    let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")?;
-    let root = VirtualPath::new("/system/extensions/github").map_err(map_binding_error)?;
+    bundled_extension_package("github", "GitHub", GITHUB_MANIFEST, github_assets())
+}
+
+fn google_calendar_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
+    bundled_extension_package(
+        "google-calendar",
+        "Google Calendar",
+        GOOGLE_CALENDAR_MANIFEST,
+        google_calendar_assets(),
+    )
+}
+
+fn gmail_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
+    bundled_extension_package("gmail", "Gmail", GMAIL_MANIFEST, gmail_assets())
+}
+
+fn bundled_extension_package(
+    id: &str,
+    label: &str,
+    manifest_toml: &str,
+    assets: Vec<AvailableExtensionAsset>,
+) -> Result<AvailableExtensionPackage, ProductWorkflowError> {
+    let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, id)?;
+    let root = VirtualPath::new(format!("/system/extensions/{id}")).map_err(map_binding_error)?;
     let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
         ProductWorkflowError::InvalidBindingRequest {
-            reason: format!("host port catalog rejected bundled GitHub extension: {error}"),
+            reason: format!("host port catalog rejected bundled {label} extension: {error}"),
         }
     })?;
     let contracts =
         ironclaw_host_runtime::default_host_api_contract_registry().map_err(|error| {
             ProductWorkflowError::InvalidBindingRequest {
-                reason: format!("host API contracts rejected bundled GitHub extension: {error}"),
+                reason: format!("host API contracts rejected bundled {label} extension: {error}"),
             }
         })?;
     let manifest = ExtensionManifest::parse_with_optional_host_api_contracts(
-        GITHUB_MANIFEST,
+        manifest_toml,
         ManifestSource::HostBundled,
         &host_ports,
         &contracts,
     )
     .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
-        reason: format!("bundled GitHub extension manifest is invalid: {error}"),
+        reason: format!("bundled {label} extension manifest is invalid: {error}"),
     })?;
     let package = ExtensionPackage::from_manifest(manifest, root).map_err(|error| {
         ProductWorkflowError::InvalidBindingRequest {
-            reason: format!("bundled GitHub extension package is invalid: {error}"),
+            reason: format!("bundled {label} extension package is invalid: {error}"),
         }
     })?;
     Ok(AvailableExtensionPackage {
         package_ref,
-        manifest_toml: GITHUB_MANIFEST.to_string(),
+        manifest_toml: manifest_toml.to_string(),
         package,
-        assets: github_assets(),
+        assets,
     })
 }
 
@@ -216,6 +246,288 @@ fn github_assets() -> Vec<AvailableExtensionAsset> {
             ),
         ),
         bytes_asset("wasm/github_tool.wasm", GITHUB_WASM_MODULE),
+    ]
+}
+
+fn google_calendar_assets() -> Vec<AvailableExtensionAsset> {
+    vec![
+        bytes_asset("manifest.toml", GOOGLE_CALENDAR_MANIFEST.as_bytes()),
+        bytes_asset(
+            "schemas/google-calendar/list_calendars.input.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/list_calendars.input.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/google-calendar/list_calendars.output.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/list_calendars.output.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/google-calendar/list_events.input.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/list_events.input.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/google-calendar/list_events.output.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/list_events.output.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/google-calendar/get_event.input.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/get_event.input.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/google-calendar/get_event.output.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/get_event.output.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/google-calendar/find_free_slots.input.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/find_free_slots.input.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/google-calendar/find_free_slots.output.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/find_free_slots.output.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/google-calendar/create_event.input.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/create_event.input.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/google-calendar/create_event.output.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/create_event.output.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/google-calendar/update_event.input.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/update_event.input.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/google-calendar/update_event.output.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/update_event.output.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/google-calendar/delete_event.input.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/delete_event.input.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/google-calendar/delete_event.output.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/delete_event.output.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/google-calendar/add_attendees.input.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/add_attendees.input.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/google-calendar/add_attendees.output.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/add_attendees.output.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/google-calendar/set_reminder.input.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/set_reminder.input.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/google-calendar/set_reminder.output.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/set_reminder.output.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "prompts/google-calendar/list_calendars.md",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/google-calendar/prompts/google-calendar/list_calendars.md"
+            ),
+        ),
+        bytes_asset(
+            "prompts/google-calendar/list_events.md",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/google-calendar/prompts/google-calendar/list_events.md"
+            ),
+        ),
+        bytes_asset(
+            "prompts/google-calendar/get_event.md",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/google-calendar/prompts/google-calendar/get_event.md"
+            ),
+        ),
+        bytes_asset(
+            "prompts/google-calendar/find_free_slots.md",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/google-calendar/prompts/google-calendar/find_free_slots.md"
+            ),
+        ),
+        bytes_asset(
+            "prompts/google-calendar/create_event.md",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/google-calendar/prompts/google-calendar/create_event.md"
+            ),
+        ),
+        bytes_asset(
+            "prompts/google-calendar/update_event.md",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/google-calendar/prompts/google-calendar/update_event.md"
+            ),
+        ),
+        bytes_asset(
+            "prompts/google-calendar/delete_event.md",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/google-calendar/prompts/google-calendar/delete_event.md"
+            ),
+        ),
+        bytes_asset(
+            "prompts/google-calendar/add_attendees.md",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/google-calendar/prompts/google-calendar/add_attendees.md"
+            ),
+        ),
+        bytes_asset(
+            "prompts/google-calendar/set_reminder.md",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/google-calendar/prompts/google-calendar/set_reminder.md"
+            ),
+        ),
+    ]
+}
+
+fn gmail_assets() -> Vec<AvailableExtensionAsset> {
+    vec![
+        bytes_asset("manifest.toml", GMAIL_MANIFEST.as_bytes()),
+        bytes_asset(
+            "schemas/gmail/list_messages.input.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/list_messages.input.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/gmail/list_messages.output.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/list_messages.output.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/gmail/get_message.input.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/get_message.input.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/gmail/get_message.output.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/get_message.output.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/gmail/send_message.input.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/send_message.input.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/gmail/send_message.output.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/send_message.output.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/gmail/create_draft.input.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/create_draft.input.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/gmail/create_draft.output.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/create_draft.output.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/gmail/reply_to_message.input.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/reply_to_message.input.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/gmail/reply_to_message.output.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/reply_to_message.output.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/gmail/trash_message.input.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/trash_message.input.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/gmail/trash_message.output.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/trash_message.output.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "prompts/gmail/list_messages.md",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/gmail/prompts/gmail/list_messages.md"
+            ),
+        ),
+        bytes_asset(
+            "prompts/gmail/get_message.md",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/gmail/prompts/gmail/get_message.md"
+            ),
+        ),
+        bytes_asset(
+            "prompts/gmail/send_message.md",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/gmail/prompts/gmail/send_message.md"
+            ),
+        ),
+        bytes_asset(
+            "prompts/gmail/create_draft.md",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/gmail/prompts/gmail/create_draft.md"
+            ),
+        ),
+        bytes_asset(
+            "prompts/gmail/reply_to_message.md",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/gmail/prompts/gmail/reply_to_message.md"
+            ),
+        ),
+        bytes_asset(
+            "prompts/gmail/trash_message.md",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/gmail/prompts/gmail/trash_message.md"
+            ),
+        ),
     ]
 }
 

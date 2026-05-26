@@ -62,6 +62,24 @@ fn cap_id(value: &str) -> CapabilityId {
     CapabilityId::new(value).unwrap()
 }
 
+fn asset_manifest(extension_id: &str) -> ironclaw_extensions::ExtensionManifest {
+    let manifest_toml = match extension_id {
+        "google-calendar" => {
+            include_str!(
+                "../../ironclaw_first_party_extensions/assets/google-calendar/manifest.toml"
+            )
+        }
+        "gmail" => include_str!("../../ironclaw_first_party_extensions/assets/gmail/manifest.toml"),
+        other => panic!("unknown GSuite asset manifest {other}"),
+    };
+    ironclaw_extensions::ExtensionManifest::parse(
+        manifest_toml,
+        ManifestSource::HostBundled,
+        &ironclaw_host_api::HostPortCatalog::empty(),
+    )
+    .unwrap()
+}
+
 async fn auth_with_google_account(scope: &ResourceScope) -> Arc<InMemoryAuthProductServices> {
     let auth = Arc::new(InMemoryAuthProductServices::new());
     auth.create_account(NewCredentialAccount {
@@ -104,6 +122,61 @@ fn bundled_gsuite_packages_are_host_bundled_but_not_registered_by_default() {
         .map(|package| package.capabilities.len())
         .sum::<usize>();
     assert_eq!(capability_count, 15);
+}
+
+#[test]
+fn bundled_gsuite_asset_manifests_match_package_specs() {
+    for spec in gsuite_package_specs() {
+        let manifest = asset_manifest(spec.extension_id);
+
+        assert_eq!(manifest.id.as_str(), spec.extension_id);
+        assert!(matches!(
+            manifest.runtime,
+            ExtensionRuntime::FirstParty { ref service } if service == spec.service
+        ));
+        let actual = manifest
+            .capabilities
+            .iter()
+            .map(|capability| {
+                (
+                    capability.id.as_str().to_string(),
+                    capability.effects.clone(),
+                    capability.default_permission,
+                    capability.input_schema_ref.as_str().to_string(),
+                    capability.output_schema_ref.as_str().to_string(),
+                    capability
+                        .prompt_doc_ref
+                        .as_ref()
+                        .map(|prompt| prompt.as_str().to_string()),
+                )
+            })
+            .collect::<Vec<_>>();
+        let expected = spec
+            .capabilities
+            .iter()
+            .map(|capability| {
+                (
+                    capability.id.to_string(),
+                    capability.effects.to_vec(),
+                    capability.default_permission,
+                    format!(
+                        "schemas/{}/{}.input.v1.json",
+                        spec.schema_prefix, capability.short_name
+                    ),
+                    format!(
+                        "schemas/{}/{}.output.v1.json",
+                        spec.schema_prefix, capability.short_name
+                    ),
+                    Some(format!(
+                        "prompts/{}/{}.md",
+                        spec.schema_prefix, capability.short_name
+                    )),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(actual, expected);
+    }
 }
 
 #[tokio::test]
