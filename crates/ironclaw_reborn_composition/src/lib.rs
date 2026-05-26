@@ -24,7 +24,9 @@ mod auth;
 mod available_extensions;
 mod default_system_prompt;
 mod error;
+mod extension_installation_store;
 mod extension_lifecycle;
+mod extension_lifecycle_command;
 mod factory;
 mod gsuite;
 mod input;
@@ -62,9 +64,17 @@ pub use auth::{
     RebornProductAuthServices,
 };
 pub use error::RebornBuildError;
+pub use extension_lifecycle_command::{
+    RebornExtensionLifecycleCommand, RebornExtensionLifecycleCommandError,
+    execute_reborn_extension_lifecycle_command, render_reborn_extension_lifecycle_response,
+};
 pub use factory::{RebornServices, build_reborn_services};
 pub use gsuite::{bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers};
 pub use input::{RebornBuildInput, RebornRuntimeProcessBinding};
+pub use ironclaw_product_workflow::{
+    LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePhase, LifecycleProductPayload,
+    LifecycleProductResponse,
+};
 pub use ironclaw_skills::{
     ManagedSkillSource as RebornSkillSource, SkillSummary as RebornSkillSummary,
     skill_summary_json as reborn_skill_summary_json,

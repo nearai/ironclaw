@@ -15,9 +15,8 @@ use ironclaw_events::{
     DurableAuditLog, DurableEventLog, InMemoryDurableAuditLog, InMemoryDurableEventLog,
 };
 use ironclaw_extensions::{
-    ExtensionLifecycleService, ExtensionRegistry, InMemoryExtensionInstallationStore,
+    ExtensionInstallationStore, ExtensionLifecycleService, ExtensionRegistry,
 };
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_filesystem::RootFilesystem;
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::{
@@ -77,7 +76,8 @@ use crate::{
 };
 use crate::{
     available_extensions::AvailableExtensionCatalog,
-    extension_lifecycle::RebornLocalExtensionManagementPort,
+    extension_installation_store::FilesystemExtensionInstallationStore,
+    extension_lifecycle::{RebornLocalExtensionManagementPort, restore_extension_lifecycle_state},
 };
 
 #[cfg(feature = "libsql")]
@@ -402,14 +402,34 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
             }
         })?,
     );
+    let extension_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
+    let extension_installation_store: Arc<dyn ExtensionInstallationStore> = Arc::new(
+        FilesystemExtensionInstallationStore::load(extension_filesystem.clone())
+            .await
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("extension installation state could not be loaded: {error}"),
+            })?,
+    );
+    let extension_lifecycle_service = Arc::new(tokio::sync::Mutex::new(
+        ExtensionLifecycleService::new(services.shared_extension_registry().snapshot_owned()),
+    ));
+    let active_registry = services.shared_extension_registry();
+    restore_extension_lifecycle_state(
+        &available_extensions,
+        &extension_installation_store,
+        &extension_lifecycle_service,
+        &active_registry,
+    )
+    .await
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("extension lifecycle state could not be restored: {error}"),
+    })?;
     let extension_management = Arc::new(RebornLocalExtensionManagementPort::new(
-        filesystem,
+        extension_filesystem,
         available_extensions,
-        Arc::new(InMemoryExtensionInstallationStore::default()),
-        Arc::new(tokio::sync::Mutex::new(ExtensionLifecycleService::new(
-            services.shared_extension_registry().snapshot_owned(),
-        ))),
-        services.shared_extension_registry(),
+        extension_installation_store,
+        extension_lifecycle_service,
+        active_registry,
     ));
     if let Some(local_runtime) = Arc::get_mut(&mut store_graph.local_runtime) {
         local_runtime.extension_management = Some(extension_management);

@@ -5,7 +5,7 @@ use std::{future::Future, thread};
 
 use anyhow::Context;
 use ironclaw_reborn_composition::{
-    PollSettings, RebornCompositionProfile, RebornLocalRuntimeProfileOptions,
+    PollSettings, RebornBuildInput, RebornCompositionProfile, RebornLocalRuntimeProfileOptions,
     RebornRuntimeIdentity, RebornRuntimeInput, TurnRunnerSettings, build_reborn_runtime,
     local_runtime_build_input_with_options,
 };
@@ -250,6 +250,55 @@ pub(crate) fn build_runtime_input_with_options(
     caller: RuntimeInputCaller,
     options: RuntimeInputOptions,
 ) -> anyhow::Result<RebornRuntimeInput> {
+    let runtime_services = build_services_input_with_options(config, caller, options)?;
+
+    #[allow(unused_mut)]
+    let mut runtime_input = RebornRuntimeInput::from_services(runtime_services.services_input)
+        .with_runner_settings(runner_settings(runtime_services.config_file.as_ref())?)
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(200),
+            max_total: Duration::from_secs(180),
+        })
+        .with_identity(runtime_identity(runtime_services.config_file.as_ref()));
+
+    #[cfg(feature = "root-llm-provider")]
+    {
+        match ironclaw_reborn_composition::resolve_reborn_runtime_llm(
+            config,
+            runtime_services.config_file.as_ref(),
+        )? {
+            Some(llm) => {
+                tracing::debug!(
+                    provider_id = %llm.provider_id(),
+                    model = %llm.model(),
+                    "resolved LLM selection for Reborn runtime"
+                );
+                runtime_input = runtime_input.with_resolved_llm(llm);
+            }
+            None => {
+                tracing::warn!(
+                    "no LLM selection configured; set `[llm.default]` in {} or configure \
+                     LLM_BACKEND / provider environment variables. Runs will fail until an \
+                     LLM is wired.",
+                    config.home().config_file_path().display()
+                );
+            }
+        }
+    }
+
+    Ok(runtime_input)
+}
+
+pub(crate) struct RuntimeServicesInput {
+    pub(crate) services_input: RebornBuildInput,
+    config_file: Option<ironclaw_reborn_config::RebornConfigFile>,
+}
+
+pub(crate) fn build_services_input_with_options(
+    config: &RebornBootConfig,
+    caller: RuntimeInputCaller,
+    options: RuntimeInputOptions,
+) -> anyhow::Result<RuntimeServicesInput> {
     // Read the operator's boot TOML if present. Missing file is OK
     // (operator may not have run `ironclaw-reborn config init` yet);
     // sparse fields are OK (each absent field falls back to the
@@ -286,39 +335,10 @@ pub(crate) fn build_runtime_input_with_options(
         services_input = services_input.with_local_dev_confirmed_host_home_root(host_home_root);
     }
 
-    #[allow(unused_mut)]
-    let mut runtime_input = RebornRuntimeInput::from_services(services_input)
-        .with_runner_settings(runner_settings(config_file.as_ref())?)
-        .with_poll_settings(PollSettings {
-            interval: Duration::from_millis(200),
-            max_total: Duration::from_secs(180),
-        })
-        .with_identity(runtime_identity(config_file.as_ref()));
-
-    #[cfg(feature = "root-llm-provider")]
-    {
-        match ironclaw_reborn_composition::resolve_reborn_runtime_llm(config, config_file.as_ref())?
-        {
-            Some(llm) => {
-                tracing::debug!(
-                    provider_id = %llm.provider_id(),
-                    model = %llm.model(),
-                    "resolved LLM selection for Reborn runtime"
-                );
-                runtime_input = runtime_input.with_resolved_llm(llm);
-            }
-            None => {
-                tracing::warn!(
-                    "no LLM selection configured; set `[llm.default]` in {} or configure \
-                     LLM_BACKEND / provider environment variables. Runs will fail until an \
-                     LLM is wired.",
-                    config.home().config_file_path().display()
-                );
-            }
-        }
-    }
-
-    Ok(runtime_input)
+    Ok(RuntimeServicesInput {
+        services_input,
+        config_file,
+    })
 }
 
 pub(crate) fn default_owner_id(

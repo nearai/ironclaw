@@ -36,6 +36,52 @@ pub(crate) struct RebornLocalExtensionManagementPort {
     operation_lock: Arc<Mutex<()>>,
 }
 
+pub(crate) async fn restore_extension_lifecycle_state(
+    catalog: &AvailableExtensionCatalog,
+    installation_store: &Arc<dyn ExtensionInstallationStore>,
+    lifecycle_service: &Arc<Mutex<ExtensionLifecycleService>>,
+    active_registry: &Arc<SharedExtensionRegistry>,
+) -> Result<(), ProductWorkflowError> {
+    for installation in installation_store
+        .list_installations()
+        .await
+        .map_err(map_extension_installation_error)?
+    {
+        let package_ref = LifecyclePackageRef::new(
+            LifecyclePackageKind::Extension,
+            installation.extension_id().as_str(),
+        )?;
+        let available = catalog.resolve(&package_ref)?;
+        {
+            let mut lifecycle = lifecycle_service.lock().await;
+            lifecycle
+                .install(available.package.clone())
+                .await
+                .map_err(map_extension_error)?;
+            match installation.activation_state() {
+                ExtensionActivationState::Enabled => {
+                    lifecycle
+                        .enable(&available.package.id)
+                        .await
+                        .map_err(map_extension_error)?;
+                }
+                ExtensionActivationState::Installed | ExtensionActivationState::Disabled => {
+                    lifecycle
+                        .disable(&available.package.id)
+                        .await
+                        .map_err(map_extension_error)?;
+                }
+            }
+        }
+        if installation.activation_state() == ExtensionActivationState::Enabled {
+            active_registry
+                .upsert(available.package.clone())
+                .map_err(map_extension_error)?;
+        }
+    }
+    Ok(())
+}
+
 impl RebornLocalExtensionManagementPort {
     pub(crate) fn new(
         filesystem: Arc<dyn RootFilesystem>,
@@ -88,14 +134,30 @@ impl RebornLocalExtensionManagementPort {
         if let Err(error) =
             materialize_available_extension(self.filesystem.as_ref(), available).await
         {
-            self.rollback_lifecycle_install(&available.package.id).await;
+            if let Err(rollback_error) =
+                self.rollback_lifecycle_install(&available.package.id).await
+            {
+                return Err(compensation_failure(
+                    "extension install materialization failed and lifecycle rollback failed",
+                    error,
+                    rollback_error,
+                ));
+            }
             return Err(error);
         }
         if let Err(error) = self.persist_install_plan(plan).await {
             let _ = self
                 .delete_materialized_extension_files(&available.package.id)
                 .await;
-            self.rollback_lifecycle_install(&available.package.id).await;
+            if let Err(rollback_error) =
+                self.rollback_lifecycle_install(&available.package.id).await
+            {
+                return Err(compensation_failure(
+                    "extension install persistence failed and lifecycle rollback failed",
+                    error,
+                    rollback_error,
+                ));
+            }
             return Err(error);
         }
 
@@ -193,28 +255,76 @@ impl RebornLocalExtensionManagementPort {
             .delete_installation(&installation_id)
             .await
         {
-            self.restore_lifecycle_package(&lifecycle_package, previous_state)
-                .await;
-            let _ = self
+            let original_error = map_extension_installation_error(error);
+            if let Err(restore_error) = self
+                .restore_lifecycle_package(&lifecycle_package, previous_state)
+                .await
+            {
+                return Err(compensation_failure(
+                    "extension remove failed to delete installation and lifecycle restore failed",
+                    original_error,
+                    restore_error,
+                ));
+            }
+            if let Err(restore_error) = self
                 .installation_store
                 .set_activation_state(&installation_id, previous_state)
-                .await;
-            return Err(map_extension_installation_error(error));
+                .await
+                .map_err(map_extension_installation_error)
+            {
+                return Err(compensation_failure(
+                    "extension remove failed to delete installation and activation restore failed",
+                    original_error,
+                    restore_error,
+                ));
+            }
+            return Err(original_error);
         }
         if let Err(error) = self.installation_store.delete_manifest(&extension_id).await {
-            self.restore_lifecycle_package(&lifecycle_package, previous_state)
-                .await;
-            self.restore_installation(&installation).await;
-            return Err(map_extension_installation_error(error));
+            let original_error = map_extension_installation_error(error);
+            if let Err(restore_error) = self
+                .restore_lifecycle_package(&lifecycle_package, previous_state)
+                .await
+            {
+                return Err(compensation_failure(
+                    "extension remove failed to delete manifest and lifecycle restore failed",
+                    original_error,
+                    restore_error,
+                ));
+            }
+            if let Err(restore_error) = self.restore_installation(&installation).await {
+                return Err(compensation_failure(
+                    "extension remove failed to delete manifest and installation restore failed",
+                    original_error,
+                    restore_error,
+                ));
+            }
+            return Err(original_error);
         }
         if let Err(error) = self
             .delete_materialized_extension_files(&extension_id)
             .await
         {
-            self.restore_lifecycle_package(&lifecycle_package, previous_state)
-                .await;
-            self.restore_installation_records(manifest, installation)
-                .await;
+            if let Err(restore_error) = self
+                .restore_lifecycle_package(&lifecycle_package, previous_state)
+                .await
+            {
+                return Err(compensation_failure(
+                    "extension remove failed to delete files and lifecycle restore failed",
+                    error,
+                    restore_error,
+                ));
+            }
+            if let Err(restore_error) = self
+                .restore_installation_records(manifest, installation)
+                .await
+            {
+                return Err(compensation_failure(
+                    "extension remove failed to delete files and installation restore failed",
+                    error,
+                    restore_error,
+                ));
+            }
             return Err(error);
         }
         self.active_registry.remove(&extension_id);
@@ -345,52 +455,67 @@ impl RebornLocalExtensionManagementPort {
             .map_err(map_extension_error)
     }
 
-    async fn rollback_lifecycle_install(&self, extension_id: &ExtensionId) {
+    async fn rollback_lifecycle_install(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<(), ProductWorkflowError> {
         let mut lifecycle = self.lifecycle_service.lock().await;
-        let _ = lifecycle.remove(extension_id).await;
+        lifecycle
+            .remove(extension_id)
+            .await
+            .map_err(map_extension_error)
     }
 
     async fn restore_lifecycle_package(
         &self,
         package: &ExtensionPackage,
         previous_state: ExtensionActivationState,
-    ) {
+    ) -> Result<(), ProductWorkflowError> {
         let mut lifecycle = self.lifecycle_service.lock().await;
-        if lifecycle.install(package.clone()).await.is_ok() {
-            match previous_state {
-                ExtensionActivationState::Enabled => {
-                    let _ = lifecycle.enable(&package.id).await;
-                }
-                ExtensionActivationState::Installed | ExtensionActivationState::Disabled => {
-                    let _ = lifecycle.disable(&package.id).await;
-                }
+        lifecycle
+            .install(package.clone())
+            .await
+            .map_err(map_extension_error)?;
+        match previous_state {
+            ExtensionActivationState::Enabled => {
+                lifecycle
+                    .enable(&package.id)
+                    .await
+                    .map_err(map_extension_error)?;
+            }
+            ExtensionActivationState::Installed | ExtensionActivationState::Disabled => {
+                lifecycle
+                    .disable(&package.id)
+                    .await
+                    .map_err(map_extension_error)?;
             }
         }
+        Ok(())
     }
 
-    async fn restore_installation(&self, installation: &ExtensionInstallation) {
-        let _ = self
-            .installation_store
+    async fn restore_installation(
+        &self,
+        installation: &ExtensionInstallation,
+    ) -> Result<(), ProductWorkflowError> {
+        self.installation_store
             .upsert_installation(installation.clone())
-            .await;
+            .await
+            .map_err(map_extension_installation_error)
     }
 
     async fn restore_installation_records(
         &self,
         manifest: ExtensionManifestRecord,
         installation: ExtensionInstallation,
-    ) {
-        if self
-            .installation_store
+    ) -> Result<(), ProductWorkflowError> {
+        self.installation_store
             .upsert_manifest(manifest)
             .await
-            .is_ok()
-        {
-            let _ = self
-                .installation_store
-                .upsert_installation(installation)
-                .await;
-        }
+            .map_err(map_extension_installation_error)?;
+        self.installation_store
+            .upsert_installation(installation)
+            .await
+            .map_err(map_extension_installation_error)
     }
 
     async fn persist_install_plan(
@@ -512,6 +637,18 @@ fn map_extension_installation_error(error: ExtensionInstallationError) -> Produc
     // lifecycle requests when ExtensionInstallationStore grows a DB backend.
     ProductWorkflowError::InvalidBindingRequest {
         reason: error.to_string(),
+    }
+}
+
+fn compensation_failure(
+    context: &str,
+    original: impl std::fmt::Display,
+    compensation: impl std::fmt::Display,
+) -> ProductWorkflowError {
+    ProductWorkflowError::Transient {
+        reason: format!(
+            "{context}; original error: {original}; compensation error: {compensation}"
+        ),
     }
 }
 

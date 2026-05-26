@@ -30,6 +30,7 @@ fn help_mentions_reborn_commands() {
     assert!(stdout.contains("completion"), "stdout: {stdout}");
     assert!(stdout.contains("config"), "stdout: {stdout}");
     assert!(stdout.contains("doctor"), "stdout: {stdout}");
+    assert!(stdout.contains("extension"), "stdout: {stdout}");
     assert!(stdout.contains("hooks"), "stdout: {stdout}");
     assert!(stdout.contains("logs"), "stdout: {stdout}");
     assert!(stdout.contains("models"), "stdout: {stdout}");
