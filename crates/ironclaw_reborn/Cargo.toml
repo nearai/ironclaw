@@ -19,7 +19,9 @@ libsql-secrets = [
     "dep:secrecy",
     "dep:ironclaw_filesystem",
     "ironclaw_filesystem/libsql",
+    "filesystem-goal-store",
 ]
+filesystem-goal-store = ["dep:ironclaw_filesystem"]
 # Opt-in because the restart coverage opens real libSQL-backed turn/thread stores.
 # Keep separate from `libsql-secrets` so local `cargo test -p ironclaw_reborn`
 # stays fast, while CI can exercise process-restart persistence explicitly.
@@ -27,6 +29,7 @@ libsql-restart-tests = [
     "dep:libsql",
     "dep:ironclaw_filesystem",
     "ironclaw_filesystem/libsql",
+    "filesystem-goal-store",
 ]
 
 [dependencies]
@@ -48,6 +51,7 @@ libsql = { version = "0.6", optional = true, default-features = false, features 
 secrecy = { version = "0.10", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"

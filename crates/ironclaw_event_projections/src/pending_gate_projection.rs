@@ -25,6 +25,7 @@ pub enum PendingGateKind {
     Approval,
     Auth,
     Resource,
+    AwaitDependentRun,
 }
 
 impl From<TurnBlockedGateKind> for PendingGateKind {
@@ -33,6 +34,7 @@ impl From<TurnBlockedGateKind> for PendingGateKind {
             TurnBlockedGateKind::Approval => Self::Approval,
             TurnBlockedGateKind::Auth => Self::Auth,
             TurnBlockedGateKind::Resource => Self::Resource,
+            TurnBlockedGateKind::AwaitDependentRun => Self::AwaitDependentRun,
         }
     }
 }

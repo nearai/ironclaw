@@ -348,6 +348,7 @@ async fn instruction_bundle_builder_orders_sections_and_rebuilds_deterministical
             InstructionSafetyContext::new("safety:prompt-write", "prompt write safety enforced")
                 .unwrap(),
         ),
+        inline_messages: Vec::new(),
     };
 
     let builder = InstructionBundleBuilder::new(context);
@@ -461,6 +462,7 @@ async fn instruction_bundle_builder_allows_safe_domain_terms_in_summaries() {
             },
             visible_surface: None,
             safety_context: None,
+            inline_messages: Vec::new(),
         })
         .unwrap();
 }
@@ -484,6 +486,7 @@ async fn instruction_bundle_builder_allows_terms_inside_larger_words() {
             },
             visible_surface: None,
             safety_context: None,
+            inline_messages: Vec::new(),
         })
         .unwrap();
 }
@@ -507,6 +510,7 @@ async fn instruction_bundle_builder_rejects_secret_credential_phrases() {
             },
             visible_surface: None,
             safety_context: None,
+            inline_messages: Vec::new(),
         })
         .unwrap_err();
 
@@ -564,6 +568,7 @@ async fn instruction_bundle_serialization_hides_materialized_content() {
             },
             visible_surface: None,
             safety_context: None,
+            inline_messages: Vec::new(),
         })
         .unwrap();
 
@@ -597,6 +602,7 @@ async fn instruction_bundle_builder_rejects_unsafe_instruction_context() {
             },
             visible_surface: None,
             safety_context: None,
+            inline_messages: Vec::new(),
         })
         .unwrap_err();
 
@@ -2321,6 +2327,10 @@ async fn claimed_run_context() -> LoopRunContext {
             requested_run_profile: Some(RunProfileRequest::new("default").unwrap()),
             idempotency_key: IdempotencyKey::new("idem-loop-host").unwrap(),
             received_at: Utc.with_ymd_and_hms(2026, 5, 7, 12, 0, 0).unwrap(),
+            requested_run_id: None,
+            parent_run_id: None,
+            subagent_depth: 0,
+            spawn_tree_root_run_id: None,
         })
         .await
         .unwrap();

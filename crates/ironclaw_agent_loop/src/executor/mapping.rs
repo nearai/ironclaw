@@ -30,6 +30,7 @@ pub(super) fn blocked_kind(kind: GateKind) -> LoopBlockedKind {
         GateKind::Approval => LoopBlockedKind::Approval,
         GateKind::Auth => LoopBlockedKind::Auth,
         GateKind::Resource => LoopBlockedKind::Resource,
+        GateKind::AwaitDependentRun => LoopBlockedKind::AwaitDependentRun,
     }
 }
 
@@ -38,6 +39,7 @@ pub(super) fn loop_gate_kind(kind: GateKind) -> LoopGateKind {
         GateKind::Approval => LoopGateKind::Approval,
         GateKind::Auth => LoopGateKind::Auth,
         GateKind::Resource => LoopGateKind::ResourceWait,
+        GateKind::AwaitDependentRun => LoopGateKind::AwaitDependentRun,
     }
 }
 
@@ -55,11 +57,14 @@ pub(super) fn capability_batch_counts(outcomes: &[CapabilityOutcome]) -> (u32, u
     let mut failed_count = 0;
     for outcome in outcomes {
         match outcome {
-            CapabilityOutcome::Completed(_) => result_count += 1,
+            CapabilityOutcome::Completed(_) | CapabilityOutcome::SpawnedChildRun { .. } => {
+                result_count += 1
+            }
             CapabilityOutcome::Denied(_) => denied_count += 1,
             CapabilityOutcome::ApprovalRequired { .. }
             | CapabilityOutcome::AuthRequired { .. }
             | CapabilityOutcome::ResourceBlocked { .. }
+            | CapabilityOutcome::AwaitDependentRun { .. }
             // SpawnedProcess: treated as gated — it is a non-completing, non-failing, non-denied
             // outcome that defers completion to a background process. Grouped with gated to avoid
             // treating it as completed or failed in batch accounting.

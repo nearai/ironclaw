@@ -165,6 +165,8 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     pub(crate) workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    pub(crate) subagent_goal_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     pub(crate) workspace_mounts: MountView,
     pub(crate) event_log: Arc<dyn DurableEventLog>,
     pub(crate) audit_log: Arc<dyn DurableAuditLog>,
@@ -398,6 +400,7 @@ fn build_local_dev_store_graph(
         thread_service,
         skill_filesystem,
         workspace_filesystem,
+        subagent_goal_filesystem: Arc::clone(&scoped_filesystem),
         workspace_mounts,
         event_log,
         audit_log,
@@ -427,6 +430,8 @@ fn build_local_dev_store_graph(
     workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     workspace_mounts: MountView,
 ) -> Result<RebornLocalDevStoreGraph, RebornBuildError> {
+    #[cfg(feature = "postgres")]
+    let subagent_goal_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
     let event_log = local_dev_event_log(Arc::clone(&filesystem))?;
     let audit_log = local_dev_audit_log(filesystem)?;
     let run_state = Arc::new(InMemoryRunStateStore::new());
@@ -445,6 +450,8 @@ fn build_local_dev_store_graph(
         thread_service,
         skill_filesystem,
         workspace_filesystem,
+        #[cfg(feature = "postgres")]
+        subagent_goal_filesystem,
         workspace_mounts,
         event_log,
         audit_log,

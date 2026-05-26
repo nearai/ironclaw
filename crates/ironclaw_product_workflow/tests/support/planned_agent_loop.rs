@@ -16,8 +16,9 @@ use ironclaw_loop_support::{
     EmptyLoopCapabilityPort, HostIdentityContextBuildError, HostIdentityContextCandidate,
     HostIdentityContextSource, HostInputBatch, HostInputQueue, HostInputQueueError,
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
-    HostManagedModelRequest, HostManagedModelResponse, ProductLiveCancellationProbe,
-    RunCancellationFactory, RunCancellationHandle,
+    HostManagedModelRequest, HostManagedModelResponse, JsonSpawnSubagentInputCodec,
+    LoopCapabilityResultWriter, ProductLiveCancellationProbe, RunCancellationFactory,
+    RunCancellationHandle,
 };
 use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
@@ -79,7 +80,7 @@ pub struct ProductLiveAgentLoopHarness {
     cancellation_factory: Arc<ReadyRunCancellationFactory>,
     composition: RebornRuntimeLoopComposition<
         InMemoryTurnStateStore,
-        InMemorySessionThreadService,
+        dyn SessionThreadService,
         RecordingModelGateway,
     >,
     model_requests: Arc<Mutex<Vec<HostManagedModelRequest>>>,
@@ -252,6 +253,8 @@ impl ProductLiveAgentLoopHarness {
                     .expect("valid harness model route"),
             ),
         );
+        let capability_result_writer: Arc<dyn LoopCapabilityResultWriter> =
+            Arc::new(ProductLiveCapabilityIo::default());
         let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
             turn_state: Arc::clone(&turn_store),
             thread_service: Arc::new(thread_service.clone()),
@@ -262,6 +265,20 @@ impl ProductLiveAgentLoopHarness {
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             capability_factory,
             capability_surface_resolver: Arc::new(AllowAllCapabilitySurfaceResolver),
+            capability_result_writer,
+            subagent_goal_store: Arc::new(
+                ironclaw_reborn::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new(),
+            ),
+            subagent_gate_store: Arc::new(
+                ironclaw_reborn::subagent::gate_resolution::BoundedSubagentGateResolutionStore::new(
+                ),
+            ),
+            subagent_definition_resolver: Arc::new(
+                ironclaw_reborn::subagent::flavors::StaticSubagentDefinitionResolver,
+            ),
+            subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(Arc::new(
+                ProductLiveCapabilityIo::default(),
+            ))),
             loop_exit_evidence: Arc::new(
                 ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
                     Arc::new(thread_service.clone()),
