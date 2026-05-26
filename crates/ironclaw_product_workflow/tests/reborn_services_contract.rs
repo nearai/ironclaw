@@ -346,6 +346,7 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
                     status: TurnStatus::Cancelled,
                     event_cursor: EventCursor(23),
                     already_terminal: false,
+                    actor: None,
                 })
             }
         })
