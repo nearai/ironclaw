@@ -24,28 +24,30 @@ use tokio::sync::RwLock;
 // an OAuth app registration flow for third-party tools, migrate to it
 // immediately.
 // ─────────────────────────────────────────────────────────────────────────────
-pub const GITHUB_COPILOT_CLIENT_ID: &str = "Iv1.b507a08c87ecfe98";
-pub const GITHUB_COPILOT_SCOPE: &str = "read:user";
-pub const GITHUB_COPILOT_DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
-pub const GITHUB_COPILOT_ACCESS_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
-pub const GITHUB_COPILOT_MODELS_URL: &str = "https://api.githubcopilot.com/models";
-pub const GITHUB_COPILOT_TOKEN_URL: &str = "https://api.github.com/copilot_internal/v2/token";
-pub const GITHUB_COPILOT_USER_AGENT: &str = "GitHubCopilotChat/0.26.7";
-pub const GITHUB_COPILOT_EDITOR_VERSION: &str = "vscode/1.99.3";
-pub const GITHUB_COPILOT_EDITOR_PLUGIN_VERSION: &str = "copilot-chat/0.26.7";
-pub const GITHUB_COPILOT_INTEGRATION_ID: &str = "vscode-chat";
+pub(crate) const GITHUB_COPILOT_CLIENT_ID: &str = "Iv1.b507a08c87ecfe98";
+pub(crate) const GITHUB_COPILOT_SCOPE: &str = "read:user";
+pub(crate) const GITHUB_COPILOT_DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
+pub(crate) const GITHUB_COPILOT_ACCESS_TOKEN_URL: &str =
+    "https://github.com/login/oauth/access_token";
+pub(crate) const GITHUB_COPILOT_MODELS_URL: &str = "https://api.githubcopilot.com/models";
+pub(crate) const GITHUB_COPILOT_TOKEN_URL: &str =
+    "https://api.github.com/copilot_internal/v2/token";
+pub(crate) const GITHUB_COPILOT_USER_AGENT: &str = "GitHubCopilotChat/0.26.7";
+pub(crate) const GITHUB_COPILOT_EDITOR_VERSION: &str = "vscode/1.99.3";
+pub(crate) const GITHUB_COPILOT_EDITOR_PLUGIN_VERSION: &str = "copilot-chat/0.26.7";
+pub(crate) const GITHUB_COPILOT_INTEGRATION_ID: &str = "vscode-chat";
 
 /// Buffer before token expiry to trigger a refresh (5 minutes).
 const TOKEN_REFRESH_BUFFER_SECS: u64 = 300;
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct DeviceCodeResponse {
-    pub device_code: String,
-    pub user_code: String,
-    pub verification_uri: String,
-    pub expires_in: u64,
+pub(crate) struct DeviceCodeResponse {
+    pub(crate) device_code: String,
+    pub(crate) user_code: String,
+    pub(crate) verification_uri: String,
+    pub(crate) expires_in: u64,
     #[serde(default = "default_poll_interval_secs")]
-    pub interval: u64,
+    pub(crate) interval: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -56,7 +58,7 @@ struct AccessTokenResponse {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum GithubCopilotAuthError {
+pub(crate) enum GithubCopilotAuthError {
     #[error("failed to start device login: {0}")]
     DeviceCodeRequest(String),
     #[error("failed to poll device login: {0}")]
@@ -70,13 +72,13 @@ pub enum GithubCopilotAuthError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DevicePollingStatus {
+pub(crate) enum DevicePollingStatus {
     Pending,
     SlowDown,
     Authorized(String),
 }
 
-pub fn default_headers() -> Vec<(String, String)> {
+pub(crate) fn default_headers() -> Vec<(String, String)> {
     vec![
         (
             "User-Agent".to_string(),
@@ -97,11 +99,11 @@ pub fn default_headers() -> Vec<(String, String)> {
     ]
 }
 
-pub fn default_poll_interval_secs() -> u64 {
+pub(crate) fn default_poll_interval_secs() -> u64 {
     5
 }
 
-pub async fn request_device_code(
+pub(crate) async fn request_device_code(
     client: &reqwest::Client,
 ) -> Result<DeviceCodeResponse, GithubCopilotAuthError> {
     let response = client
@@ -147,7 +149,7 @@ pub async fn request_device_code(
     Ok(device)
 }
 
-pub async fn poll_for_access_token(
+pub(crate) async fn poll_for_access_token(
     client: &reqwest::Client,
     device_code: &str,
 ) -> Result<DevicePollingStatus, GithubCopilotAuthError> {
@@ -224,7 +226,7 @@ pub async fn poll_for_access_token(
 /// Maximum consecutive transient poll failures before giving up.
 const MAX_POLL_FAILURES: u32 = 5;
 
-pub async fn wait_for_device_login(
+pub(crate) async fn wait_for_device_login(
     client: &reqwest::Client,
     device: &DeviceCodeResponse,
 ) -> Result<String, GithubCopilotAuthError> {
@@ -288,7 +290,7 @@ pub async fn wait_for_device_login(
 /// This exchanges the raw OAuth token for a Copilot session token (proving the
 /// token is valid and the user has Copilot access), then verifies the session
 /// token works against the models endpoint.
-pub async fn validate_token(
+pub(crate) async fn validate_token(
     client: &reqwest::Client,
     token: &str,
 ) -> Result<(), GithubCopilotAuthError> {
@@ -338,11 +340,11 @@ pub async fn validate_token(
 /// The `token` field is an HMAC-signed session token (not a JWT) used as
 /// `Authorization: Bearer <token>` for requests to `api.githubcopilot.com`.
 #[derive(Debug, Clone, Deserialize)]
-pub struct CopilotTokenResponse {
+pub(crate) struct CopilotTokenResponse {
     /// The Copilot session token (HMAC-signed, not a JWT).
-    pub token: String,
+    pub(crate) token: String,
     /// Unix timestamp (seconds) when this token expires.
-    pub expires_at: u64,
+    pub(crate) expires_at: u64,
 }
 
 /// Exchange a GitHub OAuth token for a Copilot API session token.
@@ -350,7 +352,7 @@ pub struct CopilotTokenResponse {
 /// Calls `GET https://api.github.com/copilot_internal/v2/token` with the
 /// GitHub OAuth token in `Authorization: token <oauth_token>` format.
 /// Returns a short-lived session token for `api.githubcopilot.com`.
-pub async fn exchange_copilot_token(
+pub(crate) async fn exchange_copilot_token(
     client: &reqwest::Client,
     oauth_token: &str,
 ) -> Result<CopilotTokenResponse, GithubCopilotAuthError> {
@@ -409,7 +411,7 @@ pub async fn exchange_copilot_token(
 ///
 /// This manager caches the session token and refreshes it automatically
 /// before it expires (with a 5-minute buffer).
-pub struct CopilotTokenManager {
+pub(crate) struct CopilotTokenManager {
     client: reqwest::Client,
     oauth_token: SecretString,
     cached: RwLock<Option<CachedCopilotToken>>,
@@ -430,7 +432,7 @@ fn unix_now() -> u64 {
 
 impl CopilotTokenManager {
     /// Create a new token manager with the given GitHub OAuth token.
-    pub fn new(client: reqwest::Client, oauth_token: String) -> Self {
+    pub(crate) fn new(client: reqwest::Client, oauth_token: String) -> Self {
         Self {
             client,
             oauth_token: SecretString::from(oauth_token),
@@ -442,7 +444,7 @@ impl CopilotTokenManager {
     ///
     /// Returns the cached token if it has more than 5 minutes remaining,
     /// otherwise exchanges the OAuth token for a fresh session token.
-    pub async fn get_token(&self) -> Result<SecretString, GithubCopilotAuthError> {
+    pub(crate) async fn get_token(&self) -> Result<SecretString, GithubCopilotAuthError> {
         // Fast path: check if cached token is still valid under read lock.
         {
             let guard = self.cached.read().await;
@@ -488,7 +490,7 @@ impl CopilotTokenManager {
     ///
     /// Called when the API returns 401, so the next `get_token()` call
     /// will perform a fresh token exchange instead of reusing the stale token.
-    pub async fn invalidate(&self) {
+    pub(crate) async fn invalidate(&self) {
         let mut guard = self.cached.write().await;
         *guard = None;
         tracing::debug!("Copilot session token invalidated");
