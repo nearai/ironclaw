@@ -1,12 +1,15 @@
 //! External-wallet signing providers for the IronClaw attested-signing
 //! substrate.
 //!
-//! This is **PR7 of a 10-PR stack** (see
-//! `docs/plans/2026-05-23-attested-signing-substrate.md`). It implements the
+//! This crate spans **PR7 and PR8 of a 10-PR stack** (see
+//! `docs/plans/2026-05-23-attested-signing-substrate.md`). PR7 implements the
 //! **browser injected provider** backend — `window.ethereum` (EVM) and
-//! `window.solana` (Solana) — as a [`SigningProvider`]. The wallet holds the
-//! keys and renders + signs natively (true wallet-side WYSIWYS); IronClaw never
-//! has custody.
+//! `window.solana` (Solana). PR8 adds the **NEAR browser-wallet redirect
+//! provider** ([`NearRedirectSigningProvider`]): the user is redirected to a
+//! NEAR wallet that signs the bound approved-tx hash with the account's ed25519
+//! access key and redirects back with the signature. In every case the wallet
+//! holds the keys and renders + signs natively (true wallet-side WYSIWYS);
+//! IronClaw never has custody.
 //!
 //! ## Trust model
 //!
@@ -46,7 +49,7 @@
 //!
 //! ## Dependency boundary
 //!
-//! May depend on `k256` / `ed25519-dalek` / `sha3` / `sha2` /
+//! May depend on `k256` / `ed25519-dalek` / `sha3` / `sha2` / `base64` /
 //! `ironclaw_signing_provider` / `ironclaw_attestation` — but NOT on
 //! `solana-sdk`, `near-primitives`, or `ironclaw_secrets` (it holds no keys).
 //! The architecture boundary test
@@ -56,8 +59,14 @@
 #![forbid(unsafe_code)]
 
 mod injected;
+mod near_redirect;
 
 pub use injected::{
     InjectedProofPayload, InjectedScheme, InjectedSigningProvider, decode_injected_proof,
     encode_injected_proof,
+};
+pub use near_redirect::{
+    NearAccessKeyScope, NearBoundOperation, NearRedirectProofPayload, NearRedirectSigningProvider,
+    NearRedirectState, decode_near_redirect_proof, decode_state, derive_state,
+    encode_near_redirect_proof, encode_state, verify_state,
 };
