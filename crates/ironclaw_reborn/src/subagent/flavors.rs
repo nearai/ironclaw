@@ -11,6 +11,8 @@ use crate::planned_driver_factory::SUBAGENT_PLANNED_PROFILE_ID;
 pub enum SubagentFlavorId {
     General,
     Researcher,
+    Explorer,
+    Coder,
 }
 
 impl SubagentFlavorId {
@@ -18,6 +20,8 @@ impl SubagentFlavorId {
         match self {
             Self::General => "general",
             Self::Researcher => "researcher",
+            Self::Explorer => "explorer",
+            Self::Coder => "coder",
         }
     }
 }
@@ -27,8 +31,12 @@ impl SubagentFlavorId {
 pub enum SubagentToolId {
     Message,
     ReadFile,
+    WriteFile,
+    ApplyPatch,
+    Shell,
     ListFiles,
     Search,
+    Glob,
     WebSearch,
 }
 
@@ -40,8 +48,12 @@ impl SubagentToolId {
         match self {
             Self::Message => "builtin.message",
             Self::ReadFile => "builtin.read_file",
+            Self::WriteFile => "builtin.write_file",
+            Self::ApplyPatch => "builtin.apply_patch",
+            Self::Shell => "builtin.shell",
             Self::ListFiles => "builtin.list_dir",
             Self::Search => "builtin.grep",
+            Self::Glob => "builtin.glob",
             Self::WebSearch => "builtin.http",
         }
     }
@@ -68,6 +80,23 @@ const RESEARCHER_TOOLS: &[SubagentToolId] = &[
     SubagentToolId::Search,
     SubagentToolId::WebSearch,
 ];
+const EXPLORER_TOOLS: &[SubagentToolId] = &[
+    SubagentToolId::Message,
+    SubagentToolId::ReadFile,
+    SubagentToolId::ListFiles,
+    SubagentToolId::Search,
+    SubagentToolId::Glob,
+];
+const CODER_TOOLS: &[SubagentToolId] = &[
+    SubagentToolId::Message,
+    SubagentToolId::ReadFile,
+    SubagentToolId::WriteFile,
+    SubagentToolId::ApplyPatch,
+    SubagentToolId::Shell,
+    SubagentToolId::ListFiles,
+    SubagentToolId::Search,
+    SubagentToolId::Glob,
+];
 
 pub const BUILTIN_SUBAGENT_FLAVORS: &[SubagentFlavor] = &[
     SubagentFlavor {
@@ -80,6 +109,18 @@ pub const BUILTIN_SUBAGENT_FLAVORS: &[SubagentFlavor] = &[
         id: SubagentFlavorId::Researcher,
         direction: DirectionId::Researcher,
         tool_allowlist: RESEARCHER_TOOLS,
+        allow_nesting: false,
+    },
+    SubagentFlavor {
+        id: SubagentFlavorId::Explorer,
+        direction: DirectionId::Explorer,
+        tool_allowlist: EXPLORER_TOOLS,
+        allow_nesting: false,
+    },
+    SubagentFlavor {
+        id: SubagentFlavorId::Coder,
+        direction: DirectionId::Coder,
+        tool_allowlist: CODER_TOOLS,
         allow_nesting: false,
     },
 ];
@@ -131,6 +172,8 @@ pub fn parse_flavor_id(value: &str) -> Option<SubagentFlavorId> {
     match value {
         "general" => Some(SubagentFlavorId::General),
         "researcher" => Some(SubagentFlavorId::Researcher),
+        "explorer" => Some(SubagentFlavorId::Explorer),
+        "coder" => Some(SubagentFlavorId::Coder),
         _ => None,
     }
 }
@@ -143,10 +186,54 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builtin_table_has_general_and_researcher() {
-        assert_eq!(BUILTIN_SUBAGENT_FLAVORS.len(), 2);
+    fn builtin_table_has_expected_flavors() {
+        assert_eq!(BUILTIN_SUBAGENT_FLAVORS.len(), 4);
         assert!(lookup_flavor(SubagentFlavorId::General).is_some());
         assert!(lookup_flavor(SubagentFlavorId::Researcher).is_some());
+        assert!(lookup_flavor(SubagentFlavorId::Explorer).is_some());
+        assert!(lookup_flavor(SubagentFlavorId::Coder).is_some());
+    }
+
+    #[test]
+    fn explorer_flavor_is_read_only() {
+        let flavor = lookup_flavor(SubagentFlavorId::Explorer).expect("explorer flavor");
+        let ids: Vec<&str> = flavor.tool_allowlist.iter().map(|t| t.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "builtin.message",
+                "builtin.read_file",
+                "builtin.list_dir",
+                "builtin.grep",
+                "builtin.glob",
+            ]
+        );
+        // No write/shell/web surface for explorer.
+        assert!(!ids.contains(&"builtin.write_file"));
+        assert!(!ids.contains(&"builtin.apply_patch"));
+        assert!(!ids.contains(&"builtin.shell"));
+        assert!(!ids.contains(&"builtin.http"));
+        assert!(!flavor.allow_nesting);
+    }
+
+    #[test]
+    fn coder_flavor_surface_matches_allowlist_exactly() {
+        let flavor = lookup_flavor(SubagentFlavorId::Coder).expect("coder flavor");
+        let ids: Vec<&str> = flavor.tool_allowlist.iter().map(|t| t.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "builtin.message",
+                "builtin.read_file",
+                "builtin.write_file",
+                "builtin.apply_patch",
+                "builtin.shell",
+                "builtin.list_dir",
+                "builtin.grep",
+                "builtin.glob",
+            ]
+        );
+        assert!(!flavor.allow_nesting);
     }
 
     #[test]
@@ -173,6 +260,51 @@ mod tests {
                 .flat_map(|flavor| flavor.tool_allowlist.iter())
                 .all(|tool| tool.as_str() != DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
         );
+    }
+
+    #[test]
+    fn parse_flavor_id_round_trips_all_flavors() {
+        for flavor in BUILTIN_SUBAGENT_FLAVORS {
+            assert_eq!(parse_flavor_id(flavor.id.as_str()), Some(flavor.id));
+        }
+        assert_eq!(
+            parse_flavor_id("explorer"),
+            Some(SubagentFlavorId::Explorer)
+        );
+        assert_eq!(parse_flavor_id("coder"), Some(SubagentFlavorId::Coder));
+        assert_eq!(parse_flavor_id("nope"), None);
+    }
+
+    #[test]
+    fn every_flavor_capability_surface_equals_allowlist() {
+        use ironclaw_host_api::CapabilityId;
+        use std::collections::BTreeSet;
+
+        // Attenuation invariant: the capability surface derived for each flavor
+        // is exactly the flavor's static allowlist — no leakage, no narrowing.
+        for flavor in BUILTIN_SUBAGENT_FLAVORS {
+            let expected: BTreeSet<String> = flavor
+                .tool_allowlist
+                .iter()
+                .map(|t| t.as_str().to_string())
+                .collect();
+            let resolved: BTreeSet<String> = flavor
+                .tool_allowlist
+                .iter()
+                .map(|t| {
+                    CapabilityId::new(t.as_str())
+                        .expect("flavor capability id must be valid")
+                        .as_str()
+                        .to_string()
+                })
+                .collect();
+            assert_eq!(
+                resolved,
+                expected,
+                "flavor {} capability surface must match its allowlist exactly",
+                flavor.id.as_str()
+            );
+        }
     }
 
     #[tokio::test]

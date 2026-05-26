@@ -89,7 +89,8 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "properties": {
                 "flavor_id": {
                     "type": "string",
-                    "description": "Subagent kind to spawn"
+                    "enum": ["general", "researcher", "coder", "explorer"],
+                    "description": "Subagent flavor. general: read/search only, bounded task. researcher: + web search, prefer evidence over mutation. coder: read/write/shell, file-focused execution. explorer: read/search, deep analysis, no writes."
                 },
                 "task": {
                     "type": "string",
