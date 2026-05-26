@@ -60,6 +60,7 @@
 
 mod injected;
 mod near_redirect;
+mod walletconnect;
 
 pub use injected::{
     InjectedProofPayload, InjectedScheme, InjectedSigningProvider, decode_injected_proof,
@@ -69,4 +70,9 @@ pub use near_redirect::{
     NearAccessKeyScope, NearBoundOperation, NearRedirectProofPayload, NearRedirectSigningProvider,
     NearRedirectState, decode_near_redirect_proof, decode_state, derive_state,
     encode_near_redirect_proof, encode_state, verify_state,
+};
+pub use walletconnect::{
+    Caip2ChainId, Caip10Account, ChainFamily, PinnedScope, ProjectId, ProposedScope,
+    SessionBinding, SessionBindingStore, WalletConnectProofPayload, WalletConnectSigningProvider,
+    decode_walletconnect_proof, encode_walletconnect_proof, enforce_pinned_scope,
 };

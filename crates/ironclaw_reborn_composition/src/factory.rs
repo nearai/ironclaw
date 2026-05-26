@@ -3,6 +3,9 @@ use std::{
     sync::Arc,
 };
 
+use ironclaw_attested_runtime::{
+    InMemoryAttestedGateBindingStore, InMemoryResumeGuard, ResumeGuard, RuntimeAttestedResumePort,
+};
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
@@ -23,8 +26,8 @@ use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPoli
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_turns::InMemoryRunProfileResolver;
 use ironclaw_turns::{
-    DefaultTurnCoordinator, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
-    InMemoryTurnStateStore,
+    AttestedResumePort, DefaultTurnCoordinator, InMemoryCheckpointStateStore,
+    InMemoryLoopCheckpointStore, InMemoryTurnStateStore,
 };
 
 use crate::input::RebornStorageInput;
@@ -48,6 +51,9 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) thread_service: Arc<InMemorySessionThreadService>,
     pub(crate) skill_filesystem: Arc<ScopedFilesystem<LocalFilesystem>>,
     pub(crate) workspace_filesystem: Arc<ScopedFilesystem<LocalFilesystem>>,
+    /// Authoritative attested-gate binding store shared with the resume port
+    /// (PR10). The signer-continuation driver reads bindings back from here.
+    pub(crate) attested_gate_bindings: Arc<InMemoryAttestedGateBindingStore>,
 }
 
 impl std::fmt::Debug for RebornServices {
@@ -166,7 +172,23 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
 
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
-    let turn_state = Arc::new(InMemoryTurnStateStore::default());
+
+    // Attested-signing composition (PR10): wire the production
+    // `AttestedResumePort` so a `BlockedAttested` gate can actually be resolved.
+    // Without the port the turn store fails attested resumes closed. The port
+    // and the signer-continuation driver share the same authoritative gate
+    // binding store and one-shot resume guard (in-memory here; durable backends
+    // are PR12). The driver itself is owned by the reborn runtime where
+    // `AttestedSignerContinuation` is dispatched.
+    let attested_gate_bindings = Arc::new(InMemoryAttestedGateBindingStore::new());
+    let attested_resume_guard: Arc<dyn ResumeGuard> = Arc::new(InMemoryResumeGuard::new());
+    let attested_resume_port: Arc<dyn AttestedResumePort> =
+        Arc::new(RuntimeAttestedResumePort::new(
+            Arc::clone(&attested_gate_bindings),
+            Arc::clone(&attested_resume_guard),
+        ));
+    let turn_state =
+        Arc::new(InMemoryTurnStateStore::default().with_attested_resume_port(attested_resume_port));
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
         turn_state: Arc::clone(&turn_state),
         checkpoint_state_store: Arc::new(InMemoryCheckpointStateStore::default()),
@@ -174,6 +196,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         thread_service: Arc::new(InMemorySessionThreadService::default()),
         skill_filesystem,
         workspace_filesystem,
+        attested_gate_bindings: Arc::clone(&attested_gate_bindings),
     });
 
     let mut services = HostRuntimeServices::new(

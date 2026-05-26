@@ -31,6 +31,11 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use ironclaw_attestation::InMemorySealedGrantStore;
+use ironclaw_attested_runtime::{
+    CustodialMainnetShipGate, InMemoryAttestedGateBindingStore, ProviderRegistry,
+};
+use ironclaw_chain_signing::SecretsKeyStore;
 use ironclaw_events::{DurableEventLog, InMemoryDurableEventLog, RuntimeEvent};
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_first_party_extensions::{
@@ -55,6 +60,7 @@ use ironclaw_reborn::runtime::{
     build_default_planned_runtime,
 };
 use ironclaw_reborn::turn_runner::{TurnRunnerWakeSender, TurnRunnerWorkerConfig};
+use ironclaw_secrets::SecretsCrypto;
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, InMemorySessionThreadService, MessageContent,
     MessageKind, MessageStatus, SessionThreadService, ThreadHistoryRequest, ThreadScope,
@@ -69,7 +75,10 @@ use ironclaw_turns::{
 
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
-use crate::{RebornBuildError, RebornCompositionProfile, RebornServices, build_reborn_services};
+use crate::{
+    RebornAttestedComposition, RebornBuildError, RebornCompositionProfile, RebornServices,
+    build_reborn_services,
+};
 
 mod local_dev;
 mod skills;
@@ -163,6 +172,10 @@ impl From<DefaultPlannedRuntimeBuildError> for RebornRuntimeError {
 pub struct RebornRuntime {
     services: RebornServices,
     turn_coordinator: Arc<dyn TurnCoordinator>,
+    /// Attested-signing signer-continuation composition (PR10): the shared gate
+    /// binding store + the assembled driver dispatched when a turn reaches
+    /// `AttestedResolved`.
+    attested_signing: RebornAttestedComposition,
     thread_service: Arc<InMemorySessionThreadService>,
     thread_scope: ThreadScope,
     worker_handle: JoinHandle<()>,
@@ -195,6 +208,16 @@ impl RebornRuntime {
     /// Diagnostic id for the no-profile run profile selected by this runtime.
     pub fn default_run_profile_id(&self) -> &str {
         &self.default_run_profile_id
+    }
+
+    /// The attested-signing signer-continuation composition (PR10). The PR11
+    /// `/api/chat/gate/resolve` ingress reaches the assembled driver and the
+    /// shared gate-binding store through this accessor: it persists the
+    /// authoritative binding when raising a `BlockedAttested` gate and, once the
+    /// turn reaches `AttestedResolved`, drives the deterministic sign +
+    /// broadcast continuation.
+    pub fn attested_signing(&self) -> &RebornAttestedComposition {
+        &self.attested_signing
     }
 
     pub(crate) fn webui_thread_service(&self) -> Arc<dyn SessionThreadService> {
@@ -708,6 +731,7 @@ pub async fn build_reborn_runtime(
                 reason: "local-dev RebornServices did not provide runtime substrate".to_string(),
             })?;
     let turn_state_store = Arc::clone(&local_runtime.turn_state);
+    let attested_gate_bindings = Arc::clone(&local_runtime.attested_gate_bindings);
     let checkpoint_state_store = Arc::clone(&local_runtime.checkpoint_state_store);
     let loop_checkpoint_store = Arc::clone(&local_runtime.loop_checkpoint_store);
     let thread_service = Arc::clone(&local_runtime.thread_service);
@@ -861,9 +885,19 @@ pub async fn build_reborn_runtime(
     let turn_coordinator = planned_turn_coordinator;
     let wake_sender = composition.wake_sender;
 
+    // Attested-signing signer-continuation composition (PR10). The custodial
+    // ship-gate reads CUSTODIAL_MAINNET_ENABLED (fail-closed default: mainnet
+    // refused without a wired KMS — threat #18). Local-dev has no KMS backend,
+    // so the ship-gate permits only testnet/dev custodial signing. The
+    // external-wallet provider registry starts empty here; PR11's gate/resolve
+    // ingress registers the injected/NEAR/WalletConnect providers over the
+    // shared grant store when it owns the per-provider ceremony secrets.
+    let attested_signing = build_attested_composition(attested_gate_bindings)?;
+
     Ok(RebornRuntime {
         services,
         turn_coordinator,
+        attested_signing,
         thread_service,
         thread_scope,
         worker_handle,
@@ -880,6 +914,44 @@ pub async fn build_reborn_runtime(
         skill_activation_source,
         skill_execution_adapter,
     })
+}
+
+/// Assemble the local-dev attested-signing signer-continuation composition
+/// (PR10).
+///
+/// The ship-gate is built from `CUSTODIAL_MAINNET_ENABLED` (fail-closed: a
+/// missing/false value refuses mainnet custodial signing; with no KMS backend
+/// wired in local-dev the gate permits only testnet/dev custodial signing —
+/// threat #18). The custodial keystore is encrypted under a local-dev master
+/// key; durable persistence of grants/ledger/keystore is PR12.
+fn build_attested_composition(
+    bindings: Arc<InMemoryAttestedGateBindingStore>,
+) -> Result<RebornAttestedComposition, RebornRuntimeError> {
+    // Local-dev master key for the custodial keystore AAD. Minted fresh and
+    // random per process rather than hardcoded in source: the local-dev
+    // keystore/grant/ledger stores are all in-memory (durable persistence is
+    // PR12), so no stable key is needed across restarts and no secret lives in
+    // the repo. Production wires a real master key (OS keychain / KMS); this dev
+    // key never signs mainnet because the ship-gate refuses it without secure
+    // custody.
+    let crypto = SecretsCrypto::generate();
+    let keystore = Arc::new(SecretsKeyStore::new(crypto));
+
+    // No KMS backend in local-dev: mainnet custodial signing stays refused.
+    let ship_gate = CustodialMainnetShipGate::from_env().build_chain_ship_gate(None);
+
+    let grants = Arc::new(InMemorySealedGrantStore::new());
+    // Provider-registration seam: local-dev wires no external-wallet providers
+    // (custodial-only). PR13's `AttestedProvidersConfig` layers on this closure
+    // to register WalletConnect / Injected / NEAR providers over the SAME shared
+    // `grants` store the driver uses (shared one-shot CAS, threat #1).
+    Ok(RebornAttestedComposition::new(
+        bindings,
+        keystore,
+        ship_gate,
+        grants,
+        |_grants| ProviderRegistry::new(),
+    ))
 }
 
 const LOOP_RUN_CAPABILITY_ID: &str = "loop.run";

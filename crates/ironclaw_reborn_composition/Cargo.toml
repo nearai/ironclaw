@@ -84,6 +84,13 @@ ironclaw_secrets = { path = "../ironclaw_secrets" }
 ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_trust = { path = "../ironclaw_trust" }
 ironclaw_turns = { path = "../ironclaw_turns" }
+# Attested-signing composition glue (PR10): AttestedResumePort + signer
+# continuation driver + ship-gate. Lives outside src/ per the binary-boundary
+# rule; this is the composition layer where the substrate is wired together.
+ironclaw_attested_runtime = { path = "../ironclaw_attested_runtime" }
+ironclaw_attestation = { path = "../ironclaw_attestation" }
+ironclaw_chain_signing = { path = "../ironclaw_chain_signing" }
+ironclaw_signing_provider = { path = "../ironclaw_signing_provider" }
 # WebUI v2 route surface — feature-gated; only used by `webui_serve`.
 ironclaw_webui_v2 = { path = "../ironclaw_webui_v2", optional = true }
 libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
@@ -122,6 +129,18 @@ tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "
 # proper WS client.
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }
 tower = { version = "0.5", features = ["util"] }
+# Attested-signing composition test (real RebornAttestedComposition end-to-end).
+ironclaw_chain_signing = { path = "../ironclaw_chain_signing" }
+ironclaw_attestation = { path = "../ironclaw_attestation" }
+ironclaw_signing_provider = { path = "../ironclaw_signing_provider" }
+secrecy = "0.10"
+hex = "0.4"
+alloy-consensus = "1"
+alloy-primitives = "1"
+# Already in-tree via `ironclaw_chain_signing`; used only to derive the EVM
+# address from a fixed test private key (`evm::signing_key_from_bytes` is now
+# crate-private). Adds no new transitive deps.
+k256 = { version = "0.13", features = ["ecdsa"] }
 
 [lints]
 workspace = true

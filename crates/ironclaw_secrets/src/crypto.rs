@@ -9,6 +9,7 @@ use aes_gcm::{
     aead::{Aead, AeadCore, OsRng, Payload},
 };
 use hkdf::Hkdf;
+use secrecy::zeroize::Zeroizing;
 use secrecy::{ExposeSecret, SecretString};
 use sha2::Sha256;
 
@@ -64,6 +65,26 @@ impl SecretsCrypto {
         salt
     }
 
+    /// Mint a fresh, cryptographically-random in-process master key.
+    ///
+    /// Intended for ephemeral / in-memory keystores (local-dev, tests) where no
+    /// secret must be persisted in source and no stable key is needed across
+    /// restarts. The key is a hex-encoded 32-byte `OsRng` draw, which always
+    /// satisfies the length + distinct-byte validation in [`Self::new`].
+    /// Durable deployments must still source the master key from the OS
+    /// keychain / KMS, never from this generator.
+    pub fn generate() -> Self {
+        let mut key = [0u8; KEY_SIZE];
+        rand::RngCore::fill_bytes(&mut OsRng, &mut key);
+        let mut hex = String::with_capacity(KEY_SIZE * 2);
+        for b in key {
+            use std::fmt::Write as _;
+            // Infallible: writing to a String never errors.
+            let _ = write!(hex, "{b:02x}");
+        }
+        Self::from_valid_master_key(hex)
+    }
+
     /// Encrypt `plaintext` and authenticate it against `aad`.
     ///
     /// The `aad` (additional authenticated data) is *not* encrypted but is
@@ -77,7 +98,7 @@ impl SecretsCrypto {
     pub fn encrypt(&self, plaintext: &[u8], aad: &[u8]) -> Result<(Vec<u8>, Vec<u8>), SecretError> {
         let salt = Self::generate_salt();
         let derived_key = self.derive_key(&salt)?;
-        let cipher = Aes256Gcm::new_from_slice(&derived_key)
+        let cipher = Aes256Gcm::new_from_slice(derived_key.as_slice())
             .map_err(|error| SecretError::EncryptionFailed(error.to_string()))?;
         let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
         let ciphertext = cipher
@@ -111,7 +132,7 @@ impl SecretsCrypto {
             ));
         }
         let derived_key = self.derive_key(salt)?;
-        let cipher = Aes256Gcm::new_from_slice(&derived_key)
+        let cipher = Aes256Gcm::new_from_slice(derived_key.as_slice())
             .map_err(|error| SecretError::DecryptionFailed(error.to_string()))?;
         let (nonce_bytes, ciphertext) = encrypted_value.split_at(NONCE_SIZE);
         let nonce = Nonce::from_slice(nonce_bytes);
@@ -127,10 +148,13 @@ impl SecretsCrypto {
         DecryptedSecret::from_bytes(plaintext)
     }
 
-    fn derive_key(&self, salt: &[u8]) -> Result<[u8; KEY_SIZE], SecretError> {
+    /// Derive the per-secret AES key via HKDF, returned in a [`Zeroizing`]
+    /// wrapper so the derived key material is wiped from the stack as soon as
+    /// the cipher has consumed it (rather than lingering in freed memory).
+    fn derive_key(&self, salt: &[u8]) -> Result<Zeroizing<[u8; KEY_SIZE]>, SecretError> {
         let hk = Hkdf::<Sha256>::new(Some(salt), self.master_key.expose_secret().as_bytes());
-        let mut derived = [0u8; KEY_SIZE];
-        hk.expand(b"near-agent-secrets-v1", &mut derived)
+        let mut derived = Zeroizing::new([0u8; KEY_SIZE]);
+        hk.expand(b"near-agent-secrets-v1", derived.as_mut())
             .map_err(|_| SecretError::EncryptionFailed("HKDF expansion failed".to_string()))?;
         Ok(derived)
     }
@@ -177,6 +201,40 @@ pub(crate) const AAD_DOMAIN_SECRET_RECORD: &[u8] = b"reborn/v1/secret_record";
 pub(crate) const AAD_DOMAIN_CREDENTIAL_ACCOUNT: &[u8] = b"reborn/v1/credential_account";
 pub(crate) const AAD_DOMAIN_CREDENTIAL_SESSION: &[u8] = b"reborn/v1/credential_session";
 pub(crate) const AAD_DOMAIN_FILESYSTEM_SECRET: &[u8] = b"reborn/v1/fs_secret_record";
+pub(crate) const AAD_DOMAIN_CHAIN_KEY: &[u8] = b"reborn/v1/chain_key";
+
+/// AAD for a custodial chain-signing key payload, binding ciphertext to
+/// `(owner scope, chain)`.
+///
+/// The attested-signing substrate (PR6, `ironclaw_chain_signing`) stores each
+/// per-`(user, chain)` custodial private key as a secret encrypted under this
+/// AAD. Binding the chain identity into the AAD is the crypto half of the
+/// wrong-chain-confusion defense: a key sealed for chain A authenticates only
+/// under chain A's AAD, so an attacker who swaps a chain-A ciphertext into a
+/// chain-B keystore row sees the AES-GCM tag check fail
+/// (`SecretError::DecryptionFailed`) and never recovers usable key bytes. The
+/// owner scope (`tenant/user/agent/project`) matches the account-scope binding
+/// used by the credential and filesystem stores so a key cannot be replayed
+/// across owners either.
+///
+/// This is a **pure crypto/AAD-domain** helper: it performs no authorization,
+/// no chain validation, and no key handling — it only computes the
+/// authenticated-data byte string. Authorization lives in
+/// `ironclaw_chain_signing` (grant claim + sign-time hash re-check); this crate
+/// stays the secret-material boundary.
+pub fn chain_key_aad(scope: &ResourceScope, chain: &str) -> Vec<u8> {
+    let key = ScopeKey::from_account_scope(scope);
+    build_aad(
+        AAD_DOMAIN_CHAIN_KEY,
+        &[
+            key.tenant_id.as_bytes(),
+            key.user_id.as_bytes(),
+            key.agent_id.as_bytes(),
+            key.project_id.as_bytes(),
+            chain.as_bytes(),
+        ],
+    )
+}
 
 /// AAD for the secret-record AES-GCM payload, binding ciphertext to
 /// `(user_id, name)`.
@@ -352,4 +410,115 @@ fn distinct_byte_count(bytes: &[u8]) -> usize {
         seen[slot] |= 1u64 << bit;
     }
     seen.iter().map(|word| word.count_ones() as usize).sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_host_api::{InvocationId, ProjectId, TenantId, UserId};
+    use secrecy::SecretString;
+
+    fn scope(tenant: &str, user: &str, project: Option<&str>) -> ResourceScope {
+        ResourceScope {
+            tenant_id: TenantId::new(tenant).unwrap(),
+            user_id: UserId::new(user).unwrap(),
+            agent_id: None,
+            project_id: project.map(|p| ProjectId::new(p).unwrap()),
+            // Account-scope AAD ignores mission/thread/invocation, so these
+            // never affect the chain-key AAD — verified below.
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        }
+    }
+
+    fn crypto() -> SecretsCrypto {
+        // 32 distinct bytes => passes the entropy floor.
+        SecretsCrypto::new(SecretString::from(
+            "0123456789abcdef0123456789ABCDEF".to_string(),
+        ))
+        .expect("valid master key")
+    }
+
+    #[test]
+    fn chain_key_aad_is_deterministic_and_owner_scope_only() {
+        let a = scope("tenant-a", "user-a", Some("proj"));
+        // Differs only in invocation/mission/thread — owner scope is identical.
+        let mut b = a.clone();
+        b.invocation_id = InvocationId::new();
+        assert_eq!(
+            chain_key_aad(&a, "eip155:1"),
+            chain_key_aad(&b, "eip155:1"),
+            "chain-key AAD binds the owner scope only, not the invocation"
+        );
+    }
+
+    #[test]
+    fn chain_key_aad_differs_per_chain() {
+        let s = scope("tenant-a", "user-a", Some("proj"));
+        assert_ne!(
+            chain_key_aad(&s, "eip155:1"),
+            chain_key_aad(&s, "eip155:10"),
+            "different chains must produce different AAD"
+        );
+        assert_ne!(
+            chain_key_aad(&s, "eip155:1"),
+            chain_key_aad(&s, "solana:mainnet-beta"),
+        );
+    }
+
+    #[test]
+    fn chain_key_aad_differs_per_owner() {
+        let chain = "eip155:1";
+        assert_ne!(
+            chain_key_aad(&scope("tenant-a", "user-a", Some("proj")), chain),
+            chain_key_aad(&scope("tenant-a", "user-b", Some("proj")), chain),
+        );
+        assert_ne!(
+            chain_key_aad(&scope("tenant-a", "user-a", Some("proj")), chain),
+            chain_key_aad(&scope("tenant-a", "user-a", None), chain),
+        );
+    }
+
+    #[test]
+    fn chain_key_aad_domain_is_distinct_from_other_aads() {
+        // A chain-key ciphertext must not decrypt under any other AAD domain
+        // even with an identical scope: the domain separator prevents
+        // cross-shape replay.
+        let s = scope("tenant-a", "user-a", Some("proj"));
+        let chain_aad = chain_key_aad(&s, "eip155:1");
+        assert_ne!(chain_aad, secret_record_aad("tenant-a", "user-a"));
+        assert!(chain_aad.starts_with(AAD_DOMAIN_CHAIN_KEY));
+    }
+
+    #[test]
+    fn chain_key_ciphertext_fails_under_wrong_chain_aad() {
+        // The end-to-end crypto property the keystore relies on: a key sealed
+        // for chain A cannot be decrypted under chain B's AAD.
+        let crypto = crypto();
+        let s = scope("tenant-a", "user-a", Some("proj"));
+        let key_material = [7u8; 32];
+        let (ct, salt) = crypto
+            .encrypt(&key_material, &chain_key_aad(&s, "eip155:1"))
+            .expect("encrypt");
+
+        // Right chain decrypts.
+        let ok = crypto.decrypt(&ct, &salt, &chain_key_aad(&s, "eip155:1"));
+        assert!(ok.is_ok(), "correct chain AAD must decrypt");
+
+        // Wrong chain fails closed.
+        let wrong = crypto.decrypt(&ct, &salt, &chain_key_aad(&s, "eip155:10"));
+        assert!(
+            matches!(wrong, Err(SecretError::DecryptionFailed(_))),
+            "wrong-chain AAD must fail decryption, got {wrong:?}"
+        );
+
+        // Wrong owner also fails closed.
+        let wrong_owner = crypto.decrypt(
+            &ct,
+            &salt,
+            &chain_key_aad(&scope("tenant-a", "user-b", Some("proj")), "eip155:1"),
+        );
+        assert!(matches!(wrong_owner, Err(SecretError::DecryptionFailed(_))));
+    }
 }

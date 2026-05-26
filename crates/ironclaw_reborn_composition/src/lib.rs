@@ -18,6 +18,7 @@
 //! import `TurnCoordinator`, `SessionThreadService`, `HostManagedModel
 //! Gateway`, etc.
 
+mod attested;
 mod auth;
 mod error;
 mod factory;
@@ -44,6 +45,7 @@ mod webui_ws_origin;
 
 use ironclaw_runtime_policy::{EffectiveRuntimePolicy as ResolvedRuntimePolicy, ResolveError};
 
+pub use attested::{NoopBroadcaster, RebornAttestedComposition};
 pub use auth::{
     RebornAuthContinuationDispatcher, RebornOAuthCallbackError, RebornOAuthCallbackOutcome,
     RebornOAuthCallbackRequest, RebornOAuthCallbackResponse, RebornProductAuthServices,
