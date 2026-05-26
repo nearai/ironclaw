@@ -268,7 +268,7 @@ impl TurnSpawnTreePort for RecordingChildRuns {
         &self,
         request: SubmitChildRunRequest,
     ) -> Result<SubmitTurnResponse, TurnError> {
-        let run_id = request.requested_run_id.unwrap_or_else(TurnRunId::new);
+        let run_id = request.requested_run_id.unwrap_or_default();
         let turn_id = TurnId::new();
         let accepted_message_ref = request.accepted_message_ref.clone();
         let reply_target_binding_ref = request.reply_target_binding_ref.clone();
