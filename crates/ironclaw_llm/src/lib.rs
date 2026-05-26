@@ -87,7 +87,8 @@ pub use recording::{MemorySnapshotEntry, RecordingLlm};
 pub use registry::{ProviderDefinition, ProviderProtocol, ProviderRegistry};
 #[cfg(feature = "registry-provider-factory")]
 pub use resolution::{
-    ProviderSelection, ResolvedProviderConfig, build_llm_config_from_resolved_provider,
+    ProviderResolutionError, ProviderSelection, ResolvedDedicatedProviderConfig,
+    ResolvedProviderConfig, build_llm_config_from_resolved_provider,
     build_registry_provider_config_from_resolved_provider, resolve_llm_config_from_env,
     resolve_llm_config_from_selection, resolve_provider_config_from_env,
     resolve_provider_config_from_selection,

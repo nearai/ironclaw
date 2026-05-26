@@ -30,7 +30,9 @@ use std::path::Path;
 
 use thiserror::Error;
 
-use ironclaw_llm::{ProviderRegistry, ProviderSelection, registry::ProviderDefinition};
+use ironclaw_llm::{
+    ProviderRegistry, ProviderResolutionError, ProviderSelection, registry::ProviderDefinition,
+};
 use ironclaw_reborn_config::{
     LlmSlotSelection, RebornBootConfig, RebornConfigFile, reject_inline_secret,
 };
@@ -203,9 +205,9 @@ pub fn resolve_against_registry(
         provider,
         catalog_index,
         "resolved_base_url",
-        &resolved.base_url,
+        resolved.base_url(),
     )?;
-    validate_catalog_text(provider, catalog_index, "resolved_model", &resolved.model)?;
+    validate_catalog_text(provider, catalog_index, "resolved_model", resolved.model())?;
 
     ironclaw_llm::build_llm_config_from_resolved_provider(resolved)
         .map_err(|source| RebornLlmCatalogError::EnvResolution { source })
@@ -233,14 +235,14 @@ fn validate_selection(
 }
 
 fn map_selection_resolution_error(
-    source: ironclaw_llm::LlmError,
+    source: ProviderResolutionError,
     selection: &LlmSlotSelection,
     provider: &ProviderDefinition,
 ) -> RebornLlmCatalogError {
     match source {
-        ironclaw_llm::LlmError::AuthFailed {
+        ProviderResolutionError::MissingApiKey {
             provider: error_provider,
-        } if error_provider == provider.id && provider.api_key_required => {
+        } if error_provider == provider.id => {
             match selection
                 .api_key_env
                 .clone()
@@ -255,18 +257,14 @@ fn map_selection_resolution_error(
                 },
             }
         }
-        ironclaw_llm::LlmError::RequestFailed {
+        ProviderResolutionError::MissingBaseUrl {
             provider: error_provider,
-            reason,
-        } if error_provider == provider.id
-            && provider.base_url_required
-            && reason.contains("base URL is required") =>
-        {
-            RebornLlmCatalogError::BaseUrlUnconfigured {
-                provider: provider.id.clone(),
-            }
-        }
-        source => RebornLlmCatalogError::EnvResolution { source },
+        } if error_provider == provider.id => RebornLlmCatalogError::BaseUrlUnconfigured {
+            provider: provider.id.clone(),
+        },
+        source => RebornLlmCatalogError::EnvResolution {
+            source: source.into_llm_error(),
+        },
     }
 }
 

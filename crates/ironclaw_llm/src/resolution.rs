@@ -18,21 +18,44 @@ use crate::error::{LlmConfigError, LlmError};
 use crate::registry::{ProviderDefinition, ProviderProtocol, ProviderRegistry};
 use crate::session::SessionConfig;
 
-/// Already-resolved provider input from a catalog selection.
+/// Already-resolved provider input from env or a catalog selection.
 #[derive(Debug, Clone)]
-pub struct ResolvedProviderConfig {
+pub enum ResolvedProviderConfig {
+    Registry(RegistryProviderConfig),
+    Dedicated(ResolvedDedicatedProviderConfig),
+}
+
+/// Resolved input for providers represented by dedicated `LlmConfig` slots.
+#[derive(Debug, Clone)]
+pub struct ResolvedDedicatedProviderConfig {
     pub protocol: ProviderProtocol,
     pub provider_id: String,
     pub api_key: Option<SecretString>,
     pub base_url: String,
     pub model: String,
-    pub extra_headers: Vec<(String, String)>,
-    pub oauth_token: Option<SecretString>,
-    pub is_codex_chatgpt: bool,
-    pub refresh_token: Option<SecretString>,
-    pub auth_path: Option<PathBuf>,
-    pub cache_retention: Option<CacheRetention>,
-    pub unsupported_params: Vec<String>,
+}
+
+impl ResolvedProviderConfig {
+    pub fn provider_id(&self) -> &str {
+        match self {
+            Self::Registry(config) => &config.provider_id,
+            Self::Dedicated(config) => &config.provider_id,
+        }
+    }
+
+    pub fn base_url(&self) -> &str {
+        match self {
+            Self::Registry(config) => &config.base_url,
+            Self::Dedicated(config) => &config.base_url,
+        }
+    }
+
+    pub fn model(&self) -> &str {
+        match self {
+            Self::Registry(config) => &config.model,
+            Self::Dedicated(config) => &config.model,
+        }
+    }
 }
 
 /// Provider selection overrides supplied by a composition root.
@@ -42,6 +65,34 @@ pub struct ProviderSelection {
     pub api_key_env: Option<String>,
     pub base_url: Option<String>,
     pub model: Option<String>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProviderResolutionError {
+    #[error("provider `{provider}` is not in the provider registry")]
+    UnknownProvider { provider: String },
+    #[error("provider `{provider}` requires an API key")]
+    MissingApiKey { provider: String },
+    #[error("provider `{provider}` requires a base URL")]
+    MissingBaseUrl { provider: String },
+    #[error(transparent)]
+    Llm(#[from] LlmError),
+}
+
+impl ProviderResolutionError {
+    pub fn into_llm_error(self) -> LlmError {
+        match self {
+            Self::UnknownProvider { provider } | Self::MissingApiKey { provider } => {
+                LlmError::AuthFailed { provider }
+            }
+            Self::MissingBaseUrl { provider } => LlmError::RequestFailed {
+                provider,
+                reason: "base URL is required but no base URL environment variable is set"
+                    .to_string(),
+            },
+            Self::Llm(source) => source,
+        }
+    }
 }
 
 /// Resolve a full [`LlmConfig`] from generic LLM environment variables.
@@ -89,12 +140,12 @@ pub fn resolve_provider_config_from_env(
 pub fn resolve_provider_config_from_selection(
     selection: ProviderSelection,
     registry: &ProviderRegistry,
-) -> Result<ResolvedProviderConfig, LlmError> {
-    let provider = registry
-        .find(&selection.provider_id)
-        .ok_or_else(|| LlmError::AuthFailed {
+) -> Result<ResolvedProviderConfig, ProviderResolutionError> {
+    let provider = registry.find(&selection.provider_id).ok_or_else(|| {
+        ProviderResolutionError::UnknownProvider {
             provider: selection.provider_id.clone(),
-        })?;
+        }
+    })?;
     resolve_provider_definition(
         provider,
         selection.api_key_env.as_deref(),
@@ -109,7 +160,8 @@ pub fn resolve_llm_config_from_selection(
     selection: ProviderSelection,
     registry: &ProviderRegistry,
 ) -> Result<LlmConfig, LlmError> {
-    let resolved = resolve_provider_config_from_selection(selection, registry)?;
+    let resolved = resolve_provider_config_from_selection(selection, registry)
+        .map_err(ProviderResolutionError::into_llm_error)?;
     build_llm_config_from_resolved_provider(resolved)
 }
 
@@ -120,57 +172,66 @@ pub fn build_llm_config_from_resolved_provider(
 ) -> Result<LlmConfig, LlmError> {
     let chain = ChainSettings::from_env()?;
     let session = nearai_session_config();
-    let nearai = nearai_config_from_resolved(&resolved, &chain)?;
 
+    let backend = resolved.provider_id().to_string();
+    let mut nearai = nearai_config_from_env(&chain)?;
     let mut provider = None;
     let mut bedrock = None;
     let mut gemini_oauth = None;
     let mut openai_codex = None;
 
-    match resolved.protocol {
-        ProviderProtocol::NearAi => {}
-        ProviderProtocol::Bedrock => {
-            bedrock = Some(
-                BedrockConfig::build(
-                    nonempty_env("BEDROCK_REGION"),
-                    Some(resolved.model.clone()),
-                    nonempty_env("BEDROCK_CROSS_REGION"),
-                    nonempty_env("AWS_PROFILE"),
-                )
-                .map_err(config_error_to_llm_error("bedrock"))?,
-            );
+    match resolved {
+        ResolvedProviderConfig::Registry(registry_config) => {
+            provider = Some(registry_config);
         }
-        ProviderProtocol::GeminiOauth => {
-            gemini_oauth = Some(GeminiOauthConfig::build(
-                Some(resolved.model.clone()),
-                nonempty_env("GEMINI_CREDENTIALS_PATH").map(PathBuf::from),
-            ));
-        }
-        ProviderProtocol::OpenAiCodex => {
-            openai_codex = Some(OpenAiCodexConfig::build(
-                Some(resolved.model.clone()),
-                nonempty_env("OPENAI_CODEX_AUTH_URL"),
-                nonempty_env("OPENAI_CODEX_API_URL"),
-                nonempty_env("OPENAI_CODEX_CLIENT_ID"),
-                nonempty_env("OPENAI_CODEX_SESSION_PATH").map(PathBuf::from),
-                parse_optional_u64("OPENAI_CODEX_REFRESH_MARGIN_SECS", "openai_codex")?,
-            ));
-        }
-        ProviderProtocol::OpenAiCompletions
-        | ProviderProtocol::Anthropic
-        | ProviderProtocol::Ollama
-        | ProviderProtocol::GithubCopilot
-        | ProviderProtocol::DeepSeek
-        | ProviderProtocol::Gemini
-        | ProviderProtocol::OpenRouter => {
-            provider = Some(build_registry_provider_config_from_resolved_provider(
-                resolved.clone(),
-            )?);
-        }
+        ResolvedProviderConfig::Dedicated(dedicated) => match dedicated.protocol {
+            ProviderProtocol::NearAi => {
+                nearai = nearai_config_from_dedicated(&dedicated, &chain)?;
+            }
+            ProviderProtocol::Bedrock => {
+                bedrock = Some(
+                    BedrockConfig::build(
+                        nonempty_env("BEDROCK_REGION"),
+                        Some(dedicated.model.clone()),
+                        nonempty_env("BEDROCK_CROSS_REGION"),
+                        nonempty_env("AWS_PROFILE"),
+                    )
+                    .map_err(config_error_to_llm_error("bedrock"))?,
+                );
+            }
+            ProviderProtocol::GeminiOauth => {
+                gemini_oauth = Some(GeminiOauthConfig::build(
+                    Some(dedicated.model.clone()),
+                    nonempty_env("GEMINI_CREDENTIALS_PATH").map(PathBuf::from),
+                ));
+            }
+            ProviderProtocol::OpenAiCodex => {
+                openai_codex = Some(OpenAiCodexConfig::build(
+                    Some(dedicated.model.clone()),
+                    nonempty_env("OPENAI_CODEX_AUTH_URL"),
+                    nonempty_env("OPENAI_CODEX_API_URL"),
+                    nonempty_env("OPENAI_CODEX_CLIENT_ID"),
+                    nonempty_env("OPENAI_CODEX_SESSION_PATH").map(PathBuf::from),
+                    parse_optional_u64("OPENAI_CODEX_REFRESH_MARGIN_SECS", "openai_codex")?,
+                ));
+            }
+            ProviderProtocol::OpenAiCompletions
+            | ProviderProtocol::Anthropic
+            | ProviderProtocol::Ollama
+            | ProviderProtocol::GithubCopilot
+            | ProviderProtocol::DeepSeek
+            | ProviderProtocol::Gemini
+            | ProviderProtocol::OpenRouter => {
+                return Err(LlmError::RequestFailed {
+                    provider: dedicated.provider_id,
+                    reason: "registry provider protocol resolved as dedicated config".to_string(),
+                });
+            }
+        },
     }
 
     Ok(LlmConfig {
-        backend: resolved.provider_id,
+        backend,
         session,
         nearai,
         provider,
@@ -193,26 +254,20 @@ pub fn build_llm_config_from_resolved_provider(
 pub fn build_registry_provider_config_from_resolved_provider(
     resolved: ResolvedProviderConfig,
 ) -> Result<RegistryProviderConfig, LlmError> {
-    if matches!(
-        resolved.protocol,
-        ProviderProtocol::NearAi
-            | ProviderProtocol::Bedrock
-            | ProviderProtocol::GeminiOauth
-            | ProviderProtocol::OpenAiCodex
-    ) {
-        return Err(LlmError::RequestFailed {
-            provider: resolved.provider_id,
+    match resolved {
+        ResolvedProviderConfig::Registry(config) => Ok(config),
+        ResolvedProviderConfig::Dedicated(config) => Err(LlmError::RequestFailed {
+            provider: config.provider_id,
             reason: "dedicated provider protocols require full LlmConfig resolution".to_string(),
-        });
+        }),
     }
-
-    registry_config_from_resolved(resolved)
 }
 
 fn resolve_provider_definition_from_env(
     provider: &ProviderDefinition,
 ) -> Result<ResolvedProviderConfig, LlmError> {
     resolve_provider_definition(provider, None, None, None, true)
+        .map_err(ProviderResolutionError::into_llm_error)
 }
 
 fn resolve_provider_definition(
@@ -221,12 +276,12 @@ fn resolve_provider_definition(
     base_url_override: Option<String>,
     model_override: Option<String>,
     allow_llm_model_fallback: bool,
-) -> Result<ResolvedProviderConfig, LlmError> {
+) -> Result<ResolvedProviderConfig, ProviderResolutionError> {
     let api_key_env = api_key_env_override.or(provider.api_key_env.as_deref());
     let api_key = match api_key_env.and_then(nonempty_env) {
         Some(value) => Some(SecretString::from(value)),
         None if provider.api_key_required => {
-            return Err(LlmError::AuthFailed {
+            return Err(ProviderResolutionError::MissingApiKey {
                 provider: provider.id.clone(),
             });
         }
@@ -240,9 +295,8 @@ fn resolve_provider_definition(
         .or_else(|| provider.default_base_url.clone())
         .unwrap_or_default();
     if provider.base_url_required && base_url.is_empty() {
-        return Err(LlmError::RequestFailed {
+        return Err(ProviderResolutionError::MissingBaseUrl {
             provider: provider.id.clone(),
-            reason: "base URL is required but no base URL environment variable is set".to_string(),
         });
     }
     let model = nonempty_env(&provider.model_env)
@@ -258,7 +312,8 @@ fn resolve_provider_definition(
         .as_deref()
         .and_then(nonempty_env)
         .map(|value| parse_extra_headers(&provider.id, &value))
-        .transpose()?
+        .transpose()
+        .map_err(ProviderResolutionError::Llm)?
         .unwrap_or_default();
     let extra_headers = if provider.protocol == ProviderProtocol::GithubCopilot {
         merge_extra_headers(
@@ -269,20 +324,29 @@ fn resolve_provider_definition(
         extra_headers
     };
 
-    Ok(ResolvedProviderConfig {
+    let resolved = ResolvedDedicatedProviderConfig {
         protocol: provider.protocol,
         provider_id: provider.id.clone(),
         api_key,
         base_url,
         model,
-        extra_headers,
-        oauth_token: None,
-        is_codex_chatgpt: false,
-        refresh_token: None,
-        auth_path: None,
-        cache_retention: None,
-        unsupported_params: provider.unsupported_params.clone(),
-    })
+    };
+
+    if is_registry_protocol(provider.protocol) {
+        let mut config = RegistryProviderConfig::generic(
+            resolved.protocol,
+            resolved.provider_id,
+            resolved.api_key,
+            resolved.base_url,
+            resolved.model,
+        )
+        .with_extra_headers(extra_headers)
+        .with_unsupported_params(provider.unsupported_params.clone());
+        apply_registry_provider_env(&mut config).map_err(ProviderResolutionError::Llm)?;
+        Ok(ResolvedProviderConfig::Registry(config))
+    } else {
+        Ok(ResolvedProviderConfig::Dedicated(resolved))
+    }
 }
 
 fn resolve_codex_cli_auth_provider() -> Result<ResolvedProviderConfig, LlmError> {
@@ -319,83 +383,54 @@ fn resolve_codex_cli_auth_provider() -> Result<ResolvedProviderConfig, LlmError>
     registry_config.refresh_token = credentials.refresh_token;
     registry_config.auth_path = credentials.source_path;
 
-    Ok(ResolvedProviderConfig {
-        protocol: registry_config.protocol,
-        provider_id: registry_config.provider_id,
-        api_key: registry_config.api_key,
-        base_url: registry_config.base_url,
-        model: registry_config.model,
-        extra_headers: registry_config.extra_headers,
-        oauth_token: registry_config.oauth_token,
-        is_codex_chatgpt: registry_config.is_codex_chatgpt,
-        refresh_token: registry_config.refresh_token,
-        auth_path: registry_config.auth_path,
-        cache_retention: Some(registry_config.cache_retention),
-        unsupported_params: registry_config.unsupported_params,
-    })
+    Ok(ResolvedProviderConfig::Registry(registry_config))
 }
 
-fn registry_config_from_resolved(
-    resolved: ResolvedProviderConfig,
-) -> Result<RegistryProviderConfig, LlmError> {
-    let mut config = RegistryProviderConfig::generic(
-        resolved.protocol,
-        resolved.provider_id.clone(),
-        resolved.api_key,
-        resolved.base_url,
-        resolved.model,
-    )
-    .with_extra_headers(resolved.extra_headers)
-    .with_unsupported_params(resolved.unsupported_params);
-    config.oauth_token = resolved.oauth_token;
-    config.is_codex_chatgpt = resolved.is_codex_chatgpt;
-    config.refresh_token = resolved.refresh_token;
-    config.auth_path = resolved.auth_path;
+fn apply_registry_provider_env(config: &mut RegistryProviderConfig) -> Result<(), LlmError> {
+    if config.protocol == ProviderProtocol::Anthropic {
+        config.cache_retention = nonempty_env("ANTHROPIC_CACHE_RETENTION")
+            .map(|value| {
+                value
+                    .parse::<CacheRetention>()
+                    .map_err(|reason| LlmError::RequestFailed {
+                        provider: config.provider_id.clone(),
+                        reason: format!("invalid ANTHROPIC_CACHE_RETENTION: {reason}"),
+                    })
+            })
+            .transpose()?
+            .unwrap_or_default();
 
-    if resolved.protocol == ProviderProtocol::Anthropic {
-        config.cache_retention = match resolved.cache_retention {
-            Some(cache_retention) => cache_retention,
-            None => nonempty_env("ANTHROPIC_CACHE_RETENTION")
-                .map(|value| {
-                    value
-                        .parse::<CacheRetention>()
-                        .map_err(|reason| LlmError::RequestFailed {
-                            provider: resolved.provider_id.clone(),
-                            reason: format!("invalid ANTHROPIC_CACHE_RETENTION: {reason}"),
-                        })
-                })
-                .transpose()?
-                .unwrap_or_default(),
-        };
-
-        if config.oauth_token.is_none() {
-            if let Some(token) = nonempty_env("ANTHROPIC_OAUTH_TOKEN") {
-                config.oauth_token = Some(SecretString::from(token));
-                if config.api_key.is_none() {
-                    config.api_key = Some(SecretString::from(OAUTH_PLACEHOLDER.to_string()));
-                }
+        if let Some(token) = nonempty_env("ANTHROPIC_OAUTH_TOKEN") {
+            config.oauth_token = Some(SecretString::from(token));
+            if config.api_key.is_none() {
+                config.api_key = Some(SecretString::from(OAUTH_PLACEHOLDER.to_string()));
             }
-        } else if config.api_key.is_none() {
-            config.api_key = Some(SecretString::from(OAUTH_PLACEHOLDER.to_string()));
         }
-    } else if let Some(cache_retention) = resolved.cache_retention {
-        config.cache_retention = cache_retention;
     }
-
-    Ok(config)
+    Ok(())
 }
 
-fn nearai_config_from_resolved(
-    resolved: &ResolvedProviderConfig,
+fn nearai_config_from_env(chain: &ChainSettings) -> Result<NearAiConfig, LlmError> {
+    let api_key = nonempty_env("NEARAI_API_KEY").map(SecretString::from);
+    let base_url = default_nearai_base_url(api_key.is_some(), nonempty_env("NEARAI_BASE_URL"));
+    Ok(build_nearai_config(
+        NearAiRuntimeFields {
+            model: nonempty_env("NEARAI_MODEL").unwrap_or_else(|| crate::DEFAULT_MODEL.to_string()),
+            api_key,
+            base_url,
+            failover_cooldown_secs: 300,
+            failover_cooldown_threshold: 3,
+        },
+        chain,
+    ))
+}
+
+fn nearai_config_from_dedicated(
+    resolved: &ResolvedDedicatedProviderConfig,
     chain: &ChainSettings,
 ) -> Result<NearAiConfig, LlmError> {
-    let api_key = if resolved.protocol == ProviderProtocol::NearAi {
-        resolved.api_key.clone()
-    } else {
-        nonempty_env("NEARAI_API_KEY").map(SecretString::from)
-    };
-    let base_url = if resolved.protocol == ProviderProtocol::NearAi && !resolved.base_url.is_empty()
-    {
+    let api_key = resolved.api_key.clone();
+    let base_url = if !resolved.base_url.is_empty() {
         resolved.base_url.clone()
     } else if let Some(base_url) = nonempty_env("NEARAI_BASE_URL") {
         base_url
@@ -404,28 +439,35 @@ fn nearai_config_from_resolved(
     } else {
         "https://private.near.ai".to_string()
     };
-    let model = if resolved.protocol == ProviderProtocol::NearAi {
-        resolved.model.clone()
-    } else {
-        nonempty_env("NEARAI_MODEL").unwrap_or_else(|| crate::DEFAULT_MODEL.to_string())
-    };
 
-    let failover_cooldown_secs = if resolved.protocol == ProviderProtocol::NearAi {
-        parse_optional_u64("LLM_FAILOVER_COOLDOWN_SECS", "nearai")?.unwrap_or(300)
-    } else {
-        300
-    };
-    let failover_cooldown_threshold = if resolved.protocol == ProviderProtocol::NearAi {
-        parse_optional_u32("LLM_FAILOVER_THRESHOLD", "nearai")?.unwrap_or(3)
-    } else {
-        3
-    };
+    Ok(build_nearai_config(
+        NearAiRuntimeFields {
+            model: resolved.model.clone(),
+            api_key,
+            base_url,
+            failover_cooldown_secs: parse_optional_u64("LLM_FAILOVER_COOLDOWN_SECS", "nearai")?
+                .unwrap_or(300),
+            failover_cooldown_threshold: parse_optional_u32("LLM_FAILOVER_THRESHOLD", "nearai")?
+                .unwrap_or(3),
+        },
+        chain,
+    ))
+}
 
-    Ok(NearAiConfig {
-        model,
+struct NearAiRuntimeFields {
+    model: String,
+    api_key: Option<SecretString>,
+    base_url: String,
+    failover_cooldown_secs: u64,
+    failover_cooldown_threshold: u32,
+}
+
+fn build_nearai_config(fields: NearAiRuntimeFields, chain: &ChainSettings) -> NearAiConfig {
+    NearAiConfig {
+        model: fields.model,
         cheap_model: nonempty_env("NEARAI_CHEAP_MODEL"),
-        base_url,
-        api_key,
+        base_url: fields.base_url,
+        api_key: fields.api_key,
         fallback_model: nonempty_env("NEARAI_FALLBACK_MODEL"),
         max_retries: chain.max_retries,
         circuit_breaker_threshold: chain.circuit_breaker_threshold,
@@ -433,10 +475,33 @@ fn nearai_config_from_resolved(
         response_cache_enabled: chain.response_cache_enabled,
         response_cache_ttl_secs: chain.response_cache_ttl_secs,
         response_cache_max_entries: chain.response_cache_max_entries,
-        failover_cooldown_secs,
-        failover_cooldown_threshold,
+        failover_cooldown_secs: fields.failover_cooldown_secs,
+        failover_cooldown_threshold: fields.failover_cooldown_threshold,
         smart_routing_cascade: chain.smart_routing_cascade,
-    })
+    }
+}
+
+fn default_nearai_base_url(api_key_present: bool, configured_base_url: Option<String>) -> String {
+    if let Some(base_url) = configured_base_url {
+        base_url
+    } else if api_key_present {
+        "https://cloud-api.near.ai".to_string()
+    } else {
+        "https://private.near.ai".to_string()
+    }
+}
+
+fn is_registry_protocol(protocol: ProviderProtocol) -> bool {
+    matches!(
+        protocol,
+        ProviderProtocol::OpenAiCompletions
+            | ProviderProtocol::Anthropic
+            | ProviderProtocol::Ollama
+            | ProviderProtocol::GithubCopilot
+            | ProviderProtocol::DeepSeek
+            | ProviderProtocol::Gemini
+            | ProviderProtocol::OpenRouter
+    )
 }
 
 fn nearai_session_config() -> SessionConfig {
@@ -482,34 +547,46 @@ impl ChainSettings {
     fn from_env() -> Result<Self, LlmError> {
         let defaults = Self::default();
         Ok(Self {
-            request_timeout_secs: parse_optional_u64("LLM_REQUEST_TIMEOUT_SECS", "llm_config")?
-                .unwrap_or(defaults.request_timeout_secs),
+            request_timeout_secs: parse_option_env::<u64>(
+                "LLM_REQUEST_TIMEOUT_SECS",
+                "llm_config",
+            )?
+            .unwrap_or(defaults.request_timeout_secs),
             cheap_model: nonempty_env("LLM_CHEAP_MODEL"),
-            smart_routing_cascade: parse_optional_bool("SMART_ROUTING_CASCADE", "llm_config")?
+            smart_routing_cascade: parse_option_env::<bool>("SMART_ROUTING_CASCADE", "llm_config")?
                 .unwrap_or(defaults.smart_routing_cascade),
-            max_retries: parse_optional_u32("LLM_MAX_RETRIES", "llm_config")?
-                .unwrap_or(defaults.max_retries),
-            circuit_breaker_threshold: parse_optional_u32(
+            max_retries: parse_option_env_with_fallback::<u32>(
+                "LLM_MAX_RETRIES",
+                "NEARAI_MAX_RETRIES",
+                "llm_config",
+            )?
+            .unwrap_or(defaults.max_retries),
+            circuit_breaker_threshold: parse_option_env_with_fallback::<u32>(
                 "LLM_CIRCUIT_BREAKER_THRESHOLD",
+                "CIRCUIT_BREAKER_THRESHOLD",
                 "llm_config",
             )?,
-            circuit_breaker_recovery_secs: parse_optional_u64(
+            circuit_breaker_recovery_secs: parse_option_env_with_fallback::<u64>(
                 "LLM_CIRCUIT_BREAKER_RECOVERY_SECS",
+                "CIRCUIT_BREAKER_RECOVERY_SECS",
                 "llm_config",
             )?
             .unwrap_or(defaults.circuit_breaker_recovery_secs),
-            response_cache_enabled: parse_optional_bool(
+            response_cache_enabled: parse_option_env_with_fallback::<bool>(
                 "LLM_RESPONSE_CACHE_ENABLED",
+                "RESPONSE_CACHE_ENABLED",
                 "llm_config",
             )?
             .unwrap_or(defaults.response_cache_enabled),
-            response_cache_ttl_secs: parse_optional_u64(
+            response_cache_ttl_secs: parse_option_env_with_fallback::<u64>(
                 "LLM_RESPONSE_CACHE_TTL_SECS",
+                "RESPONSE_CACHE_TTL_SECS",
                 "llm_config",
             )?
             .unwrap_or(defaults.response_cache_ttl_secs),
-            response_cache_max_entries: parse_optional_usize(
+            response_cache_max_entries: parse_option_env_with_fallback::<usize>(
                 "LLM_RESPONSE_CACHE_MAX_ENTRIES",
+                "RESPONSE_CACHE_MAX_ENTRIES",
                 "llm_config",
             )?
             .unwrap_or(defaults.response_cache_max_entries),
@@ -595,44 +672,57 @@ fn nonempty_env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
 }
 
-fn parse_optional_bool(name: &str, provider: &str) -> Result<Option<bool>, LlmError> {
-    nonempty_env(name)
-        .map(|value| {
-            value
-                .parse::<bool>()
-                .map_err(|source| invalid_env(provider, name, source))
-        })
-        .transpose()
-}
-
 fn parse_optional_u32(name: &str, provider: &str) -> Result<Option<u32>, LlmError> {
-    nonempty_env(name)
-        .map(|value| {
-            value
-                .parse::<u32>()
-                .map_err(|source| invalid_env(provider, name, source))
-        })
-        .transpose()
+    parse_option_env(name, provider)
 }
 
 fn parse_optional_u64(name: &str, provider: &str) -> Result<Option<u64>, LlmError> {
+    parse_option_env(name, provider)
+}
+
+trait EnvParse: Sized {
+    fn parse_env(value: &str) -> Result<Self, String>;
+}
+
+macro_rules! impl_env_parse_from_str {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl EnvParse for $ty {
+                fn parse_env(value: &str) -> Result<Self, String> {
+                    value.parse::<Self>().map_err(|source| source.to_string())
+                }
+            }
+        )*
+    };
+}
+
+impl_env_parse_from_str!(u32, u64, usize);
+
+impl EnvParse for bool {
+    fn parse_env(value: &str) -> Result<Self, String> {
+        match value.to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Ok(true),
+            "0" | "false" | "no" | "off" => Ok(false),
+            _ => Err("expected a boolean value".to_string()),
+        }
+    }
+}
+
+fn parse_option_env<T: EnvParse>(name: &str, provider: &str) -> Result<Option<T>, LlmError> {
     nonempty_env(name)
-        .map(|value| {
-            value
-                .parse::<u64>()
-                .map_err(|source| invalid_env(provider, name, source))
-        })
+        .map(|value| T::parse_env(&value).map_err(|source| invalid_env(provider, name, source)))
         .transpose()
 }
 
-fn parse_optional_usize(name: &str, provider: &str) -> Result<Option<usize>, LlmError> {
-    nonempty_env(name)
-        .map(|value| {
-            value
-                .parse::<usize>()
-                .map_err(|source| invalid_env(provider, name, source))
-        })
-        .transpose()
+fn parse_option_env_with_fallback<T: EnvParse>(
+    primary: &str,
+    fallback: &str,
+    provider: &str,
+) -> Result<Option<T>, LlmError> {
+    match parse_option_env(primary, provider)? {
+        Some(value) => Ok(Some(value)),
+        None => parse_option_env(fallback, provider),
+    }
 }
 
 fn invalid_env(provider: &str, name: &str, source: impl std::fmt::Display) -> LlmError {
@@ -646,5 +736,117 @@ fn config_error_to_llm_error(provider: &'static str) -> impl FnOnce(LlmConfigErr
     move |source| LlmError::RequestFailed {
         provider: provider.to_string(),
         reason: source.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CHAIN_ENV_VARS: &[&str] = &[
+        "LLM_REQUEST_TIMEOUT_SECS",
+        "LLM_CHEAP_MODEL",
+        "SMART_ROUTING_CASCADE",
+        "LLM_MAX_RETRIES",
+        "NEARAI_MAX_RETRIES",
+        "LLM_CIRCUIT_BREAKER_THRESHOLD",
+        "CIRCUIT_BREAKER_THRESHOLD",
+        "LLM_CIRCUIT_BREAKER_RECOVERY_SECS",
+        "CIRCUIT_BREAKER_RECOVERY_SECS",
+        "LLM_RESPONSE_CACHE_ENABLED",
+        "RESPONSE_CACHE_ENABLED",
+        "LLM_RESPONSE_CACHE_TTL_SECS",
+        "RESPONSE_CACHE_TTL_SECS",
+        "LLM_RESPONSE_CACHE_MAX_ENTRIES",
+        "RESPONSE_CACHE_MAX_ENTRIES",
+        "NEARAI_API_KEY",
+        "NEARAI_BASE_URL",
+        "NEARAI_MODEL",
+        "NEARAI_CHEAP_MODEL",
+        "NEARAI_FALLBACK_MODEL",
+    ];
+
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn clear(names: &[&'static str]) -> Self {
+            let saved = names
+                .iter()
+                .map(|name| (*name, std::env::var(name).ok()))
+                .collect();
+            for name in names {
+                unsafe {
+                    std::env::remove_var(name);
+                }
+            }
+            Self { saved }
+        }
+
+        fn set(&self, name: &str, value: &str) {
+            unsafe {
+                std::env::set_var(name, value);
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (name, value) in self.saved.drain(..) {
+                unsafe {
+                    match value {
+                        Some(value) => std::env::set_var(name, value),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+        }
+    }
+
+    fn registry_resolved_provider() -> ResolvedProviderConfig {
+        ResolvedProviderConfig::Registry(RegistryProviderConfig::generic(
+            ProviderProtocol::OpenAiCompletions,
+            "openai",
+            None,
+            "https://api.openai.com/v1",
+            "gpt-test",
+        ))
+    }
+
+    #[test]
+    fn full_config_resolution_uses_legacy_chain_env_fallbacks() {
+        let _env_lock = ironclaw_common::env_helpers::lock_env();
+        let env = EnvGuard::clear(CHAIN_ENV_VARS);
+        env.set("NEARAI_MAX_RETRIES", "7");
+        env.set("CIRCUIT_BREAKER_THRESHOLD", "11");
+        env.set("CIRCUIT_BREAKER_RECOVERY_SECS", "19");
+        env.set("RESPONSE_CACHE_ENABLED", "true");
+        env.set("RESPONSE_CACHE_TTL_SECS", "23");
+        env.set("RESPONSE_CACHE_MAX_ENTRIES", "29");
+
+        let config = build_llm_config_from_resolved_provider(registry_resolved_provider())
+            .expect("legacy chain environment fallbacks should resolve");
+
+        assert_eq!(config.max_retries, 7);
+        assert_eq!(config.circuit_breaker_threshold, Some(11));
+        assert_eq!(config.circuit_breaker_recovery_secs, 19);
+        assert!(config.response_cache_enabled);
+        assert_eq!(config.response_cache_ttl_secs, 23);
+        assert_eq!(config.response_cache_max_entries, 29);
+    }
+
+    #[test]
+    fn full_config_resolution_accepts_common_boolean_env_values() {
+        let _env_lock = ironclaw_common::env_helpers::lock_env();
+        let env = EnvGuard::clear(CHAIN_ENV_VARS);
+        env.set("SMART_ROUTING_CASCADE", "off");
+        env.set("LLM_RESPONSE_CACHE_ENABLED", "yes");
+
+        let config = build_llm_config_from_resolved_provider(registry_resolved_provider())
+            .expect("common boolean environment values should resolve");
+
+        assert!(!config.smart_routing_cascade);
+        assert!(config.response_cache_enabled);
     }
 }
