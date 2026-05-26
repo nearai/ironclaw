@@ -35,6 +35,11 @@ export function useChatEvents({
   // SSE replays (reconnect with `last-event-id`, repeated snapshots)
   // don't trigger duplicate timeline refetches.
   const completedRunsRef = React.useRef(new Set());
+  // Last `run_status.run_id` we've observed, persisted across event
+  // frames. Used by `applyProjectionItems` to correlate an `item.gate`
+  // (which doesn't carry `run_id`) with the active run so resolveGate
+  // can build its `/runs/{run_id}/gates/{gate_ref}/resolve` URL.
+  const latestRunIdRef = React.useRef(null);
 
   return React.useCallback(
     (envelope) => {
@@ -44,6 +49,7 @@ export function useChatEvents({
       switch (type) {
         case "accepted": {
           const ack = frame.ack || {};
+          if (ack.run_id) latestRunIdRef.current = ack.run_id;
           setActiveRun?.({
             runId: ack.run_id || null,
             threadId: ack.thread_id || threadId,
@@ -57,6 +63,7 @@ export function useChatEvents({
         case "capability_progress": {
           const progress = frame.progress || {};
           if (progress.turn_run_id) {
+            latestRunIdRef.current = progress.turn_run_id;
             setActiveRun?.((current) =>
               current && current.runId === progress.turn_run_id
                 ? current
@@ -119,6 +126,7 @@ export function useChatEvents({
             setActiveRun,
             onRunCompleted,
             completedRunsRef,
+            latestRunIdRef,
           });
           return;
         }
@@ -158,11 +166,23 @@ function applyProjectionItems({
   setActiveRun,
   onRunCompleted,
   completedRunsRef,
+  latestRunIdRef,
 }) {
+  // Snapshot the run_id surfaced by the most recent `run_status` item
+  // we've seen — either earlier in this same items batch, or carried
+  // over from a prior frame via `latestRunIdRef`. `item.gate` doesn't
+  // include a `run_id`, but resolveGate at the v2 endpoint needs both
+  // `run_id` + `gate_ref` in the URL, so we have to correlate the
+  // gate back to whichever run is currently active. setActiveRun is a
+  // React setter and doesn't update synchronously inside this loop;
+  // tracking the value locally lets the gate handler that runs later
+  // in the same iteration see the run we just learned about.
+  let activeRunId = latestRunIdRef?.current ?? null;
   for (const item of items) {
     if (item.run_status) {
       const { run_id: runId, status } = item.run_status;
       if (runId) {
+        activeRunId = runId;
         setActiveRun?.((current) =>
           current && current.runId === runId
             ? { ...current, status }
@@ -240,15 +260,25 @@ function applyProjectionItems({
 
     if (item.gate) {
       // ProductProjectionItem::Gate { gate_ref, headline } — projection
-      // only carries a coarse summary; we surface it as a pending gate
-      // even though the run_id needs to come from the active run state.
-      setPendingGate((current) => current || {
-        kind: "gate",
-        gateRef: item.gate.gate_ref,
-        headline: item.gate.headline,
-        body: "",
-      });
-      setIsProcessing(false);
+      // carries gate_ref but not run_id, so we correlate to the
+      // active run (snapshotted above). Without a run_id the
+      // pendingGate is unusable (`resolveGate` would 400 at the path
+      // construction in `api.js`), so skip emitting the gate entirely
+      // if no run is active yet — a later projection_update will
+      // re-surface it once a run_status arrives.
+      if (activeRunId) {
+        setPendingGate((current) => current || {
+          kind: "gate",
+          runId: activeRunId,
+          gateRef: item.gate.gate_ref,
+          headline: item.gate.headline,
+          body: "",
+        });
+        setIsProcessing(false);
+      }
     }
+  }
+  if (latestRunIdRef && activeRunId) {
+    latestRunIdRef.current = activeRunId;
   }
 }

@@ -581,13 +581,21 @@ impl SessionThreadService for InMemorySessionThreadService {
             None => 0,
         };
         let end_index = start_index.saturating_add(limit).min(matching.len());
-        let page: Vec<SessionThreadRecord> = matching[start_index..end_index].to_vec();
+        // Cursor reflects the last *attempted* id in the slice (vs. the
+        // last successful), so a page that ends up empty due to
+        // upstream filtering still produces a cursor that moves
+        // forward. Today every entry in `matching` survives because
+        // the scope filter is the only predicate, but lining this up
+        // with the filesystem backend keeps the contract identical
+        // when future predicates land.
         let next_cursor = if end_index < matching.len() {
-            page.last()
+            matching[start_index..end_index]
+                .last()
                 .map(|record| record.thread_id.as_str().to_string())
         } else {
             None
         };
+        let page: Vec<SessionThreadRecord> = matching[start_index..end_index].to_vec();
 
         Ok(ListThreadsForScopeResponse {
             threads: page,

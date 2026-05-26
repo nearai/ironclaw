@@ -1138,6 +1138,18 @@ where
         &self,
         request: ListThreadsForScopeRequest,
     ) -> Result<ListThreadsForScopeResponse, SessionThreadError> {
+        // Per-request work scales with total thread count, not page
+        // size: `list_dir` materializes every entry, we sort, then
+        // slice. The current `ScopedFilesystem` port doesn't expose a
+        // cursor-paginated directory listing, and adding one belongs
+        // upstream of this crate. Acceptable today because:
+        //   * local-dev / single-tenant deployments keep the per-scope
+        //     thread count bounded (per agent + project + owner).
+        //   * names are short strings; the dominant per-page cost is
+        //     the parallel `get` fan-out, not the directory scan.
+        // When a tenant grows past low thousands of threads under a
+        // single scope, replace this with a storage-level paginator
+        // (e.g. a secondary index keyed by `(scope, thread_id)`).
         let limit = request
             .limit
             .map(|n| (n as usize).clamp(1, LIST_THREADS_MAX_PAGE_SIZE))
@@ -1182,7 +1194,7 @@ where
         let results: Vec<Result<Option<(StoredThreadRecord, RecordVersion)>, SessionThreadError>> =
             futures::future::join_all(reads).await;
         let mut page: Vec<SessionThreadRecord> = Vec::with_capacity(thread_ids_page.len());
-        for (thread_id, result) in thread_ids_page.iter().zip(results.into_iter()) {
+        for (thread_id, result) in thread_ids_page.iter().zip(results) {
             match result {
                 Ok(Some((stored, _))) if stored.record.scope == request.scope => {
                     page.push(stored.record);
@@ -1207,9 +1219,15 @@ where
                 }
             }
         }
+        // Cursor must reflect the last *attempted* thread_id in this
+        // slice, not the last *successful* one — otherwise a page
+        // where every record was unreadable or scope-mismatched
+        // would return `next_cursor: None` and the caller would treat
+        // a transient corruption as end-of-stream. Using the slice's
+        // last id guarantees the next request advances strictly past
+        // the inspected range.
         let next_cursor = if end_index < thread_ids.len() {
-            page.last()
-                .map(|record| record.thread_id.as_str().to_string())
+            thread_ids_page.last().map(|tid| tid.as_str().to_string())
         } else {
             None
         };

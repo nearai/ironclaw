@@ -27,12 +27,23 @@ export function useSSE({ threadId, onEvent, enabled }) {
   const [status, setStatus] = React.useState("idle");
   const onEventRef = React.useRef(onEvent);
   onEventRef.current = onEvent;
+  // Last cursor we successfully received. EventSource sends
+  // `Last-Event-ID` automatically while a single instance reconnects
+  // internally, but a *fresh* EventSource (tab resume from hidden,
+  // explicit reconnect after threadId change) loses that memory. We
+  // pipe it through the v2 backend's `?after_cursor=` query fallback
+  // so resumption survives those cases too.
+  const lastEventIdRef = React.useRef(null);
 
   React.useEffect(() => {
     if (!enabled || !threadId) {
       setStatus("idle");
       return;
     }
+    // New thread → drop the prior thread's cursor before the first
+    // connect so we don't try to resume one thread's projection from
+    // another thread's id.
+    lastEventIdRef.current = null;
 
     let es = null;
     let reconnectTimer = null;
@@ -46,7 +57,10 @@ export function useSSE({ threadId, onEvent, enabled }) {
       }
       setStatus(reconnectAttempts > 0 ? "reconnecting" : "connecting");
 
-      es = openEventStream({ threadId });
+      es = openEventStream({
+        threadId,
+        afterCursor: lastEventIdRef.current || undefined,
+      });
 
       es.onopen = () => {
         reconnectAttempts = 0;
@@ -69,6 +83,9 @@ export function useSSE({ threadId, onEvent, enabled }) {
           return;
         }
         if (!frame || typeof frame !== "object") return;
+        if (event.lastEventId) {
+          lastEventIdRef.current = event.lastEventId;
+        }
         onEventRef.current?.({
           // The frame's own `type` field is the canonical source;
           // `event.type` (from the SSE `event:` line) is the

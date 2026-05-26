@@ -61,6 +61,14 @@ impl WebuiAuthenticator for OnlyValidToken {
 struct StubServices {
     create_thread_calls: Mutex<Vec<WebUiAuthenticatedCaller>>,
     stream_events_calls: Mutex<Vec<WebUiAuthenticatedCaller>>,
+    // Records the `gate_ref` value the facade observed on each
+    // `resolve_gate` call. Used by the JS-client contract tests to
+    // assert axum's path extractor actually percent-decodes the gate
+    // segment (e.g. `gate%3Aapproval` → `gate:approval`). The handler
+    // overwrites `body.gate_ref` from the matched path param before
+    // calling the facade, so this captures whatever the path
+    // extractor delivered.
+    resolve_gate_refs: Mutex<Vec<Option<String>>>,
 }
 
 #[async_trait]
@@ -171,8 +179,12 @@ impl RebornServicesApi for StubServices {
     async fn resolve_gate(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        _request: WebUiResolveGateRequest,
+        request: WebUiResolveGateRequest,
     ) -> Result<RebornResolveGateResponse, RebornServicesError> {
+        self.resolve_gate_refs
+            .lock()
+            .expect("lock")
+            .push(request.gate_ref.clone());
         Err(RebornServicesError {
             code: RebornServicesErrorCode::Internal,
             kind: RebornServicesErrorKind::Internal,
@@ -1197,13 +1209,18 @@ async fn static_root_emits_a_fresh_nonce_per_request() {
     );
 }
 
-// ─── JS client contract: URL + body shapes ────────────────────────────
+// ─── Route-shape contract: URLs the SPA's lib/api.js builds ────────────
 //
-// These tests lock the URL + body shapes the SPA's `lib/api.js`
-// builds against the composed router. A regression in the JS client
-// (e.g. dropping `client_action_id`, forgetting to encode `gate_ref`
-// in the path) will show up as a 4xx here rather than as a runtime
-// browser failure.
+// These tests lock the URL + body shapes the composed router accepts —
+// they hand-build requests against the same shapes `static/js/lib/api.js`
+// constructs in the browser, so a routing-level regression (path
+// segments, body field names) surfaces here rather than as a runtime
+// browser failure. They do NOT execute the JS client itself: there is
+// no JS test harness in this workspace, so a regression purely inside
+// `api.js` (e.g. forgetting `encodeURIComponent` on a gate_ref) would
+// pass these tests and only break in the browser. A full JS-level
+// caller test belongs in a separate JS test scaffold the workspace
+// doesn't currently own.
 
 #[tokio::test]
 async fn js_client_send_message_path_shape_reaches_facade() {
@@ -1269,7 +1286,7 @@ async fn js_client_resolve_gate_path_shape_dispatches_to_facade() {
     // that the path-params parsing succeeded and the facade was
     // reached. A routing-level regression (missing path segment,
     // wrong encoding) would surface as 404, not 500.
-    let (app, _) = build_app();
+    let (app, services) = build_app();
     let run_id = uuid::Uuid::new_v4();
     let gate_ref = "gate-abc";
     let body = json!({
@@ -1298,5 +1315,54 @@ async fn js_client_resolve_gate_path_shape_dispatches_to_facade() {
         response.status(),
         StatusCode::INTERNAL_SERVER_ERROR,
         "resolve_gate path must reach the stubbed facade (which returns 500)",
+    );
+    assert_eq!(
+        services.resolve_gate_refs.lock().expect("lock").as_slice(),
+        &[Some("gate-abc".to_string())],
+        "literal gate_ref must reach the facade unchanged",
+    );
+}
+
+#[tokio::test]
+async fn js_client_resolve_gate_path_decodes_percent_encoded_gate_ref() {
+    // Real gate refs can carry characters that require percent-encoding
+    // in a URL segment (`:` in `gate:approval`, `/` in compound refs).
+    // axum's path extractor must decode the segment before the handler
+    // assigns it to `body.gate_ref`, so the facade sees the literal
+    // ref the JS client built — dropping `encodeURIComponent` in
+    // `api.js` would otherwise either 404 (slash-bearing refs) or
+    // silently mismatch (`%3A` left undecoded).
+    let (app, services) = build_app();
+    let run_id = uuid::Uuid::new_v4();
+    // `gate:approval` percent-encoded = `gate%3Aapproval`.
+    let encoded_gate_ref = "gate%3Aapproval";
+    let body = json!({
+        "client_action_id": "act-from-js",
+        "resolution": "approved",
+        "always": false,
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!(
+                    "/api/webchat/v2/threads/thread.fake/runs/{run_id}/gates/{encoded_gate_ref}/resolve",
+                ))
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(
+        response.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "path-decoded resolve_gate must reach the stubbed facade",
+    );
+    assert_eq!(
+        services.resolve_gate_refs.lock().expect("lock").as_slice(),
+        &[Some("gate:approval".to_string())],
+        "facade must observe the decoded gate_ref, not the URL-encoded form",
     );
 }

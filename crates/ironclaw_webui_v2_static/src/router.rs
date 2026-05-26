@@ -58,7 +58,18 @@ pub fn static_router() -> Router {
 ///
 /// `prefix` must begin with `/` and must not end with `/`. Passing
 /// `"/v2"` mounts the SPA at `/v2`, `/v2/`, and `/v2/<anything>`.
+///
+/// # Panics
+///
+/// Panics if `prefix` is empty, doesn't start with `/`, or ends with
+/// `/`. The factory is called at composition-startup, so failing loud
+/// there is preferable to silently building broken routes that only
+/// surface as request-time 404s in production.
 pub fn mount_at_prefix(prefix: &str) -> Router {
+    let valid = !prefix.is_empty() && prefix.starts_with('/') && !prefix.ends_with('/');
+    if !valid {
+        panic!("mount_at_prefix expects a path like \"/v2\" — got {prefix:?}"); // safety: composition-startup factory — failing loud on bad prefix is preferable to silently building broken routes
+    }
     // Three explicit routes (no `nest`) for the same reason
     // `static_router` keeps `nest` out of the picture: axum 0.8's
     // nest dispatch for the exact prefix with/without trailing
@@ -409,6 +420,24 @@ mod tests {
             let body = body_string(response).await;
             assert!(body.contains("v2-root"), "`{path}` did not render shell");
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "mount_at_prefix expects a path like")]
+    fn mount_at_prefix_panics_on_empty_prefix() {
+        let _ = mount_at_prefix("");
+    }
+
+    #[test]
+    #[should_panic(expected = "mount_at_prefix expects a path like")]
+    fn mount_at_prefix_panics_on_trailing_slash() {
+        let _ = mount_at_prefix("/v2/");
+    }
+
+    #[test]
+    #[should_panic(expected = "mount_at_prefix expects a path like")]
+    fn mount_at_prefix_panics_without_leading_slash() {
+        let _ = mount_at_prefix("v2");
     }
 
     #[test]

@@ -385,6 +385,132 @@ async fn assert_reopened_history(
     assert!(wrong_scope.is_err());
 }
 
+#[tokio::test]
+async fn filesystem_list_threads_for_scope_is_scope_filtered_and_paginated() {
+    use ironclaw_threads::ListThreadsForScopeRequest;
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-host", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+
+    let scope_a = scope("a");
+    let scope_b = scope("b");
+
+    // Empty store → empty list, no cursor (matches the missing-root
+    // is_not_found arm in `list_dir`).
+    let initial = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope_a.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    assert!(initial.threads.is_empty(), "fresh store must be empty");
+    assert!(initial.next_cursor.is_none());
+
+    // Seed: 3 threads in scope A with deterministic ids so the
+    // pagination assertion is stable. 1 thread in scope B that the
+    // scope-A enumeration must not see — because the path layout
+    // encodes scope axes, this also verifies the directory walk
+    // doesn't leak across `(agent, project, owner)` cells.
+    for id in ["t-a-001", "t-a-002", "t-a-003"] {
+        service
+            .ensure_thread(EnsureThreadRequest {
+                scope: scope_a.clone(),
+                thread_id: Some(ThreadId::new(id).unwrap()),
+                created_by_actor_id: "actor-a".into(),
+                title: Some(id.into()),
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+    }
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope_b.clone(),
+            thread_id: Some(ThreadId::new("t-b-001").unwrap()),
+            created_by_actor_id: "actor-b".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    // Scope filter: A sees only A's threads, sorted deterministically.
+    let scope_a_all = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope_a.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let ids: Vec<&str> = scope_a_all
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(ids, ["t-a-001", "t-a-002", "t-a-003"]);
+    assert!(
+        scope_a_all.next_cursor.is_none(),
+        "no more pages when page size > total",
+    );
+
+    // Pagination: limit=2 → first page is [001, 002] with cursor=002.
+    let page_1 = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope_a.clone(),
+            limit: Some(2),
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let page_1_ids: Vec<&str> = page_1
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(page_1_ids, ["t-a-001", "t-a-002"]);
+    assert_eq!(page_1.next_cursor.as_deref(), Some("t-a-002"));
+
+    // Follow-up: cursor=002 → next page is [003] with no further cursor.
+    let page_2 = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope_a.clone(),
+            limit: Some(2),
+            cursor: page_1.next_cursor.clone(),
+        })
+        .await
+        .unwrap();
+    let page_2_ids: Vec<&str> = page_2
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(page_2_ids, ["t-a-003"]);
+    assert!(page_2.next_cursor.is_none());
+
+    // Cross-scope safety: scope B sees only its own thread, never A's.
+    // For the filesystem backend this is structurally guaranteed by the
+    // per-scope directory layout — `scope_axes_string` puts A and B at
+    // different paths, so `list_dir` on B's root cannot return A's ids.
+    let scope_b_all = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope_b,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let ids_b: Vec<&str> = scope_b_all
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(ids_b, ["t-b-001"]);
+}
+
 fn scope(label: &str) -> ThreadScope {
     ThreadScope {
         tenant_id: TenantId::new(format!("tenant-{label}")).unwrap(),

@@ -281,20 +281,25 @@ fn read_rate_limit() -> RateLimitPolicy {
 }
 
 fn stream_rate_limit() -> RateLimitPolicy {
-    // SSE sessions are long-lived; the per-tenant/user concurrency
-    // cap (3 streams, enforced in `WebUiV2State::SseCapacity`) does
-    // the real bounding. The request-rate window here is just for
-    // burst protection against reconnect storms.
+    // Shared budget for the SSE (`stream_events`) and WebSocket
+    // (`stream_events_ws`) routes. SSE sessions are long-lived; the
+    // per-tenant/user concurrency cap (3 streams, enforced in
+    // `WebUiV2State::SseCapacity`) does the real bounding. The
+    // request-rate window here is just for burst protection against
+    // reconnect storms.
     //
-    // Set to 30/60s — `EventSource` can't set headers so the SSE
-    // route additionally accepts `?token=…`, which leaks the bearer
-    // into browser history, server access logs, and proxy logs.
-    // Keeping the request rate higher than necessary widens the
-    // replay surface for a logged token, so the budget here is
-    // capped at 2x a worst-case exponential-backoff reconnect cycle
-    // (≈ 1, 2, 4, 8, 16, 32s per minute = 6 opens) rather than
-    // parity with the mutation budget. The 3-stream concurrency cap
-    // is the real load gate; this window only deters replay.
+    // Set to 30/60s — the SSE route additionally accepts `?token=…`
+    // because `EventSource` can't set headers, which leaks the
+    // bearer into browser history, server access logs, and proxy
+    // logs. Keeping the request rate higher than necessary widens
+    // the replay surface for a logged token, so the budget is capped
+    // at 2x a worst-case exponential-backoff reconnect cycle (≈ 1,
+    // 2, 4, 8, 16, 32s per minute = 6 opens) rather than parity with
+    // the mutation budget. The WS route doesn't carry the same
+    // URL-token risk (headers + `WebSocketOriginPolicy::SameOriginRequired`),
+    // but the lower limit costs it nothing — the same reconnect-storm
+    // math applies, the same concurrency cap is the real load gate,
+    // and using one helper for both keeps the descriptors aligned.
     rate_limit_per_caller(30, 60)
 }
 
