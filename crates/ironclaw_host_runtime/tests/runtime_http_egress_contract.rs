@@ -7,9 +7,12 @@ use ironclaw_host_api::{
     NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern, Obligation,
     ResourceEstimate, ResourceScope, RuntimeCredentialInjection, RuntimeCredentialSource,
     RuntimeCredentialTarget, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
-    RuntimeKind, SecretHandle, TenantId, TrustClass, UserId,
+    RuntimeHttpSaveTarget, RuntimeKind, ScopedPath, SecretHandle, TenantId, TrustClass, UserId,
 };
-use ironclaw_host_runtime::{BuiltinObligationServices, HostHttpEgressService};
+use ironclaw_host_runtime::{
+    BuiltinObligationServices, HostHttpEgressService, RuntimeHttpBodyStore,
+    RuntimeHttpBodyStoreError,
+};
 use ironclaw_mcp::{
     McpClient, McpClientRequest, McpHostHttpClient, McpHostHttpEgressPlan, McpHostHttpRequest,
     McpRuntimeHttpAdapter, StaticMcpHostHttpEgressPlanner,
@@ -78,6 +81,7 @@ fn host_http_egress_consumes_staged_obligation_secret_once() {
             required: true,
         }],
         response_body_limit: Some(4096),
+        save_body_to: None,
         timeout_ms: None,
     };
 
@@ -183,6 +187,7 @@ async fn host_http_egress_consumes_secret_staged_by_builtin_obligation_handler()
                 required: true,
             }],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
         .expect("host egress should consume material staged by the obligation handler");
@@ -262,6 +267,7 @@ fn host_http_egress_reuses_staged_secret_for_multiple_targets_in_one_request() {
                 },
             ],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
         .expect("same staged handle should be reusable within a single request plan");
@@ -326,6 +332,7 @@ fn host_http_egress_fails_closed_when_required_staged_secret_is_missing() {
                 required: true,
             }],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
         .expect_err("missing staged material must fail before network dispatch");
@@ -387,6 +394,7 @@ fn host_http_egress_does_not_take_staged_secret_from_other_capability() {
                 required: true,
             }],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
         .expect_err("staged material for a different capability must not authorize egress");
@@ -448,6 +456,7 @@ fn host_http_egress_does_not_take_staged_secret_for_other_handle() {
                 required: true,
             }],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
         .expect_err("staged material for a different handle must not authorize egress");
@@ -503,6 +512,7 @@ fn host_http_egress_removes_staged_secret_before_network_errors() {
                 required: true,
             }],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
         .expect_err("network error should be sanitized after staged injection is consumed");
@@ -556,6 +566,7 @@ fn host_http_egress_skips_optional_missing_staged_secret() {
                 required: false,
             }],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
         .expect("optional missing staged material should not block egress");
@@ -622,6 +633,7 @@ fn host_http_egress_does_not_take_staged_secret_from_other_scope() {
                 required: true,
             }],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
         .expect_err("staged material for a different scope must not authorize egress");
@@ -677,6 +689,7 @@ fn host_http_egress_rejects_header_injection_prefix_control_chars() {
                 required: true,
             }],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
         .expect_err("header injection prefixes with control characters must be rejected");
@@ -728,6 +741,7 @@ fn host_http_egress_injects_leased_credentials_and_redacts_errors() {
                 required: true,
             }],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
         .expect_err("network error should be sanitized");
@@ -850,6 +864,7 @@ fn host_http_egress_requires_available_required_credentials_before_network() {
                 required: true,
             }],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
         .expect_err("missing required credentials should fail before network dispatch");
@@ -895,6 +910,7 @@ fn host_http_egress_injects_and_redacts_url_encoded_query_credentials() {
                 required: true,
             }],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
         .expect_err("network error should be sanitized");
@@ -941,6 +957,7 @@ fn host_http_egress_forwards_timeout_to_network() {
             network_policy: sample_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: Some(250),
         })
         .expect("network response should be returned");
@@ -980,6 +997,7 @@ fn host_http_egress_preserves_request_and_response_byte_accounting() {
             network_policy: sample_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
         .expect("network response should be returned");
@@ -1019,6 +1037,7 @@ fn host_http_egress_without_policy_store_fails_closed_before_transport() {
             network_policy: caller_supplied_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
         .expect_err("runtime HTTP egress must not trust caller-supplied network policy without a staged-policy store");
@@ -1066,6 +1085,7 @@ fn host_http_egress_borrows_staged_network_policy_before_transport() {
             network_policy: caller_supplied_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
         .expect("staged network policy should authorize host-mediated HTTP");
@@ -1687,6 +1707,7 @@ fn host_http_egress_fails_closed_without_staged_network_policy() {
             network_policy: sample_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
         .expect_err("missing staged network policy should fail before transport");
@@ -1737,6 +1758,7 @@ fn host_http_egress_does_not_use_cross_scope_or_cross_capability_policy() {
             network_policy: sample_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
         .expect_err("cross-scope or cross-capability staged policies must not authorize egress");
@@ -1791,6 +1813,7 @@ fn host_http_egress_consumes_staged_policy_when_dispatch_fails_before_transport(
                 required: true,
             }],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
         .expect_err("credential failure should not leave reusable network policy state");
@@ -1833,6 +1856,7 @@ fn host_http_egress_consumes_staged_policy_when_request_validation_fails() {
             network_policy: sample_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
         .expect_err("request validation failure should not leave reusable policy state");
@@ -1890,6 +1914,7 @@ fn host_http_egress_redacts_injected_credentials_from_runtime_visible_response()
                 required: true,
             }],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
         .expect("sanitized response should be returned");
@@ -1947,6 +1972,7 @@ fn host_http_egress_redacts_lowercase_percent_encoded_secret_echoes() {
                 required: true,
             }],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
         .expect("lowercase percent-encoded echoed credentials should be redacted");
@@ -1957,6 +1983,157 @@ fn host_http_egress_redacts_lowercase_percent_encoded_secret_echoes() {
         vec![("x-echo".to_string(), "[REDACTED]".to_string())]
     );
     assert_eq!(response.body, b"upstream echoed [REDACTED]".to_vec());
+}
+
+#[test]
+fn host_http_egress_saves_sanitized_response_body_to_store() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![("content-type".to_string(), "text/plain".to_string())],
+        body: b"large patch body".to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 16,
+            resolved_ip: None,
+        },
+    });
+    let store = Arc::new(RecordingBodyStore::default());
+    let service = HostHttpEgressService::new_with_request_policy_for_tests(
+        network,
+        InMemorySecretStore::new(),
+    )
+    .with_body_store(store.clone());
+
+    let target = save_target("/workspace/pr.diff");
+    let response = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::FirstParty,
+            scope: sample_scope(),
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Get,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            save_body_to: Some(target.clone()),
+            timeout_ms: None,
+        })
+        .expect("response body should be saved");
+
+    assert_eq!(response.body, Vec::<u8>::new());
+    assert_eq!(
+        response.saved_body.as_ref().map(|saved| &saved.path),
+        Some(&target.path)
+    );
+    assert_eq!(
+        response
+            .saved_body
+            .as_ref()
+            .map(|saved| saved.bytes_written),
+        Some(16)
+    );
+    let writes = store.writes();
+    assert_eq!(writes.len(), 1);
+    assert_eq!(writes[0].target, target);
+    assert_eq!(writes[0].body, b"large patch body".to_vec());
+}
+
+#[test]
+fn host_http_egress_save_target_requires_configured_body_store_before_network() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: b"large patch body".to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 16,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let service = HostHttpEgressService::new_with_request_policy_for_tests(
+        network,
+        InMemorySecretStore::new(),
+    );
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::FirstParty,
+            scope: sample_scope(),
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Get,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            save_body_to: Some(save_target("/workspace/pr.diff")),
+            timeout_ms: None,
+        })
+        .expect_err("missing body store should fail closed");
+
+    assert!(matches!(error, RuntimeHttpEgressError::Request { .. }));
+    assert!(network_recorder.lock().unwrap().is_empty());
+}
+
+#[test]
+fn host_http_egress_saves_redacted_response_body() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: b"upstream echoed sk-test-secret".to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 29,
+            resolved_ip: None,
+        },
+    });
+    let secrets = InMemorySecretStore::new();
+    let scope = sample_scope();
+    let handle = SecretHandle::new("api-token").unwrap();
+    block_on_test(secrets.put(
+        scope.clone(),
+        handle.clone(),
+        SecretMaterial::from("sk-test-secret"),
+    ))
+    .unwrap();
+    let store = Arc::new(RecordingBodyStore::default());
+    let service = HostHttpEgressService::new_with_request_policy_for_tests(network, secrets)
+        .with_body_store(store.clone());
+
+    let response = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::FirstParty,
+            scope,
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Get,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle,
+                source: RuntimeCredentialSource::SecretStoreLease,
+                target: RuntimeCredentialTarget::Header {
+                    name: "authorization".to_string(),
+                    prefix: Some("Bearer ".to_string()),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            save_body_to: Some(save_target("/workspace/redacted.txt")),
+            timeout_ms: None,
+        })
+        .expect("sanitized response body should be saved");
+
+    assert!(response.redaction_applied);
+    assert_eq!(response.body, Vec::<u8>::new());
+    let writes = store.writes();
+    assert_eq!(writes.len(), 1);
+    assert_eq!(writes[0].body, b"upstream echoed [REDACTED]".to_vec());
 }
 
 #[test]
@@ -2007,6 +2184,7 @@ fn host_http_egress_strips_all_sensitive_response_headers() {
             network_policy: sample_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
         .expect("sensitive response headers should be stripped before runtime visibility");
@@ -2047,6 +2225,7 @@ fn host_http_egress_blocks_credential_shaped_response_body() {
             network_policy: sample_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
         .expect_err("credential-shaped response bodies should not reach runtimes");
@@ -2090,6 +2269,7 @@ fn host_http_egress_blocks_credential_shaped_runtime_request_before_network() {
             network_policy: sample_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
         .expect_err("credential-shaped runtime requests should fail before network dispatch");
@@ -2135,6 +2315,7 @@ fn host_http_egress_blocks_runtime_supplied_sensitive_headers_before_network() {
             network_policy: sample_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
         .expect_err("runtime-supplied sensitive headers should fail before network dispatch");
@@ -2177,6 +2358,7 @@ fn host_http_egress_blocks_runtime_supplied_credential_query_before_network() {
             network_policy: sample_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
         .expect_err("runtime-supplied credential query params should fail before network dispatch");
@@ -2219,6 +2401,7 @@ fn host_http_egress_blocks_percent_encoded_credential_values_before_network() {
             network_policy: sample_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
         .expect_err("percent-encoded credential values should fail before network dispatch");
@@ -2261,6 +2444,7 @@ fn host_http_egress_blocks_runtime_supplied_auth_like_headers_before_network() {
             network_policy: sample_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
         .expect_err("runtime-supplied auth-like headers should fail before network dispatch");
@@ -2321,6 +2505,7 @@ fn host_http_egress_runs_async_secret_store_futures_with_tokio_context() {
                 required: true,
             }],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
         .expect("host egress should poll async secret stores inside a Tokio context");
@@ -2364,6 +2549,7 @@ fn host_http_egress_maps_network_errors_to_stable_runtime_reasons() {
             network_policy: sample_policy(),
             credential_injections: vec![],
             response_body_limit: Some(4096),
+            save_body_to: None,
             timeout_ms: None,
         })
         .expect_err("network errors should surface as stable sanitized variants");
@@ -2382,6 +2568,43 @@ fn host_http_egress_maps_network_errors_to_stable_runtime_reasons() {
 struct RecordingNetwork {
     response: Result<NetworkHttpResponse, NetworkHttpError>,
     requests: Arc<Mutex<Vec<NetworkHttpRequest>>>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RecordingBodyStore {
+    writes: Arc<Mutex<Vec<RecordedBodyWrite>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecordedBodyWrite {
+    scope: ResourceScope,
+    capability_id: CapabilityId,
+    target: RuntimeHttpSaveTarget,
+    body: Vec<u8>,
+}
+
+impl RecordingBodyStore {
+    fn writes(&self) -> Vec<RecordedBodyWrite> {
+        self.writes.lock().unwrap().clone()
+    }
+}
+
+impl RuntimeHttpBodyStore for RecordingBodyStore {
+    fn write_body(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+        target: &RuntimeHttpSaveTarget,
+        body: &[u8],
+    ) -> Result<(), RuntimeHttpBodyStoreError> {
+        self.writes.lock().unwrap().push(RecordedBodyWrite {
+            scope: scope.clone(),
+            capability_id: capability_id.clone(),
+            target: target.clone(),
+            body: body.to_vec(),
+        });
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -2705,6 +2928,12 @@ fn execution_context() -> ExecutionContext {
 
 fn sample_capability_id() -> CapabilityId {
     CapabilityId::new("runtime.http").unwrap()
+}
+
+fn save_target(path: &str) -> RuntimeHttpSaveTarget {
+    RuntimeHttpSaveTarget {
+        path: ScopedPath::new(path).unwrap(),
+    }
 }
 
 fn sample_policy() -> NetworkPolicy {

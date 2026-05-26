@@ -5474,6 +5474,7 @@ impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
             status: self.response_status,
             headers: Vec::new(),
             body: Vec::new(),
+            saved_body: None,
             request_bytes: request.body.len() as u64,
             response_bytes: 0,
             redaction_applied: false,

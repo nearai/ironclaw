@@ -134,6 +134,7 @@ async fn wasm_lane_execution_failure_reconciles_preserved_usage_from_runtime() {
         status: 200,
         headers: vec![],
         body: Vec::new(),
+        saved_body: None,
         request_bytes: 5,
         response_bytes: 0,
         redaction_applied: false,
