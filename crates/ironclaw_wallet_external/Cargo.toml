@@ -35,6 +35,14 @@ ed25519-dalek = { version = "2.2.0", features = ["std"] }
 sha3 = "0.10"
 sha2 = "0.10"
 
+# WalletConnect v2 relay transport (PR9). The fork at
+# tracecommons/walletconnect-rs @ c6b528e defaults to rustls (openssl-free); we
+# take DEFAULT features for relay_client and DO NOT enable relay_rpc's `cacao`
+# feature (it pulls alloy 0.3.6 -> reqwest default-tls -> openssl). The
+# architecture boundary test `workspace_graph_is_openssl_free` enforces this.
+relay_client = { git = "https://github.com/tracecommons/walletconnect-rs", rev = "7078fd303cc521cceeed919e3d452f45eeb115e8", package = "relay_client" }
+relay_rpc = { git = "https://github.com/tracecommons/walletconnect-rs", rev = "7078fd303cc521cceeed919e3d452f45eeb115e8", package = "relay_rpc" }
+
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
 hex = "0.4"

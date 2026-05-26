@@ -71,4 +71,7 @@ allow-git = [
     # Pulls in ruff_* crates from astral-sh/ruff at a pinned revision.
     "https://github.com/pydantic/monty.git",
     "https://github.com/astral-sh/ruff.git",
+    # First-party WalletConnect v2 fork (tracecommons/walletconnect-rs) — provides
+    # relay_client/relay_rpc for the attested-signing external-wallet backend.
+    "https://github.com/tracecommons/walletconnect-rs",
 ]
