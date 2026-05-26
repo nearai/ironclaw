@@ -809,7 +809,6 @@ where
     /// (reconcile/release). When `None`, no budget enforcement happens —
     /// this preserves v1-era behavior for hosts that have not opted in.
     budget_accountant: Option<Arc<dyn LoopModelBudgetAccountant>>,
-    model_response_observer: Option<Arc<dyn HostManagedModelResponseObserver>>,
 }
 
 impl<S, G> ThreadBackedLoopModelPort<S, G>
@@ -837,7 +836,6 @@ where
             instruction_materialization_store: None,
             identity_context_source: None,
             budget_accountant: None,
-            model_response_observer: None,
         }
     }
 
@@ -862,7 +860,6 @@ where
             instruction_materialization_store: None,
             identity_context_source: None,
             budget_accountant: None,
-            model_response_observer: None,
         }
     }
 
@@ -909,14 +906,6 @@ where
 
     pub fn with_capability_port(mut self, capabilities: Arc<dyn LoopCapabilityPort>) -> Self {
         self.capabilities = Some(capabilities);
-        self
-    }
-
-    pub fn with_model_response_observer(
-        mut self,
-        observer: Arc<dyn HostManagedModelResponseObserver>,
-    ) -> Self {
-        self.model_response_observer = Some(observer);
         self
     }
 }
@@ -999,9 +988,6 @@ where
 
         let host_response_result = match gateway_result {
             Ok(response) => {
-                if let Some(observer) = self.model_response_observer.as_ref() {
-                    observer.observe_host_model_response(&self.run_context, &response);
-                }
                 let chunks = response
                     .safe_text_deltas
                     .into_iter()
@@ -1011,6 +997,7 @@ where
                     .collect::<Vec<_>>();
                 let loop_response = LoopModelResponse {
                     chunks,
+                    safe_reasoning_deltas: response.safe_reasoning_deltas,
                     output: response.output,
                     effective_model_profile_id: model_profile_id.clone(),
                 };
@@ -1397,14 +1384,6 @@ pub struct HostManagedModelRequest {
     pub resolved_model_route: Option<HostManagedModelRouteSnapshot>,
     pub run_id: TurnRunId,
     pub turn_id: TurnId,
-}
-
-pub trait HostManagedModelResponseObserver: Send + Sync {
-    fn observe_host_model_response(
-        &self,
-        run_context: &LoopRunContext,
-        response: &HostManagedModelResponse,
-    );
 }
 
 /// Boundary alias for the route snapshot carried from turn/run state into

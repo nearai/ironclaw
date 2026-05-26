@@ -1,4 +1,10 @@
 use super::*;
+use ironclaw_turns::{
+    TurnId,
+    run_profile::{
+        InMemoryLoopHostMilestoneSink, LoopDriverId, LoopHostMilestone, LoopHostMilestoneKind,
+    },
+};
 
 #[tokio::test]
 async fn webui_event_stream_drains_run_status_projection_from_event_stream_manager() {
@@ -245,6 +251,63 @@ async fn webui_event_stream_preserves_sanitized_capability_activity_error_kind()
 }
 
 #[tokio::test]
+async fn webui_event_stream_drains_live_reasoning_projection_from_update_source() {
+    let tenant_id = TenantId::new("webui-thinking-tenant").unwrap();
+    let user_id = UserId::new("webui-thinking-user").unwrap();
+    let agent_id = AgentId::new("webui-thinking-agent").unwrap();
+    let thread_id = ThreadId::new("webui-thinking-thread").unwrap();
+    let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let services = build_reborn_projection_services(
+        event_log,
+        ReplyTargetBindingRef::new("webui-thinking-reply").unwrap(),
+    );
+    let sink = services.with_live_reasoning_milestone_sink(
+        Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        user_id.clone(),
+    );
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+
+    sink.publish_loop_milestone(LoopHostMilestone {
+        scope: scope.clone(),
+        turn_id: TurnId::new(),
+        run_id: TurnRunId::new(),
+        loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
+        kind: LoopHostMilestoneKind::ModelReasoningDelta {
+            safe_delta: "checking context".to_string(),
+        },
+    })
+    .await
+    .unwrap();
+
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id),
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(events.iter().any(|event| {
+        matches!(
+            event.payload(),
+            ProductOutboundPayload::ProjectionUpdate { state }
+                if state.thread_id == thread_id.to_string()
+                    && state.items.iter().any(|item| matches!(
+                        item,
+                        ProductProjectionItem::Thinking { body, .. } if body == "checking context"
+                    ))
+        )
+    }));
+}
+
+#[tokio::test]
 async fn webui_event_stream_resumes_inside_multi_payload_runtime_projection_item() {
     let tenant_id = TenantId::new("webui-activity-resume-tenant").unwrap();
     let user_id = UserId::new("webui-activity-resume-user").unwrap();
@@ -337,7 +400,6 @@ async fn webui_event_stream_accepts_legacy_partial_origin_cursor() {
         runtime: None,
         runtime_item: None,
         turn: None,
-        live_projection: None,
         runtime_payloads_delivered: 1,
     })
     .unwrap();

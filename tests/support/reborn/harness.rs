@@ -825,7 +825,6 @@ impl RebornBinaryE2EHarness {
             identity_context_source,
             model_policy_guard: None,
             model_budget_accountant: None,
-            model_response_observer: None,
             safety_context: None,
             turn_event_sink: None,
         })?;

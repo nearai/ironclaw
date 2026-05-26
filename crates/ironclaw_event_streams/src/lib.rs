@@ -25,7 +25,8 @@ pub use types::{
     DebugProjectionPayload, DeliveryProjectionStatus, DeliveryStatusProjectionPayload, LagReason,
     ProductProjectionEnvelope, ProjectionFetchRequest, ProjectionFetchResponse,
     ProjectionStreamItem, ProjectionSubscribeRequest, ProjectionSubscription, ProjectionTarget,
-    ProjectionViewClass, PushCandidatesForUpdateRequest, SubscriberCapabilities, keep_alive_item,
+    ProjectionViewClass, PushCandidatesForUpdateRequest, SubscriberCapabilities,
+    ThreadLiveProjectionItem, ThreadLiveProjectionUpdate, keep_alive_item,
 };
 pub use update_source::{
     InMemoryProjectionUpdateSource, ProjectionLiveUpdateRequest, ProjectionUpdateSource,

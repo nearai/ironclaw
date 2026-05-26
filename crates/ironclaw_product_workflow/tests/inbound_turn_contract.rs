@@ -616,7 +616,6 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
         identity_context_source: Arc::new(EmptyIdentityContextSource),
         model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
-        model_response_observer: None,
         safety_context: Some(test_safety_context()),
         turn_event_sink: None,
     })
@@ -787,7 +786,6 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
         identity_context_source: Arc::new(EmptyIdentityContextSource),
         model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
-        model_response_observer: None,
         safety_context: Some(test_safety_context()),
         turn_event_sink: None,
     })
@@ -970,7 +968,6 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
         identity_context_source: Arc::new(EmptyIdentityContextSource),
         model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
-        model_response_observer: None,
         safety_context: Some(test_safety_context()),
         turn_event_sink: None,
     }) {

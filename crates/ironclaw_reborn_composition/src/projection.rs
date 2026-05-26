@@ -14,10 +14,11 @@ use ironclaw_event_streams::{
     InMemoryProjectionUpdateSource, NoExposureProjectionRedactionValidator,
     ProjectionStreamError as EventProjectionStreamError, ProjectionStreamItem,
     ProjectionSubscribeRequest, ProjectionSubscription as EventProjectionSubscription,
-    ProjectionTarget, ProjectionViewClass, SubscriberCapabilities,
+    ProjectionTarget, ProjectionViewClass, SubscriberCapabilities, ThreadLiveProjectionItem,
+    ThreadLiveProjectionUpdate,
 };
 use ironclaw_events::{DurableEventLog, EventCursor, EventStreamKey, ReadScope};
-use ironclaw_loop_support::HostManagedModelResponseObserver;
+use ironclaw_host_api::UserId;
 use ironclaw_outbound::InMemoryOutboundStateStore;
 use ironclaw_product_adapters::{
     AdapterInstallationId, CapabilityActivityStatusView, CapabilityActivityView,
@@ -29,7 +30,7 @@ use ironclaw_product_adapters::{
 };
 use ironclaw_turns::{
     ReplyTargetBindingRef, TurnActor, TurnCoordinator, TurnEventProjectionCursor,
-    TurnEventProjectionSource, TurnRunId, TurnScope,
+    TurnEventProjectionSource, TurnRunId, TurnScope, run_profile::LoopHostMilestoneSink,
 };
 
 mod display_preview;
@@ -37,9 +38,7 @@ mod live_reasoning;
 mod runtime_replay;
 mod turn_events;
 use display_preview::{CapabilityDisplayPreviewSource, NoopCapabilityDisplayPreviewSource};
-use live_reasoning::{
-    ReasoningProjectionObserver, WebuiLiveProjectionCursor, WebuiLiveProjectionStore,
-};
+use live_reasoning::LiveReasoningMilestoneSink;
 use runtime_replay::{
     RuntimePayloadCandidate, replay_payload_candidates, snapshot_payload_candidates,
 };
@@ -57,9 +56,9 @@ const WEBUI_PROJECTION_INSTALLATION_ID: &str = "webui_v2.local";
 #[derive(Clone)]
 pub(crate) struct RebornProjectionServices {
     event_stream_manager: Arc<EventStreamManager>,
+    live_updates: Arc<InMemoryProjectionUpdateSource>,
     turn_events: TurnEventBridge,
     display_previews: Arc<dyn CapabilityDisplayPreviewSource>,
-    live_projections: Arc<WebuiLiveProjectionStore>,
     webui_reply_target_binding_ref: ReplyTargetBindingRef,
 }
 
@@ -86,15 +85,20 @@ impl RebornProjectionServices {
             manager: Arc::clone(&self.event_stream_manager),
             turn_events: self.turn_events.clone(),
             display_previews: Arc::clone(&self.display_previews),
-            live_projections: Arc::clone(&self.live_projections),
             reply_target_binding_ref: self.webui_reply_target_binding_ref.clone(),
         })
     }
 
-    pub(crate) fn model_response_observer(&self) -> Arc<dyn HostManagedModelResponseObserver> {
-        Arc::new(ReasoningProjectionObserver::new(Arc::clone(
-            &self.live_projections,
-        )))
+    pub(crate) fn with_live_reasoning_milestone_sink(
+        &self,
+        inner: Arc<dyn LoopHostMilestoneSink>,
+        actor_user_id: UserId,
+    ) -> Arc<dyn LoopHostMilestoneSink> {
+        Arc::new(LiveReasoningMilestoneSink::new(
+            inner,
+            Arc::clone(&self.live_updates),
+            actor_user_id,
+        ))
     }
 }
 
@@ -104,19 +108,20 @@ pub(crate) fn build_reborn_projection_services(
 ) -> RebornProjectionServices {
     let projection: Arc<dyn EventProjectionService> =
         Arc::new(ReplayEventProjectionService::from_runtime_log(event_log));
+    let live_updates = Arc::new(InMemoryProjectionUpdateSource::new(128));
     let event_stream_manager = Arc::new(EventStreamManager::from_services(
         projection,
         Arc::new(AllowAllProjectionAccessPolicy),
         Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
-        Arc::new(InMemoryProjectionUpdateSource::new(128)),
+        live_updates.clone(),
         Arc::new(NoExposureProjectionRedactionValidator),
         Arc::new(InMemoryOutboundStateStore::default()),
     ));
     RebornProjectionServices {
         event_stream_manager,
+        live_updates,
         turn_events: TurnEventBridge::default(),
         display_previews: Arc::new(NoopCapabilityDisplayPreviewSource),
-        live_projections: Arc::new(WebuiLiveProjectionStore::default()),
         webui_reply_target_binding_ref,
     }
 }
@@ -131,7 +136,6 @@ struct WebuiRuntimeProjectionStream {
     manager: Arc<EventStreamManager>,
     turn_events: TurnEventBridge,
     display_previews: Arc<dyn CapabilityDisplayPreviewSource>,
-    live_projections: Arc<WebuiLiveProjectionStore>,
     reply_target_binding_ref: ReplyTargetBindingRef,
 }
 
@@ -208,20 +212,6 @@ impl ProjectionStream for WebuiRuntimeProjectionStream {
         {
             batch.push_turn(next_cursor, ProductOutboundPayload::KeepAlive);
         }
-        let live_after = batch
-            .cursor()
-            .live_projection
-            .as_ref()
-            .map(|cursor| cursor.sequence)
-            .unwrap_or_default();
-        for entry in self.live_projections.drain_after(
-            &request.scope,
-            live_after,
-            WEBUI_PROJECTION_PAGE_LIMIT,
-        )? {
-            batch.push_live_projection(entry.cursor, (*entry.payload).clone());
-        }
-
         batch
             .into_payloads()
             .map(|(cursor, payload)| {
@@ -362,15 +352,6 @@ impl WebuiProjectionBatch {
         self.push(payload);
     }
 
-    fn push_live_projection(
-        &mut self,
-        cursor: WebuiLiveProjectionCursor,
-        payload: ProductOutboundPayload,
-    ) {
-        self.cursor.live_projection = Some(cursor);
-        self.push(payload);
-    }
-
     fn push(&mut self, payload: ProductOutboundPayload) {
         self.payloads.push((self.cursor.clone(), payload));
     }
@@ -404,8 +385,6 @@ struct WebuiProjectionCursor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     runtime_item: Option<EventCursor>,
     turn: Option<TurnEventProjectionCursor>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    live_projection: Option<WebuiLiveProjectionCursor>,
     #[serde(default, skip_serializing_if = "is_zero")]
     runtime_payloads_delivered: usize,
 }
@@ -420,7 +399,6 @@ fn parse_webui_projection_cursor(
     if let Ok(parsed) = serde_json::from_str::<WebuiProjectionCursor>(cursor)
         && (parsed.runtime.is_some()
             || parsed.turn.is_some()
-            || parsed.live_projection.is_some()
             || parsed.runtime_payloads_delivered > 0)
     {
         if parsed.runtime_payloads_delivered > WEBUI_RUNTIME_ITEM_MAX_PAYLOADS + 1 {
@@ -441,7 +419,6 @@ fn parse_webui_projection_cursor(
         runtime: Some(runtime),
         runtime_item: None,
         turn: None,
-        live_projection: None,
         runtime_payloads_delivered: 0,
     })
 }
@@ -465,14 +442,6 @@ fn validate_webui_projection_cursor_scope(
         return Err(ProductAdapterError::InvalidIdentifier {
             kind: "projection_cursor",
             reason: "turn cursor scope does not match subscription scope".to_string(),
-        });
-    }
-    if let Some(live) = cursor.live_projection.as_ref()
-        && &live.scope != scope
-    {
-        return Err(ProductAdapterError::InvalidIdentifier {
-            kind: "projection_cursor",
-            reason: "live cursor scope does not match subscription scope".to_string(),
         });
     }
     Ok(())
@@ -510,16 +479,26 @@ async fn item_to_payloads(
         }
         ProjectionStreamItem::Update(envelope) => {
             let cursor = envelope.cursor();
-            replay_payloads(
-                scope,
-                display_previews,
-                replay_from_envelope(envelope.as_ref())?,
-                cursor,
-                expected_item,
-                already_delivered,
-                capacity,
-            )
-            .await
+            match envelope.as_ref() {
+                ironclaw_event_streams::ProductProjectionEnvelope::ThreadUpdates(replay) => {
+                    replay_payloads(
+                        scope,
+                        display_previews,
+                        replay,
+                        cursor,
+                        expected_item,
+                        already_delivered,
+                        capacity,
+                    )
+                    .await
+                }
+                ironclaw_event_streams::ProductProjectionEnvelope::ThreadLiveUpdate(update) => {
+                    live_update_payloads(scope, update, cursor, expected_item, already_delivered)
+                }
+                _ => Err(internal_projection_error(
+                    "unexpected projection update envelope",
+                )),
+            }
         }
         ProjectionStreamItem::RebaseRequired { snapshot, .. } => {
             let cursor = snapshot.cursor();
@@ -542,6 +521,44 @@ async fn item_to_payloads(
         }),
         ProjectionStreamItem::KeepAlive => Ok(None),
     }
+}
+
+fn live_update_payloads(
+    scope: &TurnScope,
+    update: &ThreadLiveProjectionUpdate,
+    cursor: EventProjectionCursor,
+    expected_item: Option<EventCursor>,
+    already_delivered: usize,
+) -> RuntimePayloadItemResult {
+    let already_delivered =
+        effective_runtime_payload_offset(already_delivered, expected_item, cursor.runtime);
+    if already_delivered > 0 {
+        return Err(ProductAdapterError::InvalidIdentifier {
+            kind: "projection_cursor",
+            reason: "runtime delivery offset exceeds runtime item payload count".to_string(),
+        });
+    }
+    let items = update
+        .items
+        .iter()
+        .map(|item| match item {
+            ThreadLiveProjectionItem::Thinking { id, body } => ProductProjectionItem::Thinking {
+                id: id.clone(),
+                body: body.clone(),
+            },
+        })
+        .collect::<Vec<_>>();
+    if items.is_empty() {
+        return Ok(None);
+    }
+    let state = ProductProjectionState::new(scope.thread_id.to_string(), items)?;
+    Ok(Some(RuntimePayloadItem {
+        final_cursor: cursor.clone(),
+        item_cursor: cursor,
+        payloads: vec![ProductOutboundPayload::ProjectionUpdate { state }],
+        total: 1,
+        already_delivered: 0,
+    }))
 }
 
 async fn snapshot_payloads(
@@ -842,17 +859,6 @@ fn snapshot_from_envelope(
         ironclaw_event_streams::ProductProjectionEnvelope::ThreadSnapshot(snapshot) => Ok(snapshot),
         _ => Err(internal_projection_error(
             "unexpected projection snapshot envelope",
-        )),
-    }
-}
-
-fn replay_from_envelope(
-    envelope: &ironclaw_event_streams::ProductProjectionEnvelope,
-) -> Result<&ProjectionReplay, ProductAdapterError> {
-    match envelope {
-        ironclaw_event_streams::ProductProjectionEnvelope::ThreadUpdates(replay) => Ok(replay),
-        _ => Err(internal_projection_error(
-            "unexpected projection update envelope",
         )),
     }
 }

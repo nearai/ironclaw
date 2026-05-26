@@ -2204,7 +2204,6 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
         identity_context_source: Arc::new(StaticIdentityContextSource::new(Vec::new())),
         model_policy_guard: None,
         model_budget_accountant: None,
-        model_response_observer: None,
         safety_context: None,
         turn_event_sink: Some(event_sink.clone()),
     })
@@ -2337,7 +2336,6 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
         identity_context_source: Arc::new(EmptyIdentityContextSource),
         model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
-        model_response_observer: None,
         safety_context: Some(test_safety_context()),
         turn_event_sink: None,
     })
@@ -2409,7 +2407,6 @@ async fn product_live_parts_for_gate_test(
         identity_context_source: Arc::new(EmptyIdentityContextSource),
         model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
-        model_response_observer: None,
         safety_context: Some(test_safety_context()),
         turn_event_sink: None,
     }

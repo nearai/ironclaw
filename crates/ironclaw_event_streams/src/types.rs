@@ -131,6 +131,7 @@ pub enum LagReason {
 pub enum ProductProjectionEnvelope {
     ThreadSnapshot(ProjectionSnapshot),
     ThreadUpdates(ProjectionReplay),
+    ThreadLiveUpdate(ThreadLiveProjectionUpdate),
     DeliveryStatus(DeliveryStatusProjectionPayload),
     Debug(DebugProjectionPayload),
 }
@@ -140,6 +141,7 @@ impl ProductProjectionEnvelope {
         match self {
             Self::ThreadSnapshot(snapshot) => snapshot.next_cursor.clone(),
             Self::ThreadUpdates(replay) => replay.next_cursor.clone(),
+            Self::ThreadLiveUpdate(update) => update.cursor.clone(),
             Self::DeliveryStatus(payload) => payload.cursor.clone(),
             Self::Debug(payload) => payload.cursor.clone(),
         }
@@ -149,10 +151,24 @@ impl ProductProjectionEnvelope {
         match self {
             Self::ThreadSnapshot(snapshot) => &snapshot.next_cursor.scope,
             Self::ThreadUpdates(replay) => &replay.next_cursor.scope,
+            Self::ThreadLiveUpdate(update) => &update.cursor.scope,
             Self::DeliveryStatus(payload) => &payload.cursor.scope,
             Self::Debug(payload) => &payload.cursor.scope,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadLiveProjectionUpdate {
+    pub cursor: ProjectionCursor,
+    pub thread_id: ThreadId,
+    pub items: Vec<ThreadLiveProjectionItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadLiveProjectionItem {
+    Thinking { id: String, body: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

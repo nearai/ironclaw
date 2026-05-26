@@ -1,145 +1,113 @@
-use std::{
-    collections::{HashMap, VecDeque},
-    sync::{Arc, Mutex},
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
 };
 
-use ironclaw_loop_support::{HostManagedModelResponse, HostManagedModelResponseObserver};
-use ironclaw_product_adapters::{
-    ProductAdapterError, ProductOutboundPayload, ProductProjectionItem, ProductProjectionState,
-    ProductWorkflowRejectionKind, RedactedString,
+use async_trait::async_trait;
+use ironclaw_event_projections::{
+    ProjectionCursor as EventProjectionCursor, ProjectionScope as EventProjectionScope,
 };
+use ironclaw_event_streams::{
+    InMemoryProjectionUpdateSource, ProductProjectionEnvelope, ThreadLiveProjectionItem,
+    ThreadLiveProjectionUpdate,
+};
+use ironclaw_events::{EventCursor, EventStreamKey, ReadScope};
+use ironclaw_host_api::UserId;
 use ironclaw_turns::{
-    TurnRunId, TurnScope,
-    run_profile::{LoopRunContext, sanitize_model_visible_text},
+    TurnRunId,
+    run_profile::{
+        AgentLoopHostError, LoopHostMilestone, LoopHostMilestoneKind, LoopHostMilestoneSink,
+        sanitize_model_visible_text,
+    },
 };
 
-use super::internal_projection_error;
+// Live-only reasoning updates share the projection cursor envelope with
+// durable runtime projections, so allocate them from a high range that normal
+// append-log cursors will not reach.
+const LIVE_REASONING_CURSOR_BASE: u64 = 1 << 62;
 
-#[derive(Default)]
-pub(super) struct WebuiLiveProjectionStore {
-    inner: Mutex<WebuiLiveProjectionInner>,
+pub(super) struct LiveReasoningMilestoneSink {
+    inner: Arc<dyn LoopHostMilestoneSink>,
+    update_source: Arc<InMemoryProjectionUpdateSource>,
+    actor_user_id: UserId,
+    next_sequence: AtomicU64,
 }
 
-#[derive(Default)]
-struct WebuiLiveProjectionInner {
-    next_sequence: u64,
-    entries: VecDeque<WebuiLiveProjectionEntry>,
-    last_evicted_by_scope: HashMap<TurnScope, u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(super) struct WebuiLiveProjectionCursor {
-    pub(super) scope: TurnScope,
-    pub(super) sequence: u64,
-}
-
-#[derive(Clone)]
-pub(super) struct WebuiLiveProjectionEntry {
-    pub(super) cursor: WebuiLiveProjectionCursor,
-    pub(super) payload: Arc<ProductOutboundPayload>,
-}
-
-impl WebuiLiveProjectionStore {
-    pub(super) const MAX_ENTRIES: usize = 1024;
-
-    pub(super) fn publish_reasoning_delta(
-        &self,
-        scope: TurnScope,
-        run_id: TurnRunId,
-        reasoning_delta: &str,
-    ) -> Result<(), ProductAdapterError> {
-        let reasoning_delta = sanitize_model_visible_text(reasoning_delta);
-        if reasoning_delta.is_empty() {
-            return Ok(());
+impl LiveReasoningMilestoneSink {
+    pub(super) fn new(
+        inner: Arc<dyn LoopHostMilestoneSink>,
+        update_source: Arc<InMemoryProjectionUpdateSource>,
+        actor_user_id: UserId,
+    ) -> Self {
+        Self {
+            inner,
+            update_source,
+            actor_user_id,
+            next_sequence: AtomicU64::new(0),
         }
-        let mut inner = self
-            .inner
-            .lock()
-            .map_err(|_| internal_projection_error("live lock"))?;
-        inner.next_sequence = inner.next_sequence.saturating_add(1);
-        let sequence = inner.next_sequence;
-        let state = ProductProjectionState::new(
-            scope.thread_id.to_string(),
-            vec![ProductProjectionItem::Thinking {
-                id: format!("thinking:{run_id}:{sequence}"),
-                body: reasoning_delta,
+    }
+
+    fn publish_reasoning_delta(&self, milestone: &LoopHostMilestone, safe_delta: &str) {
+        let safe_delta = sanitize_model_visible_text(safe_delta);
+        if safe_delta.is_empty() {
+            return;
+        }
+        let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed) + 1;
+        let cursor = EventProjectionCursor::for_scope(
+            self.projection_scope(milestone),
+            EventCursor::new(LIVE_REASONING_CURSOR_BASE.saturating_add(sequence)),
+        );
+        let update = ThreadLiveProjectionUpdate {
+            cursor,
+            thread_id: milestone.scope.thread_id.clone(),
+            items: vec![ThreadLiveProjectionItem::Thinking {
+                id: thinking_id(milestone.run_id, sequence),
+                body: safe_delta,
             }],
-        )?;
-        inner.entries.push_back(WebuiLiveProjectionEntry {
-            cursor: WebuiLiveProjectionCursor { scope, sequence },
-            payload: Arc::new(ProductOutboundPayload::ProjectionUpdate { state }),
-        });
-        while inner.entries.len() > Self::MAX_ENTRIES {
-            if let Some(evicted) = inner.entries.pop_front() {
-                inner
-                    .last_evicted_by_scope
-                    .insert(evicted.cursor.scope, evicted.cursor.sequence);
-            }
+        };
+        if let Err(error) = self
+            .update_source
+            .publish(ProductProjectionEnvelope::ThreadLiveUpdate(update))
+        {
+            tracing::debug!(
+                error = %error,
+                run_id = %milestone.run_id,
+                "failed to publish model reasoning projection"
+            );
+        }
+    }
+
+    fn projection_scope(&self, milestone: &LoopHostMilestone) -> EventProjectionScope {
+        EventProjectionScope {
+            stream: EventStreamKey::new(
+                milestone.scope.tenant_id.clone(),
+                self.actor_user_id.clone(),
+                milestone.scope.agent_id.clone(),
+            ),
+            read_scope: ReadScope {
+                project_id: milestone.scope.project_id.clone(),
+                mission_id: None,
+                thread_id: Some(milestone.scope.thread_id.clone()),
+                process_id: None,
+            },
+        }
+    }
+}
+
+#[async_trait]
+impl LoopHostMilestoneSink for LiveReasoningMilestoneSink {
+    async fn publish_loop_milestone(
+        &self,
+        milestone: LoopHostMilestone,
+    ) -> Result<(), AgentLoopHostError> {
+        self.inner.publish_loop_milestone(milestone.clone()).await?;
+        if let LoopHostMilestoneKind::ModelReasoningDelta { safe_delta } = &milestone.kind {
+            self.publish_reasoning_delta(&milestone, safe_delta);
         }
         Ok(())
     }
-
-    pub(super) fn drain_after(
-        &self,
-        scope: &TurnScope,
-        after: u64,
-        limit: usize,
-    ) -> Result<Vec<WebuiLiveProjectionEntry>, ProductAdapterError> {
-        let inner = self
-            .inner
-            .lock()
-            .map_err(|_| internal_projection_error("live lock"))?;
-        if after > 0
-            && inner
-                .last_evicted_by_scope
-                .get(scope)
-                .is_some_and(|evicted| after <= *evicted)
-        {
-            return Err(ProductAdapterError::WorkflowRejected {
-                kind: ProductWorkflowRejectionKind::Unavailable,
-                status_code: 503,
-                retryable: true,
-                reason: RedactedString::new("live projection stream lagged; reconnect from origin"),
-            });
-        }
-        Ok(inner
-            .entries
-            .iter()
-            .filter(|entry| entry.cursor.sequence > after && &entry.cursor.scope == scope)
-            .take(limit)
-            .cloned()
-            .collect())
-    }
 }
 
-pub(super) struct ReasoningProjectionObserver {
-    live_projections: Arc<WebuiLiveProjectionStore>,
-}
-
-impl ReasoningProjectionObserver {
-    pub(super) fn new(live_projections: Arc<WebuiLiveProjectionStore>) -> Self {
-        Self { live_projections }
-    }
-}
-
-impl HostManagedModelResponseObserver for ReasoningProjectionObserver {
-    fn observe_host_model_response(
-        &self,
-        run_context: &LoopRunContext,
-        response: &HostManagedModelResponse,
-    ) {
-        for reasoning_delta in &response.safe_reasoning_deltas {
-            if let Err(error) = self.live_projections.publish_reasoning_delta(
-                run_context.scope.clone(),
-                run_context.run_id,
-                reasoning_delta,
-            ) {
-                tracing::debug!(
-                    error = %error,
-                    run_id = %run_context.run_id,
-                    "failed to publish model reasoning projection"
-                );
-            }
-        }
-    }
+fn thinking_id(run_id: TurnRunId, sequence: u64) -> String {
+    format!("thinking:{run_id}:{sequence}")
 }

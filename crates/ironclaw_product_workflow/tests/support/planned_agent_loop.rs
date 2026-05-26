@@ -298,7 +298,6 @@ impl ProductLiveAgentLoopHarness {
             identity_context_source: Arc::new(EmptyIdentityContextSource),
             model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
             model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
-            model_response_observer: None,
             safety_context: Some(test_safety_context()),
             turn_event_sink: None,
         })
@@ -651,7 +650,6 @@ impl LoopCapabilityPortFactory for ProductLiveHostRuntimeCapabilityFactory {
                 identity_context_source: Arc::new(EmptyIdentityContextSource),
                 model_policy_guard: Arc::new(NoOpPolicyGuard),
                 model_budget_accountant: Arc::new(NoOpBudgetAccountant),
-                model_response_observer: None,
                 safety_context: test_safety_context(),
                 milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             },
