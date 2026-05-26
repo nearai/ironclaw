@@ -220,6 +220,30 @@ impl EventStreamManager {
                 Err(error) => return Err(map_projection_error(error)),
             },
         };
+        let buffered_live = self
+            .update_source
+            .replay_after(
+                ProjectionLiveUpdateRequest {
+                    actor: request.actor.clone(),
+                    scope: request.scope.clone(),
+                    view: request.view,
+                    target: request.target.clone(),
+                },
+                Some(live_floor_cursor.clone()),
+                request.limit,
+            )
+            .await?;
+        for envelope in buffered_live {
+            validate_stream_envelope(
+                envelope.as_ref(),
+                request.view,
+                &request.target,
+                &request.scope,
+            )?;
+            self.validation_cache
+                .validate_shared(self.redaction_validator.as_ref(), &envelope)?;
+            initial_items.push(ProjectionStreamItem::Update(envelope));
+        }
 
         let capacity = request.capabilities.bounded_buffer_capacity()?;
         let (sender, receiver) = mpsc::channel(capacity);
@@ -490,6 +514,7 @@ fn envelope_is_truncated(envelope: &ProductProjectionEnvelope) -> bool {
     match envelope {
         ProductProjectionEnvelope::ThreadSnapshot(snapshot) => snapshot.truncated,
         ProductProjectionEnvelope::ThreadUpdates(replay) => replay.truncated,
+        ProductProjectionEnvelope::ThreadLiveUpdate(_) => false,
         ProductProjectionEnvelope::DeliveryStatus(_) | ProductProjectionEnvelope::Debug(_) => false,
     }
 }
@@ -523,7 +548,8 @@ fn validate_stream_envelope(
             ProjectionViewClass::ProductThread,
             ProjectionTarget::Thread { thread_id },
             ProductProjectionEnvelope::ThreadSnapshot(_)
-            | ProductProjectionEnvelope::ThreadUpdates(_),
+            | ProductProjectionEnvelope::ThreadUpdates(_)
+            | ProductProjectionEnvelope::ThreadLiveUpdate(_),
         ) if scope.read_scope.thread_id.as_ref() == Some(thread_id) => {
             validate_product_thread_payload(envelope, thread_id)
         }
@@ -568,6 +594,13 @@ fn validate_product_thread_payload(
                 && all_capability_activities_match(&replay.capability_activities)
                 && all_capability_activities_match(&replay.capability_activity_transitions)
             {
+                Ok(())
+            } else {
+                Err(ProjectionStreamError::AccessDenied)
+            }
+        }
+        ProductProjectionEnvelope::ThreadLiveUpdate(update) => {
+            if &update.thread_id == thread_id {
                 Ok(())
             } else {
                 Err(ProjectionStreamError::AccessDenied)

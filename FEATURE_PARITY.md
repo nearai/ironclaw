@@ -48,7 +48,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Tailscale integration | ✅ | ❌ | |
 | Health check endpoints | ✅ | ✅ | /api/health + /api/gateway/status + /healthz + /readyz, with channel-backed readiness probes |
 | `doctor` diagnostics | ✅ | 🚧 | 16 checks: settings, LLM, DB, embeddings, routines, gateway, MCP, skills, secrets, service, Docker daemon, tunnel binaries |
-| Agent event broadcast | ✅ | 🚧 | SSE broadcast manager exists (SseManager). Reborn has a transport-neutral projection EventStreamManager with access/admission/rebase/lag/redaction contracts, product-safe capability activity events plus bounded display-preview events, and the local-dev WebUI serve path now wires it into `/events` and `/ws` through the WebUI product facade; production durable/live fanout remains follow-up work. |
+| Agent event broadcast | ✅ | 🚧 | SSE broadcast manager exists (SseManager). Reborn has a transport-neutral projection EventStreamManager with access/admission/rebase/lag/redaction contracts, product-safe capability activity events plus bounded display-preview events, live thinking projection updates, and the local-dev WebUI serve path now wires it into `/events` and `/ws` through the WebUI product facade; production durable/live fanout remains follow-up work. |
 | Channel health monitor | ✅ | ❌ | Auto-restart with configurable interval |
 | Presence system | ✅ | ❌ | Beacons on connect, system presence for agents |
 | Trusted-proxy auth mode | ✅ | ❌ | Header-based auth for reverse proxies; `trustedProxy.allowLoopback` for same-host reverse proxies |
@@ -84,6 +84,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | iMessage | ✅ | ❌ | P3 | BlueBubbles or Linq recommended |
 | Linq | ✅ | ❌ | P3 | Real iMessage via API, no Mac required |
 | Feishu/Lark | ✅ | 🚧 | P3 | WASM channel with Event Subscription v2.0; Bitable/Docx tools planned |
+| WeCom | ✅ | 🚧 | P2 | Standalone WASM channel focused on WeCom intelligent bot WebSocket inbound/outbound, pairing, group sessions, inbound media hydration, and direct Bot media upload/send; self-built app callback + Agent API deferred |
 | LINE | ✅ | ❌ | P3 | |
 | WeChat (iLink bot) | ✅ | 🚧 | P2 | Extension-first channel (`channels-src/wechat`), single-account DM flow with QR login, typing, image send/receive, inbound file/voice/video handling, outbound image/video/file media, and SILK-to-WAV voice fallback; multi-account remains deferred |
 | WebChat | ✅ | ✅ | - | Web gateway chat |

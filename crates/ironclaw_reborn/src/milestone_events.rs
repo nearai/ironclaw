@@ -326,6 +326,7 @@ impl DurableLoopHostMilestoneSink {
             // Similarly, PromptBundleBuilt is emitted by LoopPromptPort with richer context.
             LoopHostMilestoneKind::IterationStarted { .. }
             | LoopHostMilestoneKind::PromptBundleBuilt { .. }
+            | LoopHostMilestoneKind::ModelReasoningDelta { .. }
             | LoopHostMilestoneKind::CapabilityBatchStarted { .. }
             | LoopHostMilestoneKind::CapabilityBatchCompleted { .. }
             | LoopHostMilestoneKind::GateBlocked { .. }

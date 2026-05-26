@@ -530,6 +530,7 @@ pub struct AuthPromptView {
 #[serde(rename_all = "snake_case")]
 pub enum ProductProjectionItem {
     Text { id: String, body: String },
+    Thinking { id: String, body: String },
     RunStatus { run_id: TurnRunId, status: String },
     Gate { gate_ref: String, headline: String },
 }
@@ -537,7 +538,7 @@ pub enum ProductProjectionItem {
 impl ProductProjectionItem {
     fn validate(&self) -> Result<(), ProductAdapterError> {
         match self {
-            Self::Text { id, body } => {
+            Self::Text { id, body } | Self::Thinking { id, body } => {
                 validate_bounded_text("projection_item_id", id, PROJECTION_ITEM_ID_MAX_BYTES)?;
                 validate_bounded_text("projection_text", body, PROJECTION_TEXT_MAX_BYTES)
             }
@@ -571,11 +572,13 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
         #[serde(rename_all = "snake_case")]
         enum Wire {
             Text { id: String, body: String },
+            Thinking { id: String, body: String },
             RunStatus { run_id: TurnRunId, status: String },
             Gate { gate_ref: String, headline: String },
         }
         let value = match Wire::deserialize(deserializer)? {
             Wire::Text { id, body } => ProductProjectionItem::Text { id, body },
+            Wire::Thinking { id, body } => ProductProjectionItem::Thinking { id, body },
             Wire::RunStatus { run_id, status } => {
                 ProductProjectionItem::RunStatus { run_id, status }
             }
@@ -734,6 +737,23 @@ mod tests {
     #[test]
     fn projection_state_requires_renderable_items() {
         assert!(ProductProjectionState::new("thread-1", vec![]).is_err());
+    }
+
+    #[test]
+    fn projection_state_round_trips_thinking_item() {
+        let state = ProductProjectionState::new(
+            "thread-1",
+            vec![ProductProjectionItem::Thinking {
+                id: "thinking:run:1".to_string(),
+                body: "checking context".to_string(),
+            }],
+        )
+        .expect("valid thinking projection");
+        let value = serde_json::to_value(&state).expect("serialize");
+        assert_eq!(value["items"][0]["thinking"]["body"], "checking context");
+        let decoded: ProductProjectionState =
+            serde_json::from_value(value).expect("deserialize thinking projection");
+        assert_eq!(decoded, state);
     }
 
     #[test]

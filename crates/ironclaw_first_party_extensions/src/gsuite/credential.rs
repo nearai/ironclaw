@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use ironclaw_auth::{
     AuthProductError, AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountId,
-    CredentialAccountSelectionRequest, CredentialAccountService, CredentialAccountStatus,
-    GOOGLE_PROVIDER_ID, ProviderScope,
+    CredentialAccountLookupRequest, CredentialAccountSelectionRequest, CredentialAccountService,
+    CredentialAccountStatus, GOOGLE_PROVIDER_ID, ProviderScope,
 };
 use ironclaw_host_api::{ExtensionId, ResourceScope, SecretHandle};
 use thiserror::Error;
@@ -62,7 +62,10 @@ impl GoogleCredentialResolver {
             .map_err(map_selection_error)?;
         let account = self
             .accounts
-            .get_account(&auth_scope, selected.id)
+            .get_account(
+                CredentialAccountLookupRequest::new(auth_scope, selected.id)
+                    .for_extension(requester_extension.clone()),
+            )
             .await?
             .ok_or(GoogleCredentialError::Missing)?;
         if account.status != CredentialAccountStatus::Configured {
@@ -107,8 +110,9 @@ fn map_selection_error(error: AuthProductError) -> GoogleCredentialError {
 mod tests {
     use async_trait::async_trait;
     use ironclaw_auth::{
-        CredentialAccount, CredentialAccountLabel, CredentialAccountListPage,
-        CredentialAccountListRequest, CredentialAccountProjection, CredentialOwnership,
+        CredentialAccount, CredentialAccountChoiceRequest, CredentialAccountLabel,
+        CredentialAccountListPage, CredentialAccountListRequest, CredentialAccountProjection,
+        CredentialOwnership, CredentialRecoveryProjection, CredentialRecoveryRequest,
         InMemoryAuthProductServices, NewCredentialAccount,
     };
     use ironclaw_host_api::{InvocationId, UserId};
@@ -320,10 +324,9 @@ mod tests {
 
         async fn get_account(
             &self,
-            _scope: &AuthProductScope,
-            account_id: CredentialAccountId,
+            request: CredentialAccountLookupRequest,
         ) -> Result<Option<CredentialAccount>, AuthProductError> {
-            Ok((account_id == self.account.id).then(|| self.account.clone()))
+            Ok((request.account_id == self.account.id).then(|| self.account.clone()))
         }
 
         async fn list_accounts(
@@ -351,6 +354,20 @@ mod tests {
         ) -> Result<CredentialAccountProjection, AuthProductError> {
             Ok(self.account.projection())
         }
+
+        async fn project_credential_recovery(
+            &self,
+            _request: CredentialRecoveryRequest,
+        ) -> Result<CredentialRecoveryProjection, AuthProductError> {
+            unreachable!("Google credential resolver tests do not project recovery")
+        }
+
+        async fn select_configured_account(
+            &self,
+            _request: CredentialAccountChoiceRequest,
+        ) -> Result<CredentialAccountProjection, AuthProductError> {
+            unreachable!("Google credential resolver tests use unique selection")
+        }
     }
 
     #[async_trait]
@@ -364,8 +381,7 @@ mod tests {
 
         async fn get_account(
             &self,
-            _scope: &AuthProductScope,
-            _account_id: CredentialAccountId,
+            _request: CredentialAccountLookupRequest,
         ) -> Result<Option<CredentialAccount>, AuthProductError> {
             Ok(None)
         }
@@ -394,6 +410,20 @@ mod tests {
             _request: CredentialAccountSelectionRequest,
         ) -> Result<CredentialAccountProjection, AuthProductError> {
             Ok(self.selected.clone())
+        }
+
+        async fn project_credential_recovery(
+            &self,
+            _request: CredentialRecoveryRequest,
+        ) -> Result<CredentialRecoveryProjection, AuthProductError> {
+            unreachable!("Google credential resolver tests do not project recovery")
+        }
+
+        async fn select_configured_account(
+            &self,
+            _request: CredentialAccountChoiceRequest,
+        ) -> Result<CredentialAccountProjection, AuthProductError> {
+            unreachable!("Google credential resolver tests use unique selection")
         }
     }
 }

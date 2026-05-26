@@ -163,9 +163,16 @@ impl LoopCapabilityPort for AuthPassPort {
 
     async fn invoke_capability_batch(
         &self,
-        _request: CapabilityBatchInvocation,
+        request: CapabilityBatchInvocation,
     ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
-        unreachable!("batch auth is not used by these tests")
+        let mut outcomes = Vec::with_capacity(request.invocations.len());
+        for invocation in request.invocations {
+            outcomes.push(self.invoke_capability(invocation).await?);
+        }
+        Ok(CapabilityBatchOutcome {
+            outcomes,
+            stopped_on_suspension: false,
+        })
     }
 }
 
@@ -1235,6 +1242,264 @@ fn spawn_rejected_preserves_spawn_specific_reason_kind() {
 
     assert_eq!(denied.reason_kind.as_str(), "depth_cap_exceeded");
     assert!(denied.safe_summary.contains("depth_cap_exceeded"));
+}
+
+#[tokio::test]
+async fn invoke_batch_coalesces_blocking_spawns_under_single_gate() {
+    let context = test_run_context_with_agent_actor("spawn-batch-coalesce").await;
+    let turn_store = Arc::new(StaticTurnStateStore::new(Some(turn_record(&context, 0))));
+    let child_runs = Arc::new(RecordingChildRuns::default());
+    let gate_store = Arc::new(InMemorySubagentGateResolutionStore::default());
+    let deps = Arc::new(SubagentSpawnDeps {
+        coordinator: Arc::new(StaticCoordinator),
+        child_runs: child_runs.clone(),
+        turn_state_store: turn_store,
+        thread_service: Arc::new(InMemorySessionThreadService::default()),
+        goal_store: Arc::new(NoopGoalStore),
+        gate_store: gate_store.clone(),
+        definition_resolver: Arc::new(StaticDefinitionResolver {
+            resolved: Some(subagent_definition(false)),
+            parent: None,
+        }),
+        spawn_input_codec: Arc::new(StaticSpawnInputCodec {
+            args: SpawnSubagentArgs {
+                subagent_kind: SubagentKindId::new("general").unwrap(),
+                task: "shared task".to_string(),
+                handoff: None,
+                mode: SpawnSubagentMode::Blocking,
+            },
+        }),
+        result_writer: Arc::new(NoopResultWriter),
+    });
+    let port = SubagentSpawnCapabilityPort::new(
+        Arc::new(AuthPassPort),
+        context.clone(),
+        CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+        SubagentSpawnLimits::default(),
+        deps,
+    );
+    let input_ref_a = CapabilityInputRef::new("input:spawn-a").unwrap();
+    let input_ref_b = CapabilityInputRef::new("input:spawn-b").unwrap();
+    {
+        let mut refs = port.auth_input_refs.lock().unwrap();
+        refs.insert(
+            input_ref_a.clone(),
+            CapabilityInputRef::new("input:auth-a").unwrap(),
+        );
+        refs.insert(
+            input_ref_b.clone(),
+            CapabilityInputRef::new("input:auth-b").unwrap(),
+        );
+    }
+
+    let make_invocation = |input_ref: CapabilityInputRef| CapabilityInvocation {
+        surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
+        capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+        input_ref,
+    };
+    let batch_outcome = port
+        .invoke_capability_batch(CapabilityBatchInvocation {
+            invocations: vec![make_invocation(input_ref_a), make_invocation(input_ref_b)],
+            stop_on_first_suspension: true,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(batch_outcome.outcomes.len(), 2);
+    assert!(
+        !batch_outcome.stopped_on_suspension,
+        "shared batch gate must suppress stop_on_first_suspension"
+    );
+
+    let mut gate_refs = Vec::new();
+    for outcome in &batch_outcome.outcomes {
+        let CapabilityOutcome::AwaitDependentRun { gate_ref, .. } = outcome else {
+            panic!("expected await dependent run, got: {:?}", outcome);
+        };
+        gate_refs.push(gate_ref.as_str().to_string());
+    }
+    assert_eq!(
+        gate_refs[0], gate_refs[1],
+        "both blocking spawns must share the batch gate"
+    );
+    assert!(
+        gate_refs[0].contains("subagent-batch"),
+        "shared gate must use batch naming: {}",
+        gate_refs[0]
+    );
+    let requests = child_runs.requests();
+    assert_eq!(
+        requests.len(),
+        2,
+        "both children submitted through spawn tree port"
+    );
+}
+
+#[tokio::test]
+async fn invoke_batch_mixed_spawn_and_non_spawn_capabilities() {
+    let context = test_run_context_with_agent_actor("spawn-batch-mixed").await;
+    let turn_store = Arc::new(StaticTurnStateStore::new(Some(turn_record(&context, 0))));
+    let child_runs = Arc::new(RecordingChildRuns::default());
+    let gate_store = Arc::new(InMemorySubagentGateResolutionStore::default());
+    let deps = Arc::new(SubagentSpawnDeps {
+        coordinator: Arc::new(StaticCoordinator),
+        child_runs: child_runs.clone(),
+        turn_state_store: turn_store,
+        thread_service: Arc::new(InMemorySessionThreadService::default()),
+        goal_store: Arc::new(NoopGoalStore),
+        gate_store: gate_store.clone(),
+        definition_resolver: Arc::new(StaticDefinitionResolver {
+            resolved: Some(subagent_definition(false)),
+            parent: None,
+        }),
+        spawn_input_codec: Arc::new(StaticSpawnInputCodec {
+            args: SpawnSubagentArgs {
+                subagent_kind: SubagentKindId::new("general").unwrap(),
+                task: "shared task".to_string(),
+                handoff: None,
+                mode: SpawnSubagentMode::Blocking,
+            },
+        }),
+        result_writer: Arc::new(NoopResultWriter),
+    });
+    let port = SubagentSpawnCapabilityPort::new(
+        Arc::new(AuthPassPort),
+        context,
+        CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+        SubagentSpawnLimits::default(),
+        deps,
+    );
+    let input_ref_a = CapabilityInputRef::new("input:spawn-a").unwrap();
+    let input_ref_inner = CapabilityInputRef::new("input:inner").unwrap();
+    let input_ref_b = CapabilityInputRef::new("input:spawn-b").unwrap();
+    {
+        let mut refs = port.auth_input_refs.lock().unwrap();
+        refs.insert(
+            input_ref_a.clone(),
+            CapabilityInputRef::new("input:auth-a").unwrap(),
+        );
+        refs.insert(
+            input_ref_b.clone(),
+            CapabilityInputRef::new("input:auth-b").unwrap(),
+        );
+    }
+
+    let spawn_id = CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap();
+    let inner_id = CapabilityId::new("inner.echo").unwrap();
+    let surface_version = CapabilitySurfaceVersion::new("surface:test").unwrap();
+    let batch_outcome = port
+        .invoke_capability_batch(CapabilityBatchInvocation {
+            invocations: vec![
+                CapabilityInvocation {
+                    surface_version: surface_version.clone(),
+                    capability_id: spawn_id.clone(),
+                    input_ref: input_ref_a,
+                },
+                CapabilityInvocation {
+                    surface_version: surface_version.clone(),
+                    capability_id: inner_id,
+                    input_ref: input_ref_inner,
+                },
+                CapabilityInvocation {
+                    surface_version,
+                    capability_id: spawn_id,
+                    input_ref: input_ref_b,
+                },
+            ],
+            stop_on_first_suspension: true,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(batch_outcome.outcomes.len(), 3);
+    assert!(
+        !batch_outcome.stopped_on_suspension,
+        "shared spawn gate must not stop the mixed batch early"
+    );
+    let CapabilityOutcome::AwaitDependentRun {
+        gate_ref: first_gate,
+        ..
+    } = &batch_outcome.outcomes[0]
+    else {
+        panic!("first outcome should be a blocking spawn");
+    };
+    let CapabilityOutcome::Completed(inner_result) = &batch_outcome.outcomes[1] else {
+        panic!("second outcome should come from the inner non-spawn port");
+    };
+    let CapabilityOutcome::AwaitDependentRun {
+        gate_ref: second_gate,
+        ..
+    } = &batch_outcome.outcomes[2]
+    else {
+        panic!("third outcome should be a blocking spawn");
+    };
+    assert_eq!(first_gate, second_gate);
+    assert_eq!(inner_result.result_ref.as_str(), "result:auth");
+    assert_eq!(child_runs.requests().len(), 2);
+    let awaited = gate_store.records();
+    assert_eq!(awaited.len(), 1);
+    assert_eq!(awaited[0].gate_ref.as_str(), first_gate.as_str());
+}
+
+#[tokio::test]
+async fn invoke_batch_skips_shared_gate_for_single_blocking_spawn() {
+    let context = test_run_context_with_agent_actor("spawn-batch-single").await;
+    let turn_store = Arc::new(StaticTurnStateStore::new(Some(turn_record(&context, 0))));
+    let child_runs = Arc::new(RecordingChildRuns::default());
+    let gate_store = Arc::new(InMemorySubagentGateResolutionStore::default());
+    let deps = Arc::new(SubagentSpawnDeps {
+        coordinator: Arc::new(StaticCoordinator),
+        child_runs: child_runs.clone(),
+        turn_state_store: turn_store,
+        thread_service: Arc::new(InMemorySessionThreadService::default()),
+        goal_store: Arc::new(NoopGoalStore),
+        gate_store: gate_store.clone(),
+        definition_resolver: Arc::new(StaticDefinitionResolver {
+            resolved: Some(subagent_definition(false)),
+            parent: None,
+        }),
+        spawn_input_codec: Arc::new(StaticSpawnInputCodec {
+            args: SpawnSubagentArgs {
+                subagent_kind: SubagentKindId::new("general").unwrap(),
+                task: "task".to_string(),
+                handoff: None,
+                mode: SpawnSubagentMode::Blocking,
+            },
+        }),
+        result_writer: Arc::new(NoopResultWriter),
+    });
+    let port = SubagentSpawnCapabilityPort::new(
+        Arc::new(AuthPassPort),
+        context.clone(),
+        CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+        SubagentSpawnLimits::default(),
+        deps,
+    );
+    port.auth_input_refs
+        .lock()
+        .unwrap()
+        .insert(input_ref(), CapabilityInputRef::new("input:auth").unwrap());
+
+    let batch_outcome = port
+        .invoke_capability_batch(CapabilityBatchInvocation {
+            invocations: vec![CapabilityInvocation {
+                surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
+                capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+                input_ref: input_ref(),
+            }],
+            stop_on_first_suspension: true,
+        })
+        .await
+        .unwrap();
+
+    let CapabilityOutcome::AwaitDependentRun { gate_ref, .. } = &batch_outcome.outcomes[0] else {
+        panic!("expected await dependent");
+    };
+    assert!(
+        !gate_ref.as_str().contains("subagent-batch"),
+        "single blocking spawn must not allocate batch gate: {}",
+        gate_ref.as_str()
+    );
 }
 
 #[test]

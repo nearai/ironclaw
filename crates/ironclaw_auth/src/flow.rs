@@ -6,7 +6,7 @@ use crate::{
     AuthErrorCode, AuthProductError, AuthorizationCodeHash, CredentialAccountId,
     CredentialAccountLabel, LifecyclePackageRef, OpaqueStateHash, ProductActionRef, Timestamp,
     TurnRunRef,
-    credential::{CredentialAccountStatus, CredentialOwnership},
+    credential::{CredentialAccountProjection, CredentialAccountStatus, CredentialOwnership},
     ids::{AuthFlowId, AuthGateRef, AuthInteractionId, AuthProviderId, OAuthAuthorizationUrl},
     scope::AuthProductScope,
 };
@@ -53,7 +53,7 @@ pub enum AuthChallenge {
     },
     AccountSelectionRequired {
         provider: AuthProviderId,
-        account_ids: Vec<CredentialAccountId>,
+        accounts: Vec<CredentialAccountProjection>,
     },
     SetupRequired {
         provider: AuthProviderId,

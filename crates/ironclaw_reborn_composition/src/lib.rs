@@ -18,8 +18,11 @@
 //! import `TurnCoordinator`, `SessionThreadService`, `HostManagedModel
 //! Gateway`, etc.
 
+use std::sync::Arc;
+
 mod auth;
 mod available_extensions;
+mod default_system_prompt;
 mod error;
 mod extension_lifecycle;
 mod factory;
@@ -51,7 +54,9 @@ mod webui_serve;
 mod webui_ws_origin;
 
 pub use auth::{
-    RebornAuthContinuationDispatcher, RebornOAuthCallbackError, RebornOAuthCallbackOutcome,
+    RebornAuthContinuationDispatcher, RebornAuthProductError, RebornManualTokenChallenge,
+    RebornManualTokenError, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,
+    RebornManualTokenSubmitResponse, RebornOAuthCallbackError, RebornOAuthCallbackOutcome,
     RebornOAuthCallbackRequest, RebornOAuthCallbackResponse, RebornProductAuthServicePorts,
     RebornProductAuthServices,
 };
@@ -123,6 +128,7 @@ pub fn reborn_model_slot_names() -> Vec<&'static str> {
 pub struct RebornRuntimeReadinessSnapshot {
     pub text_only_driver: RebornRuntimeComponentStatus,
     pub planned_driver: RebornRuntimeComponentStatus,
+    pub subagent_planned_driver: RebornRuntimeComponentStatus,
     pub planned_default_profile: RebornRuntimeComponentStatus,
 }
 
@@ -161,9 +167,19 @@ pub fn reborn_runtime_readiness_snapshot() -> RebornRuntimeReadinessSnapshot {
             ironclaw_reborn::text_loop_driver::TextOnlyModelReplyDriverConfig::default(),
         ),
     );
-    let planned_driver = match ironclaw_reborn::app_loop_family::build_loop_family_registry() {
+    let family_registry = ironclaw_reborn::app_loop_family::build_loop_family_registry();
+    let planned_driver = match &family_registry {
         Ok(family_registry) => RebornRuntimeComponentStatus::from_result(
             ironclaw_reborn::planned_driver_factory::register_default_planned_driver(
+                &mut registry,
+                Arc::clone(family_registry),
+            ),
+        ),
+        Err(error) => RebornRuntimeComponentStatus::Failed(error.to_string()),
+    };
+    let subagent_planned_driver = match family_registry {
+        Ok(family_registry) => RebornRuntimeComponentStatus::from_result(
+            ironclaw_reborn::planned_driver_factory::register_subagent_planned_driver(
                 &mut registry,
                 family_registry,
             ),
@@ -176,12 +192,10 @@ pub fn reborn_runtime_readiness_snapshot() -> RebornRuntimeReadinessSnapshot {
     RebornRuntimeReadinessSnapshot {
         text_only_driver,
         planned_driver,
+        subagent_planned_driver,
         planned_default_profile,
     }
 }
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use std::sync::Arc;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use async_trait::async_trait;

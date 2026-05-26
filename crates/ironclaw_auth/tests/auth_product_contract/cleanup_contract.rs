@@ -65,7 +65,10 @@ async fn extension_owned_accounts_require_owner_and_cleanup_is_action_specific()
     assert!(deactivate.removed_grants.contains(&reusable.id));
     assert!(deactivate.revoked_accounts.is_empty());
     let inactive_owned = services
-        .get_account(&owner, owned.id)
+        .get_account(
+            CredentialAccountLookupRequest::new(owner.clone(), owned.id)
+                .for_extension(extension.clone()),
+        )
         .await
         .expect("lookup")
         .expect("owned account remains");
@@ -103,7 +106,10 @@ async fn extension_owned_accounts_require_owner_and_cleanup_is_action_specific()
         .expect_err("deactivated extension-owned account is not selectable");
     assert_eq!(deactivated_selection, AuthProductError::CredentialMissing);
     let isolated_after = isolated_services
-        .get_account(&owner, isolated_owned.id)
+        .get_account(
+            CredentialAccountLookupRequest::new(owner.clone(), isolated_owned.id)
+                .for_extension(extension.clone()),
+        )
         .await
         .expect("lookup")
         .expect("isolated account remains");
@@ -171,14 +177,20 @@ async fn cleanup_for_lifecycle_ignores_cross_scope_accounts() {
     assert!(report.removed_grants.is_empty());
 
     let owned_after = services
-        .get_account(&foreign_owner, foreign_owned.id)
+        .get_account(
+            CredentialAccountLookupRequest::new(foreign_owner.clone(), foreign_owned.id)
+                .for_extension(extension.clone()),
+        )
         .await
         .expect("lookup")
         .expect("foreign owned remains");
     assert_eq!(owned_after.status, CredentialAccountStatus::Configured);
     assert_eq!(owned_after.owner_extension, Some(extension.clone()));
     let granted_after = services
-        .get_account(&foreign_owner, foreign_granted.id)
+        .get_account(
+            CredentialAccountLookupRequest::new(foreign_owner, foreign_granted.id)
+                .for_extension(extension.clone()),
+        )
         .await
         .expect("lookup")
         .expect("foreign granted remains");

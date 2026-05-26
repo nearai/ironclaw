@@ -569,6 +569,7 @@ impl LlmProvider for NearAiChatProvider {
             .filter(|s| !s.trim().is_empty())
             .or_else(|| reasoning.filter(|s| !s.trim().is_empty()));
         emit_reasoning_trace(reasoning_fallback.as_deref());
+        let provider_reasoning = reasoning_fallback.clone();
         let content = content.or(reasoning_fallback).unwrap_or_default();
         let finish_reason = match choice.finish_reason.as_deref() {
             Some("stop") => FinishReason::Stop,
@@ -585,6 +586,7 @@ impl LlmProvider for NearAiChatProvider {
             finish_reason,
             input_tokens,
             output_tokens,
+            reasoning: provider_reasoning,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
         })
