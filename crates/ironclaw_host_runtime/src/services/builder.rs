@@ -692,7 +692,7 @@ where
         self
     }
 
-    fn with_verified_manifest_wasm_runtime_credentials(
+    fn with_manifest_wasm_runtime_credentials(
         mut self,
         provider: Arc<SharedHostWasmRuntimeCredentials>,
         has_current_manifest_credentials: bool,
@@ -780,10 +780,8 @@ where
             let provider = Arc::new(SharedHostWasmRuntimeCredentials::new(
                 (*self.registry).clone(),
             ));
-            self = self.with_verified_manifest_wasm_runtime_credentials(
-                provider,
-                has_current_manifest_credentials,
-            );
+            self = self
+                .with_manifest_wasm_runtime_credentials(provider, has_current_manifest_credentials);
         }
         let adapter = Arc::new(WasmRuntimeAdapter::try_new(
             config,

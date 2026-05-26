@@ -721,18 +721,6 @@ impl ExtensionInstallationStore for InMemoryExtensionInstallationStore {
         &self,
         extension_id: &ExtensionId,
     ) -> Result<(), ExtensionInstallationError> {
-        if self
-            .inner
-            .read()
-            .await
-            .installations
-            .values()
-            .any(|installation| installation.extension_id() == extension_id)
-        {
-            return Err(ExtensionInstallationError::InvalidInstallation {
-                reason: format!("extension {extension_id} still has installations"),
-            });
-        }
         let mut inner = self.inner.write().await;
         if inner
             .installations

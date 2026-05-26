@@ -239,15 +239,15 @@ impl SharedExtensionRegistry {
     }
 
     pub fn insert(&self, package: ExtensionPackage) -> Result<(), ExtensionError> {
-        self.with_mut(|registry| registry.insert(package))
+        self.with_mut_result(|registry| registry.insert(package))
     }
 
     pub fn update(&self, package: ExtensionPackage) -> Result<(), ExtensionError> {
-        self.with_mut(|registry| registry.update(package))
+        self.with_mut_result(|registry| registry.update(package))
     }
 
     pub fn upsert(&self, package: ExtensionPackage) -> Result<(), ExtensionError> {
-        self.with_mut(|registry| {
+        self.with_mut_result(|registry| {
             if registry.get_extension(&package.id).is_some() {
                 registry.update(package)
             } else {
@@ -257,13 +257,20 @@ impl SharedExtensionRegistry {
     }
 
     pub fn remove(&self, id: &ExtensionId) -> Option<ExtensionPackage> {
-        self.with_mut(|registry| registry.remove(id))
+        let removed = Arc::make_mut(&mut self.inner.write()).remove(id);
+        if removed.is_some() {
+            self.version.fetch_add(1, Ordering::AcqRel);
+        }
+        removed
     }
 
-    fn with_mut<R>(&self, f: impl FnOnce(&mut ExtensionRegistry) -> R) -> R {
-        let result = f(Arc::make_mut(&mut self.inner.write()));
+    fn with_mut_result<R>(
+        &self,
+        f: impl FnOnce(&mut ExtensionRegistry) -> Result<R, ExtensionError>,
+    ) -> Result<R, ExtensionError> {
+        let result = f(Arc::make_mut(&mut self.inner.write()))?;
         self.version.fetch_add(1, Ordering::AcqRel);
-        result
+        Ok(result)
     }
 
     pub fn replace(&self, registry: ExtensionRegistry) {
@@ -281,57 +288,19 @@ impl Default for SharedExtensionRegistry {
 pub(crate) fn validate_package_consistency(
     package: &ExtensionPackage,
 ) -> Result<(), ExtensionError> {
-    crate::ensure_extension_root_matches(&package.manifest.id, &package.root)?;
-    if package.id != package.manifest.id {
+    let expected = ExtensionPackage::from_manifest(package.manifest.clone(), package.root.clone())?;
+    if package.id != expected.id {
         return Err(ExtensionError::InvalidManifest {
             reason: format!(
                 "package id {} does not match manifest/root id {}",
-                package.id, package.manifest.id
+                package.id, expected.id
             ),
         });
     }
-    if package.capabilities.len() != package.manifest.capabilities.len() {
+    if package.capabilities != expected.capabilities {
         return Err(ExtensionError::InvalidManifest {
             reason: "package capability descriptors do not match manifest declarations".to_string(),
         });
-    }
-    let expected_prefix = format!("{}.", package.manifest.id.as_str());
-    for (descriptor, manifest_capability) in package
-        .capabilities
-        .iter()
-        .zip(package.manifest.capabilities.iter())
-    {
-        if !manifest_capability
-            .id
-            .as_str()
-            .starts_with(&expected_prefix)
-        {
-            return Err(ExtensionError::InvalidManifest {
-                reason: format!(
-                    "capability id {} must be provider-prefixed with {}",
-                    manifest_capability.id.as_str(),
-                    expected_prefix
-                ),
-            });
-        }
-        let expected = CapabilityDescriptor {
-            id: manifest_capability.id.clone(),
-            provider: package.manifest.id.clone(),
-            runtime: package.manifest.runtime_kind(),
-            trust_ceiling: package.manifest.descriptor_trust_default,
-            description: manifest_capability.description.clone(),
-            parameters_schema: crate::descriptor_schema_ref(manifest_capability),
-            effects: manifest_capability.effects.clone(),
-            default_permission: manifest_capability.default_permission,
-            runtime_credentials: manifest_capability.runtime_credentials.clone(),
-            resource_profile: manifest_capability.resource_profile.clone(),
-        };
-        if descriptor != &expected {
-            return Err(ExtensionError::InvalidManifest {
-                reason: "package capability descriptors do not match manifest declarations"
-                    .to_string(),
-            });
-        }
     }
     Ok(())
 }
@@ -427,6 +396,30 @@ mod tests {
                 .get_extension(&extension_id("beta"))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn shared_registry_version_changes_only_on_applied_mutations() {
+        let registry = SharedExtensionRegistry::default();
+        let initial_version = registry.version();
+
+        assert!(registry.remove(&extension_id("missing")).is_none());
+        assert_eq!(registry.version(), initial_version);
+
+        registry
+            .insert(test_package("alpha", &["read"]))
+            .expect("insert package");
+        let inserted_version = registry.version();
+        assert!(inserted_version > initial_version);
+
+        let duplicate = registry
+            .insert(test_package("alpha", &["write"]))
+            .expect_err("duplicate extension is rejected");
+        assert!(matches!(
+            duplicate,
+            ExtensionError::DuplicateExtension { .. }
+        ));
+        assert_eq!(registry.version(), inserted_version);
     }
 
     #[test]

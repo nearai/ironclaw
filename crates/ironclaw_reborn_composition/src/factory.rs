@@ -174,7 +174,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     let system_extensions_root =
         canonicalize_local_dev_path(&system_extensions_root, "system extensions root")?;
     let workspace_root = canonicalize_local_dev_path(&workspace_root, "workspace root")?;
-    validate_local_dev_workspace_skill_isolation(&root, &workspace_root)?;
+    validate_local_dev_workspace_system_isolation(&root, &workspace_root)?;
     let mut filesystem = LocalFilesystem::new();
     let projects_root = ironclaw_host_api::VirtualPath::new("/projects").map_err(|error| {
         RebornBuildError::InvalidConfig {
@@ -308,22 +308,23 @@ fn canonicalize_local_dev_path(path: &Path, label: &str) -> Result<PathBuf, Rebo
     })
 }
 
-fn validate_local_dev_workspace_skill_isolation(
+fn validate_local_dev_workspace_system_isolation(
     storage_root: &Path,
     workspace_root: &Path,
 ) -> Result<(), RebornBuildError> {
-    for (label, skill_root) in [
+    for (label, system_root) in [
         ("/skills", storage_root.join("skills")),
         (
             "/tenant-shared/skills",
             storage_root.join("tenant-shared/skills"),
         ),
         ("/system/skills", storage_root.join("system/skills")),
+        ("/system/extensions", storage_root.join("system/extensions")),
     ] {
-        if paths_overlap(workspace_root, &skill_root) {
+        if paths_overlap(workspace_root, &system_root) {
             return Err(RebornBuildError::InvalidConfig {
                 reason: format!(
-                    "local-dev workspace root must not overlap default skill root {label}"
+                    "local-dev workspace root must not overlap default system root {label}"
                 ),
             });
         }
@@ -957,7 +958,7 @@ mod tests {
     }
 
     #[test]
-    fn local_dev_workspace_root_overlapping_skill_root_is_rejected() {
+    fn local_dev_workspace_root_overlapping_system_root_is_rejected() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
 
@@ -965,6 +966,7 @@ mod tests {
             storage_root.join("skills"),
             storage_root.join("tenant-shared/skills"),
             storage_root.join("system/skills"),
+            storage_root.join("system/extensions"),
         ] {
             for workspace_root in [
                 skill_root.clone(),
@@ -975,8 +977,8 @@ mod tests {
                 skill_root.join("nested-workspace"),
             ] {
                 let error =
-                    validate_local_dev_workspace_skill_isolation(&storage_root, &workspace_root)
-                        .expect_err("workspace root overlapping skill root should be rejected");
+                    validate_local_dev_workspace_system_isolation(&storage_root, &workspace_root)
+                        .expect_err("workspace root overlapping system root should be rejected");
                 assert!(
                     matches!(error, RebornBuildError::InvalidConfig { .. }),
                     "unexpected error: {error:?}"

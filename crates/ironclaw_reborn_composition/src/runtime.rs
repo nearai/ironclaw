@@ -2189,42 +2189,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_dev_runtime_rejects_workspace_overlapping_default_skill_roots() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let storage_root = root.path().join("local-dev");
-        let workspace_root = storage_root.join("skills");
-        let requests = Arc::new(StdMutex::new(Vec::new()));
-        let gateway = Arc::new(RecordingGateway {
-            reply: "should not build".to_string(),
-            requests,
-        });
-        let input = RebornRuntimeInput::from_services(
-            RebornBuildInput::local_dev("runtime-overlap-owner", storage_root)
-                .with_local_dev_workspace_root(workspace_root)
-                .with_runtime_policy(local_dev_runtime_policy()),
-        )
-        .with_identity(RebornRuntimeIdentity {
-            tenant_id: "runtime-overlap-tenant".to_string(),
-            agent_id: "runtime-overlap-agent".to_string(),
-            source_binding_id: "runtime-overlap-source".to_string(),
-            reply_target_binding_id: "runtime-overlap-reply".to_string(),
-        })
-        .with_model_gateway_override(gateway);
+    async fn local_dev_runtime_rejects_workspace_overlapping_default_system_roots() {
+        for (root_name, expected_label) in [
+            ("skills", "/skills"),
+            ("system/extensions", "/system/extensions"),
+        ] {
+            let root = tempfile::tempdir().expect("tempdir");
+            let storage_root = root.path().join("local-dev");
+            let workspace_root = storage_root.join(root_name);
+            let requests = Arc::new(StdMutex::new(Vec::new()));
+            let gateway = Arc::new(RecordingGateway {
+                reply: "should not build".to_string(),
+                requests,
+            });
+            let input = RebornRuntimeInput::from_services(
+                RebornBuildInput::local_dev("runtime-overlap-owner", storage_root)
+                    .with_local_dev_workspace_root(workspace_root)
+                    .with_runtime_policy(local_dev_runtime_policy()),
+            )
+            .with_identity(RebornRuntimeIdentity {
+                tenant_id: "runtime-overlap-tenant".to_string(),
+                agent_id: "runtime-overlap-agent".to_string(),
+                source_binding_id: "runtime-overlap-source".to_string(),
+                reply_target_binding_id: "runtime-overlap-reply".to_string(),
+            })
+            .with_model_gateway_override(gateway);
 
-        let error = match build_reborn_runtime(input).await {
-            Ok(runtime) => {
-                runtime.shutdown().await.expect("runtime shutdown");
-                panic!("overlapping workspace and skill roots should fail closed");
-            }
-            Err(error) => error,
-        };
+            let error = match build_reborn_runtime(input).await {
+                Ok(runtime) => {
+                    runtime.shutdown().await.expect("runtime shutdown");
+                    panic!("overlapping workspace and system roots should fail closed");
+                }
+                Err(error) => error,
+            };
 
-        assert!(
-            error
-                .to_string()
-                .contains("must not overlap default skill root /skills"),
-            "unexpected error: {error}"
-        );
+            let message = error.to_string();
+            assert!(
+                message.contains("must not overlap default system root"),
+                "unexpected error: {error}"
+            );
+            assert!(
+                message.contains(expected_label),
+                "unexpected error label: {error}"
+            );
+        }
     }
 
     #[tokio::test]

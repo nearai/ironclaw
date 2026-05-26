@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use ironclaw_extensions::{
     CapabilityVisibility, ExtensionAssetPath, ExtensionManifest, ExtensionPackage,
     ExtensionRuntime, ManifestSource,
@@ -45,14 +43,12 @@ impl AvailableExtensionPackage {
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct AvailableExtensionCatalog {
-    sources: Vec<Arc<dyn AvailableExtensionSource>>,
+    packages: Vec<AvailableExtensionPackage>,
 }
 
 impl AvailableExtensionCatalog {
     pub(crate) fn from_packages(packages: Vec<AvailableExtensionPackage>) -> Self {
-        Self {
-            sources: vec![Arc::new(StaticAvailableExtensionSource { packages })],
-        }
+        Self { packages }
     }
 
     pub(crate) async fn from_filesystem_root<F>(
@@ -71,45 +67,6 @@ impl AvailableExtensionCatalog {
         &self,
         query: &str,
     ) -> Result<Vec<AvailableExtensionPackage>, ProductWorkflowError> {
-        let mut results = Vec::new();
-        for source in &self.sources {
-            results.extend(source.search(query)?);
-        }
-        Ok(results)
-    }
-
-    pub(crate) fn resolve(
-        &self,
-        package_ref: &LifecyclePackageRef,
-    ) -> Result<AvailableExtensionPackage, ProductWorkflowError> {
-        package_ref.require_kind(LifecyclePackageKind::Extension)?;
-        for source in &self.sources {
-            if let Some(package) = source.resolve(package_ref)? {
-                return Ok(package);
-            }
-        }
-        Err(ProductWorkflowError::InvalidBindingRequest {
-            reason: "available extension was not found".to_string(),
-        })
-    }
-}
-
-trait AvailableExtensionSource: Send + Sync + std::fmt::Debug {
-    fn search(&self, query: &str) -> Result<Vec<AvailableExtensionPackage>, ProductWorkflowError>;
-
-    fn resolve(
-        &self,
-        package_ref: &LifecyclePackageRef,
-    ) -> Result<Option<AvailableExtensionPackage>, ProductWorkflowError>;
-}
-
-#[derive(Debug)]
-struct StaticAvailableExtensionSource {
-    packages: Vec<AvailableExtensionPackage>,
-}
-
-impl AvailableExtensionSource for StaticAvailableExtensionSource {
-    fn search(&self, query: &str) -> Result<Vec<AvailableExtensionPackage>, ProductWorkflowError> {
         let normalized_query = query.trim().to_ascii_lowercase();
         Ok(self
             .packages
@@ -139,15 +96,18 @@ impl AvailableExtensionSource for StaticAvailableExtensionSource {
             .collect())
     }
 
-    fn resolve(
+    pub(crate) fn resolve(
         &self,
         package_ref: &LifecyclePackageRef,
-    ) -> Result<Option<AvailableExtensionPackage>, ProductWorkflowError> {
-        Ok(self
-            .packages
+    ) -> Result<AvailableExtensionPackage, ProductWorkflowError> {
+        package_ref.require_kind(LifecyclePackageKind::Extension)?;
+        self.packages
             .iter()
             .find(|package| &package.package_ref == package_ref)
-            .cloned())
+            .cloned()
+            .ok_or_else(|| ProductWorkflowError::InvalidBindingRequest {
+                reason: "available extension was not found".to_string(),
+            })
     }
 }
 
