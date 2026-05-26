@@ -104,8 +104,11 @@ impl SandboxBrokerPolicy {
         header_name: &str,
         header_value: &str,
     ) -> Option<&SandboxCredentialBinding> {
+        let host_without_port = host.split(':').next().unwrap_or(host);
         self.bindings.iter().find(|binding| {
-            binding.approved_host.eq_ignore_ascii_case(host)
+            binding
+                .approved_host
+                .eq_ignore_ascii_case(host_without_port)
                 && match &binding.target {
                     RuntimeCredentialTarget::Header { name, prefix } => {
                         name.eq_ignore_ascii_case(header_name)

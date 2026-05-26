@@ -11,6 +11,7 @@ pub struct SandboxProcessApprovalSummary {
     pub install_command: Option<Vec<String>>,
     pub run_command: Vec<String>,
     pub mounts: Vec<SandboxApprovalMount>,
+    pub install_allowed_hosts: Vec<String>,
     pub allowed_network_hosts: Vec<String>,
     pub credentials: Vec<SandboxApprovalCredential>,
     pub direct_egress_lockdown: bool,
@@ -30,6 +31,11 @@ impl SandboxProcessApprovalSummary {
                 SandboxApprovalMount::from_mount("tools", &plan.mounts.tools),
                 SandboxApprovalMount::from_mount("cache", &plan.mounts.cache),
             ],
+            install_allowed_hosts: plan
+                .install
+                .as_ref()
+                .map(|install| install.allowed_hosts.clone())
+                .unwrap_or_default(),
             allowed_network_hosts: plan.network.runtime_hosts.clone(),
             credentials: plan
                 .credentials

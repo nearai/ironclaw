@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    DEFAULT_CACHE_MOUNT, DEFAULT_TOOLS_MOUNT, DEFAULT_WORKSPACE_MOUNT,
+    DEFAULT_CACHE_MOUNT, DEFAULT_TOOLS_MOUNT, DEFAULT_WORKSPACE_MOUNT, MAX_OUTPUT_LIMIT,
+    MAX_TIMEOUT_MS,
     validation::{
         is_container_absolute_path, validate_env_has_no_raw_sensitive_values, validate_env_name,
         validate_header_name, validate_host,
@@ -106,6 +107,35 @@ impl SandboxCommandPlan {
                 path: working_dir.clone(),
             });
         }
+        if self
+            .timeout_ms
+            .is_some_and(|timeout_ms| timeout_ms > MAX_TIMEOUT_MS)
+        {
+            return Err(SandboxPlanError::TimeoutLimitTooLarge {
+                phase,
+                max: MAX_TIMEOUT_MS,
+            });
+        }
+        if self
+            .max_stdout_bytes
+            .is_some_and(|limit| limit > MAX_OUTPUT_LIMIT)
+        {
+            return Err(SandboxPlanError::OutputLimitTooLarge {
+                phase,
+                stream: "stdout",
+                max: MAX_OUTPUT_LIMIT,
+            });
+        }
+        if self
+            .max_stderr_bytes
+            .is_some_and(|limit| limit > MAX_OUTPUT_LIMIT)
+        {
+            return Err(SandboxPlanError::OutputLimitTooLarge {
+                phase,
+                stream: "stderr",
+                max: MAX_OUTPUT_LIMIT,
+            });
+        }
         for (name, value) in &self.env {
             validate_env_name(name)?;
             if value.contains('\0') {
@@ -171,8 +201,24 @@ impl SandboxMount {
                 path: self.container_path.clone(),
             });
         }
+        if is_blocked_container_mount_path(&self.container_path) {
+            return Err(SandboxPlanError::InvalidContainerPath {
+                path: self.container_path.clone(),
+            });
+        }
         Ok(())
     }
+}
+
+fn is_blocked_container_mount_path(path: &str) -> bool {
+    const BLOCKED_PREFIXES: &[&str] = &[
+        "/bin", "/boot", "/dev", "/etc", "/lib", "/lib64", "/proc", "/run", "/sbin", "/sys",
+        "/usr", "/var",
+    ];
+    path == "/"
+        || BLOCKED_PREFIXES
+            .iter()
+            .any(|prefix| path == *prefix || path.starts_with(&format!("{prefix}/")))
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -260,8 +306,20 @@ pub enum SandboxPlanError {
     InvalidHost { host: String, reason: String },
     #[error("invalid container path {path}")]
     InvalidContainerPath { path: String },
+    #[error("invalid host path {path}")]
+    InvalidHostPath { path: String },
     #[error("mount container paths must be unique")]
     DuplicateMountPath,
+    #[error("{phase} timeout exceeds maximum {max}ms")]
+    TimeoutLimitTooLarge { phase: &'static str, max: u64 },
+    #[error("{phase} {stream} capture limit exceeds maximum {max} bytes")]
+    OutputLimitTooLarge {
+        phase: &'static str,
+        stream: &'static str,
+        max: u64,
+    },
+    #[error("{phase} network hosts cannot be enforced by Docker process sandbox MVP")]
+    UnenforcedNetworkHosts { phase: &'static str },
     #[error("invalid environment variable name {env}")]
     InvalidEnvName { env: String },
     #[error("invalid environment variable value for {env}")]

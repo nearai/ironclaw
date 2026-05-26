@@ -48,7 +48,7 @@ fn sample_plan() -> SandboxProcessPlan {
                 max_stdout_bytes: None,
                 max_stderr_bytes: None,
             },
-            allowed_hosts: vec!["registry.npmjs.org".to_string()],
+            allowed_hosts: Vec::new(),
         }),
         run: SandboxCommandPlan {
             command: "notion".to_string(),
@@ -145,6 +145,64 @@ fn plan_validation_rejects_writable_quarantine_during_credentialed_run() {
 }
 
 #[test]
+fn plan_validation_rejects_unbounded_runtime_limits() {
+    let mut plan = sample_plan();
+    plan.run.timeout_ms = Some(crate::MAX_TIMEOUT_MS + 1);
+
+    let timeout_error = plan.validate().unwrap_err();
+
+    let mut plan = sample_plan();
+    plan.run.max_stdout_bytes = Some(crate::MAX_OUTPUT_LIMIT + 1);
+    let stdout_error = plan.validate().unwrap_err();
+
+    assert!(matches!(
+        timeout_error,
+        SandboxPlanError::TimeoutLimitTooLarge { phase: "run", .. }
+    ));
+    assert!(matches!(
+        stdout_error,
+        SandboxPlanError::OutputLimitTooLarge {
+            phase: "run",
+            stream: "stdout",
+            ..
+        }
+    ));
+}
+
+#[test]
+fn plan_validation_rejects_mounts_over_system_paths() {
+    let mut plan = sample_plan();
+    plan.mounts.workspace.container_path = "/etc/ironclaw".to_string();
+
+    let error = plan.validate().unwrap_err();
+
+    assert_eq!(
+        error,
+        SandboxPlanError::InvalidContainerPath {
+            path: "/etc/ironclaw".to_string()
+        }
+    );
+}
+
+#[test]
+fn plan_validation_does_not_reject_sensitive_env_substrings_inside_words() {
+    let mut plan = sample_plan();
+    plan.run.env.clear();
+    plan.credentials.clear();
+    plan.network.runtime_hosts.clear();
+    plan.network.direct_egress_lockdown = false;
+    plan.run
+        .env
+        .insert("AUTHOR".to_string(), "alice".to_string());
+    plan.run.env.insert(
+        "TOKENIZER_PATH".to_string(),
+        "/models/tokenizer".to_string(),
+    );
+
+    plan.validate().unwrap();
+}
+
+#[test]
 fn plan_validation_rejects_duplicate_credential_targets() {
     let mut plan = sample_plan();
     let mut duplicate = plan.credentials[0].clone();
@@ -207,7 +265,17 @@ fn docker_args_never_include_secret_material() {
     assert!(joined.contains("NOTION_API_KEY=NOTION_API_KEY"));
     assert!(joined.contains("IRONCLAW_EGRESS_LOCKDOWN=broker-only"));
     assert!(joined.contains("HTTP_PROXY=http://host.docker.internal:4489"));
+    assert!(joined.contains("http_proxy=http://host.docker.internal:4489"));
+    assert!(joined.contains("--add-host\nhost.docker.internal:host-gateway"));
+    assert!(joined.contains("--memory\n512m"));
+    assert!(joined.contains("--pids-limit\n256"));
+    assert!(joined.contains("--cap-add\nSETUID"));
     assert!(joined.contains(DEFAULT_PROCESS_SANDBOX_IMAGE));
+    assert!(
+        invocation
+            .container_name
+            .starts_with("ironclaw-sandbox-run-")
+    );
 }
 
 #[test]
@@ -240,38 +308,67 @@ fn install_and_run_phases_have_different_mount_and_network_policies() {
     let install_args = install.args.join("\n");
     let run_args = run.args.join("\n");
 
-    assert!(install_args.contains("--network\nbridge"));
+    assert!(install_args.contains("--network\nnone"));
     assert!(!install_args.contains("IRONCLAW_EGRESS_LOCKDOWN=broker-only"));
-    assert!(!install_args.contains("dst=/ironclaw/state/tools,readonly"));
+    assert!(install_args.contains("dst=/ironclaw/state/tools,readonly"));
+    assert!(install_args.contains("dst=/ironclaw/state/cache,readonly"));
     assert!(run_args.contains("IRONCLAW_EGRESS_LOCKDOWN=broker-only"));
     assert!(run_args.contains("dst=/ironclaw/state/tools,readonly"));
     assert!(run_args.contains("dst=/ironclaw/state/cache,readonly"));
 }
 
 #[test]
-fn docker_invocation_uses_no_network_for_uncredentialed_plan() {
+fn docker_invocation_rejects_unenforced_network_hosts() {
     let temp = tempfile::tempdir().unwrap();
     let mut plan = sample_plan();
-    plan.install.as_mut().unwrap().allowed_hosts.clear();
     plan.run.env.clear();
-    plan.network.runtime_hosts.clear();
     plan.network.direct_egress_lockdown = false;
     plan.credentials.clear();
     let plan = ValidatedSandboxProcessPlan::new(plan).unwrap();
     let config = sample_config(temp.path());
 
-    let install = docker_invocation_for_phase(
+    let error = docker_invocation_for_phase(&config, &plan, SandboxProcessPhase::Run, &plan.run)
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        SandboxPlanError::UnenforcedNetworkHosts { phase: "run" }
+    );
+}
+
+#[test]
+fn docker_invocation_rejects_unenforced_install_allowed_hosts() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut plan = sample_plan();
+    plan.install.as_mut().unwrap().allowed_hosts = vec!["registry.npmjs.org".to_string()];
+    let plan = ValidatedSandboxProcessPlan::new(plan).unwrap();
+    let config = sample_config(temp.path());
+
+    let error = docker_invocation_for_phase(
         &config,
         &plan,
         SandboxProcessPhase::Install,
         &plan.install.as_ref().unwrap().command,
     )
-    .unwrap();
-    let run =
-        docker_invocation_for_phase(&config, &plan, SandboxProcessPhase::Run, &plan.run).unwrap();
+    .unwrap_err();
 
-    assert!(install.args.join("\n").contains("--network\nnone"));
-    assert!(run.args.join("\n").contains("--network\nnone"));
+    assert_eq!(
+        error,
+        SandboxPlanError::UnenforcedNetworkHosts { phase: "install" }
+    );
+}
+
+#[test]
+fn docker_invocation_rejects_host_paths_that_break_mount_specs() {
+    let temp = tempfile::tempdir().unwrap();
+    let plan = validated_sample_plan();
+    let mut config = sample_config(temp.path());
+    config.workspace_host_path = temp.path().join("workspace,with-comma");
+
+    let error = docker_invocation_for_phase(&config, &plan, SandboxProcessPhase::Run, &plan.run)
+        .unwrap_err();
+
+    assert!(matches!(error, SandboxPlanError::InvalidHostPath { .. }));
 }
 
 #[test]
@@ -286,7 +383,7 @@ fn broker_policy_rewrites_only_approved_host_and_header() {
 
     let approved = policy
         .rewrite_headers(
-            "api.notion.com",
+            "api.notion.com:443",
             vec![(
                 "Authorization".to_string(),
                 "Bearer NOTION_API_KEY".to_string(),
@@ -382,7 +479,8 @@ fn broker_redacts_secret_values_from_error_paths() {
 
 #[test]
 fn approval_summary_contains_only_sanitized_authority_details() {
-    let plan = sample_plan();
+    let mut plan = sample_plan();
+    plan.install.as_mut().unwrap().allowed_hosts = vec!["registry.npmjs.org".to_string()];
 
     let summary = SandboxProcessApprovalSummary::from_plan(&plan).unwrap();
     let serialized = serde_json::to_string(&summary).unwrap();
@@ -400,6 +498,7 @@ fn approval_summary_contains_only_sanitized_authority_details() {
         summary.run_command,
         vec!["notion".to_string(), "list".to_string()]
     );
+    assert_eq!(summary.install_allowed_hosts, vec!["registry.npmjs.org"]);
     assert_eq!(summary.allowed_network_hosts, vec!["api.notion.com"]);
     assert!(summary.direct_egress_lockdown);
     assert_eq!(summary.credentials[0].secret_alias.as_str(), "notion_token");

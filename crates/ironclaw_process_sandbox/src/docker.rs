@@ -1,7 +1,11 @@
 use std::{
+    net::Ipv4Addr,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -21,6 +25,12 @@ use crate::{
     validation::{validate_env_has_no_raw_sensitive_values, validate_env_name},
 };
 use ironclaw_processes::ProcessCancellationToken;
+
+static CONTAINER_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+const DOCKER_MEMORY_LIMIT: &str = "512m";
+const DOCKER_PIDS_LIMIT: &str = "256";
+const DOCKER_CPU_LIMIT: &str = "2";
 
 #[derive(Debug, Clone)]
 pub struct DockerProcessSandboxConfig {
@@ -67,6 +77,7 @@ pub enum SandboxProcessPhase {
 pub(crate) struct DockerInvocation {
     pub docker_bin: String,
     pub phase: SandboxProcessPhase,
+    pub container_name: String,
     pub args: Vec<String>,
 }
 
@@ -140,11 +151,13 @@ impl DockerRunner for SystemDockerRunner {
             _ = cancellation.cancelled() => {
                 let _ = child.start_kill();
                 let _ = child.wait().await;
+                cleanup_container(&invocation.docker_bin, &invocation.container_name).await;
                 return Err(DockerRunError::Cancelled);
             }
             _ = time::sleep(timeout) => {
                 let _ = child.start_kill();
                 let _ = child.wait().await;
+                cleanup_container(&invocation.docker_bin, &invocation.container_name).await;
                 return Err(DockerRunError::Timeout);
             }
         };
@@ -166,6 +179,16 @@ impl DockerRunner for SystemDockerRunner {
             stderr_truncated,
         })
     }
+}
+
+async fn cleanup_container(docker_bin: &str, container_name: &str) {
+    let _ = Command::new(docker_bin)
+        .args(["rm", "-f", container_name])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await;
 }
 
 async fn read_bounded_async<R>(mut reader: R, limit: u64) -> Result<(Vec<u8>, bool), std::io::Error>
@@ -286,14 +309,31 @@ pub(crate) fn docker_invocation_for_phase(
     command: &SandboxCommandPlan,
 ) -> Result<DockerInvocation, SandboxPlanError> {
     let spec = DockerPhaseSpec::new(config, plan, phase, command)?;
+    let container_name = next_container_name(phase);
     let mut args = vec![
         "run".to_string(),
+        "--name".to_string(),
+        container_name.clone(),
         "--rm".to_string(),
         "--init".to_string(),
+        "--memory".to_string(),
+        DOCKER_MEMORY_LIMIT.to_string(),
+        "--memory-swap".to_string(),
+        DOCKER_MEMORY_LIMIT.to_string(),
+        "--pids-limit".to_string(),
+        DOCKER_PIDS_LIMIT.to_string(),
+        "--cpus".to_string(),
+        DOCKER_CPU_LIMIT.to_string(),
         "--security-opt".to_string(),
         "no-new-privileges".to_string(),
         "--cap-drop".to_string(),
         "ALL".to_string(),
+        "--cap-add".to_string(),
+        "SETPCAP".to_string(),
+        "--cap-add".to_string(),
+        "SETUID".to_string(),
+        "--cap-add".to_string(),
+        "SETGID".to_string(),
     ];
     if spec.needs_net_admin {
         args.push("--cap-add".to_string());
@@ -301,7 +341,7 @@ pub(crate) fn docker_invocation_for_phase(
     }
 
     args.extend(spec.network_args());
-    args.extend(spec.mount_args(config, plan));
+    args.extend(spec.mount_args(config, plan)?);
     args.extend(spec.env_args(config, plan)?);
     if let Some(working_dir) = &command.working_dir {
         args.push("--workdir".to_string());
@@ -313,8 +353,18 @@ pub(crate) fn docker_invocation_for_phase(
     Ok(DockerInvocation {
         docker_bin: config.docker_bin.clone(),
         phase,
+        container_name,
         args,
     })
+}
+
+fn next_container_name(phase: SandboxProcessPhase) -> String {
+    let phase = match phase {
+        SandboxProcessPhase::Install => "install",
+        SandboxProcessPhase::Run => "run",
+    };
+    let sequence = CONTAINER_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("ironclaw-sandbox-{phase}-{}-{sequence}", std::process::id())
 }
 
 struct DockerPhaseSpec<'a> {
@@ -323,6 +373,7 @@ struct DockerPhaseSpec<'a> {
     lockdown: bool,
     needs_net_admin: bool,
     include_broker_ca: bool,
+    broker_add_host: Option<String>,
     tools_readonly: bool,
     cache_readonly: bool,
 }
@@ -338,30 +389,46 @@ impl<'a> DockerPhaseSpec<'a> {
         if phase == SandboxProcessPhase::Run && has_credentials && config.broker.is_none() {
             return Err(SandboxPlanError::CredentialedRunWithoutBroker);
         }
+        if phase == SandboxProcessPhase::Install && install_needs_network(plan) {
+            return Err(SandboxPlanError::UnenforcedNetworkHosts { phase: "install" });
+        }
+        if phase == SandboxProcessPhase::Run
+            && !has_credentials
+            && !plan.network.runtime_hosts.is_empty()
+        {
+            return Err(SandboxPlanError::UnenforcedNetworkHosts { phase: "run" });
+        }
         let network_mode = match phase {
-            SandboxProcessPhase::Install if install_needs_network(plan) => "bridge",
             SandboxProcessPhase::Install => "none",
-            SandboxProcessPhase::Run
-                if has_credentials || !plan.network.runtime_hosts.is_empty() =>
-            {
-                "bridge"
-            }
+            SandboxProcessPhase::Run if has_credentials => "bridge",
             SandboxProcessPhase::Run => "none",
         };
         let brokered_run = phase == SandboxProcessPhase::Run && has_credentials;
+        let broker_add_host = if brokered_run {
+            config
+                .broker
+                .as_ref()
+                .and_then(|broker| broker_host_for_add_host(&broker.proxy_url))
+        } else {
+            None
+        };
         Ok(Self {
             command,
             network_mode,
             lockdown: brokered_run,
             needs_net_admin: brokered_run,
             include_broker_ca: brokered_run,
-            tools_readonly: phase == SandboxProcessPhase::Run && !plan.mounts.tools.writable,
-            cache_readonly: phase == SandboxProcessPhase::Run && !plan.mounts.cache.writable,
+            broker_add_host,
+            tools_readonly: phase == SandboxProcessPhase::Install || !plan.mounts.tools.writable,
+            cache_readonly: phase == SandboxProcessPhase::Install || !plan.mounts.cache.writable,
         })
     }
 
     fn network_args(&self) -> Vec<String> {
         let mut args = vec!["--network".to_string(), self.network_mode.to_string()];
+        if let Some(host) = &self.broker_add_host {
+            args.extend(["--add-host".to_string(), format!("{host}:host-gateway")]);
+        }
         if self.lockdown {
             args.extend([
                 "--env".to_string(),
@@ -375,23 +442,23 @@ impl<'a> DockerPhaseSpec<'a> {
         &self,
         config: &DockerProcessSandboxConfig,
         plan: &ValidatedSandboxProcessPlan,
-    ) -> Vec<String> {
+    ) -> Result<Vec<String>, SandboxPlanError> {
         let mut args = Vec::new();
         args.extend(bind_mount_arg(
             &config.workspace_host_path,
             &plan.mounts.workspace.container_path,
             !plan.mounts.workspace.writable,
-        ));
+        )?);
         args.extend(bind_mount_arg(
             &config.tools_host_path,
             &plan.mounts.tools.container_path,
             self.tools_readonly,
-        ));
+        )?);
         args.extend(bind_mount_arg(
             &config.cache_host_path,
             &plan.mounts.cache.container_path,
             self.cache_readonly,
-        ));
+        )?);
         if self.include_broker_ca
             && let Some(broker) = &config.broker
         {
@@ -399,9 +466,9 @@ impl<'a> DockerPhaseSpec<'a> {
                 &broker.ca_cert_host_path,
                 &broker.ca_cert_container_path,
                 true,
-            ));
+            )?);
         }
-        args
+        Ok(args)
     }
 
     fn env_args(
@@ -415,6 +482,8 @@ impl<'a> DockerPhaseSpec<'a> {
         {
             env.insert("HTTP_PROXY".to_string(), broker.proxy_url.clone());
             env.insert("HTTPS_PROXY".to_string(), broker.proxy_url.clone());
+            env.insert("http_proxy".to_string(), broker.proxy_url.clone());
+            env.insert("https_proxy".to_string(), broker.proxy_url.clone());
             env.insert(
                 "SSL_CERT_FILE".to_string(),
                 broker.ca_cert_container_path.clone(),
@@ -448,7 +517,9 @@ impl<'a> DockerPhaseSpec<'a> {
         validate_env_has_no_raw_sensitive_values(&env, &placeholders)?;
         let mut args = Vec::new();
         for (name, value) in env {
-            validate_env_name(&name)?;
+            if !is_broker_proxy_env_name(&name) {
+                validate_env_name(&name)?;
+            }
             args.push("--env".to_string());
             args.push(format!("{name}={value}"));
         }
@@ -462,14 +533,38 @@ fn install_needs_network(plan: &ValidatedSandboxProcessPlan) -> bool {
         .is_some_and(|install| !install.allowed_hosts.is_empty())
 }
 
-fn bind_mount_arg(host_path: &Path, container_path: &str, readonly: bool) -> Vec<String> {
-    let mut spec = format!(
-        "type=bind,src={},dst={}",
-        host_path.display(),
-        container_path
-    );
+fn is_broker_proxy_env_name(name: &str) -> bool {
+    matches!(name, "http_proxy" | "https_proxy")
+}
+
+fn bind_mount_arg(
+    host_path: &Path,
+    container_path: &str,
+    readonly: bool,
+) -> Result<Vec<String>, SandboxPlanError> {
+    let host_path = host_path.display().to_string();
+    if host_path.contains(',') {
+        return Err(SandboxPlanError::InvalidHostPath { path: host_path });
+    }
+    let mut spec = format!("type=bind,src={},dst={}", host_path, container_path);
     if readonly {
         spec.push_str(",readonly");
     }
-    vec!["--mount".to_string(), spec]
+    Ok(vec!["--mount".to_string(), spec])
+}
+
+fn broker_host_for_add_host(proxy_url: &str) -> Option<String> {
+    let host = broker_host(proxy_url)?;
+    if host.parse::<Ipv4Addr>().is_ok() {
+        None
+    } else {
+        Some(host.to_string())
+    }
+}
+
+fn broker_host(proxy_url: &str) -> Option<&str> {
+    let (_, rest) = proxy_url.split_once("://")?;
+    let host_port_path = rest.split('/').next().unwrap_or(rest);
+    let host = host_port_path.split(':').next().unwrap_or(host_port_path);
+    (!host.is_empty()).then_some(host)
 }

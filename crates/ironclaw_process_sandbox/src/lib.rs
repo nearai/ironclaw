@@ -43,3 +43,5 @@ pub const DEFAULT_CACHE_MOUNT: &str = "/ironclaw/state/cache";
 pub(crate) const DEFAULT_STDOUT_LIMIT: u64 = 1024 * 1024;
 pub(crate) const DEFAULT_STDERR_LIMIT: u64 = 256 * 1024;
 pub(crate) const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+pub(crate) const MAX_OUTPUT_LIMIT: u64 = 10 * 1024 * 1024;
+pub(crate) const MAX_TIMEOUT_MS: u64 = 300_000;

@@ -65,14 +65,9 @@ pub(crate) fn is_container_absolute_path(path: &str) -> bool {
 
 fn is_sensitive_env_name(name: &str) -> bool {
     let name = name.to_ascii_uppercase();
-    [
-        "TOKEN",
-        "SECRET",
-        "PASSWORD",
-        "API_KEY",
-        "ACCESS_KEY",
-        "AUTH",
-    ]
-    .iter()
-    .any(|marker| name.contains(marker))
+    if name.contains("API_KEY") || name.contains("ACCESS_KEY") {
+        return true;
+    }
+    name.split('_')
+        .any(|part| matches!(part, "TOKEN" | "SECRET" | "PASSWORD" | "AUTH"))
 }
