@@ -6,6 +6,8 @@
 //! facade. Authorization, run-state transitions, approval leases, process
 //! lifecycle, and runtime execution semantics remain in their owning crates.
 
+mod process_executor;
+
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -27,9 +29,8 @@ use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    CapabilityDispatchRequest, CapabilityDispatcher, CapabilityId, DispatchError,
-    ResourceReservationId, ResourceScope, ResourceUsage, RuntimeDispatchErrorKind,
-    RuntimeHttpEgress, RuntimeKind,
+    CapabilityDispatcher, CapabilityId, DispatchError, ResourceReservationId, ResourceScope,
+    ResourceUsage, RuntimeDispatchErrorKind, RuntimeHttpEgress, RuntimeKind,
     runtime_policy::{
         DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode,
         ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -38,8 +39,7 @@ use ironclaw_host_api::{
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutor, McpInvocation};
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_processes::{
-    BackgroundFailureStage, InMemoryProcessResultStore, InMemoryProcessStore,
-    ProcessExecutionError, ProcessExecutionRequest, ProcessExecutionResult, ProcessExecutor,
+    BackgroundFailureStage, InMemoryProcessResultStore, InMemoryProcessStore, ProcessExecutor,
     ProcessManager, ProcessResultStore, ProcessServices, ProcessStore,
 };
 use ironclaw_reborn_event_store::{
@@ -80,6 +80,7 @@ use crate::{
     RuntimeBackendHealth, RuntimeProcessPort, TenantSandboxProcessPort, TurnRunExecutor,
     TurnRunScheduler, TurnRunSchedulerConfig, plan_capability,
 };
+use process_executor::{HostProcessExecutor, RuntimeDispatchProcessExecutor};
 
 type SharedRuntimeHttpEgress = Arc<Mutex<Option<Arc<dyn RuntimeHttpEgress>>>>;
 
@@ -140,6 +141,7 @@ where
     wasm_credential_provider: Option<Arc<dyn WasmRuntimeCredentialProvider>>,
     runtime_health: Option<Arc<dyn RuntimeBackendHealth>>,
     runtime_policy: Option<EffectiveRuntimePolicy>,
+    process_sandbox_executor: Option<Arc<dyn ProcessExecutor>>,
     script_runtime: Option<Arc<dyn ScriptExecutor>>,
     mcp_runtime: Option<Arc<dyn McpExecutor>>,
     first_party_runtime: Option<Arc<FirstPartyCapabilityRegistry>>,
@@ -200,6 +202,7 @@ where
             wasm_credential_provider: None,
             runtime_health: None,
             runtime_policy: None,
+            process_sandbox_executor: None,
             script_runtime: None,
             mcp_runtime: None,
             first_party_runtime: None,
@@ -322,8 +325,10 @@ where
     /// stores, cancellation registry, result store, and runtime health graph.
     fn build_host_runtime(&self) -> DefaultHostRuntime {
         let dispatcher: Arc<dyn CapabilityDispatcher> = Arc::new(self.runtime_dispatcher());
-        let process_executor =
-            Arc::new(RuntimeDispatchProcessExecutor::new(Arc::clone(&dispatcher)));
+        let process_executor = Arc::new(HostProcessExecutor::new(
+            Arc::new(RuntimeDispatchProcessExecutor::new(Arc::clone(&dispatcher))),
+            self.process_sandbox_executor.clone(),
+        ));
         let lifecycle_process_store = Arc::clone(&self.process_lifecycle_store);
         let process_store: Arc<dyn ProcessStore> = lifecycle_process_store.clone();
         let result_failure_cleanup_store = Arc::clone(&lifecycle_process_store);
@@ -562,61 +567,6 @@ impl RuntimeBackendHealth for RegisteredRuntimeHealth {
             .collect::<Vec<_>>();
         normalize_runtime_kinds(&mut missing);
         Ok(missing)
-    }
-}
-
-#[derive(Clone)]
-struct RuntimeDispatchProcessExecutor {
-    dispatcher: Arc<dyn CapabilityDispatcher>,
-}
-
-impl RuntimeDispatchProcessExecutor {
-    pub(crate) fn new(dispatcher: Arc<dyn CapabilityDispatcher>) -> Self {
-        Self { dispatcher }
-    }
-}
-
-#[async_trait]
-impl ProcessExecutor for RuntimeDispatchProcessExecutor {
-    async fn execute(
-        &self,
-        request: ProcessExecutionRequest,
-    ) -> Result<ProcessExecutionResult, ProcessExecutionError> {
-        if request.cancellation.is_cancelled() {
-            return Err(ProcessExecutionError::new("cancelled"));
-        }
-        let result = self
-            .dispatcher
-            .dispatch_json(CapabilityDispatchRequest {
-                capability_id: request.capability_id,
-                scope: request.scope,
-                estimate: request.estimate,
-                mounts: Some(request.mounts),
-                resource_reservation: request.resource_reservation,
-                input: request.input,
-            })
-            .await
-            .map_err(|error| ProcessExecutionError::new(dispatch_error_kind(&error)))?;
-        if request.cancellation.is_cancelled() {
-            return Err(ProcessExecutionError::new("cancelled"));
-        }
-        Ok(ProcessExecutionResult {
-            output: result.output,
-        })
-    }
-}
-
-fn dispatch_error_kind(error: &DispatchError) -> &'static str {
-    match error {
-        DispatchError::UnknownCapability { .. } => "unknown_capability",
-        DispatchError::UnknownProvider { .. } => "unknown_provider",
-        DispatchError::RuntimeMismatch { .. } => "runtime_mismatch",
-        DispatchError::MissingRuntimeBackend { .. } => "missing_runtime_backend",
-        DispatchError::UnsupportedRuntime { .. } => "unsupported_runtime",
-        DispatchError::Mcp { kind }
-        | DispatchError::Script { kind }
-        | DispatchError::Wasm { kind }
-        | DispatchError::FirstParty { kind } => kind.event_kind(),
     }
 }
 

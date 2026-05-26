@@ -260,6 +260,7 @@ impl LlmProvider for GithubCopilotProvider {
                 .as_ref()
                 .map(|u| u.completion_tokens)
                 .unwrap_or(0),
+            reasoning: None,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
         })

@@ -20,6 +20,13 @@ use crate::available_extensions::{
 };
 use crate::lifecycle::response_with_payload;
 
+// This port is deliberately scoped to LocalSingleUser composition. The
+// lifecycle service models the installed extension set, while active_registry
+// is the model-visible capability surface read by host runtime dispatch.
+// install/remove keep the lifecycle set durable; activate/remove are the only
+// local-dev writers that should mirror lifecycle-managed packages into or out
+// of active_registry. Production and multi-tenant reuse require scoped storage
+// and registry ownership first; tracked in #4091.
 pub(crate) struct RebornLocalExtensionManagementPort {
     filesystem: Arc<dyn RootFilesystem>,
     catalog: AvailableExtensionCatalog,
@@ -503,6 +510,8 @@ fn map_extension_error(error: ExtensionError) -> ProductWorkflowError {
 }
 
 fn map_extension_installation_error(error: ExtensionInstallationError) -> ProductWorkflowError {
+    // TODO(#4091): split durable-store transient failures from malformed
+    // lifecycle requests when ExtensionInstallationStore grows a DB backend.
     ProductWorkflowError::InvalidBindingRequest {
         reason: error.to_string(),
     }
@@ -1001,7 +1010,10 @@ mod tests {
             .await
             .expect("unsupported projection");
 
-        assert_unsupported_extension_response(response, "extension_lifecycle_store_unwired");
+        assert_unsupported_extension_response(
+            response,
+            "extension_lifecycle_local_runtime_unwired",
+        );
     }
 
     fn extension_lifecycle_fixture() -> (

@@ -266,3 +266,79 @@ pub enum ResolveApprovalInteractionResponse {
 fn display_safe_summary() -> String {
     FALLBACK_APPROVAL_SUMMARY.to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use ironclaw_host_api::{
+        Action, ApprovalRequest, CapabilityId, CorrelationId, InvocationId, Principal,
+        ResourceEstimate, ThreadId, UserId,
+    };
+
+    use super::*;
+
+    #[test]
+    fn approval_gate_record_with_status_rejects_scope_without_thread_id() {
+        let request = approval_request();
+        let resource_scope =
+            ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
+                .unwrap();
+        let gate_ref = approval_gate_ref(request.id).unwrap();
+
+        let error = ApprovalGateRecord::with_status(
+            resource_scope,
+            TurnRunId::new(),
+            gate_ref,
+            request,
+            ApprovalStatus::Pending,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ProductWorkflowError::ApprovalInteractionRejected {
+                kind: ApprovalInteractionRejectionKind::CrossScopeDenied
+            }
+        ));
+    }
+
+    #[test]
+    fn approval_gate_record_with_status_rejects_mismatched_gate_ref() {
+        let request = approval_request();
+        let mut resource_scope =
+            ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
+                .unwrap();
+        resource_scope.thread_id = Some(ThreadId::new("thread-a").unwrap());
+        let wrong_gate_ref = GateRef::new("gate:approval-wrong").unwrap();
+
+        let error = ApprovalGateRecord::with_status(
+            resource_scope,
+            TurnRunId::new(),
+            wrong_gate_ref,
+            request,
+            ApprovalStatus::Pending,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ProductWorkflowError::ApprovalInteractionRejected {
+                kind: ApprovalInteractionRejectionKind::InvalidGateRef
+            }
+        ));
+    }
+
+    fn approval_request() -> ApprovalRequest {
+        ApprovalRequest {
+            id: ApprovalRequestId::new(),
+            correlation_id: CorrelationId::new(),
+            requested_by: Principal::User(UserId::new("alice").unwrap()),
+            action: Box::new(Action::Dispatch {
+                capability: CapabilityId::new("fixture.search").unwrap(),
+                estimated_resources: ResourceEstimate::default(),
+            }),
+            invocation_fingerprint: None,
+            reason: "needs approval".to_string(),
+            reusable_scope: None,
+        }
+    }
+}

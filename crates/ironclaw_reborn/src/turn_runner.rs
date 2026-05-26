@@ -339,35 +339,40 @@ impl TurnRunnerWorker {
         let runner_id = claimed.runner_id;
         let lease_token = claimed.lease_token;
 
-        let heartbeat_cancel = CancellationToken::new();
-        let heartbeat = heartbeat_loop(
-            Arc::clone(&self.transition_port),
-            run_id,
-            runner_id,
-            lease_token,
-            self.config.heartbeat_interval,
-            heartbeat_cancel.clone(),
-        );
-        tokio::pin!(heartbeat);
+        let exit_result = {
+            let heartbeat_cancel = CancellationToken::new();
+            let heartbeat = heartbeat_loop(
+                Arc::clone(&self.transition_port),
+                run_id,
+                runner_id,
+                lease_token,
+                self.config.heartbeat_interval,
+                heartbeat_cancel.clone(),
+            );
+            tokio::pin!(heartbeat);
 
-        // Resolve driver from registry and invoke it. Driver panics indicate
-        // unknown partial state, so convert them to RecoveryRequired.
-        let driver = AssertUnwindSafe(self.invoke_driver(&claimed)).catch_unwind();
-        tokio::pin!(driver);
+            // Resolve driver from registry and invoke it. Driver panics indicate
+            // unknown partial state, so convert them to RecoveryRequired.
+            let driver = AssertUnwindSafe(self.invoke_driver(&claimed)).catch_unwind();
+            tokio::pin!(driver);
 
-        let exit_result = tokio::select! {
-            result = &mut driver => match result {
-                Ok(result) => result,
-                Err(_) => Err(DriverInvocationError::DriverPanic),
-            },
-            heartbeat_result = &mut heartbeat => match heartbeat_result {
-                Ok(()) => Err(DriverInvocationError::HeartbeatStopped),
-                Err(err) => Err(DriverInvocationError::HeartbeatFailed(err)),
-            },
-            () = cancel.cancelled() => Err(DriverInvocationError::WorkerCancelled),
+            let exit_result = tokio::select! {
+                result = &mut driver => match result {
+                    Ok(result) => result,
+                    Err(_) => Err(DriverInvocationError::DriverPanic),
+                },
+                heartbeat_result = &mut heartbeat => match heartbeat_result {
+                    Ok(()) => Err(DriverInvocationError::HeartbeatStopped),
+                    Err(err) => Err(DriverInvocationError::HeartbeatFailed(err)),
+                },
+                () = cancel.cancelled() => Err(DriverInvocationError::WorkerCancelled),
+            };
+
+            heartbeat_cancel.cancel();
+            exit_result
         };
-
-        heartbeat_cancel.cancel();
+        // Keep heartbeat scoped above so a losing heartbeat future is dropped
+        // before exit application re-enters the same turn-state store.
 
         // Apply the exit or record recovery
         match exit_result {

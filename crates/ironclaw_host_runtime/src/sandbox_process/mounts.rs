@@ -313,6 +313,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn none_mounts_use_default_workspace_bind() {
+        let temp = tempfile::tempdir().unwrap();
+        let sources = RebornSandboxMountSources::default();
+
+        let binds = sources
+            .prepare_container_binds(temp.path(), None)
+            .await
+            .unwrap();
+
+        assert_eq!(binds.len(), 1);
+        assert_eq!(
+            binds[0].clone().into_docker_bind(),
+            format!("{}:/workspace:rw", temp.path().display())
+        );
+    }
+
+    #[tokio::test]
     async fn read_write_scoped_mount_initializes_target_directory() {
         let temp = tempfile::tempdir().unwrap();
         let source_root = temp.path().join("source");

@@ -271,7 +271,7 @@ fn unsupported_projection(
         package_ref,
         LifecyclePhase::UnsupportedOrLegacy,
         vec![LifecycleReadinessBlocker::runtime(Some(
-            "extension_lifecycle_store_unwired".to_string(),
+            "extension_lifecycle_local_runtime_unwired".to_string(),
         ))?],
     ))
 }

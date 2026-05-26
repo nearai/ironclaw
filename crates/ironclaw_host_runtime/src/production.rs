@@ -29,7 +29,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_processes::{
     ProcessCancellationRegistry, ProcessError, ProcessHost, ProcessManager, ProcessResultStore,
-    ProcessStatus, ProcessStore,
+    ProcessStart, ProcessStatus, ProcessStore,
 };
 use ironclaw_run_state::{
     ApprovalRequestStore, RunStateApprovalStore, RunStateError, RunStateStore, RunStatus,
@@ -262,6 +262,28 @@ impl DefaultHostRuntime {
     /// or [`Self::with_obligation_handler_dyn`].
     pub fn with_builtin_obligation_handler(self) -> Self {
         self.with_obligation_handler(Arc::new(BuiltinObligationHandler::new()))
+    }
+
+    /// Spawns an already-authorized process request through the configured
+    /// process manager.
+    pub async fn spawn_process(
+        &self,
+        start: ProcessStart,
+    ) -> Result<crate::RuntimeProcessHandle, HostRuntimeError> {
+        let Some(process_manager) = &self.process_manager else {
+            return Err(HostRuntimeError::Unavailable {
+                reason: "process manager unavailable".to_string(),
+            });
+        };
+        let capability_id = start.capability_id.clone();
+        let record = process_manager
+            .spawn(start)
+            .await
+            .map_err(unavailable_from_process_error)?;
+        Ok(crate::RuntimeProcessHandle {
+            process_id: record.process_id,
+            capability_id,
+        })
     }
 }
 

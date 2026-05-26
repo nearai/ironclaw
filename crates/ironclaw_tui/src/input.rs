@@ -18,6 +18,8 @@ pub(crate) enum InputAction {
     ToggleSidebar,
     /// Toggle between Conversation and Logs tabs.
     ToggleLogs,
+    /// Write the current log buffer to a file on disk (Ctrl-S in Logs tab).
+    DownloadLogs,
     /// Scroll conversation up.
     ScrollUp,
     /// Scroll conversation down.
@@ -123,6 +125,11 @@ pub(crate) fn map_key(
     // Log level filter keys only in logs tab
     if logs_active && let Some(action) = map_log_filter_key(key) {
         return action;
+    }
+
+    // Save logs only when the Logs tab is the focused view.
+    if logs_active && key.code == KeyCode::Char('s') && key.modifiers == KeyModifiers::CONTROL {
+        return InputAction::DownloadLogs;
     }
 
     match (key.code, key.modifiers) {
@@ -517,5 +524,14 @@ mod tests {
         assert_eq!(parse_slash_command("/help"), Some("/help"));
         assert_eq!(parse_slash_command("  /quit  "), Some("/quit"));
         assert_eq!(parse_slash_command("hello"), None);
+    }
+
+    #[test]
+    fn ctrl_s_triggers_download_only_in_logs_tab() {
+        let key = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        assert_eq!(map_logs(key), InputAction::DownloadLogs);
+        // Outside the Logs tab Ctrl-S must fall through to default text input,
+        // not silently dump the ring buffer from arbitrary contexts.
+        assert_eq!(map_default(key), InputAction::Forward);
     }
 }

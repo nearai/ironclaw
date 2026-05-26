@@ -249,19 +249,35 @@ pub async fn settings_set_handler(
 /// Keep this list narrow: every key added here causes an extra
 /// `Config::from_db_with_toml` round-trip plus a chain rebuild (retry, cache,
 /// circuit breaker wrappers), so non-LLM settings must not be listed.
+///
+/// Both exact-match keys and dotted-path subpaths under
+/// `llm_builtin_overrides.*` and `llm_custom_providers.*` trigger the
+/// reload — Layer D moved bedrock-specific settings into
+/// `llm_builtin_overrides["bedrock"].extras`, so a write to e.g.
+/// `llm_builtin_overrides.bedrock.extras.region` must also rebuild the
+/// chain.
 fn llm_setting_requires_reload(key: &str) -> bool {
-    matches!(
-        key,
-        "llm_backend"
-            | "selected_model"
-            | "llm_custom_providers"
-            | "llm_builtin_overrides"
-            | "ollama_base_url"
-            | "openai_compatible_base_url"
-            | "bedrock_region"
-            | "bedrock_cross_region"
-            | "bedrock_profile"
-    )
+    const EXACT: &[&str] = &[
+        "llm_backend",
+        "selected_model",
+        "llm_custom_providers",
+        "llm_builtin_overrides",
+        "ollama_base_url",
+        "openai_compatible_base_url",
+        // Legacy bedrock keys retained for backward-compat with
+        // settings.json files written before Layer D. New code writes to
+        // `llm_builtin_overrides.bedrock.extras.*` instead.
+        "bedrock_region",
+        "bedrock_cross_region",
+        "bedrock_profile",
+    ];
+    const PREFIX: &[&str] = &["llm_builtin_overrides", "llm_custom_providers"];
+    if EXACT.contains(&key) {
+        return true;
+    }
+    PREFIX.iter().any(|root| {
+        key.len() > root.len() + 1 && key.starts_with(root) && key.as_bytes()[root.len()] == b'.'
+    })
 }
 
 /// True when writes to `effective_user_id` actually feed the global provider
@@ -697,7 +713,11 @@ pub async fn settings_import_handler(
 fn is_admin_only_setting_key(key: &str) -> bool {
     // Single source of truth lives in `crate::config::helpers` so the
     // write-side gate here cannot drift from the read-side strip filter.
-    crate::config::helpers::ADMIN_ONLY_LLM_SETTING_KEYS.contains(&key)
+    // Must match dotted subpaths too: a non-admin write to
+    // `llm_builtin_overrides.bedrock.extras.region` reaches the same
+    // resolver state as a write to `llm_builtin_overrides`, so the gate
+    // has to cover both shapes.
+    crate::config::helpers::is_admin_only_llm_key(key)
 }
 
 fn ensure_setting_write_allowed(
@@ -1623,6 +1643,28 @@ mod tests {
         assert!(!is_admin_only_setting_key("selected_model"));
     }
 
+    /// Regression: dotted subpaths under an admin-only root must also be
+    /// gated. The read-side strip filter (`strip_admin_only_llm_keys`)
+    /// supports both exact-match and dotted-prefix matching; the
+    /// write-side gate used to only check exact match, so a non-admin
+    /// could write `llm_builtin_overrides.bedrock.extras.region` directly
+    /// even though the root key was protected.
+    #[test]
+    fn test_admin_only_setting_keys_cover_dotted_subpaths() {
+        assert!(is_admin_only_setting_key(
+            "llm_builtin_overrides.bedrock.extras.region"
+        ));
+        assert!(is_admin_only_setting_key(
+            "llm_builtin_overrides.bedrock.api_key"
+        ));
+        assert!(is_admin_only_setting_key(
+            "llm_custom_providers.my_provider.base_url"
+        ));
+        // Sanity: unrelated dotted subpaths must still be allowed.
+        assert!(!is_admin_only_setting_key("tool_permissions.http"));
+        assert!(!is_admin_only_setting_key("agent.name"));
+    }
+
     #[tokio::test]
     async fn test_settings_set_rejects_member_for_admin_only_key() {
         let secrets = test_secrets_store();
@@ -1681,47 +1723,14 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)] // env guard must span async hot-reload flow
     async fn settings_set_handler_triggers_llm_provider_hot_reload() {
-        use ironclaw_llm::{LlmConfig, SessionConfig, SessionManager, build_provider_chain};
+        use ironclaw_llm::{SessionConfig, SessionManager, build_provider_chain};
 
         let _env_guard = lock_env();
         let secrets = test_secrets_store();
         let (db, tmp) = crate::testing::test_db().await;
 
         // Starting config: NEAR AI backend with "model-start".
-        let mut initial = LlmConfig {
-            backend: "nearai".to_string(),
-            session: SessionConfig::default(),
-            nearai: ironclaw_llm::config::NearAiConfig {
-                model: "model-start".to_string(),
-                cheap_model: None,
-                base_url: "https://api.near.ai".to_string(),
-                api_key: None,
-                fallback_model: None,
-                max_retries: 0,
-                circuit_breaker_threshold: None,
-                circuit_breaker_recovery_secs: 30,
-                response_cache_enabled: false,
-                response_cache_ttl_secs: 3600,
-                response_cache_max_entries: 1000,
-                failover_cooldown_secs: 300,
-                failover_cooldown_threshold: 3,
-                smart_routing_cascade: true,
-            },
-            provider: None,
-            bedrock: None,
-            gemini_oauth: None,
-            request_timeout_secs: 120,
-            cheap_model: None,
-            smart_routing_cascade: true,
-            openai_codex: None,
-            max_retries: 0,
-            circuit_breaker_threshold: None,
-            circuit_breaker_recovery_secs: 30,
-            response_cache_enabled: false,
-            response_cache_ttl_secs: 3600,
-            response_cache_max_entries: 1000,
-        };
-        initial.nearai.model = "model-start".to_string();
+        let initial = ironclaw_llm::testing::nearai_test_config("model-start");
 
         let session = Arc::new(SessionManager::new(SessionConfig::default()));
         let (primary, _cheap, _recording, reload_handle) =
@@ -1834,44 +1843,12 @@ mod tests {
         Arc<dyn ironclaw_llm::LlmProvider>,
         tempfile::TempDir,
     ) {
-        use ironclaw_llm::{LlmConfig, SessionConfig, SessionManager, build_provider_chain};
+        use ironclaw_llm::{SessionConfig, SessionManager, build_provider_chain};
 
         let secrets = test_secrets_store();
         let (db, tmp) = crate::testing::test_db().await;
 
-        let initial = LlmConfig {
-            backend: "nearai".to_string(),
-            session: SessionConfig::default(),
-            nearai: ironclaw_llm::config::NearAiConfig {
-                model: "model-start".to_string(),
-                cheap_model: None,
-                base_url: "https://api.near.ai".to_string(),
-                api_key: None,
-                fallback_model: None,
-                max_retries: 0,
-                circuit_breaker_threshold: None,
-                circuit_breaker_recovery_secs: 30,
-                response_cache_enabled: false,
-                response_cache_ttl_secs: 3600,
-                response_cache_max_entries: 1000,
-                failover_cooldown_secs: 300,
-                failover_cooldown_threshold: 3,
-                smart_routing_cascade: true,
-            },
-            provider: None,
-            bedrock: None,
-            gemini_oauth: None,
-            request_timeout_secs: 120,
-            cheap_model: None,
-            smart_routing_cascade: true,
-            openai_codex: None,
-            max_retries: 0,
-            circuit_breaker_threshold: None,
-            circuit_breaker_recovery_secs: 30,
-            response_cache_enabled: false,
-            response_cache_ttl_secs: 3600,
-            response_cache_max_entries: 1000,
-        };
+        let initial = ironclaw_llm::testing::nearai_test_config("model-start");
         let session = Arc::new(SessionManager::new(SessionConfig::default()));
         let (primary, _cheap, _recording, reload_handle) =
             build_provider_chain(&initial, Arc::clone(&session))

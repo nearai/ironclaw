@@ -23,6 +23,7 @@ hex = "0.4"
 ironclaw_approvals = { path = "../ironclaw_approvals" }
 ironclaw_authorization = { path = "../ironclaw_authorization" }
 ironclaw_capabilities = { path = "../ironclaw_capabilities" }
+ironclaw_process_sandbox = { path = "../ironclaw_process_sandbox" }
 ironclaw_dispatcher = { path = "../ironclaw_dispatcher" }
 ironclaw_events = { path = "../ironclaw_events" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }

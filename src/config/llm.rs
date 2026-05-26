@@ -61,17 +61,6 @@ pub fn for_testing() -> LlmConfig {
     }
 }
 
-/// Resolve a model name from settings.selected_model -> env var -> hardcoded default.
-fn resolve_model(env_var: &str, settings: &Settings, default: &str) -> Result<String, ConfigError> {
-    if let Some(model) = selected_model_override(settings) {
-        Ok(model)
-    } else if let Some(model) = optional_env(env_var)? {
-        Ok(model)
-    } else {
-        Ok(default.to_string())
-    }
-}
-
 /// Resolve LLM configuration, with NearAI fallback for unusable configs.
 ///
 /// This entry point is for the **final** resolve after secrets have been
@@ -245,16 +234,15 @@ pub fn resolve(settings: &Settings) -> Result<LlmConfig, ConfigError> {
         );
     }
 
-    // Validate the backend is known
+    // Classify the backend by protocol. The registry knows all built-in
+    // backends including the dedicated-config ones (nearai/bedrock/codex/
+    // gemini_oauth) and their aliases.
     let backend_lower = backend.to_lowercase();
-    let is_nearai =
-        backend_lower == "nearai" || backend_lower == "near_ai" || backend_lower == "near";
-    let is_bedrock =
-        backend_lower == "bedrock" || backend_lower == "aws_bedrock" || backend_lower == "aws";
-    let is_gemini_oauth = backend_lower == "gemini_oauth" || backend_lower == "gemini-oauth";
-    let is_openai_codex = backend_lower == "openai_codex"
-        || backend_lower == "openai-codex"
-        || backend_lower == "codex";
+    let backend_protocol = registry.find(&backend_lower).map(|d| d.protocol);
+    let is_nearai = backend_protocol == Some(ProviderProtocol::NearAi);
+    let is_bedrock = backend_protocol == Some(ProviderProtocol::Bedrock);
+    let is_gemini_oauth = backend_protocol == Some(ProviderProtocol::GeminiOauth);
+    let is_openai_codex = backend_protocol == Some(ProviderProtocol::OpenAiCodex);
 
     // Check custom providers defined
     let custom_provider = settings
@@ -262,13 +250,7 @@ pub fn resolve(settings: &Settings) -> Result<LlmConfig, ConfigError> {
         .iter()
         .find(|p| p.id.to_lowercase() == backend_lower);
 
-    if !is_nearai
-        && !is_bedrock
-        && !is_gemini_oauth
-        && !is_openai_codex
-        && custom_provider.is_none()
-        && registry.find(&backend_lower).is_none()
-    {
+    if backend_protocol.is_none() && custom_provider.is_none() {
         tracing::warn!(
             "Unknown LLM backend '{}'. Will attempt as openai_compatible fallback.",
             backend
@@ -398,92 +380,66 @@ pub fn resolve(settings: &Settings) -> Result<LlmConfig, ConfigError> {
     };
 
     let bedrock = if is_bedrock {
-        let explicit_region = settings
-            .bedrock_region
-            .clone()
-            .or(optional_env("BEDROCK_REGION")?);
-        if explicit_region.is_none() {
-            tracing::debug!("BEDROCK_REGION not set, defaulting to us-east-1");
+        // Layer D: bedrock-specific settings live in
+        // `llm_builtin_overrides["bedrock"].extras` rather than
+        // top-level named fields. Legacy `bedrock_*` fields are
+        // migrated into this bag on `Settings::load`, so the resolver
+        // only needs to read from one place.
+        let bedrock_overrides = settings.llm_builtin_overrides.get("bedrock");
+        let extra = |key: &str| -> Option<String> {
+            bedrock_overrides
+                .and_then(|o| o.extra(key))
+                .map(str::to_string)
+        };
+        let region = extra("region").or(optional_env("BEDROCK_REGION")?);
+        if region.is_none() {
+            tracing::debug!(
+                "BEDROCK_REGION not set, defaulting to {}",
+                BedrockConfig::DEFAULT_REGION
+            );
         }
-        let region = explicit_region.unwrap_or_else(|| "us-east-1".to_string());
-        let model = selected_model_override(settings)
-            .or(optional_env("BEDROCK_MODEL")?)
-            .ok_or_else(|| ConfigError::MissingRequired {
-                key: "BEDROCK_MODEL".to_string(),
-                hint: "Set BEDROCK_MODEL or selected_model when LLM_BACKEND=bedrock".to_string(),
-            })?;
-        let cross_region = settings
-            .bedrock_cross_region
-            .clone()
-            .or(optional_env("BEDROCK_CROSS_REGION")?);
-        if let Some(ref cr) = cross_region
-            && !matches!(cr.as_str(), "us" | "eu" | "apac" | "global")
-        {
-            return Err(ConfigError::InvalidValue {
-                key: "BEDROCK_CROSS_REGION".to_string(),
-                message: format!(
-                    "'{}' is not valid, expected one of: us, eu, apac, global",
-                    cr
-                ),
-            });
-        }
-        let profile = settings
-            .bedrock_profile
-            .clone()
-            .or(optional_env("AWS_PROFILE")?);
-        Some(BedrockConfig {
-            region,
-            model,
-            cross_region,
-            profile,
-        })
+        let model = selected_model_override(settings).or(optional_env("BEDROCK_MODEL")?);
+        let cross_region = extra("cross_region").or(optional_env("BEDROCK_CROSS_REGION")?);
+        let profile = extra("profile").or(optional_env("AWS_PROFILE")?);
+        Some(BedrockConfig::build(region, model, cross_region, profile)?)
     } else {
         None
     };
 
-    // Resolve OpenAI Codex config
+    // Resolve OpenAI Codex config. Defaults live in `OpenAiCodexConfig::build`;
+    // this side owns env reading and SSRF validation against the resolved URLs.
     let openai_codex = if is_openai_codex {
-        // Model: settings.selected_model > OPENAI_CODEX_MODEL > OPENAI_MODEL > default
-        let model = selected_model_override(settings)
-            .or(optional_env("OPENAI_CODEX_MODEL")?)
-            .or(optional_env("OPENAI_MODEL")?)
-            .unwrap_or_else(|| "gpt-5.3-codex".to_string());
-        let auth_endpoint = optional_env("OPENAI_CODEX_AUTH_URL")?
-            .unwrap_or_else(|| "https://auth.openai.com".to_string());
-        validate_base_url(&auth_endpoint, "OPENAI_CODEX_AUTH_URL")?;
-        let api_base_url = optional_env("OPENAI_CODEX_API_URL")?
-            .unwrap_or_else(|| "https://chatgpt.com/backend-api/codex".to_string());
-        validate_base_url(&api_base_url, "OPENAI_CODEX_API_URL")?;
-        let client_id = optional_env("OPENAI_CODEX_CLIENT_ID")?
-            .unwrap_or_else(|| "app_EMoamEEZ73f0CkXaXp7hrann".to_string());
-        let session_path = optional_env("OPENAI_CODEX_SESSION_PATH")?
-            .map(PathBuf::from)
-            .unwrap_or_else(|| ironclaw_base_dir().join("openai_codex_session.json"));
-        let token_refresh_margin_secs =
-            parse_optional_env("OPENAI_CODEX_REFRESH_MARGIN_SECS", 300)?;
-        Some(OpenAiCodexConfig {
-            model,
-            auth_endpoint,
-            api_base_url,
-            client_id,
-            session_path,
-            token_refresh_margin_secs,
-        })
+        let cfg = OpenAiCodexConfig::build(
+            // Model: settings.selected_model > OPENAI_CODEX_MODEL > OPENAI_MODEL > default
+            selected_model_override(settings)
+                .or(optional_env("OPENAI_CODEX_MODEL")?)
+                .or(optional_env("OPENAI_MODEL")?),
+            optional_env("OPENAI_CODEX_AUTH_URL")?,
+            optional_env("OPENAI_CODEX_API_URL")?,
+            optional_env("OPENAI_CODEX_CLIENT_ID")?,
+            optional_env("OPENAI_CODEX_SESSION_PATH")?.map(PathBuf::from),
+            optional_env("OPENAI_CODEX_REFRESH_MARGIN_SECS")?
+                .map(|s| s.parse::<u64>())
+                .transpose()
+                .map_err(|e| ConfigError::InvalidValue {
+                    key: "OPENAI_CODEX_REFRESH_MARGIN_SECS".to_string(),
+                    message: format!("must be a non-negative integer: {e}"),
+                })?,
+        );
+        validate_base_url(&cfg.auth_endpoint, "OPENAI_CODEX_AUTH_URL")?;
+        validate_base_url(&cfg.api_base_url, "OPENAI_CODEX_API_URL")?;
+        Some(cfg)
     } else {
         None
     };
 
     let request_timeout_secs = parse_optional_env("LLM_REQUEST_TIMEOUT_SECS", 120)?;
 
-    let gemini_oauth = if backend_lower == "gemini_oauth" || backend_lower == "gemini-oauth" {
-        let model = resolve_model("GEMINI_MODEL", settings, "gemini-2.5-flash")?;
-        let credentials_path = optional_env("GEMINI_CREDENTIALS_PATH")?
-            .map(PathBuf::from)
-            .unwrap_or_else(GeminiOauthConfig::default_credentials_path);
-        Some(GeminiOauthConfig {
-            model,
-            credentials_path,
-        })
+    let gemini_oauth = if is_gemini_oauth {
+        Some(GeminiOauthConfig::build(
+            selected_model_override(settings).or(optional_env("GEMINI_MODEL")?),
+            optional_env("GEMINI_CREDENTIALS_PATH")?.map(PathBuf::from),
+        ))
     } else {
         None
     };
@@ -552,20 +508,17 @@ pub fn resolve(settings: &Settings) -> Result<LlmConfig, ConfigError> {
         })?
         .unwrap_or(nearai.response_cache_max_entries);
 
+    // Canonical backend id: registry-resolved when the backend is known,
+    // otherwise the resolved registry provider's id, otherwise the raw
+    // (lowercased) backend string the caller passed.
+    let canonical_backend = registry
+        .find(&backend_lower)
+        .map(|d| d.id.clone())
+        .or_else(|| provider.as_ref().map(|p| p.provider_id.clone()))
+        .unwrap_or(backend_lower);
+
     Ok(LlmConfig {
-        backend: if is_nearai {
-            "nearai".to_string()
-        } else if is_bedrock {
-            "bedrock".to_string()
-        } else if is_gemini_oauth {
-            "gemini_oauth".to_string()
-        } else if is_openai_codex {
-            "openai_codex".to_string()
-        } else if let Some(ref p) = provider {
-            p.provider_id.clone()
-        } else {
-            backend_lower
-        },
+        backend: canonical_backend,
         session,
         nearai,
         provider,
@@ -701,20 +654,21 @@ fn resolve_registry_provider(
     // is also overridden to the private ChatGPT backend endpoint.
     let mut codex_base_url_override: Option<String> = None;
     let codex_creds = if parse_optional_env("LLM_USE_CODEX_AUTH", false)? {
-        let path = optional_env("CODEX_AUTH_PATH")?
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(ironclaw_llm::codex_auth::default_codex_auth_path);
-        ironclaw_llm::codex_auth::load_codex_credentials(&path)
+        let override_path = optional_env("CODEX_AUTH_PATH")?.map(std::path::PathBuf::from);
+        ironclaw_llm::auth::load_persisted_credentials(
+            ironclaw_llm::auth::CredentialSource::CodexCli,
+            override_path.as_deref(),
+        )
     } else {
         None
     };
 
     let codex_refresh_token = codex_creds.as_ref().and_then(|c| c.refresh_token.clone());
-    let codex_auth_path = codex_creds.as_ref().and_then(|c| c.auth_path.clone());
+    let codex_auth_path = codex_creds.as_ref().and_then(|c| c.source_path.clone());
 
     let api_key = if let Some(creds) = codex_creds {
-        if creds.is_chatgpt_mode {
-            codex_base_url_override = Some(creds.base_url().to_string());
+        if creds.is_subscription {
+            codex_base_url_override = Some(creds.base_url.clone());
         }
         Some(creds.token)
     } else if let Some(env_var) = api_key_env {
@@ -810,7 +764,7 @@ fn resolve_registry_provider(
     };
     let extra_headers = if canonical_id == "github_copilot" {
         merge_extra_headers(
-            ironclaw_llm::github_copilot_auth::default_headers(),
+            ironclaw_llm::auth::default_headers(ironclaw_llm::auth::AuthBackend::GithubCopilot),
             extra_headers,
         )
     } else {
@@ -1779,6 +1733,7 @@ mod tests {
                 api_key: None,
                 model: Some("llama-3.1-8b-instant".to_string()),
                 base_url: None,
+                extras: Default::default(),
             },
         );
         let settings = Settings {
@@ -1831,6 +1786,7 @@ mod tests {
                 api_key: None,
                 model: Some("llama-3.1-8b-instant".to_string()),
                 base_url: None,
+                extras: Default::default(),
             },
         );
         let settings = Settings {
@@ -1889,6 +1845,7 @@ mod tests {
                 api_key: Some("gsk_test_key".to_string()),
                 model: Some("llama-3.3-70b-versatile".to_string()),
                 base_url: None,
+                extras: Default::default(),
             },
         );
         let settings = Settings {
@@ -2097,6 +2054,7 @@ mod tests {
                 api_key: Some("gsk_from_db".to_string()),
                 model: None,
                 base_url: None,
+                extras: Default::default(),
             },
         );
         let settings = Settings {
@@ -2139,6 +2097,7 @@ mod tests {
                 api_key: None,
                 model: Some("model-from-db".to_string()),
                 base_url: None,
+                extras: Default::default(),
             },
         );
         let settings = Settings {
@@ -2268,6 +2227,7 @@ mod tests {
                 api_key: None,
                 model: Some("model-from-db-override".to_string()),
                 base_url: None,
+                extras: Default::default(),
             },
         );
         let settings = Settings {
@@ -2304,6 +2264,7 @@ mod tests {
                 api_key: None,
                 model: Some("model-from-override".to_string()),
                 base_url: None,
+                extras: Default::default(),
             },
         );
         let settings = Settings {
@@ -2337,6 +2298,7 @@ mod tests {
                 api_key: None,
                 model: None,
                 base_url: Some("http://localhost:9002".to_string()),
+                extras: Default::default(),
             },
         );
         let settings = Settings {
@@ -2400,6 +2362,7 @@ mod tests {
                 api_key: Some("key-from-db".to_string()),
                 model: None,
                 base_url: None,
+                extras: Default::default(),
             },
         );
         let settings = Settings {
@@ -2455,6 +2418,7 @@ mod tests {
                 api_key: Some("some-key".to_string()),
                 model: None,
                 base_url: None,
+                extras: Default::default(),
             },
         );
         let settings_with_key = Settings {
@@ -2488,6 +2452,7 @@ mod tests {
                 api_key: None,
                 model: None,
                 base_url: Some("http://localhost:9004".to_string()),
+                extras: Default::default(),
             },
         );
         let settings = Settings {

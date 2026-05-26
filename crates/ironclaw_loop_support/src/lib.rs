@@ -988,14 +988,16 @@ where
 
         let host_response_result = match gateway_result {
             Ok(response) => {
+                let chunks = response
+                    .safe_text_deltas
+                    .into_iter()
+                    .map(|safe_text_delta| ModelStreamChunk {
+                        safe_text_delta: sanitize_model_visible_text(safe_text_delta),
+                    })
+                    .collect::<Vec<_>>();
                 let loop_response = LoopModelResponse {
-                    chunks: response
-                        .safe_text_deltas
-                        .into_iter()
-                        .map(|safe_text_delta| ModelStreamChunk {
-                            safe_text_delta: sanitize_model_visible_text(safe_text_delta),
-                        })
-                        .collect(),
+                    chunks,
+                    safe_reasoning_deltas: response.safe_reasoning_deltas,
                     output: response.output,
                     effective_model_profile_id: model_profile_id.clone(),
                 };
@@ -1426,6 +1428,8 @@ impl HostManagedModelMessageRole {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostManagedModelResponse {
     pub safe_text_deltas: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub safe_reasoning_deltas: Vec<String>,
     pub output: ParentLoopOutput,
 }
 
@@ -1435,10 +1439,20 @@ impl HostManagedModelResponse {
         let safe_content = sanitize_model_visible_text(content);
         Self {
             safe_text_deltas: vec![safe_content.clone()],
+            safe_reasoning_deltas: Vec::new(),
             output: ParentLoopOutput::AssistantReply(AssistantReply {
                 content: safe_content,
             }),
         }
+    }
+
+    pub fn assistant_reply_with_reasoning(
+        content: impl Into<String>,
+        reasoning: Option<String>,
+    ) -> Self {
+        let mut response = Self::assistant_reply(content);
+        response.safe_reasoning_deltas = sanitized_reasoning_deltas(reasoning);
+        response
     }
 
     pub fn capability_calls(
@@ -1452,9 +1466,28 @@ impl HostManagedModelResponse {
             } else {
                 vec![safe_text_delta]
             },
+            safe_reasoning_deltas: Vec::new(),
             output: ParentLoopOutput::CapabilityCalls(calls),
         }
     }
+
+    pub fn capability_calls_with_reasoning(
+        calls: Vec<ironclaw_turns::run_profile::CapabilityCallCandidate>,
+        safe_text_delta: impl Into<String>,
+        reasoning: Option<String>,
+    ) -> Self {
+        let mut response = Self::capability_calls(calls, safe_text_delta);
+        response.safe_reasoning_deltas = sanitized_reasoning_deltas(reasoning);
+        response
+    }
+}
+
+fn sanitized_reasoning_deltas(reasoning: Option<String>) -> Vec<String> {
+    reasoning
+        .map(sanitize_model_visible_text)
+        .filter(|reasoning| !reasoning.is_empty())
+        .into_iter()
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

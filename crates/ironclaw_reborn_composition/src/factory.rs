@@ -66,6 +66,7 @@ use ironclaw_turns::{
     InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore, InMemoryTurnStateStore,
 };
 
+use crate::default_system_prompt::seed_default_system_prompt;
 use crate::input::{RebornRuntimeProcessBinding, RebornStorageInput};
 use crate::local_dev_mounts::{
     skill_context_mount_view, skill_management_mount_view, workspace_mount_view,
@@ -91,6 +92,8 @@ type LocalDevWorkspaceFilesystems = (
     Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     MountView,
 );
+
+const LOCAL_DEV_DEFAULT_SYSTEM_PROMPT_PATH: &str = "system/prompts/default-system.md";
 
 #[cfg(feature = "libsql")]
 pub(crate) type LocalDevTurnStateStore = FilesystemTurnStateStore<LocalDevRootFilesystem>;
@@ -184,6 +187,9 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) skill_management: Arc<RebornLocalSkillManagementPort>,
+    // LocalSingleUser-only for now. Production and multi-tenant lifecycle
+    // wiring need scoped storage/registry ownership before this is reused
+    // outside local-dev composition. Tracked in #4091.
     pub(crate) extension_management: Option<Arc<RebornLocalExtensionManagementPort>>,
     pub(crate) skill_mounts: MountView,
     pub(crate) skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
@@ -191,6 +197,8 @@ pub(crate) struct RebornLocalRuntimeServices {
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     pub(crate) subagent_goal_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     pub(crate) workspace_mounts: MountView,
+    pub(crate) local_dev_storage_root: PathBuf,
+    pub(crate) default_system_prompt_path: PathBuf,
     pub(crate) event_log: Arc<dyn DurableEventLog>,
     pub(crate) audit_log: Arc<dyn DurableAuditLog>,
 }
@@ -336,6 +344,12 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         (false, None) => None,
     };
     validate_local_dev_workspace_skill_isolation(&root, &workspace_root)?;
+    let default_system_prompt_path = local_dev_default_system_prompt_path(&root);
+    seed_default_system_prompt(&root, &default_system_prompt_path).map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: error.to_string(),
+        }
+    })?;
     let filesystem =
         build_local_dev_root_filesystem(&root, &workspace_root, host_home_root.as_ref()).await?;
     let (skill_filesystem, workspace_filesystem, runtime_workspace_mounts) =
@@ -349,6 +363,8 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         skill_filesystem,
         workspace_filesystem,
         runtime_workspace_mounts,
+        root.clone(),
+        default_system_prompt_path,
     )?;
 
     let mut services = HostRuntimeServices::new(
@@ -436,6 +452,8 @@ fn build_local_dev_store_graph(
     skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     workspace_mounts: MountView,
+    local_dev_storage_root: PathBuf,
+    default_system_prompt_path: PathBuf,
 ) -> Result<RebornLocalDevStoreGraph, RebornBuildError> {
     let scoped_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
     let event_log = local_dev_event_log(Arc::clone(&filesystem))?;
@@ -484,6 +502,8 @@ fn build_local_dev_store_graph(
         workspace_filesystem,
         subagent_goal_filesystem: Arc::clone(&scoped_filesystem),
         workspace_mounts,
+        local_dev_storage_root,
+        default_system_prompt_path,
         event_log,
         audit_log,
     });
@@ -511,6 +531,8 @@ fn build_local_dev_store_graph(
     skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     workspace_mounts: MountView,
+    local_dev_storage_root: PathBuf,
+    default_system_prompt_path: PathBuf,
 ) -> Result<RebornLocalDevStoreGraph, RebornBuildError> {
     #[cfg(feature = "postgres")]
     let subagent_goal_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
@@ -554,6 +576,8 @@ fn build_local_dev_store_graph(
         #[cfg(feature = "postgres")]
         subagent_goal_filesystem,
         workspace_mounts,
+        local_dev_storage_root,
+        default_system_prompt_path,
         event_log,
         audit_log,
     });
@@ -879,6 +903,10 @@ fn validate_local_dev_workspace_skill_isolation(
         }
     }
     Ok(())
+}
+
+fn local_dev_default_system_prompt_path(storage_root: &Path) -> PathBuf {
+    storage_root.join(LOCAL_DEV_DEFAULT_SYSTEM_PROMPT_PATH)
 }
 
 fn paths_overlap(left: &Path, right: &Path) -> bool {
@@ -1298,6 +1326,14 @@ mod tests {
         assert!(services.turn_coordinator.is_some());
         assert!(services.product_auth.is_some());
         assert!(services.local_runtime.is_some());
+        assert!(
+            services
+                .local_runtime
+                .as_ref()
+                .expect("local runtime")
+                .extension_management
+                .is_some()
+        );
         assert_eq!(services.readiness.state, RebornReadinessState::DevOnly);
     }
 

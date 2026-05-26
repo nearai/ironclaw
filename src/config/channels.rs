@@ -40,6 +40,10 @@ pub struct ChannelsConfig {
     /// telegram webhook installation; the v1 path must NOT be active for
     /// the same installation in that mode.
     pub reborn_telegram_v2_enabled: bool,
+    /// Runtime config overrides for WASM channels.
+    ///
+    /// Key format: `<channel>:<config_key>` (e.g. `wecom:allow_from`).
+    pub wasm_channel_runtime_overrides: HashMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -457,6 +461,7 @@ impl ChannelsConfig {
                 ids
             },
             reborn_telegram_v2_enabled: parse_bool_env("REBORN_TELEGRAM_V2_ENABLED", false)?,
+            wasm_channel_runtime_overrides: cs.wasm_channel_runtime_overrides.clone(),
         };
         // Config-time check: only the env-var view of v1 is available here.
         // The runtime startup path re-runs the validator with the
@@ -549,6 +554,7 @@ mod telegram_v2_tests {
             },
             wasm_channel_owner_ids: HashMap::new(),
             reborn_telegram_v2_enabled: v2_active,
+            wasm_channel_runtime_overrides: HashMap::new(),
         }
     }
 
@@ -907,6 +913,7 @@ mod tests {
             configured_wasm_channels: Vec::new(),
             wasm_channel_owner_ids: HashMap::new(),
             reborn_telegram_v2_enabled: false,
+            wasm_channel_runtime_overrides: HashMap::new(),
         };
         assert!(cfg.cli.enabled);
         assert!(cfg.http.is_none());
@@ -916,6 +923,7 @@ mod tests {
         assert!(cfg.wasm_channels_enabled);
         assert!(cfg.wasm_channel_owner_ids.is_empty());
         assert!(!cfg.reborn_telegram_v2_enabled);
+        assert!(cfg.wasm_channel_runtime_overrides.is_empty());
     }
 
     #[test]
@@ -935,6 +943,7 @@ mod tests {
             configured_wasm_channels: vec!["telegram".to_string()],
             wasm_channel_owner_ids: ids,
             reborn_telegram_v2_enabled: false,
+            wasm_channel_runtime_overrides: HashMap::new(),
         };
         assert_eq!(cfg.wasm_channel_owner_ids.get("telegram"), Some(&12345));
         assert_eq!(cfg.wasm_channel_owner_ids.get("slack"), Some(&67890));

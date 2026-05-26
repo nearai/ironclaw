@@ -617,6 +617,7 @@ async fn text_only_model_reply_driver_redacts_credential_marker_reply_text() {
     let mut fixture = HostFixture::new("thread-driver-marker-reply", "hello config").await;
     fixture.gateway.set_response(Ok(HostManagedModelResponse {
         safe_text_deltas: vec!["Use OPENAI_API_KEY in the environment".to_string()],
+        safe_reasoning_deltas: Vec::new(),
         output: ParentLoopOutput::AssistantReply(AssistantReply {
             content: "Use OPENAI_API_KEY in the environment".to_string(),
         }),
@@ -6711,6 +6712,7 @@ impl RecordingGateway {
     fn respond_with_capability_calls(&self) {
         *self.response.lock().unwrap() = Ok(HostManagedModelResponse {
             safe_text_deltas: Vec::new(),
+            safe_reasoning_deltas: Vec::new(),
             output: ParentLoopOutput::CapabilityCalls(vec![
                 ironclaw_turns::run_profile::CapabilityCallCandidate {
                     surface_version: CapabilitySurfaceVersion::new("empty:v1").unwrap(),

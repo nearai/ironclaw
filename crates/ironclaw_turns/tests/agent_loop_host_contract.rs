@@ -45,6 +45,7 @@ async fn two_fake_drivers_use_the_same_per_run_agent_loop_host_contract() {
     let host = Arc::new(RecordingAgentLoopHost::new(claimed_run_context().await));
     host.push_model_response(LoopModelResponse {
         chunks: Vec::new(),
+        safe_reasoning_deltas: Vec::new(),
         output: ParentLoopOutput::AssistantReply(AssistantReply {
             content: "done".to_string(),
         }),
@@ -123,6 +124,9 @@ async fn host_managed_model_port_routes_gateway_and_emits_model_milestones() {
         chunks: vec![ironclaw_turns::run_profile::ModelStreamChunk {
             safe_text_delta: "safe delta".to_string(),
         }],
+        safe_reasoning_deltas: vec![
+            "checking sk-proj-abcdefghijklmnopqrstuvwxyz123456".to_string(),
+        ],
         output: ParentLoopOutput::AssistantReply(AssistantReply {
             content: "RAW_ASSISTANT_CONTENT_SENTINEL".to_string(),
         }),
@@ -158,10 +162,12 @@ async fn host_managed_model_port_routes_gateway_and_emits_model_milestones() {
             .iter()
             .map(|milestone| milestone.kind.kind_name())
             .collect::<Vec<_>>(),
-        vec!["model_started", "model_completed"]
+        vec!["model_started", "model_reasoning_delta", "model_completed"]
     );
     let serialized_milestones = serde_json::to_string(&milestone_sink.milestones()).unwrap();
     assert!(!serialized_milestones.contains("RAW_ASSISTANT_CONTENT_SENTINEL"));
+    assert!(!serialized_milestones.contains("sk-proj-abcdefghijklmnopqrstuvwxyz123456"));
+    assert!(serialized_milestones.contains("[redacted]"));
 }
 
 #[tokio::test]
@@ -173,6 +179,7 @@ async fn host_managed_model_port_returns_response_when_model_started_milestone_f
         chunks: vec![ironclaw_turns::run_profile::ModelStreamChunk {
             safe_text_delta: "safe delta".to_string(),
         }],
+        safe_reasoning_deltas: Vec::new(),
         output: ParentLoopOutput::AssistantReply(AssistantReply {
             content: "model response survived start milestone failure".to_string(),
         }),
@@ -211,6 +218,7 @@ async fn host_managed_model_port_returns_response_when_model_completed_milestone
         chunks: vec![ironclaw_turns::run_profile::ModelStreamChunk {
             safe_text_delta: "safe delta".to_string(),
         }],
+        safe_reasoning_deltas: Vec::new(),
         output: ParentLoopOutput::AssistantReply(AssistantReply {
             content: "model response survived milestone failure".to_string(),
         }),
@@ -2491,6 +2499,7 @@ fn success_response(context: &LoopRunContext) -> LoopModelResponse {
         chunks: vec![ironclaw_turns::run_profile::ModelStreamChunk {
             safe_text_delta: "safe delta".to_string(),
         }],
+        safe_reasoning_deltas: Vec::new(),
         output: ParentLoopOutput::AssistantReply(AssistantReply {
             content: "hello".to_string(),
         }),
@@ -2582,6 +2591,7 @@ async fn redaction_sentinels_never_leak_through_serialized_surfaces() {
         chunks: vec![ironclaw_turns::run_profile::ModelStreamChunk {
             safe_text_delta: "RAW_CREDENTIAL_SENTINEL visible in chunk".to_string(),
         }],
+        safe_reasoning_deltas: Vec::new(),
         output: ParentLoopOutput::AssistantReply(AssistantReply {
             content: "sk-test-key-12345 leaked content".to_string(),
         }),

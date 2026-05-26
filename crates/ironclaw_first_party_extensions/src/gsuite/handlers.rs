@@ -755,7 +755,7 @@ fn encode_percent(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::HostApiError;
+    use ironclaw_host_api::{HostApiError, RuntimeHttpEgressResponse};
 
     use super::*;
 
@@ -922,5 +922,55 @@ mod tests {
         assert!(gmail_messages.contains("q=is%3Aunread%20from%3Aada"));
         assert!(gmail_messages.contains("labelIds=INBOX"));
         assert!(gmail_messages.contains("labelIds=Team%20Label"));
+    }
+
+    #[test]
+    fn merge_attendees_deduplicates_email_case_insensitively() {
+        let merged = merge_attendees(
+            vec![
+                serde_json::json!({"email": "Alice@Example.com", "name": "old"}),
+                serde_json::json!({"email": "bob@example.com"}),
+            ],
+            vec![
+                serde_json::json!({"email": "alice@example.com", "name": "new"}),
+                serde_json::json!({"email": "carol@example.com"}),
+            ],
+        );
+
+        assert_eq!(merged.len(), 3);
+        assert_eq!(merged[0]["name"], "new");
+        assert_eq!(merged[2]["email"], "carol@example.com");
+    }
+
+    #[test]
+    fn response_etag_reads_case_insensitive_header_body_fallback_and_absent_case() {
+        let response = RuntimeHttpEgressResponse {
+            status: 200,
+            headers: vec![("ETag".to_string(), "header-etag".to_string())],
+            body: Vec::new(),
+            request_bytes: 0,
+            response_bytes: 0,
+            redaction_applied: false,
+        };
+        assert_eq!(
+            response_etag(&response, &serde_json::json!({"etag": "body-etag"})),
+            Some("header-etag".to_string())
+        );
+
+        let response_without_header = RuntimeHttpEgressResponse {
+            headers: Vec::new(),
+            ..response
+        };
+        assert_eq!(
+            response_etag(
+                &response_without_header,
+                &serde_json::json!({"etag": "body-etag"})
+            ),
+            Some("body-etag".to_string())
+        );
+        assert_eq!(
+            response_etag(&response_without_header, &serde_json::json!({})),
+            None
+        );
     }
 }

@@ -30,6 +30,7 @@ fn channels_cfg(v1_enabled: bool, v1_telegram_listed: bool, v2_enabled: bool) ->
         },
         wasm_channel_owner_ids: HashMap::new(),
         reborn_telegram_v2_enabled: v2_enabled,
+        wasm_channel_runtime_overrides: HashMap::new(),
     }
 }
 

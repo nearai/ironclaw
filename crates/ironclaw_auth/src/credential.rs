@@ -111,10 +111,146 @@ pub struct CredentialAccountProjection {
     pub secret_handle_count: usize,
 }
 
+/// Product-facing credential recovery state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialRecoveryKind {
+    Configured,
+    SetupRequired,
+    ReauthorizeRequired,
+    AccountSelectionRequired,
+}
+
+/// Stable reason a product surface can render without inspecting backend
+/// errors or secret handles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialRecoveryReason {
+    Configured,
+    NoAccount,
+    AccountMissing,
+    PendingSetup,
+    AccountExpired,
+    RefreshFailed,
+    AccountRevoked,
+    AccountInactive,
+    AmbiguousAccount,
+}
+
+/// Adapter-safe credential recovery projection. Account entries are filtered
+/// to choices authorized for the requester and never include backend secret
+/// handle names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialRecoveryProjection {
+    pub provider: AuthProviderId,
+    pub reason: CredentialRecoveryReason,
+    #[serde(flatten)]
+    pub state: CredentialRecoveryState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CredentialRecoveryState {
+    Configured {
+        selected_account: CredentialAccountProjection,
+    },
+    SetupRequired {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        choices: Vec<CredentialAccountProjection>,
+    },
+    ReauthorizeRequired {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        choices: Vec<CredentialAccountProjection>,
+    },
+    AccountSelectionRequired {
+        choices: Vec<CredentialAccountProjection>,
+    },
+}
+
+impl CredentialRecoveryProjection {
+    pub fn configured(
+        provider: AuthProviderId,
+        selected_account: CredentialAccountProjection,
+    ) -> Self {
+        Self {
+            provider,
+            reason: CredentialRecoveryReason::Configured,
+            state: CredentialRecoveryState::Configured { selected_account },
+        }
+    }
+
+    pub fn setup_required(
+        provider: AuthProviderId,
+        reason: CredentialRecoveryReason,
+        choices: Vec<CredentialAccountProjection>,
+    ) -> Self {
+        Self {
+            provider,
+            reason,
+            state: CredentialRecoveryState::SetupRequired { choices },
+        }
+    }
+
+    pub fn reauthorize_required(
+        provider: AuthProviderId,
+        reason: CredentialRecoveryReason,
+        choices: Vec<CredentialAccountProjection>,
+    ) -> Self {
+        Self {
+            provider,
+            reason,
+            state: CredentialRecoveryState::ReauthorizeRequired { choices },
+        }
+    }
+
+    pub fn account_selection_required(
+        provider: AuthProviderId,
+        choices: Vec<CredentialAccountProjection>,
+    ) -> Self {
+        Self {
+            provider,
+            reason: CredentialRecoveryReason::AmbiguousAccount,
+            state: CredentialRecoveryState::AccountSelectionRequired { choices },
+        }
+    }
+
+    pub fn kind(&self) -> CredentialRecoveryKind {
+        match &self.state {
+            CredentialRecoveryState::Configured { .. } => CredentialRecoveryKind::Configured,
+            CredentialRecoveryState::SetupRequired { .. } => CredentialRecoveryKind::SetupRequired,
+            CredentialRecoveryState::ReauthorizeRequired { .. } => {
+                CredentialRecoveryKind::ReauthorizeRequired
+            }
+            CredentialRecoveryState::AccountSelectionRequired { .. } => {
+                CredentialRecoveryKind::AccountSelectionRequired
+            }
+        }
+    }
+
+    pub fn selected_account(&self) -> Option<&CredentialAccountProjection> {
+        match &self.state {
+            CredentialRecoveryState::Configured { selected_account } => Some(selected_account),
+            CredentialRecoveryState::SetupRequired { .. }
+            | CredentialRecoveryState::ReauthorizeRequired { .. }
+            | CredentialRecoveryState::AccountSelectionRequired { .. } => None,
+        }
+    }
+
+    pub fn choices(&self) -> &[CredentialAccountProjection] {
+        match &self.state {
+            CredentialRecoveryState::Configured { .. } => &[],
+            CredentialRecoveryState::SetupRequired { choices }
+            | CredentialRecoveryState::ReauthorizeRequired { choices }
+            | CredentialRecoveryState::AccountSelectionRequired { choices } => choices,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialAccountListRequest {
     pub scope: AuthProductScope,
     pub provider: AuthProviderId,
+    pub requester_extension: Option<ExtensionId>,
     pub cursor: Option<CredentialAccountId>,
     pub limit: usize,
 }
@@ -127,9 +263,15 @@ impl CredentialAccountListRequest {
         Self {
             scope,
             provider,
+            requester_extension: None,
             cursor: None,
             limit: Self::DEFAULT_LIMIT,
         }
+    }
+
+    pub fn for_extension(mut self, extension_id: ExtensionId) -> Self {
+        self.requester_extension = Some(extension_id);
+        self
     }
 
     pub fn with_cursor(mut self, cursor: CredentialAccountId) -> Self {
@@ -158,11 +300,55 @@ impl CredentialAccountListRequest {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialAccountLookupRequest {
+    pub scope: AuthProductScope,
+    pub account_id: CredentialAccountId,
+    pub requester_extension: Option<ExtensionId>,
+}
+
+impl CredentialAccountLookupRequest {
+    pub fn new(scope: AuthProductScope, account_id: CredentialAccountId) -> Self {
+        Self {
+            scope,
+            account_id,
+            requester_extension: None,
+        }
+    }
+
+    pub fn for_extension(mut self, extension_id: ExtensionId) -> Self {
+        self.requester_extension = Some(extension_id);
+        self
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CredentialAccountListPage {
     pub accounts: Vec<CredentialAccountProjection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<CredentialAccountId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialRecoveryRequest {
+    pub scope: AuthProductScope,
+    pub provider: AuthProviderId,
+    pub requester_extension: Option<ExtensionId>,
+}
+
+impl CredentialRecoveryRequest {
+    pub fn new(scope: AuthProductScope, provider: AuthProviderId) -> Self {
+        Self {
+            scope,
+            provider,
+            requester_extension: None,
+        }
+    }
+
+    pub fn for_extension(mut self, extension_id: ExtensionId) -> Self {
+        self.requester_extension = Some(extension_id);
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,6 +363,34 @@ impl CredentialAccountSelectionRequest {
         Self {
             scope,
             provider,
+            requester_extension: None,
+        }
+    }
+
+    pub fn for_extension(mut self, extension_id: ExtensionId) -> Self {
+        self.requester_extension = Some(extension_id);
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialAccountChoiceRequest {
+    pub scope: AuthProductScope,
+    pub provider: AuthProviderId,
+    pub account_id: CredentialAccountId,
+    pub requester_extension: Option<ExtensionId>,
+}
+
+impl CredentialAccountChoiceRequest {
+    pub fn new(
+        scope: AuthProductScope,
+        provider: AuthProviderId,
+        account_id: CredentialAccountId,
+    ) -> Self {
+        Self {
+            scope,
+            provider,
+            account_id,
             requester_extension: None,
         }
     }
@@ -223,8 +437,7 @@ pub trait CredentialAccountService: Send + Sync {
 
     async fn get_account(
         &self,
-        scope: &AuthProductScope,
-        account_id: CredentialAccountId,
+        request: CredentialAccountLookupRequest,
     ) -> Result<Option<CredentialAccount>, AuthProductError>;
 
     async fn list_accounts(
@@ -242,6 +455,16 @@ pub trait CredentialAccountService: Send + Sync {
     async fn select_unique_configured_account(
         &self,
         request: CredentialAccountSelectionRequest,
+    ) -> Result<CredentialAccountProjection, AuthProductError>;
+
+    async fn project_credential_recovery(
+        &self,
+        request: CredentialRecoveryRequest,
+    ) -> Result<CredentialRecoveryProjection, AuthProductError>;
+
+    async fn select_configured_account(
+        &self,
+        request: CredentialAccountChoiceRequest,
     ) -> Result<CredentialAccountProjection, AuthProductError>;
 }
 
