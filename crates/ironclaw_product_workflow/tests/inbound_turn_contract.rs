@@ -6,14 +6,14 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{AgentId, CapabilityId, InvocationId, TenantId, ThreadId, UserId};
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
     EmptyLoopCapabilityPort, HostIdentityContextBuildError, HostIdentityContextCandidate,
     HostIdentityContextSource, HostInputBatch, HostInputQueue, HostInputQueueError,
     HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
-    HostManagedModelResponse, ProductLiveCancellationProbe, RunCancellationFactory,
-    RunCancellationHandle,
+    HostManagedModelResponse, JsonSpawnSubagentInputCodec, LoopCapabilityResultWriter,
+    ProductLiveCancellationProbe, RunCancellationFactory, RunCancellationHandle,
 };
 use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
@@ -36,6 +36,7 @@ use ironclaw_reborn::planned_driver_factory::{
 use ironclaw_reborn::runtime::{
     DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, build_product_live_planned_runtime,
 };
+use ironclaw_reborn_composition::ProductLiveCapabilityIo;
 use ironclaw_threads::{
     InMemorySessionThreadService, MessageStatus, SessionThreadService, ThreadHistoryRequest,
     ThreadScope,
@@ -43,14 +44,14 @@ use ironclaw_threads::{
 use ironclaw_turns::{
     CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator, EventCursor, GetRunStateRequest,
     IdempotencyKey, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
-    InMemoryTurnStateStore, ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileVersion,
-    SanitizedCancelReason, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
-    TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnRunWake, TurnScope,
+    InMemoryTurnStateStore, LoopResultRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
+    RunProfileVersion, SanitizedCancelReason, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy,
+    TurnActor, TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnRunWake, TurnScope,
     TurnStateStore, TurnStatus,
     run_profile::{
-        AgentLoopHostError, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
-        LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken, LoopInputCursorToken,
-        LoopRunContext, NoOpBudgetAccountant, NoOpPolicyGuard, PromptMode,
+        AgentLoopHostError, CapabilityInputRef, InMemoryLoopHostMilestoneSink,
+        InstructionSafetyContext, LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken,
+        LoopInputCursorToken, LoopRunContext, NoOpBudgetAccountant, NoOpPolicyGuard, PromptMode,
     },
 };
 use tokio::time::{sleep, timeout};
@@ -67,6 +68,10 @@ struct CapturingTurnCoordinator {
 
 #[async_trait]
 impl TurnCoordinator for CapturingTurnCoordinator {
+    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        Ok(TurnRunId::new())
+    }
+
     async fn submit_turn(
         &self,
         request: SubmitTurnRequest,
@@ -128,6 +133,10 @@ impl ScriptedTurnCoordinator {
 
 #[async_trait]
 impl TurnCoordinator for ScriptedTurnCoordinator {
+    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        Ok(TurnRunId::new())
+    }
+
     async fn submit_turn(
         &self,
         request: SubmitTurnRequest,
@@ -223,6 +232,25 @@ impl LoopCapabilityPortFactory for EmptyCapabilityFactory {
         _run_context: &LoopRunContext,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
         Ok(Arc::new(EmptyLoopCapabilityPort))
+    }
+}
+
+struct UnusedCapabilityResultWriter;
+
+#[async_trait]
+impl LoopCapabilityResultWriter for UnusedCapabilityResultWriter {
+    async fn write_capability_result(
+        &self,
+        _run_context: &LoopRunContext,
+        _input_ref: &CapabilityInputRef,
+        _invocation_id: InvocationId,
+        _capability_id: &CapabilityId,
+        _output: serde_json::Value,
+    ) -> Result<LoopResultRef, AgentLoopHostError> {
+        Err(AgentLoopHostError::new(
+            ironclaw_turns::run_profile::AgentLoopHostErrorKind::InvalidInvocation,
+            "unused capability result writer",
+        ))
     }
 }
 
@@ -557,6 +585,20 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
         milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
         capability_factory: Arc::new(EmptyCapabilityFactory),
         capability_surface_resolver: Arc::new(AllowAllCapabilitySurfaceResolver),
+        capability_result_writer: Arc::new(UnusedCapabilityResultWriter),
+        subagent_goal_store: Arc::new(
+            ironclaw_reborn::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new(),
+        ),
+        subagent_gate_store: Arc::new(
+            ironclaw_reborn::subagent::gate_resolution::BoundedSubagentGateResolutionStore::new(),
+        ),
+        subagent_definition_resolver: Arc::new(
+            ironclaw_reborn::subagent::flavors::StaticSubagentDefinitionResolver,
+        ),
+        subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(Arc::new(
+            ProductLiveCapabilityIo::default(),
+        ))),
+        subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
         loop_exit_evidence: Arc::new(
             ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
                 Arc::new(thread_service.clone()),
@@ -575,6 +617,7 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
         model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         safety_context: Some(test_safety_context()),
+        turn_event_sink: None,
     })
     .expect("product-live runtime should build");
 
@@ -713,6 +756,20 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
         milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
         capability_factory: Arc::new(EmptyCapabilityFactory),
         capability_surface_resolver: Arc::new(AllowAllCapabilitySurfaceResolver),
+        capability_result_writer: Arc::new(UnusedCapabilityResultWriter),
+        subagent_goal_store: Arc::new(
+            ironclaw_reborn::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new(),
+        ),
+        subagent_gate_store: Arc::new(
+            ironclaw_reborn::subagent::gate_resolution::BoundedSubagentGateResolutionStore::new(),
+        ),
+        subagent_definition_resolver: Arc::new(
+            ironclaw_reborn::subagent::flavors::StaticSubagentDefinitionResolver,
+        ),
+        subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(Arc::new(
+            ProductLiveCapabilityIo::default(),
+        ))),
+        subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
         // Product-live composition must bind the applier evidence to the
         // runtime cancellation source even if the supplied evidence is not.
         loop_exit_evidence: Arc::new(ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
@@ -730,6 +787,7 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
         model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         safety_context: Some(test_safety_context()),
+        turn_event_sink: None,
     })
     .expect("product-live runtime should build");
 
@@ -874,7 +932,7 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
 
     let error = match build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         turn_state: turn_store,
-        thread_service: Arc::new(thread_service),
+        thread_service: Arc::new(thread_service.clone()),
         thread_scope: thread_scope.clone(),
         model_gateway,
         checkpoint_state_store: Arc::new(InMemoryCheckpointStateStore::default()),
@@ -882,6 +940,20 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
         milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
         capability_factory: Arc::new(EmptyCapabilityFactory),
         capability_surface_resolver: Arc::new(AllowAllCapabilitySurfaceResolver),
+        capability_result_writer: Arc::new(UnusedCapabilityResultWriter),
+        subagent_goal_store: Arc::new(
+            ironclaw_reborn::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new(),
+        ),
+        subagent_gate_store: Arc::new(
+            ironclaw_reborn::subagent::gate_resolution::BoundedSubagentGateResolutionStore::new(),
+        ),
+        subagent_definition_resolver: Arc::new(
+            ironclaw_reborn::subagent::flavors::StaticSubagentDefinitionResolver,
+        ),
+        subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(Arc::new(
+            ProductLiveCapabilityIo::default(),
+        ))),
+        subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
         loop_exit_evidence: Arc::new(ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
             Arc::new(InMemorySessionThreadService::default()),
             Arc::new(InMemoryTurnStateStore::default()) as Arc<dyn TurnStateStore>,
@@ -897,6 +969,7 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
         model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         safety_context: Some(test_safety_context()),
+        turn_event_sink: None,
     }) {
         Ok(_) => panic!("product-live readiness must reject inert cancellation"),
         Err(error) => error,

@@ -685,7 +685,7 @@ fn default_prompt_mode() -> PromptMode {
     PromptMode::TextOnly
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopContextBundle {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub identity_messages: Vec<LoopContextMessage>,
@@ -1071,6 +1071,8 @@ pub trait LoopPromptPort: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopModelResponse {
     pub chunks: Vec<ModelStreamChunk>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub safe_reasoning_deltas: Vec<String>,
     pub output: ParentLoopOutput,
     pub effective_model_profile_id: ModelProfileId,
 }
@@ -1340,6 +1342,16 @@ pub enum CapabilityOutcome {
         safe_summary: String,
     },
     SpawnedProcess(ProcessHandleSummary),
+    AwaitDependentRun {
+        gate_ref: LoopGateRef,
+        result_ref: LoopResultRef,
+        safe_summary: String,
+    },
+    SpawnedChildRun {
+        child_run_id: TurnRunId,
+        result_ref: LoopResultRef,
+        safe_summary: String,
+    },
     Denied(CapabilityDenied),
     Failed(CapabilityFailure),
 }
@@ -1351,6 +1363,7 @@ impl CapabilityOutcome {
             Self::ApprovalRequired { .. }
                 | Self::AuthRequired { .. }
                 | Self::ResourceBlocked { .. }
+                | Self::AwaitDependentRun { .. }
                 | Self::SpawnedProcess(_)
         )
     }
@@ -1839,12 +1852,14 @@ pub enum BatchPolicyKind {
     Parallel,
 }
 
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LoopGateKind {
     Approval,
     Auth,
     ResourceWait,
+    AwaitDependentRun,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -48,6 +48,8 @@ use crate::{
 
 pub(super) struct LocalDevCapabilityWiring {
     pub(super) capability_factory: Arc<dyn LoopCapabilityPortFactory>,
+    pub(super) capability_input_resolver: Arc<dyn LoopCapabilityInputResolver>,
+    pub(super) capability_result_writer: Arc<dyn LoopCapabilityResultWriter>,
     pub(super) model_gateway: Arc<dyn HostManagedModelGateway>,
     pub(super) display_previews: Arc<CapabilityDisplayPreviewStore>,
 }
@@ -78,8 +80,8 @@ pub(super) fn capability_wiring(
             runtime,
             user_id,
             workspace_mounts,
-            capability_input_resolver,
-            capability_result_writer,
+            Arc::clone(&capability_input_resolver),
+            Arc::clone(&capability_result_writer),
             milestone_sink,
         ));
     let model_gateway: Arc<dyn HostManagedModelGateway> = Arc::new(
@@ -88,6 +90,8 @@ pub(super) fn capability_wiring(
 
     Some(LocalDevCapabilityWiring {
         capability_factory,
+        capability_input_resolver,
+        capability_result_writer,
         model_gateway,
         display_previews,
     })
@@ -224,7 +228,7 @@ impl LocalDevCapabilityIo {
             return Ok(());
         };
         let Some(record) = self.display_previews.record_for_invocation(invocation_id) else {
-            tracing::warn!(
+            tracing::debug!(
                 invocation_id = %invocation_id,
                 capability_id = capability_id.as_str(),
                 "capability display preview record missing after result staging"
@@ -249,7 +253,7 @@ impl LocalDevCapabilityIo {
             }) {
                 Ok(preview) => preview,
                 Err(error) => {
-                    tracing::warn!(
+                    tracing::debug!(
                         invocation_id = %invocation_id,
                         capability_id = capability_id.as_str(),
                         error,
@@ -268,11 +272,11 @@ impl LocalDevCapabilityIo {
             })
             .await
             .map_err(|error| {
-                tracing::warn!(
-                invocation_id = %invocation_id,
-                capability_id = capability_id.as_str(),
-                error = %error,
-                "capability display preview durable append failed"
+                tracing::debug!(
+                    invocation_id = %invocation_id,
+                    capability_id = capability_id.as_str(),
+                    error = %error,
+                    "capability display preview durable append failed"
                 );
                 capability_io_error()
             })?;
@@ -356,6 +360,13 @@ impl StagedValueStore {
                 self.total_bytes = self.total_bytes.saturating_sub(previous.bytes);
                 return;
             }
+        }
+    }
+
+    fn remove(&mut self, reference: &str) {
+        if let Some(previous) = self.values.remove(reference) {
+            self.total_bytes = self.total_bytes.saturating_sub(previous.bytes);
+            self.oldest_refs.retain(|candidate| candidate != reference);
         }
     }
 }
@@ -453,6 +464,50 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
         self.append_durable_display_preview(run_context, invocation_id, _capability_id)
             .await?;
         Ok(result_ref)
+    }
+
+    async fn update_capability_result(
+        &self,
+        run_context: &LoopRunContext,
+        result_ref: &LoopResultRef,
+        output: serde_json::Value,
+    ) -> Result<(), AgentLoopHostError> {
+        ensure_local_dev_ref_scope("result", result_ref.as_str(), run_context)?;
+        let bytes = staged_value_bytes(&output)?;
+        let mut results = self.results.lock().map_err(|_| capability_io_error())?;
+        let previous_bytes = results
+            .values
+            .get(result_ref.as_str())
+            .map(|previous| previous.bytes)
+            .unwrap_or(0);
+        let next_total = results
+            .total_bytes
+            .saturating_sub(previous_bytes)
+            .saturating_add(bytes);
+        if next_total > LOCAL_DEV_CAPABILITY_IO_MAX_STAGED_BYTES
+            || (previous_bytes == 0
+                && results.values.len() >= LOCAL_DEV_CAPABILITY_IO_MAX_STAGED_REFS)
+        {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::BudgetExceeded,
+                "local-dev capability result exceeds staging budget",
+            ));
+        }
+        results.insert_measured(result_ref.as_str().to_string(), output, bytes);
+        Ok(())
+    }
+
+    async fn delete_capability_result(
+        &self,
+        run_context: &LoopRunContext,
+        result_ref: &LoopResultRef,
+    ) -> Result<(), AgentLoopHostError> {
+        ensure_local_dev_ref_scope("result", result_ref.as_str(), run_context)?;
+        self.results
+            .lock()
+            .map_err(|_| capability_io_error())?
+            .remove(result_ref.as_str());
+        Ok(())
     }
 }
 
@@ -723,7 +778,7 @@ fn local_dev_skill_management_capability_ids() -> impl Iterator<Item = &'static 
         })
 }
 
-fn local_dev_grant_constraints(
+pub(super) fn local_dev_grant_constraints(
     capability_id: &str,
     workspace_mounts: &MountView,
     skill_mounts: &MountView,
@@ -840,7 +895,13 @@ fn ensure_local_dev_ref_scope(
     reference: &str,
     run_context: &LoopRunContext,
 ) -> Result<(), AgentLoopHostError> {
-    let expected_prefix = format!("{prefix}:{}:", run_context.run_id);
+    // Match product_live_adapters' convention: result refs are
+    // `result:<run_id>.<uuid>` (dot) so they tokenize cleanly when a uuid
+    // contains hyphens, while input refs stay `input:<run_id>:<n>` (colon).
+    // Keep this in sync with `ensure_ref_scoped_to_run` in
+    // `product_live_adapters.rs`.
+    let separator = if prefix == "result" { "." } else { ":" };
+    let expected_prefix = format!("{prefix}:{}{separator}", run_context.run_id);
     if reference.starts_with(&expected_prefix) {
         Ok(())
     } else {

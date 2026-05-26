@@ -6,6 +6,7 @@
 //! 3. Validates the configuration
 //! 4. Saves secrets to the database
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use base64::Engine;
@@ -21,6 +22,8 @@ use crate::setup::prompts::{
     confirm, input, optional_input, print_error, print_info, print_success, print_warning,
     secret_input, select_one,
 };
+
+const VALIDATION_RESPONSE_BODY_MAX_BYTES: usize = 64 * 1024;
 
 /// Typed errors for channel setup flows.
 #[derive(Debug, thiserror::Error)]
@@ -726,6 +729,7 @@ pub async fn setup_signal(_settings: &Settings) -> Result<SignalSetupResult, Cha
 pub struct WasmChannelSetupResult {
     pub enabled: bool,
     pub channel_name: String,
+    pub config_overrides: HashMap<String, serde_json::Value>,
 }
 
 /// Set up a WASM channel using its capabilities file setup schema.
@@ -832,11 +836,19 @@ pub async fn setup_wasm_channel(
         }
     }
 
+    let config_overrides = if channel_name.eq_ignore_ascii_case("wecom") {
+        println!();
+        setup_wecom_channel_runtime_overrides()?
+    } else {
+        HashMap::new()
+    };
+
     print_success(&format!("{} channel configured", channel_name));
 
     Ok(WasmChannelSetupResult {
         enabled: true,
         channel_name: channel_name.to_string(),
+        config_overrides,
     })
 }
 
@@ -851,6 +863,60 @@ fn setup_mode_note(channel_name: &str) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+fn parse_comma_separated_values(input: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    for value in input
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if !values.iter().any(|existing| existing == value) {
+            values.push(value.to_string());
+        }
+    }
+    values
+}
+
+fn setup_wecom_channel_runtime_overrides()
+-> Result<HashMap<String, serde_json::Value>, ChannelSetupError> {
+    print_info("WeCom access policy (applies to DM sender authorization):");
+    let dm_policy = optional_input(
+        "DM policy (pairing/open/allowlist)",
+        Some("default: pairing"),
+    )?
+    .unwrap_or_else(|| "pairing".to_string());
+    let dm_policy = dm_policy.trim().to_ascii_lowercase();
+
+    if !matches!(dm_policy.as_str(), "pairing" | "open" | "allowlist") {
+        return Err(ChannelSetupError::Validation(format!(
+            "Invalid DM policy '{}'; expected one of: pairing, open, allowlist",
+            dm_policy
+        )));
+    }
+
+    let allow_from_raw = optional_input(
+        "Allow from (comma-separated WeCom user IDs)",
+        Some("leave empty to require pairing when dm_policy=pairing"),
+    )?
+    .unwrap_or_default();
+    let allow_from = parse_comma_separated_values(&allow_from_raw);
+
+    print_info(&format!("DM policy: {}", dm_policy));
+    if allow_from.is_empty() {
+        print_info("Allow from: (none)");
+    } else {
+        print_info(&format!("Allow from: {}", allow_from.join(", ")));
+    }
+
+    let mut overrides = HashMap::new();
+    overrides.insert(
+        "dm_policy".to_string(),
+        serde_json::Value::String(dm_policy),
+    );
+    overrides.insert("allow_from".to_string(), serde_json::json!(allow_from));
+    Ok(overrides)
 }
 
 async fn validate_channel_credentials(
@@ -874,7 +940,7 @@ async fn validate_channel_credentials(
         .build()
         .map_err(|e| ChannelSetupError::Network(format!("Failed to build HTTP client: {}", e)))?;
 
-    let response = client.get(parsed.clone()).send().await.map_err(|e| {
+    let mut response = client.get(parsed.clone()).send().await.map_err(|e| {
         ChannelSetupError::Network(format!(
             "Validation request to {} failed: {}",
             target,
@@ -882,15 +948,75 @@ async fn validate_channel_credentials(
         ))
     })?;
 
-    if response.status().is_success() {
-        Ok(())
+    let status = response.status();
+    if status.is_success() {
+        let body = read_validation_response_body(&mut response).await?;
+        if let Some(error) = validation_endpoint_body_error(&body) {
+            Err(ChannelSetupError::Validation(error))
+        } else {
+            Ok(())
+        }
     } else {
         Err(ChannelSetupError::Validation(format!(
             "Validation endpoint returned HTTP {} from {}",
-            response.status(),
-            target
+            status, target
         )))
     }
+}
+
+fn validation_response_exceeds_limit(current_len: usize, chunk_len: usize, limit: usize) -> bool {
+    match current_len.checked_add(chunk_len) {
+        Some(total) => total > limit,
+        None => true,
+    }
+}
+
+async fn read_validation_response_body(
+    response: &mut reqwest::Response,
+) -> Result<Vec<u8>, ChannelSetupError> {
+    if let Some(content_length) = response.content_length()
+        && content_length > VALIDATION_RESPONSE_BODY_MAX_BYTES as u64
+    {
+        return Err(ChannelSetupError::Network(format!(
+            "Validation response exceeded {} bytes",
+            VALIDATION_RESPONSE_BODY_MAX_BYTES
+        )));
+    }
+
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| {
+        ChannelSetupError::Network(format!("Failed to read validation response: {}", e))
+    })? {
+        if validation_response_exceeds_limit(
+            body.len(),
+            chunk.len(),
+            VALIDATION_RESPONSE_BODY_MAX_BYTES,
+        ) {
+            return Err(ChannelSetupError::Network(format!(
+                "Validation response exceeded {} bytes",
+                VALIDATION_RESPONSE_BODY_MAX_BYTES
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    Ok(body)
+}
+
+fn validation_endpoint_body_error(body: &[u8]) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let errcode = parsed.get("errcode")?.as_i64()?;
+    if errcode == 0 {
+        return None;
+    }
+
+    let errmsg = parsed
+        .get("errmsg")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown error");
+    Some(format!(
+        "Validation endpoint returned errcode {errcode}: {errmsg}"
+    ))
 }
 
 async fn substitute_validation_placeholders(
@@ -898,10 +1024,7 @@ async fn substitute_validation_placeholders(
     validation_endpoint: &str,
 ) -> Result<String, ChannelSetupError> {
     let mut resolved = validation_endpoint.to_string();
-    let placeholder_names: std::collections::BTreeSet<String> = validation_placeholder_regex()
-        .captures_iter(validation_endpoint)
-        .filter_map(|caps| caps.get(1).map(|m| m.as_str().to_string()))
-        .collect();
+    let placeholder_names = validation_placeholder_names(validation_endpoint);
 
     for secret_name in placeholder_names {
         let secret_value = secrets.get_secret(&secret_name).await?;
@@ -1042,12 +1165,25 @@ fn normalize_validation_domain(host: &str) -> &str {
     host.trim_end_matches('.')
 }
 
-fn validation_placeholder_regex() -> &'static regex::Regex {
-    static PLACEHOLDER_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    PLACEHOLDER_RE.get_or_init(|| {
-        regex::Regex::new(r"\{([A-Za-z0-9_]+)\}")
-            .expect("validation placeholder regex must compile") // safety: hardcoded literal
-    })
+fn validation_placeholder_names(template: &str) -> std::collections::BTreeSet<String> {
+    let mut names = std::collections::BTreeSet::new();
+    let mut offset = 0;
+
+    while let Some(relative_start) = template[offset..].find('{') {
+        let start = offset + relative_start;
+        let value_start = start + 1;
+        let Some(relative_end) = template[value_start..].find('}') else {
+            break;
+        };
+        let end = value_start + relative_end;
+        let name = &template[value_start..end];
+        if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            names.insert(name.to_string());
+        }
+        offset = end + 1;
+    }
+
+    names
 }
 
 fn validation_target_display(parsed: &Url) -> String {
@@ -1243,6 +1379,13 @@ mod tests {
         assert!(!validate_cloudflare_token_format(""));
     }
 
+    #[test]
+    fn test_validation_response_exceeds_limit_detects_chunk_overflow() {
+        assert!(!super::validation_response_exceeds_limit(10, 20, 30));
+        assert!(super::validation_response_exceeds_limit(10, 21, 30));
+        assert!(super::validation_response_exceeds_limit(usize::MAX, 1, 30));
+    }
+
     #[tokio::test]
     async fn test_substitute_validation_placeholders() {
         let secrets = test_secrets_context();
@@ -1295,6 +1438,18 @@ mod tests {
         assert_eq!(
             resolved,
             "https://api.example.com/verify?token=abc123%3Ffoo%3D1%26bar%3D%23baz%2Fslash"
+        );
+    }
+
+    #[test]
+    fn test_validation_placeholder_names_extracts_unique_secret_names() {
+        let names = super::validation_placeholder_names(
+            "https://api.example.com/{workspace_id}/verify?token={telegram_bot_token}&again={workspace_id}",
+        );
+
+        assert_eq!(
+            names.into_iter().collect::<Vec<_>>(),
+            vec!["telegram_bot_token".to_string(), "workspace_id".to_string()]
         );
     }
 

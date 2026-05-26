@@ -1,10 +1,10 @@
-use std::{collections::HashMap, hash::Hash, marker::PhantomData};
+use std::{collections::VecDeque, marker::PhantomData};
 
 use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct BoundedRing<T, const N: usize> {
-    items: Vec<T>,
+    items: VecDeque<T>,
 }
 
 struct ExpectedAtMost<const N: usize>;
@@ -15,7 +15,7 @@ impl<const N: usize> serde::de::Expected for ExpectedAtMost<N> {
     }
 }
 
-impl<T: Clone + Eq + Hash, const N: usize> BoundedRing<T, N> {
+impl<T: Clone + Eq, const N: usize> BoundedRing<T, N> {
     pub fn new() -> Self {
         Self::default()
     }
@@ -25,9 +25,9 @@ impl<T: Clone + Eq + Hash, const N: usize> BoundedRing<T, N> {
             return;
         }
         if self.items.len() == N {
-            self.items.remove(0);
+            self.items.pop_front();
         }
-        self.items.push(item);
+        self.items.push_back(item);
     }
 
     pub fn len(&self) -> usize {
@@ -47,15 +47,26 @@ impl<T: Clone + Eq + Hash, const N: usize> BoundedRing<T, N> {
             return 0;
         }
         let window = window.min(self.items.len());
-        let mut counts: HashMap<&T, usize> = HashMap::new();
-        for item in self.items[self.items.len() - window..].iter() {
-            *counts.entry(item).or_insert(0) += 1;
+        let mut most_common = 0;
+        for (index, item) in self
+            .items
+            .iter()
+            .skip(self.items.len() - window)
+            .enumerate()
+        {
+            let count = self
+                .items
+                .iter()
+                .skip(self.items.len() - window + index)
+                .filter(|candidate| *candidate == item)
+                .count();
+            most_common = most_common.max(count);
         }
-        counts.values().copied().max().unwrap_or(0)
+        most_common
     }
 
     pub fn same_run_length(&self) -> usize {
-        let Some(last) = self.items.last() else {
+        let Some(last) = self.items.back() else {
             return 0;
         };
         self.items
@@ -68,7 +79,9 @@ impl<T: Clone + Eq + Hash, const N: usize> BoundedRing<T, N> {
 
 impl<T, const N: usize> Default for BoundedRing<T, N> {
     fn default() -> Self {
-        Self { items: Vec::new() }
+        Self {
+            items: VecDeque::new(),
+        }
     }
 }
 
@@ -147,7 +160,7 @@ impl<'de, T: serde::Deserialize<'de>, const N: usize> serde::Deserialize<'de>
         impl<'de, T: serde::Deserialize<'de>, const N: usize> serde::de::DeserializeSeed<'de>
             for BoundedItemsVisitor<T, N>
         {
-            type Value = Vec<T>;
+            type Value = VecDeque<T>;
 
             fn deserialize<D: serde::Deserializer<'de>>(
                 self,
@@ -158,19 +171,19 @@ impl<'de, T: serde::Deserialize<'de>, const N: usize> serde::Deserialize<'de>
         }
 
         impl<'de, T: serde::Deserialize<'de>, const N: usize> Visitor<'de> for BoundedItemsVisitor<T, N> {
-            type Value = Vec<T>;
+            type Value = VecDeque<T>;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 write!(formatter, "an array with at most {N} items")
             }
 
             fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-                let mut items = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(N));
+                let mut items = VecDeque::with_capacity(seq.size_hint().unwrap_or(0).min(N));
                 while items.len() < N {
                     let Some(item) = seq.next_element::<T>()? else {
                         return Ok(items);
                     };
-                    items.push(item);
+                    items.push_back(item);
                 }
                 if seq.next_element::<IgnoredAny>()?.is_some() {
                     return Err(serde::de::Error::invalid_length(

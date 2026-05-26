@@ -12,6 +12,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_product_adapters::{
     CapabilityActivityStatusView, ProductOutboundEnvelope, ProductOutboundPayload,
+    ProductProjectionItem,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor as TurnEventCursor,
@@ -22,6 +23,7 @@ use ironclaw_turns::{
 };
 
 mod cursor_validation;
+mod display_preview;
 mod runtime_stream;
 mod turn_stream;
 
@@ -75,6 +77,7 @@ impl TurnEventProjectionSource for FakeTurnEventSource {
     async fn read_turn_events_after(
         &self,
         scope: &TurnScope,
+        owner_user_id: Option<&UserId>,
         after: Option<TurnEventCursor>,
         limit: usize,
     ) -> Result<TurnEventPage, TurnError> {
@@ -82,7 +85,11 @@ impl TurnEventProjectionSource for FakeTurnEventSource {
         let mut events = self
             .events
             .iter()
-            .filter(|event| &event.scope == scope && event.cursor > after)
+            .filter(|event| {
+                &event.scope == scope
+                    && event.cursor > after
+                    && owner_user_id.is_none_or(|owner| event.owner_user_id.as_ref() == Some(owner))
+            })
             .cloned()
             .collect::<Vec<_>>();
         events.sort_by_key(|event| event.cursor);
@@ -100,12 +107,38 @@ impl TurnEventProjectionSource for FakeTurnEventSource {
     }
 }
 
+struct RebaseTurnEventSource {
+    cursor: TurnEventCursor,
+}
+
+#[async_trait]
+impl TurnEventProjectionSource for RebaseTurnEventSource {
+    async fn read_turn_events_after(
+        &self,
+        _scope: &TurnScope,
+        _owner_user_id: Option<&UserId>,
+        _after: Option<TurnEventCursor>,
+        _limit: usize,
+    ) -> Result<TurnEventPage, TurnError> {
+        Ok(TurnEventPage {
+            entries: Vec::new(),
+            next_cursor: self.cursor,
+            truncated: false,
+            rebase_required: Some(self.cursor),
+        })
+    }
+}
+
 struct FakeTurnCoordinator {
     state: TurnRunState,
 }
 
 #[async_trait]
 impl TurnCoordinator for FakeTurnCoordinator {
+    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        Ok(TurnRunId::new())
+    }
+
     async fn submit_turn(
         &self,
         _request: SubmitTurnRequest,

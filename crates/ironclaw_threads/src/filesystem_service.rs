@@ -53,11 +53,12 @@ use crate::{
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
     AppendToolResultReferenceRequest, CapabilityDisplayPreviewEnvelope, ContextMessage,
     ContextMessages, ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest,
-    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
-    MessageStatus, ProviderToolCallReferenceEnvelope, RedactMessageRequest,
-    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
-    SessionThreadService, SummaryArtifact, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
-    ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
+    LatestThreadMessageRequest, LoadContextMessagesRequest, LoadContextWindowRequest,
+    MessageContent, MessageKind, MessageStatus, ProviderToolCallReferenceEnvelope,
+    RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
+    SessionThreadRecord, SessionThreadService, SummaryArtifact, ThreadHistory,
+    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
+    ToolResultReferenceEnvelope, UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
 };
 
 /// Bound on the CAS retry loop. Mirrors the run-state / authorization
@@ -935,6 +936,55 @@ where
         }
     }
 
+    async fn update_tool_result_reference(
+        &self,
+        request: UpdateToolResultReferenceRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        let envelope =
+            ToolResultReferenceEnvelope::new(request.result_ref.clone(), request.safe_summary)
+                .map_err(SessionThreadError::Serialization)?;
+        let content = serde_json::to_string(&envelope)
+            .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
+        let existing = self
+            .list_thread_messages(&request.scope, &request.thread_id)
+            .await?;
+        let message = existing
+            .into_iter()
+            .find(|message| {
+                matches_tool_result_reference(message, &request.turn_run_id, &request.result_ref)
+            })
+            .ok_or_else(|| {
+                SessionThreadError::Backend(format!(
+                    "tool result reference {} was not found in thread {}",
+                    request.result_ref, request.thread_id
+                ))
+            })?;
+        // Re-validate inside the CAS closure: on retry the pre-scan record is
+        // stale, so a concurrent writer that flipped status, changed
+        // turn_run_id, or rewrote tool_result_ref between the scan and our
+        // retry must not be silently overwritten. The closure refuses the
+        // mutation in that case and surfaces the same "not found" error as
+        // the pre-scan path.
+        let turn_run_id = request.turn_run_id.clone();
+        let result_ref = request.result_ref.clone();
+        let thread_id_for_error = request.thread_id.clone();
+        self.apply_message_update(
+            &request.scope,
+            &request.thread_id,
+            message.message_id,
+            |message| {
+                if !matches_tool_result_reference(message, &turn_run_id, &result_ref) {
+                    return Err(SessionThreadError::Backend(format!(
+                        "tool result reference {result_ref} was not found in thread {thread_id_for_error}",
+                    )));
+                }
+                message.content = Some(content.clone());
+                Ok(())
+            },
+        )
+        .await
+    }
+
     async fn update_assistant_draft(
         &self,
         request: UpdateAssistantDraftRequest,
@@ -1068,6 +1118,27 @@ where
             summary_artifacts: history_summary_artifacts(&messages, summaries),
             messages: history_messages(&messages),
         })
+    }
+
+    async fn latest_thread_message(
+        &self,
+        request: LatestThreadMessageRequest,
+    ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        self.read_thread_versioned(&request.scope, &request.thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: request.thread_id.clone(),
+            })?;
+        let Some(message) = self
+            .list_thread_messages(&request.scope, &request.thread_id)
+            .await?
+            .into_iter()
+            .rev()
+            .find(|message| message.kind == request.kind && message.status == request.status)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(history_message(&message)))
     }
 
     async fn read_thread(
@@ -1426,6 +1497,17 @@ fn capability_display_preview_message_id(
     Ok(ThreadMessageId::from_uuid(Uuid::from_bytes(bytes)))
 }
 
+fn matches_tool_result_reference(
+    message: &ThreadMessageRecord,
+    turn_run_id: &str,
+    result_ref: &str,
+) -> bool {
+    message.kind == MessageKind::ToolResultReference
+        && message.status == MessageStatus::Finalized
+        && message.turn_run_id.as_deref() == Some(turn_run_id)
+        && message.tool_result_ref.as_deref() == Some(result_ref)
+}
+
 const REDACTED_SUMMARY_CONTENT: &str = "[redacted]";
 
 fn context_messages_with_summary_replacements(
@@ -1506,25 +1588,26 @@ fn context_messages_by_id(
 }
 
 fn history_messages(messages: &[ThreadMessageRecord]) -> Vec<ThreadMessageRecord> {
-    messages
-        .iter()
-        .map(|message| ThreadMessageRecord {
-            message_id: message.message_id,
-            thread_id: message.thread_id.clone(),
-            sequence: message.sequence,
-            kind: message.kind,
-            status: message.status,
-            actor_id: message.actor_id.clone(),
-            source_binding_id: message.source_binding_id.clone(),
-            reply_target_binding_id: message.reply_target_binding_id.clone(),
-            turn_id: message.turn_id.clone(),
-            turn_run_id: message.turn_run_id.clone(),
-            tool_result_ref: message.tool_result_ref.clone(),
-            tool_result_provider_call: None,
-            content: message.content.clone(),
-            redaction_ref: message.redaction_ref.clone(),
-        })
-        .collect()
+    messages.iter().map(history_message).collect()
+}
+
+fn history_message(message: &ThreadMessageRecord) -> ThreadMessageRecord {
+    ThreadMessageRecord {
+        message_id: message.message_id,
+        thread_id: message.thread_id.clone(),
+        sequence: message.sequence,
+        kind: message.kind,
+        status: message.status,
+        actor_id: message.actor_id.clone(),
+        source_binding_id: message.source_binding_id.clone(),
+        reply_target_binding_id: message.reply_target_binding_id.clone(),
+        turn_id: message.turn_id.clone(),
+        turn_run_id: message.turn_run_id.clone(),
+        tool_result_ref: message.tool_result_ref.clone(),
+        tool_result_provider_call: None,
+        content: message.content.clone(),
+        redaction_ref: message.redaction_ref.clone(),
+    }
 }
 
 fn history_summary_artifacts(

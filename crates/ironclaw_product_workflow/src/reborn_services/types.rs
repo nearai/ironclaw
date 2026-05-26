@@ -9,6 +9,10 @@ use ironclaw_turns::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::{
+    LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload, LifecycleReadinessBlocker,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornCreateThreadResponse {
     pub thread: SessionThreadRecord,
@@ -190,19 +194,20 @@ pub struct RebornListThreadsResponse {
     pub next_cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RebornSetupExtensionStatus {
-    /// Concrete extension lifecycle is not yet wired into the native
-    /// Reborn surface. v2 callers receive this so the route inventory
-    /// is complete without coupling to v1's onboarding controller.
-    NotImplemented,
-}
-
+/// WebUI v2 setup projection for extension lifecycle.
+///
+/// This intentionally uses the v2 `phase`/`blockers` lifecycle contract and
+/// omits the legacy `status` field from the earlier unimplemented route shape.
+/// The live browser consumer still uses the v1 setup route, so this v2 contract
+/// can become lifecycle-native before it has compatibility consumers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornSetupExtensionResponse {
     pub extension_name: ExtensionName,
-    pub status: RebornSetupExtensionStatus,
+    pub phase: LifecyclePhase,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blockers: Vec<LifecycleReadinessBlocker>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub payload: Option<serde_json::Value>,
+    pub package_ref: Option<LifecyclePackageRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<LifecycleProductPayload>,
 }

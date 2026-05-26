@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AuthContinuationRef, AuthProductError, CredentialAccountId, CredentialAccountLabel,
-    CredentialAccountStatus, Timestamp,
+    CredentialAccountStatus, CredentialAccountUpdateBinding, Timestamp,
     ids::{AuthInteractionId, AuthProviderId},
     scope::AuthProductScope,
 };
@@ -18,6 +18,7 @@ pub struct ManualTokenSetupRequest {
     pub provider: AuthProviderId,
     pub label: CredentialAccountLabel,
     pub continuation: AuthContinuationRef,
+    pub update_binding: Option<CredentialAccountUpdateBinding>,
     pub expires_at: Timestamp,
 }
 
@@ -82,5 +83,6 @@ pub(crate) struct PendingSecretInteraction {
     pub provider: AuthProviderId,
     pub label: CredentialAccountLabel,
     pub continuation: AuthContinuationRef,
+    pub update_binding: Option<CredentialAccountUpdateBinding>,
     pub expires_at: Timestamp,
 }

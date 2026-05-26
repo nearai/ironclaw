@@ -4,18 +4,22 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{AgentId, ApprovalRequestId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductOutboundEnvelope, ProductWorkflowRejectionKind, ProjectionCursor,
     ProjectionStream, ProjectionSubscriptionRequest, ProtocolAuthFailure, RedactedString,
 };
 use ironclaw_product_workflow::{
-    RebornGetRunStateRequest, RebornResolveGateResponse, RebornServices, RebornServicesApi,
-    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
+    ApprovalInteractionDecision, ApprovalInteractionService, LifecyclePackageKind,
+    LifecyclePackageRef, LifecyclePhase, LifecycleProductContext, LifecycleProductFacade,
+    LifecycleProductResponse, LifecycleReadinessBlocker, ListPendingApprovalsRequest,
+    ListPendingApprovalsResponse, RebornGetRunStateRequest, RebornResolveGateResponse,
+    RebornServices, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    RebornTimelineRequest, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiInboundValidationCode, WebUiListThreadsRequest, WebUiResolveGateRequest,
-    WebUiSendMessageRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest, approval_gate_ref,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
@@ -26,13 +30,15 @@ use ironclaw_threads::{
     ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
     SessionThreadService, SummaryArtifact, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
     ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
+    UpdateToolResultReferenceRequest,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, CancelRunRequest,
     CancelRunResponse, DefaultTurnCoordinator, EventCursor, GateRef, GetRunStateRequest,
     InMemoryTurnStateStore, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
     ResumeTurnResponse, RunProfileId, RunProfileVersion, SourceBindingRef, SubmitTurnRequest,
-    SubmitTurnResponse, TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnStatus,
+    SubmitTurnResponse, TurnCapacityResource, TurnCoordinator, TurnError, TurnId, TurnRunId,
+    TurnRunState, TurnScope, TurnStatus,
 };
 use serde_json::json;
 
@@ -219,6 +225,10 @@ impl FakeTurnCoordinator {
 
 #[async_trait]
 impl TurnCoordinator for FakeTurnCoordinator {
+    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        Ok(TurnRunId::new())
+    }
+
     async fn submit_turn(
         &self,
         request: SubmitTurnRequest,
@@ -259,6 +269,7 @@ impl TurnCoordinator for FakeTurnCoordinator {
             status: TurnStatus::Cancelled,
             event_cursor: EventCursor(13),
             already_terminal: false,
+            actor: None,
         })
     }
 
@@ -289,6 +300,104 @@ impl TurnCoordinator for FakeTurnCoordinator {
             failure: None,
             event_cursor: EventCursor(17),
         })
+    }
+}
+
+#[derive(Default)]
+struct RecordingApprovalInteractionService {
+    resolutions: Mutex<Vec<ResolveApprovalInteractionRequest>>,
+}
+
+impl RecordingApprovalInteractionService {
+    fn resolution_count(&self) -> usize {
+        self.resolutions.lock().expect("lock").len()
+    }
+
+    fn last_resolution(&self) -> Option<ResolveApprovalInteractionRequest> {
+        self.resolutions.lock().expect("lock").last().cloned()
+    }
+}
+
+#[async_trait]
+impl ApprovalInteractionService for RecordingApprovalInteractionService {
+    async fn list_pending(
+        &self,
+        _request: ListPendingApprovalsRequest,
+    ) -> Result<ListPendingApprovalsResponse, ironclaw_product_workflow::ProductWorkflowError> {
+        Ok(ListPendingApprovalsResponse { approvals: vec![] })
+    }
+
+    async fn resolve(
+        &self,
+        request: ResolveApprovalInteractionRequest,
+    ) -> Result<ResolveApprovalInteractionResponse, ironclaw_product_workflow::ProductWorkflowError>
+    {
+        let run_id = request.run_id_hint.expect("webui passes run_id");
+        let decision = request.decision;
+        self.resolutions.lock().expect("lock").push(request);
+        Ok(match decision {
+            ApprovalInteractionDecision::ApproveOnce => {
+                ResolveApprovalInteractionResponse::Approved(ResumeTurnResponse {
+                    run_id,
+                    status: TurnStatus::Queued,
+                    event_cursor: EventCursor(19),
+                })
+            }
+            ApprovalInteractionDecision::Deny => {
+                ResolveApprovalInteractionResponse::Denied(CancelRunResponse {
+                    run_id,
+                    status: TurnStatus::Cancelled,
+                    event_cursor: EventCursor(23),
+                    already_terminal: false,
+                    actor: None,
+                })
+            }
+        })
+    }
+}
+
+struct RecordingLifecycleFacade {
+    package_refs: Mutex<Vec<LifecyclePackageRef>>,
+}
+
+impl RecordingLifecycleFacade {
+    fn new() -> Self {
+        Self {
+            package_refs: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn package_refs(&self) -> Vec<LifecyclePackageRef> {
+        self.package_refs.lock().expect("lock").clone()
+    }
+}
+
+#[async_trait]
+impl LifecycleProductFacade for RecordingLifecycleFacade {
+    async fn execute(
+        &self,
+        _context: LifecycleProductContext,
+        _action: ironclaw_product_workflow::LifecycleProductAction,
+    ) -> Result<LifecycleProductResponse, ironclaw_product_workflow::ProductWorkflowError> {
+        panic!("setup_extension should project package state, not execute lifecycle actions")
+    }
+
+    async fn project_package(
+        &self,
+        _context: LifecycleProductContext,
+        package_ref: LifecyclePackageRef,
+    ) -> Result<LifecycleProductResponse, ironclaw_product_workflow::ProductWorkflowError> {
+        self.package_refs
+            .lock()
+            .expect("lock")
+            .push(package_ref.clone());
+        Ok(LifecycleProductResponse::projection(
+            Some(package_ref),
+            LifecyclePhase::UnsupportedOrLegacy,
+            vec![LifecycleReadinessBlocker::runtime(Some(
+                "extension_lifecycle_store_unwired".to_string(),
+            ))?],
+        ))
     }
 }
 
@@ -454,6 +563,13 @@ impl SessionThreadService for ScopeMismatchThreadStub {
         _request: AppendCapabilityDisplayPreviewRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         panic!("ScopeMismatchThreadStub::append_capability_display_preview should not be reached")
+    }
+
+    async fn update_tool_result_reference(
+        &self,
+        _request: UpdateToolResultReferenceRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("ScopeMismatchThreadStub::update_tool_result_reference should not be reached")
     }
 
     async fn update_assistant_draft(
@@ -646,6 +762,13 @@ impl SessionThreadService for ScriptedThreadService {
         _request: AppendCapabilityDisplayPreviewRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         scripted_stub_unreachable("append_capability_display_preview")
+    }
+
+    async fn update_tool_result_reference(
+        &self,
+        _request: UpdateToolResultReferenceRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        scripted_stub_unreachable("update_tool_result_reference")
     }
 
     async fn update_assistant_draft(
@@ -1215,6 +1338,34 @@ async fn submit_turn_rejects_missing_thread_before_turn_submission() {
 
     assert_eq!(err.code, RebornServicesErrorCode::NotFound);
     assert_eq!(err.status_code, 404);
+    assert_eq!(coordinator.submission_count(), 0);
+}
+
+#[tokio::test]
+async fn submit_turn_maps_capacity_exceeded_to_non_retryable_rate_limit() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::with_submit_error(
+        TurnError::capacity_exceeded(TurnCapacityResource::SubmitTurn, 1),
+    ));
+    let services = RebornServices::new(threads, coordinator.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let err = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-capacity",
+                "thread_id": "thread-alpha",
+                "content": "capacity denied"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("capacity error must map through facade");
+
+    assert_eq!(err.code, RebornServicesErrorCode::RateLimited);
+    assert_eq!(err.status_code, 429);
+    assert!(!err.retryable);
     assert_eq!(coordinator.submission_count(), 0);
 }
 
@@ -2152,6 +2303,84 @@ async fn approved_gate_resolution_resumes_turn() {
 }
 
 #[tokio::test]
+async fn approval_gate_resolution_uses_approval_interaction_service() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let approval_interactions = Arc::new(RecordingApprovalInteractionService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    )
+    .with_approval_interactions(approval_interactions.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+    let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
+
+    let response = services
+        .resolve_gate(
+            caller(),
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "approval-gate-1",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string(),
+                "gate_ref": gate_ref.as_str(),
+                "resolution": "approved"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("approval gate resolution succeeds");
+
+    assert!(matches!(response, RebornResolveGateResponse::Resumed(_)));
+    assert_eq!(approval_interactions.resolution_count(), 1);
+    assert_eq!(coordinator.resumption_count(), 0);
+    assert_eq!(
+        approval_interactions
+            .last_resolution()
+            .expect("resolution")
+            .gate_ref,
+        gate_ref
+    );
+}
+
+#[tokio::test]
+async fn approval_gate_denial_uses_approval_interaction_service_and_returns_cancelled() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let approval_interactions = Arc::new(RecordingApprovalInteractionService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    )
+    .with_approval_interactions(approval_interactions.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+    let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
+
+    let response = services
+        .resolve_gate(
+            caller(),
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "approval-gate-deny",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string(),
+                "gate_ref": gate_ref.as_str(),
+                "resolution": "denied"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("approval gate denial succeeds");
+
+    assert!(matches!(response, RebornResolveGateResponse::Cancelled(_)));
+    assert_eq!(approval_interactions.resolution_count(), 1);
+    assert_eq!(coordinator.cancellation_count(), 0);
+    assert_eq!(
+        approval_interactions
+            .last_resolution()
+            .expect("resolution")
+            .decision,
+        ApprovalInteractionDecision::Deny
+    );
+}
+
+#[tokio::test]
 async fn credential_gate_resolution_returns_sanitized_stable_error_until_gate_port_exists() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let services = RebornServices::new(
@@ -2498,6 +2727,74 @@ async fn approved_gate_resolution_with_persistent_flag_is_rejected() {
         coordinator.resumption_count(),
         0,
         "resume_turn must NOT be called for unsupported persistent approval"
+    );
+}
+
+#[tokio::test]
+async fn approval_gate_resolution_with_persistent_flag_is_rejected_without_approval_interaction() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let approval_interactions = Arc::new(RecordingApprovalInteractionService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    )
+    .with_approval_interactions(approval_interactions.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+    let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
+
+    let err = services
+        .resolve_gate(
+            caller(),
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "approval-gate-always",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string(),
+                "gate_ref": gate_ref.as_str(),
+                "resolution": "approved",
+                "always": true,
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("persistent approval must be rejected");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(err.kind, RebornServicesErrorKind::BlockedApproval);
+    assert_eq!(err.status_code, 503);
+    assert_eq!(approval_interactions.resolution_count(), 0);
+    assert_eq!(coordinator.resumption_count(), 0);
+}
+
+#[tokio::test]
+async fn setup_extension_projects_through_configured_lifecycle_facade() {
+    let lifecycle_facade = Arc::new(RecordingLifecycleFacade::new());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_lifecycle_product_facade(lifecycle_facade.clone());
+
+    let response = services
+        .setup_extension(
+            caller(),
+            ironclaw_common::ExtensionName::new("github").expect("valid extension"),
+            WebUiSetupExtensionRequest::default(),
+        )
+        .await
+        .expect("setup extension response");
+
+    assert_eq!(response.phase, LifecyclePhase::UnsupportedOrLegacy);
+    assert!(response.blockers.iter().any(|blocker| matches!(
+        blocker,
+        LifecycleReadinessBlocker::Runtime { ref_id: Some(ref_id) }
+            if ref_id.as_str() == "extension_lifecycle_store_unwired"
+    )));
+    assert_eq!(
+        lifecycle_facade.package_refs(),
+        vec![
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
+                .expect("valid package ref")
+        ]
     );
 }
 

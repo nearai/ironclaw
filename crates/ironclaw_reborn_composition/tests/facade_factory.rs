@@ -34,7 +34,10 @@ use ironclaw_reborn_composition::RebornCompositionProfile;
 use ironclaw_reborn_composition::RebornRuntimeProcessBinding;
 #[cfg(feature = "libsql")]
 use ironclaw_reborn_composition::{RebornBuildError, RebornCompositionProfile};
-use ironclaw_reborn_composition::{RebornBuildInput, RebornReadinessState, build_reborn_services};
+use ironclaw_reborn_composition::{
+    RebornBuildInput, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,
+    RebornReadinessState, build_reborn_services,
+};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_secrets::SecretMaterial;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -270,6 +273,10 @@ fn submit_turn_request(thread: &str, idempotency_key: &str) -> SubmitTurnRequest
         requested_run_profile: Some(RunProfileRequest::new("default").unwrap()),
         idempotency_key: IdempotencyKey::new(idempotency_key).unwrap(),
         received_at: Utc::now(),
+        requested_run_id: None,
+        parent_run_id: None,
+        subagent_depth: 0,
+        spawn_tree_root_run_id: None,
     }
 }
 
@@ -424,40 +431,28 @@ async fn local_dev_product_auth_entrypoint_redacts_manual_token_submit() {
     let label = ironclaw_auth::CredentialAccountLabel::new("work github").unwrap();
 
     let challenge = product_auth
-        .interaction_service()
-        .request_secret_input(ironclaw_auth::ManualTokenSetupRequest {
+        .request_manual_token_setup(RebornManualTokenSetupRequest {
             scope: scope.clone(),
             provider: provider.clone(),
             label: label.clone(),
             continuation: ironclaw_auth::AuthContinuationRef::SetupOnly,
+            update_binding: None,
             expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
         })
         .await
         .unwrap();
-    let ironclaw_auth::AuthChallenge::ManualTokenRequired {
-        interaction_id,
-        provider: challenge_provider,
-        label: challenge_label,
-        ..
-    } = challenge
-    else {
-        panic!("expected manual-token challenge");
-    };
-    assert_eq!(challenge_provider, provider);
-    assert_eq!(challenge_label, label);
+    assert_eq!(challenge.provider, provider);
+    assert_eq!(challenge.label, label);
 
-    let submit = ironclaw_auth::SecretSubmitRequest {
-        interaction_id,
-        secret: SecretString::from("super-secret-token".to_string()),
-    };
+    let submit = RebornManualTokenSubmitRequest::new(
+        scope.clone(),
+        challenge.interaction_id,
+        SecretString::from("super-secret-token".to_string()),
+    );
     let debug = format!("{submit:?}");
     assert!(!debug.contains("super-secret-token"));
 
-    let result = product_auth
-        .interaction_service()
-        .submit_manual_token(&scope, submit)
-        .await
-        .unwrap();
+    let result = product_auth.submit_manual_token(submit).await.unwrap();
     assert_eq!(
         result.status,
         ironclaw_auth::CredentialAccountStatus::Configured

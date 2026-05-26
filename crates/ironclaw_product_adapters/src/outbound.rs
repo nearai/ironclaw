@@ -19,11 +19,11 @@ const PROJECTION_TEXT_MAX_BYTES: usize = 128 * 1024;
 const CAPABILITY_ACTIVITY_ERROR_KIND_MAX_BYTES: usize = 64;
 const CAPABILITY_ACTIVITY_ERROR_KIND_SEGMENT_MAX_BYTES: usize = 24;
 const CAPABILITY_ACTIVITY_UNCLASSIFIED_ERROR_KIND: &str = "Unclassified";
-const CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES: usize = 2 * 1024;
-const CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES: usize = 16 * 1024;
-const CAPABILITY_DISPLAY_PREVIEW_MAX_LINES: usize = 120;
-const CAPABILITY_DISPLAY_KIND_MAX_BYTES: usize = 32;
-const CAPABILITY_DISPLAY_RESULT_REF_MAX_BYTES: usize = 256;
+pub const CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES: usize = 2 * 1024;
+pub const CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES: usize = 16 * 1024;
+pub const CAPABILITY_DISPLAY_PREVIEW_MAX_LINES: usize = 120;
+pub const CAPABILITY_DISPLAY_KIND_MAX_BYTES: usize = 32;
+pub const CAPABILITY_DISPLAY_RESULT_REF_MAX_BYTES: usize = 256;
 
 fn invalid(kind: &'static str, reason: impl Into<String>) -> ProductAdapterError {
     ProductAdapterError::InvalidIdentifier {
@@ -543,6 +543,7 @@ pub struct AuthPromptView {
 #[serde(rename_all = "snake_case")]
 pub enum ProductProjectionItem {
     Text { id: String, body: String },
+    Thinking { id: String, body: String },
     RunStatus { run_id: TurnRunId, status: String },
     Gate { gate_ref: String, headline: String },
 }
@@ -550,7 +551,7 @@ pub enum ProductProjectionItem {
 impl ProductProjectionItem {
     fn validate(&self) -> Result<(), ProductAdapterError> {
         match self {
-            Self::Text { id, body } => {
+            Self::Text { id, body } | Self::Thinking { id, body } => {
                 validate_bounded_text("projection_item_id", id, PROJECTION_ITEM_ID_MAX_BYTES)?;
                 validate_bounded_text("projection_text", body, PROJECTION_TEXT_MAX_BYTES)
             }
@@ -584,11 +585,13 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
         #[serde(rename_all = "snake_case")]
         enum Wire {
             Text { id: String, body: String },
+            Thinking { id: String, body: String },
             RunStatus { run_id: TurnRunId, status: String },
             Gate { gate_ref: String, headline: String },
         }
         let value = match Wire::deserialize(deserializer)? {
             Wire::Text { id, body } => ProductProjectionItem::Text { id, body },
+            Wire::Thinking { id, body } => ProductProjectionItem::Thinking { id, body },
             Wire::RunStatus { run_id, status } => {
                 ProductProjectionItem::RunStatus { run_id, status }
             }
@@ -747,6 +750,23 @@ mod tests {
     #[test]
     fn projection_state_requires_renderable_items() {
         assert!(ProductProjectionState::new("thread-1", vec![]).is_err());
+    }
+
+    #[test]
+    fn projection_state_round_trips_thinking_item() {
+        let state = ProductProjectionState::new(
+            "thread-1",
+            vec![ProductProjectionItem::Thinking {
+                id: "thinking:run:1".to_string(),
+                body: "checking context".to_string(),
+            }],
+        )
+        .expect("valid thinking projection");
+        let value = serde_json::to_value(&state).expect("serialize");
+        assert_eq!(value["items"][0]["thinking"]["body"], "checking context");
+        let decoded: ProductProjectionState =
+            serde_json::from_value(value).expect("deserialize thinking projection");
+        assert_eq!(decoded, state);
     }
 
     #[test]

@@ -417,6 +417,7 @@ mod tests {
             configured_wasm_channels: Vec::new(),
             wasm_channel_owner_ids: std::collections::HashMap::new(),
             reborn_telegram_v2_enabled: false,
+            wasm_channel_runtime_overrides: std::collections::HashMap::new(),
         }
     }
 

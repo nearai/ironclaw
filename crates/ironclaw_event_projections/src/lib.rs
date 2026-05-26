@@ -11,9 +11,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_events::{
-    AuditSink, DurableAuditLog, DurableEventLog, EventCursor, EventError, EventLogEntry,
-    EventStreamKey, ReadScope, RuntimeEvent, RuntimeEventKind, UNCLASSIFIED_ERROR_KIND,
-    sanitize_error_kind,
+    AuditSink, DurableAuditLog, DurableEventLog, EventError, EventLogEntry, EventStreamKey,
+    ReadScope, RuntimeEvent, RuntimeEventKind, UNCLASSIFIED_ERROR_KIND, sanitize_error_kind,
 };
 use ironclaw_host_api::{
     ActionResultSummary, ActionSummary, AgentId, ApprovalRequestId, AuditEnvelope, AuditEventId,
@@ -31,17 +30,12 @@ use ironclaw_turns::EventCursor as TurnEventCursor;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub use ironclaw_events::EventCursor;
+
+#[allow(dead_code)]
 mod pending_gate_projection;
 mod runtime_projection;
-use runtime_projection::{
-    RuntimeProjectionState, sort_capability_activities_for_projection, sort_runs_for_projection,
-};
-
-pub use pending_gate_projection::{
-    PENDING_GATE_PROJECTION_CONSUMER_ID, PendingGateKind, PendingGateProjection,
-    PendingGateProjectionCursorStore, PendingGateProjectionKey, PendingGateProjectionReplay,
-    PendingGateProjectionRow, PendingGateProjectionSink,
-};
+use runtime_projection::{RuntimeProjectionState, capability_activity_transition_for_entry};
 
 const STATE_REPLAY_PAGE_LIMIT: usize = 256;
 
@@ -168,6 +162,8 @@ pub struct ProjectionSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectionReplay {
     pub updates: Vec<TimelineEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capability_activity_transitions: Vec<CapabilityActivityProjection>,
     pub runs: Vec<RunStatusProjection>,
     pub capability_activities: Vec<CapabilityActivityProjection>,
     pub next_cursor: ProjectionCursor,
@@ -213,7 +209,7 @@ pub struct TimelineEntry {
     pub hook_failure_disposition: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TimelineEntryKind {
     DispatchRequested,
@@ -305,7 +301,7 @@ pub struct CapabilityActivityProjection {
     pub updated_at: Timestamp,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CapabilityActivityStatus {
     Started,
@@ -323,13 +319,14 @@ pub enum CapabilityActivityStatus {
 /// replace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MissingMetadataField {
-    /// `TurnLifecycleEvent.blocked_gate` was absent on a `Blocked` event.
+    /// Legacy blocked events may predate gate metadata; replay skips the
+    /// derived pending-gate row rather than inventing a resolver reference.
     BlockedGate,
-    /// `TurnLifecycleEvent.occurred_at` was absent on an event whose
-    /// projection row records the blocked timestamp.
+    /// Legacy blocked events may predate durable event timestamps; replay
+    /// skips rows that cannot provide a stable blocked-at value.
     OccurredAt,
-    /// `TurnLifecycleEvent.owner_user_id` was absent on an event whose
-    /// projection key requires the owner identity.
+    /// Legacy turn events may predate owner metadata; replay skips rows whose
+    /// pending-gate key cannot be scoped to the owning user.
     OwnerUserId,
 }
 
@@ -1339,7 +1336,7 @@ impl ReplayEventProjectionService {
         until: EventCursor,
         touched: &HashSet<InvocationId>,
     ) -> Result<RuntimeProjectionState, ProjectionError> {
-        let mut state = RuntimeProjectionState::default();
+        let mut state = RuntimeProjectionState::without_capability_activity_output_limit();
         if touched.is_empty() || until == EventCursor::origin() {
             return Ok(state);
         }
@@ -1419,9 +1416,7 @@ impl EventProjectionService for ReplayEventProjectionService {
         // `Running` status for a run whose terminal event lives on the
         // next page — see PR #3212 review feedback (discussion_r3195454963).
         let folded = self.fold_runtime_to_head(&scope, limit).await?;
-        let (mut runs, mut capability_activities) = folded.into_parts();
-        sort_runs_for_projection(&mut runs);
-        sort_capability_activities_for_projection(&mut capability_activities);
+        let (runs, capability_activities) = folded.into_parts();
         Ok(ProjectionSnapshot {
             timeline,
             runs,
@@ -1437,12 +1432,17 @@ impl EventProjectionService for ReplayEventProjectionService {
     ) -> Result<ProjectionReplay, ProjectionError> {
         let scope = request.scope.clone();
         let page = self.read_runtime(request).await?;
+        let capability_activity_transitions = page
+            .entries
+            .iter()
+            .filter_map(capability_activity_transition_for_entry)
+            .collect::<Vec<_>>();
         let touched_runs = page
             .entries
             .iter()
             .map(|entry| entry.record.scope.invocation_id)
             .collect::<HashSet<_>>();
-        let (mut runs, mut capability_activities) = if touched_runs.is_empty() {
+        let (runs, capability_activities) = if touched_runs.is_empty() {
             (Vec::new(), Vec::new())
         } else {
             let folded = self
@@ -1450,10 +1450,9 @@ impl EventProjectionService for ReplayEventProjectionService {
                 .await?;
             folded.into_parts()
         };
-        sort_runs_for_projection(&mut runs);
-        sort_capability_activities_for_projection(&mut capability_activities);
         Ok(ProjectionReplay {
             updates: project_timeline(&page.entries).entries,
+            capability_activity_transitions,
             runs,
             capability_activities,
             next_cursor: page.next_cursor,

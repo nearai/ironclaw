@@ -9,7 +9,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_events::{EventSink, RuntimeEvent};
-use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry};
+use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, ExtensionId, MountView, ResourceEstimate, ResourceReceipt,
@@ -103,7 +103,7 @@ where
     F: RootFilesystem,
     G: ResourceGovernor,
 {
-    registry: ServiceHandle<'a, ExtensionRegistry>,
+    registry: Arc<SharedExtensionRegistry>,
     filesystem: ServiceHandle<'a, F>,
     governor: ServiceHandle<'a, G>,
     runtime_policy: EffectiveRuntimePolicy,
@@ -118,7 +118,7 @@ where
 {
     pub fn new(registry: &'a ExtensionRegistry, filesystem: &'a F, governor: &'a G) -> Self {
         Self {
-            registry: ServiceHandle::Borrowed(registry),
+            registry: Arc::new(SharedExtensionRegistry::new(registry.clone())),
             filesystem: ServiceHandle::Borrowed(filesystem),
             governor: ServiceHandle::Borrowed(governor),
             runtime_policy: default_runtime_policy(),
@@ -136,8 +136,24 @@ where
         F: 'static,
         G: 'static,
     {
+        Self::from_shared_registry(
+            Arc::new(SharedExtensionRegistry::new((*registry).clone())),
+            filesystem,
+            governor,
+        )
+    }
+
+    pub fn from_shared_registry(
+        registry: Arc<SharedExtensionRegistry>,
+        filesystem: Arc<F>,
+        governor: Arc<G>,
+    ) -> RuntimeDispatcher<'static, F, G>
+    where
+        F: 'static,
+        G: 'static,
+    {
         RuntimeDispatcher {
-            registry: ServiceHandle::Shared(registry),
+            registry,
             filesystem: ServiceHandle::Shared(filesystem),
             governor: ServiceHandle::Shared(governor),
             runtime_policy: default_runtime_policy(),
@@ -199,38 +215,38 @@ where
         &self,
         request: CapabilityDispatchRequest,
     ) -> Result<CapabilityDispatchResult, DispatchError> {
+        let mut request = request;
         let scope = request.scope.clone();
         let capability_id = request.capability_id.clone();
+        let mut reservation_guard = DispatchReservationGuard::new(
+            self.governor.as_ref(),
+            request.resource_reservation.take(),
+        );
         self.emit_event(RuntimeEvent::dispatch_requested(
             scope.clone(),
             capability_id.clone(),
         ))
         .await?;
 
-        let descriptor = match self
-            .registry
-            .as_ref()
-            .get_capability(&request.capability_id)
-        {
+        let registry = self.registry.snapshot();
+        let descriptor = match registry.get_capability(&request.capability_id).cloned() {
             Some(descriptor) => descriptor,
             None => {
                 let error = DispatchError::UnknownCapability {
                     capability: capability_id.clone(),
                 };
-                self.release_request_reservation(&request);
                 self.emit_dispatch_failure(scope, capability_id, None, None, &error)
                     .await?;
                 return Err(error);
             }
         };
-        let package = match self.registry.as_ref().get_extension(&descriptor.provider) {
+        let package = match registry.get_extension(&descriptor.provider).cloned() {
             Some(package) => package,
             None => {
                 let error = DispatchError::UnknownProvider {
                     capability: capability_id.clone(),
                     provider: descriptor.provider.clone(),
                 };
-                self.release_request_reservation(&request);
                 self.emit_dispatch_failure(
                     scope,
                     capability_id,
@@ -249,7 +265,6 @@ where
                 descriptor_runtime: descriptor.runtime,
                 package_runtime,
             };
-            self.release_request_reservation(&request);
             self.emit_dispatch_failure(
                 scope,
                 capability_id,
@@ -264,7 +279,6 @@ where
         let runtime = descriptor.runtime;
         let Some(adapter) = self.runtime_adapters.get(&runtime) else {
             let error = DispatchError::MissingRuntimeBackend { runtime };
-            self.release_request_reservation(&request);
             self.emit_dispatch_failure(
                 scope,
                 capability_id,
@@ -287,8 +301,8 @@ where
         let execution = match adapter
             .as_ref()
             .dispatch_json(RuntimeAdapterRequest {
-                package,
-                descriptor,
+                package: &package,
+                descriptor: &descriptor,
                 filesystem: self.filesystem.as_ref(),
                 governor: self.governor.as_ref(),
                 runtime_policy: &self.runtime_policy,
@@ -296,7 +310,7 @@ where
                 scope: request.scope,
                 estimate: request.estimate,
                 mounts: request.mounts,
-                resource_reservation: request.resource_reservation,
+                resource_reservation: reservation_guard.take(),
                 input: request.input,
             })
             .await
@@ -334,18 +348,6 @@ where
         })
     }
 
-    fn release_request_reservation(&self, request: &CapabilityDispatchRequest) {
-        if let Some(reservation) = &request.resource_reservation
-            && let Err(error) = self.governor.as_ref().release(reservation.id)
-        {
-            tracing::warn!(
-                reservation_id = %reservation.id,
-                error = %error,
-                "failed to release prepared resource reservation after dispatcher validation failure"
-            );
-        }
-    }
-
     async fn emit_dispatch_failure(
         &self,
         scope: ResourceScope,
@@ -378,6 +380,47 @@ where
             let _ = sink.as_ref().emit(event).await;
         }
         Ok(())
+    }
+}
+
+struct DispatchReservationGuard<'a, G>
+where
+    G: ResourceGovernor,
+{
+    governor: &'a G,
+    reservation: Option<ResourceReservation>,
+}
+
+impl<'a, G> DispatchReservationGuard<'a, G>
+where
+    G: ResourceGovernor,
+{
+    fn new(governor: &'a G, reservation: Option<ResourceReservation>) -> Self {
+        Self {
+            governor,
+            reservation,
+        }
+    }
+
+    fn take(&mut self) -> Option<ResourceReservation> {
+        self.reservation.take()
+    }
+}
+
+impl<G> Drop for DispatchReservationGuard<'_, G>
+where
+    G: ResourceGovernor,
+{
+    fn drop(&mut self) {
+        if let Some(reservation) = &self.reservation
+            && let Err(error) = self.governor.release(reservation.id)
+        {
+            tracing::warn!(
+                reservation_id = %reservation.id,
+                error = %error,
+                "failed to release prepared resource reservation after dispatcher validation failure"
+            );
+        }
     }
 }
 

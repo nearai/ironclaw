@@ -181,6 +181,30 @@ def parse_results_json(path: Path, report: LaneReport) -> None:
             report.duration_s += latency / 1000.0
 
 
+SUMMARY_STATUS_RE = re.compile(
+    r"^\|\s*Status\s*\|\s*`(?P<status>-?\d+)`\s*\|\s*$", re.MULTILINE
+)
+
+
+def parse_summary_status(summary_md: str) -> int | None:
+    """Extract the `| Status | \\`N\\` |` row from a lane summary.md.
+
+    Returns the integer exit code or None if the file doesn't carry that
+    row. Used as a last-resort fallback for summary-only lanes
+    (private-oauth) and for any future lane whose results.json is
+    deleted by strict scrub before upload.
+    """
+    if not summary_md:
+        return None
+    m = SUMMARY_STATUS_RE.search(summary_md)
+    if not m:
+        return None
+    try:
+        return int(m.group("status"))
+    except ValueError:
+        return None
+
+
 def collect_lane(lane_dir: Path) -> LaneReport | None:
     parts = lane_dir.parts
     if len(parts) < 3:
@@ -189,19 +213,33 @@ def collect_lane(lane_dir: Path) -> LaneReport | None:
     provider = parts[-2]
     r = LaneReport(lane=lane, provider=provider)
     # Auth-canary lanes write JUnit XML; workflow-canary writes its own
-    # results.json. Read whichever exists — both populate the same
-    # LaneReport fields so downstream rendering / Haiku enrichment is
-    # source-agnostic.
+    # results.json; cargo lanes get a scraped results.json from
+    # emit_results_json.py. Read whichever exists — all three populate
+    # the same LaneReport fields so downstream rendering / Haiku
+    # enrichment is source-agnostic.
     parse_junit(lane_dir / "auth-canary-junit.xml", r)
     parse_results_json(lane_dir / "results.json", r)
     r.summary_md = read_tail(lane_dir / "summary.md", 4_000)
     r.log_tail = read_tail(lane_dir / "test-output.log", MAX_LOG_BYTES)
-    if r.tests == 0 and not r.log_tail:
-        r.status = "skip"
-    elif r.failed > 0:
+
+    if r.failed > 0:
         r.status = "fail"
     elif r.tests > 0:
         r.status = "pass"
+    else:
+        # No structured counts. Fall back to the lane's exit code from
+        # summary.md so summary-only lanes (private-oauth) and any lane
+        # whose results.json got stripped by strict scrub still show
+        # up as pass/fail instead of misleading "skip".
+        summary_status = parse_summary_status(r.summary_md)
+        if summary_status is not None:
+            r.status = "pass" if summary_status == 0 else "fail"
+            if summary_status != 0 and not r.reason:
+                r.reason = f"lane exited with status {summary_status}"
+        elif r.log_tail:
+            r.status = "unknown"
+        else:
+            r.status = "skip"
     return r
 
 

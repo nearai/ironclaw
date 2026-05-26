@@ -15,7 +15,9 @@ use chrono::Utc;
 use ironclaw_authorization::{
     GrantAuthorizer, InMemoryCapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer,
 };
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
+use ironclaw_extensions::{
+    ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource, SharedExtensionRegistry,
+};
 use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
@@ -629,6 +631,57 @@ async fn default_runtime_returns_versioned_visible_surface_with_registry_descrip
 }
 
 #[tokio::test]
+async fn default_runtime_visible_surface_tracks_shared_registry_mutations() {
+    let registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
+    let runtime = DefaultHostRuntime::from_shared_registry(
+        Arc::clone(&registry),
+        dispatcher,
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy()));
+    let empty_surface = runtime
+        .visible_capabilities(visible_capability_request(
+            execution_context_with_dispatch_grant(),
+        ))
+        .await
+        .unwrap();
+    assert!(empty_surface.capabilities.is_empty());
+
+    registry
+        .upsert(
+            registry_with_echo_capability()
+                .get_extension(&extension_id())
+                .unwrap()
+                .clone(),
+        )
+        .expect("insert visible extension");
+    let populated_surface = runtime
+        .visible_capabilities(visible_capability_request(
+            execution_context_with_dispatch_grant(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(populated_surface.capabilities.len(), 1);
+    assert_eq!(
+        populated_surface.capabilities[0].descriptor.id,
+        capability_id()
+    );
+
+    registry.remove(&extension_id());
+    let removed_surface = runtime
+        .visible_capabilities(visible_capability_request(
+            execution_context_with_dispatch_grant(),
+        ))
+        .await
+        .unwrap();
+    assert!(removed_surface.capabilities.is_empty());
+}
+
+#[tokio::test]
 async fn default_runtime_status_reports_running_invocations_only() {
     let registry = Arc::new(registry_with_echo_capability());
     let dispatcher = Arc::new(RecordingDispatcher::default());
@@ -757,6 +810,31 @@ async fn default_runtime_cancel_kills_running_processes_and_cancels_tokens() {
         .unwrap()
         .unwrap();
     assert_eq!(record.status, ProcessStatus::Killed);
+}
+
+#[tokio::test]
+async fn spawn_process_returns_unavailable_when_process_manager_is_none() {
+    let registry = Arc::new(registry_with_echo_capability());
+    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
+    let runtime = DefaultHostRuntime::new(
+        registry,
+        dispatcher,
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
+    );
+    let context = execution_context_with_dispatch_grant();
+
+    let error = runtime
+        .spawn_process(process_start(&context, ProcessId::new()))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        HostRuntimeError::Unavailable { reason } if reason == "process manager unavailable"
+    ));
 }
 
 #[tokio::test]

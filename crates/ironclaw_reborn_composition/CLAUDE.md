@@ -15,6 +15,15 @@
   the scoped flow/state/provider through `AuthFlowManager` before exchanging
   provider material through `AuthProviderClient`, then complete the flow and
   emit typed continuations.
+- Manual-token setup routes should call
+  `RebornProductAuthServices::request_manual_token_setup` for the typed
+  challenge and `RebornProductAuthServices::submit_manual_token` with a
+  one-shot `RebornManualTokenSubmitRequest` for the dedicated secret-submit
+  body. Build setup request scope from authenticated caller/session context,
+  not a browser body; attach `CredentialAccountUpdateBinding` only after
+  pre-authorizing the existing scoped account. Do not route raw token values
+  through chat commands, model-visible messages, serializable DTOs,
+  projections, or route-local pending maps.
 - Blocked run-state approval/auth gate rendering and resume belongs to #3094;
   keep this crate's #3811 auth seam reusable by that layer without implementing
   a second gate-resolution path.
@@ -112,7 +121,7 @@ rows are inventoried here, not implemented in the current PR.
 | Resolve gate | `POST /api/chat/gate/resolve` | `POST /api/webchat/v2/threads/{tid}/runs/{run_id}/gates/{gate_ref}/resolve` | Mapped |
 | Approval shim | `POST /api/chat/approval` | (Subsumed by `resolve_gate`) | Mapped |
 | Auth-token / auth-cancel | `POST /api/chat/auth-{token,cancel}` | (Engine v1 compatibility shim; delete with v1) | v1-only (legacy) |
-| Extensions onboarding | `GET\|POST /api/extensions/{name}/setup` | `POST /api/webchat/v2/extensions/{name}/setup` | Mapped (skeleton — facade returns `NotImplemented` until v2-aware extension lifecycle lands) |
+| Extensions onboarding | `GET\|POST /api/extensions/{name}/setup` | `POST /api/webchat/v2/extensions/{name}/setup` | Mapped to lifecycle projection; no production setup side effects yet |
 
 ### Security invariants on every "Mapped" row
 

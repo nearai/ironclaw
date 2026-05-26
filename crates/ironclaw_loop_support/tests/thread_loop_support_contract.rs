@@ -30,6 +30,7 @@ use ironclaw_threads::{
     SessionThreadError, SessionThreadRecord, SessionThreadService, SummaryArtifact, ThreadHistory,
     ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
     ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
+    UpdateToolResultReferenceRequest,
 };
 use ironclaw_turns::{
     LoopMessageRef, LoopResultRef, RunProfileResolutionRequest, RunProfileResolver, TurnActor,
@@ -3387,6 +3388,13 @@ impl SessionThreadService for GatedFinalizeThreadService {
         self.inner.append_capability_display_preview(request).await
     }
 
+    async fn update_tool_result_reference(
+        &self,
+        request: UpdateToolResultReferenceRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        self.inner.update_tool_result_reference(request).await
+    }
+
     async fn update_assistant_draft(
         &self,
         request: UpdateAssistantDraftRequest,
@@ -3518,6 +3526,13 @@ impl SessionThreadService for StaticContextThreadService {
         _request: AppendCapabilityDisplayPreviewRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         panic!("static context service does not append capability display previews")
+    }
+
+    async fn update_tool_result_reference(
+        &self,
+        _request: UpdateToolResultReferenceRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("static context service does not update tool result references")
     }
 
     async fn update_assistant_draft(

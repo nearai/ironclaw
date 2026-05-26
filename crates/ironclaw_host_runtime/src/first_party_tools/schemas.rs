@@ -84,6 +84,34 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["command"],
             "additionalProperties": false
         }),
+        "schemas/builtin/spawn_subagent.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "flavor_id": {
+                    "type": "string",
+                    "description": "Subagent kind to spawn"
+                },
+                "task": {
+                    "type": "string",
+                    "description": "Task for the child subagent run"
+                },
+                "handoff": {
+                    "type": "string",
+                    "description": "Optional context to pass to the child subagent"
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["blocking", "background"],
+                    "description": "Whether the parent waits for completion"
+                },
+                "run_in_background": {
+                    "type": "boolean",
+                    "description": "Legacy background-mode flag"
+                }
+            },
+            "required": ["flavor_id", "task"],
+            "additionalProperties": false
+        }),
         "schemas/builtin/read_file.input.v1.json" => json!({
             "type": "object",
             "properties": {
@@ -174,6 +202,21 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 }
             },
             "required": ["content"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/skill_install_url.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Optional skill name to use for the installed SKILL.md document"
+                },
+                "url": {
+                    "type": "string",
+                    "description": "HTTPS URL to a SKILL.md document, ZIP bundle, or GitHub skill repository/tree to fetch and install"
+                }
+            },
+            "required": ["url"],
             "additionalProperties": false
         }),
         "schemas/builtin/skill_remove.input.v1.json" => json!({

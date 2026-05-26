@@ -106,15 +106,16 @@ Every `socket.send` is bounded by the remaining
 backpressuring client cannot pin the slot past the configured
 stream lifetime.
 
-### Setup-extension (skeleton)
+### Setup-extension lifecycle projection
 
 `setup_extension` is the v2 entrypoint for extension onboarding.
-The native facade exposes the route surface but the underlying
-extension lifecycle is still v1-only — the default
-`RebornServices::setup_extension` returns
-`RebornSetupExtensionStatus::NotImplemented` until a v2-aware
-extension lifecycle lands. The route exists so the v2 inventory is
-complete and so future onboarding port work has a stable surface.
+The native facade exposes the route surface as a lifecycle
+projection: responses carry `phase`, `blockers`, optional
+`package_ref`, and optional payload. Auth, pairing, approval,
+policy, credential, and runtime requirements must be represented
+as blockers owned by their dedicated services, not as legacy
+setup status aliases or lifecycle phases. The route still does
+not perform production setup/configure/activate side effects.
 
 The path segment is validated at the handler/facade boundary via
 `ExtensionName::new(...)`. A malformed identifier returns

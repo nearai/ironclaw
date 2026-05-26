@@ -25,6 +25,7 @@ pub enum PendingGateKind {
     Approval,
     Auth,
     Resource,
+    AwaitDependentRun,
 }
 
 impl From<TurnBlockedGateKind> for PendingGateKind {
@@ -33,6 +34,7 @@ impl From<TurnBlockedGateKind> for PendingGateKind {
             TurnBlockedGateKind::Approval => Self::Approval,
             TurnBlockedGateKind::Auth => Self::Auth,
             TurnBlockedGateKind::Resource => Self::Resource,
+            TurnBlockedGateKind::AwaitDependentRun => Self::AwaitDependentRun,
         }
     }
 }
@@ -189,7 +191,7 @@ impl PendingGateProjection {
             .await?;
         let effective_limit = limit.min(MAX_TURN_EVENT_PROJECTION_LIMIT);
         let page = source
-            .read_turn_events_after(scope, Some(after), effective_limit)
+            .read_turn_events_after(scope, None, Some(after), effective_limit)
             .await
             .map_err(|_| ProjectionError::Source {
                 operation: "read_turn_events_after",
@@ -234,6 +236,7 @@ impl PendingGateProjection {
                     TurnStatus::BlockedApproval
                         | TurnStatus::BlockedAuth
                         | TurnStatus::BlockedResource
+                        | TurnStatus::BlockedDependentRun
                 ) {
                     return Ok(());
                 }

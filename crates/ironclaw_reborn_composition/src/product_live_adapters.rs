@@ -274,6 +274,84 @@ impl LoopCapabilityResultWriter for ProductLiveCapabilityIo {
             });
         Ok(result_ref)
     }
+
+    async fn update_capability_result(
+        &self,
+        run_context: &LoopRunContext,
+        result_ref: &LoopResultRef,
+        output: serde_json::Value,
+    ) -> Result<(), AgentLoopHostError> {
+        ensure_ref_scoped_to_run("result", result_ref.as_str(), run_context)?;
+        let byte_len = serialized_json_len(&output, "capability result")?;
+        let mut results = self
+            .results
+            .lock()
+            .map_err(|_| capability_io_internal_error())?;
+        let previous_byte_len = if let Some(previous) = results.get(result_ref.as_str()) {
+            if previous.run_id != run_context.run_id.to_string() {
+                return Err(cross_run_ref_error("capability result ref"));
+            }
+            previous.byte_len
+        } else {
+            0
+        };
+        if previous_byte_len == 0 && results.len() >= PRODUCT_LIVE_CAPABILITY_IO_MAX_STAGED_REFS {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::BudgetExceeded,
+                format!(
+                    "capability result staging exceeds {} staged refs",
+                    PRODUCT_LIVE_CAPABILITY_IO_MAX_STAGED_REFS
+                ),
+            ));
+        }
+        if !result_ref
+            .as_str()
+            .starts_with(&format!("result:{}.", run_context.run_id))
+        {
+            return Err(cross_run_ref_error("capability result ref"));
+        }
+        let total_without_previous = results
+            .values()
+            .map(|result| result.byte_len)
+            .sum::<usize>()
+            .saturating_sub(previous_byte_len);
+        ensure_staging_capacity(
+            "capability result",
+            results
+                .len()
+                .saturating_sub(usize::from(previous_byte_len > 0)),
+            total_without_previous,
+            byte_len,
+        )?;
+        results.insert(
+            result_ref.as_str().to_string(),
+            StagedCapabilityResult {
+                run_id: run_context.run_id.to_string(),
+                output,
+                byte_len,
+            },
+        );
+        Ok(())
+    }
+
+    async fn delete_capability_result(
+        &self,
+        run_context: &LoopRunContext,
+        result_ref: &LoopResultRef,
+    ) -> Result<(), AgentLoopHostError> {
+        ensure_ref_scoped_to_run("result", result_ref.as_str(), run_context)?;
+        let mut results = self
+            .results
+            .lock()
+            .map_err(|_| capability_io_internal_error())?;
+        if let Some(previous) = results.get(result_ref.as_str())
+            && previous.run_id != run_context.run_id.to_string()
+        {
+            return Err(cross_run_ref_error("capability result ref"));
+        }
+        results.remove(result_ref.as_str());
+        Ok(())
+    }
 }
 
 fn serialized_json_len(
@@ -597,6 +675,10 @@ pub struct ProductLivePlannedRuntimeAdapterConfig {
 pub struct ProductLivePlannedRuntimeAdapters {
     /// Capability port factory backed by the host runtime facade.
     pub capability_factory: Arc<dyn LoopCapabilityPortFactory>,
+    /// Capability input resolver shared with synthetic host capabilities.
+    pub capability_input_resolver: Arc<dyn LoopCapabilityInputResolver>,
+    /// Capability result writer shared with runtime completion observers.
+    pub capability_result_writer: Arc<dyn LoopCapabilityResultWriter>,
     /// Capability surface resolver exposing the configured allow-set.
     pub capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver>,
     /// Model route resolver generated from product-live route settings.
@@ -631,8 +713,8 @@ impl ProductLivePlannedRuntimeAdapters {
         let capability_factory = ProductLiveLoopCapabilityPortFactory::new(
             host_runtime,
             config.capability_authority_resolver,
-            config.capability_input_resolver,
-            config.capability_result_writer,
+            Arc::clone(&config.capability_input_resolver),
+            Arc::clone(&config.capability_result_writer),
             config.milestone_sink,
         );
         let model_route_resolver: Arc<dyn ModelRouteResolver> =
@@ -640,6 +722,8 @@ impl ProductLivePlannedRuntimeAdapters {
 
         Ok(Self {
             capability_factory: Arc::new(capability_factory),
+            capability_input_resolver: config.capability_input_resolver,
+            capability_result_writer: config.capability_result_writer,
             capability_surface_resolver: Arc::new(StaticCapabilitySurfaceResolver::new(
                 config.capability_allow_set,
             )),

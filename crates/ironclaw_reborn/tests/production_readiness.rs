@@ -7,8 +7,9 @@ use ironclaw_reborn::{
         RebornActiveRunIdentity, RebornComponentReadiness, RebornComponentRequirement,
         RebornConfiguredRunProfile, RebornLoopComponentGraphReadiness,
         RebornLoopProductionComponent, RebornLoopProductionInputs, RebornLoopProductionIssueKind,
-        RebornLoopProductionStatus, RebornLoopReadinessMode, text_only_driver_requirements,
-        tool_capable_driver_requirements, validate_reborn_loop_production_readiness,
+        RebornLoopProductionStatus, RebornLoopReadinessMode, subagent_driver_requirements,
+        text_only_driver_requirements, tool_capable_driver_requirements,
+        validate_reborn_loop_production_readiness,
     },
 };
 use ironclaw_turns::{
@@ -102,6 +103,121 @@ fn production_readiness_rejects_in_memory_checkpoint_store() {
 }
 
 #[test]
+fn production_readiness_rejects_non_durable_subagent_goal_store() {
+    let mut registry = DriverRegistry::new();
+    let key = register_driver(&mut registry, "text_loop", DriverKind::Production);
+    let mut graph = RebornLoopComponentGraphReadiness::production_verified();
+    graph.subagent_goal_store =
+        RebornComponentReadiness::non_durable(RebornComponentRequirement::Required);
+
+    let report = validate_reborn_loop_production_readiness(RebornLoopProductionInputs {
+        mode: RebornLoopReadinessMode::Production,
+        driver_registry: &registry,
+        component_graph: graph,
+        configured_profiles: vec![selected_profile(key)],
+        active_runs: Vec::new(),
+    });
+
+    assert_eq!(report.status, RebornLoopProductionStatus::NotReady);
+    assert!(report.contains(
+        RebornLoopProductionComponent::SubagentGoalStore,
+        RebornLoopProductionIssueKind::NonDurableImplementation
+    ));
+}
+
+#[test]
+fn production_readiness_rejects_missing_subagent_completion_observer() {
+    let mut registry = DriverRegistry::new();
+    let key = register_driver(&mut registry, "text_loop", DriverKind::Production);
+    let mut graph = RebornLoopComponentGraphReadiness::production_verified();
+    graph.subagent_completion_observer =
+        RebornComponentReadiness::missing(RebornComponentRequirement::Required);
+
+    let report = validate_reborn_loop_production_readiness(RebornLoopProductionInputs {
+        mode: RebornLoopReadinessMode::Production,
+        driver_registry: &registry,
+        component_graph: graph,
+        configured_profiles: vec![selected_profile(key)],
+        active_runs: Vec::new(),
+    });
+
+    assert_eq!(report.status, RebornLoopProductionStatus::NotReady);
+    assert!(report.contains(
+        RebornLoopProductionComponent::SubagentCompletionObserver,
+        RebornLoopProductionIssueKind::Missing
+    ));
+}
+
+#[test]
+fn production_readiness_rejects_non_durable_subagent_tombstone_store() {
+    let mut registry = DriverRegistry::new();
+    let key = register_driver(&mut registry, "text_loop", DriverKind::Production);
+    let mut graph = RebornLoopComponentGraphReadiness::production_verified();
+    graph.subagent_result_tombstone_store =
+        RebornComponentReadiness::non_durable(RebornComponentRequirement::Required);
+
+    let report = validate_reborn_loop_production_readiness(RebornLoopProductionInputs {
+        mode: RebornLoopReadinessMode::Production,
+        driver_registry: &registry,
+        component_graph: graph,
+        configured_profiles: vec![selected_profile(key)],
+        active_runs: Vec::new(),
+    });
+
+    assert_eq!(report.status, RebornLoopProductionStatus::NotReady);
+    assert!(report.contains(
+        RebornLoopProductionComponent::SubagentResultTombstoneStore,
+        RebornLoopProductionIssueKind::NonDurableImplementation
+    ));
+}
+
+#[test]
+fn production_readiness_rejects_missing_subagent_autonomous_continuation_budget() {
+    let mut registry = DriverRegistry::new();
+    let key = register_driver(&mut registry, "text_loop", DriverKind::Production);
+    let mut graph = RebornLoopComponentGraphReadiness::production_verified();
+    graph.subagent_autonomous_continuation_budget =
+        RebornComponentReadiness::missing(RebornComponentRequirement::Required);
+
+    let report = validate_reborn_loop_production_readiness(RebornLoopProductionInputs {
+        mode: RebornLoopReadinessMode::Production,
+        driver_registry: &registry,
+        component_graph: graph,
+        configured_profiles: vec![selected_profile(key)],
+        active_runs: Vec::new(),
+    });
+
+    assert_eq!(report.status, RebornLoopProductionStatus::NotReady);
+    assert!(report.contains(
+        RebornLoopProductionComponent::SubagentAutonomousContinuationBudget,
+        RebornLoopProductionIssueKind::Missing
+    ));
+}
+
+#[test]
+fn production_readiness_rejects_missing_subagent_restart_reconciler() {
+    let mut registry = DriverRegistry::new();
+    let key = register_driver(&mut registry, "text_loop", DriverKind::Production);
+    let mut graph = RebornLoopComponentGraphReadiness::production_verified();
+    graph.subagent_restart_reconciler =
+        RebornComponentReadiness::missing(RebornComponentRequirement::Required);
+
+    let report = validate_reborn_loop_production_readiness(RebornLoopProductionInputs {
+        mode: RebornLoopReadinessMode::Production,
+        driver_registry: &registry,
+        component_graph: graph,
+        configured_profiles: vec![selected_profile(key)],
+        active_runs: Vec::new(),
+    });
+
+    assert_eq!(report.status, RebornLoopProductionStatus::NotReady);
+    assert!(report.contains(
+        RebornLoopProductionComponent::SubagentRestartReconciler,
+        RebornLoopProductionIssueKind::Missing
+    ));
+}
+
+#[test]
 fn production_readiness_rejects_noop_wake_notifier() {
     let mut registry = DriverRegistry::new();
     let key = register_driver(&mut registry, "text_loop", DriverKind::Production);
@@ -185,6 +301,14 @@ fn production_readiness_rejects_tool_profile_without_surface_service() {
         RebornLoopProductionComponent::CapabilityPort,
         RebornLoopProductionIssueKind::Missing
     ));
+}
+
+#[test]
+fn subagent_driver_requirements_match_tool_capable_surface() {
+    assert_eq!(
+        subagent_driver_requirements(),
+        tool_capable_driver_requirements()
+    );
 }
 
 #[test]

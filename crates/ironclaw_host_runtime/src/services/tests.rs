@@ -31,6 +31,15 @@ use super::{
 use crate::CommandExecutionRequest;
 
 #[test]
+fn shared_extension_registry_returns_same_instance() {
+    let services = test_services();
+    let left = services.shared_extension_registry();
+    let right = services.shared_extension_registry();
+
+    assert_eq!(Arc::as_ptr(&left), Arc::as_ptr(&right)); // safety: test assertion only; verifies both accessors expose the same shared registry.
+}
+
+#[test]
 fn host_http_egress_borrows_staged_policy_for_repeated_invocation_requests() {
     let network = RecordingNetwork::ok();
     let recorded_requests = Arc::clone(&network.requests);

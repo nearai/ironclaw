@@ -1,16 +1,19 @@
 use async_trait::async_trait;
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::{sync::Arc, sync::Mutex};
 use thiserror::Error;
 
 use ironclaw_host_api::{Timestamp, UserId};
 
-use crate::{GateRef, TurnError, TurnRunId, TurnScope, TurnStatus};
+use crate::{GateRef, TurnError, TurnRunId, TurnRunState, TurnScope, TurnStatus};
 
 const MAX_IN_MEMORY_EVENTS: usize = 10_000;
 pub const MAX_TURN_EVENT_PROJECTION_LIMIT: usize = 1_000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default,
+)]
 #[serde(transparent)]
 pub struct EventCursor(pub u64);
 
@@ -34,6 +37,7 @@ pub enum TurnBlockedGateKind {
     Approval,
     Auth,
     Resource,
+    AwaitDependentRun,
 }
 
 impl TurnBlockedGateKind {
@@ -42,6 +46,7 @@ impl TurnBlockedGateKind {
             TurnStatus::BlockedApproval => Some(Self::Approval),
             TurnStatus::BlockedAuth => Some(Self::Auth),
             TurnStatus::BlockedResource => Some(Self::Resource),
+            TurnStatus::BlockedDependentRun => Some(Self::AwaitDependentRun),
             _ => None,
         }
     }
@@ -76,6 +81,36 @@ pub struct TurnLifecycleEvent {
 }
 
 impl TurnLifecycleEvent {
+    pub fn from_run_state(
+        state: &TurnRunState,
+        kind: TurnEventKind,
+        sanitized_reason: Option<String>,
+    ) -> Self {
+        let blocked_gate = if kind == TurnEventKind::Blocked {
+            state.gate_ref.clone().and_then(|gate_ref| {
+                TurnBlockedGateKind::from_status(state.status).map(|gate_kind| {
+                    TurnBlockedGateMetadata {
+                        gate_ref,
+                        gate_kind,
+                    }
+                })
+            })
+        } else {
+            None
+        };
+        Self {
+            cursor: state.event_cursor,
+            scope: state.scope.clone(),
+            occurred_at: Some(Utc::now()),
+            owner_user_id: state.actor.as_ref().map(|actor| actor.user_id.clone()),
+            run_id: state.run_id,
+            status: state.status,
+            kind,
+            blocked_gate,
+            sanitized_reason,
+        }
+    }
+
     /// Return the transport-facing lifecycle event view.
     ///
     /// Internal projection consumers may need gate and owner metadata to
@@ -91,6 +126,32 @@ impl TurnLifecycleEvent {
 #[async_trait]
 pub trait TurnEventSink: Send + Sync {
     async fn publish(&self, event: TurnLifecycleEvent) -> Result<(), TurnError>;
+}
+
+#[async_trait]
+pub trait TurnCommittedEventObserver: Send + Sync {
+    /// Returns true when this observer must process a committed state.
+    ///
+    /// Observer errors are treated as required side-effect failures by most
+    /// coordinator and runner transitions. Callers that have already committed
+    /// a lease batch may log observer failures and return the committed state
+    /// so the runner does not lose track of persisted ownership.
+    fn observes_state(&self, _state: &TurnRunState) -> bool {
+        true
+    }
+
+    /// Returns true when this observer must process a committed event.
+    ///
+    /// Event observers run before best-effort event sinks. Errors are
+    /// propagated to the coordinator caller because the observer represents an
+    /// internal consistency side effect rather than external notification.
+    fn observes_event(&self, _event: &TurnLifecycleEvent) -> bool {
+        true
+    }
+
+    async fn observe_committed_state(&self, state: TurnRunState) -> Result<(), TurnError>;
+
+    async fn observe_committed_event(&self, event: TurnLifecycleEvent) -> Result<(), TurnError>;
 }
 
 #[derive(Default)]
@@ -150,6 +211,8 @@ impl TurnEventProjectionCursor {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnEventProjectionRequest {
     pub scope: TurnScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_user_id: Option<UserId>,
     pub after: Option<TurnEventProjectionCursor>,
     pub limit: usize,
 }
@@ -187,6 +250,7 @@ pub trait TurnEventProjectionSource: Send + Sync {
     async fn read_turn_events_after(
         &self,
         scope: &TurnScope,
+        owner_user_id: Option<&UserId>,
         after: Option<EventCursor>,
         limit: usize,
     ) -> Result<TurnEventPage, TurnError>;
@@ -243,7 +307,12 @@ where
         let after = request.after.as_ref().map(|cursor| cursor.event);
         let page = self
             .source
-            .read_turn_events_after(&request.scope, after, request.limit)
+            .read_turn_events_after(
+                &request.scope,
+                request.owner_user_id.as_ref(),
+                after,
+                request.limit,
+            )
             .await
             .map_err(|_| TurnEventProjectionError::Source {
                 operation: "read_turn_events_after",
@@ -274,6 +343,7 @@ where
 pub(crate) fn project_turn_events(
     events: &[TurnLifecycleEvent],
     scope: &TurnScope,
+    owner_user_id: Option<&UserId>,
     after: Option<EventCursor>,
     limit: usize,
     retention_floor: EventCursor,
@@ -281,7 +351,10 @@ pub(crate) fn project_turn_events(
     let after = after.unwrap_or_default();
     let mut scoped_events = events
         .iter()
-        .filter(|event| &event.scope == scope)
+        .filter(|event| {
+            &event.scope == scope
+                && owner_user_id.is_none_or(|owner| event.owner_user_id.as_ref() == Some(owner))
+        })
         .cloned()
         .collect::<Vec<_>>();
     scoped_events.sort_by_key(|event| event.cursor);
@@ -370,12 +443,14 @@ mod tests {
         async fn read_turn_events_after(
             &self,
             scope: &TurnScope,
+            owner_user_id: Option<&UserId>,
             after: Option<EventCursor>,
             limit: usize,
         ) -> Result<TurnEventPage, TurnError> {
             Ok(project_turn_events(
                 &self.events,
                 scope,
+                owner_user_id,
                 after,
                 limit,
                 EventCursor::default(),
@@ -418,6 +493,7 @@ mod tests {
         let page = project_turn_events(
             std::slice::from_ref(&event),
             &scope,
+            None,
             Some(EventCursor(5)),
             10,
             EventCursor(5),
@@ -439,6 +515,7 @@ mod tests {
         let snapshot = service
             .snapshot(crate::events::TurnEventProjectionRequest {
                 scope,
+                owner_user_id: None,
                 after: None,
                 limit: 10,
             })

@@ -61,6 +61,10 @@ impl SanitizedStrategySummary {
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
+
+    pub(crate) fn into_inner(self) -> String {
+        self.0
+    }
 }
 
 impl<'de> serde::Deserialize<'de> for SanitizedStrategySummary {

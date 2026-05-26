@@ -213,6 +213,15 @@ pub struct AppendCapabilityDisplayPreviewRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateToolResultReferenceRequest {
+    pub scope: ThreadScope,
+    pub thread_id: ThreadId,
+    pub turn_run_id: String,
+    pub result_ref: String,
+    pub safe_summary: ToolResultSafeSummary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateAssistantDraftRequest {
     pub scope: ThreadScope,
     pub thread_id: ThreadId,
@@ -232,6 +241,14 @@ pub struct RedactMessageRequest {
 pub struct ThreadHistoryRequest {
     pub scope: ThreadScope,
     pub thread_id: ThreadId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LatestThreadMessageRequest {
+    pub scope: ThreadScope,
+    pub thread_id: ThreadId,
+    pub kind: MessageKind,
+    pub status: MessageStatus,
 }
 
 /// Browser-driven list-threads query scoped to a single caller.

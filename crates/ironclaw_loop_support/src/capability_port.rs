@@ -140,6 +140,26 @@ pub trait LoopCapabilityResultWriter: Send + Sync {
         capability_id: &CapabilityId,
         output: serde_json::Value,
     ) -> Result<LoopResultRef, AgentLoopHostError>;
+
+    async fn update_capability_result(
+        &self,
+        _run_context: &LoopRunContext,
+        _result_ref: &LoopResultRef,
+        _output: serde_json::Value,
+    ) -> Result<(), AgentLoopHostError> {
+        Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "capability result updates are not supported by this writer",
+        ))
+    }
+
+    async fn delete_capability_result(
+        &self,
+        _run_context: &LoopRunContext,
+        _result_ref: &LoopResultRef,
+    ) -> Result<(), AgentLoopHostError> {
+        Ok(())
+    }
 }
 
 #[derive(Clone)]

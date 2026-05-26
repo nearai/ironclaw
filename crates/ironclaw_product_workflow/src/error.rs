@@ -10,6 +10,8 @@ use ironclaw_product_adapters::{
 use ironclaw_turns::{TurnError, TurnErrorCategory};
 use thiserror::Error;
 
+use crate::approval_interaction::ApprovalInteractionRejectionKind;
+
 /// Stable reasons for rejecting an auth continuation before or during turn resume.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthContinuationRejectionKind {
@@ -77,6 +79,12 @@ pub enum ProductWorkflowError {
     #[error("auth continuation rejected: {kind:?}")]
     AuthContinuationRejected { kind: AuthContinuationRejectionKind },
 
+    /// Approval interaction was rejected with a stable sanitized reason.
+    #[error("approval interaction rejected: {kind:?}")]
+    ApprovalInteractionRejected {
+        kind: ApprovalInteractionRejectionKind,
+    },
+
     /// Turn coordinator rejected a resume with typed category/status information.
     #[error("turn resume denied: {error}")]
     TurnResumeDenied { error: TurnError },
@@ -108,6 +116,7 @@ fn workflow_rejection_kind(category: TurnErrorCategory) -> ProductWorkflowReject
         TurnErrorCategory::Unauthorized => ProductWorkflowRejectionKind::Unauthorized,
         TurnErrorCategory::InvalidRequest => ProductWorkflowRejectionKind::InvalidRequest,
         TurnErrorCategory::Unavailable => ProductWorkflowRejectionKind::Unavailable,
+        TurnErrorCategory::CapacityExceeded => ProductWorkflowRejectionKind::AdmissionRejected,
         TurnErrorCategory::Conflict => ProductWorkflowRejectionKind::Conflict,
     }
 }
@@ -170,6 +179,14 @@ impl From<ProductWorkflowError> for ProductAdapterError {
                     kind: ProductWorkflowRejectionKind::InvalidRequest,
                     status_code: 400,
                     retryable: false,
+                    reason: RedactedString::new(kind.sanitized_reason()),
+                }
+            }
+            ProductWorkflowError::ApprovalInteractionRejected { kind } => {
+                ProductAdapterError::WorkflowRejected {
+                    kind: kind.workflow_rejection_kind(),
+                    status_code: kind.status_code(),
+                    retryable: kind.retryable(),
                     reason: RedactedString::new(kind.sanitized_reason()),
                 }
             }
@@ -266,6 +283,15 @@ mod tests {
                 },
                 ProductWorkflowRejectionKind::Unavailable,
                 503,
+                true,
+            ),
+            (
+                TurnError::capacity_exceeded(
+                    ironclaw_turns::TurnCapacityResource::SpawnTreeDescendants,
+                    3,
+                ),
+                ProductWorkflowRejectionKind::AdmissionRejected,
+                429,
                 true,
             ),
         ] {

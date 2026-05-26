@@ -150,6 +150,134 @@ async fn webui_event_stream_resumes_mixed_batch_without_skipping_turn_event() {
 }
 
 #[tokio::test]
+async fn webui_event_stream_projects_blocked_dependent_run_status() {
+    let tenant_id = TenantId::new("webui-events-tenant").unwrap();
+    let user_id = UserId::new("webui-events-user").unwrap();
+    let agent_id = AgentId::new("webui-events-agent").unwrap();
+    let thread_id = ThreadId::new("webui-events-dependent-thread").unwrap();
+    let turn_run = TurnRunId::new();
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+    let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let actor = TurnActor::new(user_id.clone());
+    let services = build_reborn_projection_services(
+        event_log_dyn,
+        ReplyTargetBindingRef::new("webui-events-reply").unwrap(),
+    )
+    .with_turn_events(
+        Arc::new(FakeTurnEventSource {
+            events: vec![TurnLifecycleEvent {
+                cursor: TurnEventCursor(1),
+                scope: scope.clone(),
+                occurred_at: Some(chrono::Utc::now()),
+                owner_user_id: Some(user_id.clone()),
+                run_id: turn_run,
+                status: TurnStatus::BlockedDependentRun,
+                kind: TurnEventKind::Blocked,
+                blocked_gate: Some(TurnBlockedGateMetadata {
+                    gate_ref: GateRef::new("gate:await-dependent-run").unwrap(),
+                    gate_kind: TurnBlockedGateKind::AwaitDependentRun,
+                }),
+                sanitized_reason: Some("Waiting for dependent run".to_string()),
+            }],
+        }),
+        Arc::new(FakeTurnCoordinator {
+            state: TurnRunState {
+                status: TurnStatus::BlockedDependentRun,
+                gate_ref: Some(GateRef::new("gate:await-dependent-run").unwrap()),
+                ..turn_run_state(&scope, &user_id, turn_run, TurnEventCursor(1))
+            },
+        }),
+    );
+
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor,
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(events.iter().any(|event| match event.payload() {
+        ProductOutboundPayload::ProjectionUpdate { state } => state.items.iter().any(|item| {
+            matches!(
+                item,
+                ProductProjectionItem::RunStatus { run_id, status }
+                    if *run_id == turn_run && status == "blocked_dependent_run"
+            )
+        }),
+        _ => false,
+    }));
+}
+
+#[tokio::test]
+async fn webui_event_stream_tolerates_initial_turn_event_rebase() {
+    let tenant_id = TenantId::new("webui-events-tenant").unwrap();
+    let user_id = UserId::new("webui-events-user").unwrap();
+    let agent_id = AgentId::new("webui-events-agent").unwrap();
+    let thread_id = ThreadId::new("webui-events-thread").unwrap();
+    let runtime_run = InvocationId::new();
+    let turn_run = TurnRunId::new();
+    let turn_cursor = TurnEventCursor(7);
+    let event_log = Arc::new(InMemoryDurableEventLog::new());
+    event_log
+        .append(RuntimeEvent::model_started(
+            resource_scope(&tenant_id, &user_id, &agent_id, &thread_id, runtime_run),
+            CapabilityId::new("loop.model").unwrap(),
+        ))
+        .await
+        .unwrap();
+
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+    let event_log_dyn: Arc<dyn DurableEventLog> = event_log;
+    let services = build_reborn_projection_services(
+        event_log_dyn,
+        ReplyTargetBindingRef::new("webui-events-reply").unwrap(),
+    )
+    .with_turn_events(
+        Arc::new(RebaseTurnEventSource {
+            cursor: turn_cursor,
+        }),
+        Arc::new(FakeTurnCoordinator {
+            state: turn_run_state(&scope, &user_id, turn_run, turn_cursor),
+        }),
+    );
+
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id),
+            scope: scope.clone(),
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(contains_run_status(&events, runtime_run, "running"));
+    assert!(matches!(
+        events.last().map(|event| event.payload()),
+        Some(ProductOutboundPayload::KeepAlive)
+    ));
+    let parsed =
+        parse_webui_projection_cursor(events.last().unwrap().projection_cursor().as_str()).unwrap();
+    assert_eq!(
+        parsed.turn,
+        Some(TurnEventProjectionCursor::for_scope(scope, turn_cursor))
+    );
+}
+
+#[tokio::test]
 async fn webui_event_stream_rejects_foreign_composite_turn_cursor() {
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let user_id = UserId::new("webui-events-user").unwrap();
@@ -482,5 +610,56 @@ async fn webui_event_stream_uses_request_actor_for_projection_scope() {
     assert!(
         events.is_empty(),
         "projection stream must not read another user's event stream through a hidden runtime actor"
+    );
+}
+
+#[tokio::test]
+async fn webui_event_stream_filters_turn_events_by_owner_user() {
+    let tenant_id = TenantId::new("webui-events-tenant").unwrap();
+    let owner_user_id = UserId::new("webui-events-owner").unwrap();
+    let other_user_id = UserId::new("webui-events-other").unwrap();
+    let agent_id = AgentId::new("webui-events-agent").unwrap();
+    let thread_id = ThreadId::new("webui-events-thread").unwrap();
+    let scope = TurnScope::new(tenant_id, Some(agent_id), None, thread_id);
+    let run_id = TurnRunId::new();
+    let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let services = build_reborn_projection_services(
+        event_log,
+        ReplyTargetBindingRef::new("webui-events-reply").unwrap(),
+    )
+    .with_turn_events(
+        Arc::new(FakeTurnEventSource {
+            events: vec![TurnLifecycleEvent {
+                cursor: TurnEventCursor(1),
+                scope: scope.clone(),
+                occurred_at: Some(chrono::Utc::now()),
+                owner_user_id: Some(owner_user_id.clone()),
+                run_id,
+                status: TurnStatus::Running,
+                kind: TurnEventKind::RunnerClaimed,
+                blocked_gate: None,
+                sanitized_reason: None,
+            }],
+        }),
+        Arc::new(FakeTurnCoordinator {
+            state: turn_run_state(&scope, &owner_user_id, run_id, TurnEventCursor(1)),
+        }),
+    );
+
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(other_user_id),
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        events
+            .iter()
+            .all(|event| matches!(event.payload(), ProductOutboundPayload::KeepAlive)),
+        "turn event bridge must not emit another user's lifecycle event payload"
     );
 }

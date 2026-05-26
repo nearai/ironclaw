@@ -1,14 +1,20 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use ironclaw_host_api::{CapabilityDescriptor, CapabilityId, ExtensionId};
+use parking_lot::RwLock;
 
-use crate::{ExtensionError, ExtensionPackage};
+use crate::{CapabilityVisibility, ExtensionError, ExtensionPackage};
 
 /// Registry of validated extension packages and declared capabilities.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ExtensionRegistry {
     packages: HashMap<ExtensionId, ExtensionPackage>,
     capabilities: HashMap<CapabilityId, CapabilityDescriptor>,
+    capability_visibility: HashMap<CapabilityId, CapabilityVisibility>,
     extension_order: Vec<ExtensionId>,
     capability_order: Vec<CapabilityId>,
 }
@@ -99,6 +105,15 @@ impl ExtensionRegistry {
             self.capability_order.push(descriptor.id.clone());
             self.capabilities
                 .insert(descriptor.id.clone(), descriptor.clone());
+            if let Some(capability) = package
+                .manifest
+                .capabilities
+                .iter()
+                .find(|capability| capability.id == descriptor.id)
+            {
+                self.capability_visibility
+                    .insert(descriptor.id.clone(), capability.visibility);
+            }
         }
         self.extension_order.push(package.id.clone());
         self.packages.insert(package.id.clone(), package);
@@ -110,7 +125,11 @@ impl ExtensionRegistry {
             .extension_order
             .iter()
             .position(|extension_id| extension_id == &id);
-        let Some(current) = self.packages.remove(&id) else {
+        let Some(current) = self.packages.get(&id).cloned() else {
+            debug_assert!(
+                false,
+                "replace_validated called without an existing package"
+            );
             return;
         };
         let current_capability_ids = current
@@ -126,6 +145,7 @@ impl ExtensionRegistry {
 
         for capability_id in &current_capability_ids {
             self.capabilities.remove(capability_id);
+            self.capability_visibility.remove(capability_id);
         }
         self.capability_order
             .retain(|capability_id| !current_capability_ids.contains(capability_id));
@@ -134,21 +154,41 @@ impl ExtensionRegistry {
                 .insert(capability_insert_index + offset, descriptor.id.clone());
             self.capabilities
                 .insert(descriptor.id.clone(), descriptor.clone());
+            if let Some(capability) = package
+                .manifest
+                .capabilities
+                .iter()
+                .find(|capability| capability.id == descriptor.id)
+            {
+                self.capability_visibility
+                    .insert(descriptor.id.clone(), capability.visibility);
+            }
         }
         if let Some(index) = extension_index {
             self.extension_order[index] = id.clone();
         } else {
+            debug_assert!(
+                false,
+                "replace_validated found package missing from extension_order"
+            );
             self.extension_order.push(id.clone());
         }
         self.packages.insert(id, package);
     }
 
-    pub(crate) fn remove_validated(&mut self, id: &ExtensionId) -> Option<ExtensionPackage> {
+    pub fn update(&mut self, package: ExtensionPackage) -> Result<(), ExtensionError> {
+        self.validate_replacement(&package)?;
+        self.replace_validated(package);
+        Ok(())
+    }
+
+    pub fn remove(&mut self, id: &ExtensionId) -> Option<ExtensionPackage> {
         let package = self.packages.remove(id)?;
         self.extension_order
             .retain(|extension_id| extension_id != id);
         for descriptor in &package.capabilities {
             self.capabilities.remove(&descriptor.id);
+            self.capability_visibility.remove(&descriptor.id);
             self.capability_order
                 .retain(|capability_id| capability_id != &descriptor.id);
         }
@@ -161,6 +201,10 @@ impl ExtensionRegistry {
 
     pub fn get_capability(&self, id: &CapabilityId) -> Option<&CapabilityDescriptor> {
         self.capabilities.get(id)
+    }
+
+    pub fn capability_visibility(&self, id: &CapabilityId) -> Option<CapabilityVisibility> {
+        self.capability_visibility.get(id).copied()
     }
 
     pub fn extensions(&self) -> impl Iterator<Item = &ExtensionPackage> {
@@ -176,22 +220,284 @@ impl ExtensionRegistry {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct SharedExtensionRegistry {
+    inner: Arc<RwLock<Arc<ExtensionRegistry>>>,
+    version: Arc<AtomicU64>,
+}
+
+impl SharedExtensionRegistry {
+    pub fn new(registry: ExtensionRegistry) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(Arc::new(registry))),
+            version: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    pub fn snapshot(&self) -> Arc<ExtensionRegistry> {
+        Arc::clone(&self.inner.read())
+    }
+
+    pub fn snapshot_owned(&self) -> ExtensionRegistry {
+        self.snapshot().as_ref().clone()
+    }
+
+    pub fn version(&self) -> u64 {
+        self.version.load(Ordering::Acquire)
+    }
+
+    pub fn insert(&self, package: ExtensionPackage) -> Result<(), ExtensionError> {
+        self.with_mut_result(|registry| registry.insert(package))
+    }
+
+    pub fn update(&self, package: ExtensionPackage) -> Result<(), ExtensionError> {
+        self.with_mut_result(|registry| registry.update(package))
+    }
+
+    pub fn upsert(&self, package: ExtensionPackage) -> Result<(), ExtensionError> {
+        self.with_mut_result(|registry| {
+            if registry.get_extension(&package.id).is_some() {
+                registry.update(package)
+            } else {
+                registry.insert(package)
+            }
+        })
+    }
+
+    pub fn remove(&self, id: &ExtensionId) -> Option<ExtensionPackage> {
+        let mut guard = self.inner.write();
+        let removed = Arc::make_mut(&mut guard).remove(id);
+        if removed.is_some() {
+            self.version.fetch_add(1, Ordering::AcqRel);
+        }
+        removed
+    }
+
+    fn with_mut_result<R>(
+        &self,
+        f: impl FnOnce(&mut ExtensionRegistry) -> Result<R, ExtensionError>,
+    ) -> Result<R, ExtensionError> {
+        let mut guard = self.inner.write();
+        let result = f(Arc::make_mut(&mut guard))?;
+        self.version.fetch_add(1, Ordering::AcqRel);
+        Ok(result)
+    }
+
+    pub fn replace(&self, registry: ExtensionRegistry) {
+        let mut guard = self.inner.write();
+        *guard = Arc::new(registry);
+        self.version.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+impl Default for SharedExtensionRegistry {
+    fn default() -> Self {
+        Self::new(ExtensionRegistry::default())
+    }
+}
+
 pub(crate) fn validate_package_consistency(
     package: &ExtensionPackage,
 ) -> Result<(), ExtensionError> {
-    let expected = ExtensionPackage::from_manifest(package.manifest.clone(), package.root.clone())?;
-    if package.id != expected.id {
-        return Err(ExtensionError::InvalidManifest {
-            reason: format!(
-                "package id {} does not match manifest/root id {}",
-                package.id, expected.id
-            ),
-        });
+    package.validate_consistency()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::thread;
+
+    use ironclaw_host_api::{HostPortCatalog, VirtualPath};
+
+    use super::*;
+    use crate::{ExtensionManifest, ManifestSource};
+
+    #[test]
+    fn shared_registry_upsert_inserts_new_and_updates_existing() {
+        let registry = SharedExtensionRegistry::default();
+        let initial = test_package("fixture", &["search"]);
+        registry.upsert(initial).expect("insert through upsert");
+
+        let updated = test_package("fixture", &["write"]);
+        registry.upsert(updated).expect("update through upsert");
+        let snapshot = registry.snapshot();
+
+        assert!(snapshot.get_extension(&extension_id("fixture")).is_some());
+        assert!(
+            snapshot
+                .get_capability(&capability_id("fixture.search"))
+                .is_none()
+        );
+        assert!(
+            snapshot
+                .get_capability(&capability_id("fixture.write"))
+                .is_some()
+        );
     }
-    if package.capabilities != expected.capabilities {
-        return Err(ExtensionError::InvalidManifest {
-            reason: "package capability descriptors do not match manifest declarations".to_string(),
-        });
+
+    #[test]
+    fn shared_registry_methods_cover_mutation_and_snapshot_paths() {
+        let registry = SharedExtensionRegistry::default();
+        registry
+            .insert(test_package("alpha", &["read"]))
+            .expect("insert package");
+        registry
+            .update(test_package("alpha", &["write"]))
+            .expect("update package");
+        assert!(
+            registry
+                .snapshot()
+                .get_capability(&capability_id("alpha.write"))
+                .is_some()
+        );
+
+        let held_snapshot = registry.snapshot();
+        registry
+            .upsert(test_package("beta", &["read"]))
+            .expect("copy-on-write insert while snapshot is held");
+        assert!(held_snapshot.get_extension(&extension_id("beta")).is_none());
+        assert!(
+            registry
+                .snapshot()
+                .get_extension(&extension_id("beta"))
+                .is_some()
+        );
+
+        let owned = registry.snapshot_owned();
+        assert!(owned.get_extension(&extension_id("alpha")).is_some());
+
+        let removed = registry
+            .remove(&extension_id("alpha"))
+            .expect("remove package");
+        assert_eq!(removed.id, extension_id("alpha"));
+        assert!(
+            registry
+                .snapshot()
+                .get_extension(&extension_id("alpha"))
+                .is_none()
+        );
+
+        let mut replacement = ExtensionRegistry::new();
+        replacement
+            .insert(test_package("gamma", &["read"]))
+            .expect("replacement insert");
+        registry.replace(replacement);
+        assert!(
+            registry
+                .snapshot()
+                .get_extension(&extension_id("gamma"))
+                .is_some()
+        );
+        assert!(
+            registry
+                .snapshot()
+                .get_extension(&extension_id("beta"))
+                .is_none()
+        );
     }
-    Ok(())
+
+    #[test]
+    fn shared_registry_version_changes_only_on_applied_mutations() {
+        let registry = SharedExtensionRegistry::default();
+        let initial_version = registry.version();
+
+        assert!(registry.remove(&extension_id("missing")).is_none());
+        assert_eq!(registry.version(), initial_version);
+
+        registry
+            .insert(test_package("alpha", &["read"]))
+            .expect("insert package");
+        let inserted_version = registry.version();
+        assert!(inserted_version > initial_version);
+
+        let duplicate = registry
+            .insert(test_package("alpha", &["write"]))
+            .expect_err("duplicate extension is rejected");
+        assert!(matches!(
+            duplicate,
+            ExtensionError::DuplicateExtension { .. }
+        ));
+        assert_eq!(registry.version(), inserted_version);
+    }
+
+    #[test]
+    fn shared_registry_concurrent_insert_and_snapshot() {
+        let registry = SharedExtensionRegistry::default();
+        let writer_registry = registry.clone();
+        let writer = thread::spawn(move || {
+            for id in ["alpha", "beta", "gamma"] {
+                writer_registry
+                    .upsert(test_package(id, &["read"]))
+                    .expect("writer upsert");
+            }
+        });
+
+        let reader_registry = registry.clone();
+        let reader = thread::spawn(move || {
+            for _ in 0..16 {
+                let _ = reader_registry.snapshot();
+            }
+        });
+
+        writer.join().expect("writer thread");
+        reader.join().expect("reader thread");
+
+        let snapshot = registry.snapshot();
+        for id in ["alpha", "beta", "gamma"] {
+            assert!(snapshot.get_extension(&extension_id(id)).is_some());
+        }
+    }
+
+    fn test_package(extension_id: &str, capabilities: &[&str]) -> ExtensionPackage {
+        let capability_blocks = capabilities
+            .iter()
+            .map(|name| {
+                format!(
+                    r#"
+[[capabilities]]
+id = "{extension_id}.{name}"
+description = "{name}"
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/{name}.input.json"
+output_schema_ref = "schemas/{name}.output.json"
+"#
+                )
+            })
+            .collect::<String>();
+        let manifest = format!(
+            r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "{extension_id}"
+name = "{extension_id}"
+version = "0.1.0"
+description = "test extension"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/{extension_id}.wasm"
+{capability_blocks}
+"#
+        );
+        let manifest = ExtensionManifest::parse(
+            &manifest,
+            ManifestSource::HostBundled,
+            &HostPortCatalog::empty(),
+        )
+        .expect("manifest parses");
+        ExtensionPackage::from_manifest(
+            manifest,
+            VirtualPath::new(format!("/system/extensions/{extension_id}")).expect("root"),
+        )
+        .expect("package builds")
+    }
+
+    fn extension_id(value: &str) -> ExtensionId {
+        ExtensionId::new(value.to_string()).expect("extension id")
+    }
+
+    fn capability_id(value: &str) -> CapabilityId {
+        CapabilityId::new(value.to_string()).expect("capability id")
+    }
 }
