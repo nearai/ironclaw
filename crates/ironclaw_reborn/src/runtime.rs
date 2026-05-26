@@ -14,15 +14,17 @@ use ironclaw_loop_support::{
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 use ironclaw_turns::{
-    AgentLoopDriverError, CheckpointStateStore, DefaultTurnCoordinator, LoopCheckpointStore,
-    RunProfileResolver, TurnCommittedEventObserver, TurnEventSink, TurnRunWakeNotifier,
-    TurnSpawnTreePort, TurnSpawnTreeStateStore, TurnStateStore,
+    AgentLoopDriverError, CheckpointStateStore, DefaultTurnCoordinator,
+    DefaultTurnLifecycleEventBus, LifecyclePublicationErrorPort, LifecyclePublishingTurnStateStore,
+    LoopCheckpointStore, RunProfileResolver, TurnCommittedEventObserver, TurnEventSink,
+    TurnLifecycleEventBus, TurnRunWakeNotifier, TurnSpawnTreePort, TurnSpawnTreeStateStore,
+    TurnStateStore,
     loop_exit::LoopExitEvidencePort,
     run_profile::{
         AgentLoopHostError, InstructionSafetyContext, LoopCapabilityPort, LoopHostMilestoneSink,
         LoopModelBudgetAccountant, LoopModelPolicyGuard, LoopRunContext,
     },
-    runner::{EventPublishingTurnRunTransitionPort, TurnRunTransitionPort},
+    runner::TurnRunTransitionPort,
 };
 
 use crate::{
@@ -352,13 +354,26 @@ where
     ));
     let subagent_completion_observer: Arc<dyn TurnCommittedEventObserver> =
         completion_observer.clone();
-    let mut base_coordinator = DefaultTurnCoordinator::new(Arc::clone(&parts.turn_state))
+    let lifecycle_bus = Arc::new(DefaultTurnLifecycleEventBus::new());
+    lifecycle_bus
+        .subscribe_required(Arc::clone(&subagent_completion_observer))
+        .map_err(|error| DefaultPlannedRuntimeBuildError::SubagentCompletion(error.to_string()))?;
+    if let Some(turn_event_sink) = parts.turn_event_sink.clone() {
+        lifecycle_bus
+            .subscribe_best_effort(turn_event_sink)
+            .map_err(|error| {
+                DefaultPlannedRuntimeBuildError::SubagentCompletion(error.to_string())
+            })?;
+    }
+    let turn_state = Arc::new(LifecyclePublishingTurnStateStore::new(
+        Arc::clone(&parts.turn_state),
+        lifecycle_bus,
+    ));
+    let publication_error_port: Arc<dyn LifecyclePublicationErrorPort> = turn_state.clone();
+    let base_coordinator = DefaultTurnCoordinator::new(Arc::clone(&turn_state))
         .with_run_profile_resolver(Arc::clone(&run_profile_resolver))
         .with_wake_notifier(Arc::clone(&wake_notifier))
-        .with_required_event_observer(Arc::clone(&subagent_completion_observer));
-    if let Some(turn_event_sink) = parts.turn_event_sink.clone() {
-        base_coordinator = base_coordinator.with_event_sink(turn_event_sink);
-    }
+        .with_lifecycle_publication_error_port(publication_error_port);
     let base_coordinator_arc = Arc::new(base_coordinator);
     let child_runs: Arc<dyn TurnSpawnTreePort> = base_coordinator_arc.clone();
     let coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> = base_coordinator_arc;
@@ -366,7 +381,7 @@ where
         .bind_coordinator(Arc::clone(&coordinator))
         .map_err(|error| DefaultPlannedRuntimeBuildError::SubagentCompletion(error.to_string()))?;
 
-    let turn_state_store: Arc<dyn TurnStateStore> = parts.turn_state.clone();
+    let turn_state_store: Arc<dyn TurnStateStore> = turn_state.clone();
     let subagent_prompt_source = Arc::new(GateBackedSubagentPromptMaterialSource::new(
         Arc::clone(&parts.subagent_goal_store),
         Arc::clone(&parts.subagent_gate_store),
@@ -429,14 +444,7 @@ where
     host_factory = host_factory.with_identity_context_source(parts.identity_context_source);
     let host_factory = Arc::new(host_factory);
 
-    let transition_port_inner: Arc<dyn TurnRunTransitionPort> = parts.turn_state;
-    let transition_port: Arc<dyn TurnRunTransitionPort> = Arc::new(
-        EventPublishingTurnRunTransitionPort::new_optional_sink(
-            transition_port_inner,
-            parts.turn_event_sink,
-        )
-        .with_required_observer(subagent_completion_observer),
-    );
+    let transition_port: Arc<dyn TurnRunTransitionPort> = turn_state;
     let loop_exit_applier = Arc::new(LoopExitApplier::new(
         Arc::clone(&transition_port),
         parts.loop_exit_evidence,

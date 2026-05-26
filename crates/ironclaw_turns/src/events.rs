@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::{sync::Arc, sync::Mutex};
 use thiserror::Error;
@@ -80,6 +81,36 @@ pub struct TurnLifecycleEvent {
 }
 
 impl TurnLifecycleEvent {
+    pub fn from_run_state(
+        state: &TurnRunState,
+        kind: TurnEventKind,
+        sanitized_reason: Option<String>,
+    ) -> Self {
+        let blocked_gate = if kind == TurnEventKind::Blocked {
+            state.gate_ref.clone().and_then(|gate_ref| {
+                TurnBlockedGateKind::from_status(state.status).map(|gate_kind| {
+                    TurnBlockedGateMetadata {
+                        gate_ref,
+                        gate_kind,
+                    }
+                })
+            })
+        } else {
+            None
+        };
+        Self {
+            cursor: state.event_cursor,
+            scope: state.scope.clone(),
+            occurred_at: Some(Utc::now()),
+            owner_user_id: state.actor.as_ref().map(|actor| actor.user_id.clone()),
+            run_id: state.run_id,
+            status: state.status,
+            kind,
+            blocked_gate,
+            sanitized_reason,
+        }
+    }
+
     /// Return the transport-facing lifecycle event view.
     ///
     /// Internal projection consumers may need gate and owner metadata to

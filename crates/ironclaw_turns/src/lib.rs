@@ -12,6 +12,7 @@ mod coordinator;
 pub mod events;
 mod filesystem_store;
 mod ids;
+mod lifecycle;
 pub mod loop_exit;
 mod memory;
 mod request;
@@ -54,6 +55,10 @@ pub use ids::{
     LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef, LoopUsageSummaryRef,
     ReplyTargetBindingRef, RunProfileId, RunProfileRequest, RunProfileVersion, SourceBindingRef,
     TurnCheckpointId, TurnId, TurnLeaseToken, TurnRunId, TurnRunnerId,
+};
+pub use lifecycle::{
+    DefaultTurnLifecycleEventBus, LifecyclePublicationErrorPort, LifecyclePublishingTurnStateStore,
+    NoopLifecyclePublicationErrorPort, TurnLifecycleEventBus,
 };
 pub use loop_exit::{
     BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
