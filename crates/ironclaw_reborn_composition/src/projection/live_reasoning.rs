@@ -21,9 +21,11 @@ use ironclaw_turns::{
     },
 };
 
-// Live-only reasoning updates share the projection cursor envelope with
-// durable runtime projections, so allocate them from a high range that normal
-// append-log cursors will not reach.
+// Live reasoning uses a synthetic cursor because it is an ephemeral UI hint,
+// not a durable runtime event. This sink must remain the only producer on this
+// `InMemoryProjectionUpdateSource`: mixing durable `ThreadUpdates` into the
+// same live broadcast would put low append-log cursors and high synthetic
+// cursors behind the same `last_delivered_cursor` ordering gate.
 const LIVE_REASONING_CURSOR_BASE: u64 = 1 << 62;
 
 pub(super) struct LiveReasoningMilestoneSink {
@@ -48,6 +50,9 @@ impl LiveReasoningMilestoneSink {
     }
 
     fn publish_reasoning_delta(&self, milestone: &LoopHostMilestone, safe_delta: &str) {
+        // The delta is already model-visible sanitized upstream. Re-sanitize at
+        // the product projection boundary so this publish path has its own
+        // last-mile redaction gate before sending a browser-facing payload.
         let safe_delta = sanitize_model_visible_text(safe_delta);
         if safe_delta.is_empty() {
             return;
