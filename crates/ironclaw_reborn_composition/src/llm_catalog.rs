@@ -10,9 +10,9 @@
 //!    `ironclaw_reborn_config::LlmSlotSelection`. "Use provider X
 //!    for the `default` slot, with model Y."
 //! 3. **Runtime config** — derived here. The resolved `ProviderDefinition`
-//!    plus the selection's overrides becomes a `RebornLlmConfig` that
-//!    `build_reborn_runtime` knows how to wire into a host-managed
-//!    model gateway.
+//!    plus the selection's overrides becomes an `ironclaw_llm::LlmConfig`
+//!    that `build_reborn_runtime` wires through the shared LLM provider
+//!    chain.
 //!
 //! This module is the home of step 3. Lives behind the
 //! `root-llm-provider` feature so the substrate-only composition stays
@@ -30,12 +30,12 @@ use std::path::Path;
 
 use thiserror::Error;
 
-use ironclaw_llm::{ProviderRegistry, registry::ProviderDefinition};
+use ironclaw_llm::{ProviderRegistry, ResolvedProviderConfig, registry::ProviderDefinition};
 use ironclaw_reborn_config::{
     LlmSlotSelection, RebornBootConfig, RebornConfigFile, reject_inline_secret,
 };
 
-use crate::runtime_input::{DEFAULT_LLM_REQUEST_TIMEOUT_SECS, RebornLlmConfig, ResolvedRebornLlm};
+use crate::runtime_input::ResolvedRebornLlm;
 
 /// Errors surfaced when resolving an `LlmSlotSelection` against the
 /// merged provider catalog.
@@ -129,7 +129,7 @@ pub fn resolve_reborn_runtime_llm(
             selection,
             Some(boot.home().providers_file_path().as_path()),
         )
-        .map(ResolvedRebornLlm::from_catalog)
+        .map(ResolvedRebornLlm::from_llm_config)
         .map(Some);
     }
 
@@ -139,15 +139,9 @@ pub fn resolve_reborn_runtime_llm(
 fn resolve_llm_from_env(
     boot: &RebornBootConfig,
 ) -> Result<Option<ResolvedRebornLlm>, RebornLlmCatalogError> {
-    ironclaw_llm::resolve_registry_provider_from_env(Some(
-        boot.home().providers_file_path().as_path(),
-    ))
-    .map(|maybe_config| {
-        maybe_config.map(|config| {
-            ResolvedRebornLlm::from_registry_provider(config, DEFAULT_LLM_REQUEST_TIMEOUT_SECS)
-        })
-    })
-    .map_err(|source| RebornLlmCatalogError::EnvResolution { source })
+    ironclaw_llm::resolve_llm_config_from_env(Some(boot.home().providers_file_path().as_path()))
+        .map(|maybe_config| maybe_config.map(ResolvedRebornLlm::from_llm_config))
+        .map_err(|source| RebornLlmCatalogError::EnvResolution { source })
 }
 
 /// Resolve an `LlmSlotSelection` against the merged provider catalog.
@@ -159,11 +153,11 @@ fn resolve_llm_from_env(
 /// 4. Read the API key value from that env var (fail-closed if absent).
 /// 5. Determine base_url (selection override > catalog default).
 /// 6. Determine model (selection override > catalog default).
-/// 7. Build and return a `RebornLlmConfig`.
+/// 7. Build and return a full `ironclaw_llm::LlmConfig`.
 pub fn resolve_llm_selection_against_catalog(
     selection: &LlmSlotSelection,
     user_providers_path: Option<&Path>,
-) -> Result<RebornLlmConfig, RebornLlmCatalogError> {
+) -> Result<ironclaw_llm::LlmConfig, RebornLlmCatalogError> {
     let registry = ProviderRegistry::try_load_from_path(user_providers_path)
         .map_err(|source| RebornLlmCatalogError::CatalogLoad { source })?;
     resolve_against_registry(selection, &registry)
@@ -175,7 +169,7 @@ pub fn resolve_llm_selection_against_catalog(
 pub fn resolve_against_registry(
     selection: &LlmSlotSelection,
     registry: &ProviderRegistry,
-) -> Result<RebornLlmConfig, RebornLlmCatalogError> {
+) -> Result<ironclaw_llm::LlmConfig, RebornLlmCatalogError> {
     validate_catalog(registry)?;
 
     let provider_id = selection
@@ -215,15 +209,16 @@ pub fn resolve_against_registry(
 
     let extra_headers = resolve_extra_headers(provider)?;
 
-    Ok(RebornLlmConfig {
+    ironclaw_llm::build_llm_config_from_resolved_provider(ResolvedProviderConfig {
+        protocol: provider.protocol,
         provider_id: provider.id.clone(),
-        model,
-        base_url,
         api_key,
-        protocol: serialize_protocol(provider.protocol),
-        request_timeout_secs: DEFAULT_LLM_REQUEST_TIMEOUT_SECS,
+        base_url,
+        model,
         extra_headers,
+        unsupported_params: provider.unsupported_params.clone(),
     })
+    .map_err(|source| RebornLlmCatalogError::EnvResolution { source })
 }
 
 fn validate_catalog(registry: &ProviderRegistry) -> Result<(), RebornLlmCatalogError> {
@@ -477,26 +472,6 @@ fn merge_extra_headers(
     merged
 }
 
-/// Map `ironclaw_llm::ProviderProtocol` to the wire string
-/// `RebornLlmConfig.protocol` accepts.
-fn serialize_protocol(protocol: ironclaw_llm::ProviderProtocol) -> String {
-    use ironclaw_llm::ProviderProtocol;
-    match protocol {
-        ProviderProtocol::OpenAiCompletions => "open_ai_completions",
-        ProviderProtocol::Anthropic => "anthropic",
-        ProviderProtocol::Ollama => "ollama",
-        ProviderProtocol::GithubCopilot => "github_copilot",
-        ProviderProtocol::DeepSeek => "deep_seek",
-        ProviderProtocol::Gemini => "gemini",
-        ProviderProtocol::OpenRouter => "open_router",
-        ProviderProtocol::Bedrock => "bedrock",
-        ProviderProtocol::OpenAiCodex => "openai_codex",
-        ProviderProtocol::GeminiOauth => "gemini_oauth",
-        ProviderProtocol::NearAi => "nearai",
-    }
-    .to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -579,6 +554,25 @@ mod tests {
             model_env: "REBORN_TEST_GITHUB_COPILOT_MODEL_UNSET_DO_NOT_SET_9c13".to_string(),
             default_model: "gpt-4o".to_string(),
             description: "test github copilot".to_string(),
+            extra_headers_env: None,
+            unsupported_params: Vec::new(),
+            setup: None,
+        }
+    }
+
+    fn provider_with_protocol(id: &str, protocol: ProviderProtocol) -> ProviderDefinition {
+        ProviderDefinition {
+            id: id.to_string(),
+            aliases: Vec::new(),
+            protocol,
+            default_base_url: None,
+            base_url_env: None,
+            base_url_required: false,
+            api_key_env: None,
+            api_key_required: false,
+            model_env: "REBORN_TEST_DEDICATED_MODEL_UNSET_DO_NOT_SET_9c13".to_string(),
+            default_model: "dedicated-default-model".to_string(),
+            description: "test dedicated provider".to_string(),
             extra_headers_env: None,
             unsupported_params: Vec::new(),
             setup: None,
@@ -768,38 +762,12 @@ mod tests {
         };
 
         let config = resolve_against_registry(&selection, &registry).expect("must resolve");
-        assert_eq!(config.provider_id, "alpha");
-        assert_eq!(config.model, "llama3"); // catalog default
-        assert_eq!(config.base_url, "http://localhost:11434"); // catalog default
-        assert_eq!(config.protocol, "ollama");
-        assert!(config.api_key.is_none());
-    }
-
-    #[test]
-    fn serializes_protocols_with_serde_snake_case_names() {
-        assert_eq!(
-            serialize_protocol(ProviderProtocol::OpenAiCompletions),
-            "open_ai_completions"
-        );
-        assert_eq!(serialize_protocol(ProviderProtocol::DeepSeek), "deep_seek");
-        assert_eq!(
-            serialize_protocol(ProviderProtocol::OpenRouter),
-            "open_router"
-        );
-        assert_eq!(
-            serialize_protocol(ProviderProtocol::GithubCopilot),
-            "github_copilot"
-        );
-        assert_eq!(serialize_protocol(ProviderProtocol::Bedrock), "bedrock");
-        assert_eq!(
-            serialize_protocol(ProviderProtocol::OpenAiCodex),
-            "openai_codex"
-        );
-        assert_eq!(
-            serialize_protocol(ProviderProtocol::GeminiOauth),
-            "gemini_oauth"
-        );
-        assert_eq!(serialize_protocol(ProviderProtocol::NearAi), "nearai");
+        let provider = config.provider.as_ref().expect("registry provider");
+        assert_eq!(provider.provider_id, "alpha");
+        assert_eq!(provider.model, "llama3"); // catalog default
+        assert_eq!(provider.base_url, "http://localhost:11434"); // catalog default
+        assert_eq!(provider.protocol, ProviderProtocol::Ollama);
+        assert!(provider.api_key.is_none());
     }
 
     #[test]
@@ -811,8 +779,9 @@ mod tests {
         };
 
         let config = resolve_against_registry(&selection, &registry).expect("must resolve");
-        assert_eq!(config.base_url, "");
-        assert_eq!(config.model, "default-model");
+        let provider = config.provider.as_ref().expect("registry provider");
+        assert_eq!(provider.base_url, "");
+        assert_eq!(provider.model, "default-model");
     }
 
     #[test]
@@ -841,8 +810,9 @@ mod tests {
         };
 
         let config = resolve_against_registry(&selection, &registry).expect("must resolve");
-        assert_eq!(config.model, "custom-model");
-        assert_eq!(config.base_url, "https://override.test/v1");
+        let provider = config.provider.as_ref().expect("registry provider");
+        assert_eq!(provider.model, "custom-model");
+        assert_eq!(provider.base_url, "https://override.test/v1");
     }
 
     #[test]
@@ -858,20 +828,92 @@ mod tests {
         let config = resolve_against_registry(&selection, &registry).expect("must resolve");
         assert!(
             config
+                .provider
+                .as_ref()
+                .expect("registry provider")
                 .extra_headers
                 .iter()
                 .any(|(key, _)| key == "Editor-Version"),
             "headers: {:?}",
-            config.extra_headers
+            config.provider.as_ref().unwrap().extra_headers
         );
         assert!(
             config
+                .provider
+                .as_ref()
+                .expect("registry provider")
                 .extra_headers
                 .iter()
                 .any(|(key, _)| key == "Copilot-Integration-Id"),
             "headers: {:?}",
-            config.extra_headers
+            config.provider.as_ref().unwrap().extra_headers
         );
+    }
+
+    #[test]
+    fn nearai_catalog_selection_resolves_to_full_dedicated_llm_config() {
+        let registry = ProviderRegistry::new(vec![provider_with_protocol(
+            "nearai",
+            ProviderProtocol::NearAi,
+        )]);
+        let selection = LlmSlotSelection {
+            provider_id: Some("nearai".to_string()),
+            model: Some("nearai/test-model".to_string()),
+            base_url: Some("https://private.near.ai".to_string()),
+            api_key_env: None,
+        };
+
+        let config = resolve_against_registry(&selection, &registry).expect("must resolve");
+        assert_eq!(config.backend, "nearai");
+        assert_eq!(config.nearai.model, "nearai/test-model");
+        assert_eq!(config.nearai.base_url, "https://private.near.ai");
+        assert!(config.provider.is_none());
+    }
+
+    #[test]
+    fn openai_codex_catalog_selection_resolves_to_full_dedicated_llm_config() {
+        let registry = ProviderRegistry::new(vec![provider_with_protocol(
+            "openai_codex",
+            ProviderProtocol::OpenAiCodex,
+        )]);
+        let selection = LlmSlotSelection {
+            provider_id: Some("openai_codex".to_string()),
+            model: Some("gpt-test-codex".to_string()),
+            ..Default::default()
+        };
+
+        let config = resolve_against_registry(&selection, &registry).expect("must resolve");
+        assert_eq!(config.backend, "openai_codex");
+        assert_eq!(
+            config.openai_codex.as_ref().expect("codex config").model,
+            "gpt-test-codex"
+        );
+        assert!(config.provider.is_none());
+    }
+
+    #[test]
+    fn gemini_oauth_catalog_selection_resolves_to_full_dedicated_llm_config() {
+        let registry = ProviderRegistry::new(vec![provider_with_protocol(
+            "gemini_oauth",
+            ProviderProtocol::GeminiOauth,
+        )]);
+        let selection = LlmSlotSelection {
+            provider_id: Some("gemini_oauth".to_string()),
+            model: Some("gemini-test".to_string()),
+            ..Default::default()
+        };
+
+        let config = resolve_against_registry(&selection, &registry).expect("must resolve");
+        assert_eq!(config.backend, "gemini_oauth");
+        assert_eq!(
+            config
+                .gemini_oauth
+                .as_ref()
+                .expect("gemini oauth config")
+                .model,
+            "gemini-test"
+        );
+        assert!(config.provider.is_none());
     }
 
     #[test]

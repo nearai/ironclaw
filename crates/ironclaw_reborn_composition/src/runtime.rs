@@ -98,7 +98,7 @@ pub use skills::{
 use skills::skill_asset_error;
 
 #[cfg(feature = "root-llm-provider")]
-use crate::runtime_input::{ResolvedRebornLlm, ResolvedRebornLlmSource};
+use crate::runtime_input::ResolvedRebornLlm;
 
 /// Stable identifier for a Reborn CLI conversation. Wraps a `ThreadId`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -407,7 +407,7 @@ impl RebornRuntime {
     /// from the session thread service.
     ///
     /// Without an LLM gateway wired in (i.e. when this crate is built
-    /// without the `root-llm-provider` feature or `RebornLlmConfig` is not
+    /// without the `root-llm-provider` feature or an LLM config is not
     /// provided), the run will fail and the returned reply will surface
     /// that failure via `status = Failed` and `text = None`.
     pub async fn send_user_message(
@@ -921,14 +921,14 @@ pub async fn build_reborn_runtime(
             gateway
         } else {
             match llm {
-                Some(cfg) => build_llm_gateway(cfg)?,
+                Some(cfg) => build_llm_gateway(cfg).await?,
                 None => build_stub_gateway(),
             }
         }
         #[cfg(not(test))]
         {
             match llm {
-                Some(cfg) => build_llm_gateway(cfg)?,
+                Some(cfg) => build_llm_gateway(cfg).await?,
                 None => build_stub_gateway(),
             }
         }
@@ -1254,33 +1254,20 @@ impl HostIdentityContextSource for EmptyIdentityContextSource {
 }
 
 #[cfg(feature = "root-llm-provider")]
-fn build_llm_gateway(
+async fn build_llm_gateway(
     llm: ResolvedRebornLlm,
 ) -> Result<Arc<dyn ironclaw_loop_support::HostManagedModelGateway>, RebornRuntimeError> {
-    use ironclaw_llm::RegistryProviderConfig;
     use ironclaw_reborn::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
     use ironclaw_turns::run_profile::ModelProfileId;
 
     let model = llm.model().to_string();
-    let provider = match llm.source {
-        ResolvedRebornLlmSource::Catalog(cfg) => {
-            let protocol = parse_provider_protocol(&cfg.protocol)?;
-            let registry_config = RegistryProviderConfig::generic(
-                protocol,
-                cfg.provider_id.clone(),
-                cfg.api_key.clone(),
-                cfg.base_url.clone(),
-                cfg.model.clone(),
-            )
-            .with_extra_headers(cfg.extra_headers.clone());
-            ironclaw_llm::create_registry_provider(&registry_config, cfg.request_timeout_secs)
-        }
-        ResolvedRebornLlmSource::RegistryProvider {
-            config,
-            request_timeout_secs,
-        } => ironclaw_llm::create_registry_provider(&config, request_timeout_secs),
-    }
-    .map_err(|error| RebornRuntimeError::LlmProvider(error.to_string()))?;
+    let session = Arc::new(ironclaw_llm::SessionManager::new(
+        llm.config.session.clone(),
+    ));
+    let (provider, _cheap_provider, _recording_handle, _reload_handle) =
+        ironclaw_llm::build_provider_chain(&llm.config, session)
+            .await
+            .map_err(|error| RebornRuntimeError::LlmProvider(error.to_string()))?;
 
     let model_profile_id = ModelProfileId::new("interactive_model").map_err(|reason| {
         RebornRuntimeError::LlmProvider(format!("invalid interactive model profile id: {reason}"))
@@ -1288,32 +1275,6 @@ fn build_llm_gateway(
     let policy = LlmModelProfilePolicy::new().allow_model_profile(model_profile_id, Some(model));
     let gateway = LlmProviderModelGateway::new(provider, policy);
     Ok(Arc::new(gateway))
-}
-
-#[cfg(feature = "root-llm-provider")]
-fn parse_provider_protocol(
-    protocol: &str,
-) -> Result<ironclaw_llm::ProviderProtocol, RebornRuntimeError> {
-    use ironclaw_llm::ProviderProtocol;
-
-    match protocol {
-        "open_ai_completions" | "openai_completions" | "openai" => {
-            Ok(ProviderProtocol::OpenAiCompletions)
-        }
-        "anthropic" => Ok(ProviderProtocol::Anthropic),
-        "ollama" => Ok(ProviderProtocol::Ollama),
-        "github_copilot" => Ok(ProviderProtocol::GithubCopilot),
-        "deep_seek" | "deepseek" => Ok(ProviderProtocol::DeepSeek),
-        "gemini" => Ok(ProviderProtocol::Gemini),
-        "open_router" | "openrouter" => Ok(ProviderProtocol::OpenRouter),
-        "bedrock" => Ok(ProviderProtocol::Bedrock),
-        "openai_codex" | "open_ai_codex" => Ok(ProviderProtocol::OpenAiCodex),
-        "gemini_oauth" => Ok(ProviderProtocol::GeminiOauth),
-        "nearai" | "near_ai" => Ok(ProviderProtocol::NearAi),
-        _ => Err(RebornRuntimeError::LlmProvider(format!(
-            "unsupported llm protocol: {protocol}"
-        ))),
-    }
 }
 
 fn build_stub_gateway() -> Arc<dyn ironclaw_loop_support::HostManagedModelGateway> {
@@ -3222,65 +3183,5 @@ mod tests {
         assert!(combined_skill_context.contains("WEBUI_HELPER_PROMPT_SENTINEL"));
 
         runtime.shutdown().await.expect("runtime shutdown");
-    }
-}
-
-#[cfg(all(test, feature = "root-llm-provider"))]
-mod llm_provider_tests {
-    use ironclaw_llm::ProviderProtocol;
-
-    use super::parse_provider_protocol;
-
-    #[test]
-    fn parses_supported_provider_protocols_without_wildcard_mapping() {
-        assert_eq!(
-            parse_provider_protocol("open_ai_completions").unwrap(),
-            ProviderProtocol::OpenAiCompletions
-        );
-        assert_eq!(
-            parse_provider_protocol("openai_completions").unwrap(),
-            ProviderProtocol::OpenAiCompletions
-        );
-        assert_eq!(
-            parse_provider_protocol("openai").unwrap(),
-            ProviderProtocol::OpenAiCompletions
-        );
-        assert_eq!(
-            parse_provider_protocol("anthropic").unwrap(),
-            ProviderProtocol::Anthropic
-        );
-        assert_eq!(
-            parse_provider_protocol("ollama").unwrap(),
-            ProviderProtocol::Ollama
-        );
-        assert_eq!(
-            parse_provider_protocol("deep_seek").unwrap(),
-            ProviderProtocol::DeepSeek
-        );
-        assert_eq!(
-            parse_provider_protocol("deepseek").unwrap(),
-            ProviderProtocol::DeepSeek
-        );
-        assert_eq!(
-            parse_provider_protocol("gemini").unwrap(),
-            ProviderProtocol::Gemini
-        );
-        assert_eq!(
-            parse_provider_protocol("open_router").unwrap(),
-            ProviderProtocol::OpenRouter
-        );
-        assert_eq!(
-            parse_provider_protocol("openrouter").unwrap(),
-            ProviderProtocol::OpenRouter
-        );
-        assert_eq!(
-            parse_provider_protocol("github_copilot").unwrap(),
-            ProviderProtocol::GithubCopilot
-        );
-    }
-
-    #[test]
-    fn rejects_unsupported_provider_protocol() {
-        assert!(parse_provider_protocol("made_up_protocol").is_err());
     }
 }

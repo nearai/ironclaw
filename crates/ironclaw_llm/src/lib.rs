@@ -31,6 +31,8 @@ mod provider;
 mod reasoning;
 pub mod recording;
 pub mod registry;
+#[cfg(feature = "registry-provider-factory")]
+mod resolution;
 pub mod response_cache;
 pub mod retry;
 mod rig_adapter;
@@ -83,6 +85,10 @@ pub use reasoning::{
 pub use reasoning::{clean_response, recover_tool_calls_from_content};
 pub use recording::{MemorySnapshotEntry, RecordingLlm};
 pub use registry::{ProviderDefinition, ProviderProtocol, ProviderRegistry};
+#[cfg(feature = "registry-provider-factory")]
+pub use resolution::{
+    ResolvedProviderConfig, build_llm_config_from_resolved_provider, resolve_llm_config_from_env,
+};
 pub use response_cache::{CachedProvider, ResponseCacheConfig};
 pub use retry::{RetryConfig, RetryProvider};
 pub use rig_adapter::RigAdapter;
