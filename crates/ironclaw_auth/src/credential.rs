@@ -135,7 +135,6 @@ pub enum CredentialRecoveryReason {
     AccountRevoked,
     AccountInactive,
     AmbiguousAccount,
-    NoAuthorizedAccount,
 }
 
 /// Adapter-safe credential recovery projection. Account entries are filtered
@@ -251,6 +250,7 @@ impl CredentialRecoveryProjection {
 pub struct CredentialAccountListRequest {
     pub scope: AuthProductScope,
     pub provider: AuthProviderId,
+    pub requester_extension: Option<ExtensionId>,
     pub cursor: Option<CredentialAccountId>,
     pub limit: usize,
 }
@@ -263,9 +263,15 @@ impl CredentialAccountListRequest {
         Self {
             scope,
             provider,
+            requester_extension: None,
             cursor: None,
             limit: Self::DEFAULT_LIMIT,
         }
+    }
+
+    pub fn for_extension(mut self, extension_id: ExtensionId) -> Self {
+        self.requester_extension = Some(extension_id);
+        self
     }
 
     pub fn with_cursor(mut self, cursor: CredentialAccountId) -> Self {
@@ -291,6 +297,28 @@ impl CredentialAccountListRequest {
             )));
         }
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialAccountLookupRequest {
+    pub scope: AuthProductScope,
+    pub account_id: CredentialAccountId,
+    pub requester_extension: Option<ExtensionId>,
+}
+
+impl CredentialAccountLookupRequest {
+    pub fn new(scope: AuthProductScope, account_id: CredentialAccountId) -> Self {
+        Self {
+            scope,
+            account_id,
+            requester_extension: None,
+        }
+    }
+
+    pub fn for_extension(mut self, extension_id: ExtensionId) -> Self {
+        self.requester_extension = Some(extension_id);
+        self
     }
 }
 
@@ -409,8 +437,7 @@ pub trait CredentialAccountService: Send + Sync {
 
     async fn get_account(
         &self,
-        scope: &AuthProductScope,
-        account_id: CredentialAccountId,
+        request: CredentialAccountLookupRequest,
     ) -> Result<Option<CredentialAccount>, AuthProductError>;
 
     async fn list_accounts(

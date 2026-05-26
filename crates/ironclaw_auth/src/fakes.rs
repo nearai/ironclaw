@@ -9,17 +9,18 @@ use crate::{
     AuthChallenge, AuthContinuationEvent, AuthFlowId, AuthFlowManager, AuthFlowRecord,
     AuthFlowStatus, AuthInteractionId, AuthInteractionService, AuthProductError,
     AuthProviderClient, CredentialAccount, CredentialAccountChoiceRequest, CredentialAccountId,
-    CredentialAccountListPage, CredentialAccountListRequest, CredentialAccountMutation,
-    CredentialAccountProjection, CredentialAccountSelectionRequest, CredentialAccountService,
-    CredentialAccountStatus, CredentialAccountUpdateBinding, CredentialOwnership,
-    CredentialRecoveryKind, CredentialRecoveryProjection, CredentialRecoveryReason,
-    CredentialRecoveryRequest, CredentialSetupService, ManualTokenSetupRequest, NewAuthFlow,
-    NewCredentialAccount, OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
-    OAuthProviderCallbackRequest, OAuthProviderExchange, ProviderCallbackOutcome,
-    SecretCleanupAction, SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
-    SecretSubmitRequest, SecretSubmitResult, cleanup::SecretCleanupAction::Deactivate,
-    flow::credential_status_for_completed_flow, interaction::PendingSecretInteraction,
-    provider::validate_provider_callback_request, scope_matches,
+    CredentialAccountListPage, CredentialAccountListRequest, CredentialAccountLookupRequest,
+    CredentialAccountMutation, CredentialAccountProjection, CredentialAccountSelectionRequest,
+    CredentialAccountService, CredentialAccountStatus, CredentialAccountUpdateBinding,
+    CredentialOwnership, CredentialRecoveryKind, CredentialRecoveryProjection,
+    CredentialRecoveryReason, CredentialRecoveryRequest, CredentialSetupService,
+    ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount, OAuthCallbackClaimRequest,
+    OAuthCallbackFailureInput, OAuthCallbackInput, OAuthProviderCallbackRequest,
+    OAuthProviderExchange, ProviderCallbackOutcome, SecretCleanupAction, SecretCleanupReport,
+    SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest, SecretSubmitResult,
+    cleanup::SecretCleanupAction::Deactivate, flow::credential_status_for_completed_flow,
+    interaction::PendingSecretInteraction, provider::validate_provider_callback_request,
+    scope_matches,
 };
 
 #[derive(Default)]
@@ -271,14 +272,16 @@ impl CredentialAccountService for InMemoryAuthProductServices {
 
     async fn get_account(
         &self,
-        scope: &crate::AuthProductScope,
-        account_id: CredentialAccountId,
+        request: CredentialAccountLookupRequest,
     ) -> Result<Option<CredentialAccount>, AuthProductError> {
         let state = self.lock_state();
-        let Some(account) = state.accounts.get(&account_id) else {
+        let Some(account) = state.accounts.get(&request.account_id) else {
             return Ok(None);
         };
-        if !scope_matches(scope, &account.scope) {
+        if !scope_matches(&request.scope, &account.scope) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if !account_is_authorized_for_requester(account, request.requester_extension.as_ref()) {
             return Err(AuthProductError::CrossScopeDenied);
         }
         Ok(Some(account.clone()))
@@ -297,6 +300,10 @@ impl CredentialAccountService for InMemoryAuthProductServices {
                 scope_matches(&request.scope, &account.scope)
                     && account.provider == request.provider
                     && request.cursor.is_none_or(|cursor| account.id > cursor)
+                    && account_is_authorized_for_requester(
+                        account,
+                        request.requester_extension.as_ref(),
+                    )
             })
             .map(CredentialAccount::projection)
             .collect::<Vec<_>>();
@@ -399,7 +406,7 @@ impl CredentialAccountService for InMemoryAuthProductServices {
         if authorized.is_empty() {
             return Ok(CredentialRecoveryProjection::setup_required(
                 request.provider,
-                CredentialRecoveryReason::NoAuthorizedAccount,
+                CredentialRecoveryReason::NoAccount,
                 Vec::new(),
             ));
         }
@@ -428,19 +435,16 @@ impl CredentialAccountService for InMemoryAuthProductServices {
             [] => {}
         }
 
-        if authorized.len() > 1 {
-            return Ok(CredentialRecoveryProjection::account_selection_required(
+        if let [account] = authorized.as_slice() {
+            return Ok(recovery_projection_for_single_account(
                 request.provider,
-                authorized
-                    .iter()
-                    .map(|account| account.projection())
-                    .collect(),
+                account,
             ));
         }
 
-        Ok(recovery_projection_for_single_account(
+        Ok(recovery_projection_for_unconfigured_accounts(
             request.provider,
-            authorized[0],
+            &authorized,
         ))
     }
 
@@ -947,7 +951,61 @@ fn recovery_projection_for_single_account(
     provider: crate::AuthProviderId,
     account: &CredentialAccount,
 ) -> CredentialRecoveryProjection {
-    let (kind, reason) = match account.status {
+    let (kind, reason) = recovery_kind_and_reason_for_status(account.status);
+    match kind {
+        CredentialRecoveryKind::Configured => {
+            CredentialRecoveryProjection::configured(provider, account.projection())
+        }
+        CredentialRecoveryKind::SetupRequired => CredentialRecoveryProjection::setup_required(
+            provider,
+            reason,
+            vec![account.projection()],
+        ),
+        CredentialRecoveryKind::ReauthorizeRequired => {
+            CredentialRecoveryProjection::reauthorize_required(
+                provider,
+                reason,
+                vec![account.projection()],
+            )
+        }
+        CredentialRecoveryKind::AccountSelectionRequired => {
+            unreachable!("single account recovery cannot produce account selection required")
+        }
+    }
+}
+
+fn recovery_projection_for_unconfigured_accounts(
+    provider: crate::AuthProviderId,
+    accounts: &[&CredentialAccount],
+) -> CredentialRecoveryProjection {
+    let setup_reason = accounts
+        .iter()
+        .map(|account| recovery_kind_and_reason_for_status(account.status))
+        .find_map(|(kind, reason)| {
+            (kind == CredentialRecoveryKind::SetupRequired).then_some(reason)
+        });
+    let reason = setup_reason.unwrap_or_else(|| {
+        accounts
+            .iter()
+            .map(|account| recovery_kind_and_reason_for_status(account.status).1)
+            .next()
+            .unwrap_or(CredentialRecoveryReason::NoAccount)
+    });
+    let choices = accounts
+        .iter()
+        .map(|account| account.projection())
+        .collect::<Vec<_>>();
+    if setup_reason.is_some() {
+        CredentialRecoveryProjection::setup_required(provider, reason, choices)
+    } else {
+        CredentialRecoveryProjection::reauthorize_required(provider, reason, choices)
+    }
+}
+
+fn recovery_kind_and_reason_for_status(
+    status: CredentialAccountStatus,
+) -> (CredentialRecoveryKind, CredentialRecoveryReason) {
+    match status {
         CredentialAccountStatus::Configured => (
             CredentialRecoveryKind::Configured,
             CredentialRecoveryReason::Configured,
@@ -976,26 +1034,6 @@ fn recovery_projection_for_single_account(
             CredentialRecoveryKind::ReauthorizeRequired,
             CredentialRecoveryReason::AccountRevoked,
         ),
-    };
-    match kind {
-        CredentialRecoveryKind::Configured => {
-            CredentialRecoveryProjection::configured(provider, account.projection())
-        }
-        CredentialRecoveryKind::SetupRequired => CredentialRecoveryProjection::setup_required(
-            provider,
-            reason,
-            vec![account.projection()],
-        ),
-        CredentialRecoveryKind::ReauthorizeRequired => {
-            CredentialRecoveryProjection::reauthorize_required(
-                provider,
-                reason,
-                vec![account.projection()],
-            )
-        }
-        CredentialRecoveryKind::AccountSelectionRequired => {
-            unreachable!("single account recovery cannot produce account selection required")
-        }
     }
 }
 

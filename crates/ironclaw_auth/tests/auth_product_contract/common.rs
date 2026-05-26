@@ -3,14 +3,14 @@ pub use ironclaw_auth::{
     AuthChallenge, AuthContinuationRef, AuthErrorCode, AuthFlowKind, AuthFlowManager,
     AuthFlowStatus, AuthGateRef, AuthInteractionService, AuthProductError, AuthProductScope,
     AuthProviderClient, AuthProviderId, AuthSessionId, AuthSurface, AuthorizationCodeHash,
-    CredentialAccount, CredentialAccountChoiceRequest, CredentialAccountLabel,
-    CredentialAccountListRequest, CredentialAccountMutation, CredentialAccountProjection,
-    CredentialAccountSelectionRequest, CredentialAccountService, CredentialAccountStatus,
-    CredentialAccountUpdate, CredentialAccountUpdateBinding, CredentialOwnership,
-    CredentialRecoveryKind, CredentialRecoveryProjection, CredentialRecoveryReason,
-    CredentialRecoveryRequest, CredentialSetupService, InMemoryAuthProductServices,
-    LifecyclePackageRef, ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount,
-    OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthCallbackInput,
+    CredentialAccount, CredentialAccountChoiceRequest, CredentialAccountId, CredentialAccountLabel,
+    CredentialAccountListRequest, CredentialAccountLookupRequest, CredentialAccountMutation,
+    CredentialAccountProjection, CredentialAccountSelectionRequest, CredentialAccountService,
+    CredentialAccountStatus, CredentialAccountUpdate, CredentialAccountUpdateBinding,
+    CredentialOwnership, CredentialRecoveryKind, CredentialRecoveryProjection,
+    CredentialRecoveryReason, CredentialRecoveryRequest, CredentialSetupService,
+    InMemoryAuthProductServices, LifecyclePackageRef, ManualTokenSetupRequest, NewAuthFlow,
+    NewCredentialAccount, OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthCallbackInput,
     OAuthProviderCallbackRequest, OAuthProviderExchange, OpaqueStateHash, PkceVerifierHash,
     PkceVerifierSecret, ProviderCallbackOutcome, ProviderScope, SecretCleanupAction,
     SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest, SecretSubmitResult,
@@ -90,6 +90,15 @@ pub fn account_request(
         refresh_secret: None,
         scopes: Vec::new(),
     }
+}
+
+pub fn account_ids(accounts: &[CredentialAccountProjection]) -> Vec<CredentialAccountId> {
+    let mut ids = accounts
+        .iter()
+        .map(|account| account.id)
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids
 }
 
 pub fn update_binding(account: &CredentialAccount) -> CredentialAccountUpdateBinding {

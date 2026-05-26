@@ -144,12 +144,12 @@ async fn serializable_records_never_include_raw_oauth_or_token_material() {
     assert!(serialized.contains(&fake_digest("code-hash")));
 
     let account = services
-        .get_account(
-            &owner,
+        .get_account(CredentialAccountLookupRequest::new(
+            owner.clone(),
             completed
                 .credential_account_id
                 .expect("completed flow has account"),
-        )
+        ))
         .await
         .expect("lookup")
         .expect("account");

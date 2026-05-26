@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use ironclaw_auth::{
     AuthProductError, AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountId,
-    CredentialAccountSelectionRequest, CredentialAccountService, CredentialAccountStatus,
-    GOOGLE_PROVIDER_ID, ProviderScope,
+    CredentialAccountLookupRequest, CredentialAccountSelectionRequest, CredentialAccountService,
+    CredentialAccountStatus, GOOGLE_PROVIDER_ID, ProviderScope,
 };
 use ironclaw_host_api::{ExtensionId, ResourceScope, SecretHandle};
 use thiserror::Error;
@@ -62,7 +62,10 @@ impl GoogleCredentialResolver {
             .map_err(map_selection_error)?;
         let account = self
             .accounts
-            .get_account(&auth_scope, selected.id)
+            .get_account(
+                CredentialAccountLookupRequest::new(auth_scope, selected.id)
+                    .for_extension(requester_extension.clone()),
+            )
             .await?
             .ok_or(GoogleCredentialError::Missing)?;
         if account.status != CredentialAccountStatus::Configured {
@@ -201,10 +204,9 @@ mod tests {
 
         async fn get_account(
             &self,
-            _scope: &AuthProductScope,
-            account_id: CredentialAccountId,
+            request: CredentialAccountLookupRequest,
         ) -> Result<Option<CredentialAccount>, AuthProductError> {
-            Ok((account_id == self.account.id).then(|| self.account.clone()))
+            Ok((request.account_id == self.account.id).then(|| self.account.clone()))
         }
 
         async fn list_accounts(

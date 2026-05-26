@@ -160,15 +160,20 @@ Rules:
   projections, not loose account-id lists.
 - Recovery reasons are stable categories only: missing accounts, pending setup,
   expired credentials, refresh failures, revoked credentials, inactive accounts,
-  ambiguous account choices, and missing requester grants. Backend errors,
-  provider response bodies, host paths, state tokens, secret names, leases, and
-  raw tokens must not appear in recovery projections.
+  and ambiguous account choices. Empty authorized choices use the same public
+  missing-account reason whether no accounts exist or only unauthorized accounts
+  exist, so recovery projections do not reveal hidden account existence.
+  Backend errors, provider response bodies, host paths, state tokens, secret
+  names, leases, and raw tokens must not appear in recovery projections.
 - If policy cannot choose a unique configured account, return
   `account_selection_required` instead of guessing.
 - Explicit account choice must go through `select_configured_account`, which
   revalidates scope, provider, configured status, ownership, and requester
   grants before returning a redacted projection. A raw `CredentialAccountId` is
   never authority by itself.
+- Account lookup and listing requests carry requester extension identity and
+  apply the same ownership/grant filter before returning records or redacted
+  projections.
 - Admin/shared credentials must be explicit accounts/grants, not implicit
   `default` fallback authority.
 - Account updates must name the target `CredentialAccountId` and preserve the
@@ -177,8 +182,8 @@ Rules:
 - OAuth callback account updates must be bound to a pre-authorized
   `CredentialAccountUpdateBinding` on the flow before provider exchange
   completion.
-- Account listing uses explicit limit/cursor pagination and returns redacted
-  projections only.
+- Account listing uses explicit limit/cursor pagination and returns only
+  authorized redacted projections.
 
 ---
 
@@ -293,8 +298,9 @@ strings.
   projections;
 - missing, refresh-failed, single-account, and multi-account selection states;
 - credential recovery states for configured, missing, pending setup, inactive,
-  expired, refresh-failed, revoked, ambiguous, and unauthorized accounts;
-- explicit account-choice validation and shared-admin grant filtering;
+  expired, refresh-failed, revoked, ambiguous, and hidden unauthorized accounts;
+- explicit account-choice validation plus lookup, listing, extension-owned, and
+  shared-admin grant filtering;
 - extension-owned owner validation and deactivate/uninstall cleanup behavior;
 - serde validation for newtypes and snake_case wire enums;
 - serialization checks proving raw code/verifier/token material is absent.

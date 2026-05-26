@@ -637,12 +637,12 @@ mod tests {
     use ironclaw_auth::{
         AuthChallenge, AuthFlowId, AuthFlowRecord, AuthProductError, AuthProductScope,
         CredentialAccount, CredentialAccountChoiceRequest, CredentialAccountId,
-        CredentialAccountListPage, CredentialAccountListRequest, CredentialAccountMutation,
-        CredentialAccountProjection, CredentialAccountSelectionRequest, CredentialAccountStatus,
-        CredentialRecoveryProjection, CredentialRecoveryRequest, NewAuthFlow, NewCredentialAccount,
-        OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
-        OAuthProviderCallbackRequest, OAuthProviderExchange, SecretCleanupReport,
-        SecretCleanupRequest, SecretSubmitRequest, SecretSubmitResult,
+        CredentialAccountListPage, CredentialAccountListRequest, CredentialAccountLookupRequest,
+        CredentialAccountMutation, CredentialAccountProjection, CredentialAccountSelectionRequest,
+        CredentialAccountStatus, CredentialRecoveryProjection, CredentialRecoveryRequest,
+        NewAuthFlow, NewCredentialAccount, OAuthCallbackClaimRequest, OAuthCallbackFailureInput,
+        OAuthCallbackInput, OAuthProviderCallbackRequest, OAuthProviderExchange,
+        SecretCleanupReport, SecretCleanupRequest, SecretSubmitRequest, SecretSubmitResult,
     };
 
     struct SharedAuthTestDouble;
@@ -811,8 +811,7 @@ mod tests {
 
         async fn get_account(
             &self,
-            _scope: &AuthProductScope,
-            _account_id: CredentialAccountId,
+            _request: CredentialAccountLookupRequest,
         ) -> Result<Option<CredentialAccount>, AuthProductError> {
             unreachable!("constructor tests do not call credential-account methods")
         }

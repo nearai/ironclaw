@@ -25,9 +25,9 @@ pub use cleanup::{
 };
 pub use credential::{
     CredentialAccount, CredentialAccountChoiceRequest, CredentialAccountListPage,
-    CredentialAccountListRequest, CredentialAccountMutation, CredentialAccountProjection,
-    CredentialAccountSelectionRequest, CredentialAccountService, CredentialAccountStatus,
-    CredentialAccountUpdate, CredentialOwnership, CredentialRecoveryKind,
+    CredentialAccountListRequest, CredentialAccountLookupRequest, CredentialAccountMutation,
+    CredentialAccountProjection, CredentialAccountSelectionRequest, CredentialAccountService,
+    CredentialAccountStatus, CredentialAccountUpdate, CredentialOwnership, CredentialRecoveryKind,
     CredentialRecoveryProjection, CredentialRecoveryReason, CredentialRecoveryRequest,
     CredentialRecoveryState, CredentialSetupService, NewCredentialAccount,
 };
