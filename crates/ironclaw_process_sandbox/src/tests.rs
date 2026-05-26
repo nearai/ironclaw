@@ -218,22 +218,77 @@ fn plan_validation_rejects_entrypoint_control_env_names() {
 
 #[test]
 fn plan_validation_rejects_malformed_command_fields() {
-    let mut option_like = sample_plan();
-    option_like.run.command = "--help".to_string();
-    let option_like_error = option_like.validate().unwrap_err();
+    let cases = [
+        (
+            "empty command",
+            {
+                let mut plan = sample_plan();
+                plan.run.command.clear();
+                plan
+            },
+            SandboxPlanError::EmptyCommand { phase: "run" },
+        ),
+        (
+            "flag command",
+            {
+                let mut plan = sample_plan();
+                plan.run.command = "--help".to_string();
+                plan
+            },
+            SandboxPlanError::UnsafeCommand { phase: "run" },
+        ),
+        (
+            "shell words",
+            {
+                let mut plan = sample_plan();
+                plan.run.command = "notion cli".to_string();
+                plan
+            },
+            SandboxPlanError::UnsafeCommand { phase: "run" },
+        ),
+        (
+            "relative working directory",
+            {
+                let mut plan = sample_plan();
+                plan.run.working_dir = Some("workspace".to_string());
+                plan
+            },
+            SandboxPlanError::InvalidContainerPath {
+                path: "workspace".to_string(),
+            },
+        ),
+        (
+            "invalid env name",
+            {
+                let mut plan = sample_plan();
+                plan.run
+                    .env
+                    .insert("lowercase".to_string(), "1".to_string());
+                plan
+            },
+            SandboxPlanError::InvalidEnvName {
+                env: "lowercase".to_string(),
+            },
+        ),
+        (
+            "nul env value",
+            {
+                let mut plan = sample_plan();
+                plan.run
+                    .env
+                    .insert("SAFE_ENV".to_string(), "a\0b".to_string());
+                plan
+            },
+            SandboxPlanError::InvalidEnvValue {
+                env: "SAFE_ENV".to_string(),
+            },
+        ),
+    ];
 
-    let mut shell_words = sample_plan();
-    shell_words.run.command = "notion cli".to_string();
-    let shell_words_error = shell_words.validate().unwrap_err();
-
-    assert_eq!(
-        option_like_error,
-        SandboxPlanError::UnsafeCommand { phase: "run" }
-    );
-    assert_eq!(
-        shell_words_error,
-        SandboxPlanError::UnsafeCommand { phase: "run" }
-    );
+    for (name, plan, expected) in cases {
+        let error = plan.validate().unwrap_err();
+        assert_eq!(error, expected, "{name}");
+    }
 }
 
 #[test]
