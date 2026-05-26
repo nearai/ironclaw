@@ -115,7 +115,9 @@ pub fn resolve_provider_config_from_env(
             .ok_or_else(|| LlmError::AuthFailed {
                 provider: backend.clone(),
             })?;
-        if codex_auth_enabled_from_env() && provider.protocol == ProviderProtocol::OpenAiCodex {
+        if provider.protocol == ProviderProtocol::OpenAiCodex
+            && (codex_auth_enabled_from_env() || std::env::var_os("CODEX_AUTH_PATH").is_some())
+        {
             return resolve_codex_cli_auth_provider().map(Some);
         }
         return resolve_provider_definition_from_env(provider).map(Some);
@@ -746,7 +748,10 @@ mod tests {
     const CHAIN_ENV_VARS: &[&str] = &[
         "LLM_REQUEST_TIMEOUT_SECS",
         "LLM_CHEAP_MODEL",
+        "LLM_BACKEND",
         "SMART_ROUTING_CASCADE",
+        "CODEX_AUTH_PATH",
+        "LLM_USE_CODEX_AUTH",
         "LLM_MAX_RETRIES",
         "NEARAI_MAX_RETRIES",
         "LLM_CIRCUIT_BREAKER_THRESHOLD",
@@ -848,5 +853,21 @@ mod tests {
 
         assert!(!config.smart_routing_cascade);
         assert!(config.response_cache_enabled);
+    }
+
+    #[test]
+    fn openai_codex_backend_with_missing_codex_auth_path_fails_fast() {
+        let _env_lock = ironclaw_common::env_helpers::lock_env();
+        let env = EnvGuard::clear(CHAIN_ENV_VARS);
+        env.set("LLM_BACKEND", "openai_codex");
+        env.set("CODEX_AUTH_PATH", "/tmp/ironclaw-missing-codex-auth.json");
+
+        let error = resolve_provider_config_from_env(None)
+            .expect_err("missing explicit Codex auth path should fail before provider startup");
+
+        assert!(matches!(
+            error,
+            LlmError::AuthFailed { provider } if provider == "openai_codex"
+        ));
     }
 }
