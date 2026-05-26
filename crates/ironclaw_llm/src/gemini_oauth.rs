@@ -2041,6 +2041,7 @@ impl GeminiOauthProvider {
                 finish_reason: stop_reason,
                 input_tokens,
                 output_tokens,
+                reasoning: None,
                 cache_read_input_tokens: cached_content_tokens,
                 cache_creation_input_tokens: 0,
             },

@@ -822,6 +822,10 @@ pub async fn build_reborn_runtime(
     if trusted_laptop_access {
         append_trusted_laptop_access_audit(&audit_log, &thread_scope, &actor_user_id).await?;
     }
+    let projection_services = build_reborn_projection_services(
+        Arc::clone(&event_log),
+        validated_identity.reply_target_binding_ref.clone(),
+    );
     let local_dev_capabilities = local_dev::capability_wiring(
         &services,
         actor_user_id.clone(),
@@ -869,6 +873,7 @@ pub async fn build_reborn_runtime(
         identity_context_source: Arc::new(EmptyIdentityContextSource),
         model_policy_guard: None,
         model_budget_accountant: None,
+        model_response_observer: Some(projection_services.model_response_observer()),
         safety_context: None,
     })?;
     let default_resolved_run_profile = composition
@@ -881,12 +886,9 @@ pub async fn build_reborn_runtime(
     let default_run_profile_id = default_resolved_run_profile.profile_id.as_str().to_string();
     let planned_turn_coordinator: Arc<dyn TurnCoordinator> = composition.coordinator.clone();
     let turn_event_source: Arc<dyn TurnEventProjectionSource> = turn_state_store.clone();
-    let projection_services = build_reborn_projection_services(
-        Arc::clone(&event_log),
-        validated_identity.reply_target_binding_ref.clone(),
-    )
-    .with_turn_events(turn_event_source, Arc::clone(&planned_turn_coordinator))
-    .with_display_previews(Arc::clone(&local_dev_capabilities.display_previews));
+    let projection_services = projection_services
+        .with_turn_events(turn_event_source, Arc::clone(&planned_turn_coordinator))
+        .with_display_previews(Arc::clone(&local_dev_capabilities.display_previews));
     services.turn_coordinator = Some(Arc::clone(&planned_turn_coordinator));
 
     let worker_cancel = CancellationToken::new();
@@ -1177,7 +1179,9 @@ mod tests {
         HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
         HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
     };
-    use ironclaw_product_adapters::{ProductOutboundPayload, ProductProjectionItem};
+    use ironclaw_product_adapters::{
+        ProductOutboundEnvelope, ProductOutboundPayload, ProductProjectionItem,
+    };
     use ironclaw_product_workflow::{
         RebornStreamEventsRequest, RebornSubmitTurnResponse, WebUiAuthenticatedCaller,
         WebUiCreateThreadRequest, WebUiSendMessageRequest,
@@ -1199,7 +1203,7 @@ mod tests {
     use crate::webui::build_webui_services;
 
     use super::{
-        RebornSkillSourceKind, TRUSTED_LAPTOP_ACCESS_AUDIT_KIND,
+        RebornRuntime, RebornSkillSourceKind, TRUSTED_LAPTOP_ACCESS_AUDIT_KIND,
         TRUSTED_LAPTOP_ACCESS_AUDIT_STATUS, TRUSTED_LAPTOP_ACCESS_AUDIT_TARGET,
         build_reborn_runtime,
     };
@@ -1221,6 +1225,13 @@ mod tests {
     #[derive(Debug)]
     struct RecordingGateway {
         reply: String,
+        requests: Arc<StdMutex<Vec<HostManagedModelRequest>>>,
+    }
+
+    #[derive(Debug)]
+    struct ReasoningRecordingGateway {
+        reply: String,
+        reasoning: Option<String>,
         requests: Arc<StdMutex<Vec<HostManagedModelRequest>>>,
     }
 
@@ -1274,6 +1285,23 @@ mod tests {
                 .push(request);
             Ok(HostManagedModelResponse::assistant_reply(
                 self.reply.clone(),
+            ))
+        }
+    }
+
+    #[async_trait]
+    impl HostManagedModelGateway for ReasoningRecordingGateway {
+        async fn stream_model(
+            &self,
+            request: HostManagedModelRequest,
+        ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+            self.requests
+                .lock()
+                .expect("reasoning gateway requests lock poisoned")
+                .push(request);
+            Ok(HostManagedModelResponse::assistant_reply_with_reasoning(
+                self.reply.clone(),
+                self.reasoning.clone(),
             ))
         }
     }
@@ -2605,6 +2633,176 @@ mod tests {
         );
         assert_eq!(bundle.readiness, runtime.services().readiness);
         assert_eq!(bundle.readiness.state, RebornReadinessState::DevOnly);
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    async fn collect_webui_events_for_reasoning_case(
+        case: &str,
+        reasoning: Option<String>,
+    ) -> (RebornRuntime, Vec<ProductOutboundEnvelope>, String) {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(ReasoningRecordingGateway {
+            reply: format!("{case} reply ok"),
+            reasoning,
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                format!("runtime-webui-{case}-owner"),
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: format!("runtime-webui-{case}-tenant"),
+            agent_id: format!("runtime-webui-{case}-agent"),
+            source_binding_id: format!("runtime-webui-{case}-source"),
+            reply_target_binding_id: format!("runtime-webui-{case}-reply"),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+        let caller = WebUiAuthenticatedCaller::new(
+            TenantId::new(format!("runtime-webui-{case}-tenant")).unwrap(),
+            UserId::new(format!("runtime-webui-{case}-owner")).unwrap(),
+            Some(AgentId::new(format!("runtime-webui-{case}-agent")).unwrap()),
+            None,
+        );
+        let created = bundle
+            .api
+            .create_thread(
+                caller.clone(),
+                WebUiCreateThreadRequest {
+                    client_action_id: Some(format!("create-webui-{case}-thread")),
+                    requested_thread_id: None,
+                },
+            )
+            .await
+            .expect("create webui thread");
+        let submitted = bundle
+            .api
+            .submit_turn(
+                caller.clone(),
+                WebUiSendMessageRequest {
+                    client_action_id: Some(format!("send-webui-{case}-message")),
+                    thread_id: Some(created.thread.thread_id.to_string()),
+                    content: Some(format!("hello webui {case}")),
+                },
+            )
+            .await
+            .expect("submit webui turn");
+        let RebornSubmitTurnResponse::Submitted { run_id, .. } = submitted else {
+            panic!("webui submit should start a run");
+        };
+
+        let stream = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let stream = bundle
+                    .api
+                    .stream_events(
+                        caller.clone(),
+                        RebornStreamEventsRequest {
+                            thread_id: created.thread.thread_id.to_string(),
+                            after_cursor: None,
+                        },
+                    )
+                    .await
+                    .expect("webui event stream");
+                if stream.events.iter().any(|event| {
+                    matches!(
+                        event.payload(),
+                        ProductOutboundPayload::ProjectionSnapshot { state }
+                            | ProductOutboundPayload::ProjectionUpdate { state }
+                            if state.items.iter().any(|item| matches!(
+                                item,
+                                ProductProjectionItem::RunStatus { run_id: seen, status }
+                                    if *seen == run_id && status == "completed"
+                            ))
+                    )
+                }) {
+                    break stream;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("completed webui projection should appear");
+
+        (runtime, stream.events, created.thread.thread_id.to_string())
+    }
+
+    #[tokio::test]
+    async fn local_dev_runtime_webui_streams_model_reasoning_as_thinking_projection() {
+        let (runtime, events, thread_id) = collect_webui_events_for_reasoning_case(
+            "thinking",
+            Some("thinking through the webui path".to_string()),
+        )
+        .await;
+
+        assert!(events.iter().any(|event| {
+            matches!(
+                event.payload(),
+                ProductOutboundPayload::ProjectionUpdate { state }
+                    if state.thread_id == thread_id
+                        && state.items.iter().any(|item| matches!(
+                            item,
+                            ProductProjectionItem::Thinking { body, .. }
+                                if body == "thinking through the webui path"
+                        ))
+            )
+        }));
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn local_dev_runtime_webui_sanitizes_model_reasoning_projection() {
+        let raw_secret = "sk-proj-abcdefghijklmnopqrstuvwxyz123456";
+        let (runtime, events, _thread_id) = collect_webui_events_for_reasoning_case(
+            "thinking-sanitize",
+            Some(format!("checking {raw_secret} before replying")),
+        )
+        .await;
+
+        let thinking_body = events
+            .iter()
+            .find_map(|event| match event.payload() {
+                ProductOutboundPayload::ProjectionUpdate { state } => {
+                    state.items.iter().find_map(|item| match item {
+                        ProductProjectionItem::Thinking { body, .. } => Some(body.as_str()),
+                        _ => None,
+                    })
+                }
+                _ => None,
+            })
+            .expect("thinking projection should appear");
+        assert!(thinking_body.contains("[redacted]"));
+        assert!(!thinking_body.contains(raw_secret));
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn local_dev_runtime_webui_does_not_emit_thinking_projection_without_reasoning() {
+        let (runtime, events, _thread_id) =
+            collect_webui_events_for_reasoning_case("thinking-none", None).await;
+
+        assert!(!events.iter().any(|event| {
+            matches!(
+                event.payload(),
+                ProductOutboundPayload::ProjectionUpdate { state }
+                    if state
+                        .items
+                        .iter()
+                        .any(|item| matches!(item, ProductProjectionItem::Thinking { .. }))
+            )
+        }));
 
         runtime.shutdown().await.expect("runtime shutdown");
     }

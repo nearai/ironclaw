@@ -299,6 +299,7 @@ async fn webui_event_stream_rejects_foreign_composite_turn_cursor() {
             scope_a,
             TurnEventCursor(10),
         )),
+        live_projection: None,
         runtime_payloads_delivered: 0,
     })
     .unwrap();
@@ -348,6 +349,7 @@ async fn webui_event_stream_rejects_foreign_composite_runtime_cursor() {
         )),
         runtime_item: None,
         turn: None,
+        live_projection: None,
         runtime_payloads_delivered: 1,
     })
     .unwrap();

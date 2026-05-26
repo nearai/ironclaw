@@ -6,11 +6,12 @@ use async_trait::async_trait;
 use ironclaw_host_api::CapabilityId;
 use ironclaw_loop_support::{
     CapabilitySurfaceProfileResolver, CompositeTurnRunWakeNotifier, HostIdentityContextSource,
-    HostInputQueue, HostManagedModelGateway, HostRuntimeLoopCapabilityPortFactory,
-    HostSkillContextSource, LoopCapabilityResultWriter, ProductLiveCancellationReadiness,
-    RunCancellationFactory, SpawnSubagentInputCodec, SubagentDefinitionResolver,
-    SubagentPromptComposer, SubagentSpawnCapabilityPort, SubagentSpawnDeps, SubagentSpawnGoalStore,
-    SubagentSpawnLimits, verify_product_live_cancellation_probe,
+    HostInputQueue, HostManagedModelGateway, HostManagedModelResponseObserver,
+    HostRuntimeLoopCapabilityPortFactory, HostSkillContextSource, LoopCapabilityResultWriter,
+    ProductLiveCancellationReadiness, RunCancellationFactory, SpawnSubagentInputCodec,
+    SubagentDefinitionResolver, SubagentPromptComposer, SubagentSpawnCapabilityPort,
+    SubagentSpawnDeps, SubagentSpawnGoalStore, SubagentSpawnLimits,
+    verify_product_live_cancellation_probe,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 use ironclaw_turns::{
@@ -95,6 +96,7 @@ where
     /// `None`, matching the cancellation/identity contract.
     pub model_policy_guard: Option<Arc<dyn LoopModelPolicyGuard>>,
     pub model_budget_accountant: Option<Arc<dyn LoopModelBudgetAccountant>>,
+    pub model_response_observer: Option<Arc<dyn HostManagedModelResponseObserver>>,
     pub safety_context: Option<InstructionSafetyContext>,
 }
 
@@ -415,6 +417,9 @@ where
     }
     if let Some(accountant) = parts.model_budget_accountant {
         host_factory = host_factory.with_model_budget_accountant(accountant);
+    }
+    if let Some(observer) = parts.model_response_observer {
+        host_factory = host_factory.with_model_response_observer(observer);
     }
     if let Some(safety) = parts.safety_context {
         host_factory = host_factory.with_safety_context(safety);

@@ -19,10 +19,10 @@ use ironclaw_host_api::ExtensionId;
 use ironclaw_loop_support::{
     CapabilityResolveError, CapabilitySurfaceProfileFilter, CapabilitySurfaceProfileResolver,
     EmptyLoopCapabilityPort, HostIdentityContextSource, HostInputQueue, HostManagedModelGateway,
-    HostQueueLoopInputPort, HostSkillContextSource, LoopCapabilityInputResolver,
-    RunCancellationFactory, RunCancellationObservationKind, RunStateLoopCancellationPort,
-    SubagentLoopPromptPort, SubagentPromptComposer, ThreadBackedLoopContextPort,
-    ThreadBackedLoopTranscriptPort, TurnStateRunCancellationFactory,
+    HostManagedModelResponseObserver, HostQueueLoopInputPort, HostSkillContextSource,
+    LoopCapabilityInputResolver, RunCancellationFactory, RunCancellationObservationKind,
+    RunStateLoopCancellationPort, SubagentLoopPromptPort, SubagentPromptComposer,
+    ThreadBackedLoopContextPort, ThreadBackedLoopTranscriptPort, TurnStateRunCancellationFactory,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 
@@ -803,6 +803,7 @@ where
     safety_context: Option<InstructionSafetyContext>,
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
     input_queue: Option<Arc<dyn HostInputQueue>>,
+    model_response_observer: Option<Arc<dyn HostManagedModelResponseObserver>>,
     profiled_capabilities: Option<ProfiledCapabilityHostRuntime>,
     subagent_prompt_composer: Option<SubagentPromptComposer>,
     driver_requirements: HashMap<LoopDriverRegistryKey, DriverRequirements>,
@@ -863,6 +864,7 @@ where
             safety_context: None,
             identity_context_source: None,
             input_queue: None,
+            model_response_observer: None,
             profiled_capabilities: None,
             subagent_prompt_composer: None,
             driver_requirements: HashMap::new(),
@@ -1117,6 +1119,14 @@ where
         self
     }
 
+    pub fn with_model_response_observer(
+        mut self,
+        observer: Arc<dyn HostManagedModelResponseObserver>,
+    ) -> Self {
+        self.model_response_observer = Some(observer);
+        self
+    }
+
     pub async fn build_text_only_host(
         &self,
         request: RebornLoopDriverHostRequest,
@@ -1342,6 +1352,7 @@ where
             instruction_materialization_store: Some(Arc::clone(&instruction_materialization_store)),
             capabilities: Some(Arc::clone(&capabilities)),
             prompt_authority,
+            model_response_observer: self.model_response_observer.clone(),
         });
         let mut model: Arc<dyn LoopModelPort> = Arc::new(HostManagedLoopModelPort::with_guards(
             run_context.clone(),

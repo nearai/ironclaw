@@ -17,6 +17,7 @@ use ironclaw_event_streams::{
     ProjectionTarget, ProjectionViewClass, SubscriberCapabilities,
 };
 use ironclaw_events::{DurableEventLog, EventCursor, EventStreamKey, ReadScope};
+use ironclaw_loop_support::HostManagedModelResponseObserver;
 use ironclaw_outbound::InMemoryOutboundStateStore;
 use ironclaw_product_adapters::{
     AdapterInstallationId, CapabilityActivityStatusView, CapabilityActivityView,
@@ -32,9 +33,13 @@ use ironclaw_turns::{
 };
 
 mod display_preview;
+mod live_reasoning;
 mod runtime_replay;
 mod turn_events;
 use display_preview::{CapabilityDisplayPreviewSource, NoopCapabilityDisplayPreviewSource};
+use live_reasoning::{
+    ReasoningProjectionObserver, WebuiLiveProjectionCursor, WebuiLiveProjectionStore,
+};
 use runtime_replay::{
     RuntimePayloadCandidate, replay_payload_candidates, snapshot_payload_candidates,
 };
@@ -54,6 +59,7 @@ pub(crate) struct RebornProjectionServices {
     event_stream_manager: Arc<EventStreamManager>,
     turn_events: TurnEventBridge,
     display_previews: Arc<dyn CapabilityDisplayPreviewSource>,
+    live_projections: Arc<WebuiLiveProjectionStore>,
     webui_reply_target_binding_ref: ReplyTargetBindingRef,
 }
 
@@ -80,8 +86,15 @@ impl RebornProjectionServices {
             manager: Arc::clone(&self.event_stream_manager),
             turn_events: self.turn_events.clone(),
             display_previews: Arc::clone(&self.display_previews),
+            live_projections: Arc::clone(&self.live_projections),
             reply_target_binding_ref: self.webui_reply_target_binding_ref.clone(),
         })
+    }
+
+    pub(crate) fn model_response_observer(&self) -> Arc<dyn HostManagedModelResponseObserver> {
+        Arc::new(ReasoningProjectionObserver::new(Arc::clone(
+            &self.live_projections,
+        )))
     }
 }
 
@@ -103,6 +116,7 @@ pub(crate) fn build_reborn_projection_services(
         event_stream_manager,
         turn_events: TurnEventBridge::default(),
         display_previews: Arc::new(NoopCapabilityDisplayPreviewSource),
+        live_projections: Arc::new(WebuiLiveProjectionStore::default()),
         webui_reply_target_binding_ref,
     }
 }
@@ -117,6 +131,7 @@ struct WebuiRuntimeProjectionStream {
     manager: Arc<EventStreamManager>,
     turn_events: TurnEventBridge,
     display_previews: Arc<dyn CapabilityDisplayPreviewSource>,
+    live_projections: Arc<WebuiLiveProjectionStore>,
     reply_target_binding_ref: ReplyTargetBindingRef,
 }
 
@@ -192,6 +207,19 @@ impl ProjectionStream for WebuiRuntimeProjectionStream {
             && batch.cursor().turn.as_ref() != Some(&next_cursor)
         {
             batch.push_turn(next_cursor, ProductOutboundPayload::KeepAlive);
+        }
+        let live_after = batch
+            .cursor()
+            .live_projection
+            .as_ref()
+            .map(|cursor| cursor.sequence)
+            .unwrap_or_default();
+        for entry in self.live_projections.drain_after(
+            &request.scope,
+            live_after,
+            WEBUI_PROJECTION_PAGE_LIMIT,
+        )? {
+            batch.push_live_projection(entry.cursor, (*entry.payload).clone());
         }
 
         batch
@@ -334,6 +362,15 @@ impl WebuiProjectionBatch {
         self.push(payload);
     }
 
+    fn push_live_projection(
+        &mut self,
+        cursor: WebuiLiveProjectionCursor,
+        payload: ProductOutboundPayload,
+    ) {
+        self.cursor.live_projection = Some(cursor);
+        self.push(payload);
+    }
+
     fn push(&mut self, payload: ProductOutboundPayload) {
         self.payloads.push((self.cursor.clone(), payload));
     }
@@ -367,6 +404,8 @@ struct WebuiProjectionCursor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     runtime_item: Option<EventCursor>,
     turn: Option<TurnEventProjectionCursor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    live_projection: Option<WebuiLiveProjectionCursor>,
     #[serde(default, skip_serializing_if = "is_zero")]
     runtime_payloads_delivered: usize,
 }
@@ -381,6 +420,7 @@ fn parse_webui_projection_cursor(
     if let Ok(parsed) = serde_json::from_str::<WebuiProjectionCursor>(cursor)
         && (parsed.runtime.is_some()
             || parsed.turn.is_some()
+            || parsed.live_projection.is_some()
             || parsed.runtime_payloads_delivered > 0)
     {
         if parsed.runtime_payloads_delivered > WEBUI_RUNTIME_ITEM_MAX_PAYLOADS + 1 {
@@ -401,6 +441,7 @@ fn parse_webui_projection_cursor(
         runtime: Some(runtime),
         runtime_item: None,
         turn: None,
+        live_projection: None,
         runtime_payloads_delivered: 0,
     })
 }
@@ -424,6 +465,14 @@ fn validate_webui_projection_cursor_scope(
         return Err(ProductAdapterError::InvalidIdentifier {
             kind: "projection_cursor",
             reason: "turn cursor scope does not match subscription scope".to_string(),
+        });
+    }
+    if let Some(live) = cursor.live_projection.as_ref()
+        && &live.scope != scope
+    {
+        return Err(ProductAdapterError::InvalidIdentifier {
+            kind: "projection_cursor",
+            reason: "live cursor scope does not match subscription scope".to_string(),
         });
     }
     Ok(())

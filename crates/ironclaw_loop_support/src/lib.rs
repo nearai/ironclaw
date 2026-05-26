@@ -809,6 +809,7 @@ where
     /// (reconcile/release). When `None`, no budget enforcement happens —
     /// this preserves v1-era behavior for hosts that have not opted in.
     budget_accountant: Option<Arc<dyn LoopModelBudgetAccountant>>,
+    model_response_observer: Option<Arc<dyn HostManagedModelResponseObserver>>,
 }
 
 impl<S, G> ThreadBackedLoopModelPort<S, G>
@@ -836,6 +837,7 @@ where
             instruction_materialization_store: None,
             identity_context_source: None,
             budget_accountant: None,
+            model_response_observer: None,
         }
     }
 
@@ -860,6 +862,7 @@ where
             instruction_materialization_store: None,
             identity_context_source: None,
             budget_accountant: None,
+            model_response_observer: None,
         }
     }
 
@@ -906,6 +909,14 @@ where
 
     pub fn with_capability_port(mut self, capabilities: Arc<dyn LoopCapabilityPort>) -> Self {
         self.capabilities = Some(capabilities);
+        self
+    }
+
+    pub fn with_model_response_observer(
+        mut self,
+        observer: Arc<dyn HostManagedModelResponseObserver>,
+    ) -> Self {
+        self.model_response_observer = Some(observer);
         self
     }
 }
@@ -988,14 +999,18 @@ where
 
         let host_response_result = match gateway_result {
             Ok(response) => {
+                if let Some(observer) = self.model_response_observer.as_ref() {
+                    observer.observe_host_model_response(&self.run_context, &response);
+                }
+                let chunks = response
+                    .safe_text_deltas
+                    .into_iter()
+                    .map(|safe_text_delta| ModelStreamChunk {
+                        safe_text_delta: sanitize_model_visible_text(safe_text_delta),
+                    })
+                    .collect::<Vec<_>>();
                 let loop_response = LoopModelResponse {
-                    chunks: response
-                        .safe_text_deltas
-                        .into_iter()
-                        .map(|safe_text_delta| ModelStreamChunk {
-                            safe_text_delta: sanitize_model_visible_text(safe_text_delta),
-                        })
-                        .collect(),
+                    chunks,
                     output: response.output,
                     effective_model_profile_id: model_profile_id.clone(),
                 };
@@ -1384,6 +1399,14 @@ pub struct HostManagedModelRequest {
     pub turn_id: TurnId,
 }
 
+pub trait HostManagedModelResponseObserver: Send + Sync {
+    fn observe_host_model_response(
+        &self,
+        run_context: &LoopRunContext,
+        response: &HostManagedModelResponse,
+    );
+}
+
 /// Boundary alias for the route snapshot carried from turn/run state into
 /// host-managed model requests. This intentionally preserves the turn-owned
 /// wire shape across the loop-support boundary instead of defining a duplicate
@@ -1426,6 +1449,8 @@ impl HostManagedModelMessageRole {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostManagedModelResponse {
     pub safe_text_deltas: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub safe_reasoning_deltas: Vec<String>,
     pub output: ParentLoopOutput,
 }
 
@@ -1435,10 +1460,20 @@ impl HostManagedModelResponse {
         let safe_content = sanitize_model_visible_text(content);
         Self {
             safe_text_deltas: vec![safe_content.clone()],
+            safe_reasoning_deltas: Vec::new(),
             output: ParentLoopOutput::AssistantReply(AssistantReply {
                 content: safe_content,
             }),
         }
+    }
+
+    pub fn assistant_reply_with_reasoning(
+        content: impl Into<String>,
+        reasoning: Option<String>,
+    ) -> Self {
+        let mut response = Self::assistant_reply(content);
+        response.safe_reasoning_deltas = sanitized_reasoning_deltas(reasoning);
+        response
     }
 
     pub fn capability_calls(
@@ -1452,9 +1487,28 @@ impl HostManagedModelResponse {
             } else {
                 vec![safe_text_delta]
             },
+            safe_reasoning_deltas: Vec::new(),
             output: ParentLoopOutput::CapabilityCalls(calls),
         }
     }
+
+    pub fn capability_calls_with_reasoning(
+        calls: Vec<ironclaw_turns::run_profile::CapabilityCallCandidate>,
+        safe_text_delta: impl Into<String>,
+        reasoning: Option<String>,
+    ) -> Self {
+        let mut response = Self::capability_calls(calls, safe_text_delta);
+        response.safe_reasoning_deltas = sanitized_reasoning_deltas(reasoning);
+        response
+    }
+}
+
+fn sanitized_reasoning_deltas(reasoning: Option<String>) -> Vec<String> {
+    reasoning
+        .map(sanitize_model_visible_text)
+        .filter(|reasoning| !reasoning.is_empty())
+        .into_iter()
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

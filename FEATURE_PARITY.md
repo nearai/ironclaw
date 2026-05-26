@@ -48,7 +48,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Tailscale integration | ✅ | ❌ | |
 | Health check endpoints | ✅ | ✅ | /api/health + /api/gateway/status + /healthz + /readyz, with channel-backed readiness probes |
 | `doctor` diagnostics | ✅ | 🚧 | 16 checks: settings, LLM, DB, embeddings, routines, gateway, MCP, skills, secrets, service, Docker daemon, tunnel binaries |
-| Agent event broadcast | ✅ | 🚧 | SSE broadcast manager exists (SseManager). Reborn has a transport-neutral projection EventStreamManager with access/admission/rebase/lag/redaction contracts, product-safe capability activity events plus bounded display-preview events, and the local-dev WebUI serve path now wires it into `/events` and `/ws` through the WebUI product facade; production durable/live fanout remains follow-up work. |
+| Agent event broadcast | ✅ | 🚧 | SSE broadcast manager exists (SseManager). Reborn has a transport-neutral projection EventStreamManager with access/admission/rebase/lag/redaction contracts, product-safe capability activity events plus bounded display-preview events, live thinking projection updates, and the local-dev WebUI serve path now wires it into `/events` and `/ws` through the WebUI product facade; production durable/live fanout remains follow-up work. |
 | Channel health monitor | ✅ | ❌ | Auto-restart with configurable interval |
 | Presence system | ✅ | ❌ | Beacons on connect, system presence for agents |
 | Trusted-proxy auth mode | ✅ | ❌ | Header-based auth for reverse proxies; `trustedProxy.allowLoopback` for same-host reverse proxies |

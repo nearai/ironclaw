@@ -617,6 +617,7 @@ async fn text_only_model_reply_driver_redacts_credential_marker_reply_text() {
     let mut fixture = HostFixture::new("thread-driver-marker-reply", "hello config").await;
     fixture.gateway.set_response(Ok(HostManagedModelResponse {
         safe_text_deltas: vec!["Use OPENAI_API_KEY in the environment".to_string()],
+        safe_reasoning_deltas: Vec::new(),
         output: ParentLoopOutput::AssistantReply(AssistantReply {
             content: "Use OPENAI_API_KEY in the environment".to_string(),
         }),
@@ -2201,6 +2202,7 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
         identity_context_source: Arc::new(StaticIdentityContextSource::new(Vec::new())),
         model_policy_guard: None,
         model_budget_accountant: None,
+        model_response_observer: None,
         safety_context: None,
     })
     .unwrap();
@@ -2327,6 +2329,7 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
         identity_context_source: Arc::new(EmptyIdentityContextSource),
         model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
+        model_response_observer: None,
         safety_context: Some(test_safety_context()),
     })
     .expect("all product-live adapters should satisfy readiness");
@@ -2396,6 +2399,7 @@ async fn product_live_parts_for_gate_test(
         identity_context_source: Arc::new(EmptyIdentityContextSource),
         model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
+        model_response_observer: None,
         safety_context: Some(test_safety_context()),
     }
 }
@@ -6700,6 +6704,7 @@ impl RecordingGateway {
     fn respond_with_capability_calls(&self) {
         *self.response.lock().unwrap() = Ok(HostManagedModelResponse {
             safe_text_deltas: Vec::new(),
+            safe_reasoning_deltas: Vec::new(),
             output: ParentLoopOutput::CapabilityCalls(vec![
                 ironclaw_turns::run_profile::CapabilityCallCandidate {
                     surface_version: CapabilitySurfaceVersion::new("empty:v1").unwrap(),

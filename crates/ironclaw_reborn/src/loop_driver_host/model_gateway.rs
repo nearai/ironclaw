@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_loop_support::{
-    HostIdentityContextSource, HostManagedModelGateway, HostSkillContextSource,
-    ThreadBackedLoopModelPort,
+    HostIdentityContextSource, HostManagedModelGateway, HostManagedModelResponseObserver,
+    HostSkillContextSource, ThreadBackedLoopModelPort,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 use ironclaw_turns::run_profile::{
@@ -26,6 +26,7 @@ where
     pub(super) instruction_materialization_store: Option<Arc<dyn InstructionMaterializationStore>>,
     pub(super) capabilities: Option<Arc<dyn LoopCapabilityPort>>,
     pub(super) prompt_authority: LoopPromptBundleAuthority,
+    pub(super) model_response_observer: Option<Arc<dyn HostManagedModelResponseObserver>>,
 }
 
 #[async_trait]
@@ -57,6 +58,9 @@ where
         }
         if let Some(capabilities) = self.capabilities.as_ref() {
             model_port = model_port.with_capability_port(Arc::clone(capabilities));
+        }
+        if let Some(observer) = self.model_response_observer.as_ref() {
+            model_port = model_port.with_model_response_observer(Arc::clone(observer));
         }
         model_port
             .stream_model(request.request)

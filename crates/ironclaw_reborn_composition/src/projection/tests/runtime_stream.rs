@@ -337,6 +337,7 @@ async fn webui_event_stream_accepts_legacy_partial_origin_cursor() {
         runtime: None,
         runtime_item: None,
         turn: None,
+        live_projection: None,
         runtime_payloads_delivered: 1,
     })
     .unwrap();

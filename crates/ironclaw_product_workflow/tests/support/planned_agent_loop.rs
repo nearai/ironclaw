@@ -145,6 +145,7 @@ pub fn capability_call_response(
 ) -> HostManagedModelResponse {
     HostManagedModelResponse {
         safe_text_deltas: Vec::new(),
+        safe_reasoning_deltas: Vec::new(),
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
             surface_version: harness_surface_version(),
             capability_id: harness_capability_id(capability_id.into()),
@@ -296,6 +297,7 @@ impl ProductLiveAgentLoopHarness {
             identity_context_source: Arc::new(EmptyIdentityContextSource),
             model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
             model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
+            model_response_observer: None,
             safety_context: Some(test_safety_context()),
         })
         .expect("product-live planned AgentLoop harness should build");
@@ -544,6 +546,7 @@ impl ScriptedHostRuntimeToolCall {
         };
         Ok(Some(HostManagedModelResponse {
             safe_text_deltas: Vec::new(),
+            safe_reasoning_deltas: Vec::new(),
             output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
                 surface_version,
                 capability_id: self.capability_id.clone(),
@@ -646,6 +649,7 @@ impl LoopCapabilityPortFactory for ProductLiveHostRuntimeCapabilityFactory {
                 identity_context_source: Arc::new(EmptyIdentityContextSource),
                 model_policy_guard: Arc::new(NoOpPolicyGuard),
                 model_budget_accountant: Arc::new(NoOpBudgetAccountant),
+                model_response_observer: None,
                 safety_context: test_safety_context(),
                 milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             },

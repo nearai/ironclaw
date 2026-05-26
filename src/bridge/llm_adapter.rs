@@ -662,6 +662,7 @@ mod tests {
                 input_tokens: 1,
                 output_tokens: 1,
                 finish_reason: ironclaw_llm::FinishReason::Stop,
+                reasoning: None,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             })
@@ -977,6 +978,7 @@ mod tests {
                 input_tokens: 1,
                 output_tokens: 1,
                 finish_reason: ironclaw_llm::FinishReason::Stop,
+                reasoning: None,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             })
@@ -1676,6 +1678,7 @@ And also check the token price:\n\
                 input_tokens: 1000,
                 output_tokens: 500,
                 finish_reason: ironclaw_llm::FinishReason::Stop,
+                reasoning: None,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             })
@@ -1766,6 +1769,7 @@ And also check the token price:\n\
                     input_tokens: 1000,
                     output_tokens: 500,
                     finish_reason: ironclaw_llm::FinishReason::Stop,
+                    reasoning: None,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                 })
@@ -1825,6 +1829,7 @@ And also check the token price:\n\
                     input_tokens: 10_000,
                     output_tokens: 5_000,
                     finish_reason: ironclaw_llm::FinishReason::Stop,
+                    reasoning: None,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                 })
@@ -1895,6 +1900,7 @@ And also check the token price:\n\
                     input_tokens: 10_000,
                     output_tokens: 500,
                     finish_reason: ironclaw_llm::FinishReason::Stop,
+                    reasoning: None,
                     cache_read_input_tokens: 2_000,
                     cache_creation_input_tokens: 1_000,
                 })
