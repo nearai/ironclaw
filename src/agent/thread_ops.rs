@@ -18,13 +18,13 @@ use crate::agent::dispatcher::{
     persist_selected_auth_prompt, restore_selected_auth_prompt,
 };
 use crate::agent::session::{
-    MAX_PENDING_MESSAGES, PendingApproval, Session, ThreadState, TurnOutcome,
+    MAX_PENDING_MESSAGES, PendingApproval, Session, ThreadState, TurnOutcome, TurnToolCall,
 };
 use crate::agent::submission::SubmissionResult;
 use crate::channels::{ChatApprovalPrompt, HistoryMessage, IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::Error;
-use crate::generated_images::GeneratedImageSentinel;
+use crate::generated_images::{GeneratedImageSentinel, stage_generated_image_data_url};
 use crate::tools::redact_params;
 use ironclaw_common::truncate_preview;
 use ironclaw_llm::{ChatMessage, ToolCall};
@@ -60,6 +60,43 @@ fn tool_result_preview_for_persistence(result: &serde_json::Value) -> String {
         serde_json::Value::String(s) => truncate_preview(s, 500),
         other => truncate_preview(&other.to_string(), 500),
     }
+}
+
+fn stage_generated_image_response_attachments(tool_calls: &[TurnToolCall]) -> Vec<String> {
+    let mut attachments = Vec::new();
+    for call in tool_calls {
+        if !matches!(call.name.as_str(), "image_generate" | "image_edit") {
+            continue;
+        }
+        let Some(result) = call.result.as_ref() else {
+            continue;
+        };
+        let Some(sentinel) = GeneratedImageSentinel::from_value(result) else {
+            continue;
+        };
+        let Some(data_url) = sentinel.data_url().filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        match stage_generated_image_data_url(data_url) {
+            Ok(path) => attachments.push(path),
+            Err(error) => tracing::warn!(
+                tool = %call.name,
+                error = %error,
+                "Failed to stage generated image as response attachment"
+            ),
+        }
+    }
+    attachments
+}
+
+fn strip_markdown_image_lines(content: &str) -> String {
+    content
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("!["))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
 }
 
 fn tool_result_content_for_persistence(result: &serde_json::Value) -> String {
@@ -798,7 +835,8 @@ impl Agent {
                     crate::agent::dispatcher::extract_suggestions(&response);
 
                 // Hook: TransformResponse — allow hooks to modify or reject the final response
-                let response = {
+                let mut response_attachments_allowed = true;
+                let mut response = {
                     let event = crate::hooks::HookEvent::ResponseTransform {
                         user_id: message.user_id.clone(),
                         thread_id: thread_id.to_string(),
@@ -806,9 +844,11 @@ impl Agent {
                     };
                     match self.hooks().run(&event).await {
                         Err(crate::hooks::HookError::Rejected { reason }) => {
+                            response_attachments_allowed = false;
                             format!("[Response filtered: {}]", reason)
                         }
                         Err(err) => {
+                            response_attachments_allowed = false;
                             format!("[Response blocked by hook policy: {}]", err)
                         }
                         Ok(crate::hooks::HookOutcome::Continue {
@@ -817,6 +857,20 @@ impl Agent {
                         _ => response, // fail-open: use original
                     }
                 };
+
+                let response_attachments = if response_attachments_allowed {
+                    let current_tool_calls = thread
+                        .turns
+                        .last()
+                        .map(|turn| turn.tool_calls.clone())
+                        .unwrap_or_default();
+                    stage_generated_image_response_attachments(&current_tool_calls)
+                } else {
+                    Vec::new()
+                };
+                if !response_attachments.is_empty() {
+                    response = strip_markdown_image_lines(&response);
+                }
 
                 thread.conclude_turn(TurnOutcome::Completed(response.clone()));
                 let (turn_number, tool_calls, narrative) = thread
@@ -867,7 +921,10 @@ impl Agent {
                     message.metadata.clone(),
                 );
 
-                Ok(SubmissionResult::response(response))
+                Ok(SubmissionResult::response_with_attachments(
+                    response,
+                    response_attachments,
+                ))
             }
             Ok(AgenticLoopResult::NeedApproval {
                 pending,
@@ -1647,6 +1704,26 @@ impl Agent {
         // Clear undo history too
         let undo_mgr = self.session_manager.get_undo_manager(thread_id).await;
         undo_mgr.lock().await.clear();
+
+        // Drain in-flight OAuth flows for this user (#3320). Mirror of the
+        // engine-v2 cleanup in `bridge::router::clear_engine_conversation` so
+        // both code paths give `/clear` a consistent "clean slate" contract.
+        // Pending flows otherwise live until `OAUTH_FLOW_EXPIRY` (5 min) and
+        // can fool a fresh auth attempt's CSRF dedupe or leave a ghost entry
+        // in `pending_oauth_flows()` after the user already moved on.
+        if let Some(ext_mgr) = self.deps.extension_manager.as_ref() {
+            let mut flows = ext_mgr.pending_oauth_flows().write().await;
+            let before = flows.len();
+            flows.retain(|_state, flow| flow.user_id != user_id);
+            let removed = before.saturating_sub(flows.len());
+            if removed > 0 {
+                tracing::debug!(
+                    user_id = %user_id,
+                    removed,
+                    "engine v1: drained pending OAuth flows on /clear"
+                );
+            }
+        }
 
         Ok(SubmissionResult::ok_with_message("Thread cleared."))
     }
@@ -3022,6 +3099,7 @@ mod tests {
     use crate::channels::{AttachmentKind, IncomingAttachment};
     use crate::config::{AgentConfig, SafetyConfig, SkillsConfig};
     use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     use crate::agent::AgentDeps;
     use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
@@ -3030,7 +3108,10 @@ mod tests {
     };
     use crate::context::ContextManager;
     use crate::error::ChannelError;
-    use crate::generated_images::{GeneratedImageSentinel, MAX_RECORDED_IMAGE_SENTINEL_BYTES};
+    use crate::generated_images::{
+        GeneratedImageSentinel, MAX_RECORDED_IMAGE_SENTINEL_BYTES,
+        remove_staged_generated_image_attachments,
+    };
     use crate::hooks::HookRegistry;
     use crate::testing::{StubChannel, StubLlm};
     use crate::tools::ToolRegistry;
@@ -3130,6 +3211,14 @@ mod tests {
             }
         }
 
+        let llm: Arc<dyn ironclaw_llm::LlmProvider> = Arc::new(StaticLlmProvider);
+        make_thread_ops_test_agent_with(llm, Arc::new(crate::tools::ToolRegistry::new())).await
+    }
+
+    async fn make_thread_ops_test_agent_with(
+        llm: Arc<dyn ironclaw_llm::LlmProvider>,
+        tools: Arc<crate::tools::ToolRegistry>,
+    ) -> (Agent, Arc<TokioMutex<Vec<StatusUpdate>>>) {
         let statuses = Arc::new(TokioMutex::new(Vec::new()));
         let channels = Arc::new(crate::channels::ChannelManager::new());
         channels
@@ -3143,7 +3232,7 @@ mod tests {
             owner_id: "default".to_string(),
             store: None,
             settings_store: None,
-            llm: Arc::new(StaticLlmProvider),
+            llm,
             cheap_llm: None,
             safety: Arc::new(ironclaw_safety::SafetyLayer::new(
                 &ironclaw_safety::SafetyConfig {
@@ -3151,7 +3240,7 @@ mod tests {
                     injection_check_enabled: true,
                 },
             )),
-            tools: Arc::new(crate::tools::ToolRegistry::new()),
+            tools,
             workspace: None,
             extension_manager: None,
             skill_registry: None,
@@ -3207,6 +3296,121 @@ mod tests {
         );
 
         (agent, statuses)
+    }
+
+    const TEST_IMAGE_DATA_URL: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
+
+    struct SequencedImageLlm {
+        calls: AtomicU32,
+    }
+
+    impl SequencedImageLlm {
+        fn new() -> Self {
+            Self {
+                calls: AtomicU32::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ironclaw_llm::LlmProvider for SequencedImageLlm {
+        fn model_name(&self) -> &str {
+            "sequenced-image-mock"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: ironclaw_llm::CompletionRequest,
+        ) -> Result<ironclaw_llm::CompletionResponse, crate::error::LlmError> {
+            Ok(ironclaw_llm::CompletionResponse {
+                content: "unused".to_string(),
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: ironclaw_llm::FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ironclaw_llm::ToolCompletionRequest,
+        ) -> Result<ironclaw_llm::ToolCompletionResponse, crate::error::LlmError> {
+            let call = self.calls.fetch_add(1, Ordering::Relaxed);
+            if call == 0 {
+                return Ok(ironclaw_llm::ToolCompletionResponse {
+                    content: None,
+                    tool_calls: vec![ToolCall {
+                        id: "call_img_0".to_string(),
+                        name: "image_generate".to_string(),
+                        arguments: serde_json::json!({"prompt": "cat"}),
+                        reasoning: None,
+                        signature: None,
+                    }],
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    finish_reason: ironclaw_llm::FinishReason::ToolUse,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                    reasoning: None,
+                });
+            }
+
+            Ok(ironclaw_llm::ToolCompletionResponse {
+                content: Some(
+                    "已生成小猫图片：\n\n![小猫](/mnt/data/generated_image.jpg)".to_string(),
+                ),
+                tool_calls: Vec::new(),
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: ironclaw_llm::FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                reasoning: None,
+            })
+        }
+    }
+
+    struct GeneratedImageTool;
+
+    #[async_trait::async_trait]
+    impl crate::tools::Tool for GeneratedImageTool {
+        fn name(&self) -> &str {
+            "image_generate"
+        }
+
+        fn description(&self) -> &str {
+            "Generate an image for tests"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string"}
+                },
+                "required": ["prompt"]
+            })
+        }
+
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<crate::tools::ToolOutput, crate::tools::ToolError> {
+            Ok(crate::tools::ToolOutput::success(
+                serde_json::json!({
+                    "type": "image_generated",
+                    "data": TEST_IMAGE_DATA_URL,
+                    "media_type": "image/png"
+                }),
+                Duration::from_millis(1),
+            ))
+        }
     }
 
     #[cfg(feature = "libsql")]
@@ -4300,6 +4504,17 @@ mod tests {
     }
 
     #[test]
+    fn test_strip_markdown_image_lines_can_return_empty_text() {
+        let content = "![generated](/mnt/data/image.png)";
+
+        assert_eq!(strip_markdown_image_lines(content), "");
+        assert_eq!(
+            strip_markdown_image_lines("已生成：\n\n![generated](/mnt/data/image.png)"),
+            "已生成："
+        );
+    }
+
+    #[test]
     fn test_tool_result_preview_for_persistence_handles_double_stringified_sentinel() {
         let sentinel = serde_json::json!({
             "type": "image_generated",
@@ -4684,7 +4899,7 @@ mod tests {
             .expect("attachment-only message handled");
 
         match result {
-            SubmissionResult::Response { content } => {
+            SubmissionResult::Response { content, .. } => {
                 assert_eq!(content.to_ascii_lowercase(), "ok")
             }
             other => panic!("expected response result, got {other:?}"),
@@ -4709,6 +4924,136 @@ mod tests {
             "{}",
             turn.user_input
         );
+    }
+
+    #[tokio::test]
+    async fn test_process_user_input_attaches_generated_image_from_tool_result() {
+        use crate::agent::session::{Session, Thread};
+        use uuid::Uuid;
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(GeneratedImageTool)).await;
+        let llm: Arc<dyn ironclaw_llm::LlmProvider> = Arc::new(SequencedImageLlm::new());
+        let (agent, statuses) = make_thread_ops_test_agent_with(llm, tools).await;
+        let session_id = Uuid::new_v4();
+        let thread_id = Uuid::new_v4();
+        let thread = Thread::with_id(thread_id, session_id, Some("test"));
+
+        let mut sess = Session::new("test-user");
+        sess.threads.insert(thread_id, thread);
+        let session = Arc::new(TokioMutex::new(sess));
+        let message = IncomingMessage::new("test", "test-user", "生成一张小猫图片");
+
+        let result = agent
+            .process_user_input(
+                &message,
+                agent.tenant_ctx("test-user").await,
+                Arc::clone(&session),
+                thread_id,
+                "生成一张小猫图片",
+            )
+            .await
+            .expect("image generation turn handled");
+
+        let attachments = match result {
+            SubmissionResult::Response {
+                content,
+                attachments,
+            } => {
+                assert_eq!(content, "已生成小猫图片：");
+                assert!(!content.contains("!["));
+                attachments
+            }
+            other => panic!("expected response result, got {other:?}"),
+        };
+
+        assert_eq!(attachments.len(), 1);
+        assert!(
+            std::path::Path::new(&attachments[0]).exists(),
+            "staged generated image attachment should exist"
+        );
+        remove_staged_generated_image_attachments(&attachments);
+
+        let statuses = statuses.lock().await.clone();
+        assert!(statuses.iter().any(|status| matches!(
+            status,
+            StatusUpdate::ImageGenerated {
+                event_id,
+                data_url,
+                ..
+            } if event_id == "call_img_0" && data_url == TEST_IMAGE_DATA_URL
+        )));
+    }
+
+    #[tokio::test]
+    async fn test_response_transform_rejection_blocks_generated_image_attachment() {
+        use crate::agent::session::{Session, Thread};
+        use crate::hooks::{Hook, HookContext, HookError, HookEvent, HookOutcome, HookPoint};
+        use uuid::Uuid;
+
+        struct RejectGeneratedImageResponseHook;
+
+        #[async_trait::async_trait]
+        impl Hook for RejectGeneratedImageResponseHook {
+            fn name(&self) -> &str {
+                "reject-generated-image-response"
+            }
+
+            fn hook_points(&self) -> &[HookPoint] {
+                const POINTS: &[HookPoint] = &[HookPoint::TransformResponse];
+                POINTS
+            }
+
+            async fn execute(
+                &self,
+                _event: &HookEvent,
+                _ctx: &HookContext,
+            ) -> Result<HookOutcome, HookError> {
+                Ok(HookOutcome::reject("blocked by response policy"))
+            }
+        }
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(GeneratedImageTool)).await;
+        let llm: Arc<dyn ironclaw_llm::LlmProvider> = Arc::new(SequencedImageLlm::new());
+        let (agent, _statuses) = make_thread_ops_test_agent_with(llm, tools).await;
+        agent
+            .hooks()
+            .register(Arc::new(RejectGeneratedImageResponseHook))
+            .await;
+        let session_id = Uuid::new_v4();
+        let thread_id = Uuid::new_v4();
+        let thread = Thread::with_id(thread_id, session_id, Some("test"));
+
+        let mut sess = Session::new("test-user");
+        sess.threads.insert(thread_id, thread);
+        let session = Arc::new(TokioMutex::new(sess));
+        let message = IncomingMessage::new("test", "test-user", "生成一张小猫图片");
+
+        let result = agent
+            .process_user_input(
+                &message,
+                agent.tenant_ctx("test-user").await,
+                Arc::clone(&session),
+                thread_id,
+                "生成一张小猫图片",
+            )
+            .await
+            .expect("image generation turn handled");
+
+        match result {
+            SubmissionResult::Response {
+                content,
+                attachments,
+            } => {
+                assert_eq!(content, "[Response filtered: blocked by response policy]");
+                assert!(
+                    attachments.is_empty(),
+                    "rejected response must not deliver generated image attachments"
+                );
+            }
+            other => panic!("expected response result, got {other:?}"),
+        }
     }
 
     #[tokio::test]

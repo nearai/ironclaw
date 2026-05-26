@@ -393,11 +393,10 @@ pub struct ListThreadsQuery {
 
 /// `POST /api/webchat/v2/extensions/{extension_name}/setup`
 ///
-/// Skeleton route — the v2 native extension lifecycle is not wired
-/// yet, so the underlying facade returns
-/// `RebornSetupExtensionStatus::NotImplemented`. The route exists so
-/// the v2 entrypoint inventory is complete and so future onboarding
-/// port work has a stable surface to fill in.
+/// V2-native route that returns a product-safe lifecycle projection. The route
+/// exists so the v2 entrypoint inventory is complete and so future onboarding
+/// port work has a stable surface to fill in without coupling this crate to v1
+/// onboarding controllers.
 ///
 /// The path segment is validated against
 /// [`ExtensionName`] at the handler/facade boundary; a

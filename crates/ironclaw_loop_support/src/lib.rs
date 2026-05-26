@@ -29,6 +29,9 @@ mod input_queue;
 mod skill_bundle_context_source;
 mod skill_bundle_source;
 mod skill_context;
+mod subagent_prompt_port;
+mod subagent_spawn_port;
+mod turn_event_publisher;
 
 pub use budget_accountant::GovernorBackedAccountant;
 pub use budget_cost_table::{ModelCost, ModelCostTable, StaticModelCostTable, ZeroCostTable};
@@ -71,6 +74,22 @@ pub use skill_context::{
     HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
     build_skill_run_snapshot,
 };
+pub use subagent_prompt_port::{
+    DEFAULT_SUBAGENT_GOAL_MAX_BYTES, SubagentLoopPromptPort, SubagentPromptComposer,
+    SubagentPromptGoal, SubagentPromptLimits, SubagentPromptMaterial, SubagentPromptMaterialSource,
+    materialize_direction_message, materialize_goal_framing_message, materialize_goal_message,
+    subagent_run_id_from_context,
+};
+pub use subagent_spawn_port::{
+    AwaitedChildSetRecord, DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, DEFAULT_SUBAGENT_MAX_DEPTH,
+    DEFAULT_SUBAGENT_MAX_SPAWN_PER_TURN, DEFAULT_SUBAGENT_MAX_TREE_DESCENDANTS,
+    InMemorySubagentGateResolutionStore, JsonSpawnSubagentInputCodec, SpawnSubagentArgs,
+    SpawnSubagentInputCodec, SpawnSubagentMode, SubagentDefinition, SubagentDefinitionResolver,
+    SubagentGateResolutionStore, SubagentGoalRecord, SubagentKindId, SubagentSpawnCapabilityPort,
+    SubagentSpawnDeps, SubagentSpawnGoalStore, SubagentSpawnLimits, SubagentThreadKind,
+    SubagentThreadMetadata,
+};
+pub use turn_event_publisher::EventPublishingTurnRunTransitionPort;
 
 use tokio::sync::{Mutex, OnceCell};
 

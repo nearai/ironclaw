@@ -1063,7 +1063,7 @@ impl Agent {
             .handle_system_command(command, args, channel, tenant)
             .await?
         {
-            SubmissionResult::Response { content } => Ok(Some(content)),
+            SubmissionResult::Response { content, .. } => Ok(Some(content)),
             SubmissionResult::Ok { message } => Ok(message),
             SubmissionResult::Error { message } => Ok(Some(format!("Error: {}", message))),
             _ => Ok(None),

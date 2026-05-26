@@ -34,7 +34,7 @@ use exit_helpers::{
     cancelled_exit, cancelled_exit_with_reason, cancelled_reason_from_signal, completed_exit,
     exit_id, failed_exit,
 };
-use gates::{GateInput, GateStage};
+use gates::{AwaitDependentRunGateInput, AwaitDependentRunGateStage, GateInput, GateStage};
 #[cfg(test)]
 use input::consume_drainable_inputs;
 use input::{DrainInput, InputStage, InputStep, UserFacingInputDrainMode};

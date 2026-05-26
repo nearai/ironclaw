@@ -25,6 +25,7 @@
 #![forbid(unsafe_code)]
 
 mod action;
+mod approval_interaction;
 mod auth_continuation;
 mod binding;
 mod binding_ref;
@@ -37,6 +38,7 @@ mod fakes;
 mod in_memory_ledger;
 mod inbound_turn;
 mod ledger;
+mod lifecycle;
 mod policy;
 mod reborn_services;
 mod webui_inbound;
@@ -45,6 +47,16 @@ mod workflow;
 pub use action::{
     ActionDispatchKind, ActionFingerprintKey, ActionPhase, AuthRequestRef, LinkedThreadActionId,
     ProductActionId, ProductCommandName, ProductInboundAction, SourceBindingKey,
+};
+pub use approval_interaction::{
+    ApprovalBlockedTurnRun, ApprovalGateRecord, ApprovalInteractionActionView,
+    ApprovalInteractionDecision, ApprovalInteractionReadModel, ApprovalInteractionRejectionKind,
+    ApprovalInteractionScope, ApprovalInteractionService, ApprovalLeaseTermsProvider,
+    ApprovalResolutionPort, ApprovalResolverPort, ApprovalTurnRunLocator,
+    DefaultApprovalInteractionService, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
+    PendingApprovalInteractionView, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse, RunStateApprovalInteractionReadModel, approval_gate_ref,
+    is_approval_gate_ref,
 };
 /// Concrete turn-gate resume dispatcher used by the Reborn composition crate to
 /// bridge product-auth continuations into the workflow-owned turn boundary.
@@ -58,7 +70,8 @@ pub use command_dispatch::{
     ProductCommandService, RejectingProductCommandAdmissionService, RejectingProductCommandService,
 };
 pub use commands::{
-    ProductCommand, ProductCommandDescriptor, ProductModelCommand, product_command_descriptors,
+    LifecycleProductCommandService, ProductCommand, ProductCommandDescriptor, ProductModelCommand,
+    product_command_descriptors,
 };
 pub use conversation_binding::{
     ProductConversationBindingService, ProductInstallationKey, ProductInstallationScope,
@@ -75,6 +88,13 @@ pub use inbound_turn::{
     DefaultInboundTurnService, InboundTurnOutcome, InboundTurnService, InboundUserMessageDispatch,
 };
 pub use ledger::{IdempotencyDecision, IdempotencyLedger};
+pub use lifecycle::{
+    LifecycleBlockerRef, LifecycleCommandKind, LifecyclePackageId, LifecyclePackageKind,
+    LifecyclePackageRef, LifecyclePhase, LifecycleProductAction, LifecycleProductContext,
+    LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
+    LifecycleProductSurfaceContext, LifecycleReadinessBlocker, LifecycleSkillSource,
+    LifecycleSkillSummary, UnsupportedLifecycleProductFacade,
+};
 pub use policy::{
     BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,
     NoopBeforeInboundPolicy,
@@ -99,8 +119,8 @@ pub use reborn_services::{
     RebornGetRunStateResponse, RebornListThreadsResponse, RebornResolveGateResponse,
     RebornResumeGateResponse, RebornServices, RebornServicesApi, RebornServicesError,
     RebornServicesErrorCode, RebornServicesErrorKind, RebornSetupExtensionResponse,
-    RebornSetupExtensionStatus, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse,
 };
 pub use webui_inbound::{
     WebUiAuthenticatedCaller, WebUiCancelReason, WebUiCancelRunRequest, WebUiCreateThreadRequest,

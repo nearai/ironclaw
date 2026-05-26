@@ -27,10 +27,12 @@ parks the VM, and the OAuth callback delivers the resolved credential to
 retry the action. `tool_activate` was removed in favor of this contract;
 its install + auto-activation behavior is covered by:
 
-- `tool_install` (callable; non-agent surface) — installs an extension and
+- `tool_install` (callable; agent-callable) — installs an extension and
   registers its tools with the engine registry. After install, the new
   tools appear on the next top-level turn (CodeAct does not hot-refresh
-  callable tools mid-step).
+  callable tools mid-step). User consent is mediated by the tool's
+  `ApprovalRequirement::UnlessAutoApproved` and the seeded `AskEachTime`
+  permission rather than by hiding the tool from the agent surface.
 - `tool_auth` (callable; v1-only) — manual auth flow surface for non-OAuth
   credential types.
 - The auth-preflight + inline-await pipeline (see #3133 / PR #3157) for
@@ -38,8 +40,11 @@ its install + auto-activation behavior is covered by:
 
 Integrations that need user setup (`NeedsSetup`, `Inactive`,
 `AvailableNotInstalled`) surface in the prompt under `Activatable
-Integrations`, but the model cannot enable them itself — it tells the user
-to install/activate them through the IronClaw UI.
+Integrations`. The model installs them by calling `tool_install` directly;
+the engine's auth preflight handles any credential prompt at execute time.
+(Restored in issue #3533 / PR #3559 — `tool_install` was previously
+hidden from the model surface, which left "connect my telegram"
+narrating manual UI steps instead of running the actual install.)
 
 ## Auth-flow extension resolution: one place, no re-derivation
 

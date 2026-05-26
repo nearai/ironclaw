@@ -13,8 +13,8 @@ use ironclaw_host_api::{
 use ironclaw_turns::{
     AcceptedMessageRef, AllowAllTurnAdmissionPolicy, FilesystemTurnStateStore, GetRunStateRequest,
     IdempotencyKey, InMemoryRunProfileResolver, ReplyTargetBindingRef, RunProfileRequest,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnRunId, TurnScope,
-    TurnStateStore, TurnStatus,
+    SourceBindingRef, SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
+    TurnError, TurnRunId, TurnScope, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
 };
 
 /// Build a [`LocalFilesystem`] with `/engine` mounted to a tempdir; the
@@ -79,12 +79,40 @@ fn submit_request_for(scope: TurnScope, idempotency_key: &str) -> SubmitTurnRequ
         requested_run_profile: Some(RunProfileRequest::new("default").unwrap()),
         idempotency_key: IdempotencyKey::new(idempotency_key).unwrap(),
         received_at: Utc.with_ymd_and_hms(2026, 5, 17, 12, 0, 0).unwrap(),
+        requested_run_id: None,
+        parent_run_id: None,
+        subagent_depth: 0,
+        spawn_tree_root_run_id: None,
     }
 }
 
 fn accepted_run_id(response: &SubmitTurnResponse) -> TurnRunId {
     let SubmitTurnResponse::Accepted { run_id, .. } = response;
     *run_id
+}
+
+fn child_run_request(
+    parent_scope: TurnScope,
+    parent_run_id: TurnRunId,
+    child_scope: TurnScope,
+    idempotency_key: &str,
+    cap: u32,
+) -> SubmitChildRunRequest {
+    SubmitChildRunRequest {
+        parent_scope,
+        parent_run_id,
+        child_scope,
+        actor: turn_actor(),
+        accepted_message_ref: AcceptedMessageRef::new(format!("message-{idempotency_key}"))
+            .unwrap(),
+        source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
+        requested_run_profile: Some(RunProfileRequest::new("default").unwrap()),
+        idempotency_key: IdempotencyKey::new(idempotency_key).unwrap(),
+        received_at: Utc.with_ymd_and_hms(2026, 5, 17, 12, 0, 0).unwrap(),
+        requested_run_id: Some(TurnRunId::new()),
+        spawn_tree_descendant_cap: cap,
+    }
 }
 
 #[tokio::test]
@@ -192,5 +220,181 @@ async fn filesystem_turn_state_store_hides_records_from_other_tenants_via_mount_
     assert_ne!(
         run_id_a, run_id_b,
         "each tenant snapshot must mint its own run id; collision implies leakage"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_store_persists_lineage_and_tree_reservations() {
+    let backend = Arc::new(engine_filesystem());
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let store = FilesystemTurnStateStore::new(Arc::clone(&scoped));
+    let resolver = InMemoryRunProfileResolver::default();
+
+    let parent_scope = turn_scope("thread-fs-parent");
+    let parent = accepted_run_id(
+        &store
+            .submit_turn(
+                submit_request_for(parent_scope.clone(), "idem-fs-parent"),
+                &AllowAllTurnAdmissionPolicy,
+                &resolver,
+            )
+            .await
+            .unwrap(),
+    );
+
+    let child_scope = turn_scope("thread-fs-child");
+    let child_run_id = accepted_run_id(
+        &store
+            .submit_child_turn(
+                child_run_request(
+                    parent_scope.clone(),
+                    parent,
+                    child_scope.clone(),
+                    "idem-fs-child",
+                    3,
+                ),
+                &AllowAllTurnAdmissionPolicy,
+                &resolver,
+            )
+            .await
+            .unwrap(),
+    );
+
+    let child_b_scope = turn_scope("thread-fs-child-b");
+    let reservation = store
+        .reserve_tree_descendants(&child_scope, parent, 1, 3)
+        .await
+        .unwrap();
+    assert_eq!(reservation.descendant_count, 2);
+    assert!(matches!(
+        store
+            .reserve_tree_descendants(&child_b_scope, parent, 2, 3)
+            .await,
+        Err(TurnError::CapacityExceeded { .. })
+    ));
+    store
+        .release_tree_descendants(&child_b_scope, parent, 1)
+        .await
+        .unwrap();
+
+    let reopened = FilesystemTurnStateStore::new(scoped);
+    let children = reopened.children_of(&parent_scope, parent).await.unwrap();
+    assert_eq!(children.len(), 1);
+    assert_eq!(children[0].run_id, child_run_id);
+    assert_eq!(children[0].parent_run_id, Some(parent));
+    assert_eq!(
+        reopened
+            .get_run_record(&child_scope, child_run_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .spawn_tree_root_run_id,
+        Some(parent)
+    );
+    assert_eq!(
+        reopened
+            .reserve_tree_descendants(&child_b_scope, parent, 1, 3)
+            .await
+            .unwrap()
+            .descendant_count,
+        2
+    );
+}
+
+#[tokio::test]
+async fn filesystem_spawn_tree_reads_are_scope_checked() {
+    let backend = Arc::new(engine_filesystem());
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let store = FilesystemTurnStateStore::new(Arc::clone(&scoped));
+    let resolver = InMemoryRunProfileResolver::default();
+
+    let parent_scope = turn_scope("thread-fs-scope-parent");
+    let parent = accepted_run_id(
+        &store
+            .submit_turn(
+                submit_request_for(parent_scope.clone(), "idem-fs-scope-parent"),
+                &AllowAllTurnAdmissionPolicy,
+                &resolver,
+            )
+            .await
+            .unwrap(),
+    );
+    let child_scope = turn_scope("thread-fs-scope-child");
+    let child = accepted_run_id(
+        &store
+            .submit_child_turn(
+                child_run_request(
+                    parent_scope.clone(),
+                    parent,
+                    child_scope.clone(),
+                    "idem-fs-scope-child",
+                    4,
+                ),
+                &AllowAllTurnAdmissionPolicy,
+                &resolver,
+            )
+            .await
+            .unwrap(),
+    );
+
+    let reopened = FilesystemTurnStateStore::new(scoped);
+    assert_eq!(
+        reopened
+            .children_of(&parent_scope, parent)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        reopened
+            .children_of(&child_scope, parent)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        reopened
+            .children_of(&parent_scope, TurnRunId::new())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let foreign_scope = TurnScope::new(
+        TenantId::new("foreign-tenant").unwrap(),
+        Some(AgentId::new("agent1").unwrap()),
+        Some(ProjectId::new("project1").unwrap()),
+        ThreadId::new("thread-fs-scope-parent").unwrap(),
+    );
+    assert!(
+        reopened
+            .children_of(&foreign_scope, parent)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        reopened
+            .get_run_record(&foreign_scope, parent)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        reopened
+            .get_run_record(&parent_scope, child)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        reopened
+            .get_run_record(&child_scope, child)
+            .await
+            .unwrap()
+            .unwrap()
+            .run_id,
+        child
     );
 }

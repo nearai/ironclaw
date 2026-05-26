@@ -2,10 +2,11 @@ use std::collections::HashSet;
 
 use async_trait::async_trait;
 use ironclaw_turns::{
-    LoopFailureKind,
+    LoopFailureKind, LoopResultRef,
     run_profile::{
         CapabilityBatchInvocation, CapabilityCallCandidate, CapabilityFailureKind,
-        CapabilityOutcome, LoopDriverNoteKind, LoopProgressEvent, VisibleCapabilitySurface,
+        CapabilityOutcome, CapabilityResultMessage, LoopDriverNoteKind, LoopProgressEvent,
+        VisibleCapabilitySurface,
     },
 };
 
@@ -18,13 +19,14 @@ use crate::{
 };
 
 use super::{
-    AgentLoopExecutorError, BatchStep, CancelCheck, CapabilitySurfaceIndex, CheckpointStage,
-    ExecutorStage, GateInput, GateStage, MAX_CAPABILITY_RETRIES, StageContext, TurnCompletedStep,
-    append_capability_error_ref, append_capability_result_ref, append_capability_safe_summary_ref,
-    batch_policy_kind, cancelled_exit, capability_batch_counts, capability_error_class,
-    capability_failure_kind, capability_host_error, capability_invocation_from_candidate,
-    capability_is_visible, capability_summary, failed_exit, honor_retry_alteration,
-    push_call_signature_once, push_completed_result, sanitized_strategy_summary,
+    AgentLoopExecutorError, AwaitDependentRunGateInput, AwaitDependentRunGateStage, BatchStep,
+    CancelCheck, CapabilitySurfaceIndex, CheckpointStage, ExecutorStage, GateInput, GateStage,
+    MAX_CAPABILITY_RETRIES, StageContext, TurnCompletedStep, append_capability_error_ref,
+    append_capability_result_ref, append_capability_safe_summary_ref, batch_policy_kind,
+    cancelled_exit, capability_batch_counts, capability_error_class, capability_failure_kind,
+    capability_host_error, capability_invocation_from_candidate, capability_is_visible,
+    capability_summary, failed_exit, honor_retry_alteration, push_call_signature_once,
+    push_completed_result, sanitized_strategy_summary,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -163,18 +165,35 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
 
         let outcomes = batch.outcomes;
         if !batch.stopped_on_suspension {
-            // Non-suspended batches record completed outcomes before handling
-            // possible gates/errors so partial parallel progress is durable in
-            // any later suspension checkpoint. Keep this in sync with the
-            // Completed arm in handle_capability_outcome.
+            // Non-suspended batches record completed outcomes before gates so
+            // partial parallel progress is durable in any later suspension
+            // checkpoint.
             let mut pending_outcomes = Vec::new();
             for (call, outcome) in visible_calls.into_iter().zip(outcomes) {
-                if let CapabilityOutcome::Completed(result) = outcome {
-                    push_call_signature_once(&mut state, &mut signatures, &call)?;
-                    append_capability_result_ref(ctx.host, &call, &result).await?;
-                    push_completed_result(&mut state, result);
-                } else {
-                    pending_outcomes.push((call, outcome));
+                match outcome {
+                    CapabilityOutcome::Completed(result) => {
+                        push_call_signature_once(&mut state, &mut signatures, &call)?;
+                        append_capability_result_ref(ctx.host, &call, &result).await?;
+                        push_completed_result(&mut state, result);
+                    }
+                    CapabilityOutcome::SpawnedChildRun {
+                        result_ref,
+                        safe_summary,
+                        ..
+                    } => {
+                        push_call_signature_once(&mut state, &mut signatures, &call)?;
+                        append_spawned_child_result(
+                            ctx.host,
+                            &mut state,
+                            &call,
+                            result_ref,
+                            safe_summary,
+                        )
+                        .await?;
+                    }
+                    other => {
+                        pending_outcomes.push((call, other));
+                    }
                 }
             }
             for (call, outcome) in pending_outcomes {
@@ -280,6 +299,15 @@ impl CapabilityStage {
                 push_completed_result(&mut state, result);
                 Ok(BatchStep::Continue(Box::new(state)))
             }
+            CapabilityOutcome::SpawnedChildRun {
+                result_ref,
+                safe_summary,
+                ..
+            } => {
+                append_spawned_child_result(ctx.host, &mut state, &call, result_ref, safe_summary)
+                    .await?;
+                Ok(BatchStep::Continue(Box::new(state)))
+            }
             CapabilityOutcome::ApprovalRequired { gate_ref, .. } => {
                 GateStage
                     .process(
@@ -315,6 +343,28 @@ impl CapabilityStage {
                             call,
                             kind: GateKind::Resource,
                             gate_ref,
+                        },
+                    )
+                    .await
+            }
+            CapabilityOutcome::AwaitDependentRun {
+                gate_ref,
+                result_ref,
+                safe_summary,
+            } => {
+                let resolved_result = CapabilityResultMessage {
+                    result_ref,
+                    safe_summary,
+                    terminate_hint: false,
+                };
+                AwaitDependentRunGateStage
+                    .process(
+                        ctx,
+                        AwaitDependentRunGateInput {
+                            state,
+                            call,
+                            gate_ref,
+                            resolved_result,
                         },
                     )
                     .await
@@ -513,4 +563,22 @@ impl CapabilityStage {
             Some(checked.checkpoint_id),
         )?))
     }
+}
+
+async fn append_spawned_child_result(
+    host: &(dyn ironclaw_turns::run_profile::AgentLoopDriverHost + Send + Sync),
+    state: &mut LoopExecutionState,
+    call: &CapabilityCallCandidate,
+    result_ref: LoopResultRef,
+    safe_summary: String,
+) -> Result<(), AgentLoopExecutorError> {
+    let safe_summary = sanitized_strategy_summary(safe_summary)?.into_inner();
+    let result = CapabilityResultMessage {
+        result_ref,
+        safe_summary,
+        terminate_hint: false,
+    };
+    append_capability_result_ref(host, call, &result).await?;
+    push_completed_result(state, result);
+    Ok(())
 }
