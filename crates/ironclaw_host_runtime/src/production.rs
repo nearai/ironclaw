@@ -411,7 +411,8 @@ impl HostRuntime for DefaultHostRuntime {
         };
         context.trust = trust_decision.effective_trust.class();
 
-        let host = self.capability_host();
+        let registry = self.registry.snapshot();
+        let host = self.capability_host(&registry);
         let spawn = CapabilitySpawnRequest {
             context,
             capability_id: capability_id.clone(),
@@ -588,7 +589,8 @@ impl HostRuntime for DefaultHostRuntime {
         };
         context.trust = trust_decision.effective_trust.class();
 
-        let host = self.capability_host();
+        let registry = self.registry.snapshot();
+        let host = self.capability_host(&registry);
         let resume = CapabilityResumeRequest {
             context,
             approval_request_id,
