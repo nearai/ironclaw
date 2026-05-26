@@ -11,13 +11,11 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::run_profile::{AgentLoopHostError, AgentLoopHostErrorKind, LoopRunContext};
 
-use crate::{
+use crate::subagent::{
     directions::direction_prompt,
-    subagent::{
-        flavors::{SubagentFlavorId, lookup_flavor, parse_flavor_id},
-        gate_resolution::BoundedSubagentGateResolutionStore,
-        goal_store::{SubagentGoalStore, SubagentGoalStoreError},
-    },
+    flavors::{SubagentFlavorId, lookup_flavor, parse_flavor_id},
+    gate_resolution::BoundedSubagentGateResolutionStore,
+    goal_store::{SubagentGoalStore, SubagentGoalStoreError},
 };
 
 pub struct RebornSubagentPromptMaterialSource<G>
@@ -77,13 +75,13 @@ where
     ) -> Result<SubagentPromptMaterial, AgentLoopHostError> {
         let flavor_id = self
             .gate_store
-            .flavor_id_for_child(run_context.run_id)
+            .subagent_kind_for_child(run_context.run_id)
             .map_err(|error| AgentLoopHostError::new(error.kind, error.safe_summary))?;
         let flavor_id = match flavor_id {
             Some(flavor_id) => flavor_id,
             None => thread_metadata_for_run(self.thread_service.as_ref(), run_context)
                 .await?
-                .map(|metadata| metadata.flavor)
+                .map(|metadata| metadata.subagent_kind)
                 .ok_or_else(|| {
                     AgentLoopHostError::new(
                         AgentLoopHostErrorKind::InvalidInvocation,
@@ -91,7 +89,7 @@ where
                     )
                 })?,
         };
-        let flavor_id = parse_flavor_id(&flavor_id).ok_or_else(|| {
+        let flavor_id = parse_flavor_id(flavor_id.as_str()).ok_or_else(|| {
             AgentLoopHostError::new(
                 AgentLoopHostErrorKind::InvalidInvocation,
                 "subagent run recorded an unknown flavor",
@@ -298,14 +296,14 @@ mod tests {
 
     use crate::subagent::{
         flavors::SubagentFlavorId,
-        goal_store::{BoundedSubagentGoalStore, SubagentGoal},
+        goal_store::{InMemoryBoundedSubagentGoalStore, SubagentGoal},
     };
 
     use super::*;
 
     #[tokio::test]
     async fn material_source_fails_loud_on_goal_miss() {
-        let store = Arc::new(BoundedSubagentGoalStore::new());
+        let store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
         let source = RebornSubagentPromptMaterialSource::new(store, SubagentFlavorId::General);
         let context = ironclaw_agent_loop::test_support::test_run_context("missing-goal");
 
@@ -316,7 +314,7 @@ mod tests {
 
     #[tokio::test]
     async fn material_source_combines_static_direction_goal_and_allowlist() {
-        let store = Arc::new(BoundedSubagentGoalStore::new());
+        let store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
         let context = ironclaw_agent_loop::test_support::test_run_context("goal");
         store
             .put_goal(

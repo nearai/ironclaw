@@ -55,9 +55,12 @@ use ironclaw_reborn::runtime::{
     DefaultPlannedRuntimeBuildError, DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts,
     build_default_planned_runtime,
 };
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_reborn::subagent::goal_store::FilesystemSubagentGoalStore;
+#[cfg(not(any(feature = "libsql", feature = "postgres")))]
+use ironclaw_reborn::subagent::goal_store::InMemoryBoundedSubagentGoalStore;
 use ironclaw_reborn::subagent::{
-    flavors::StaticSubagentFlavorPolicyResolver,
-    gate_resolution::BoundedSubagentGateResolutionStore, goal_store::BoundedSubagentGoalStore,
+    flavors::StaticSubagentDefinitionResolver, gate_resolution::BoundedSubagentGateResolutionStore,
 };
 use ironclaw_reborn::turn_runner::{TurnRunnerWakeSender, TurnRunnerWorkerConfig};
 use ironclaw_threads::{
@@ -810,6 +813,12 @@ pub async fn build_reborn_runtime(
     let milestone_sink: Arc<dyn LoopHostMilestoneSink> = Arc::new(
         DurableLoopHostMilestoneSink::new(Arc::clone(&event_log), milestone_scope),
     );
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    let subagent_goal_store = Arc::new(FilesystemSubagentGoalStore::new(Arc::clone(
+        &local_runtime.subagent_goal_filesystem,
+    )));
+    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+    let subagent_goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
     if trusted_laptop_access {
         append_trusted_laptop_access_audit(&audit_log, &thread_scope, &actor_user_id).await?;
     }
@@ -828,7 +837,6 @@ pub async fn build_reborn_runtime(
     let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
         turn_state: Arc::clone(&turn_state_store),
         thread_service: Arc::clone(&thread_service),
-        thread_service_dyn: Arc::clone(&thread_service),
         thread_scope: thread_scope.clone(),
         model_gateway,
         checkpoint_state_store: Arc::clone(&checkpoint_state_store)
@@ -839,9 +847,9 @@ pub async fn build_reborn_runtime(
         capability_factory,
         capability_surface_resolver: Arc::new(AllowAllCapabilitySurfaceResolver),
         capability_result_writer,
-        subagent_goal_store: Arc::new(BoundedSubagentGoalStore::new()),
+        subagent_goal_store,
         subagent_gate_store: Arc::new(BoundedSubagentGateResolutionStore::new()),
-        subagent_flavor_resolver: Arc::new(StaticSubagentFlavorPolicyResolver),
+        subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(
             capability_input_resolver,
         )),

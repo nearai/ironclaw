@@ -31,8 +31,9 @@ use ironclaw_reborn::{
         DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, build_product_live_planned_runtime,
     },
     subagent::{
-        flavors::StaticSubagentFlavorPolicyResolver,
-        gate_resolution::BoundedSubagentGateResolutionStore, goal_store::BoundedSubagentGoalStore,
+        flavors::StaticSubagentDefinitionResolver,
+        gate_resolution::BoundedSubagentGateResolutionStore,
+        goal_store::InMemoryBoundedSubagentGoalStore,
     },
 };
 use ironclaw_reborn_composition::{
@@ -1197,8 +1198,7 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
     let loop_checkpoint_for_evidence: Arc<dyn LoopCheckpointStore> = loop_checkpoint_store.clone();
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         turn_state,
-        thread_service: Arc::clone(&thread_service),
-        thread_service_dyn: Arc::clone(&thread_service) as Arc<dyn SessionThreadService>,
+        thread_service: Arc::clone(&thread_service) as Arc<dyn SessionThreadService>,
         thread_scope: thread_scope.clone(),
         model_gateway: Arc::new(StubModelGateway),
         checkpoint_state_store: checkpoint_state_store as Arc<dyn CheckpointStateStore>,
@@ -1207,9 +1207,9 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
         capability_factory: adapters.capability_factory,
         capability_surface_resolver: adapters.capability_surface_resolver,
         capability_result_writer: adapters.capability_result_writer,
-        subagent_goal_store: Arc::new(BoundedSubagentGoalStore::new()),
+        subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
         subagent_gate_store: Arc::new(BoundedSubagentGateResolutionStore::new()),
-        subagent_flavor_resolver: Arc::new(StaticSubagentFlavorPolicyResolver),
+        subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(
             adapters.capability_input_resolver,
         )),

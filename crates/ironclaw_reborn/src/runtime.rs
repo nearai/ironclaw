@@ -8,14 +8,15 @@ use ironclaw_loop_support::{
     CapabilitySurfaceProfileResolver, CompositeTurnRunWakeNotifier, HostIdentityContextSource,
     HostInputQueue, HostManagedModelGateway, HostRuntimeLoopCapabilityPortFactory,
     HostSkillContextSource, LoopCapabilityResultWriter, ProductLiveCancellationReadiness,
-    RunCancellationFactory, SpawnSubagentInputCodec, SubagentFlavorPolicyResolver,
+    RunCancellationFactory, SpawnSubagentInputCodec, SubagentDefinitionResolver,
     SubagentPromptComposer, SubagentSpawnCapabilityPort, SubagentSpawnDeps, SubagentSpawnGoalStore,
     SubagentSpawnLimits, verify_product_live_cancellation_probe,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 use ironclaw_turns::{
     AgentLoopDriverError, CheckpointStateStore, DefaultTurnCoordinator, LoopCheckpointStore,
-    RunProfileResolver, TurnRunWakeNotifier, TurnStateStore,
+    RunProfileResolver, TurnRunWakeNotifier, TurnSpawnTreePort, TurnSpawnTreeStateStore,
+    TurnStateStore,
     loop_exit::LoopExitEvidencePort,
     run_profile::{
         AgentLoopHostError, InstructionSafetyContext, LoopCapabilityPort, LoopHostMilestoneSink,
@@ -59,19 +60,13 @@ pub struct DefaultPlannedRuntimeConfig {
     pub host: TextOnlyLoopHostConfig,
 }
 
-pub struct DefaultPlannedRuntimeParts<T, S, G>
+pub struct DefaultPlannedRuntimeParts<T, G>
 where
-    T: TurnStateStore + TurnRunTransitionPort + Send + Sync + 'static,
-    S: SessionThreadService + ?Sized + Send + Sync + 'static,
+    T: TurnSpawnTreeStateStore + TurnRunTransitionPort + Send + Sync + 'static,
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
 {
     pub turn_state: Arc<T>,
-    pub thread_service: Arc<S>,
-    /// Type-erased view of `thread_service` for capability ports that consume
-    /// `Arc<dyn SessionThreadService>`. Callers with `S: Sized` populate this
-    /// via `Arc::clone(&thread_service) as Arc<dyn SessionThreadService>`;
-    /// callers with `S = dyn SessionThreadService` clone the same Arc.
-    pub thread_service_dyn: Arc<dyn SessionThreadService>,
+    pub thread_service: Arc<dyn SessionThreadService>,
     pub thread_scope: ThreadScope,
     pub model_gateway: Arc<G>,
     pub checkpoint_state_store: Arc<dyn CheckpointStateStore>,
@@ -82,7 +77,7 @@ where
     pub capability_result_writer: Arc<dyn LoopCapabilityResultWriter>,
     pub subagent_goal_store: Arc<dyn RuntimeSubagentGoalStore>,
     pub subagent_gate_store: Arc<BoundedSubagentGateResolutionStore>,
-    pub subagent_flavor_resolver: Arc<dyn SubagentFlavorPolicyResolver>,
+    pub subagent_definition_resolver: Arc<dyn SubagentDefinitionResolver>,
     pub subagent_spawn_input_codec: Arc<dyn SpawnSubagentInputCodec>,
     pub loop_exit_evidence: Arc<dyn LoopExitEvidencePort>,
     pub config: DefaultPlannedRuntimeConfig,
@@ -235,12 +230,14 @@ impl Error for ProductLiveRuntimeBuildError {
     }
 }
 
-pub fn build_product_live_planned_runtime<T, S, G>(
-    mut parts: DefaultPlannedRuntimeParts<T, S, G>,
-) -> Result<RebornRuntimeLoopComposition<T, S, G>, ProductLiveRuntimeBuildError>
+pub fn build_product_live_planned_runtime<T, G>(
+    mut parts: DefaultPlannedRuntimeParts<T, G>,
+) -> Result<
+    RebornRuntimeLoopComposition<T, dyn SessionThreadService, G>,
+    ProductLiveRuntimeBuildError,
+>
 where
-    T: TurnStateStore + TurnRunTransitionPort + Send + Sync + 'static,
-    S: SessionThreadService + ?Sized + Send + Sync + 'static,
+    T: TurnSpawnTreeStateStore + TurnRunTransitionPort + Send + Sync + 'static,
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
 {
     if parts.model_route_resolver.is_none() {
@@ -288,7 +285,7 @@ where
     let turn_state_store: Arc<dyn TurnStateStore> = parts.turn_state.clone();
     parts.loop_exit_evidence = Arc::new(
         ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
-            Arc::clone(&parts.thread_service_dyn),
+            Arc::clone(&parts.thread_service),
             turn_state_store,
             Arc::clone(&parts.loop_checkpoint_store),
             parts.thread_scope.clone(),
@@ -298,12 +295,14 @@ where
     build_default_planned_runtime(parts).map_err(ProductLiveRuntimeBuildError::Runtime)
 }
 
-pub fn build_default_planned_runtime<T, S, G>(
-    parts: DefaultPlannedRuntimeParts<T, S, G>,
-) -> Result<RebornRuntimeLoopComposition<T, S, G>, DefaultPlannedRuntimeBuildError>
+pub fn build_default_planned_runtime<T, G>(
+    parts: DefaultPlannedRuntimeParts<T, G>,
+) -> Result<
+    RebornRuntimeLoopComposition<T, dyn SessionThreadService, G>,
+    DefaultPlannedRuntimeBuildError,
+>
 where
-    T: TurnStateStore + TurnRunTransitionPort + Send + Sync + 'static,
-    S: SessionThreadService + ?Sized + Send + Sync + 'static,
+    T: TurnSpawnTreeStateStore + TurnRunTransitionPort + Send + Sync + 'static,
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
 {
     let mut registry = DriverRegistry::new();
@@ -341,19 +340,21 @@ where
         )),
         None => worker_wake_notifier,
     };
-    let base_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> = Arc::new(
+    let base_coordinator_impl = Arc::new(
         DefaultTurnCoordinator::new(Arc::clone(&parts.turn_state))
             .with_run_profile_resolver(Arc::clone(&run_profile_resolver))
             .with_wake_notifier(Arc::clone(&wake_notifier)),
     );
-    let turn_state_for_observer: Arc<dyn TurnStateStore> = parts.turn_state.clone();
+    let base_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> = base_coordinator_impl.clone();
+    let child_runs: Arc<dyn TurnSpawnTreePort> = base_coordinator_impl;
+    let turn_state_for_observer: Arc<dyn TurnSpawnTreeStateStore> = parts.turn_state.clone();
     let completion_observer = Arc::new(SubagentCompletionObserver::new(
         Arc::clone(&parts.subagent_gate_store),
         Arc::clone(&parts.subagent_goal_store) as Arc<dyn SubagentSpawnGoalStore>,
         turn_state_for_observer,
         Arc::clone(&parts.capability_result_writer),
         Arc::clone(&base_coordinator),
-        Arc::clone(&parts.thread_service_dyn),
+        Arc::clone(&parts.thread_service),
     ));
     let coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> = Arc::new(
         SubagentCompletionCoordinator::new(base_coordinator, completion_observer.clone()),
@@ -363,7 +364,7 @@ where
     let subagent_prompt_source = Arc::new(GateBackedSubagentPromptMaterialSource::new(
         Arc::clone(&parts.subagent_goal_store),
         Arc::clone(&parts.subagent_gate_store),
-        Arc::clone(&parts.thread_service_dyn),
+        Arc::clone(&parts.thread_service),
     ));
     let subagent_prompt_composer = SubagentPromptComposer::new(subagent_prompt_source);
     let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
@@ -371,13 +372,14 @@ where
             parts.capability_factory,
             SubagentSpawnDeps {
                 coordinator: Arc::clone(&coordinator) as Arc<dyn ironclaw_turns::TurnCoordinator>,
-                turn_state_store: turn_state_store.clone(),
-                thread_service: Arc::clone(&parts.thread_service_dyn),
+                child_runs,
+                turn_state_store: Arc::clone(&parts.turn_state) as Arc<dyn TurnSpawnTreeStateStore>,
+                thread_service: Arc::clone(&parts.thread_service),
                 goal_store: Arc::clone(&parts.subagent_goal_store)
                     as Arc<dyn SubagentSpawnGoalStore>,
                 gate_store: Arc::clone(&parts.subagent_gate_store)
                     as Arc<dyn ironclaw_loop_support::SubagentGateResolutionStore>,
-                flavor_resolver: Arc::clone(&parts.subagent_flavor_resolver),
+                definition_resolver: Arc::clone(&parts.subagent_definition_resolver),
                 spawn_input_codec: Arc::clone(&parts.subagent_spawn_input_codec),
                 result_writer: Arc::clone(&parts.capability_result_writer),
             },
@@ -437,15 +439,17 @@ where
         wake_receiver,
     ));
 
-    Ok(RebornRuntimeLoopComposition::<T, S, G> {
-        driver_registry,
-        run_profile_resolver,
-        coordinator,
-        host_factory,
-        worker,
-        wake_sender,
-        _turn_state: PhantomData,
-    })
+    Ok(
+        RebornRuntimeLoopComposition::<T, dyn SessionThreadService, G> {
+            driver_registry,
+            run_profile_resolver,
+            coordinator,
+            host_factory,
+            worker,
+            wake_sender,
+            _turn_state: PhantomData,
+        },
+    )
 }
 
 struct SubagentAwareCapabilityPortFactory {

@@ -79,11 +79,11 @@ pub use subagent_prompt_port::{
     subagent_run_id_from_context,
 };
 pub use subagent_spawn_port::{
-    AwaitedChildSetRecord, DEFAULT_MAX_SPAWN_PER_TURN, DEFAULT_MAX_SUBAGENT_DEPTH,
-    DEFAULT_MAX_TREE_DESCENDANTS, DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID,
+    AwaitedChildSetRecord, DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, DEFAULT_SUBAGENT_MAX_DEPTH,
+    DEFAULT_SUBAGENT_MAX_SPAWN_PER_TURN, DEFAULT_SUBAGENT_MAX_TREE_DESCENDANTS,
     InMemorySubagentGateResolutionStore, JsonSpawnSubagentInputCodec, SpawnSubagentArgs,
-    SpawnSubagentInputCodec, SpawnSubagentMode, SubagentFlavorPolicy, SubagentFlavorPolicyResolver,
-    SubagentGateResolutionStore, SubagentGoalRecord, SubagentSpawnCapabilityPort,
+    SpawnSubagentInputCodec, SpawnSubagentMode, SubagentDefinition, SubagentDefinitionResolver,
+    SubagentGateResolutionStore, SubagentGoalRecord, SubagentKindId, SubagentSpawnCapabilityPort,
     SubagentSpawnDeps, SubagentSpawnGoalStore, SubagentSpawnLimits, SubagentThreadKind,
     SubagentThreadMetadata,
 };

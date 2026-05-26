@@ -39,6 +39,7 @@ Start with these deeper docs as needed:
 - Module-specific initialization should live in the owning module behind a public factory/helper, not be reimplemented ad hoc.
 - Keep feature-flag branching inside the module that owns the abstraction whenever possible.
 - Prefer extending existing traits and registries over hardcoding one-off integration paths.
+- Subagent spawn creates and wires child runs only. It must not implement a second agent loop: child planning, execution, capability calls, checkpointing, gates, retries, and completion must go through the existing Reborn runner/driver/executor path.
 
 ## Repo-Wide Coding Rules
 

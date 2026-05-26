@@ -175,7 +175,7 @@ async fn mixed_parallel_batch_blocks_after_recording_completed_results() {
         matches!(
             call,
             MockHostCall::AppendCapabilityResultRef { result_ref, .. }
-                if result_ref.as_str() == "result:child-wait"
+                if result_ref.as_str() == "result:a"
         )
     }));
 }

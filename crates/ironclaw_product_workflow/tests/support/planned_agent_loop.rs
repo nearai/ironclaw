@@ -258,11 +258,6 @@ impl ProductLiveAgentLoopHarness {
         let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
             turn_state: Arc::clone(&turn_store),
             thread_service: Arc::new(thread_service.clone()),
-            thread_service_dyn: {
-                let svc: std::sync::Arc<dyn ironclaw_threads::SessionThreadService> =
-                    std::sync::Arc::new(thread_service.clone());
-                svc
-            },
             thread_scope: thread_scope.clone(),
             model_gateway,
             checkpoint_state_store: Arc::new(InMemoryCheckpointStateStore::default()),
@@ -272,14 +267,14 @@ impl ProductLiveAgentLoopHarness {
             capability_surface_resolver: Arc::new(AllowAllCapabilitySurfaceResolver),
             capability_result_writer,
             subagent_goal_store: Arc::new(
-                ironclaw_reborn::subagent::goal_store::BoundedSubagentGoalStore::new(),
+                ironclaw_reborn::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new(),
             ),
             subagent_gate_store: Arc::new(
                 ironclaw_reborn::subagent::gate_resolution::BoundedSubagentGateResolutionStore::new(
                 ),
             ),
-            subagent_flavor_resolver: Arc::new(
-                ironclaw_reborn::subagent::flavors::StaticSubagentFlavorPolicyResolver,
+            subagent_definition_resolver: Arc::new(
+                ironclaw_reborn::subagent::flavors::StaticSubagentDefinitionResolver,
             ),
             subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(Arc::new(
                 ProductLiveCapabilityIo::default(),

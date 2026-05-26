@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_host_api::{AgentId, CapabilityId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{AgentId, CapabilityId, InvocationId, TenantId, ThreadId, UserId};
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
     EmptyLoopCapabilityPort, HostIdentityContextBuildError, HostIdentityContextCandidate,
@@ -49,9 +49,9 @@ use ironclaw_turns::{
     TurnActor, TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnRunWake, TurnScope,
     TurnStateStore, TurnStatus,
     run_profile::{
-        AgentLoopHostError, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
-        LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken, LoopInputCursorToken,
-        LoopRunContext, NoOpBudgetAccountant, NoOpPolicyGuard, PromptMode,
+        AgentLoopHostError, CapabilityInputRef, InMemoryLoopHostMilestoneSink,
+        InstructionSafetyContext, LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken,
+        LoopInputCursorToken, LoopRunContext, NoOpBudgetAccountant, NoOpPolicyGuard, PromptMode,
     },
 };
 use tokio::time::{sleep, timeout};
@@ -242,6 +242,8 @@ impl LoopCapabilityResultWriter for UnusedCapabilityResultWriter {
     async fn write_capability_result(
         &self,
         _run_context: &LoopRunContext,
+        _input_ref: &CapabilityInputRef,
+        _invocation_id: InvocationId,
         _capability_id: &CapabilityId,
         _output: serde_json::Value,
     ) -> Result<LoopResultRef, AgentLoopHostError> {
@@ -576,11 +578,6 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         turn_state: Arc::clone(&turn_store),
         thread_service: Arc::new(thread_service.clone()),
-        thread_service_dyn: {
-            let svc: std::sync::Arc<dyn ironclaw_threads::SessionThreadService> =
-                std::sync::Arc::new(thread_service.clone());
-            svc
-        },
         thread_scope: thread_scope.clone(),
         model_gateway,
         checkpoint_state_store: Arc::new(InMemoryCheckpointStateStore::default()),
@@ -590,13 +587,13 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
         capability_surface_resolver: Arc::new(AllowAllCapabilitySurfaceResolver),
         capability_result_writer: Arc::new(UnusedCapabilityResultWriter),
         subagent_goal_store: Arc::new(
-            ironclaw_reborn::subagent::goal_store::BoundedSubagentGoalStore::new(),
+            ironclaw_reborn::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new(),
         ),
         subagent_gate_store: Arc::new(
             ironclaw_reborn::subagent::gate_resolution::BoundedSubagentGateResolutionStore::new(),
         ),
-        subagent_flavor_resolver: Arc::new(
-            ironclaw_reborn::subagent::flavors::StaticSubagentFlavorPolicyResolver,
+        subagent_definition_resolver: Arc::new(
+            ironclaw_reborn::subagent::flavors::StaticSubagentDefinitionResolver,
         ),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(Arc::new(
             ProductLiveCapabilityIo::default(),
@@ -750,11 +747,6 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         turn_state: Arc::clone(&turn_store),
         thread_service: Arc::new(thread_service.clone()),
-        thread_service_dyn: {
-            let svc: std::sync::Arc<dyn ironclaw_threads::SessionThreadService> =
-                std::sync::Arc::new(thread_service.clone());
-            svc
-        },
         thread_scope: thread_scope.clone(),
         model_gateway,
         checkpoint_state_store: Arc::new(InMemoryCheckpointStateStore::default()),
@@ -764,13 +756,13 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
         capability_surface_resolver: Arc::new(AllowAllCapabilitySurfaceResolver),
         capability_result_writer: Arc::new(UnusedCapabilityResultWriter),
         subagent_goal_store: Arc::new(
-            ironclaw_reborn::subagent::goal_store::BoundedSubagentGoalStore::new(),
+            ironclaw_reborn::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new(),
         ),
         subagent_gate_store: Arc::new(
             ironclaw_reborn::subagent::gate_resolution::BoundedSubagentGateResolutionStore::new(),
         ),
-        subagent_flavor_resolver: Arc::new(
-            ironclaw_reborn::subagent::flavors::StaticSubagentFlavorPolicyResolver,
+        subagent_definition_resolver: Arc::new(
+            ironclaw_reborn::subagent::flavors::StaticSubagentDefinitionResolver,
         ),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(Arc::new(
             ProductLiveCapabilityIo::default(),
@@ -937,11 +929,6 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
     let error = match build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         turn_state: turn_store,
         thread_service: Arc::new(thread_service.clone()),
-        thread_service_dyn: {
-            let svc: std::sync::Arc<dyn ironclaw_threads::SessionThreadService> =
-                std::sync::Arc::new(thread_service);
-            svc
-        },
         thread_scope: thread_scope.clone(),
         model_gateway,
         checkpoint_state_store: Arc::new(InMemoryCheckpointStateStore::default()),
@@ -951,13 +938,13 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
         capability_surface_resolver: Arc::new(AllowAllCapabilitySurfaceResolver),
         capability_result_writer: Arc::new(UnusedCapabilityResultWriter),
         subagent_goal_store: Arc::new(
-            ironclaw_reborn::subagent::goal_store::BoundedSubagentGoalStore::new(),
+            ironclaw_reborn::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new(),
         ),
         subagent_gate_store: Arc::new(
             ironclaw_reborn::subagent::gate_resolution::BoundedSubagentGateResolutionStore::new(),
         ),
-        subagent_flavor_resolver: Arc::new(
-            ironclaw_reborn::subagent::flavors::StaticSubagentFlavorPolicyResolver,
+        subagent_definition_resolver: Arc::new(
+            ironclaw_reborn::subagent::flavors::StaticSubagentDefinitionResolver,
         ),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(Arc::new(
             ProductLiveCapabilityIo::default(),

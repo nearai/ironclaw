@@ -61,8 +61,8 @@ use ironclaw_product_workflow::{
     ResolvedBinding,
 };
 use ironclaw_reborn::subagent::{
-    flavors::StaticSubagentFlavorPolicyResolver,
-    gate_resolution::BoundedSubagentGateResolutionStore, goal_store::BoundedSubagentGoalStore,
+    flavors::StaticSubagentDefinitionResolver, gate_resolution::BoundedSubagentGateResolutionStore,
+    goal_store::InMemoryBoundedSubagentGoalStore,
 };
 use ironclaw_reborn::{
     loop_driver_host::LoopCapabilityPortFactory,
@@ -792,8 +792,7 @@ impl RebornBinaryE2EHarness {
         });
         let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
             turn_state: Arc::clone(&turn_store),
-            thread_service: thread_harness.service.clone(),
-            thread_service_dyn: thread_harness.service.clone()
+            thread_service: thread_harness.service.clone()
                 as Arc<dyn ironclaw_threads::SessionThreadService>,
             thread_scope: thread_scope.clone(),
             model_gateway: Arc::new(model_gateway.clone()),
@@ -803,9 +802,9 @@ impl RebornBinaryE2EHarness {
             capability_factory,
             capability_surface_resolver,
             capability_result_writer,
-            subagent_goal_store: Arc::new(BoundedSubagentGoalStore::new()),
+            subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
             subagent_gate_store: Arc::new(BoundedSubagentGateResolutionStore::new()),
-            subagent_flavor_resolver: Arc::new(StaticSubagentFlavorPolicyResolver),
+            subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
             subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(
                 capability_input_resolver,
             )),

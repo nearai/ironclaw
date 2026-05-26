@@ -1,5 +1,7 @@
 use std::{
     collections::HashMap,
+    fmt,
+    str::FromStr,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU32, Ordering},
@@ -8,7 +10,7 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_host_api::{CapabilityId, ThreadId};
+use ironclaw_host_api::{CapabilityId, InvocationId, ThreadId};
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent, SessionThreadService,
     ThreadMessageId, ThreadScope,
@@ -16,8 +18,8 @@ use ironclaw_threads::{
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, GateRef, IdempotencyKey, LoopGateRef, LoopResultRef,
     ReplyTargetBindingRef, RunProfileRequest, SanitizedCancelReason, SourceBindingRef,
-    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
-    TurnErrorCategory, TurnRunId, TurnScope, TurnStateStore,
+    SubmitChildRunRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
+    TurnErrorCategory, TurnRunId, TurnScope, TurnSpawnTreePort, TurnSpawnTreeStateStore,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
         CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityDenied,
@@ -31,10 +33,82 @@ use serde::{Deserialize, Serialize};
 
 use crate::{LoopCapabilityInputResolver, LoopCapabilityResultWriter};
 
-pub const DEFAULT_MAX_SUBAGENT_DEPTH: u32 = 1;
-pub const DEFAULT_MAX_SPAWN_PER_TURN: u32 = 4;
-pub const DEFAULT_MAX_TREE_DESCENDANTS: u32 = 16;
+pub const DEFAULT_SUBAGENT_MAX_DEPTH: u32 = 1;
+pub const DEFAULT_SUBAGENT_MAX_SPAWN_PER_TURN: u32 = 4;
+pub const DEFAULT_SUBAGENT_MAX_TREE_DESCENDANTS: u32 = 16;
 pub const DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID: &str = "builtin.spawn_subagent";
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct SubagentKindId(String);
+
+impl SubagentKindId {
+    pub fn new(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        Self::validate(&value)?;
+        Ok(Self(value))
+    }
+
+    fn validate(value: &str) -> Result<(), String> {
+        if value.is_empty() {
+            return Err("subagent kind id cannot be empty".to_string());
+        }
+        if value.len() > 64 {
+            return Err("subagent kind id cannot exceed 64 bytes".to_string());
+        }
+        if !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        {
+            return Err(
+                "subagent kind id may only contain ascii letters, digits, '_' or '-'".to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl AsRef<str> for SubagentKindId {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for SubagentKindId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for SubagentKindId {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<String> for SubagentKindId {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<SubagentKindId> for String {
+    fn from(value: SubagentKindId) -> Self {
+        value.into_inner()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -45,31 +119,54 @@ pub enum SpawnSubagentMode {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpawnSubagentArgs {
-    pub flavor_id: String,
+    #[serde(rename = "flavor_id")]
+    pub subagent_kind: SubagentKindId,
     pub task: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff: Option<String>,
-    #[serde(default)]
-    pub mode: Option<SpawnSubagentMode>,
-    #[serde(default)]
-    pub run_in_background: bool,
+    pub mode: SpawnSubagentMode,
 }
 
 impl SpawnSubagentArgs {
     pub fn spawn_mode(&self) -> SpawnSubagentMode {
-        self.mode.unwrap_or({
-            if self.run_in_background {
+        self.mode
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct SpawnSubagentWireArgs {
+    #[serde(rename = "flavor_id")]
+    subagent_kind: SubagentKindId,
+    task: String,
+    #[serde(default)]
+    handoff: Option<String>,
+    #[serde(default)]
+    mode: Option<SpawnSubagentMode>,
+    #[serde(default)]
+    run_in_background: bool,
+}
+
+impl From<SpawnSubagentWireArgs> for SpawnSubagentArgs {
+    fn from(value: SpawnSubagentWireArgs) -> Self {
+        let mode = value.mode.unwrap_or({
+            if value.run_in_background {
                 SpawnSubagentMode::Background
             } else {
                 SpawnSubagentMode::Blocking
             }
-        })
+        });
+        Self {
+            subagent_kind: value.subagent_kind,
+            task: value.task,
+            handoff: value.handoff,
+            mode,
+        }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SubagentFlavorPolicy {
-    pub flavor_id: String,
+pub struct SubagentDefinition {
+    pub subagent_kind: SubagentKindId,
     pub allow_nesting: bool,
     pub requested_run_profile: RunProfileRequest,
 }
@@ -84,17 +181,15 @@ pub struct SubagentGoalRecord {
 pub struct AwaitedChildSetRecord {
     pub gate_ref: GateRef,
     pub parent_run_context: LoopRunContext,
-    pub parent_scope: TurnScope,
-    pub parent_run_id: TurnRunId,
     pub tree_root_run_id: TurnRunId,
     pub child_scope: TurnScope,
     pub child_run_id: TurnRunId,
     pub child_thread_id: ThreadId,
     pub source_binding_ref: SourceBindingRef,
     pub reply_target_binding_ref: ReplyTargetBindingRef,
-    pub flavor_id: String,
+    pub subagent_kind: SubagentKindId,
     pub spawn_capability_id: CapabilityId,
-    pub background_result_ref: Option<LoopResultRef>,
+    pub result_ref: LoopResultRef,
     pub mode: SpawnSubagentMode,
 }
 
@@ -114,7 +209,8 @@ pub struct SubagentThreadMetadata {
     pub parent_thread_id: ThreadId,
     pub tree_root_run_id: TurnRunId,
     pub child_run_id: TurnRunId,
-    pub flavor: String,
+    #[serde(rename = "flavor")]
+    pub subagent_kind: SubagentKindId,
     pub mode: SpawnSubagentMode,
     pub result_ref: LoopResultRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -142,16 +238,16 @@ pub trait SpawnSubagentInputCodec: Send + Sync {
 }
 
 #[async_trait]
-pub trait SubagentFlavorPolicyResolver: Send + Sync {
-    async fn resolve_flavor(
+pub trait SubagentDefinitionResolver: Send + Sync {
+    async fn resolve_kind(
         &self,
-        flavor_id: &str,
-    ) -> Result<Option<SubagentFlavorPolicy>, AgentLoopHostError>;
+        kind: &SubagentKindId,
+    ) -> Result<Option<SubagentDefinition>, AgentLoopHostError>;
 
-    async fn flavor_of_run(
+    async fn definition_of_run(
         &self,
         _run_id: TurnRunId,
-    ) -> Result<Option<SubagentFlavorPolicy>, AgentLoopHostError> {
+    ) -> Result<Option<SubagentDefinition>, AgentLoopHostError> {
         Ok(None)
     }
 }
@@ -192,9 +288,9 @@ pub struct SubagentSpawnLimits {
 impl Default for SubagentSpawnLimits {
     fn default() -> Self {
         Self {
-            max_depth: DEFAULT_MAX_SUBAGENT_DEPTH,
-            max_spawn_per_turn: DEFAULT_MAX_SPAWN_PER_TURN,
-            max_tree_descendants: DEFAULT_MAX_TREE_DESCENDANTS,
+            max_depth: DEFAULT_SUBAGENT_MAX_DEPTH,
+            max_spawn_per_turn: DEFAULT_SUBAGENT_MAX_SPAWN_PER_TURN,
+            max_tree_descendants: DEFAULT_SUBAGENT_MAX_TREE_DESCENDANTS,
         }
     }
 }
@@ -202,11 +298,12 @@ impl Default for SubagentSpawnLimits {
 #[derive(Clone)]
 pub struct SubagentSpawnDeps {
     pub coordinator: Arc<dyn TurnCoordinator>,
-    pub turn_state_store: Arc<dyn TurnStateStore>,
+    pub child_runs: Arc<dyn TurnSpawnTreePort>,
+    pub turn_state_store: Arc<dyn TurnSpawnTreeStateStore>,
     pub thread_service: Arc<dyn SessionThreadService>,
     pub goal_store: Arc<dyn SubagentSpawnGoalStore>,
     pub gate_store: Arc<dyn SubagentGateResolutionStore>,
-    pub flavor_resolver: Arc<dyn SubagentFlavorPolicyResolver>,
+    pub definition_resolver: Arc<dyn SubagentDefinitionResolver>,
     pub spawn_input_codec: Arc<dyn SpawnSubagentInputCodec>,
     pub result_writer: Arc<dyn LoopCapabilityResultWriter>,
 }
@@ -222,18 +319,60 @@ pub struct SubagentSpawnCapabilityPort {
 }
 
 struct SpawnContext {
-    flavor: SubagentFlavorPolicy,
+    definition: SubagentDefinition,
     child_scope: ThreadScope,
     child_run_id: TurnRunId,
     tree_root: TurnRunId,
-    child_depth: u32,
 }
 
 #[derive(Default)]
 struct SpawnCompensationState {
-    goal_written: bool,
+    goal_written: Option<(TurnScope, TurnRunId)>,
     gate_written: Option<GateRef>,
     result_written: Option<LoopResultRef>,
+    submitted_child_tree: Option<(TurnScope, TurnRunId)>,
+}
+
+impl SpawnCompensationState {
+    async fn rollback(&mut self, deps: &SubagentSpawnDeps, run_context: &LoopRunContext) {
+        if let Some(gate_ref) = self.gate_written.as_ref() {
+            let _ = deps.gate_store.delete_awaited_child(gate_ref).await;
+        }
+        if let Some((scope, run_id)) = self.goal_written.as_ref() {
+            let _ = deps.goal_store.delete_goal(scope, *run_id).await;
+        }
+        if let Some(result_ref) = self.result_written.as_ref() {
+            let _ = deps
+                .result_writer
+                .delete_capability_result(run_context, result_ref)
+                .await;
+        }
+        if let Some((scope, tree_root)) = self.submitted_child_tree.as_ref() {
+            let _ = deps
+                .turn_state_store
+                .release_tree_descendants(scope, *tree_root, 1)
+                .await;
+        }
+    }
+}
+
+struct SpawnSlotGuard<'a> {
+    port: &'a SubagentSpawnCapabilityPort,
+    active: bool,
+}
+
+impl<'a> SpawnSlotGuard<'a> {
+    fn commit(mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for SpawnSlotGuard<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            self.port.release_spawn_slot();
+        }
+    }
 }
 
 impl SubagentSpawnCapabilityPort {
@@ -271,33 +410,41 @@ impl SubagentSpawnCapabilityPort {
             .is_ok()
     }
 
+    fn reserve_spawn_slot(&self) -> Option<SpawnSlotGuard<'_>> {
+        self.try_reserve_spawn_slot().then_some(SpawnSlotGuard {
+            port: self,
+            active: true,
+        })
+    }
+
     fn release_spawn_slot(&self) {
-        if self
-            .spawned_this_turn
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                current.checked_sub(1)
-            })
-            .is_err()
-        {
-            tracing::warn!("subagent spawn slot release ignored because no slot was reserved");
+        let previous =
+            self.spawned_this_turn
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                    current.checked_sub(1)
+                });
+        if previous.is_err() {
+            tracing::warn!(
+                run_id = %self.run_context.run_id,
+                spawn_id = %self.spawn_id,
+                "subagent spawn slot release ignored because no slot was reserved"
+            );
         }
     }
 
     async fn handle_spawn(
         &self,
-        _invocation: &CapabilityInvocation,
+        invocation: &CapabilityInvocation,
         args: SpawnSubagentArgs,
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
-        if !self.try_reserve_spawn_slot() {
+        let Some(spawn_slot) = self.reserve_spawn_slot() else {
             return Ok(spawn_rejected("fanout_cap_exceeded"));
-        }
+        };
 
         let Some(agent_id) = self.run_context.scope.agent_id.clone() else {
-            self.release_spawn_slot();
             return Ok(spawn_rejected("spawn_requires_agent_scope"));
         };
         let Some(actor) = self.run_context.actor.clone() else {
-            self.release_spawn_slot();
             return Ok(spawn_rejected("spawn_requires_actor"));
         };
         let owner_user_id = actor.user_id.clone();
@@ -306,12 +453,8 @@ impl SubagentSpawnCapabilityPort {
             .turn_state_store
             .get_run_record(&self.run_context.scope, self.run_context.run_id)
             .await
-            .map_err(|error| {
-                self.release_spawn_slot();
-                map_turn_error(error)
-            })?
+            .map_err(map_turn_error)?
             .ok_or_else(|| {
-                self.release_spawn_slot();
                 AgentLoopHostError::new(
                     AgentLoopHostErrorKind::InvalidInvocation,
                     "parent run record not found for subagent spawn",
@@ -319,24 +462,18 @@ impl SubagentSpawnCapabilityPort {
             })?;
         let child_depth = parent_record.subagent_depth.saturating_add(1);
         if child_depth > self.limits.max_depth {
-            self.release_spawn_slot();
             return Ok(spawn_rejected("depth_cap_exceeded"));
         }
-        let parent_flavor_outcome = self
+        let parent_definition = self
             .deps
-            .flavor_resolver
-            .flavor_of_run(self.run_context.run_id)
-            .await
-            .inspect_err(|_| {
-                self.release_spawn_slot();
-            })?;
-        match parent_flavor_outcome {
-            Some(parent_flavor) if !parent_flavor.allow_nesting => {
-                self.release_spawn_slot();
+            .definition_resolver
+            .definition_of_run(self.run_context.run_id)
+            .await?;
+        match parent_definition {
+            Some(parent_definition) if !parent_definition.allow_nesting => {
                 return Ok(spawn_rejected("nesting_not_permitted"));
             }
             None if parent_record.subagent_depth > 0 => {
-                self.release_spawn_slot();
                 return Ok(spawn_rejected("nesting_not_permitted"));
             }
             _ => {}
@@ -344,15 +481,11 @@ impl SubagentSpawnCapabilityPort {
 
         let resolved = self
             .deps
-            .flavor_resolver
-            .resolve_flavor(&args.flavor_id)
-            .await
-            .inspect_err(|_| {
-                self.release_spawn_slot();
-            })?;
-        let Some(flavor) = resolved else {
-            self.release_spawn_slot();
-            return Ok(spawn_rejected("unknown_flavor"));
+            .definition_resolver
+            .resolve_kind(&args.subagent_kind)
+            .await?;
+        let Some(definition) = resolved else {
+            return Ok(spawn_rejected("unknown_subagent_kind"));
         };
 
         let child_scope = ThreadScope {
@@ -362,78 +495,29 @@ impl SubagentSpawnCapabilityPort {
             owner_user_id: Some(owner_user_id.clone()),
             mission_id: None,
         };
-        let child_turn_scope = TurnScope::new(
-            child_scope.tenant_id.clone(),
-            Some(child_scope.agent_id.clone()),
-            child_scope.project_id.clone(),
-            ThreadId::new(format!(
-                "subagent-pending-{}",
-                TurnRunId::new().as_uuid().simple()
-            ))
-            .map_err(invalid_static_ref)?,
-        );
-        let child_run_id = self
-            .deps
-            .coordinator
-            .prepare_turn(child_turn_scope.clone())
-            .await
-            .map_err(|error| {
-                self.release_spawn_slot();
-                map_turn_error(error)
-            })?;
+        let child_run_id = TurnRunId::new();
         let tree_root = parent_record
             .spawn_tree_root_run_id
             .unwrap_or(self.run_context.run_id);
-        self.deps
-            .turn_state_store
-            .reserve_tree_descendants(
-                &self.run_context.scope,
-                tree_root,
-                1,
-                self.limits.max_tree_descendants,
-            )
-            .await
-            .map_err(|error| {
-                self.release_spawn_slot();
-                map_reservation_error(error)
-            })?;
         let mut compensation = SpawnCompensationState::default();
         let spawn_ctx = SpawnContext {
-            flavor,
+            definition,
             child_scope,
             child_run_id,
             tree_root,
-            child_depth,
         };
 
         let result = self
-            .finish_spawn(args, spawn_ctx, actor, &mut compensation)
+            .finish_spawn(args, spawn_ctx, actor, invocation, &mut compensation)
             .await;
         match result {
-            Ok(outcome) => Ok(outcome),
+            Ok(outcome) => {
+                spawn_slot.commit();
+                Ok(outcome)
+            }
             Err(error) => {
-                self.release_spawn_slot();
-                if let Some(gate_ref) = compensation.gate_written.as_ref() {
-                    let _ = self.deps.gate_store.delete_awaited_child(gate_ref).await;
-                }
-                if compensation.goal_written {
-                    let _ = self
-                        .deps
-                        .goal_store
-                        .delete_goal(&child_turn_scope, child_run_id)
-                        .await;
-                }
-                if let Some(result_ref) = compensation.result_written.as_ref() {
-                    let _ = self
-                        .deps
-                        .result_writer
-                        .delete_capability_result(&self.run_context, result_ref)
-                        .await;
-                }
-                let _ = self
-                    .deps
-                    .turn_state_store
-                    .release_tree_descendants(&self.run_context.scope, tree_root, 1)
+                compensation
+                    .rollback(self.deps.as_ref(), &self.run_context)
                     .await;
                 Err(error)
             }
@@ -497,28 +581,31 @@ impl SubagentSpawnCapabilityPort {
         args: SpawnSubagentArgs,
         ctx: SpawnContext,
         actor: TurnActor,
+        invocation: &CapabilityInvocation,
         compensation: &mut SpawnCompensationState,
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
         let SpawnContext {
-            flavor,
+            definition,
             child_scope,
             child_run_id,
             tree_root,
-            child_depth,
         } = ctx;
         let child_thread_id =
             ThreadId::new(format!("subagent-{}", child_run_id.as_uuid().simple()))
                 .map_err(invalid_static_ref)?;
         let mode = args.spawn_mode();
+        // The gate ref is also returned as a `LoopGateRef`; keep the opaque
+        // suffix colon-free so it satisfies the model-visible loop ref
+        // contract (`gate:<ascii-id>` with only alnum/underscore/dash/dot).
         let gate_ref = GateRef::new(match mode {
-            SpawnSubagentMode::Blocking => format!("gate:subagent:{child_run_id}"),
-            SpawnSubagentMode::Background => format!("gate:subagent-bg:{child_run_id}"),
+            SpawnSubagentMode::Blocking => format!("gate:subagent.{child_run_id}"),
+            SpawnSubagentMode::Background => format!("gate:subagent-bg.{child_run_id}"),
         })
         .map_err(invalid_static_ref)?;
         let payload = spawn_result_payload(
             child_run_id,
             &child_thread_id,
-            &flavor.flavor_id,
+            &definition.subagent_kind,
             mode,
             "spawned",
             false,
@@ -526,7 +613,13 @@ impl SubagentSpawnCapabilityPort {
         let result_ref = self
             .deps
             .result_writer
-            .write_capability_result(&self.run_context, &self.spawn_id, payload)
+            .write_capability_result(
+                &self.run_context,
+                &invocation.input_ref,
+                InvocationId::new(),
+                &self.spawn_id,
+                payload,
+            )
             .await?;
         compensation.result_written = Some(result_ref.clone());
         let child_thread = self
@@ -543,7 +636,7 @@ impl SubagentSpawnCapabilityPort {
                     parent_thread_id: self.run_context.thread_id.clone(),
                     tree_root_run_id: tree_root,
                     child_run_id,
-                    flavor: flavor.flavor_id.clone(),
+                    subagent_kind: definition.subagent_kind.clone(),
                     mode,
                     result_ref: result_ref.clone(),
                     handoff: args.handoff.clone(),
@@ -568,15 +661,13 @@ impl SubagentSpawnCapabilityPort {
                 },
             )
             .await?;
-        compensation.goal_written = true;
+        compensation.goal_written = Some((child_turn_scope.clone(), child_run_id));
 
         self.deps
             .gate_store
             .record_awaited_child(AwaitedChildSetRecord {
                 gate_ref: gate_ref.clone(),
                 parent_run_context: self.run_context.clone(),
-                parent_scope: self.run_context.scope.clone(),
-                parent_run_id: self.run_context.run_id,
                 tree_root_run_id: tree_root,
                 child_scope: child_turn_scope.clone(),
                 child_run_id,
@@ -586,9 +677,9 @@ impl SubagentSpawnCapabilityPort {
                     self.run_context.run_id,
                     child_run_id,
                 )?,
-                flavor_id: flavor.flavor_id.clone(),
+                subagent_kind: definition.subagent_kind.clone(),
                 spawn_capability_id: self.spawn_id.clone(),
-                background_result_ref: Some(result_ref.clone()),
+                result_ref: result_ref.clone(),
                 mode,
             })
             .await?;
@@ -620,23 +711,24 @@ impl SubagentSpawnCapabilityPort {
             turn_id, run_id, ..
         } = self
             .deps
-            .coordinator
-            .submit_turn(SubmitTurnRequest {
-                scope: child_turn_scope.clone(),
+            .child_runs
+            .submit_child_run(SubmitChildRunRequest {
+                parent_scope: self.run_context.scope.clone(),
+                parent_run_id: self.run_context.run_id,
+                child_scope: child_turn_scope.clone(),
                 actor: actor.clone(),
                 accepted_message_ref,
                 source_binding_ref,
                 reply_target_binding_ref,
-                requested_run_profile: Some(flavor.requested_run_profile),
+                requested_run_profile: Some(definition.requested_run_profile),
                 idempotency_key,
                 received_at: Utc::now(),
                 requested_run_id: Some(child_run_id),
-                parent_run_id: Some(self.run_context.run_id),
-                subagent_depth: child_depth,
-                spawn_tree_root_run_id: Some(tree_root),
+                spawn_tree_descendant_cap: self.limits.max_tree_descendants,
             })
             .await
             .map_err(map_turn_error)?;
+        compensation.submitted_child_tree = Some((self.run_context.scope.clone(), tree_root));
         if let Err(error) = self
             .deps
             .thread_service
@@ -848,12 +940,14 @@ impl SpawnSubagentInputCodec for JsonSpawnSubagentInputCodec {
             .input_resolver
             .resolve_capability_input(run_context, input_ref)
             .await?;
-        serde_json::from_value(value).map_err(|error| {
-            AgentLoopHostError::new(
-                AgentLoopHostErrorKind::InvalidInvocation,
-                format!("invalid spawn_subagent input: {error}"),
-            )
-        })
+        serde_json::from_value::<SpawnSubagentWireArgs>(value)
+            .map(Into::into)
+            .map_err(|error| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    format!("invalid spawn_subagent input: {error}"),
+                )
+            })
     }
 
     async fn register_provider_tool_call_input(
@@ -914,17 +1008,6 @@ fn map_turn_error(error: TurnError) -> AgentLoopHostError {
         | TurnErrorCategory::Conflict => AgentLoopHostErrorKind::InvalidInvocation,
     };
     AgentLoopHostError::new(kind, error.to_string())
-}
-
-fn map_reservation_error(error: TurnError) -> AgentLoopHostError {
-    if matches!(error.category(), TurnErrorCategory::CapacityExceeded) {
-        AgentLoopHostError::new(
-            AgentLoopHostErrorKind::BudgetExceeded,
-            "subagent spawn rejected: tree_descendant_cap_exceeded",
-        )
-    } else {
-        map_turn_error(error)
-    }
 }
 
 fn map_thread_error(error: ironclaw_threads::SessionThreadError) -> AgentLoopHostError {
@@ -992,7 +1075,7 @@ fn safe_summary(value: &'static str) -> String {
 fn spawn_result_payload(
     child_run_id: TurnRunId,
     child_thread_id: &ThreadId,
-    flavor_id: &str,
+    subagent_kind: &SubagentKindId,
     mode: SpawnSubagentMode,
     status: &'static str,
     output_available: bool,
@@ -1000,7 +1083,7 @@ fn spawn_result_payload(
     serde_json::json!({
         "child_run_id": child_run_id,
         "child_thread_id": child_thread_id,
-        "flavor": flavor_id,
+        "flavor": subagent_kind,
         "mode": mode_label(mode),
         "status": status,
         "output_available": output_available
@@ -1015,620 +1098,4 @@ fn mode_label(mode: SpawnSubagentMode) -> &'static str {
 }
 
 #[cfg(test)]
-mod tests {
-    use chrono::Utc;
-    use ironclaw_host_api::{AgentId, TenantId, UserId};
-    use ironclaw_threads::InMemorySessionThreadService;
-    use ironclaw_turns::{
-        AcceptedMessageRef, CancelRunResponse, EventCursor, GetRunStateRequest,
-        InMemoryRunProfileResolver, ResumeTurnRequest, ResumeTurnResponse,
-        RunProfileResolutionRequest, RunProfileResolver, SpawnTreeReservation, TurnId,
-        TurnRunProfile, TurnRunRecord, TurnRunState, TurnStatus,
-        run_profile::{CapabilityResultMessage, CapabilitySurfaceVersion},
-    };
-    use serde_json::json;
-
-    use super::*;
-
-    struct StaticInputResolver {
-        value: Result<serde_json::Value, AgentLoopHostError>,
-    }
-
-    struct StaticSpawnInputCodec {
-        args: SpawnSubagentArgs,
-    }
-
-    struct StaticFlavorResolver {
-        resolved: Option<SubagentFlavorPolicy>,
-        parent: Option<SubagentFlavorPolicy>,
-    }
-
-    struct AuthPassPort;
-
-    struct NoopResultWriter;
-
-    struct NoopGoalStore;
-
-    struct StaticCoordinator;
-
-    struct StaticTurnStateStore {
-        record: Option<TurnRunRecord>,
-    }
-
-    #[async_trait]
-    impl LoopCapabilityInputResolver for StaticInputResolver {
-        async fn resolve_capability_input(
-            &self,
-            _run_context: &LoopRunContext,
-            _input_ref: &CapabilityInputRef,
-        ) -> Result<serde_json::Value, AgentLoopHostError> {
-            self.value.clone()
-        }
-    }
-
-    #[async_trait]
-    impl SpawnSubagentInputCodec for StaticSpawnInputCodec {
-        async fn decode(
-            &self,
-            _run_context: &LoopRunContext,
-            _input_ref: &CapabilityInputRef,
-        ) -> Result<SpawnSubagentArgs, AgentLoopHostError> {
-            Ok(self.args.clone())
-        }
-    }
-
-    #[async_trait]
-    impl SubagentFlavorPolicyResolver for StaticFlavorResolver {
-        async fn resolve_flavor(
-            &self,
-            _flavor_id: &str,
-        ) -> Result<Option<SubagentFlavorPolicy>, AgentLoopHostError> {
-            Ok(self.resolved.clone())
-        }
-
-        async fn flavor_of_run(
-            &self,
-            _run_id: TurnRunId,
-        ) -> Result<Option<SubagentFlavorPolicy>, AgentLoopHostError> {
-            Ok(self.parent.clone())
-        }
-    }
-
-    #[async_trait]
-    impl LoopCapabilityPort for AuthPassPort {
-        async fn visible_capabilities(
-            &self,
-            _request: VisibleCapabilityRequest,
-        ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
-            Ok(VisibleCapabilitySurface {
-                version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
-                descriptors: Vec::new(),
-            })
-        }
-
-        async fn invoke_capability(
-            &self,
-            _request: CapabilityInvocation,
-        ) -> Result<CapabilityOutcome, AgentLoopHostError> {
-            Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
-                result_ref: LoopResultRef::new("result:auth").unwrap(),
-                safe_summary: "authorized".to_string(),
-                terminate_hint: false,
-            }))
-        }
-
-        async fn invoke_capability_batch(
-            &self,
-            _request: CapabilityBatchInvocation,
-        ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
-            unreachable!("batch auth is not used by these tests")
-        }
-    }
-
-    #[async_trait]
-    impl LoopCapabilityResultWriter for NoopResultWriter {
-        async fn write_capability_result(
-            &self,
-            _run_context: &LoopRunContext,
-            _capability_id: &CapabilityId,
-            _output: serde_json::Value,
-        ) -> Result<LoopResultRef, AgentLoopHostError> {
-            Ok(LoopResultRef::new("result:spawn").unwrap())
-        }
-    }
-
-    #[async_trait]
-    impl SubagentSpawnGoalStore for NoopGoalStore {
-        async fn put_goal(
-            &self,
-            _scope: &TurnScope,
-            _run_id: TurnRunId,
-            _goal: SubagentGoalRecord,
-        ) -> Result<(), AgentLoopHostError> {
-            Ok(())
-        }
-
-        async fn delete_goal(
-            &self,
-            _scope: &TurnScope,
-            _run_id: TurnRunId,
-        ) -> Result<(), AgentLoopHostError> {
-            Ok(())
-        }
-    }
-
-    #[async_trait]
-    impl TurnCoordinator for StaticCoordinator {
-        async fn submit_turn(
-            &self,
-            _request: SubmitTurnRequest,
-        ) -> Result<SubmitTurnResponse, TurnError> {
-            unreachable!("spawn early-return tests do not submit child turns")
-        }
-
-        async fn resume_turn(
-            &self,
-            _request: ResumeTurnRequest,
-        ) -> Result<ResumeTurnResponse, TurnError> {
-            unreachable!("spawn tests do not resume turns")
-        }
-
-        async fn cancel_run(
-            &self,
-            _request: CancelRunRequest,
-        ) -> Result<CancelRunResponse, TurnError> {
-            unreachable!("spawn tests do not cancel turns")
-        }
-
-        async fn get_run_state(
-            &self,
-            _request: GetRunStateRequest,
-        ) -> Result<TurnRunState, TurnError> {
-            unreachable!("spawn tests do not read run state through coordinator")
-        }
-    }
-
-    #[async_trait]
-    impl TurnStateStore for StaticTurnStateStore {
-        async fn submit_turn(
-            &self,
-            _request: SubmitTurnRequest,
-            _admission_policy: &dyn ironclaw_turns::TurnAdmissionPolicy,
-            _run_profile_resolver: &dyn RunProfileResolver,
-        ) -> Result<SubmitTurnResponse, TurnError> {
-            unreachable!("spawn tests do not submit through state store")
-        }
-
-        async fn resume_turn(
-            &self,
-            _request: ResumeTurnRequest,
-        ) -> Result<ResumeTurnResponse, TurnError> {
-            unreachable!("spawn tests do not resume through state store")
-        }
-
-        async fn request_cancel(
-            &self,
-            _request: CancelRunRequest,
-        ) -> Result<CancelRunResponse, TurnError> {
-            unreachable!("spawn tests do not cancel through state store")
-        }
-
-        async fn get_run_state(
-            &self,
-            _request: GetRunStateRequest,
-        ) -> Result<TurnRunState, TurnError> {
-            unreachable!("spawn tests do not get run state")
-        }
-
-        async fn children_of(
-            &self,
-            _scope: &TurnScope,
-            _run_id: TurnRunId,
-        ) -> Result<Vec<TurnRunRecord>, TurnError> {
-            Ok(Vec::new())
-        }
-
-        async fn get_run_record(
-            &self,
-            _scope: &TurnScope,
-            _run_id: TurnRunId,
-        ) -> Result<Option<TurnRunRecord>, TurnError> {
-            Ok(self.record.clone())
-        }
-
-        async fn reserve_tree_descendants(
-            &self,
-            scope: &TurnScope,
-            root_run_id: TurnRunId,
-            delta: u32,
-            _cap: u32,
-        ) -> Result<SpawnTreeReservation, TurnError> {
-            Ok(SpawnTreeReservation {
-                scope: scope.clone(),
-                root_run_id,
-                descendant_count: u64::from(delta),
-            })
-        }
-
-        async fn release_tree_descendants(
-            &self,
-            _scope: &TurnScope,
-            _root_run_id: TurnRunId,
-            _delta: u32,
-        ) -> Result<(), TurnError> {
-            Ok(())
-        }
-    }
-
-    fn input_ref() -> CapabilityInputRef {
-        CapabilityInputRef::new("input:spawn").unwrap()
-    }
-
-    async fn test_run_context(label: &str) -> LoopRunContext {
-        let resolved = InMemoryRunProfileResolver::default()
-            .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
-            .await
-            .expect("profile resolves");
-        LoopRunContext::new(
-            TurnScope::new(
-                TenantId::new(format!("tenant-{label}")).unwrap(),
-                None,
-                None,
-                ThreadId::new(format!("thread-{label}")).unwrap(),
-            ),
-            TurnId::new(),
-            TurnRunId::new(),
-            resolved,
-        )
-    }
-
-    async fn test_run_context_with_agent_actor(label: &str) -> LoopRunContext {
-        let mut context = test_run_context(label).await.with_actor(TurnActor::new(
-            UserId::new(format!("user-{label}")).unwrap(),
-        ));
-        context.scope.agent_id = Some(AgentId::new(format!("agent-{label}")).unwrap());
-        context
-    }
-
-    fn default_spawn_args() -> SpawnSubagentArgs {
-        SpawnSubagentArgs {
-            flavor_id: "general".to_string(),
-            task: "task".to_string(),
-            handoff: None,
-            mode: None,
-            run_in_background: false,
-        }
-    }
-
-    fn flavor_policy(allow_nesting: bool) -> SubagentFlavorPolicy {
-        SubagentFlavorPolicy {
-            flavor_id: "general".to_string(),
-            allow_nesting,
-            requested_run_profile: RunProfileRequest::new("subagent-test").unwrap(),
-        }
-    }
-
-    fn turn_record(run_context: &LoopRunContext, subagent_depth: u32) -> TurnRunRecord {
-        let lineage_root = (subagent_depth > 0).then(TurnRunId::new);
-        TurnRunRecord {
-            run_id: run_context.run_id,
-            turn_id: run_context.turn_id,
-            scope: run_context.scope.clone(),
-            accepted_message_ref: AcceptedMessageRef::new("msg:parent").unwrap(),
-            source_binding_ref: SourceBindingRef::new("source:parent").unwrap(),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("reply:parent").unwrap(),
-            status: TurnStatus::Queued,
-            profile: TurnRunProfile::from_resolved(run_context.resolved_run_profile.clone()),
-            resolved_model_route: None,
-            checkpoint_id: None,
-            gate_ref: None,
-            failure: None,
-            event_cursor: EventCursor(1),
-            runner_id: None,
-            lease_token: None,
-            lease_expires_at: None,
-            last_heartbeat_at: None,
-            claim_count: 0,
-            received_at: Utc::now(),
-            parent_run_id: lineage_root,
-            subagent_depth,
-            spawn_tree_root_run_id: lineage_root,
-        }
-    }
-
-    async fn spawn_test_port(
-        run_context: LoopRunContext,
-        limits: SubagentSpawnLimits,
-        parent_subagent_depth: Option<u32>,
-        resolver: StaticFlavorResolver,
-    ) -> SubagentSpawnCapabilityPort {
-        let turn_store = Arc::new(StaticTurnStateStore {
-            record: parent_subagent_depth.map(|depth| turn_record(&run_context, depth)),
-        });
-        let coordinator: Arc<dyn TurnCoordinator> = Arc::new(StaticCoordinator);
-        let deps = Arc::new(SubagentSpawnDeps {
-            coordinator,
-            turn_state_store: turn_store,
-            thread_service: Arc::new(InMemorySessionThreadService::default()),
-            goal_store: Arc::new(NoopGoalStore),
-            gate_store: Arc::new(InMemorySubagentGateResolutionStore::default()),
-            flavor_resolver: Arc::new(resolver),
-            spawn_input_codec: Arc::new(StaticSpawnInputCodec {
-                args: default_spawn_args(),
-            }),
-            result_writer: Arc::new(NoopResultWriter),
-        });
-        let port = SubagentSpawnCapabilityPort::new(
-            Arc::new(AuthPassPort),
-            run_context,
-            CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
-            limits,
-            deps,
-        );
-        port.auth_input_refs
-            .lock()
-            .unwrap()
-            .insert(input_ref(), CapabilityInputRef::new("input:auth").unwrap());
-        port
-    }
-
-    async fn invoke_spawn(port: &SubagentSpawnCapabilityPort) -> CapabilityOutcome {
-        port.invoke_capability(CapabilityInvocation {
-            surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
-            capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
-            input_ref: input_ref(),
-        })
-        .await
-        .unwrap()
-    }
-
-    fn denied_reason(outcome: CapabilityOutcome) -> String {
-        let CapabilityOutcome::Denied(denied) = outcome else {
-            panic!("expected denied outcome");
-        };
-        denied.reason_kind.as_str().to_string()
-    }
-
-    #[test]
-    fn spawn_mode_prefers_explicit_mode_over_legacy_background_flag() {
-        let mut args = SpawnSubagentArgs {
-            flavor_id: "general".to_string(),
-            task: "task".to_string(),
-            handoff: None,
-            mode: None,
-            run_in_background: false,
-        };
-        assert_eq!(args.spawn_mode(), SpawnSubagentMode::Blocking);
-
-        args.run_in_background = true;
-        assert_eq!(args.spawn_mode(), SpawnSubagentMode::Background);
-
-        args.mode = Some(SpawnSubagentMode::Blocking);
-        assert_eq!(args.spawn_mode(), SpawnSubagentMode::Blocking);
-
-        args.mode = Some(SpawnSubagentMode::Background);
-        args.run_in_background = false;
-        assert_eq!(args.spawn_mode(), SpawnSubagentMode::Background);
-    }
-
-    #[tokio::test]
-    async fn invoke_spawn_rejects_when_fanout_cap_is_exceeded() {
-        let context = test_run_context_with_agent_actor("spawn-fanout").await;
-        let port = spawn_test_port(
-            context,
-            SubagentSpawnLimits {
-                max_spawn_per_turn: 0,
-                ..SubagentSpawnLimits::default()
-            },
-            Some(0),
-            StaticFlavorResolver {
-                resolved: Some(flavor_policy(false)),
-                parent: None,
-            },
-        )
-        .await;
-
-        assert_eq!(
-            denied_reason(invoke_spawn(&port).await),
-            "fanout_cap_exceeded"
-        );
-    }
-
-    #[tokio::test]
-    async fn invoke_spawn_rejects_missing_agent_scope() {
-        let mut context = test_run_context_with_agent_actor("spawn-agent-scope").await;
-        context.scope.agent_id = None;
-        let port = spawn_test_port(
-            context,
-            SubagentSpawnLimits::default(),
-            None,
-            StaticFlavorResolver {
-                resolved: Some(flavor_policy(false)),
-                parent: None,
-            },
-        )
-        .await;
-
-        assert_eq!(
-            denied_reason(invoke_spawn(&port).await),
-            "spawn_requires_agent_scope"
-        );
-    }
-
-    #[tokio::test]
-    async fn invoke_spawn_rejects_missing_actor() {
-        let mut context = test_run_context("spawn-actor").await;
-        context.scope.agent_id = Some(AgentId::new("agent-spawn-actor").unwrap());
-        let port = spawn_test_port(
-            context,
-            SubagentSpawnLimits::default(),
-            None,
-            StaticFlavorResolver {
-                resolved: Some(flavor_policy(false)),
-                parent: None,
-            },
-        )
-        .await;
-
-        assert_eq!(
-            denied_reason(invoke_spawn(&port).await),
-            "spawn_requires_actor"
-        );
-    }
-
-    #[tokio::test]
-    async fn invoke_spawn_fails_when_parent_record_is_missing() {
-        let context = test_run_context_with_agent_actor("spawn-parent-missing").await;
-        let port = spawn_test_port(
-            context,
-            SubagentSpawnLimits::default(),
-            None,
-            StaticFlavorResolver {
-                resolved: Some(flavor_policy(false)),
-                parent: None,
-            },
-        )
-        .await;
-
-        let error = port
-            .invoke_capability(CapabilityInvocation {
-                surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
-                capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
-                input_ref: input_ref(),
-            })
-            .await
-            .unwrap_err();
-
-        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
-        assert!(error.safe_summary.contains("parent run record not found"));
-    }
-
-    #[tokio::test]
-    async fn invoke_spawn_rejects_depth_cap() {
-        let context = test_run_context_with_agent_actor("spawn-depth").await;
-        let port = spawn_test_port(
-            context,
-            SubagentSpawnLimits {
-                max_depth: 1,
-                ..SubagentSpawnLimits::default()
-            },
-            Some(1),
-            StaticFlavorResolver {
-                resolved: Some(flavor_policy(false)),
-                parent: Some(flavor_policy(true)),
-            },
-        )
-        .await;
-
-        assert_eq!(
-            denied_reason(invoke_spawn(&port).await),
-            "depth_cap_exceeded"
-        );
-    }
-
-    #[tokio::test]
-    async fn invoke_spawn_rejects_subagent_parent_without_resolved_parent_flavor() {
-        let context = test_run_context_with_agent_actor("spawn-nesting").await;
-        let port = spawn_test_port(
-            context,
-            SubagentSpawnLimits {
-                max_depth: 2,
-                ..SubagentSpawnLimits::default()
-            },
-            Some(1),
-            StaticFlavorResolver {
-                resolved: Some(flavor_policy(false)),
-                parent: None,
-            },
-        )
-        .await;
-
-        assert_eq!(
-            denied_reason(invoke_spawn(&port).await),
-            "nesting_not_permitted"
-        );
-    }
-
-    #[tokio::test]
-    async fn json_spawn_input_codec_decodes_legacy_background_flag() {
-        let codec = JsonSpawnSubagentInputCodec::new(Arc::new(StaticInputResolver {
-            value: Ok(json!({
-                "flavor_id": "general",
-                "task": "investigate",
-                "run_in_background": true
-            })),
-        }));
-        let context = test_run_context("spawn-codec").await;
-
-        let args = codec.decode(&context, &input_ref()).await.unwrap();
-
-        assert_eq!(args.flavor_id, "general");
-        assert_eq!(args.task, "investigate");
-        assert_eq!(args.spawn_mode(), SpawnSubagentMode::Background);
-    }
-
-    #[tokio::test]
-    async fn json_spawn_input_codec_rejects_invalid_shape() {
-        let context = test_run_context("spawn-codec-invalid").await;
-        for value in [
-            json!({"task": "missing flavor"}),
-            json!({"flavor_id": "general", "task": 42}),
-            json!({"flavor_id": "general", "task": "task", "mode": "later"}),
-        ] {
-            let codec = JsonSpawnSubagentInputCodec::new(Arc::new(StaticInputResolver {
-                value: Ok(value),
-            }));
-
-            let error = codec.decode(&context, &input_ref()).await.unwrap_err();
-
-            assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
-            assert!(error.safe_summary.contains("invalid spawn_subagent input"));
-        }
-    }
-
-    #[tokio::test]
-    async fn json_spawn_input_codec_propagates_resolver_error() {
-        let codec = JsonSpawnSubagentInputCodec::new(Arc::new(StaticInputResolver {
-            value: Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::Unavailable,
-                "input unavailable",
-            )),
-        }));
-        let context = test_run_context("spawn-codec-error").await;
-
-        let error = codec.decode(&context, &input_ref()).await.unwrap_err();
-
-        assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
-        assert_eq!(error.safe_summary, "input unavailable");
-    }
-
-    #[test]
-    fn spawn_rejected_preserves_spawn_specific_reason_kind() {
-        let CapabilityOutcome::Denied(denied) = spawn_rejected("depth_cap_exceeded") else {
-            panic!("spawn_rejected should deny");
-        };
-
-        assert_eq!(denied.reason_kind.as_str(), "depth_cap_exceeded");
-        assert!(denied.safe_summary.contains("depth_cap_exceeded"));
-    }
-
-    #[test]
-    fn child_submit_bindings_are_unique_per_prepared_child_run() {
-        let parent_run_id = TurnRunId::new();
-        let first_child = TurnRunId::new();
-        let second_child = TurnRunId::new();
-
-        assert_ne!(
-            source_binding_ref(parent_run_id, first_child).unwrap(),
-            source_binding_ref(parent_run_id, second_child).unwrap()
-        );
-        assert_ne!(
-            reply_target_binding_ref(parent_run_id, first_child).unwrap(),
-            reply_target_binding_ref(parent_run_id, second_child).unwrap()
-        );
-        assert_ne!(
-            idempotency_key(parent_run_id, first_child).unwrap(),
-            idempotency_key(parent_run_id, second_child).unwrap()
-        );
-    }
-}
+mod tests;

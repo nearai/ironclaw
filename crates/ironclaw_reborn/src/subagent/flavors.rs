@@ -1,6 +1,6 @@
 use crate::subagent::directions::DirectionId;
 use async_trait::async_trait;
-use ironclaw_loop_support::{SubagentFlavorPolicy, SubagentFlavorPolicyResolver};
+use ironclaw_loop_support::{SubagentDefinition, SubagentDefinitionResolver, SubagentKindId};
 use ironclaw_turns::{RunProfileRequest, TurnRunId, run_profile::AgentLoopHostError};
 use serde::{Deserialize, Serialize};
 
@@ -91,22 +91,22 @@ pub fn lookup_flavor(id: SubagentFlavorId) -> Option<&'static SubagentFlavor> {
 }
 
 #[derive(Default)]
-pub struct StaticSubagentFlavorPolicyResolver;
+pub struct StaticSubagentDefinitionResolver;
 
 #[async_trait]
-impl SubagentFlavorPolicyResolver for StaticSubagentFlavorPolicyResolver {
-    async fn resolve_flavor(
+impl SubagentDefinitionResolver for StaticSubagentDefinitionResolver {
+    async fn resolve_kind(
         &self,
-        flavor_id: &str,
-    ) -> Result<Option<SubagentFlavorPolicy>, AgentLoopHostError> {
-        let Some(id) = parse_flavor_id(flavor_id) else {
+        kind: &SubagentKindId,
+    ) -> Result<Option<SubagentDefinition>, AgentLoopHostError> {
+        let Some(id) = parse_flavor_id(kind.as_str()) else {
             return Ok(None);
         };
         let Some(flavor) = lookup_flavor(id) else {
             return Ok(None);
         };
-        Ok(Some(SubagentFlavorPolicy {
-            flavor_id: flavor.id.as_str().to_string(),
+        Ok(Some(SubagentDefinition {
+            subagent_kind: kind.clone(),
             allow_nesting: flavor.allow_nesting,
             requested_run_profile: RunProfileRequest::new(SUBAGENT_PLANNED_PROFILE_ID).map_err(
                 |reason| {
@@ -119,10 +119,10 @@ impl SubagentFlavorPolicyResolver for StaticSubagentFlavorPolicyResolver {
         }))
     }
 
-    async fn flavor_of_run(
+    async fn definition_of_run(
         &self,
         _run_id: TurnRunId,
-    ) -> Result<Option<SubagentFlavorPolicy>, AgentLoopHostError> {
+    ) -> Result<Option<SubagentDefinition>, AgentLoopHostError> {
         Ok(None)
     }
 }
@@ -177,14 +177,14 @@ mod tests {
 
     #[tokio::test]
     async fn static_policy_resolver_binds_subagent_profile() {
-        let resolver = StaticSubagentFlavorPolicyResolver;
+        let resolver = StaticSubagentDefinitionResolver;
         let policy = resolver
-            .resolve_flavor("researcher")
+            .resolve_kind(&SubagentKindId::new("researcher").unwrap())
             .await
             .unwrap()
             .expect("researcher flavor");
 
-        assert_eq!(policy.flavor_id, "researcher");
+        assert_eq!(policy.subagent_kind.as_str(), "researcher");
         assert_eq!(
             policy.requested_run_profile.as_str(),
             SUBAGENT_PLANNED_PROFILE_ID

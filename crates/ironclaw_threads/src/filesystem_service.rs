@@ -50,12 +50,13 @@ use crate::identifiers::SummaryArtifactId;
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextMessage, ContextMessages,
-    ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest, LoadContextMessagesRequest,
-    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
-    ProviderToolCallReferenceEnvelope, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
-    SessionThreadError, SessionThreadRecord, SessionThreadService, SummaryArtifact, ThreadHistory,
-    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
-    ToolResultReferenceEnvelope, UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
+    ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest, LatestThreadMessageRequest,
+    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
+    MessageStatus, ProviderToolCallReferenceEnvelope, RedactMessageRequest,
+    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
+    SessionThreadService, SummaryArtifact, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
+    ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
+    UpdateToolResultReferenceRequest,
 };
 
 /// Bound on the CAS retry loop. Mirrors the run-state / authorization
@@ -1020,6 +1021,27 @@ where
         })
     }
 
+    async fn latest_thread_message(
+        &self,
+        request: LatestThreadMessageRequest,
+    ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        self.read_thread_versioned(&request.scope, &request.thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: request.thread_id.clone(),
+            })?;
+        let Some(message) = self
+            .list_thread_messages(&request.scope, &request.thread_id)
+            .await?
+            .into_iter()
+            .rev()
+            .find(|message| message.kind == request.kind && message.status == request.status)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(history_message(&message)))
+    }
+
     async fn read_thread(
         &self,
         request: ThreadHistoryRequest,
@@ -1435,25 +1457,26 @@ fn context_messages_by_id(
 }
 
 fn history_messages(messages: &[ThreadMessageRecord]) -> Vec<ThreadMessageRecord> {
-    messages
-        .iter()
-        .map(|message| ThreadMessageRecord {
-            message_id: message.message_id,
-            thread_id: message.thread_id.clone(),
-            sequence: message.sequence,
-            kind: message.kind,
-            status: message.status,
-            actor_id: message.actor_id.clone(),
-            source_binding_id: message.source_binding_id.clone(),
-            reply_target_binding_id: message.reply_target_binding_id.clone(),
-            turn_id: message.turn_id.clone(),
-            turn_run_id: message.turn_run_id.clone(),
-            tool_result_ref: message.tool_result_ref.clone(),
-            tool_result_provider_call: None,
-            content: message.content.clone(),
-            redaction_ref: message.redaction_ref.clone(),
-        })
-        .collect()
+    messages.iter().map(history_message).collect()
+}
+
+fn history_message(message: &ThreadMessageRecord) -> ThreadMessageRecord {
+    ThreadMessageRecord {
+        message_id: message.message_id,
+        thread_id: message.thread_id.clone(),
+        sequence: message.sequence,
+        kind: message.kind,
+        status: message.status,
+        actor_id: message.actor_id.clone(),
+        source_binding_id: message.source_binding_id.clone(),
+        reply_target_binding_id: message.reply_target_binding_id.clone(),
+        turn_id: message.turn_id.clone(),
+        turn_run_id: message.turn_run_id.clone(),
+        tool_result_ref: message.tool_result_ref.clone(),
+        tool_result_provider_call: None,
+        content: message.content.clone(),
+        redaction_ref: message.redaction_ref.clone(),
+    }
 }
 
 fn history_summary_artifacts(

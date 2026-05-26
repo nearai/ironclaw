@@ -11,6 +11,7 @@ mod json;
 mod schemas;
 mod shell;
 mod skill_management;
+mod spawn_subagent;
 mod time;
 
 use std::{sync::Arc, time::Instant};
@@ -43,6 +44,7 @@ pub use shell::SHELL_CAPABILITY_ID;
 pub use skill_management::{
     SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
 };
+pub use spawn_subagent::SPAWN_SUBAGENT_CAPABILITY_ID;
 pub use time::TIME_CAPABILITY_ID;
 
 pub const BUILTIN_FIRST_PARTY_PROVIDER: &str = "builtin";
@@ -52,7 +54,6 @@ pub const LIST_DIR_CAPABILITY_ID: &str = "builtin.list_dir";
 pub const GLOB_CAPABILITY_ID: &str = "builtin.glob";
 pub const GREP_CAPABILITY_ID: &str = "builtin.grep";
 pub const APPLY_PATCH_CAPABILITY_ID: &str = "builtin.apply_patch";
-pub(crate) const SPAWN_SUBAGENT_CAPABILITY_ID: &str = "builtin.spawn_subagent";
 
 const MAX_FIRST_PARTY_INPUT_BYTES: usize = 1_048_576;
 const MAX_WRITE_FILE_INPUT_BYTES: usize = 6 * 1024 * 1024;
@@ -142,7 +143,7 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                     json::manifest()?,
                     http::manifest()?,
                     shell::manifest()?,
-                    spawn_subagent_manifest()?,
+                    spawn_subagent::manifest()?,
                 ];
                 capabilities.extend(coding_manifests()?);
                 capabilities.extend(skill_management::manifests()?);
@@ -186,16 +187,6 @@ pub fn builtin_first_party_handlers() -> Result<FirstPartyCapabilityRegistry, Ho
     );
     skill_management::insert_handlers(&mut registry)?;
     Ok(registry)
-}
-
-fn spawn_subagent_manifest() -> Result<CapabilityManifest, ExtensionError> {
-    first_party_capability_manifest(
-        SPAWN_SUBAGENT_CAPABILITY_ID,
-        "Authorize a scoped child subagent run",
-        vec![EffectKind::DispatchCapability, EffectKind::SpawnProcess],
-        PermissionMode::Ask,
-        resource_profile(),
-    )
 }
 
 fn first_party_capability_manifest(
@@ -272,9 +263,7 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
                     },
                 ));
             }
-            SPAWN_SUBAGENT_CAPABILITY_ID => serde_json::json!({
-                "authorized": true,
-            }),
+            SPAWN_SUBAGENT_CAPABILITY_ID => spawn_subagent::dispatch(),
             capability_id => {
                 let Some(metadata) = coding_capability_metadata(capability_id) else {
                     return Err(FirstPartyCapabilityError::new(

@@ -52,14 +52,16 @@ use ironclaw_reborn::model_routes::{
     ModelRoute, ModelRoutePolicy, ModelRouteResolver, ModelSelectionMode, ModelSlot,
     StaticModelRouteResolver,
 };
-use ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver;
+use ironclaw_reborn::planned_driver_factory::{
+    SUBAGENT_PLANNED_PROFILE_ID, default_planned_run_profile_resolver,
+};
 use ironclaw_reborn::runtime::{
     DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, build_default_planned_runtime,
     build_product_live_planned_runtime,
 };
 use ironclaw_reborn::subagent::{
-    flavors::StaticSubagentFlavorPolicyResolver,
-    gate_resolution::BoundedSubagentGateResolutionStore, goal_store::BoundedSubagentGoalStore,
+    flavors::StaticSubagentDefinitionResolver, gate_resolution::BoundedSubagentGateResolutionStore,
+    goal_store::InMemoryBoundedSubagentGoalStore,
 };
 use ironclaw_reborn::text_loop_driver::TextOnlyModelReplyDriver;
 use ironclaw_reborn::turn_runner::{
@@ -88,10 +90,11 @@ use ironclaw_turns::{
     InMemoryTurnStateStoreLimits, LoopBlocked, LoopBlockedKind, LoopCheckpointRecord,
     LoopCheckpointStore, LoopCompleted, LoopCompletionKind, LoopExit, LoopExitId, LoopGateRef,
     LoopMessageRef, LoopResultRef, PutCheckpointStateRequest, PutLoopCheckpointRequest,
-    ReplyTargetBindingRef, ResumeTurnRequest, RunProfileId, RunProfileResolutionRequest,
-    RunProfileResolver, RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
-    TurnActor, TurnAdmissionPolicy, TurnCoordinator, TurnError, TurnId, TurnLeaseToken, TurnRunId,
-    TurnRunState, TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
+    ReplyTargetBindingRef, ResumeTurnRequest, RunProfileId, RunProfileRequest,
+    RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion, SourceBindingRef,
+    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnAdmissionPolicy, TurnCoordinator,
+    TurnError, TurnId, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnScope,
+    TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
         BatchPolicyKind, CapabilityDeniedReasonKind, CapabilityDescriptorView,
@@ -1976,6 +1979,55 @@ async fn planned_host_factory_create_host_requires_profiled_capabilities() {
 }
 
 #[tokio::test]
+async fn subagent_planned_host_factory_create_host_requires_prompt_composer() {
+    let fixture = HostFixture::new("thread-host-subagent-missing-composer", "hello").await;
+    let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([])));
+    let io = Arc::new(InMemoryCapabilityIo::default());
+    let capability_factory = Arc::new(TestHostRuntimeCapabilityFactory {
+        runtime,
+        visible_request: host_runtime_visible_request(&fixture, []),
+        io: io.clone(),
+        milestone_sink: fixture.milestone_sink.clone(),
+    });
+    let surface_resolver = Arc::new(StaticCapabilitySurfaceProfileResolver::new(
+        CapabilityAllowSet::All,
+    ));
+    let planned = default_planned_run_profile_resolver()
+        .expect("planned default profile resolver")
+        .resolve_run_profile(
+            RunProfileResolutionRequest::interactive_default().with_requested_run_profile(
+                RunProfileRequest::new(SUBAGENT_PLANNED_PROFILE_ID).unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+    let mut claimed = fixture.claimed.clone();
+    claimed.state.resolved_run_profile_id = planned.profile_id.clone();
+    claimed.state.resolved_run_profile_version = planned.loop_driver.version;
+    claimed.resolved_run_profile = planned;
+
+    let error = match fixture
+        .factory()
+        .with_driver_requirements(driver_requirements_for(
+            &claimed.resolved_run_profile.loop_driver,
+            DriverRequirements::all_required(),
+        ))
+        .with_profiled_capability_port_factory(capability_factory, surface_resolver)
+        .create_host(&claimed)
+        .await
+    {
+        Ok(_) => panic!("subagent hosts must fail closed without prompt composer"),
+        Err(error) => error,
+    };
+
+    assert!(
+        error
+            .reason
+            .contains("subagent prompt composer is required")
+    );
+}
+
+#[tokio::test]
 async fn planned_host_factory_fails_closed_when_driver_requirements_are_missing() {
     let fixture = HostFixture::new("thread-host-planned-missing-requirements", "hello").await;
     let planned = default_planned_run_profile_resolver()
@@ -2120,8 +2172,7 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
     ));
     let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
         turn_state: turn_store.clone(),
-        thread_service: fixture.thread_service.clone(),
-        thread_service_dyn: fixture.thread_service.clone() as Arc<dyn SessionThreadService>,
+        thread_service: fixture.thread_service.clone() as Arc<dyn SessionThreadService>,
         thread_scope: fixture.thread_scope.clone(),
         model_gateway: fixture.gateway.clone(),
         checkpoint_state_store: fixture.checkpoint_state_store.clone(),
@@ -2130,9 +2181,9 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
         capability_factory,
         capability_surface_resolver: surface_resolver,
         capability_result_writer: io.clone(),
-        subagent_goal_store: Arc::new(BoundedSubagentGoalStore::new()),
+        subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
         subagent_gate_store: Arc::new(BoundedSubagentGateResolutionStore::new()),
-        subagent_flavor_resolver: Arc::new(StaticSubagentFlavorPolicyResolver),
+        subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
         loop_exit_evidence: evidence,
         config: DefaultPlannedRuntimeConfig {
@@ -2248,8 +2299,7 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
 
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         turn_state: turn_store.clone(),
-        thread_service: fixture.thread_service.clone(),
-        thread_service_dyn: fixture.thread_service.clone() as Arc<dyn SessionThreadService>,
+        thread_service: fixture.thread_service.clone() as Arc<dyn SessionThreadService>,
         thread_scope: fixture.thread_scope.clone(),
         model_gateway: fixture.gateway.clone(),
         checkpoint_state_store: fixture.checkpoint_state_store.clone(),
@@ -2260,9 +2310,9 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
             CapabilityAllowSet::allowlist([CapabilityId::new("demo.allowed").unwrap()]),
         )),
         capability_result_writer: io.clone(),
-        subagent_goal_store: Arc::new(BoundedSubagentGoalStore::new()),
+        subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
         subagent_gate_store: Arc::new(BoundedSubagentGateResolutionStore::new()),
-        subagent_flavor_resolver: Arc::new(StaticSubagentFlavorPolicyResolver),
+        subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
         loop_exit_evidence: Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
             fixture.thread_service.clone(),
@@ -2294,11 +2344,7 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
 /// to assert the fail-closed branch fires.
 async fn product_live_parts_for_gate_test(
     thread_label: &'static str,
-) -> DefaultPlannedRuntimeParts<
-    InMemoryTurnStateStore,
-    InMemorySessionThreadService,
-    RecordingGateway,
-> {
+) -> DefaultPlannedRuntimeParts<InMemoryTurnStateStore, RecordingGateway> {
     let fixture = HostFixture::new_unsubmitted(thread_label, "hello").await;
     let turn_store = Arc::new(InMemoryTurnStateStore::default());
     let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([
@@ -2322,8 +2368,7 @@ async fn product_live_parts_for_gate_test(
     );
     DefaultPlannedRuntimeParts {
         turn_state: turn_store.clone(),
-        thread_service: fixture.thread_service.clone(),
-        thread_service_dyn: fixture.thread_service.clone() as Arc<dyn SessionThreadService>,
+        thread_service: fixture.thread_service.clone() as Arc<dyn SessionThreadService>,
         thread_scope: fixture.thread_scope.clone(),
         model_gateway: fixture.gateway.clone(),
         checkpoint_state_store: fixture.checkpoint_state_store.clone(),
@@ -2334,9 +2379,9 @@ async fn product_live_parts_for_gate_test(
             CapabilityAllowSet::allowlist([CapabilityId::new("demo.allowed").unwrap()]),
         )),
         capability_result_writer: io.clone(),
-        subagent_goal_store: Arc::new(BoundedSubagentGoalStore::new()),
+        subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
         subagent_gate_store: Arc::new(BoundedSubagentGateResolutionStore::new()),
-        subagent_flavor_resolver: Arc::new(StaticSubagentFlavorPolicyResolver),
+        subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
         loop_exit_evidence: Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
             fixture.thread_service.clone(),

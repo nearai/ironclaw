@@ -229,6 +229,14 @@ pub struct ThreadHistoryRequest {
     pub thread_id: ThreadId,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LatestThreadMessageRequest {
+    pub scope: ThreadScope,
+    pub thread_id: ThreadId,
+    pub kind: MessageKind,
+    pub status: MessageStatus,
+}
+
 /// Browser-driven list-threads query scoped to a single caller.
 ///
 /// Pagination is opaque: `cursor` is whatever value the backend

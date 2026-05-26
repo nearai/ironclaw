@@ -1,8 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use async_trait::async_trait;
 use ironclaw_host_api::UserId;
-use ironclaw_loop_support::{AwaitedChildSetRecord, SubagentGateResolutionStore};
+use ironclaw_loop_support::{AwaitedChildSetRecord, SubagentGateResolutionStore, SubagentKindId};
 use ironclaw_turns::{
     EventCursor, GateRef, TurnEventKind, TurnRunId, TurnStatus,
     run_profile::{AgentLoopHostError, AgentLoopHostErrorKind},
@@ -15,6 +15,7 @@ pub struct AwaitedChildState {
     pub record: AwaitedChildSetRecord,
     pub terminal_status: Option<TurnStatus>,
     pub terminal_event: Option<AwaitedChildTerminalEvent>,
+    pub descendant_reservation_release_claimed: bool,
     pub descendant_reservation_released: bool,
     pub delivery_claimed: bool,
     pub delivered_to_parent: bool,
@@ -38,6 +39,7 @@ pub struct BoundedSubagentGateResolutionStore {
 struct GateResolutionInner {
     by_gate: HashMap<GateRef, AwaitedChildState>,
     gates_by_child: HashMap<TurnRunId, Vec<GateRef>>,
+    deliverable_by_child: HashMap<TurnRunId, VecDeque<GateRef>>,
 }
 
 impl BoundedSubagentGateResolutionStore {
@@ -58,17 +60,25 @@ impl BoundedSubagentGateResolutionStore {
             ));
         }
         let mut inner = lock(&self.inner)?;
-        let gate_refs = inner
-            .gates_by_child
-            .get(&child_run_id)
-            .cloned()
-            .unwrap_or_default();
+        let gate_refs = inner.gates_by_child.get(&child_run_id).cloned();
+        let mut deliverable = Vec::new();
+        let Some(gate_refs) = gate_refs else {
+            return Ok(());
+        };
         for gate_ref in gate_refs {
             if let Some(state) = inner.by_gate.get_mut(&gate_ref) {
                 state.terminal_status = Some(terminal_status);
                 state.terminal_event = Some(terminal_event.clone());
+                if !state.delivery_claimed && !state.delivered_to_parent {
+                    deliverable.push(gate_ref);
+                }
             }
         }
+        inner
+            .deliverable_by_child
+            .entry(child_run_id)
+            .or_default()
+            .extend(deliverable);
         Ok(())
     }
 
@@ -77,12 +87,11 @@ impl BoundedSubagentGateResolutionStore {
         child_run_id: TurnRunId,
     ) -> Result<Option<AwaitedChildState>, AgentLoopHostError> {
         let mut inner = lock(&self.inner)?;
-        let gate_refs = inner
-            .gates_by_child
-            .get(&child_run_id)
-            .cloned()
-            .unwrap_or_default();
-        for gate_ref in gate_refs {
+        while let Some(gate_ref) = inner
+            .deliverable_by_child
+            .get_mut(&child_run_id)
+            .and_then(VecDeque::pop_front)
+        {
             if let Some(state) = inner.by_gate.get_mut(&gate_ref)
                 && state.terminal_status.is_some()
                 && !state.delivery_claimed
@@ -92,6 +101,7 @@ impl BoundedSubagentGateResolutionStore {
                 return Ok(Some(state.clone()));
             }
         }
+        inner.deliverable_by_child.remove(&child_run_id);
         Ok(None)
     }
 
@@ -106,10 +116,23 @@ impl BoundedSubagentGateResolutionStore {
 
     pub fn release_terminal_claim(&self, gate_ref: &GateRef) -> Result<(), AgentLoopHostError> {
         let mut inner = lock(&self.inner)?;
-        if let Some(state) = inner.by_gate.get_mut(gate_ref)
+        let child_run_id = if let Some(state) = inner.by_gate.get_mut(gate_ref)
             && !state.delivered_to_parent
         {
             state.delivery_claimed = false;
+            state
+                .terminal_status
+                .is_some()
+                .then_some(state.record.child_run_id)
+        } else {
+            None
+        };
+        if let Some(child_run_id) = child_run_id {
+            inner
+                .deliverable_by_child
+                .entry(child_run_id)
+                .or_default()
+                .push_front(gate_ref.clone());
         }
         Ok(())
     }
@@ -126,7 +149,7 @@ impl BoundedSubagentGateResolutionStore {
             .collect())
     }
 
-    pub fn mark_descendant_reservation_released(
+    pub fn claim_descendant_reservation_release(
         &self,
         gate_ref: &GateRef,
     ) -> Result<bool, AgentLoopHostError> {
@@ -134,11 +157,36 @@ impl BoundedSubagentGateResolutionStore {
         let Some(state) = inner.by_gate.get_mut(gate_ref) else {
             return Ok(false);
         };
-        if state.descendant_reservation_released {
+        if state.descendant_reservation_released || state.descendant_reservation_release_claimed {
             return Ok(false);
         }
-        state.descendant_reservation_released = true;
+        state.descendant_reservation_release_claimed = true;
         Ok(true)
+    }
+
+    pub fn mark_descendant_reservation_released(
+        &self,
+        gate_ref: &GateRef,
+    ) -> Result<(), AgentLoopHostError> {
+        let mut inner = lock(&self.inner)?;
+        if let Some(state) = inner.by_gate.get_mut(gate_ref) {
+            state.descendant_reservation_release_claimed = false;
+            state.descendant_reservation_released = true;
+        }
+        Ok(())
+    }
+
+    pub fn release_descendant_reservation_claim(
+        &self,
+        gate_ref: &GateRef,
+    ) -> Result<(), AgentLoopHostError> {
+        let mut inner = lock(&self.inner)?;
+        if let Some(state) = inner.by_gate.get_mut(gate_ref)
+            && !state.descendant_reservation_released
+        {
+            state.descendant_reservation_release_claimed = false;
+        }
+        Ok(())
     }
 
     pub fn state_for_gate(
@@ -148,10 +196,10 @@ impl BoundedSubagentGateResolutionStore {
         Ok(lock(&self.inner)?.by_gate.get(gate_ref).cloned())
     }
 
-    pub fn flavor_id_for_child(
+    pub fn subagent_kind_for_child(
         &self,
         child_run_id: TurnRunId,
-    ) -> Result<Option<String>, AgentLoopHostError> {
+    ) -> Result<Option<SubagentKindId>, AgentLoopHostError> {
         let inner = lock(&self.inner)?;
         let Some(gates) = inner.gates_by_child.get(&child_run_id) else {
             return Ok(None);
@@ -159,7 +207,7 @@ impl BoundedSubagentGateResolutionStore {
         Ok(gates
             .iter()
             .find_map(|gate| inner.by_gate.get(gate))
-            .map(|state| state.record.flavor_id.clone()))
+            .map(|state| state.record.subagent_kind.clone()))
     }
 
     pub fn len(&self) -> Result<usize, AgentLoopHostError> {
@@ -202,6 +250,7 @@ impl SubagentGateResolutionStore for BoundedSubagentGateResolutionStore {
                 record,
                 terminal_status: None,
                 terminal_event: None,
+                descendant_reservation_release_claimed: false,
                 descendant_reservation_released: false,
                 delivery_claimed: false,
                 delivered_to_parent: false,
@@ -214,6 +263,11 @@ impl SubagentGateResolutionStore for BoundedSubagentGateResolutionStore {
         let mut inner = lock(&self.inner)?;
         if let Some(old) = inner.by_gate.remove(gate_ref) {
             prune_child_index(&mut inner.gates_by_child, old.record.child_run_id, gate_ref);
+            prune_deliverable_child_index(
+                &mut inner.deliverable_by_child,
+                old.record.child_run_id,
+                gate_ref,
+            );
         }
         Ok(())
     }
@@ -221,6 +275,19 @@ impl SubagentGateResolutionStore for BoundedSubagentGateResolutionStore {
 
 fn prune_child_index(
     gates_by_child: &mut HashMap<TurnRunId, Vec<GateRef>>,
+    child_run_id: TurnRunId,
+    gate_ref: &GateRef,
+) {
+    if let Some(gates) = gates_by_child.get_mut(&child_run_id) {
+        gates.retain(|gate| gate != gate_ref);
+        if gates.is_empty() {
+            gates_by_child.remove(&child_run_id);
+        }
+    }
+}
+
+fn prune_deliverable_child_index(
+    gates_by_child: &mut HashMap<TurnRunId, VecDeque<GateRef>>,
     child_run_id: TurnRunId,
     gate_ref: &GateRef,
 ) {
@@ -270,25 +337,27 @@ mod tests {
             None,
             ThreadId::new("child-thread").unwrap(),
         );
+        let parent_run_id = TurnRunId::new();
+        let mut parent_run_context =
+            ironclaw_agent_loop::test_support::test_run_context("subagent-gate");
+        parent_run_context.scope = parent_scope;
+        parent_run_context.thread_id = ThreadId::new("parent-thread").unwrap();
+        parent_run_context.run_id = parent_run_id;
         AwaitedChildSetRecord {
             gate_ref: GateRef::new(gate_ref).unwrap(),
-            parent_run_context: ironclaw_agent_loop::test_support::test_run_context(
-                "subagent-gate",
-            ),
-            parent_scope,
-            parent_run_id: TurnRunId::new(),
+            parent_run_context,
             tree_root_run_id: TurnRunId::new(),
             child_scope,
             child_run_id,
             child_thread_id: ThreadId::new("child-thread").unwrap(),
             source_binding_ref: SourceBindingRef::new("subagent-source:test").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("subagent-reply:test").unwrap(),
-            flavor_id: "general".to_string(),
+            subagent_kind: SubagentKindId::new("general").unwrap(),
             spawn_capability_id: CapabilityId::new(
                 ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID,
             )
             .unwrap(),
-            background_result_ref: Some(LoopResultRef::new("result:subagent.test").unwrap()),
+            result_ref: LoopResultRef::new("result:subagent.test").unwrap(),
             mode: SpawnSubagentMode::Blocking,
         }
     }
@@ -318,6 +387,24 @@ mod tests {
             .claim_next_terminal_state_for_child(child_run_id)
             .unwrap();
         assert!(ready.is_none());
+    }
+
+    #[tokio::test]
+    async fn record_child_terminal_rejects_non_terminal_statuses() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child_run_id = TurnRunId::new();
+        let gate = GateRef::new("gate:subagent:test").unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_run_id))
+            .await
+            .unwrap();
+
+        let error = store
+            .record_child_terminal(child_run_id, terminal_event(TurnStatus::Running))
+            .unwrap_err();
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::Invalid);
+        assert!(error.safe_summary.contains("must be terminal"));
     }
 
     #[tokio::test]
@@ -387,8 +474,25 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(store.mark_descendant_reservation_released(&gate).unwrap());
-        assert!(!store.mark_descendant_reservation_released(&gate).unwrap());
+        assert!(store.claim_descendant_reservation_release(&gate).unwrap());
+        assert!(!store.claim_descendant_reservation_release(&gate).unwrap());
+        store.mark_descendant_reservation_released(&gate).unwrap();
+        assert!(!store.claim_descendant_reservation_release(&gate).unwrap());
+    }
+
+    #[tokio::test]
+    async fn descendant_release_claim_can_be_retried_before_marked_released() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child_run_id = TurnRunId::new();
+        let gate = GateRef::new("gate:subagent:test").unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_run_id))
+            .await
+            .unwrap();
+
+        assert!(store.claim_descendant_reservation_release(&gate).unwrap());
+        store.release_descendant_reservation_claim(&gate).unwrap();
+        assert!(store.claim_descendant_reservation_release(&gate).unwrap());
     }
 
     #[tokio::test]

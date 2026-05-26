@@ -19,13 +19,14 @@ use crate::{
 };
 
 use super::{
-    AgentLoopExecutorError, BatchStep, CancelCheck, CapabilitySurfaceIndex, CheckpointStage,
-    ExecutorStage, GateInput, GateStage, MAX_CAPABILITY_RETRIES, StageContext, TurnCompletedStep,
-    append_capability_error_ref, append_capability_result_ref, append_capability_safe_summary_ref,
-    batch_policy_kind, cancelled_exit, capability_batch_counts, capability_error_class,
-    capability_failure_kind, capability_host_error, capability_invocation_from_candidate,
-    capability_is_visible, capability_summary, failed_exit, honor_retry_alteration,
-    push_call_signature_once, push_completed_result, sanitized_strategy_summary,
+    AgentLoopExecutorError, AwaitDependentRunGateInput, AwaitDependentRunGateStage, BatchStep,
+    CancelCheck, CapabilitySurfaceIndex, CheckpointStage, ExecutorStage, GateInput, GateStage,
+    MAX_CAPABILITY_RETRIES, StageContext, TurnCompletedStep, append_capability_error_ref,
+    append_capability_result_ref, append_capability_safe_summary_ref, batch_policy_kind,
+    cancelled_exit, capability_batch_counts, capability_error_class, capability_failure_kind,
+    capability_host_error, capability_invocation_from_candidate, capability_is_visible,
+    capability_summary, failed_exit, honor_retry_alteration, push_call_signature_once,
+    push_completed_result, sanitized_strategy_summary,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -316,7 +317,6 @@ impl CapabilityStage {
                             call,
                             kind: GateKind::Approval,
                             gate_ref,
-                            resolved_result: None,
                         },
                     )
                     .await
@@ -330,7 +330,6 @@ impl CapabilityStage {
                             call,
                             kind: GateKind::Auth,
                             gate_ref,
-                            resolved_result: None,
                         },
                     )
                     .await
@@ -344,7 +343,6 @@ impl CapabilityStage {
                             call,
                             kind: GateKind::Resource,
                             gate_ref,
-                            resolved_result: None,
                         },
                     )
                     .await
@@ -359,15 +357,14 @@ impl CapabilityStage {
                     safe_summary,
                     terminate_hint: false,
                 };
-                GateStage
+                AwaitDependentRunGateStage
                     .process(
                         ctx,
-                        GateInput {
+                        AwaitDependentRunGateInput {
                             state,
                             call,
-                            kind: GateKind::AwaitDependentRun,
                             gate_ref,
-                            resolved_result: Some(resolved_result),
+                            resolved_result,
                         },
                     )
                     .await

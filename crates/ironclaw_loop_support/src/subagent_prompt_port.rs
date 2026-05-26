@@ -105,12 +105,13 @@ impl SubagentPromptComposer {
         mut request: LoopPromptBundleRequest,
     ) -> Result<LoopPromptBundleRequest, AgentLoopHostError> {
         let material = self.source.material_for_run(run_context).await?;
+        let goal_message = materialize_goal_message(&material.goal, self.limits)?;
         request.inline_messages.splice(
             0..0,
             [
                 materialize_direction_message(&material.direction_markdown)?,
-                materialize_goal_message(&material.goal, self.limits)
-                    .or_else(|_| materialize_goal_summary_message(&material.goal))?,
+                materialize_goal_framing_message()?,
+                goal_message,
             ],
         );
         request.capability_view = Some(subagent_capability_view(
@@ -141,27 +142,6 @@ pub fn materialize_goal_framing_message() -> Result<LoopInlineMessage, AgentLoop
         AgentLoopHostError::new(
             AgentLoopHostErrorKind::Invalid,
             format!("invalid subagent goal framing prompt: {reason}"),
-        )
-    })?;
-    Ok(LoopInlineMessage {
-        role: LoopInlineMessageRole::User,
-        safe_body,
-    })
-}
-
-pub(crate) fn materialize_goal_summary_message(
-    goal: &SubagentPromptGoal,
-) -> Result<LoopInlineMessage, AgentLoopHostError> {
-    let mut body = String::from("Subagent assignment summary ");
-    body.push_str(&goal.task);
-    if let Some(handoff) = goal.handoff.as_deref() {
-        body.push_str(" Handoff ");
-        body.push_str(handoff);
-    }
-    let safe_body = LoopSafeSummary::new(loop_safe_summary_text(body)).map_err(|reason| {
-        AgentLoopHostError::new(
-            AgentLoopHostErrorKind::Invalid,
-            format!("invalid subagent goal summary prompt: {reason}"),
         )
     })?;
     Ok(LoopInlineMessage {
@@ -239,35 +219,6 @@ fn loop_safe_inline_text(value: impl Into<String>) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-fn loop_safe_summary_text(value: impl Into<String>) -> String {
-    let sanitized = loop_safe_inline_text(value);
-    let mut safe = sanitized
-        .chars()
-        .map(|character| match character {
-            '{' | '}' | '[' | ']' | '`' | '<' | '>' | '/' | '\\' => ' ',
-            _ => character,
-        })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    if safe.len() > 500 {
-        truncate_to_char_boundary(&mut safe, 500);
-    }
-    safe
-}
-
-fn truncate_to_char_boundary(value: &mut String, max_bytes: usize) {
-    if value.len() <= max_bytes {
-        return;
-    }
-    let mut end = max_bytes;
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    value.truncate(end);
 }
 
 pub fn subagent_run_id_from_context(run_context: &LoopRunContext) -> TurnRunId {
@@ -362,19 +313,5 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["demo.read"]
         );
-    }
-
-    #[test]
-    fn summary_text_strips_special_characters_and_truncates_on_utf8_boundary() {
-        let raw = format!("hello {{world}} <bad/path> {}", "é".repeat(300));
-
-        let safe = loop_safe_summary_text(raw);
-
-        assert!(safe.len() <= 500);
-        assert!(safe.is_char_boundary(safe.len()));
-        assert!(!safe.contains('{'));
-        assert!(!safe.contains('}'));
-        assert!(!safe.contains('<'));
-        assert!(!safe.contains('/'));
     }
 }

@@ -4,12 +4,12 @@ use ironclaw_host_api::ThreadId;
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextMessages, ContextWindow,
-    CreateSummaryArtifactRequest, EnsureThreadRequest, ListThreadsForScopeRequest,
-    ListThreadsForScopeResponse, LoadContextMessagesRequest, LoadContextWindowRequest,
-    MessageContent, RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
-    SessionThreadRecord, SummaryArtifact, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
-    ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
-    UpdateToolResultReferenceRequest,
+    CreateSummaryArtifactRequest, EnsureThreadRequest, LatestThreadMessageRequest,
+    ListThreadsForScopeRequest, ListThreadsForScopeResponse, LoadContextMessagesRequest,
+    LoadContextWindowRequest, MessageContent, RedactMessageRequest,
+    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord, SummaryArtifact,
+    ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
+    UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
 };
 
 /// Canonical Reborn session thread and transcript boundary.
@@ -93,6 +93,23 @@ pub trait SessionThreadService: Send + Sync {
         &self,
         request: ThreadHistoryRequest,
     ) -> Result<ThreadHistory, SessionThreadError>;
+
+    async fn latest_thread_message(
+        &self,
+        request: LatestThreadMessageRequest,
+    ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        let history = self
+            .list_thread_history(ThreadHistoryRequest {
+                scope: request.scope,
+                thread_id: request.thread_id,
+            })
+            .await?;
+        Ok(history
+            .messages
+            .into_iter()
+            .rev()
+            .find(|message| message.kind == request.kind && message.status == request.status))
+    }
 
     /// Cheap, owner-scoped existence probe that returns *only* the
     /// thread record — no message transcript, no summary artifacts.
