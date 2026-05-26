@@ -1,9 +1,9 @@
 //! Canonical signing-bytes + [`ApprovedTxHash`] core for the IronClaw
 //! attested-signing substrate.
 //!
-//! This is **PR2 of a 10-PR stack** (see
-//! `docs/plans/2026-05-23-attested-signing-substrate.md`). It defines the
-//! value-binding core: the chain-tagged, chain-SDK-FREE
+//! This is **PR3 of a 10-PR stack** (see
+//! `docs/plans/2026-05-23-attested-signing-substrate.md`). It builds on the
+//! PR2 value-binding core: the chain-tagged, chain-SDK-FREE
 //! [`DecodedTransaction`] model, the [`render`] function that derives the
 //! human-facing view, the [`canonical_signing_bytes`] encoder, and
 //! [`approved_tx_hash_for`] which binds them — together with an explicit,
@@ -13,7 +13,8 @@
 //! ## Purity invariant
 //!
 //! This crate depends ONLY on `ironclaw_signing_provider`, `serde`,
-//! `thiserror`, and `sha2`. It carries **no chain SDK** (no `solana-sdk`,
+//! `thiserror`, `sha2`, and `async-trait` (PR3 added the async store/ledger
+//! traits). It carries **no chain SDK** (no `solana-sdk`,
 //! `near-*`, `alloy`), **no secrets**, and **no webauthn** — those land in
 //! PR4/PR6. The architecture boundary test
 //! (`crates/ironclaw_architecture/tests/attested_signing_boundaries.rs`)
@@ -40,6 +41,21 @@ mod rendered;
 
 mod wire;
 
+// `grant` and `ledger` are private by default — their public types are
+// re-exported below. Under the `contract-tests` feature they are made public
+// so out-of-crate durable-backend crates can reach the canonical contract
+// suites at `ironclaw_attestation::grant::contract` /
+// `ironclaw_attestation::ledger::contract` (the `#[macro_export]`ed
+// `*_contract_cases!` macros expand to `$crate::grant::contract::...` paths).
+#[cfg(not(feature = "contract-tests"))]
+mod grant;
+#[cfg(feature = "contract-tests")]
+pub mod grant;
+#[cfg(not(feature = "contract-tests"))]
+mod ledger;
+#[cfg(feature = "contract-tests")]
+pub mod ledger;
+
 pub use approved_tx_hash::approved_tx_hash_for;
 pub use canonical::canonical_signing_bytes;
 pub use decoded_tx::{
@@ -49,6 +65,11 @@ pub use decoded_tx::{
     SolanaTransaction,
 };
 pub use error::AttestationError;
+pub use grant::{
+    AttestedSigningGrant, ClaimedGrant, GrantError, GrantKey, GrantStatus,
+    InMemorySealedGrantStore, SealedGrantStore,
+};
+pub use ledger::{InMemorySigningLedger, LedgerError, SigningLedger, SigningLedgerState};
 pub use rendered::{RenderedField, RenderedTx, render};
 
 /// Test-only re-export of the low-level component hasher.
