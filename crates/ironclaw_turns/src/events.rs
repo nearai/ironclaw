@@ -154,6 +154,8 @@ impl TurnEventProjectionCursor {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnEventProjectionRequest {
     pub scope: TurnScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_user_id: Option<UserId>,
     pub after: Option<TurnEventProjectionCursor>,
     pub limit: usize,
 }
@@ -191,6 +193,7 @@ pub trait TurnEventProjectionSource: Send + Sync {
     async fn read_turn_events_after(
         &self,
         scope: &TurnScope,
+        owner_user_id: Option<&UserId>,
         after: Option<EventCursor>,
         limit: usize,
     ) -> Result<TurnEventPage, TurnError>;
@@ -247,7 +250,12 @@ where
         let after = request.after.as_ref().map(|cursor| cursor.event);
         let page = self
             .source
-            .read_turn_events_after(&request.scope, after, request.limit)
+            .read_turn_events_after(
+                &request.scope,
+                request.owner_user_id.as_ref(),
+                after,
+                request.limit,
+            )
             .await
             .map_err(|_| TurnEventProjectionError::Source {
                 operation: "read_turn_events_after",
@@ -278,6 +286,7 @@ where
 pub(crate) fn project_turn_events(
     events: &[TurnLifecycleEvent],
     scope: &TurnScope,
+    owner_user_id: Option<&UserId>,
     after: Option<EventCursor>,
     limit: usize,
     retention_floor: EventCursor,
@@ -285,7 +294,10 @@ pub(crate) fn project_turn_events(
     let after = after.unwrap_or_default();
     let mut scoped_events = events
         .iter()
-        .filter(|event| &event.scope == scope)
+        .filter(|event| {
+            &event.scope == scope
+                && owner_user_id.is_none_or(|owner| event.owner_user_id.as_ref() == Some(owner))
+        })
         .cloned()
         .collect::<Vec<_>>();
     scoped_events.sort_by_key(|event| event.cursor);
@@ -374,12 +386,14 @@ mod tests {
         async fn read_turn_events_after(
             &self,
             scope: &TurnScope,
+            owner_user_id: Option<&UserId>,
             after: Option<EventCursor>,
             limit: usize,
         ) -> Result<TurnEventPage, TurnError> {
             Ok(project_turn_events(
                 &self.events,
                 scope,
+                owner_user_id,
                 after,
                 limit,
                 EventCursor::default(),
@@ -422,6 +436,7 @@ mod tests {
         let page = project_turn_events(
             std::slice::from_ref(&event),
             &scope,
+            None,
             Some(EventCursor(5)),
             10,
             EventCursor(5),
@@ -443,6 +458,7 @@ mod tests {
         let snapshot = service
             .snapshot(crate::events::TurnEventProjectionRequest {
                 scope,
+                owner_user_id: None,
                 after: None,
                 limit: 10,
             })

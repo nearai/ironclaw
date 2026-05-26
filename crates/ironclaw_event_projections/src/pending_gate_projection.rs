@@ -191,7 +191,7 @@ impl PendingGateProjection {
             .await?;
         let effective_limit = limit.min(MAX_TURN_EVENT_PROJECTION_LIMIT);
         let page = source
-            .read_turn_events_after(scope, Some(after), effective_limit)
+            .read_turn_events_after(scope, None, Some(after), effective_limit)
             .await
             .map_err(|_| ProjectionError::Source {
                 operation: "read_turn_events_after",

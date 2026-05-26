@@ -870,7 +870,7 @@ impl RebornBinaryE2EHarness {
         milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
         composition: RebornRuntimeLoopComposition<
             FilesystemTurnStateStore<LocalFilesystem>,
-            dyn ironclaw_threads::SessionThreadService,
+            dyn SessionThreadService,
             RebornTraceReplayModelGateway,
         >,
         turn_root: Arc<tempfile::TempDir>,

@@ -1,46 +1,53 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures::{StreamExt, stream};
+#[cfg(test)]
+use ironclaw_event_projections::CapabilityActivityProjection;
 use ironclaw_event_projections::{
-    CapabilityActivityProjection, CapabilityActivityStatus, EventProjectionService,
-    ProjectionCursor as EventProjectionCursor, ProjectionReplay,
-    ProjectionScope as EventProjectionScope, ProjectionSnapshot, ReplayEventProjectionService,
-    RunProjectionStatus, RunStatusProjection,
+    CapabilityActivityStatus, EventProjectionService, ProjectionCursor as EventProjectionCursor,
+    ProjectionReplay, ProjectionScope as EventProjectionScope, ProjectionSnapshot,
+    ReplayEventProjectionService, RunProjectionStatus, RunStatusProjection,
 };
 use ironclaw_event_streams::{
     AllowAllProjectionAccessPolicy, EventStreamManager, InMemoryProjectionStreamAdmissionPolicy,
     InMemoryProjectionUpdateSource, NoExposureProjectionRedactionValidator,
     ProjectionStreamError as EventProjectionStreamError, ProjectionStreamItem,
-    ProjectionSubscribeRequest, ProjectionTarget, ProjectionViewClass, SubscriberCapabilities,
+    ProjectionSubscribeRequest, ProjectionSubscription as EventProjectionSubscription,
+    ProjectionTarget, ProjectionViewClass, SubscriberCapabilities,
 };
 use ironclaw_events::{DurableEventLog, EventCursor, EventStreamKey, ReadScope};
-use ironclaw_host_api::{CapabilityId, InvocationId};
 use ironclaw_outbound::InMemoryOutboundStateStore;
 use ironclaw_product_adapters::{
     AdapterInstallationId, CapabilityActivityStatusView, CapabilityActivityView,
-    CapabilityActivityViewInput, CapabilityDisplayPreviewView, CapabilityDisplayPreviewViewInput,
-    ExternalActorRef, ExternalConversationRef, ProductAdapterError, ProductAdapterId,
-    ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget, ProductProjectionItem,
-    ProductProjectionState, ProductWorkflowRejectionKind,
+    CapabilityActivityViewInput, ExternalActorRef, ExternalConversationRef, ProductAdapterError,
+    ProductAdapterId, ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
+    ProductProjectionItem, ProductProjectionState, ProductWorkflowRejectionKind,
     ProjectionCursor as ProductProjectionCursor, ProjectionStream, ProjectionSubscriptionRequest,
     RedactedString,
 };
 use ironclaw_turns::{
     ReplyTargetBindingRef, TurnActor, TurnCoordinator, TurnEventProjectionCursor,
-    TurnEventProjectionSource, TurnRunId, TurnScope, run_profile::CapabilityInputRef,
+    TurnEventProjectionSource, TurnRunId, TurnScope,
 };
 
+mod display_preview;
+mod runtime_replay;
 mod turn_events;
+use display_preview::{CapabilityDisplayPreviewSource, NoopCapabilityDisplayPreviewSource};
+use runtime_replay::{
+    RuntimePayloadCandidate, replay_payload_candidates, snapshot_payload_candidates,
+};
 use turn_events::{TurnEventBridge, TurnEventPayload};
+
+pub(crate) use display_preview::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore};
+#[cfg(test)]
+pub(crate) use display_preview::{SANITIZE_JSON_MAX_DEPTH, sanitize_json_value, sanitize_text};
 
 const WEBUI_PROJECTION_PAGE_LIMIT: usize = 256;
 const WEBUI_RUNTIME_ITEM_MAX_PAYLOADS: usize = WEBUI_PROJECTION_PAGE_LIMIT + 1;
 const WEBUI_PROJECTION_ADAPTER_ID: &str = "webui_v2";
 const WEBUI_PROJECTION_INSTALLATION_ID: &str = "webui_v2.local";
-const SANITIZE_JSON_MAX_DEPTH: usize = 32;
 
 #[derive(Clone)]
 pub(crate) struct RebornProjectionServices {
@@ -48,178 +55,6 @@ pub(crate) struct RebornProjectionServices {
     turn_events: TurnEventBridge,
     display_previews: Arc<dyn CapabilityDisplayPreviewSource>,
     webui_reply_target_binding_ref: ReplyTargetBindingRef,
-}
-
-#[async_trait]
-trait CapabilityDisplayPreviewSource: Send + Sync {
-    async fn preview(
-        &self,
-        activity: &CapabilityActivityProjection,
-    ) -> Result<Option<CapabilityDisplayPreviewView>, ProductAdapterError>;
-}
-
-struct NoopCapabilityDisplayPreviewSource;
-
-#[async_trait]
-impl CapabilityDisplayPreviewSource for NoopCapabilityDisplayPreviewSource {
-    async fn preview(
-        &self,
-        _activity: &CapabilityActivityProjection,
-    ) -> Result<Option<CapabilityDisplayPreviewView>, ProductAdapterError> {
-        Ok(None)
-    }
-}
-
-#[derive(Default)]
-pub(crate) struct CapabilityDisplayPreviewStore {
-    pending: Mutex<CapabilityDisplayPendingInputs>,
-    completed: Mutex<CapabilityDisplayCompletedPreviews>,
-}
-
-#[derive(Default)]
-struct CapabilityDisplayPendingInputs {
-    by_ref: HashMap<String, CapabilityDisplayInputPreview>,
-    refs_by_run: HashMap<String, Vec<String>>,
-}
-
-#[derive(Default)]
-struct CapabilityDisplayCompletedPreviews {
-    by_invocation: HashMap<String, CapabilityDisplayPreviewRecord>,
-    invocations_by_run: HashMap<String, Vec<String>>,
-}
-
-#[derive(Debug, Clone)]
-struct CapabilityDisplayInputPreview {
-    title: String,
-    subtitle: Option<String>,
-    input_summary: Option<String>,
-    truncated: bool,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct CapabilityDisplayPreviewRecord {
-    pub(crate) title: String,
-    pub(crate) subtitle: Option<String>,
-    pub(crate) input_summary: Option<String>,
-    pub(crate) output_summary: Option<String>,
-    pub(crate) output_preview: Option<String>,
-    pub(crate) output_kind: Option<String>,
-    pub(crate) output_bytes: Option<u64>,
-    pub(crate) result_ref: Option<String>,
-    pub(crate) truncated: bool,
-}
-
-pub(crate) struct CapabilityDisplayPreviewResult<'a> {
-    pub(crate) run_id: &'a str,
-    pub(crate) input_ref: &'a CapabilityInputRef,
-    pub(crate) invocation_id: InvocationId,
-    pub(crate) capability_id: &'a CapabilityId,
-    pub(crate) result_ref: &'a str,
-    pub(crate) output: &'a serde_json::Value,
-    pub(crate) output_bytes: u64,
-}
-
-impl CapabilityDisplayPreviewStore {
-    pub(crate) fn record_input(
-        &self,
-        run_id: &str,
-        input_ref: &CapabilityInputRef,
-        tool_name: &str,
-        arguments: &serde_json::Value,
-    ) {
-        let input_summary = input_summary(tool_name, arguments);
-        let input = CapabilityDisplayInputPreview {
-            title: bounded_display_text(tool_name, 2048).text,
-            subtitle: safe_path_subtitle(arguments),
-            truncated: input_summary
-                .as_ref()
-                .is_some_and(|summary| summary.truncated),
-            input_summary: input_summary.map(|summary| summary.text),
-        };
-        if let Ok(mut pending) = self.pending.lock() {
-            let input_ref = input_ref.as_str().to_string();
-            pending.by_ref.insert(input_ref.clone(), input);
-            pending
-                .refs_by_run
-                .entry(run_id.to_string())
-                .or_default()
-                .push(input_ref);
-        }
-    }
-
-    pub(crate) fn record_result(&self, result: CapabilityDisplayPreviewResult<'_>) {
-        let input = self
-            .pending
-            .lock()
-            .ok()
-            .and_then(|mut pending| pending.by_ref.remove(result.input_ref.as_str()));
-        let title = input
-            .as_ref()
-            .map(|input| input.title.clone())
-            .unwrap_or_else(|| safe_capability_title(result.capability_id.as_str()).to_string());
-        let output = output_preview(result.output);
-        let record = CapabilityDisplayPreviewRecord {
-            title,
-            subtitle: input.as_ref().and_then(|input| input.subtitle.clone()),
-            input_summary: input.as_ref().and_then(|input| input.input_summary.clone()),
-            output_summary: output.summary,
-            output_preview: output.preview,
-            output_kind: Some(output.kind),
-            output_bytes: Some(result.output_bytes),
-            result_ref: Some(result.result_ref.to_string()),
-            truncated: input.as_ref().is_some_and(|input| input.truncated) || output.truncated,
-        };
-        if let Ok(mut completed) = self.completed.lock() {
-            let invocation_id = result.invocation_id.to_string();
-            completed
-                .by_invocation
-                .insert(invocation_id.clone(), record);
-            completed
-                .invocations_by_run
-                .entry(result.run_id.to_string())
-                .or_default()
-                .push(invocation_id);
-        }
-    }
-
-    pub(crate) fn prune_run(&self, run_id: &str) {
-        if let Ok(mut pending) = self.pending.lock()
-            && let Some(input_refs) = pending.refs_by_run.remove(run_id)
-        {
-            for input_ref in input_refs {
-                pending.by_ref.remove(&input_ref);
-            }
-        }
-        if let Ok(mut completed) = self.completed.lock()
-            && let Some(invocation_ids) = completed.invocations_by_run.remove(run_id)
-        {
-            for invocation_id in invocation_ids {
-                completed.by_invocation.remove(&invocation_id);
-            }
-        }
-    }
-
-    pub(crate) fn record_for_invocation(
-        &self,
-        invocation_id: InvocationId,
-    ) -> Option<CapabilityDisplayPreviewRecord> {
-        self.completed.lock().ok().and_then(|completed| {
-            completed
-                .by_invocation
-                .get(&invocation_id.to_string())
-                .cloned()
-        })
-    }
-}
-
-#[async_trait]
-impl CapabilityDisplayPreviewSource for CapabilityDisplayPreviewStore {
-    async fn preview(
-        &self,
-        activity: &CapabilityActivityProjection,
-    ) -> Result<Option<CapabilityDisplayPreviewView>, ProductAdapterError> {
-        capability_display_preview_from_store(self, activity)
-    }
 }
 
 impl RebornProjectionServices {
@@ -314,49 +149,38 @@ impl ProjectionStream for WebuiRuntimeProjectionStream {
             .await
             .map_err(map_event_stream_error)?;
 
-        let resumes_runtime_item = origin_cursor.runtime_payloads_delivered > 0;
+        let is_resuming_runtime_payloads = origin_cursor.runtime_payloads_delivered > 0;
         let mut batch = WebuiProjectionBatch::new(origin_cursor);
         if let Some(item) = subscription.next().await
             && batch
                 .push_runtime_item(item, &request.scope, self.display_previews.as_ref())
                 .await?
-            && !resumes_runtime_item
+            && !is_resuming_runtime_payloads
         {
-            for _ in 1..WEBUI_PROJECTION_PAGE_LIMIT {
-                if !batch.has_runtime_payload_capacity() {
-                    break;
-                }
-                let Some(item) = subscription.try_next_buffered() else {
-                    break;
-                };
-                if !batch
-                    .push_runtime_item(item, &request.scope, self.display_previews.as_ref())
-                    .await?
-                {
-                    break;
-                }
-            }
+            consume_buffered_runtime_items(
+                &mut subscription,
+                &mut batch,
+                &request.scope,
+                self.display_previews.as_ref(),
+            )
+            .await?;
         }
 
-        if batch.runtime_payloads_pushed == 0 && !resumes_runtime_item {
-            for _ in 0..WEBUI_PROJECTION_PAGE_LIMIT {
-                if !batch.has_runtime_payload_capacity() {
-                    break;
-                }
-                let Some(item) = subscription.try_next_buffered() else {
-                    break;
-                };
-                if !batch
-                    .push_runtime_item(item, &request.scope, self.display_previews.as_ref())
-                    .await?
-                {
-                    break;
-                }
-            }
+        if batch.runtime_payloads_pushed == 0 && !is_resuming_runtime_payloads {
+            consume_buffered_runtime_items(
+                &mut subscription,
+                &mut batch,
+                &request.scope,
+                self.display_previews.as_ref(),
+            )
+            .await?;
         }
 
         let turn_after = batch.cursor().turn.clone();
-        let turn_drain = self.turn_events.drain(&request.scope, turn_after).await?;
+        let turn_drain = self
+            .turn_events
+            .drain(&request.actor.user_id, &request.scope, turn_after)
+            .await?;
         for TurnEventPayload {
             cursor: turn_cursor,
             payload,
@@ -383,6 +207,29 @@ impl ProjectionStream for WebuiRuntimeProjectionStream {
             })
             .collect()
     }
+}
+
+async fn consume_buffered_runtime_items(
+    subscription: &mut EventProjectionSubscription,
+    batch: &mut WebuiProjectionBatch,
+    scope: &TurnScope,
+    display_previews: &dyn CapabilityDisplayPreviewSource,
+) -> Result<(), ProductAdapterError> {
+    for _ in 0..WEBUI_PROJECTION_PAGE_LIMIT {
+        if !batch.has_runtime_payload_capacity() {
+            break;
+        }
+        let Some(item) = subscription.try_next_buffered() else {
+            break;
+        };
+        if !batch
+            .push_runtime_item(item, scope, display_previews)
+            .await?
+        {
+            break;
+        }
+    }
+    Ok(())
 }
 
 struct WebuiProjectionBatch {
@@ -747,10 +594,12 @@ struct RuntimePayloadItem {
 
 type RuntimePayloadItemResult = Result<Option<RuntimePayloadItem>, ProductAdapterError>;
 
-enum RuntimePayloadCandidate {
-    State { runs: Vec<RunStatusProjection> },
-    CapabilityActivity(CapabilityActivityProjection),
-    CapabilityDisplayPreview(CapabilityActivityProjection),
+#[cfg(test)]
+struct RuntimePayloadItemInput {
+    runs: Vec<RunStatusProjection>,
+    capability_activities: Vec<CapabilityActivityProjection>,
+    cursor: EventProjectionCursor,
+    state_kind: StatePayloadKind,
 }
 
 #[derive(Clone, Copy)]
@@ -759,42 +608,58 @@ enum StatePayloadKind {
     Update,
 }
 
-fn snapshot_payload_candidates(snapshot: ProjectionSnapshot) -> Vec<RuntimePayloadCandidate> {
-    runtime_payload_candidates(
-        snapshot.runs,
-        snapshot.capability_activities,
-        WEBUI_RUNTIME_ITEM_MAX_PAYLOADS,
-    )
-}
-
-fn replay_payload_candidates(replay: &ProjectionReplay) -> Vec<RuntimePayloadCandidate> {
-    runtime_payload_candidates(
-        replay.runs.clone(),
-        replay.capability_activities.clone(),
-        WEBUI_RUNTIME_ITEM_MAX_PAYLOADS,
-    )
-}
-
-fn runtime_payload_candidates(
-    runs: Vec<RunStatusProjection>,
-    capability_activities: Vec<CapabilityActivityProjection>,
-    max_payloads: usize,
-) -> Vec<RuntimePayloadCandidate> {
-    let state_payloads = usize::from(!runs.is_empty());
-    let activity_payloads = max_payloads.saturating_sub(state_payloads);
-    let mut candidates = Vec::with_capacity(
-        state_payloads.saturating_add(activity_payloads.min(capability_activities.len())),
-    );
-    if !runs.is_empty() {
-        candidates.push(RuntimePayloadCandidate::State { runs });
+#[cfg(test)]
+async fn runtime_payloads_for_item(
+    scope: &TurnScope,
+    display_previews: &dyn CapabilityDisplayPreviewSource,
+    input: RuntimePayloadItemInput,
+    expected_item: Option<EventCursor>,
+    already_delivered: usize,
+    capacity: usize,
+) -> RuntimePayloadItemResult {
+    let RuntimePayloadItemInput {
+        runs,
+        capability_activities,
+        cursor,
+        state_kind,
+    } = input;
+    let snapshot = ProjectionSnapshot {
+        timeline: ironclaw_event_projections::ThreadTimeline {
+            entries: Vec::new(),
+        },
+        runs,
+        capability_activities,
+        next_cursor: cursor.clone(),
+        truncated: false,
+    };
+    let item_cursor = snapshot_item_cursor(&snapshot, &cursor);
+    let candidates = snapshot_payload_candidates(snapshot);
+    let all_payloads =
+        runtime_payloads_from_candidates(scope, display_previews, candidates, state_kind).await?;
+    if all_payloads.is_empty() {
+        return Ok(None);
     }
-    for activity in capability_activities.into_iter().take(activity_payloads) {
-        candidates.push(RuntimePayloadCandidate::CapabilityActivity(
-            activity.clone(),
-        ));
-        candidates.push(RuntimePayloadCandidate::CapabilityDisplayPreview(activity));
+    let total = all_payloads.len();
+    let already_delivered =
+        effective_runtime_payload_offset(already_delivered, expected_item, item_cursor.runtime);
+    if already_delivered > 0 && already_delivered >= total {
+        return Err(ProductAdapterError::InvalidIdentifier {
+            kind: "projection_cursor",
+            reason: "runtime delivery offset exceeds runtime item payload count".to_string(),
+        });
     }
-    candidates
+    let payloads = all_payloads
+        .into_iter()
+        .skip(already_delivered)
+        .take(capacity)
+        .collect();
+    Ok(Some(RuntimePayloadItem {
+        final_cursor: cursor,
+        item_cursor,
+        payloads,
+        total,
+        already_delivered,
+    }))
 }
 
 async fn runtime_payloads_from_candidates(
@@ -803,15 +668,16 @@ async fn runtime_payloads_from_candidates(
     candidates: Vec<RuntimePayloadCandidate>,
     state_kind: StatePayloadKind,
 ) -> Result<Vec<ProductOutboundPayload>, ProductAdapterError> {
-    let mut payloads = Vec::with_capacity(candidates.len());
-    for candidate in candidates {
-        if let Some(payload) =
-            runtime_payload_from_candidate(scope, display_previews, candidate, state_kind).await?
-        {
-            payloads.push(payload);
-        }
-    }
-    Ok(payloads)
+    stream::iter(candidates)
+        .map(|candidate| {
+            runtime_payload_from_candidate(scope, display_previews, candidate, state_kind)
+        })
+        .buffered(16)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .filter_map(Result::transpose)
+        .collect()
 }
 
 async fn runtime_payload_from_candidate(
@@ -851,373 +717,6 @@ async fn runtime_payload_from_candidate(
             .await
             .map(|preview| preview.map(ProductOutboundPayload::CapabilityDisplayPreview)),
     }
-}
-
-fn capability_display_preview_from_store(
-    store: &CapabilityDisplayPreviewStore,
-    activity: &CapabilityActivityProjection,
-) -> Result<Option<CapabilityDisplayPreviewView>, ProductAdapterError> {
-    if !matches!(
-        activity.status,
-        CapabilityActivityStatus::Completed
-            | CapabilityActivityStatus::Failed
-            | CapabilityActivityStatus::Killed
-    ) {
-        return Ok(None);
-    }
-    let Some(record) = store.record_for_invocation(activity.invocation_id) else {
-        return failed_capability_display_preview(activity);
-    };
-    CapabilityDisplayPreviewView::new(CapabilityDisplayPreviewViewInput {
-        invocation_id: activity.invocation_id,
-        thread_id: activity.thread_id.clone(),
-        capability_id: activity.capability_id.clone(),
-        status: capability_activity_status_wire(activity.status),
-        title: record.title,
-        subtitle: record.subtitle,
-        input_summary: record.input_summary,
-        output_summary: record.output_summary,
-        output_preview: record.output_preview,
-        output_kind: record.output_kind,
-        output_bytes: activity.output_bytes.or(record.output_bytes),
-        result_ref: record.result_ref,
-        truncated: record.truncated,
-        updated_at: activity.updated_at,
-    })
-    .map(Some)
-}
-
-fn failed_capability_display_preview(
-    activity: &CapabilityActivityProjection,
-) -> Result<Option<CapabilityDisplayPreviewView>, ProductAdapterError> {
-    if !matches!(
-        activity.status,
-        CapabilityActivityStatus::Failed | CapabilityActivityStatus::Killed
-    ) {
-        return Ok(None);
-    }
-    let summary = activity
-        .error_kind
-        .as_deref()
-        .map(|kind| format!("tool failed: {}", sanitize_text(kind)))
-        .unwrap_or_else(|| "tool failed".to_string());
-    CapabilityDisplayPreviewView::new(CapabilityDisplayPreviewViewInput {
-        invocation_id: activity.invocation_id,
-        thread_id: activity.thread_id.clone(),
-        capability_id: activity.capability_id.clone(),
-        status: capability_activity_status_wire(activity.status),
-        title: bounded_display_text(safe_capability_title(activity.capability_id.as_str()), 2048)
-            .text,
-        subtitle: None,
-        input_summary: None,
-        output_summary: Some(summary.clone()),
-        output_preview: Some(summary),
-        output_kind: Some("text".to_string()),
-        output_bytes: activity.output_bytes,
-        result_ref: None,
-        truncated: false,
-        updated_at: activity.updated_at,
-    })
-    .map(Some)
-}
-
-#[derive(Debug, Clone)]
-struct OutputPreview {
-    summary: Option<String>,
-    preview: Option<String>,
-    kind: String,
-    truncated: bool,
-}
-
-fn output_preview(value: &serde_json::Value) -> OutputPreview {
-    let (kind, text, json_truncated) = if let Some(text) = value.as_str() {
-        ("text", text.to_string(), false)
-    } else if let Some(text) = value
-        .get("content")
-        .or_else(|| value.get("text"))
-        .or_else(|| value.get("stdout"))
-        .and_then(serde_json::Value::as_str)
-    {
-        ("text", text.to_string(), false)
-    } else {
-        let safe_value = sanitize_json_value_with_truncation(value);
-        (
-            "json",
-            serde_json::to_string_pretty(&safe_value.value).unwrap_or_else(|_| "{}".to_string()),
-            safe_value.truncated,
-        )
-    };
-    let preview = bounded_preview_text(&text);
-    let summary = bounded_display_text(
-        match kind {
-            "text" => "text output",
-            _ => "json output",
-        },
-        2048,
-    );
-    OutputPreview {
-        summary: non_empty(summary.text),
-        preview: non_empty(preview.text),
-        kind: kind.to_string(),
-        truncated: summary.truncated || preview.truncated || json_truncated,
-    }
-}
-
-#[derive(Debug, Clone)]
-struct DisplayText {
-    text: String,
-    truncated: bool,
-}
-
-fn input_summary(capability_id: &str, value: &serde_json::Value) -> Option<DisplayText> {
-    if (capability_id == "read_file"
-        || capability_id == "builtin.read_file"
-        || capability_id.ends_with(".read_file"))
-        && let Some(path) = safe_path_subtitle(value)
-    {
-        let mut summary = format!("path: {path}");
-        if let Some(max_bytes) = value.get("max_bytes").and_then(serde_json::Value::as_u64) {
-            summary.push_str(&format!("\nmax_bytes: {max_bytes}"));
-        }
-        return Some(bounded_display_text(&summary, 2048));
-    }
-    let safe_value = sanitize_json_value_with_truncation(value);
-    serde_json::to_string_pretty(&safe_value.value)
-        .ok()
-        .map(|text| {
-            let mut summary = bounded_display_text(&text, 2048);
-            summary.truncated |= safe_value.truncated;
-            summary
-        })
-}
-
-fn safe_capability_title(capability_id: &str) -> &str {
-    capability_id
-        .rsplit_once('.')
-        .map(|(_, suffix)| suffix)
-        .unwrap_or(capability_id)
-}
-
-fn safe_path_subtitle(value: &serde_json::Value) -> Option<String> {
-    let path = value
-        .get("path")
-        .or_else(|| value.get("file_path"))
-        .or_else(|| value.get("target"))?
-        .as_str()?;
-    safe_display_path(path)
-}
-
-fn safe_display_path(path: &str) -> Option<String> {
-    if path.is_empty()
-        || path.starts_with('/')
-        || path.starts_with('~')
-        || path.contains("..")
-        || path.contains('\\')
-        || path.chars().any(char::is_control)
-    {
-        return None;
-    }
-    Some(bounded_display_text(path, 2048).text)
-}
-
-#[derive(Debug, Clone)]
-struct SanitizedJson {
-    value: serde_json::Value,
-    truncated: bool,
-}
-
-#[cfg(test)]
-fn sanitize_json_value(value: &serde_json::Value) -> serde_json::Value {
-    sanitize_json_value_with_truncation(value).value
-}
-
-fn sanitize_json_value_with_truncation(value: &serde_json::Value) -> SanitizedJson {
-    sanitize_json_value_at_depth(value, SANITIZE_JSON_MAX_DEPTH)
-}
-
-fn sanitize_json_value_at_depth(
-    value: &serde_json::Value,
-    remaining_depth: usize,
-) -> SanitizedJson {
-    if remaining_depth == 0 {
-        return SanitizedJson {
-            value: serde_json::Value::String("[truncated]".to_string()),
-            truncated: true,
-        };
-    }
-    match value {
-        serde_json::Value::Object(map) => {
-            let mut truncated = false;
-            let value = serde_json::Value::Object(
-                map.iter()
-                    .map(|(key, value)| {
-                        let sanitized = if is_sensitive_key(key) {
-                            serde_json::Value::String("[redacted]".to_string())
-                        } else {
-                            let sanitized =
-                                sanitize_json_value_at_depth(value, remaining_depth - 1);
-                            truncated |= sanitized.truncated;
-                            sanitized.value
-                        };
-                        (key.clone(), sanitized)
-                    })
-                    .collect(),
-            );
-            SanitizedJson { value, truncated }
-        }
-        serde_json::Value::Array(values) => {
-            let mut truncated = false;
-            let value = serde_json::Value::Array(
-                values
-                    .iter()
-                    .map(|value| {
-                        let sanitized = sanitize_json_value_at_depth(value, remaining_depth - 1);
-                        truncated |= sanitized.truncated;
-                        sanitized.value
-                    })
-                    .collect(),
-            );
-            SanitizedJson { value, truncated }
-        }
-        serde_json::Value::String(value) => SanitizedJson {
-            value: serde_json::Value::String(sanitize_text(value)),
-            truncated: false,
-        },
-        other => SanitizedJson {
-            value: other.clone(),
-            truncated: false,
-        },
-    }
-}
-
-fn is_sensitive_key(key: &str) -> bool {
-    let key = key.to_ascii_lowercase();
-    // Display previews bias toward over-redaction; benign counters like max_tokens can be hidden.
-    key.contains("secret")
-        || key.contains("password")
-        || key.contains("token")
-        || key.contains("credential")
-        || key.contains("api_key")
-        || key == "key"
-}
-
-fn bounded_display_text(text: &str, max_bytes: usize) -> DisplayText {
-    let sanitized = sanitize_text(text);
-    truncate_bytes(&sanitized, max_bytes)
-}
-
-fn bounded_preview_text(text: &str) -> DisplayText {
-    let mut sanitized = sanitize_text(text);
-    let mut truncated = false;
-    let mut line_count = 0usize;
-    let mut end = sanitized.len();
-    // Keep in sync with ironclaw_product_adapters display-preview validator limits.
-    for (index, _) in sanitized.match_indices('\n') {
-        line_count += 1;
-        if line_count >= 120 {
-            end = index;
-            truncated = true;
-            break;
-        }
-    }
-    if truncated {
-        sanitized.truncate(end);
-    }
-    let mut bounded = truncate_bytes(&sanitized, 16 * 1024);
-    bounded.truncated |= truncated;
-    bounded
-}
-
-fn non_empty(text: String) -> Option<String> {
-    if text.is_empty() { None } else { Some(text) }
-}
-
-fn truncate_bytes(text: &str, max_bytes: usize) -> DisplayText {
-    if text.len() <= max_bytes {
-        return DisplayText {
-            text: text.to_string(),
-            truncated: false,
-        };
-    }
-    let mut end = max_bytes;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    DisplayText {
-        text: text[..end].to_string(),
-        truncated: true,
-    }
-}
-
-fn sanitize_text(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for token in text.split_inclusive(char::is_whitespace) {
-        let trimmed = token.trim_end();
-        let suffix = &token[trimmed.len()..];
-        if is_secret_like(trimmed) || is_unsafe_path_like(trimmed) {
-            out.push_str("[redacted]");
-            push_safe_text(&mut out, suffix);
-        } else {
-            push_safe_text(&mut out, token);
-        }
-    }
-    out
-}
-
-fn push_safe_text(out: &mut String, text: &str) {
-    out.extend(
-        text.chars().filter(|character| {
-            *character == '\n' || *character == '\t' || !character.is_control()
-        }),
-    );
-}
-
-fn is_secret_like(token: &str) -> bool {
-    let lower = token
-        .trim_matches(token_boundary_punctuation)
-        .to_ascii_lowercase();
-    lower.starts_with("sk-")
-        || lower.contains("api_key=")
-        || lower.contains("api_key:")
-        || lower.contains("access_token=")
-        || lower.contains("access_token:")
-        || lower.contains("secret=")
-        || lower.contains("secret:")
-        || lower.contains("password=")
-        || lower.contains("password:")
-        || lower.contains("token=")
-        || lower.contains("token:")
-}
-
-fn is_unsafe_path_like(token: &str) -> bool {
-    let token = token.trim_matches(token_boundary_punctuation);
-    token_contains_absolute_posix_path(token)
-        || token.starts_with("\\\\")
-        || token.contains("\\\\")
-        || token.get(1..3) == Some(":\\")
-}
-
-fn token_contains_absolute_posix_path(token: &str) -> bool {
-    let mut previous = None;
-    let mut characters = token.chars().peekable();
-    while let Some(character) = characters.next() {
-        if character == '/'
-            && previous.is_none_or(token_boundary_punctuation)
-            && !matches!(previous, Some('/'))
-            && !matches!(characters.peek(), Some('/'))
-        {
-            return true;
-        }
-        previous = Some(character);
-    }
-    false
-}
-
-fn token_boundary_punctuation(character: char) -> bool {
-    matches!(
-        character,
-        '"' | '\'' | '`' | ',' | ';' | ':' | '=' | '(' | ')' | '[' | ']' | '{' | '}'
-    )
 }
 
 fn effective_runtime_payload_offset(
@@ -1273,6 +772,12 @@ fn replay_item_cursor(
         .chain(
             replay
                 .capability_activities
+                .iter()
+                .map(|activity| activity.last_cursor),
+        )
+        .chain(
+            replay
+                .capability_activity_transitions
                 .iter()
                 .map(|activity| activity.last_cursor),
         )

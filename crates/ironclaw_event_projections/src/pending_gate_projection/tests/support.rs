@@ -141,6 +141,7 @@ impl TurnEventProjectionSource for MemoryTurnEventSource {
     async fn read_turn_events_after(
         &self,
         scope: &TurnScope,
+        owner_user_id: Option<&UserId>,
         after: Option<TurnEventCursor>,
         limit: usize,
     ) -> Result<ironclaw_turns::TurnEventPage, ironclaw_turns::TurnError> {
@@ -152,7 +153,11 @@ impl TurnEventProjectionSource for MemoryTurnEventSource {
         let mut entries = self
             .events
             .iter()
-            .filter(|event| &event.scope == scope && event.cursor > after)
+            .filter(|event| {
+                &event.scope == scope
+                    && event.cursor > after
+                    && owner_user_id.is_none_or(|owner| event.owner_user_id.as_ref() == Some(owner))
+            })
             .cloned()
             .collect::<Vec<_>>();
         entries.sort_by_key(|event| event.cursor);
@@ -177,6 +182,7 @@ impl TurnEventProjectionSource for FailingTurnEventSource {
     async fn read_turn_events_after(
         &self,
         _scope: &TurnScope,
+        _owner_user_id: Option<&UserId>,
         _after: Option<TurnEventCursor>,
         _limit: usize,
     ) -> Result<ironclaw_turns::TurnEventPage, ironclaw_turns::TurnError> {
@@ -193,6 +199,7 @@ impl TurnEventProjectionSource for RebaseTurnEventSource {
     async fn read_turn_events_after(
         &self,
         _scope: &TurnScope,
+        _owner_user_id: Option<&UserId>,
         _after: Option<TurnEventCursor>,
         _limit: usize,
     ) -> Result<ironclaw_turns::TurnEventPage, ironclaw_turns::TurnError> {
