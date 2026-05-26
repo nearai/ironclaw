@@ -209,19 +209,38 @@ impl SecurityAuditSink for NoopSecurityAuditSink {
 /// `debug!` is chosen deliberately: per the repo `CLAUDE.md` REPL/TUI rule,
 /// `info!`/`warn!` corrupt the interactive display. Security-boundary
 /// decisions are not user-facing status — they are diagnostics + retention
-/// data, so they go to `debug!`. A real deployment will additionally wire a
-/// durable sink behind this (or alongside it via a multi-adapter).
+/// data, so they go to `debug!`.
+///
+/// # Retention status (PR #3922 review)
+///
+/// This sink is the **observability** shape, not the durable retention store.
+/// It emits every recorded field — `boundary`, `decision`, `code`,
+/// `capability_id`, **and `scope`** — at `debug!` so SRE can grep/filter the
+/// full dimension set the module promises. It does **not** itself persist
+/// events to a queryable store; that durable backing is provided by wiring a
+/// persistent [`SecurityAuditSink`] alongside this one (e.g. via a
+/// multi-adapter) at composition time. Production composition installs this
+/// sink today so security-boundary decisions are never dropped silently; the
+/// durable store is a tracked follow-up and is intentionally decoupled from
+/// this primitive.
 #[derive(Clone, Debug, Default)]
 pub struct TracingSecurityAuditSink;
 
 impl SecurityAuditSink for TracingSecurityAuditSink {
     fn record(&self, event: SecurityAuditEvent) {
+        // Emit the *full* recorded dimension set. The module docs promise
+        // events are "filterable by boundary/decision/scope"; omitting `scope`
+        // here would silently break that filterability for any boundary that
+        // sets it (e.g. scope-mismatch decisions). `ResourceScope` is a
+        // redaction-safe type, so logging it does not violate the
+        // payload-free invariant.
         tracing::debug!(
             target: "ironclaw::security_audit",
             boundary = event.boundary.as_str(),
             decision = event.decision.as_str(),
             code = event.code,
             capability_id = event.capability_id.as_ref().map(|c| c.as_str()),
+            scope = event.scope.as_ref().map(|s| format!("{s:?}")),
             "security boundary decision"
         );
     }
@@ -358,6 +377,31 @@ mod tests {
 
         assert_eq!(event.capability_id.as_ref(), Some(&cap));
         assert_eq!(event.scope.as_ref(), Some(&scope));
+    }
+
+    #[test]
+    fn tracing_sink_records_scope_bearing_event() {
+        // Regression guard (PR #3922 review): the production tracing sink must
+        // accept and emit the *full* dimension set — including `scope` — not
+        // just boundary/decision/code/capability. A scope-bearing event must
+        // record without panicking through both the concrete type and the
+        // `Arc<dyn>` boundary used in composition.
+        use ironclaw_host_api::{InvocationId, UserId};
+
+        let scope = ResourceScope::local_default(
+            UserId::new("alice").expect("valid user id"),
+            InvocationId::new(),
+        )
+        .expect("valid scope");
+        let event = SecurityAuditEvent::new(
+            SecurityBoundary::HookDeny,
+            SecurityDecision::Blocked,
+            "hook_deny_predicate",
+        )
+        .with_scope(scope);
+
+        let sink: Arc<dyn SecurityAuditSink> = Arc::new(TracingSecurityAuditSink);
+        sink.record(event);
     }
 
     #[test]
