@@ -714,6 +714,7 @@ impl SessionThreadService for ScopeMismatchThreadStub {
 enum ScriptedThreadBehavior {
     BackendHistory,
     History(Box<ThreadHistory>),
+    LeakyCrossUserHistory(Box<ThreadHistory>),
     SubmittedReplay { turn_run_id: Option<String> },
 }
 
@@ -733,6 +734,13 @@ impl ScriptedThreadService {
     fn history(history: ThreadHistory) -> Self {
         Self {
             behavior: ScriptedThreadBehavior::History(Box::new(history)),
+            history_requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn leaky_cross_user_history(history: ThreadHistory) -> Self {
+        Self {
+            behavior: ScriptedThreadBehavior::LeakyCrossUserHistory(Box::new(history)),
             history_requests: Mutex::new(Vec::new()),
         }
     }
@@ -763,7 +771,10 @@ impl SessionThreadService for ScriptedThreadService {
             ScriptedThreadBehavior::BackendHistory => Err(SessionThreadError::Backend(
                 "backend detail /host/path secret-token".to_string(),
             )),
-            ScriptedThreadBehavior::History(history) => Ok(history.as_ref().clone()),
+            ScriptedThreadBehavior::History(history)
+            | ScriptedThreadBehavior::LeakyCrossUserHistory(history) => {
+                Ok(history.as_ref().clone())
+            }
             ScriptedThreadBehavior::SubmittedReplay { .. } => Ok(ThreadHistory {
                 thread: SessionThreadRecord {
                     scope: request.scope,
@@ -774,6 +785,39 @@ impl SessionThreadService for ScriptedThreadService {
                 },
                 messages: Vec::new(),
                 summary_artifacts: Vec::new(),
+            }),
+        }
+    }
+
+    async fn read_thread(
+        &self,
+        request: ThreadHistoryRequest,
+    ) -> Result<SessionThreadRecord, SessionThreadError> {
+        match &self.behavior {
+            ScriptedThreadBehavior::BackendHistory => Ok(SessionThreadRecord {
+                scope: request.scope,
+                thread_id: request.thread_id,
+                created_by_actor_id: "user-alpha".to_string(),
+                title: None,
+                metadata_json: None,
+            }),
+            ScriptedThreadBehavior::History(history) => Ok(history.thread.clone()),
+            ScriptedThreadBehavior::LeakyCrossUserHistory(history) => {
+                if request.scope.owner_user_id.as_ref().map(|id| id.as_str()) == Some("user-alpha")
+                {
+                    Ok(history.thread.clone())
+                } else {
+                    Err(SessionThreadError::UnknownThread {
+                        thread_id: request.thread_id,
+                    })
+                }
+            }
+            ScriptedThreadBehavior::SubmittedReplay { .. } => Ok(SessionThreadRecord {
+                scope: request.scope,
+                thread_id: request.thread_id,
+                created_by_actor_id: "user-alpha".to_string(),
+                title: None,
+                metadata_json: None,
             }),
         }
     }
@@ -810,7 +854,9 @@ impl SessionThreadService for ScriptedThreadService {
                     turn_run_id: turn_run_id.clone(),
                 }))
             }
-            ScriptedThreadBehavior::BackendHistory | ScriptedThreadBehavior::History(_) => {
+            ScriptedThreadBehavior::BackendHistory
+            | ScriptedThreadBehavior::History(_)
+            | ScriptedThreadBehavior::LeakyCrossUserHistory(_) => {
                 scripted_stub_unreachable("replay_accepted_inbound_message")
             }
         }
@@ -1775,6 +1821,34 @@ async fn get_timeline_rejects_cross_user_access() {
 
     assert_eq!(err.code, RebornServicesErrorCode::NotFound);
     assert_eq!(err.status_code, 404);
+}
+
+#[tokio::test]
+async fn get_timeline_revalidates_owner_before_loading_history() {
+    let thread_service = Arc::new(ScriptedThreadService::leaky_cross_user_history(
+        fake_thread_history(&caller(), "thread-alpha"),
+    ));
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    let err = services
+        .get_timeline(
+            caller_for_user("user-beta"),
+            RebornTimelineRequest {
+                thread_id: "thread-alpha".to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("metadata probe must block cross-user history load");
+
+    assert_eq!(err.code, RebornServicesErrorCode::NotFound);
+    assert!(
+        thread_service.history_requests().is_empty(),
+        "timeline must not call list_thread_history after the ownership probe rejects"
+    );
 }
 
 #[tokio::test]
@@ -3058,6 +3132,34 @@ async fn get_timeline_rejects_malformed_cursor() {
         )
         .await
         .expect_err("malformed cursor must be rejected");
+
+    assert_eq!(err.code, RebornServicesErrorCode::InvalidRequest);
+    assert_eq!(err.field.as_deref(), Some("cursor"));
+    assert_eq!(
+        err.validation_code,
+        Some(WebUiInboundValidationCode::InvalidValue)
+    );
+}
+
+#[tokio::test]
+async fn get_timeline_rejects_oversized_cursor_before_json_parse() {
+    let threads = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(threads, coordinator);
+    let alice = caller();
+    setup_owned_thread(&services, alice.clone(), "thread-oversized-cursor").await;
+
+    let err = services
+        .get_timeline(
+            alice,
+            RebornTimelineRequest {
+                thread_id: "thread-oversized-cursor".to_string(),
+                limit: None,
+                cursor: Some("x".repeat(2048)),
+            },
+        )
+        .await
+        .expect_err("oversized cursor must be rejected");
 
     assert_eq!(err.code, RebornServicesErrorCode::InvalidRequest);
     assert_eq!(err.field.as_deref(), Some("cursor"));

@@ -11,7 +11,8 @@ use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor as TurnEventCursor,
     GateRef, GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
     RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnError,
-    TurnEventKind, TurnEventPage, TurnLifecycleEvent, TurnRunState, TurnStatus,
+    TurnEventKind, TurnEventPage, TurnEventProjectionCursor, TurnLifecycleEvent, TurnRunState,
+    TurnStatus,
 };
 
 #[tokio::test]
@@ -250,6 +251,89 @@ async fn webui_event_stream_rejects_foreign_composite_turn_cursor() {
         error,
         ProductAdapterError::InvalidIdentifier {
             kind: "projection_cursor",
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn turn_event_bridge_maps_foreign_cursor_rebase_to_invalid_identifier() {
+    let tenant_id = TenantId::new("webui-events-tenant").unwrap();
+    let user_id = UserId::new("webui-events-user").unwrap();
+    let agent_id = AgentId::new("webui-events-agent").unwrap();
+    let scope_a = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        ThreadId::new("webui-events-thread-a").unwrap(),
+    );
+    let scope_b = TurnScope::new(
+        tenant_id,
+        Some(agent_id),
+        None,
+        ThreadId::new("webui-events-thread-b").unwrap(),
+    );
+    let run_id = TurnRunId::new();
+    let bridge = super::turn_events::TurnEventBridge::enabled(
+        Arc::new(FakeTurnEventSource { events: Vec::new() }),
+        Arc::new(FakeTurnCoordinator {
+            state: turn_run_state(&scope_b, &user_id, run_id, TurnEventCursor(1)),
+        }),
+    );
+
+    let error = match bridge
+        .drain(
+            &scope_b,
+            Some(TurnEventProjectionCursor::for_scope(
+                scope_a,
+                TurnEventCursor(10),
+            )),
+        )
+        .await
+    {
+        Ok(_) => panic!("foreign turn cursor must be rejected"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        ProductAdapterError::InvalidIdentifier {
+            kind: "projection_cursor",
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn turn_event_bridge_maps_source_error_to_retryable_workflow_rejection() {
+    let tenant_id = TenantId::new("webui-events-tenant").unwrap();
+    let user_id = UserId::new("webui-events-user").unwrap();
+    let agent_id = AgentId::new("webui-events-agent").unwrap();
+    let scope = TurnScope::new(
+        tenant_id,
+        Some(agent_id),
+        None,
+        ThreadId::new("webui-events-thread").unwrap(),
+    );
+    let run_id = TurnRunId::new();
+    let bridge = super::turn_events::TurnEventBridge::enabled(
+        Arc::new(FailingTurnEventSource),
+        Arc::new(FakeTurnCoordinator {
+            state: turn_run_state(&scope, &user_id, run_id, TurnEventCursor(1)),
+        }),
+    );
+
+    let error = match bridge.drain(&scope, None).await {
+        Ok(_) => panic!("source failure must be rejected"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        ProductAdapterError::WorkflowRejected {
+            kind: ProductWorkflowRejectionKind::Unavailable,
+            status_code: 503,
+            retryable: true,
             ..
         }
     ));
@@ -574,6 +658,22 @@ impl TurnEventProjectionSource for FakeTurnEventSource {
             next_cursor,
             truncated,
             rebase_required: None,
+        })
+    }
+}
+
+struct FailingTurnEventSource;
+
+#[async_trait]
+impl TurnEventProjectionSource for FailingTurnEventSource {
+    async fn read_turn_events_after(
+        &self,
+        _scope: &TurnScope,
+        _after: Option<TurnEventCursor>,
+        _limit: usize,
+    ) -> Result<TurnEventPage, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "projection source unavailable".to_string(),
         })
     }
 }

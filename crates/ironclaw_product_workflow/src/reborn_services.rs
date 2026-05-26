@@ -462,8 +462,9 @@ impl RebornServicesApi for RebornServices {
         let actor = caller.actor();
         let limit = clamp_timeline_limit(request.limit);
         let cursor = parse_timeline_cursor(request.cursor.as_deref())?;
-        let scope = caller.turn_scope(thread_id);
-        let thread_scope = thread_scope_from_turn_scope(&scope, Some(actor.user_id.clone()))?;
+        let (scope, thread_scope) = self
+            .resolve_webui_thread_metadata(caller.turn_scope(thread_id), &actor)
+            .await?;
         let history = self
             .thread_service
             .list_thread_history(ThreadHistoryRequest {
@@ -1080,6 +1081,8 @@ pub(crate) const TIMELINE_DEFAULT_PAGE_SIZE: u32 = 100;
 /// issue.
 pub(crate) const TIMELINE_MAX_PAGE_SIZE: u32 = 200;
 
+const TIMELINE_CURSOR_MAX_BYTES: usize = 1024;
+
 /// Hard ceiling on summary artifacts returned per response. Summary
 /// artifacts are typically much smaller than the message transcript so
 /// this cap is generous; it exists to bound the worst case where a
@@ -1109,6 +1112,11 @@ fn parse_timeline_cursor(raw: Option<&str>) -> Result<Option<TimelineCursor>, Re
     };
     if raw.is_empty() {
         return Ok(None);
+    }
+    if raw.len() > TIMELINE_CURSOR_MAX_BYTES {
+        return Err(RebornServicesError::validation(
+            WebUiInboundValidationError::new("cursor", WebUiInboundValidationCode::InvalidValue),
+        ));
     }
     let cursor: TimelineCursor = serde_json::from_str(raw).map_err(|_| {
         RebornServicesError::validation(WebUiInboundValidationError::new(

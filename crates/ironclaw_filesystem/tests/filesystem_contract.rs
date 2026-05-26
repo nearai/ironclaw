@@ -611,6 +611,52 @@ async fn nonexistent_backend_mount_root_fails_without_leaking_host_path() {
     assert!(!display.contains(&missing.display().to_string()));
 }
 
+#[tokio::test]
+async fn local_list_dir_bounded_returns_at_most_max_entries() {
+    let storage = tempdir().unwrap();
+    std::fs::create_dir_all(storage.path().join("project1")).unwrap();
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        std::fs::write(storage.path().join("project1").join(name), b"entry").unwrap();
+    }
+    let root = local_root_with_projects_mount(storage.path());
+
+    let entries = root
+        .list_dir_bounded(&VirtualPath::new("/projects/project1").unwrap(), 2)
+        .await
+        .unwrap();
+
+    assert_eq!(entries.len(), 2);
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry.path.as_str().starts_with("/projects/project1/"))
+    );
+}
+
+#[tokio::test]
+async fn local_list_dir_bounded_propagates_read_dir_errors() {
+    let storage = tempdir().unwrap();
+    std::fs::create_dir_all(storage.path().join("project1")).unwrap();
+    std::fs::write(storage.path().join("project1/not-a-dir.txt"), b"entry").unwrap();
+    let root = local_root_with_projects_mount(storage.path());
+
+    let err = root
+        .list_dir_bounded(
+            &VirtualPath::new("/projects/project1/not-a-dir.txt").unwrap(),
+            1,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        FilesystemError::Backend {
+            operation: FilesystemOperation::ListDir,
+            ..
+        }
+    ));
+}
+
 #[test]
 fn invalid_scoped_paths_are_rejected_before_filesystem_access() {
     for invalid in [

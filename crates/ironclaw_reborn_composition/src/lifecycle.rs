@@ -235,7 +235,10 @@ fn map_skill_error(error: SkillManagementError) -> ProductWorkflowError {
         | SkillManagementErrorKind::NotFound
         | SkillManagementErrorKind::Conflict
         | SkillManagementErrorKind::InvalidSkill => ProductWorkflowError::InvalidBindingRequest {
-            reason: "skill management request rejected".to_string(),
+            reason: error
+                .reason()
+                .unwrap_or("skill management request rejected")
+                .to_string(),
         },
         SkillManagementErrorKind::FilesystemDenied => ProductWorkflowError::BindingAccessDenied,
         SkillManagementErrorKind::Resource => ProductWorkflowError::Transient {

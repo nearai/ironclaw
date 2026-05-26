@@ -29,15 +29,27 @@ pub enum SkillManagementErrorKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillManagementError {
     kind: SkillManagementErrorKind,
+    reason: Option<String>,
 }
 
 impl SkillManagementError {
     pub fn new(kind: SkillManagementErrorKind) -> Self {
-        Self { kind }
+        Self { kind, reason: None }
+    }
+
+    pub fn with_reason(kind: SkillManagementErrorKind, reason: impl Into<String>) -> Self {
+        Self {
+            kind,
+            reason: Some(reason.into()),
+        }
     }
 
     pub fn kind(&self) -> SkillManagementErrorKind {
         self.kind
+    }
+
+    pub fn reason(&self) -> Option<&str> {
+        self.reason.as_deref()
     }
 }
 
@@ -200,9 +212,12 @@ pub async fn install_skill(
     }
 
     let normalized = normalize_line_endings(request.content);
-    let parsed = parse_skill_md(&normalized).map_err(|_| {
-        tracing::debug!("skill install failed to parse SKILL.md content");
-        SkillManagementError::new(SkillManagementErrorKind::InvalidInput)
+    let parsed = parse_skill_md(&normalized).map_err(|error| {
+        tracing::debug!(%error, "skill install failed to parse SKILL.md content");
+        SkillManagementError::with_reason(
+            SkillManagementErrorKind::InvalidInput,
+            format!("skill content failed to parse: {error}"),
+        )
     })?;
     if let Some(requested_name) = request.name
         && requested_name != parsed.manifest.name
@@ -449,8 +464,12 @@ async fn list_skill_root_entries_with(
     scoped_root: &str,
     max_entries: Option<usize>,
 ) -> Result<Vec<DirEntry>, SkillManagementError> {
-    let root = ScopedPath::new(scoped_root)
-        .map_err(|_| SkillManagementError::new(SkillManagementErrorKind::InvalidInput))?;
+    let root = ScopedPath::new(scoped_root).map_err(|error| {
+        SkillManagementError::with_reason(
+            SkillManagementErrorKind::InvalidInput,
+            format!("invalid skill root path: {error}"),
+        )
+    })?;
     let result = match max_entries {
         Some(max_entries) => {
             context
@@ -492,12 +511,16 @@ async fn read_skill_summary(
     let Some(content) = read_skill_file(context, path).await? else {
         return Ok(None);
     };
-    let parsed = parse_skill_md(&content).map_err(|_| {
+    let parsed = parse_skill_md(&content).map_err(|error| {
         tracing::debug!(
             scoped_path = %path,
+            %error,
             "skill management failed to parse skill summary"
         );
-        SkillManagementError::new(SkillManagementErrorKind::InvalidSkill)
+        SkillManagementError::with_reason(
+            SkillManagementErrorKind::InvalidSkill,
+            format!("skill summary failed to parse: {error}"),
+        )
     })?;
     tracing::debug!(
         scoped_path = %path,
@@ -542,8 +565,12 @@ fn skill_scoped_path(
     } else {
         format!("{}/{}/{}", root.trim_end_matches('/'), name, file_name)
     };
-    ScopedPath::new(path)
-        .map_err(|_| SkillManagementError::new(SkillManagementErrorKind::InvalidInput))
+    ScopedPath::new(path).map_err(|error| {
+        SkillManagementError::with_reason(
+            SkillManagementErrorKind::InvalidInput,
+            format!("invalid skill path: {error}"),
+        )
+    })
 }
 
 async fn stat_optional(
@@ -722,6 +749,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn install_preserves_parse_error_context() {
+        let filesystem = Arc::new(InMemoryBackend::default());
+        let context = skill_management_context(filesystem, skill_mounts());
+
+        let error = install_skill(
+            &context,
+            SkillInstallRequest {
+                name: None,
+                content: "---\nname: broken\ndescription: [\n---\nPROMPT",
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.kind(), SkillManagementErrorKind::InvalidInput);
+        assert!(
+            error
+                .reason()
+                .expect("parse failure should carry context")
+                .contains("skill content failed to parse")
+        );
+    }
+
+    #[tokio::test]
     async fn list_treats_unmounted_optional_skill_root_as_empty() {
         let filesystem = Arc::new(InMemoryBackend::default());
         write_file(
@@ -793,6 +844,55 @@ mod tests {
 
         assert!(result.skills.is_empty());
         assert!(result.truncated);
+    }
+
+    #[tokio::test]
+    async fn search_skills_empty_query_returns_all_matching_skills() {
+        let filesystem = Arc::new(InMemoryBackend::default());
+        for name in ["alpha-helper", "beta-helper"] {
+            write_file(
+                filesystem.as_ref(),
+                &format!("/projects/skills/{name}/SKILL.md"),
+                skill_md(name, "shared search description", "PROMPT"),
+            )
+            .await;
+        }
+        let context = skill_management_context(filesystem, skill_mounts());
+
+        let result = search_skills(
+            &context,
+            SkillSearchRequest {
+                query: "",
+                limit: 10,
+            },
+        )
+        .await
+        .unwrap();
+
+        let names = result
+            .skills
+            .iter()
+            .map(|skill| skill.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["alpha-helper", "beta-helper"]);
+        assert!(!result.truncated);
+    }
+
+    #[tokio::test]
+    async fn search_skills_propagates_filesystem_error() {
+        let context = skill_management_context(Arc::new(FailingListBackend), skill_mounts());
+
+        let error = search_skills(
+            &context,
+            SkillSearchRequest {
+                query: "",
+                limit: 10,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.kind(), SkillManagementErrorKind::InvalidSkill);
     }
 
     #[tokio::test]
@@ -881,14 +981,49 @@ mod tests {
     }
 
     fn skill_management_context(
-        filesystem: Arc<InMemoryBackend>,
+        filesystem: Arc<dyn RootFilesystem>,
         mounts: MountView,
     ) -> SkillManagementContext {
-        let filesystem: Arc<dyn RootFilesystem> = filesystem;
         SkillManagementContext::new(filesystem, mounts, ResourceScope::system())
     }
 
     fn skill_md(name: &str, description: &str, prompt: &str) -> String {
         format!("---\nname: {name}\ndescription: {description}\n---\n{prompt}\n")
+    }
+
+    struct FailingListBackend;
+
+    #[async_trait::async_trait]
+    impl RootFilesystem for FailingListBackend {
+        async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+            Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::ListDir,
+                reason: "list failed".to_string(),
+            })
+        }
+
+        async fn list_dir_bounded(
+            &self,
+            path: &VirtualPath,
+            _max_entries: usize,
+        ) -> Result<Vec<DirEntry>, FilesystemError> {
+            Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::ListDir,
+                reason: "bounded list failed".to_string(),
+            })
+        }
+
+        async fn stat(
+            &self,
+            path: &VirtualPath,
+        ) -> Result<ironclaw_filesystem::FileStat, FilesystemError> {
+            Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::Stat,
+                reason: "stat failed".to_string(),
+            })
+        }
     }
 }

@@ -294,33 +294,7 @@ impl RootFilesystem for LocalFilesystem {
     }
 
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-        let resolved = self
-            .resolve_existing(path, FilesystemOperation::ListDir)
-            .await?;
-        let mut read_dir = tokio::fs::read_dir(resolved)
-            .await
-            .map_err(|error| io_error(path.clone(), FilesystemOperation::ListDir, error))?;
-        let mut entries = Vec::new();
-        while let Some(entry) = read_dir
-            .next_entry()
-            .await
-            .map_err(|error| io_error(path.clone(), FilesystemOperation::ListDir, error))?
-        {
-            let name = entry.file_name().to_string_lossy().to_string();
-            let entry_path =
-                VirtualPath::new(format!("{}/{}", path.as_str().trim_end_matches('/'), name))?;
-            let metadata = entry
-                .metadata()
-                .await
-                .map_err(|error| io_error(entry_path.clone(), FilesystemOperation::Stat, error))?;
-            entries.push(DirEntry {
-                name,
-                path: entry_path,
-                file_type: file_type_from_metadata(&metadata),
-            });
-        }
-        entries.sort_by(|left, right| left.name.cmp(&right.name));
-        Ok(entries)
+        self.list_dir_bounded(path, usize::MAX).await
     }
 
     async fn list_dir_bounded(

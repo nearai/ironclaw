@@ -294,24 +294,28 @@ fn extension_package_command(
 
 fn lifecycle_ref_argument(payload: &InboundCommandPayload) -> Result<String, String> {
     let args = payload.arguments.trim();
-    match serde_json::from_str::<Value>(args) {
-        Ok(json) => json
-            .get("id")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .ok_or_else(|| format!("{}.id is required", payload.command)),
-        Err(_) => Ok(first_argument(args).to_string()),
-    }
+    json_or_whitespace_field(args, &["id"], || {
+        format!("{}.id is required", payload.command)
+    })
 }
 
 fn skill_remove_ref_argument(args: &str) -> Result<String, String> {
+    json_or_whitespace_field(args, &["id", "name"], || {
+        "skill_remove.id or skill_remove.name is required".to_string()
+    })
+}
+
+fn json_or_whitespace_field(
+    args: &str,
+    keys: &[&str],
+    missing_message: impl FnOnce() -> String,
+) -> Result<String, String> {
     match serde_json::from_str::<Value>(args) {
-        Ok(json) => json
-            .get("id")
-            .or_else(|| json.get("name"))
-            .and_then(Value::as_str)
+        Ok(json) => keys
+            .iter()
+            .find_map(|key| json.get(*key).and_then(Value::as_str))
             .map(str::to_string)
-            .ok_or_else(|| "skill_remove.id or skill_remove.name is required".to_string()),
+            .ok_or_else(missing_message),
         Err(_) => Ok(first_argument(args).to_string()),
     }
 }
