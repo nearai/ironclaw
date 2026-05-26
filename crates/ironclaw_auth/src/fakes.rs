@@ -382,16 +382,14 @@ impl CredentialAccountService for InMemoryAuthProductServices {
         accounts.sort_by_key(|account| account.id);
 
         if accounts.is_empty() {
-            return Ok(CredentialRecoveryProjection {
-                provider: request.provider,
-                kind: CredentialRecoveryKind::SetupRequired,
-                reason: CredentialRecoveryReason::NoAccount,
-                selected_account: None,
-                choices: Vec::new(),
-            });
+            return Ok(CredentialRecoveryProjection::setup_required(
+                request.provider,
+                CredentialRecoveryReason::NoAccount,
+                Vec::new(),
+            ));
         }
 
-        let mut authorized = accounts
+        let authorized = accounts
             .iter()
             .copied()
             .filter(|account| {
@@ -399,15 +397,12 @@ impl CredentialAccountService for InMemoryAuthProductServices {
             })
             .collect::<Vec<_>>();
         if authorized.is_empty() {
-            return Ok(CredentialRecoveryProjection {
-                provider: request.provider,
-                kind: CredentialRecoveryKind::SetupRequired,
-                reason: CredentialRecoveryReason::NoAuthorizedAccount,
-                selected_account: None,
-                choices: Vec::new(),
-            });
+            return Ok(CredentialRecoveryProjection::setup_required(
+                request.provider,
+                CredentialRecoveryReason::NoAuthorizedAccount,
+                Vec::new(),
+            ));
         }
-        authorized.sort_by_key(|account| account.id);
 
         let configured = authorized
             .iter()
@@ -416,40 +411,31 @@ impl CredentialAccountService for InMemoryAuthProductServices {
             .collect::<Vec<_>>();
         match configured.as_slice() {
             [account] => {
-                return Ok(CredentialRecoveryProjection {
-                    provider: request.provider,
-                    kind: CredentialRecoveryKind::Configured,
-                    reason: CredentialRecoveryReason::Configured,
-                    selected_account: Some(account.projection()),
-                    choices: Vec::new(),
-                });
+                return Ok(CredentialRecoveryProjection::configured(
+                    request.provider,
+                    account.projection(),
+                ));
             }
             [_, ..] => {
-                return Ok(CredentialRecoveryProjection {
-                    provider: request.provider,
-                    kind: CredentialRecoveryKind::AccountSelectionRequired,
-                    reason: CredentialRecoveryReason::AmbiguousAccount,
-                    selected_account: None,
-                    choices: configured
+                return Ok(CredentialRecoveryProjection::account_selection_required(
+                    request.provider,
+                    configured
                         .iter()
                         .map(|account| account.projection())
                         .collect(),
-                });
+                ));
             }
             [] => {}
         }
 
         if authorized.len() > 1 {
-            return Ok(CredentialRecoveryProjection {
-                provider: request.provider,
-                kind: CredentialRecoveryKind::AccountSelectionRequired,
-                reason: CredentialRecoveryReason::AmbiguousAccount,
-                selected_account: None,
-                choices: authorized
+            return Ok(CredentialRecoveryProjection::account_selection_required(
+                request.provider,
+                authorized
                     .iter()
                     .map(|account| account.projection())
                     .collect(),
-            });
+            ));
         }
 
         Ok(recovery_projection_for_single_account(
@@ -991,19 +977,25 @@ fn recovery_projection_for_single_account(
             CredentialRecoveryReason::AccountRevoked,
         ),
     };
-    let selected_account =
-        (kind == CredentialRecoveryKind::Configured).then(|| account.projection());
-    let choices = if kind == CredentialRecoveryKind::Configured {
-        Vec::new()
-    } else {
-        vec![account.projection()]
-    };
-    CredentialRecoveryProjection {
-        provider,
-        kind,
-        reason,
-        selected_account,
-        choices,
+    match kind {
+        CredentialRecoveryKind::Configured => {
+            CredentialRecoveryProjection::configured(provider, account.projection())
+        }
+        CredentialRecoveryKind::SetupRequired => CredentialRecoveryProjection::setup_required(
+            provider,
+            reason,
+            vec![account.projection()],
+        ),
+        CredentialRecoveryKind::ReauthorizeRequired => {
+            CredentialRecoveryProjection::reauthorize_required(
+                provider,
+                reason,
+                vec![account.projection()],
+            )
+        }
+        CredentialRecoveryKind::AccountSelectionRequired => {
+            unreachable!("single account recovery cannot produce account selection required")
+        }
     }
 }
 
