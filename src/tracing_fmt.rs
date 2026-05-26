@@ -12,7 +12,7 @@
 //!        v
 //!   tracing_subscriber::registry()
 //!        |
-//!        +-- fmt::layer().with_writer(TruncatingStderr)  <-- caps at 500B
+//!        +-- fmt::layer().with_writer(TruncatingStderr)  <-- caps at 500B (IRONCLAW_LOG_MAX_BYTES to override)
 //!        |       \-- stderr (truncated)
 //!        |
 //!        \-- WebLogLayer (unchanged)
@@ -58,9 +58,20 @@ pub struct TruncatingStderr {
 
 impl Default for TruncatingStderr {
     fn default() -> Self {
-        Self {
-            max_bytes: TERMINAL_MAX_EVENT_BYTES,
-        }
+        let max_bytes = std::env::var("IRONCLAW_LOG_MAX_BYTES")
+            .ok()
+            .and_then(|v| match v.parse::<usize>() {
+                Ok(n) => Some(n),
+                Err(_) => {
+                    eprintln!(
+                        "warning: IRONCLAW_LOG_MAX_BYTES={v:?} is not a valid number, \
+                         using default ({TERMINAL_MAX_EVENT_BYTES})"
+                    );
+                    None
+                }
+            })
+            .unwrap_or(TERMINAL_MAX_EVENT_BYTES);
+        Self { max_bytes }
     }
 }
 
