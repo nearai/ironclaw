@@ -156,13 +156,27 @@ impl TurnLifecycleEventBus for DefaultTurnLifecycleEventBus {
 
     async fn publish_event(&self, event: TurnLifecycleEvent) -> Result<(), TurnError> {
         let snapshot = self.subscriber_snapshot()?;
+        // Run every required observer, capturing the first error, so a single
+        // observer failure does not skip remaining observers or best-effort
+        // sinks. Sinks must always see committed events for projection
+        // durability; the first observer error is returned to the caller after
+        // fanout completes.
+        let mut first_observer_error: Option<TurnError> = None;
         for observer in &snapshot.required {
-            if observer.observes_event(&event) {
-                observer.observe_committed_event(event.clone()).await?;
+            if !observer.observes_event(&event) {
+                continue;
+            }
+            if let Err(error) = observer.observe_committed_event(event.clone()).await
+                && first_observer_error.is_none()
+            {
+                first_observer_error = Some(error);
             }
         }
         self.fanout_best_effort(&snapshot.best_effort, event).await;
-        Ok(())
+        match first_observer_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     async fn publish_state(
@@ -171,13 +185,22 @@ impl TurnLifecycleEventBus for DefaultTurnLifecycleEventBus {
         event: TurnLifecycleEvent,
     ) -> Result<(), TurnError> {
         let snapshot = self.subscriber_snapshot()?;
+        let mut first_observer_error: Option<TurnError> = None;
         for observer in &snapshot.required {
-            if observer.observes_state(&state) {
-                observer.observe_committed_state(state.clone()).await?;
+            if !observer.observes_state(&state) {
+                continue;
+            }
+            if let Err(error) = observer.observe_committed_state(state.clone()).await
+                && first_observer_error.is_none()
+            {
+                first_observer_error = Some(error);
             }
         }
         self.fanout_best_effort(&snapshot.best_effort, event).await;
-        Ok(())
+        match first_observer_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 }
 
@@ -205,7 +228,23 @@ impl<S: ?Sized> LifecyclePublishingTurnStateStore<S> {
         }
     }
 
-    fn claim_event_cursor_for_publish(&self, cursor: EventCursor) -> Result<bool, TurnError> {
+    /// Returns true when this cursor has not yet been published successfully
+    /// and the caller should attempt publication. The cursor is NOT marked
+    /// delivered until [`Self::mark_event_cursor_delivered`] runs after a
+    /// successful publish, so a transient observer error allows idempotent
+    /// retries to re-attempt publication instead of permanently dropping
+    /// required side effects.
+    fn try_begin_publish(&self, cursor: EventCursor) -> Result<bool, TurnError> {
+        let delivered =
+            self.delivered_event_cursors
+                .lock()
+                .map_err(|_| TurnError::Unavailable {
+                    reason: "turn lifecycle event cursor mutex poisoned".to_string(),
+                })?;
+        Ok(!delivered.contains(&cursor))
+    }
+
+    fn mark_event_cursor_delivered(&self, cursor: EventCursor) -> Result<(), TurnError> {
         let mut delivered =
             self.delivered_event_cursors
                 .lock()
@@ -215,7 +254,8 @@ impl<S: ?Sized> LifecyclePublishingTurnStateStore<S> {
         if delivered.len() >= MAX_DELIVERED_EVENT_CURSORS {
             delivered.clear();
         }
-        Ok(delivered.insert(cursor))
+        delivered.insert(cursor);
+        Ok(())
     }
 
     async fn publish_event_once_deferred(
@@ -223,17 +263,25 @@ impl<S: ?Sized> LifecyclePublishingTurnStateStore<S> {
         event: TurnLifecycleEvent,
     ) -> Result<(), TurnError> {
         let cursor = event.cursor;
-        if !self.claim_event_cursor_for_publish(cursor)? {
+        if !self.try_begin_publish(cursor)? {
             return Ok(());
         }
-        if let Err(error) = self.bus.publish_event(event).await {
-            let mut errors =
-                self.deferred_publication_errors
-                    .lock()
-                    .map_err(|_| TurnError::Unavailable {
+        match self.bus.publish_event(event).await {
+            Ok(()) => {
+                self.mark_event_cursor_delivered(cursor)?;
+            }
+            Err(error) => {
+                // Do NOT mark delivered on failure: idempotent retries of the
+                // same submit/resume/cancel cursor must be allowed to
+                // re-attempt publication so a transient observer error cannot
+                // permanently drop required side effects.
+                let mut errors = self.deferred_publication_errors.lock().map_err(|_| {
+                    TurnError::Unavailable {
                         reason: "turn lifecycle publication error mutex poisoned".to_string(),
-                    })?;
-            errors.insert(cursor, error);
+                    }
+                })?;
+                errors.insert(cursor, error);
+            }
         }
         Ok(())
     }
@@ -243,10 +291,17 @@ impl<S: ?Sized> LifecyclePublishingTurnStateStore<S> {
         state: TurnRunState,
         event: TurnLifecycleEvent,
     ) -> Result<(), TurnError> {
-        if !self.claim_event_cursor_for_publish(event.cursor)? {
+        let cursor = event.cursor;
+        if !self.try_begin_publish(cursor)? {
             return Ok(());
         }
-        self.bus.publish_state(state, event).await
+        match self.bus.publish_state(state, event).await {
+            Ok(()) => {
+                self.mark_event_cursor_delivered(cursor)?;
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     async fn publish_state_once_best_effort(
@@ -255,18 +310,26 @@ impl<S: ?Sized> LifecyclePublishingTurnStateStore<S> {
         event: TurnLifecycleEvent,
         context: &'static str,
     ) {
-        let claimed = match self.claim_event_cursor_for_publish(event.cursor) {
-            Ok(claimed) => claimed,
+        let cursor = event.cursor;
+        let should_publish = match self.try_begin_publish(cursor) {
+            Ok(should_publish) => should_publish,
             Err(error) => {
-                debug!(error = %error, "turn lifecycle cursor claim failed after {context}");
+                debug!(error = %error, "turn lifecycle cursor check failed after {context}");
                 return;
             }
         };
-        if !claimed {
+        if !should_publish {
             return;
         }
-        if let Err(error) = self.bus.publish_state(state, event).await {
-            debug!(error = %error, "turn lifecycle publication failed after {context}");
+        match self.bus.publish_state(state, event).await {
+            Ok(()) => {
+                if let Err(error) = self.mark_event_cursor_delivered(cursor) {
+                    debug!(error = %error, "turn lifecycle delivered mark failed after {context}");
+                }
+            }
+            Err(error) => {
+                debug!(error = %error, "turn lifecycle publication failed after {context}");
+            }
         }
     }
 }

@@ -1076,37 +1076,6 @@ mod tests {
         }
     }
 
-    fn turn_state_for_context(
-        context: &ironclaw_turns::run_profile::LoopRunContext,
-        status: TurnStatus,
-    ) -> TurnRunState {
-        let profile = TurnRunProfile::from_resolved(context.resolved_run_profile.clone());
-        TurnRunState {
-            scope: context.scope.clone(),
-            actor: None,
-            turn_id: context.turn_id,
-            run_id: context.run_id,
-            status,
-            accepted_message_ref: AcceptedMessageRef::new(format!("msg-{}", context.run_id))
-                .unwrap(),
-            source_binding_ref: SourceBindingRef::new(format!("source-{}", context.run_id))
-                .unwrap(),
-            reply_target_binding_ref: ReplyTargetBindingRef::new(format!(
-                "reply-{}",
-                context.run_id
-            ))
-            .unwrap(),
-            resolved_run_profile_id: profile.id,
-            resolved_run_profile_version: profile.version,
-            resolved_model_route: None,
-            received_at: chrono::Utc::now(),
-            checkpoint_id: None,
-            gate_ref: None,
-            failure: None,
-            event_cursor: EventCursor(1),
-        }
-    }
-
     #[tokio::test]
     async fn bind_coordinator_rejects_double_bind() {
         let observer = empty_observer();
