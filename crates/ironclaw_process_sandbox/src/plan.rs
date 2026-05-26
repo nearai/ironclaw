@@ -5,19 +5,15 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    DEFAULT_CACHE_MOUNT, DEFAULT_PROCESS_SANDBOX_IMAGE, DEFAULT_TOOLS_MOUNT,
-    DEFAULT_WORKSPACE_MOUNT,
+    DEFAULT_CACHE_MOUNT, DEFAULT_TOOLS_MOUNT, DEFAULT_WORKSPACE_MOUNT,
     validation::{
-        is_container_absolute_path, validate_docker_image_reference,
-        validate_env_has_no_raw_sensitive_values, validate_env_name, validate_header_name,
-        validate_host,
+        is_container_absolute_path, validate_env_has_no_raw_sensitive_values, validate_env_name,
+        validate_header_name, validate_host,
     },
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxProcessPlan {
-    #[serde(default)]
-    pub image: Option<String>,
     #[serde(default)]
     pub install: Option<SandboxInstallPlan>,
     pub run: SandboxCommandPlan,
@@ -32,12 +28,6 @@ pub struct SandboxProcessPlan {
 impl SandboxProcessPlan {
     pub fn validate(&self) -> Result<(), SandboxPlanError> {
         validate_plan(self)
-    }
-
-    pub(crate) fn image(&self) -> &str {
-        self.image
-            .as_deref()
-            .unwrap_or(DEFAULT_PROCESS_SANDBOX_IMAGE)
     }
 }
 
@@ -266,8 +256,6 @@ pub enum SandboxPlanError {
     EmptyCommand { phase: &'static str },
     #[error("{phase} command must be a single executable name or path")]
     UnsafeCommand { phase: &'static str },
-    #[error("invalid Docker image reference: {reason}")]
-    InvalidImage { reason: String },
     #[error("invalid host {host}: {reason}")]
     InvalidHost { host: String, reason: String },
     #[error("invalid container path {path}")]
@@ -305,9 +293,6 @@ pub enum SandboxPlanError {
 }
 
 fn validate_plan(plan: &SandboxProcessPlan) -> Result<(), SandboxPlanError> {
-    if let Some(image) = &plan.image {
-        validate_docker_image_reference(image)?;
-    }
     if let Some(install) = &plan.install {
         install.command.validate("install")?;
         for host in &install.allowed_hosts {

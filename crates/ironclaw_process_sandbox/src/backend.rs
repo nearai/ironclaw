@@ -43,21 +43,48 @@ pub struct SandboxPhaseOutput {
     pub wall_clock_ms: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessSandboxErrorKind {
+    InvalidProcessSandboxPlan,
+    DockerSpawnFailed,
+    DockerIoFailed,
+    Cancelled,
+    Timeout,
+}
+
+impl ProcessSandboxErrorKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidProcessSandboxPlan => "invalid_process_sandbox_plan",
+            Self::DockerSpawnFailed => "docker_spawn_failed",
+            Self::DockerIoFailed => "docker_io_failed",
+            Self::Cancelled => "cancelled",
+            Self::Timeout => "timeout",
+        }
+    }
+}
+
+impl std::fmt::Display for ProcessSandboxErrorKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("process sandbox execution failed: {kind}")]
 pub struct ProcessSandboxError {
-    pub kind: String,
+    pub kind: ProcessSandboxErrorKind,
 }
 
 impl ProcessSandboxError {
-    pub fn new(kind: impl Into<String>) -> Self {
-        Self { kind: kind.into() }
+    pub fn new(kind: ProcessSandboxErrorKind) -> Self {
+        Self { kind }
     }
 }
 
 impl From<SandboxPlanError> for ProcessSandboxError {
     fn from(_: SandboxPlanError) -> Self {
-        Self::new("invalid_process_sandbox_plan")
+        Self::new(ProcessSandboxErrorKind::InvalidProcessSandboxPlan)
     }
 }
 
@@ -99,7 +126,7 @@ impl ProcessExecutor for ProcessSandboxExecutor {
                 cancellation: request.cancellation,
             })
             .await
-            .map_err(|error| ProcessExecutionError::new(error.kind))?;
+            .map_err(|error| ProcessExecutionError::new(error.kind.as_str()))?;
         Ok(ProcessExecutionResult {
             output: json!({
                 "kind": "process_sandbox_result",

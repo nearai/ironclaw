@@ -2,25 +2,6 @@ use std::collections::HashMap;
 
 use crate::SandboxPlanError;
 
-pub(crate) fn validate_docker_image_reference(image: &str) -> Result<(), SandboxPlanError> {
-    if image.is_empty() {
-        return Err(SandboxPlanError::InvalidImage {
-            reason: "must not be empty".to_string(),
-        });
-    }
-    if image.starts_with('-') {
-        return Err(SandboxPlanError::InvalidImage {
-            reason: "must not start with '-'".to_string(),
-        });
-    }
-    if image.chars().any(char::is_whitespace) {
-        return Err(SandboxPlanError::InvalidImage {
-            reason: "must not contain whitespace".to_string(),
-        });
-    }
-    Ok(())
-}
-
 pub(crate) fn validate_host(host: &str) -> Result<(), SandboxPlanError> {
     if host.is_empty() {
         return Err(SandboxPlanError::InvalidHost {

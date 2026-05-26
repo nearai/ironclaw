@@ -1,7 +1,10 @@
 use std::{
     collections::HashMap,
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use async_trait::async_trait;
@@ -10,23 +13,27 @@ use ironclaw_host_api::{
     ResourceEstimate, ResourceScope, RuntimeCredentialTarget, RuntimeKind, SecretHandle, TenantId,
     ThreadId, UserId,
 };
-use ironclaw_process_sandbox::{
-    DEFAULT_PROCESS_SANDBOX_IMAGE, DockerBrokerConfig, DockerInvocation,
-    DockerProcessSandboxBackend, DockerProcessSandboxConfig, DockerRunError, DockerRunOutput,
-    DockerRunner, ProcessSandboxExecutor, SandboxBrokerPolicy, SandboxCommandPlan,
-    SandboxCredentialBinding, SandboxInstallPlan, SandboxMounts, SandboxNetworkPlan,
-    SandboxPlanError, SandboxProcessApprovalSummary, SandboxProcessPhase, SandboxProcessPlan,
-    ValidatedSandboxProcessPlan, docker_invocation_for_phase,
-};
 use ironclaw_processes::{ProcessCancellationToken, ProcessExecutionRequest, ProcessExecutor};
 use secrecy::SecretString;
 use serde_json::Value;
+
+use crate::{
+    BrokerRewriteError, DEFAULT_PROCESS_SANDBOX_IMAGE, DockerBrokerConfig,
+    DockerProcessSandboxBackend, DockerProcessSandboxConfig, ProcessSandboxBackend,
+    ProcessSandboxError, ProcessSandboxExecutor, SandboxBrokerPolicy, SandboxCommandPlan,
+    SandboxCredentialBinding, SandboxInstallPlan, SandboxMounts, SandboxNetworkPlan,
+    SandboxPlanError, SandboxProcessApprovalSummary, SandboxProcessOutput, SandboxProcessPhase,
+    SandboxProcessPlan, SandboxProcessRequest, SandboxProcessResult, ValidatedSandboxProcessPlan,
+    docker::{
+        DockerInvocation, DockerRunError, DockerRunOutput, DockerRunner,
+        docker_invocation_for_phase,
+    },
+};
 
 fn sample_plan() -> SandboxProcessPlan {
     let mut env = HashMap::new();
     env.insert("NOTION_API_KEY".to_string(), "NOTION_API_KEY".to_string());
     SandboxProcessPlan {
-        image: None,
         install: Some(SandboxInstallPlan {
             command: SandboxCommandPlan {
                 command: "npm".to_string(),
@@ -138,6 +145,55 @@ fn plan_validation_rejects_writable_quarantine_during_credentialed_run() {
 }
 
 #[test]
+fn plan_validation_rejects_duplicate_credential_targets() {
+    let mut plan = sample_plan();
+    let mut duplicate = plan.credentials[0].clone();
+    duplicate.approved_host = "API.NOTION.COM".to_string();
+    duplicate.target = RuntimeCredentialTarget::Header {
+        name: "authorization".to_string(),
+        prefix: Some("Bearer ".to_string()),
+    };
+    plan.credentials.push(duplicate);
+
+    let error = plan.validate().unwrap_err();
+
+    assert!(matches!(
+        error,
+        SandboxPlanError::DuplicateCredentialTarget { .. }
+    ));
+}
+
+#[test]
+fn plan_validation_rejects_missing_or_mismatched_placeholder_env() {
+    let mut missing = sample_plan();
+    missing.run.env.clear();
+    let missing_error = missing.validate().unwrap_err();
+
+    let mut mismatched = sample_plan();
+    mismatched.run.env.clear();
+    mismatched.credentials[0].placeholder_env = Some("PLACEHOLDER".to_string());
+    mismatched.credentials[0].placeholder_value = "PLACEHOLDER".to_string();
+    mismatched
+        .run
+        .env
+        .insert("PLACEHOLDER".to_string(), "WRONG_PLACEHOLDER".to_string());
+    let mismatched_error = mismatched.validate().unwrap_err();
+
+    assert_eq!(
+        missing_error,
+        SandboxPlanError::MissingPlaceholderEnv {
+            env: "NOTION_API_KEY".to_string()
+        }
+    );
+    assert_eq!(
+        mismatched_error,
+        SandboxPlanError::InvalidPlaceholderEnv {
+            env: "PLACEHOLDER".to_string()
+        }
+    );
+}
+
+#[test]
 fn docker_args_never_include_secret_material() {
     let temp = tempfile::tempdir().unwrap();
     let plan = validated_sample_plan();
@@ -151,6 +207,7 @@ fn docker_args_never_include_secret_material() {
     assert!(joined.contains("NOTION_API_KEY=NOTION_API_KEY"));
     assert!(joined.contains("IRONCLAW_EGRESS_LOCKDOWN=broker-only"));
     assert!(joined.contains("HTTP_PROXY=http://host.docker.internal:4489"));
+    assert!(joined.contains(DEFAULT_PROCESS_SANDBOX_IMAGE));
 }
 
 #[test]
@@ -192,6 +249,32 @@ fn install_and_run_phases_have_different_mount_and_network_policies() {
 }
 
 #[test]
+fn docker_invocation_uses_no_network_for_uncredentialed_plan() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut plan = sample_plan();
+    plan.install.as_mut().unwrap().allowed_hosts.clear();
+    plan.run.env.clear();
+    plan.network.runtime_hosts.clear();
+    plan.network.direct_egress_lockdown = false;
+    plan.credentials.clear();
+    let plan = ValidatedSandboxProcessPlan::new(plan).unwrap();
+    let config = sample_config(temp.path());
+
+    let install = docker_invocation_for_phase(
+        &config,
+        &plan,
+        SandboxProcessPhase::Install,
+        &plan.install.as_ref().unwrap().command,
+    )
+    .unwrap();
+    let run =
+        docker_invocation_for_phase(&config, &plan, SandboxProcessPhase::Run, &plan.run).unwrap();
+
+    assert!(install.args.join("\n").contains("--network\nnone"));
+    assert!(run.args.join("\n").contains("--network\nnone"));
+}
+
+#[test]
 fn broker_policy_rewrites_only_approved_host_and_header() {
     let plan = sample_plan();
     let policy = SandboxBrokerPolicy::new(plan.credentials).unwrap();
@@ -201,22 +284,26 @@ fn broker_policy_rewrites_only_approved_host_and_header() {
         SecretString::from("real-notion-secret"),
     );
 
-    let approved = policy.rewrite_headers(
-        "api.notion.com",
-        vec![(
-            "Authorization".to_string(),
-            "Bearer NOTION_API_KEY".to_string(),
-        )],
-        &secrets,
-    );
-    let denied = policy.rewrite_headers(
-        "example.com",
-        vec![(
-            "Authorization".to_string(),
-            "Bearer NOTION_API_KEY".to_string(),
-        )],
-        &secrets,
-    );
+    let approved = policy
+        .rewrite_headers(
+            "api.notion.com",
+            vec![(
+                "Authorization".to_string(),
+                "Bearer NOTION_API_KEY".to_string(),
+            )],
+            &secrets,
+        )
+        .unwrap();
+    let denied = policy
+        .rewrite_headers(
+            "example.com",
+            vec![(
+                "Authorization".to_string(),
+                "Bearer NOTION_API_KEY".to_string(),
+            )],
+            &secrets,
+        )
+        .unwrap();
 
     assert_eq!(
         approved.headers,
@@ -234,6 +321,29 @@ fn broker_policy_rewrites_only_approved_host_and_header() {
         )]
     );
     assert!(denied.rewrites.is_empty());
+}
+
+#[test]
+fn broker_policy_rejects_missing_required_secret() {
+    let plan = sample_plan();
+    let policy = SandboxBrokerPolicy::new(plan.credentials).unwrap();
+    let error = policy
+        .rewrite_headers(
+            "api.notion.com",
+            vec![(
+                "Authorization".to_string(),
+                "Bearer NOTION_API_KEY".to_string(),
+            )],
+            &HashMap::new(),
+        )
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        BrokerRewriteError::MissingRequiredSecret {
+            secret_alias: SecretHandle::new("notion_token").unwrap()
+        }
+    );
 }
 
 #[test]
@@ -327,36 +437,94 @@ async fn executor_returns_sanitized_phase_output_json() {
     assert_eq!(runner.invocations.lock().unwrap().len(), 2);
 }
 
-struct CancellingRunner;
+#[derive(Clone)]
+struct FailingRunner {
+    error: DockerRunError,
+}
 
 #[async_trait]
-impl DockerRunner for CancellingRunner {
+impl DockerRunner for FailingRunner {
     async fn run(
         &self,
         _invocation: DockerInvocation,
         _command: &SandboxCommandPlan,
         cancellation: ProcessCancellationToken,
     ) -> Result<DockerRunOutput, DockerRunError> {
-        cancellation.cancel();
-        Err(DockerRunError::Cancelled)
+        if self.error == DockerRunError::Cancelled {
+            cancellation.cancel();
+        }
+        Err(self.error.clone())
     }
 }
 
 #[tokio::test]
-async fn executor_surfaces_cancellation_as_stable_error_kind() {
-    let temp = tempfile::tempdir().unwrap();
-    let backend = DockerProcessSandboxBackend::with_runner(
-        sample_config(temp.path()),
-        Arc::new(CancellingRunner),
-    );
-    let executor = ProcessSandboxExecutor::new(Arc::new(backend));
+async fn executor_maps_docker_runner_errors_to_stable_kinds() {
+    for (runner_error, expected_kind) in [
+        (DockerRunError::Spawn, "docker_spawn_failed"),
+        (DockerRunError::Io, "docker_io_failed"),
+        (DockerRunError::Cancelled, "cancelled"),
+        (DockerRunError::Timeout, "timeout"),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = DockerProcessSandboxBackend::with_runner(
+            sample_config(temp.path()),
+            Arc::new(FailingRunner {
+                error: runner_error,
+            }),
+        );
+        let executor = ProcessSandboxExecutor::new(Arc::new(backend));
 
-    let error = executor
-        .execute(sample_request(serde_json::to_value(sample_plan()).unwrap()))
+        let error = executor
+            .execute(sample_request(serde_json::to_value(sample_plan()).unwrap()))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind, expected_kind);
+    }
+}
+
+#[derive(Default)]
+struct CountingBackend {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl ProcessSandboxBackend for CountingBackend {
+    async fn execute(
+        &self,
+        _request: SandboxProcessRequest,
+    ) -> Result<SandboxProcessResult, ProcessSandboxError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(SandboxProcessResult {
+            output: SandboxProcessOutput::default(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn executor_rejects_invalid_process_sandbox_plan_without_backend_execution() {
+    let backend = Arc::new(CountingBackend::default());
+    let executor = ProcessSandboxExecutor::new(backend.clone());
+
+    let malformed = executor
+        .execute(sample_request(serde_json::json!({ "run": 1 })))
+        .await
+        .unwrap_err();
+    let invalid = executor
+        .execute(sample_request(
+            serde_json::to_value({
+                let mut plan = sample_plan();
+                plan.run.command.clear();
+                plan
+            })
+            .unwrap(),
+        ))
         .await
         .unwrap_err();
 
-    assert_eq!(error.kind, "cancelled");
+    assert_eq!(malformed.kind, "invalid_process_sandbox_plan");
+    assert_eq!(invalid.kind, "invalid_process_sandbox_plan");
+    assert_eq!(backend.calls.load(Ordering::SeqCst), 0);
 }
 
 fn sample_request(input: Value) -> ProcessExecutionRequest {

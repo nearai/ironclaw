@@ -16,19 +16,23 @@ pub use approval::{
     SandboxApprovalCredential, SandboxApprovalMount, SandboxProcessApprovalSummary,
 };
 pub use backend::{
-    ProcessSandboxBackend, ProcessSandboxError, ProcessSandboxExecutor, SandboxPhaseOutput,
-    SandboxProcessOutput, SandboxProcessRequest, SandboxProcessResult,
+    ProcessSandboxBackend, ProcessSandboxError, ProcessSandboxErrorKind, ProcessSandboxExecutor,
+    SandboxPhaseOutput, SandboxProcessOutput, SandboxProcessRequest, SandboxProcessResult,
 };
-pub use broker::{BrokerHeaderRewrite, BrokerRewriteResult, SandboxBrokerPolicy};
+pub use broker::{
+    BrokerHeaderRewrite, BrokerRewriteError, BrokerRewriteResult, SandboxBrokerPolicy,
+};
 pub use docker::{
-    DockerBrokerConfig, DockerInvocation, DockerProcessSandboxBackend, DockerProcessSandboxConfig,
-    DockerRunError, DockerRunOutput, DockerRunner, SandboxProcessPhase, SystemDockerRunner,
-    docker_invocation_for_phase,
+    DockerBrokerConfig, DockerProcessSandboxBackend, DockerProcessSandboxConfig,
+    SandboxProcessPhase,
 };
 pub use plan::{
     SandboxCommandPlan, SandboxCredentialBinding, SandboxInstallPlan, SandboxMount, SandboxMounts,
     SandboxNetworkPlan, SandboxPlanError, SandboxProcessPlan, ValidatedSandboxProcessPlan,
 };
+
+#[cfg(test)]
+mod tests;
 
 pub const DEFAULT_PROCESS_SANDBOX_IMAGE: &str = "ironclaw-process-sandbox:dev";
 pub const PROCESS_SANDBOX_CAPABILITY_ID: &str = "system.process_sandbox.run";

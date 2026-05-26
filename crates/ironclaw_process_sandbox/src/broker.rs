@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use ironclaw_host_api::{RuntimeCredentialTarget, SecretHandle};
 use secrecy::{ExposeSecret, SecretString};
+use thiserror::Error;
 
 use crate::{SandboxCredentialBinding, SandboxPlanError};
 
@@ -17,6 +18,12 @@ pub struct BrokerHeaderRewrite {
 pub struct BrokerRewriteResult {
     pub headers: Vec<(String, String)>,
     pub rewrites: Vec<BrokerHeaderRewrite>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum BrokerRewriteError {
+    #[error("required secret {secret_alias} is missing")]
+    MissingRequiredSecret { secret_alias: SecretHandle },
 }
 
 #[derive(Debug, Clone)]
@@ -38,35 +45,41 @@ impl SandboxBrokerPolicy {
         host: &str,
         headers: Vec<(String, String)>,
         secrets: &HashMap<SecretHandle, SecretString>,
-    ) -> BrokerRewriteResult {
+    ) -> Result<BrokerRewriteResult, BrokerRewriteError> {
         let mut rewrites = Vec::new();
-        let rewritten_headers = headers
-            .into_iter()
-            .map(|(name, value)| {
-                let Some(binding) = self.matching_header_binding(host, &name, &value) else {
-                    return (name, value);
-                };
-                let Some(secret) = secrets.get(&binding.handle) else {
-                    return (name, value);
-                };
-                let RuntimeCredentialTarget::Header { prefix, .. } = &binding.target else {
-                    return (name, value);
-                };
-                let prefix = prefix.as_deref().unwrap_or_default();
-                let new_plain = format!("{prefix}{}", secret.expose_secret());
-                rewrites.push(BrokerHeaderRewrite {
-                    name: name.clone(),
-                    old_value: value,
-                    new_value: SecretString::from(new_plain.clone()),
-                    secret_alias: binding.handle.clone(),
-                });
-                (name, new_plain)
-            })
-            .collect();
-        BrokerRewriteResult {
+        let mut rewritten_headers = Vec::with_capacity(headers.len());
+        for (name, value) in headers {
+            let Some(binding) = self.matching_header_binding(host, &name, &value) else {
+                rewritten_headers.push((name, value));
+                continue;
+            };
+            let Some(secret) = secrets.get(&binding.handle) else {
+                if binding.required {
+                    return Err(BrokerRewriteError::MissingRequiredSecret {
+                        secret_alias: binding.handle.clone(),
+                    });
+                }
+                rewritten_headers.push((name, value));
+                continue;
+            };
+            let RuntimeCredentialTarget::Header { prefix, .. } = &binding.target else {
+                rewritten_headers.push((name, value));
+                continue;
+            };
+            let prefix = prefix.as_deref().unwrap_or_default();
+            let new_plain = format!("{prefix}{}", secret.expose_secret());
+            rewrites.push(BrokerHeaderRewrite {
+                name: name.clone(),
+                old_value: value,
+                new_value: SecretString::from(new_plain.clone()),
+                secret_alias: binding.handle.clone(),
+            });
+            rewritten_headers.push((name, new_plain));
+        }
+        Ok(BrokerRewriteResult {
             headers: rewritten_headers,
             rewrites,
-        }
+        })
     }
 
     pub fn sanitize_text(

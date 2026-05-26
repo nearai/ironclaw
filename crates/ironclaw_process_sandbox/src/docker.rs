@@ -15,9 +15,9 @@ use tokio::{
 
 use crate::{
     DEFAULT_PROCESS_SANDBOX_IMAGE, DEFAULT_STDERR_LIMIT, DEFAULT_STDOUT_LIMIT, DEFAULT_TIMEOUT_MS,
-    ProcessSandboxBackend, ProcessSandboxError, SandboxCommandPlan, SandboxPhaseOutput,
-    SandboxPlanError, SandboxProcessOutput, SandboxProcessRequest, SandboxProcessResult,
-    ValidatedSandboxProcessPlan,
+    ProcessSandboxBackend, ProcessSandboxError, ProcessSandboxErrorKind, SandboxCommandPlan,
+    SandboxPhaseOutput, SandboxPlanError, SandboxProcessOutput, SandboxProcessRequest,
+    SandboxProcessResult, ValidatedSandboxProcessPlan,
     validation::{validate_env_has_no_raw_sensitive_values, validate_env_name},
 };
 use ironclaw_processes::ProcessCancellationToken;
@@ -64,14 +64,14 @@ pub enum SandboxProcessPhase {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DockerInvocation {
+pub(crate) struct DockerInvocation {
     pub docker_bin: String,
     pub phase: SandboxProcessPhase,
     pub args: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DockerRunOutput {
+pub(crate) struct DockerRunOutput {
     pub exit_code: i32,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
@@ -81,7 +81,7 @@ pub struct DockerRunOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum DockerRunError {
+pub(crate) enum DockerRunError {
     #[error("Docker process failed to start")]
     Spawn,
     #[error("Docker process I/O failed")]
@@ -95,7 +95,7 @@ pub enum DockerRunError {
 use thiserror::Error;
 
 #[async_trait]
-pub trait DockerRunner: Send + Sync {
+pub(crate) trait DockerRunner: Send + Sync {
     async fn run(
         &self,
         invocation: DockerInvocation,
@@ -105,7 +105,7 @@ pub trait DockerRunner: Send + Sync {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-pub struct SystemDockerRunner;
+pub(crate) struct SystemDockerRunner;
 
 #[async_trait]
 impl DockerRunner for SystemDockerRunner {
@@ -208,7 +208,11 @@ impl DockerProcessSandboxBackend {
         }
     }
 
-    pub fn with_runner(config: DockerProcessSandboxConfig, runner: Arc<dyn DockerRunner>) -> Self {
+    #[cfg(test)]
+    pub(crate) fn with_runner(
+        config: DockerProcessSandboxConfig,
+        runner: Arc<dyn DockerRunner>,
+    ) -> Self {
         Self { config, runner }
     }
 }
@@ -256,10 +260,10 @@ impl ProcessSandboxBackend for DockerProcessSandboxBackend {
 
 fn sandbox_process_error(error: DockerRunError) -> ProcessSandboxError {
     ProcessSandboxError::new(match error {
-        DockerRunError::Spawn => "docker_spawn_failed",
-        DockerRunError::Io => "docker_io_failed",
-        DockerRunError::Cancelled => "cancelled",
-        DockerRunError::Timeout => "timeout",
+        DockerRunError::Spawn => ProcessSandboxErrorKind::DockerSpawnFailed,
+        DockerRunError::Io => ProcessSandboxErrorKind::DockerIoFailed,
+        DockerRunError::Cancelled => ProcessSandboxErrorKind::Cancelled,
+        DockerRunError::Timeout => ProcessSandboxErrorKind::Timeout,
     })
 }
 
@@ -275,7 +279,7 @@ fn phase_output(phase: SandboxProcessPhase, output: DockerRunOutput) -> SandboxP
     }
 }
 
-pub fn docker_invocation_for_phase(
+pub(crate) fn docker_invocation_for_phase(
     config: &DockerProcessSandboxConfig,
     plan: &ValidatedSandboxProcessPlan,
     phase: SandboxProcessPhase,
@@ -303,7 +307,7 @@ pub fn docker_invocation_for_phase(
         args.push("--workdir".to_string());
         args.push(working_dir.clone());
     }
-    args.push(plan.image().to_string());
+    args.push(config.image.clone());
     args.push(command.command.clone());
     args.extend(command.args.clone());
     Ok(DockerInvocation {
