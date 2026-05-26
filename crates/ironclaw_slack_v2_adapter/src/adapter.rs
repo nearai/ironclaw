@@ -6,10 +6,9 @@ use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, DeclaredEgressHost, DeclaredEgressTarget,
     DeliveryStatus, EgressCredentialHandle, OutboundDeliverySink, ParsedProductInbound,
     ProductAdapter, ProductAdapterCapabilities, ProductAdapterError, ProductAdapterId,
-    ProductOutboundEnvelope, ProductOutboundPayload, ProductRenderOutcome, ProductSurfaceKind,
-    ProtocolAuthEvidence, ProtocolHttpEgress, ProtocolHttpEgressError,
+    ProductCapabilityFlag, ProductOutboundEnvelope, ProductOutboundPayload, ProductRenderOutcome,
+    ProductSurfaceKind, ProtocolAuthEvidence, ProtocolHttpEgress, ProtocolHttpEgressError,
 };
-use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId};
 use serde::Deserialize;
 
 use crate::payload::{SLACK_API_HOST, SlackPayloadParseError, parse_slack_event};
@@ -49,6 +48,7 @@ impl SlackV2Adapter {
 
 pub fn slack_default_capabilities() -> ProductAdapterCapabilities {
     ProductAdapterCapabilities::external_channel_default()
+        .without(ProductCapabilityFlag::InboundCommands)
 }
 
 pub fn slack_request_signature_auth_requirement() -> AuthRequirement {
@@ -141,7 +141,17 @@ impl ProductAdapter for SlackV2Adapter {
 
         let attempt_id = envelope.delivery_attempt_id;
         let target_binding = envelope.target.reply_target_binding_ref.clone();
-        let run_id = run_id_for_payload(&envelope.payload);
+        let run_id = match &envelope.payload {
+            ProductOutboundPayload::FinalReply(view) => Some(view.turn_run_id),
+            ProductOutboundPayload::Progress(view) => Some(view.turn_run_id),
+            ProductOutboundPayload::GatePrompt(view) => Some(view.turn_run_id),
+            ProductOutboundPayload::AuthPrompt(view) => Some(view.turn_run_id),
+            ProductOutboundPayload::CapabilityActivity(_)
+            | ProductOutboundPayload::CapabilityDisplayPreview(_)
+            | ProductOutboundPayload::ProjectionSnapshot { .. }
+            | ProductOutboundPayload::ProjectionUpdate { .. }
+            | ProductOutboundPayload::KeepAlive => None,
+        };
 
         let request = match envelope.payload {
             ProductOutboundPayload::FinalReply(view) => {
@@ -185,36 +195,49 @@ impl ProductAdapter for SlackV2Adapter {
             | ProductOutboundPayload::ProjectionSnapshot { .. }
             | ProductOutboundPayload::ProjectionUpdate { .. }
             | ProductOutboundPayload::KeepAlive => {
+                let reason =
+                    RedactedString::new("slack first slice only renders final reply envelopes");
                 record_status(
                     delivery_sink,
-                    DeliveryStatus::Deferred {
+                    DeliveryStatus::FailedPermanent {
                         attempt_id,
                         target: target_binding,
                         run_id,
-                        reason: RedactedString::new(
-                            "slack first slice only renders final reply envelopes",
-                        ),
+                        reason: reason.clone(),
                     },
                 )
                 .await;
-                return Ok(ProductRenderOutcome::Deferred);
+                return Err(ProductAdapterError::EgressDenied { reason });
             }
         };
 
         let response = match egress.send(request).await {
             Ok(response) => response,
             Err(egress_err) => {
-                record_status(
-                    delivery_sink,
-                    egress_err_to_delivery_status(
-                        &egress_err,
+                let failure = SlackDeliveryFailureKind::from_egress_error(&egress_err);
+                let reason = RedactedString::new(egress_err.to_string());
+                let status = match failure {
+                    SlackDeliveryFailureKind::Retryable => DeliveryStatus::FailedRetryable {
                         attempt_id,
-                        target_binding.clone(),
+                        target: target_binding.clone(),
                         run_id,
-                    ),
-                )
-                .await;
-                return Err(map_egress_error(egress_err));
+                        reason: reason.clone(),
+                    },
+                    SlackDeliveryFailureKind::Unauthorized => DeliveryStatus::FailedUnauthorized {
+                        attempt_id,
+                        target: target_binding.clone(),
+                        run_id,
+                        reason: reason.clone(),
+                    },
+                    SlackDeliveryFailureKind::Permanent => DeliveryStatus::FailedPermanent {
+                        attempt_id,
+                        target: target_binding.clone(),
+                        run_id,
+                        reason: reason.clone(),
+                    },
+                };
+                record_status(delivery_sink, status).await;
+                return Err(failure.to_adapter_error(reason));
             }
         };
 
@@ -223,59 +246,74 @@ impl ProductAdapter for SlackV2Adapter {
                 "slack web api returned status {}",
                 response.status()
             ));
-            if response.status() >= 500 || response.status() == 429 {
-                record_status(
-                    delivery_sink,
-                    DeliveryStatus::FailedRetryable {
-                        attempt_id,
-                        target: target_binding.clone(),
-                        run_id,
-                        reason: reason.clone(),
-                    },
-                )
-                .await;
-                return Err(ProductAdapterError::EgressTransient { reason });
-            }
-            if response.status() == 401 || response.status() == 403 {
-                record_status(
-                    delivery_sink,
-                    DeliveryStatus::FailedUnauthorized {
-                        attempt_id,
-                        target: target_binding.clone(),
-                        run_id,
-                        reason: reason.clone(),
-                    },
-                )
-                .await;
-            } else {
-                record_status(
-                    delivery_sink,
-                    DeliveryStatus::FailedPermanent {
-                        attempt_id,
-                        target: target_binding.clone(),
-                        run_id,
-                        reason: reason.clone(),
-                    },
-                )
-                .await;
-            }
-            return Err(ProductAdapterError::EgressDenied { reason });
-        }
-
-        if let Err(slack_err) = slack_post_message_result(response.body()) {
-            record_status(
-                delivery_sink,
-                DeliveryStatus::FailedPermanent {
+            let failure = SlackDeliveryFailureKind::from_http_status(response.status());
+            let status = match failure {
+                SlackDeliveryFailureKind::Retryable => DeliveryStatus::FailedRetryable {
                     attempt_id,
                     target: target_binding.clone(),
                     run_id,
-                    reason: RedactedString::new(slack_err.clone()),
+                    reason: reason.clone(),
                 },
-            )
-            .await;
-            return Err(ProductAdapterError::EgressDenied {
-                reason: RedactedString::new(slack_err),
-            });
+                SlackDeliveryFailureKind::Unauthorized => DeliveryStatus::FailedUnauthorized {
+                    attempt_id,
+                    target: target_binding.clone(),
+                    run_id,
+                    reason: reason.clone(),
+                },
+                SlackDeliveryFailureKind::Permanent => DeliveryStatus::FailedPermanent {
+                    attempt_id,
+                    target: target_binding.clone(),
+                    run_id,
+                    reason: reason.clone(),
+                },
+            };
+            record_status(delivery_sink, status).await;
+            return Err(failure.to_adapter_error(reason));
+        }
+
+        if let Err(slack_err) = slack_post_message_result(response.body()) {
+            let reason = RedactedString::new(slack_err.reason);
+            match slack_err.kind {
+                SlackDeliveryFailureKind::Unauthorized => {
+                    record_status(
+                        delivery_sink,
+                        DeliveryStatus::FailedUnauthorized {
+                            attempt_id,
+                            target: target_binding.clone(),
+                            run_id,
+                            reason: reason.clone(),
+                        },
+                    )
+                    .await;
+                    return Err(ProductAdapterError::EgressDenied { reason });
+                }
+                SlackDeliveryFailureKind::Retryable => {
+                    record_status(
+                        delivery_sink,
+                        DeliveryStatus::FailedRetryable {
+                            attempt_id,
+                            target: target_binding.clone(),
+                            run_id,
+                            reason: reason.clone(),
+                        },
+                    )
+                    .await;
+                    return Err(ProductAdapterError::EgressTransient { reason });
+                }
+                SlackDeliveryFailureKind::Permanent => {
+                    record_status(
+                        delivery_sink,
+                        DeliveryStatus::FailedPermanent {
+                            attempt_id,
+                            target: target_binding.clone(),
+                            run_id,
+                            reason: reason.clone(),
+                        },
+                    )
+                    .await;
+                    return Err(ProductAdapterError::EgressDenied { reason });
+                }
+            }
         }
 
         record_status(
@@ -291,57 +329,8 @@ impl ProductAdapter for SlackV2Adapter {
     }
 }
 
-fn run_id_for_payload(payload: &ProductOutboundPayload) -> Option<TurnRunId> {
-    match payload {
-        ProductOutboundPayload::FinalReply(view) => Some(view.turn_run_id),
-        ProductOutboundPayload::Progress(view) => Some(view.turn_run_id),
-        ProductOutboundPayload::GatePrompt(view) => Some(view.turn_run_id),
-        ProductOutboundPayload::AuthPrompt(view) => Some(view.turn_run_id),
-        ProductOutboundPayload::CapabilityActivity(_)
-        | ProductOutboundPayload::CapabilityDisplayPreview(_)
-        | ProductOutboundPayload::ProjectionSnapshot { .. }
-        | ProductOutboundPayload::ProjectionUpdate { .. }
-        | ProductOutboundPayload::KeepAlive => None,
-    }
-}
-
 async fn record_status(sink: &dyn OutboundDeliverySink, status: DeliveryStatus) {
     sink.record(status).await;
-}
-
-fn egress_err_to_delivery_status(
-    err: &ProtocolHttpEgressError,
-    attempt_id: ironclaw_product_adapters::DeliveryAttemptId,
-    target: ReplyTargetBindingRef,
-    run_id: Option<TurnRunId>,
-) -> DeliveryStatus {
-    let reason = RedactedString::new(err.to_string());
-    match err {
-        ProtocolHttpEgressError::Timeout
-        | ProtocolHttpEgressError::Network(_)
-        | ProtocolHttpEgressError::LeakDetected => DeliveryStatus::FailedRetryable {
-            attempt_id,
-            target,
-            run_id,
-            reason,
-        },
-        ProtocolHttpEgressError::UnknownCredentialHandle { .. }
-        | ProtocolHttpEgressError::UnauthorizedCredentialHandle { .. } => {
-            DeliveryStatus::FailedUnauthorized {
-                attempt_id,
-                target,
-                run_id,
-                reason,
-            }
-        }
-        ProtocolHttpEgressError::UndeclaredHost { .. }
-        | ProtocolHttpEgressError::PolicyDenied { .. } => DeliveryStatus::FailedPermanent {
-            attempt_id,
-            target,
-            run_id,
-            reason,
-        },
-    }
 }
 
 fn map_render_error(err: SlackRenderError) -> ProductAdapterError {
@@ -356,31 +345,20 @@ fn map_render_error(err: SlackRenderError) -> ProductAdapterError {
     }
 }
 
-fn map_egress_error(err: ProtocolHttpEgressError) -> ProductAdapterError {
-    let reason = RedactedString::new(err.to_string());
-    match err {
-        ProtocolHttpEgressError::Timeout
-        | ProtocolHttpEgressError::Network(_)
-        | ProtocolHttpEgressError::LeakDetected => ProductAdapterError::EgressTransient { reason },
-        ProtocolHttpEgressError::UndeclaredHost { .. }
-        | ProtocolHttpEgressError::UnknownCredentialHandle { .. }
-        | ProtocolHttpEgressError::UnauthorizedCredentialHandle { .. }
-        | ProtocolHttpEgressError::PolicyDenied { .. } => {
-            ProductAdapterError::EgressDenied { reason }
-        }
-    }
-}
-
-fn slack_post_message_result(body: &[u8]) -> Result<(), String> {
-    let parsed: SlackPostMessageResponse = serde_json::from_slice(body)
-        .map_err(|err| format!("Slack chat.postMessage response was not valid JSON: {err}"))?;
+fn slack_post_message_result(body: &[u8]) -> Result<(), SlackPostMessageFailure> {
+    let parsed: SlackPostMessageResponse = serde_json::from_slice(body).map_err(|err| {
+        SlackPostMessageFailure::permanent(format!(
+            "Slack chat.postMessage response was not valid JSON: {err}"
+        ))
+    })?;
     if parsed.ok {
         Ok(())
     } else {
-        Err(format!(
-            "Slack rejected chat.postMessage ({})",
-            parsed.error.unwrap_or_else(|| "unknown_error".to_string())
-        ))
+        let error = parsed.error.unwrap_or_else(|| "unknown_error".to_string());
+        Err(SlackPostMessageFailure {
+            reason: format!("Slack rejected chat.postMessage ({})", error),
+            kind: slack_error_kind(&error),
+        })
     }
 }
 
@@ -390,15 +368,88 @@ struct SlackPostMessageResponse {
     error: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SlackDeliveryFailureKind {
+    Unauthorized,
+    Retryable,
+    Permanent,
+}
+
+impl SlackDeliveryFailureKind {
+    fn from_egress_error(err: &ProtocolHttpEgressError) -> Self {
+        match err {
+            ProtocolHttpEgressError::Timeout
+            | ProtocolHttpEgressError::Network(_)
+            | ProtocolHttpEgressError::LeakDetected => Self::Retryable,
+            ProtocolHttpEgressError::UnknownCredentialHandle { .. }
+            | ProtocolHttpEgressError::UnauthorizedCredentialHandle { .. } => Self::Unauthorized,
+            ProtocolHttpEgressError::UndeclaredHost { .. }
+            | ProtocolHttpEgressError::PolicyDenied { .. } => Self::Permanent,
+        }
+    }
+
+    fn from_http_status(status: u16) -> Self {
+        if status >= 500 || status == 429 {
+            Self::Retryable
+        } else if status == 401 || status == 403 {
+            Self::Unauthorized
+        } else {
+            Self::Permanent
+        }
+    }
+
+    fn to_adapter_error(self, reason: RedactedString) -> ProductAdapterError {
+        match self {
+            Self::Retryable => ProductAdapterError::EgressTransient { reason },
+            Self::Unauthorized | Self::Permanent => ProductAdapterError::EgressDenied { reason },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SlackPostMessageFailure {
+    reason: String,
+    kind: SlackDeliveryFailureKind,
+}
+
+impl SlackPostMessageFailure {
+    fn permanent(reason: String) -> Self {
+        Self {
+            reason,
+            kind: SlackDeliveryFailureKind::Permanent,
+        }
+    }
+}
+
+fn slack_error_kind(error: &str) -> SlackDeliveryFailureKind {
+    match error {
+        "not_authed"
+        | "invalid_auth"
+        | "account_inactive"
+        | "token_revoked"
+        | "missing_scope"
+        | "no_permission"
+        | "is_bot"
+        | "not_allowed_token_type" => SlackDeliveryFailureKind::Unauthorized,
+        "fatal_error"
+        | "internal_error"
+        | "service_unavailable"
+        | "request_timeout"
+        | "ratelimited" => SlackDeliveryFailureKind::Retryable,
+        _ => SlackDeliveryFailureKind::Permanent,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::Utc;
+    use ironclaw_product_adapters::auth::mark_request_signature_verified;
     use ironclaw_product_adapters::{
         DeliveryStatus, ExternalConversationRef, FakeOutboundDeliverySink, FakeProtocolHttpEgress,
         FinalReplyView, ProductOutboundTarget,
     };
-    use ironclaw_turns::ReplyTargetBindingRef;
+    use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId};
 
     fn config() -> SlackV2AdapterConfig {
         SlackV2AdapterConfig {
@@ -432,6 +483,14 @@ mod tests {
         }
     }
 
+    fn final_reply_payload(text: &str) -> ProductOutboundPayload {
+        ProductOutboundPayload::FinalReply(FinalReplyView {
+            turn_run_id: TurnRunId::new(),
+            text: text.to_string(),
+            generated_at: Utc::now(),
+        })
+    }
+
     #[test]
     fn metadata_declares_signature_auth_and_paired_egress() {
         let adapter = SlackV2Adapter::new(config());
@@ -440,6 +499,21 @@ mod tests {
         assert_eq!(
             adapter.auth_requirement(),
             &slack_request_signature_auth_requirement()
+        );
+        assert!(
+            adapter
+                .capabilities()
+                .contains(ProductCapabilityFlag::InboundMessages)
+        );
+        assert!(
+            adapter
+                .capabilities()
+                .contains(ProductCapabilityFlag::InboundAttachments)
+        );
+        assert!(
+            !adapter
+                .capabilities()
+                .contains(ProductCapabilityFlag::InboundCommands)
         );
         assert_eq!(adapter.declared_egress().len(), 1);
         assert_eq!(adapter.declared_egress()[0].host.as_str(), SLACK_API_HOST);
@@ -450,6 +524,41 @@ mod tests {
                 .map(EgressCredentialHandle::as_str),
             Some("slack_bot_token")
         );
+    }
+
+    #[test]
+    fn parse_inbound_maps_slack_parse_errors() {
+        let adapter = SlackV2Adapter::new(config());
+
+        let malformed = adapter
+            .parse_inbound(
+                br#"{"type":"event_callback","event_id":]"#,
+                &mark_request_signature_verified(
+                    "X-Slack-Signature",
+                    Some("X-Slack-Request-Timestamp".to_string()),
+                    "T123",
+                ),
+            )
+            .expect_err("malformed JSON must fail at adapter boundary");
+        assert!(matches!(
+            malformed,
+            ProductAdapterError::MalformedInboundPayload { .. }
+        ));
+
+        let unauthenticated = adapter
+            .parse_inbound(
+                br#"{"type":"event_callback","event_id":"EvNoAuth"}"#,
+                &ProtocolAuthEvidence::failed(
+                    ironclaw_product_adapters::ProtocolAuthFailure::Missing,
+                ),
+            )
+            .expect_err("unverified auth evidence must fail at adapter boundary");
+        assert!(matches!(
+            unauthenticated,
+            ProductAdapterError::Authentication(
+                ironclaw_product_adapters::ProtocolAuthFailure::Missing
+            )
+        ));
     }
 
     #[tokio::test]
@@ -482,11 +591,52 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&calls[0].body).expect("body json");
         assert_eq!(body["channel"], "C123");
         assert_eq!(body["text"], "hello Slack");
+        assert_eq!(body["mrkdwn"], false);
         assert_eq!(body["thread_ts"], "1710000000.000001");
         assert!(matches!(
             sink.statuses().as_slice(),
             [DeliveryStatus::Delivered { run_id: Some(delivered), .. }] if delivered == &run_id
         ));
+    }
+
+    #[tokio::test]
+    async fn render_outbound_rejects_mismatched_envelope_ids_without_egress() {
+        let adapter = SlackV2Adapter::new(config());
+        let egress = FakeProtocolHttpEgress::new(vec![SLACK_API_HOST.to_string()]);
+        egress.allow_credential_handle("slack_bot_token");
+        let sink = FakeOutboundDeliverySink::new();
+
+        let mut wrong_adapter = envelope(final_reply_payload("wrong adapter"));
+        wrong_adapter.adapter_id = ProductAdapterId::new("other_slack").expect("valid");
+        let err = adapter
+            .render_outbound(wrong_adapter, &egress, &sink)
+            .await
+            .expect_err("wrong adapter id must fail");
+        assert!(matches!(
+            err,
+            ProductAdapterError::InvalidIdentifier {
+                kind: "envelope.adapter_id",
+                ..
+            }
+        ));
+
+        let mut wrong_installation = envelope(final_reply_payload("wrong installation"));
+        wrong_installation.installation_id =
+            AdapterInstallationId::new("other_installation").expect("valid");
+        let err = adapter
+            .render_outbound(wrong_installation, &egress, &sink)
+            .await
+            .expect_err("wrong installation id must fail");
+        assert!(matches!(
+            err,
+            ProductAdapterError::InvalidIdentifier {
+                kind: "envelope.installation_id",
+                ..
+            }
+        ));
+
+        assert!(egress.calls().is_empty());
+        assert!(sink.statuses().is_empty());
     }
 
     #[tokio::test]
@@ -516,7 +666,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn slack_ok_false_records_permanent_failure_without_token_leak() {
+    async fn render_outbound_records_status_for_slack_http_failures() {
+        for (status, expected) in [
+            (429, "retryable"),
+            (500, "retryable"),
+            (401, "unauthorized"),
+            (403, "unauthorized"),
+            (400, "permanent"),
+        ] {
+            let adapter = SlackV2Adapter::new(config());
+            let egress = FakeProtocolHttpEgress::new(vec![SLACK_API_HOST.to_string()]);
+            egress.allow_credential_handle("slack_bot_token");
+            egress.program_response(
+                SLACK_API_HOST,
+                Ok(ironclaw_product_adapters::EgressResponse::new(
+                    status,
+                    br#"{"ok":false,"error":"http_error"}"#.to_vec(),
+                )),
+            );
+            let sink = FakeOutboundDeliverySink::new();
+
+            let err = adapter
+                .render_outbound(envelope(final_reply_payload("hello Slack")), &egress, &sink)
+                .await
+                .expect_err("HTTP failure status must fail");
+
+            match expected {
+                "retryable" => {
+                    assert!(matches!(err, ProductAdapterError::EgressTransient { .. }));
+                    assert!(matches!(
+                        sink.statuses().as_slice(),
+                        [DeliveryStatus::FailedRetryable { .. }]
+                    ));
+                }
+                "unauthorized" => {
+                    assert!(matches!(err, ProductAdapterError::EgressDenied { .. }));
+                    assert!(matches!(
+                        sink.statuses().as_slice(),
+                        [DeliveryStatus::FailedUnauthorized { .. }]
+                    ));
+                }
+                "permanent" => {
+                    assert!(matches!(err, ProductAdapterError::EgressDenied { .. }));
+                    assert!(matches!(
+                        sink.statuses().as_slice(),
+                        [DeliveryStatus::FailedPermanent { .. }]
+                    ));
+                }
+                other => panic!("unknown expectation {other}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn slack_ok_false_auth_failure_records_unauthorized_without_token_leak() {
         let adapter = SlackV2Adapter::new(config());
         let egress = FakeProtocolHttpEgress::new(vec![SLACK_API_HOST.to_string()]);
         egress.allow_credential_handle("slack_bot_token");
@@ -528,14 +731,9 @@ mod tests {
             )),
         );
         let sink = FakeOutboundDeliverySink::new();
-        let payload = ProductOutboundPayload::FinalReply(FinalReplyView {
-            turn_run_id: TurnRunId::new(),
-            text: "hello Slack".to_string(),
-            generated_at: Utc::now(),
-        });
 
         let err = adapter
-            .render_outbound(envelope(payload), &egress, &sink)
+            .render_outbound(envelope(final_reply_payload("hello Slack")), &egress, &sink)
             .await
             .expect_err("Slack ok=false must fail");
 
@@ -545,7 +743,33 @@ mod tests {
         assert!(!rendered.contains("xoxb"));
         assert!(matches!(
             sink.statuses().as_slice(),
-            [DeliveryStatus::FailedPermanent { reason, .. }] if reason.to_string() == RedactedString::placeholder()
+            [DeliveryStatus::FailedUnauthorized { reason, .. }] if reason.to_string() == RedactedString::placeholder()
+        ));
+    }
+
+    #[tokio::test]
+    async fn slack_ok_false_retryable_error_records_retryable() {
+        let adapter = SlackV2Adapter::new(config());
+        let egress = FakeProtocolHttpEgress::new(vec![SLACK_API_HOST.to_string()]);
+        egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            SLACK_API_HOST,
+            Ok(ironclaw_product_adapters::EgressResponse::new(
+                200,
+                br#"{"ok":false,"error":"internal_error"}"#.to_vec(),
+            )),
+        );
+        let sink = FakeOutboundDeliverySink::new();
+
+        let err = adapter
+            .render_outbound(envelope(final_reply_payload("hello Slack")), &egress, &sink)
+            .await
+            .expect_err("Slack retryable ok=false must fail");
+
+        assert!(matches!(err, ProductAdapterError::EgressTransient { .. }));
+        assert!(matches!(
+            sink.statuses().as_slice(),
+            [DeliveryStatus::FailedRetryable { .. }]
         ));
     }
 }

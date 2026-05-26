@@ -9,6 +9,7 @@ use ironclaw_product_adapters::{
     DeclaredEgressHost, EgressCredentialHandle, EgressHeader, EgressMethod, EgressPath,
     EgressRequest, FinalReplyView, ProductOutboundTarget,
 };
+use serde::Serialize;
 use thiserror::Error;
 
 use crate::payload::SLACK_API_HOST;
@@ -51,16 +52,14 @@ pub fn render_final_reply(
     credential_handle: EgressCredentialHandle,
 ) -> Result<EgressRequest, SlackRenderError> {
     let reply = slack_reply_target(target)?;
-    let mut body = serde_json::Map::new();
-    body.insert("channel".into(), serde_json::Value::String(reply.channel));
-    body.insert("text".into(), serde_json::Value::String(view.text.clone()));
-    if let Some(thread_ts) = reply.thread_ts {
-        body.insert("thread_ts".into(), serde_json::Value::String(thread_ts));
-    }
-    let body_bytes = serde_json::to_vec(&serde_json::Value::Object(body)).map_err(|err| {
-        SlackRenderError::Serialization {
-            reason: err.to_string(),
-        }
+    let body = ChatPostMessageRequest {
+        channel: reply.channel,
+        text: view.text.clone(),
+        mrkdwn: false,
+        thread_ts: reply.thread_ts,
+    };
+    let body_bytes = serde_json::to_vec(&body).map_err(|err| SlackRenderError::Serialization {
+        reason: err.to_string(),
     })?;
 
     Ok(build_egress_request(
@@ -68,6 +67,15 @@ pub fn render_final_reply(
         body_bytes,
         credential_handle,
     ))
+}
+
+#[derive(Debug, Serialize)]
+struct ChatPostMessageRequest {
+    channel: String,
+    text: String,
+    mrkdwn: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thread_ts: Option<String>,
 }
 
 fn build_egress_request(
@@ -140,6 +148,7 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(request.body()).expect("body json");
         assert_eq!(body["channel"], "C123");
         assert_eq!(body["text"], "hello Slack");
+        assert_eq!(body["mrkdwn"], false);
         assert_eq!(body["thread_ts"], "1710000000.000001");
     }
 

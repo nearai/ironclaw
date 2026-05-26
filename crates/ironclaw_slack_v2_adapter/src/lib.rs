@@ -9,13 +9,18 @@
 //! * [`payload`] — Slack Events API payload normalization.
 //! * [`render`] — `FinalReplyView` -> `chat.postMessage` request shaping.
 
-pub mod adapter;
-pub mod payload;
-pub mod render;
+#![forbid(unsafe_code)]
+
+mod adapter;
+mod payload;
+mod render;
 
 pub use adapter::{
     SlackV2Adapter, SlackV2AdapterConfig, slack_declared_egress_hosts, slack_default_capabilities,
     slack_request_signature_auth_requirement,
 };
-pub use payload::{SLACK_API_HOST, SLACK_USER_ACTOR_KIND, parse_slack_event};
-pub use render::{SlackRenderError, SlackReplyTarget, render_final_reply};
+pub use payload::{
+    SLACK_API_HOST, SLACK_USER_ACTOR_KIND, SlackPayloadParseError, SlackUrlVerificationChallenge,
+    parse_slack_event, parse_slack_url_verification_challenge,
+};
+pub use render::{SlackRenderError, render_final_reply};
