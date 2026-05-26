@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use axum::body::{Body, to_bytes};
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{AgentId, NetworkMethod, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_workflow::{
     ExtensionName, RebornCancelRunResponse, RebornCreateThreadResponse, RebornGetRunStateRequest,
     RebornGetRunStateResponse, RebornListThreadsResponse, RebornResolveGateResponse,
@@ -1005,4 +1005,69 @@ async fn rate_limit_is_independent_per_caller() {
         StatusCode::OK,
         "bob's per-caller budget must be independent of alice's",
     );
+}
+
+/// Every descriptor returned by `webui_v2_routes()` must be reachable on
+/// the composed `webui_v2_app` Router. Sends a request with a bogus
+/// bearer token to each route and asserts the response is anything *but*
+/// 404. A 404 means the descriptor exists but host composition forgot to
+/// mount the matching handler — exactly the regression Lane 7 step 1
+/// ("Mount WebUI v2 routes in production composition") guards against.
+///
+/// 401 is the expected status for a mounted route receiving a wrong
+/// token; some routes may also legitimately surface 400/405/413/426 (WS
+/// upgrade without proper headers) — anything but 404 proves the mount.
+#[tokio::test]
+async fn every_webui_v2_descriptor_is_mounted_on_composed_app() {
+    let (app, _services) = build_app();
+
+    for descriptor in ironclaw_webui_v2::webui_v2_routes() {
+        let method = match descriptor.method() {
+            NetworkMethod::Get => Method::GET,
+            NetworkMethod::Post => Method::POST,
+            NetworkMethod::Put => Method::PUT,
+            NetworkMethod::Patch => Method::PATCH,
+            NetworkMethod::Delete => Method::DELETE,
+            NetworkMethod::Head => Method::HEAD,
+        };
+        let uri = expand_route_pattern(descriptor.route_pattern().as_str());
+
+        let mut builder = Request::builder()
+            .method(method.clone())
+            .uri(&uri)
+            .header(header::AUTHORIZATION, "Bearer not-the-valid-token");
+        // POST routes with non-NoBody policies expect a JSON content
+        // type; body is empty so it's within every per-route cap.
+        if method == Method::POST {
+            builder = builder.header(header::CONTENT_TYPE, "application/json");
+        }
+        let request = builder.body(Body::empty()).expect("request");
+
+        let response = app
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("oneshot must complete");
+
+        assert_ne!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "descriptor `{route_id}` ({method} {uri}) returned 404 — host composition did not mount the handler",
+            route_id = descriptor.route_id().as_str(),
+            method = method,
+            uri = uri,
+        );
+    }
+}
+
+fn expand_route_pattern(pattern: &str) -> String {
+    // Stand-in values for the four path params the v2 descriptors use.
+    // All must satisfy each handler's path-segment validation (handlers
+    // only validate `extension_name` before facade dispatch; the others
+    // pass straight through to the stub services).
+    pattern
+        .replace("{thread_id}", "thread.fake")
+        .replace("{run_id}", "11111111-1111-1111-1111-111111111111")
+        .replace("{gate_ref}", "gate.fake")
+        .replace("{extension_name}", "ext_fake")
 }
