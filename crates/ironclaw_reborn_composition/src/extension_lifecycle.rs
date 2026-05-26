@@ -27,6 +27,7 @@ pub(crate) struct RebornLocalExtensionManagementPort {
     installation_store: Arc<dyn ExtensionInstallationStore>,
     lifecycle_service: Arc<Mutex<ExtensionLifecycleService>>,
     active_registry: Arc<SharedExtensionRegistry>,
+    operation_lock: Arc<Mutex<()>>,
 }
 
 impl RebornLocalExtensionManagementPort {
@@ -43,6 +44,7 @@ impl RebornLocalExtensionManagementPort {
             installation_store,
             lifecycle_service,
             active_registry,
+            operation_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -71,6 +73,9 @@ impl RebornLocalExtensionManagementPort {
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let available = self.catalog.resolve(&package_ref)?;
         let plan = prepare_install(available)?;
+        let _operation_guard = self.operation_lock.lock().await;
+        self.ensure_not_installed(&available.package.id, plan.installation.installation_id())
+            .await?;
         let rollback = self.register_lifecycle_package(&available.package).await?;
 
         if let Err(error) =
@@ -104,10 +109,13 @@ impl RebornLocalExtensionManagementPort {
         package_ref: LifecyclePackageRef,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let (extension_id, installation_id) = extension_ids_from_package_ref(&package_ref)?;
+        let _operation_guard = self.operation_lock.lock().await;
+        let installation = self
+            .load_installation(&extension_id, &installation_id)
+            .await?;
+        let previous_state = installation.activation_state();
         let package = self.lifecycle_package(&extension_id).await?;
-        replace_active_extension(&self.active_registry, package)?;
         if let Err(error) = self.enable_lifecycle_package(&extension_id).await {
-            remove_active_extension(&self.active_registry, &extension_id);
             return Err(error);
         }
         if let Err(error) = self
@@ -116,8 +124,15 @@ impl RebornLocalExtensionManagementPort {
             .await
         {
             self.disable_lifecycle_package(&extension_id).await;
-            remove_active_extension(&self.active_registry, &extension_id);
             return Err(map_extension_installation_error(error));
+        }
+        if let Err(error) = replace_active_extension(&self.active_registry, package) {
+            self.disable_lifecycle_package(&extension_id).await;
+            let _ = self
+                .installation_store
+                .set_activation_state(&installation_id, previous_state)
+                .await;
+            return Err(error);
         }
 
         Ok(response_with_payload(
@@ -132,12 +147,32 @@ impl RebornLocalExtensionManagementPort {
         package_ref: LifecyclePackageRef,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let (extension_id, installation_id) = extension_ids_from_package_ref(&package_ref)?;
-        self.delete_materialized_extension_files(&extension_id)
+        let _operation_guard = self.operation_lock.lock().await;
+        let installation = self
+            .load_installation(&extension_id, &installation_id)
             .await?;
-        self.installation_store
+        let previous_state = installation.activation_state();
+        self.lifecycle_package(&extension_id).await?;
+        let previous_active = remove_active_extension(&self.active_registry, &extension_id);
+        if let Err(error) = self
+            .installation_store
             .set_activation_state(&installation_id, ExtensionActivationState::Disabled)
             .await
-            .map_err(map_extension_installation_error)?;
+        {
+            restore_active_extension(&self.active_registry, previous_active);
+            return Err(map_extension_installation_error(error));
+        }
+        if let Err(error) = self
+            .delete_materialized_extension_files(&extension_id)
+            .await
+        {
+            restore_active_extension(&self.active_registry, previous_active);
+            let _ = self
+                .installation_store
+                .set_activation_state(&installation_id, previous_state)
+                .await;
+            return Err(error);
+        }
         self.installation_store
             .delete_installation(&installation_id)
             .await
@@ -161,19 +196,71 @@ impl RebornLocalExtensionManagementPort {
         package: &ExtensionPackage,
     ) -> Result<LifecycleRollback, ProductWorkflowError> {
         let mut lifecycle = self.lifecycle_service.lock().await;
-        let previous_package = lifecycle.registry().get_extension(&package.id).cloned();
-        if previous_package.is_some() {
-            lifecycle
-                .update(package.clone())
-                .await
-                .map_err(map_extension_error)?;
-        } else {
-            lifecycle
-                .install(package.clone())
-                .await
-                .map_err(map_extension_error)?;
+        if lifecycle.registry().get_extension(&package.id).is_some() {
+            return Err(ProductWorkflowError::InvalidBindingRequest {
+                reason: format!("extension {} is already installed", package.id.as_str()),
+            });
         }
-        Ok(LifecycleRollback { previous_package })
+        lifecycle
+            .install(package.clone())
+            .await
+            .map_err(map_extension_error)?;
+        Ok(LifecycleRollback)
+    }
+
+    async fn ensure_not_installed(
+        &self,
+        extension_id: &ExtensionId,
+        installation_id: &ExtensionInstallationId,
+    ) -> Result<(), ProductWorkflowError> {
+        if self
+            .installation_store
+            .get_installation(installation_id)
+            .await
+            .map_err(map_extension_installation_error)?
+            .is_some()
+        {
+            return Err(ProductWorkflowError::InvalidBindingRequest {
+                reason: format!("extension {} is already installed", extension_id.as_str()),
+            });
+        }
+        if self
+            .installation_store
+            .get_manifest(extension_id)
+            .await
+            .map_err(map_extension_installation_error)?
+            .is_some()
+        {
+            return Err(ProductWorkflowError::InvalidBindingRequest {
+                reason: format!("extension {} is already installed", extension_id.as_str()),
+            });
+        }
+        Ok(())
+    }
+
+    async fn load_installation(
+        &self,
+        extension_id: &ExtensionId,
+        installation_id: &ExtensionInstallationId,
+    ) -> Result<ExtensionInstallation, ProductWorkflowError> {
+        let installation = self
+            .installation_store
+            .get_installation(installation_id)
+            .await
+            .map_err(map_extension_installation_error)?
+            .ok_or_else(|| ProductWorkflowError::InvalidBindingRequest {
+                reason: format!("extension {} is not installed", extension_id.as_str()),
+            })?;
+        if installation.extension_id() != extension_id {
+            return Err(ProductWorkflowError::InvalidBindingRequest {
+                reason: format!(
+                    "installation {} does not belong to extension {}",
+                    installation_id.as_str(),
+                    extension_id.as_str()
+                ),
+            });
+        }
+        Ok(installation)
     }
 
     async fn lifecycle_package(
@@ -228,12 +315,9 @@ impl RebornLocalExtensionManagementPort {
         extension_id: &ExtensionId,
         rollback: LifecycleRollback,
     ) {
+        let LifecycleRollback = rollback;
         let mut lifecycle = self.lifecycle_service.lock().await;
-        if let Some(package) = rollback.previous_package {
-            let _ = lifecycle.update(package).await;
-        } else {
-            let _ = lifecycle.remove(extension_id).await;
-        }
+        let _ = lifecycle.remove(extension_id).await;
     }
 
     async fn persist_install_plan(
@@ -282,9 +366,7 @@ struct ExtensionInstallPlan {
     installation: ExtensionInstallation,
 }
 
-struct LifecycleRollback {
-    previous_package: Option<ExtensionPackage>,
-}
+struct LifecycleRollback;
 
 fn prepare_install(
     available: &AvailableExtensionPackage,
@@ -348,8 +430,20 @@ fn replace_active_extension(
     active_registry.upsert(package).map_err(map_extension_error)
 }
 
-fn remove_active_extension(active_registry: &SharedExtensionRegistry, extension_id: &ExtensionId) {
-    active_registry.remove(extension_id);
+fn remove_active_extension(
+    active_registry: &SharedExtensionRegistry,
+    extension_id: &ExtensionId,
+) -> Option<ExtensionPackage> {
+    active_registry.remove(extension_id)
+}
+
+fn restore_active_extension(
+    active_registry: &SharedExtensionRegistry,
+    package: Option<ExtensionPackage>,
+) {
+    if let Some(package) = package {
+        let _ = active_registry.upsert(package);
+    }
 }
 
 fn map_extension_error(error: ExtensionError) -> ProductWorkflowError {
@@ -374,7 +468,9 @@ fn map_extension_installation_error(error: ExtensionInstallationError) -> Produc
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::available_extensions::{AvailableExtensionAsset, AvailableExtensionPackage};
+    use crate::available_extensions::{
+        AvailableExtensionAsset, AvailableExtensionAssetContent, AvailableExtensionPackage,
+    };
     use ironclaw_extensions::{
         ExtensionLifecycleService, ExtensionManifest, ExtensionRegistry,
         InMemoryExtensionInstallationStore,
@@ -526,6 +622,121 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn extension_install_rejects_duplicate_without_overwriting_materialized_files() {
+        let (_dir, storage_root, facade, _active_registry) = extension_lifecycle_fixture();
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
+            .expect("valid ref");
+
+        facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionInstall {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("initial install");
+        let wasm_path = storage_root.join("system/extensions/fixture/wasm/fixture.wasm");
+        std::fs::write(&wasm_path, b"existing-live-module").expect("rewrite installed module");
+
+        let error = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionInstall { package_ref },
+            )
+            .await
+            .expect_err("duplicate install is rejected before materialization");
+
+        assert!(matches!(
+            error,
+            ProductWorkflowError::InvalidBindingRequest { .. }
+        ));
+        assert_eq!(
+            std::fs::read(wasm_path).expect("installed module remains"),
+            b"existing-live-module"
+        );
+    }
+
+    #[tokio::test]
+    async fn extension_activate_rejects_lifecycle_package_without_installation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
+        let mut filesystem = LocalFilesystem::new();
+        filesystem
+            .mount_local(
+                VirtualPath::new("/system/extensions").expect("valid virtual path"),
+                HostPath::from_path_buf(storage_root.join("system/extensions")),
+            )
+            .expect("mount system extensions");
+        let package = fixture_extension_package().package;
+        let mut lifecycle_registry = ExtensionRegistry::new();
+        lifecycle_registry
+            .insert(package.clone())
+            .expect("lifecycle package");
+        let mut active_registry_initial = ExtensionRegistry::new();
+        active_registry_initial
+            .insert(package)
+            .expect("active package");
+        let active_registry = Arc::new(SharedExtensionRegistry::new(active_registry_initial));
+        let port = RebornLocalExtensionManagementPort::new(
+            Arc::new(filesystem),
+            AvailableExtensionCatalog::from_packages(Vec::new()),
+            Arc::new(InMemoryExtensionInstallationStore::default()),
+            Arc::new(Mutex::new(ExtensionLifecycleService::new(
+                lifecycle_registry,
+            ))),
+            Arc::clone(&active_registry),
+        );
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
+            .expect("valid ref");
+
+        let error = port
+            .activate(package_ref)
+            .await
+            .expect_err("activation requires an installation record");
+
+        assert!(matches!(
+            error,
+            ProductWorkflowError::InvalidBindingRequest { .. }
+        ));
+        assert!(
+            active_registry
+                .snapshot()
+                .get_extension(&ExtensionId::new("fixture").unwrap())
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn extension_remove_rejects_uninstalled_ref_without_deleting_files() {
+        let (_dir, storage_root, facade, _active_registry) = extension_lifecycle_fixture();
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
+            .expect("valid ref");
+        let manifest_path = storage_root.join("system/extensions/fixture/manifest.toml");
+        std::fs::create_dir_all(manifest_path.parent().expect("manifest parent"))
+            .expect("extension directory");
+        std::fs::write(&manifest_path, b"unmanaged manifest").expect("write unmanaged file");
+
+        let error = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionRemove { package_ref },
+            )
+            .await
+            .expect_err("remove requires an installation record");
+
+        assert!(matches!(
+            error,
+            ProductWorkflowError::InvalidBindingRequest { .. }
+        ));
+        assert_eq!(
+            std::fs::read(manifest_path).expect("unmanaged file remains"),
+            b"unmanaged manifest"
+        );
+    }
+
+    #[tokio::test]
     async fn extension_auth_and_configure_return_unsupported() {
         let (_dir, _storage_root, facade, _active_registry) = extension_lifecycle_fixture();
         let package_ref =
@@ -667,11 +878,11 @@ output_schema_ref = "schemas/write.output.json"
             assets: vec![
                 AvailableExtensionAsset {
                     path: "manifest.toml".to_string(),
-                    bytes: MANIFEST.as_bytes().to_vec(),
+                    content: AvailableExtensionAssetContent::Bytes(MANIFEST.as_bytes().to_vec()),
                 },
                 AvailableExtensionAsset {
                     path: "wasm/fixture.wasm".to_string(),
-                    bytes: b"\0asm\x01\0\0\0".to_vec(),
+                    content: AvailableExtensionAssetContent::Bytes(b"\0asm\x01\0\0\0".to_vec()),
                 },
             ],
         }

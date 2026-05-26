@@ -265,6 +265,47 @@ async fn lifecycle_command_dispatches_through_lifecycle_facade() {
 }
 
 #[tokio::test]
+async fn malformed_lifecycle_command_settles_invalid_request_without_command_side_effects() {
+    let inbound = Arc::new(FakeInboundTurnService::new());
+    let ledger = Arc::new(FakeIdempotencyLedger::new());
+    let binding = Arc::new(FakeConversationBindingService::new());
+    let admission_service = Arc::new(RecordingProductCommandAdmissionService::allowing());
+    let lifecycle_facade = Arc::new(RecordingLifecycleProductFacade::default());
+    let command_service = Arc::new(RecordingProductCommandService::with_ack(
+        ProductInboundAck::NoOp,
+    ));
+    let workflow = DefaultProductWorkflow::new(inbound.clone(), ledger.clone(), binding)
+        .with_product_command_admission_service(admission_service.clone())
+        .with_product_command_service(command_service.clone());
+    let envelope =
+        sample_command_envelope("command-skill-install-malformed", "skill_install", "{}");
+
+    let error = workflow
+        .accept_inbound(envelope)
+        .await
+        .expect_err("malformed lifecycle command must reject at the workflow boundary");
+
+    assert!(matches!(
+        error,
+        ironclaw_product_adapters::ProductAdapterError::WorkflowRejected {
+            kind: ironclaw_product_adapters::ProductWorkflowRejectionKind::InvalidRequest,
+            retryable: false,
+            ..
+        }
+    ));
+    assert!(admission_service.records().is_empty());
+    assert!(command_service.commands().is_empty());
+    assert!(lifecycle_facade.commands().is_empty());
+    assert_eq!(inbound.accepted_count(), 0);
+    let settled = ledger.settled_actions();
+    assert_eq!(settled.len(), 1);
+    assert!(matches!(
+        settled[0].dispatch_kind,
+        Some(ActionDispatchKind::Rejected { .. })
+    ));
+}
+
+#[tokio::test]
 async fn lifecycle_command_admission_rejects_before_facade_executes() {
     let inbound = Arc::new(FakeInboundTurnService::new());
     let ledger = Arc::new(FakeIdempotencyLedger::new());

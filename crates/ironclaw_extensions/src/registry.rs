@@ -257,7 +257,8 @@ impl SharedExtensionRegistry {
     }
 
     pub fn remove(&self, id: &ExtensionId) -> Option<ExtensionPackage> {
-        let removed = Arc::make_mut(&mut self.inner.write()).remove(id);
+        let mut guard = self.inner.write();
+        let removed = Arc::make_mut(&mut guard).remove(id);
         if removed.is_some() {
             self.version.fetch_add(1, Ordering::AcqRel);
         }
@@ -268,13 +269,15 @@ impl SharedExtensionRegistry {
         &self,
         f: impl FnOnce(&mut ExtensionRegistry) -> Result<R, ExtensionError>,
     ) -> Result<R, ExtensionError> {
-        let result = f(Arc::make_mut(&mut self.inner.write()))?;
+        let mut guard = self.inner.write();
+        let result = f(Arc::make_mut(&mut guard))?;
         self.version.fetch_add(1, Ordering::AcqRel);
         Ok(result)
     }
 
     pub fn replace(&self, registry: ExtensionRegistry) {
-        *self.inner.write() = Arc::new(registry);
+        let mut guard = self.inner.write();
+        *guard = Arc::new(registry);
         self.version.fetch_add(1, Ordering::AcqRel);
     }
 }

@@ -10,7 +10,13 @@ use serde_json::{Value, json};
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct AvailableExtensionAsset {
     pub(crate) path: String,
-    pub(crate) bytes: Vec<u8>,
+    pub(crate) content: AvailableExtensionAssetContent,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum AvailableExtensionAssetContent {
+    Bytes(Vec<u8>),
+    Filesystem(VirtualPath),
 }
 
 #[derive(Debug)]
@@ -123,7 +129,26 @@ where
     let mut written_paths = Vec::new();
     for asset in &extension.assets {
         let path = extension_asset_path(&extension.package.id, &asset.path)?;
-        if let Err(error) = fs.write_file(&path, &asset.bytes).await {
+        let bytes = match &asset.content {
+            AvailableExtensionAssetContent::Bytes(bytes) => bytes.clone(),
+            AvailableExtensionAssetContent::Filesystem(source_path) => {
+                match fs.read_file(source_path).await {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        for written_path in written_paths.iter().rev() {
+                            let _ = fs.delete(written_path).await;
+                        }
+                        return Err(ProductWorkflowError::Transient {
+                            reason: format!(
+                                "failed to read available extension asset {}: {error}",
+                                asset.path
+                            ),
+                        });
+                    }
+                }
+            }
+        };
+        if let Err(error) = fs.write_file(&path, &bytes).await {
             for written_path in written_paths.iter().rev() {
                 let _ = fs.delete(written_path).await;
             }
@@ -205,20 +230,15 @@ where
             ExtensionPackage::from_manifest(manifest, entry.path).map_err(map_binding_error)?;
         let mut assets = vec![AvailableExtensionAsset {
             path: "manifest.toml".to_string(),
-            bytes: manifest_toml.as_bytes().to_vec(),
+            content: AvailableExtensionAssetContent::Bytes(manifest_toml.as_bytes().to_vec()),
         }];
         if let ExtensionRuntime::Wasm { module } = &package.manifest.runtime {
             let module_path = module
                 .resolve_under(&package.root)
                 .map_err(map_binding_error)?;
-            let bytes = fs.read_file(&module_path).await.map_err(|error| {
-                ProductWorkflowError::Transient {
-                    reason: format!("failed to read available extension asset: {error}"),
-                }
-            })?;
             assets.push(AvailableExtensionAsset {
                 path: module.as_str().to_string(),
-                bytes,
+                content: AvailableExtensionAssetContent::Filesystem(module_path),
             });
         }
         packages.push(AvailableExtensionPackage {
@@ -322,7 +342,10 @@ mod tests {
         let extension = test_extension_package();
         for asset in &extension.assets {
             let path = extension_asset_path(&extension.package.id, &asset.path).unwrap();
-            fs.write_file(&path, &asset.bytes).await.unwrap();
+            let AvailableExtensionAssetContent::Bytes(bytes) = &asset.content else {
+                panic!("test fixture assets are byte-backed");
+            };
+            fs.write_file(&path, bytes).await.unwrap();
         }
 
         let catalog = AvailableExtensionCatalog::from_filesystem_root(
@@ -456,11 +479,11 @@ output_schema_ref = "schemas/write.output.json"
             assets: vec![
                 AvailableExtensionAsset {
                     path: "manifest.toml".to_string(),
-                    bytes: MANIFEST.as_bytes().to_vec(),
+                    content: AvailableExtensionAssetContent::Bytes(MANIFEST.as_bytes().to_vec()),
                 },
                 AvailableExtensionAsset {
                     path: "wasm/fixture.wasm".to_string(),
-                    bytes: b"wasm".to_vec(),
+                    content: AvailableExtensionAssetContent::Bytes(b"wasm".to_vec()),
                 },
             ],
         }
