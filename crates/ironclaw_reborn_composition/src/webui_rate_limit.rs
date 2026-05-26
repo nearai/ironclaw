@@ -3,7 +3,7 @@
 //!
 //! `ironclaw_webui_v2::webui_v2_routes()` returns an
 //! [`IngressRouteDescriptor`] per route, each carrying a
-//! [`RateLimitPolicy`] (mutation 60/60, read 120/60, stream 12/60 in
+//! [`RateLimitPolicy`] (mutation 60/60, read 120/60, stream 30/60 in
 //! the current beta). The v2 crate's CLAUDE.md explicitly designates
 //! enforcement of these policies as a host-composition responsibility;
 //! this module is that enforcement.

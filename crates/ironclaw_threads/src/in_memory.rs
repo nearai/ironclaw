@@ -557,11 +557,18 @@ impl SessionThreadService for InMemorySessionThreadService {
         // cannot see threads owned by other users in the same
         // (tenant, agent, project) triple. The trait contract
         // documents this invariant.
+        //
+        // Filter before cloning: matching on the borrowed scope avoids
+        // cloning records owned by other tenants/projects only to throw
+        // them away. The store is bounded by tenant memory so a full
+        // scan is still acceptable here; a scope-indexed secondary
+        // map would help with very large stores but local-dev never
+        // gets close to that scale.
         let mut matching: Vec<SessionThreadRecord> = state
             .threads
             .values()
+            .filter(|stored| stored.record.scope == request.scope)
             .map(|stored| stored.record.clone())
-            .filter(|record| record.scope == request.scope)
             .collect();
         // Stable order so opaque cursor → resumption is deterministic.
         matching.sort_by(|a, b| a.thread_id.as_str().cmp(b.thread_id.as_str()));

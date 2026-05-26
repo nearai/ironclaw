@@ -18,8 +18,9 @@ default = []
 webui-v2-beta = ["dep:axum", "dep:tokio", "dep:tracing"]
 
 [dependencies]
-# Tiny RNG for per-request CSP nonces. `rand_core` keeps the dep
-# surface minimal (no `rand` macros, no SmallRng grab-bag).
+# Tiny RNG for per-request CSP nonces. `default-features = false`
+# keeps the dep surface minimal — only the `std` + `std_rng` features
+# are pulled in (no `rand` derive macros, no SmallRng grab-bag).
 rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
 
 # Optional — only when `webui-v2-beta` is enabled.

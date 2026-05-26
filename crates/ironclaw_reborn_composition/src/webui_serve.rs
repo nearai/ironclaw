@@ -265,7 +265,7 @@ pub enum WebuiServeError {
 ///   [`WebUiAuthenticatedCaller`]
 /// - per-route rate limit, resolved from the
 ///   `ironclaw_webui_v2::webui_v2_routes()` descriptors (mutation
-///   60/60, read 120/60, stream 12/60 per `(tenant, user)` today)
+///   60/60, read 120/60, stream 30/60 per `(tenant, user)` today)
 /// - WebChat v2 route set from `ironclaw_webui_v2::webui_v2_router`
 ///
 /// The returned [`Router`] is the seam between this composition crate
@@ -364,24 +364,14 @@ pub fn webui_v2_app(
         // CORS, panic boundary, and the global body-limit
         // (`.layer(...)` calls below) still apply, defense in depth.
         //
-        // Three explicit routes (no `.nest`) so axum 0.8 dispatches
-        // the handler uniformly for `/v2`, `/v2/`, and every
-        // sub-path. The static crate exposes two handlers — `serve_root`
-        // for the prefix root + trailing-slash, `serve_wildcard` for
-        // sub-paths — so the path passed to the asset lookup is
-        // already mount-prefix-stripped via axum's `Path` extractor.
-        .route(
-            "/v2",
-            axum::routing::get(ironclaw_webui_v2_static::serve_root),
-        )
-        .route(
-            "/v2/",
-            axum::routing::get(ironclaw_webui_v2_static::serve_root),
-        )
-        .route(
-            "/v2/{*path}",
-            axum::routing::get(ironclaw_webui_v2_static::serve_wildcard),
-        )
+        // The static crate's `mount_at_prefix` factory owns the
+        // routing surface (root, trailing-slash, wildcard, and any
+        // future routes it adds) so the composition layer never
+        // enumerates individual handlers. `merge` (not `nest`) is
+        // used because the factory already returns fully prefixed
+        // routes — `nest` in axum 0.8 has quirky dispatch for the
+        // exact prefix with/without trailing slash.
+        .merge(ironclaw_webui_v2_static::mount_at_prefix("/v2"))
         // Outer global cap: applies to unmatched paths (e.g. 404 fallback)
         // as defense in depth. v2 routes are tighter via the per-route
         // body-limit middleware above.

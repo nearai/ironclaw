@@ -27,14 +27,15 @@ const NONCE_PLACEHOLDER: &str = "__IRONCLAW_CSP_NONCE__";
 /// characters, well above the CSP-3 recommendation of 128 bits.
 const NONCE_BYTES: usize = 16;
 
-/// Build the SPA static-asset router.
+/// Build the SPA static-asset router with no path prefix.
 ///
-/// Mounted by host composition under `/v2`. The router owns no
-/// per-instance state; each request generates a fresh nonce.
+/// Standalone consumers (the crate's own tests) mount this at `/`.
+/// Host composition should call [`mount_at_prefix`] instead so the
+/// SPA lives under a stable URL prefix without dragging the SPA
+/// shell handler onto the gateway root.
 ///
-/// A single fallback handles every path so nesting semantics
-/// (with or without a trailing slash on the mount prefix) resolve
-/// uniformly to either an embedded asset, the SPA shell, or 404.
+/// The router owns no per-instance state; each request generates a
+/// fresh nonce.
 pub fn static_router() -> Router {
     // Three explicit routes keep `axum::Router::nest` out of the
     // picture — nest in 0.8 has quirky dispatch for the exact prefix
@@ -44,6 +45,29 @@ pub fn static_router() -> Router {
     Router::new()
         .route("/", get(serve_root))
         .route("/{*path}", get(serve_wildcard))
+}
+
+/// Build the SPA static-asset router wired under `prefix`.
+///
+/// This is the factory host composition should use — owning the
+/// prefixed route shape inside the static crate means a future
+/// fourth route is picked up automatically by every mount site.
+/// Composition merges the returned `Router` into the gateway's main
+/// router; it must not also enumerate individual handlers from this
+/// crate.
+///
+/// `prefix` must begin with `/` and must not end with `/`. Passing
+/// `"/v2"` mounts the SPA at `/v2`, `/v2/`, and `/v2/<anything>`.
+pub fn mount_at_prefix(prefix: &str) -> Router {
+    // Three explicit routes (no `nest`) for the same reason
+    // `static_router` keeps `nest` out of the picture: axum 0.8's
+    // nest dispatch for the exact prefix with/without trailing
+    // slash is quirky and was the source of regressions in the
+    // earlier inline wiring this factory replaces.
+    Router::new()
+        .route(prefix, get(serve_root))
+        .route(&format!("{prefix}/"), get(serve_root))
+        .route(&format!("{prefix}/{{*path}}"), get(serve_wildcard))
 }
 
 /// Render the SPA shell with a freshly-substituted CSP nonce. Used
@@ -80,10 +104,14 @@ fn serve_for_path(path: &str) -> Response {
     }
 
     // Unknown path that does not look like a real asset request
-    // (no `.` in any segment, so probably a client-side route like
-    // `chat/123`) → serve the SPA shell so react-router can render
-    // the right view.
-    if !path.contains('.') {
+    // (last segment has no file extension, so probably a client-side
+    // route like `chat/abc` or `chat/user.123`) → serve the SPA shell
+    // so react-router can render the right view. We check only the
+    // last segment so a route like `profile/john.doe` doesn't get
+    // misclassified as an asset request just because an earlier
+    // segment happened to contain a dot.
+    let last_segment = path.rsplit('/').next().unwrap_or(path);
+    if !last_segment.contains('.') {
         return render_index_with_nonce();
     }
 
@@ -114,7 +142,13 @@ fn render_index_with_nonce() -> Response {
     // The CDN origins below match `index.html`: React + react-router
     // + react-query + htm + react-hook-form from esm.sh, Tailwind
     // browser runtime from jsdelivr, dompurify + marked + highlight.js
-    // from cdnjs, Google Fonts CSS + woff files.
+    // from cdnjs, Google Fonts CSS + woff files. Those origins are
+    // allowed under `script-src` / `style-src` (the directives module
+    // loading actually consults) but NOT under `connect-src`. The
+    // SPA itself only `fetch`es from the same-origin v2 API; leaving
+    // the CDNs out of `connect-src` cuts off the most direct path
+    // for any XSS-injected script to use those origins as
+    // exfiltration channels.
     let csp = format!(
         "default-src 'self'; \
          script-src 'self' 'nonce-{nonce}' https://esm.sh https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; \
@@ -123,7 +157,7 @@ fn render_index_with_nonce() -> Response {
          style-src-elem 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net; \
          font-src 'self' https://fonts.gstatic.com data:; \
          img-src 'self' data:; \
-         connect-src 'self' https://esm.sh https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; \
+         connect-src 'self'; \
          object-src 'none'; \
          frame-ancestors 'none'; \
          base-uri 'self'",
@@ -263,6 +297,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn standalone_path_traversal_segments_return_not_found() {
+        // Defense-in-depth check: the asset table is a closed set built
+        // from `static/` so traversal could never escape the embedded
+        // bundle, but `serve_for_path` still rejects any path with `..`
+        // or `.` segments. If a future routing change starts forwarding
+        // raw OS paths into the asset lookup this regression test fails
+        // loudly before any leak ships.
+        let app = static_router();
+        for path in [
+            "/../../etc/passwd",
+            "/js/../../../etc/passwd",
+            "/./../../etc/passwd",
+            "/styles/../../../etc/passwd",
+            "/foo/./bar",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(path)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("oneshot");
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "path `{path}` must be rejected with 404",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn standalone_no_dot_path_falls_back_to_spa_shell() {
+        // Single-segment client-side routes (e.g. `/admin`, `/login`,
+        // `/settings`) have no slashes and no dots, so the fallback
+        // logic must serve the SPA shell rather than 404. The
+        // multi-segment case is covered by
+        // `standalone_spa_fallback_for_client_route`; this guards the
+        // simpler form which the wildcard handler also has to match.
+        let app = static_router();
+        for path in ["/admin", "/login", "/settings"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(path)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("oneshot");
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "single-segment client route `{path}` should fall back to SPA shell",
+            );
+            let body = body_string(response).await;
+            assert!(body.contains("v2-root"), "`{path}` did not render shell");
+        }
+    }
+
+    #[tokio::test]
     async fn standalone_spa_fallback_for_client_route() {
         let app = static_router();
         let response = app
@@ -278,6 +378,37 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = body_string(response).await;
         assert!(body.contains("v2-root"));
+    }
+
+    #[tokio::test]
+    async fn standalone_spa_fallback_accepts_dot_in_non_terminal_segment() {
+        // A client-side route may have a dot in a middle segment
+        // while the final segment has no extension (e.g. the React
+        // router's segment-versioning convention). The fallback
+        // decision must only look at the last segment — under the
+        // previous full-path `.contains('.')` check these routes
+        // would 404 instead of rendering the SPA shell.
+        let app = static_router();
+        for path in ["/a.b/c", "/v1.2/dashboard"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(path)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("oneshot");
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "client-side route `{path}` should fall back to the SPA shell",
+            );
+            let body = body_string(response).await;
+            assert!(body.contains("v2-root"), "`{path}` did not render shell");
+        }
     }
 
     #[test]

@@ -1168,15 +1168,43 @@ where
             None => 0,
         };
         let end_index = start_index.saturating_add(limit).min(thread_ids.len());
-        let mut page: Vec<SessionThreadRecord> = Vec::with_capacity(end_index - start_index);
-        for name in &thread_ids[start_index..end_index] {
-            let thread_id = ThreadId::new(name.clone()).map_err(invalid_path)?;
-            if let Some((stored, _)) = self
-                .read_thread_versioned(&request.scope, &thread_id)
-                .await?
-                && stored.record.scope == request.scope
-            {
-                page.push(stored.record);
+        let thread_ids_page: Vec<ThreadId> = thread_ids[start_index..end_index]
+            .iter()
+            .map(|name| ThreadId::new(name.clone()).map_err(invalid_path))
+            .collect::<Result<_, _>>()?;
+        // Parallelize the per-thread reads. `list_dir` only returns
+        // names, so each entry still requires a `get` to materialize
+        // the record — issuing them concurrently turns an N-sequential
+        // page (up to 200 reads) into a single bounded fan-out.
+        let reads = thread_ids_page
+            .iter()
+            .map(|tid| self.read_thread_versioned(&request.scope, tid));
+        let results: Vec<Result<Option<(StoredThreadRecord, RecordVersion)>, SessionThreadError>> =
+            futures::future::join_all(reads).await;
+        let mut page: Vec<SessionThreadRecord> = Vec::with_capacity(thread_ids_page.len());
+        for (thread_id, result) in thread_ids_page.iter().zip(results.into_iter()) {
+            match result {
+                Ok(Some((stored, _))) if stored.record.scope == request.scope => {
+                    page.push(stored.record);
+                }
+                Ok(_) => {
+                    // Absent record or scope-mismatched payload (e.g.
+                    // tenancy drift between disk and request) — skip
+                    // silently, matching the prior behavior.
+                }
+                Err(error) => {
+                    // silent-ok: list_threads is a sidebar read; one
+                    // corrupted record must not blank out the whole
+                    // page. The error is surfaced through tracing so
+                    // operators see it without the user losing the
+                    // rest of their thread list.
+                    tracing::warn!(
+                        thread_id = %thread_id.as_str(),
+                        scope = ?request.scope,
+                        ?error,
+                        "skipping unreadable thread record during list_threads_for_scope",
+                    );
+                }
             }
         }
         let next_cursor = if end_index < thread_ids.len() {

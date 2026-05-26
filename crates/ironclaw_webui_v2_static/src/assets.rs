@@ -21,3 +21,22 @@ pub(crate) fn lookup(path: &str) -> Option<&'static Asset> {
         .ok()
         .map(|idx| &ASSETS[idx].1)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lookup_returns_none_for_unknown_path() {
+        // Direct coverage of the `None` arm. The router-level tests
+        // exercise the `Some` path via known assets and the SPA-shell
+        // fallback for unknown paths, but neither directly asserts
+        // that the asset table itself returns `None` — a future
+        // refactor that swaps `binary_search_by` for something that
+        // returns the closest match instead would regress this
+        // contract silently without this guard.
+        assert!(lookup("nonexistent.js").is_none());
+        assert!(lookup("../etc/passwd").is_none());
+        assert!(lookup("").is_none());
+    }
+}

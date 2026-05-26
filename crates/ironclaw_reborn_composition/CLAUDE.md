@@ -137,7 +137,7 @@ rows are inventoried here, not implemented in the current PR.
   is kept as defense in depth for paths that don't match any v2
   descriptor.
 - **Rate limit** — descriptor-driven; the v2 crate declares mutation
-  60/60, read 120/60, stream 12/60 per `(tenant, user)`. Reading and
+  60/60, read 120/60, stream 30/60 per `(tenant, user)`. Reading and
   enforcing happens in `webui_rate_limit::build_rate_limit_state`.
 - **Static security headers** — `nosniff`, `DENY`, CSP applied via
   outer `SetResponseHeaderLayer`s; default CSP is

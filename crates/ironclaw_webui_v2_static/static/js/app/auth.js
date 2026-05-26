@@ -45,11 +45,14 @@ export function useAuthSession() {
     setError,
     isChecking: false,
     isAuthenticated: Boolean(token),
-    // Local-dev with no profile defaults to admin so the fork's
-    // sidebar / admin pages render. Matches the fork's `!profile`
-    // permissive read — production deployments that surface a real
-    // profile through a future v2 endpoint can flip this.
-    isAdmin: true,
+    // No v2 profile endpoint exists yet, so the SPA cannot prove
+    // admin status — default closed. The fork's `!profile`
+    // permissive read defaulted open, which is the wrong direction
+    // for a bearer-only auth surface. Admin-gated routes are also
+    // hidden via `route.hidden`, so this is defense in depth; once a
+    // server-issued profile endpoint lands the flag flips from
+    // there.
+    isAdmin: false,
     signIn,
     signOut,
   };

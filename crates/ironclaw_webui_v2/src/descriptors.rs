@@ -284,11 +284,18 @@ fn stream_rate_limit() -> RateLimitPolicy {
     // SSE sessions are long-lived; the per-tenant/user concurrency
     // cap (3 streams, enforced in `WebUiV2State::SseCapacity`) does
     // the real bounding. The request-rate window here is just for
-    // burst protection against reconnect storms — bumped to 60/60s
-    // (parity with the mutation budget) so a browser doing
-    // exponential-backoff reconnects after a transient outage does
-    // not lock itself out before the concurrency cap recycles.
-    rate_limit_per_caller(60, 60)
+    // burst protection against reconnect storms.
+    //
+    // Set to 30/60s — `EventSource` can't set headers so the SSE
+    // route additionally accepts `?token=…`, which leaks the bearer
+    // into browser history, server access logs, and proxy logs.
+    // Keeping the request rate higher than necessary widens the
+    // replay surface for a logged token, so the budget here is
+    // capped at 2x a worst-case exponential-backoff reconnect cycle
+    // (≈ 1, 2, 4, 8, 16, 32s per minute = 6 opens) rather than
+    // parity with the mutation budget. The 3-stream concurrency cap
+    // is the real load gate; this window only deters replay.
+    rate_limit_per_caller(30, 60)
 }
 
 fn rate_limit_per_caller(max: u32, window_secs: u32) -> RateLimitPolicy {
