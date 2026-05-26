@@ -21,6 +21,7 @@
 use std::sync::Arc;
 
 mod auth;
+mod default_system_prompt;
 mod error;
 mod factory;
 mod gsuite;

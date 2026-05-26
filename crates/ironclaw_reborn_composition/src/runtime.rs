@@ -43,8 +43,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
-    FilesystemSkillBundleSource, HostIdentityContextBuildError, HostIdentityContextCandidate,
-    HostIdentityContextSource, HostSkillContextSource, JsonSpawnSubagentInputCodec,
+    FilesystemSkillBundleSource, HostSkillContextSource, JsonSpawnSubagentInputCodec,
 };
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
@@ -81,12 +80,15 @@ use ironclaw_turns::{
     run_profile::{LoopHostMilestoneSink, LoopRunContext, PromptMode},
 };
 
+use crate::default_system_prompt::DefaultSystemPromptIdentitySource;
 use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore};
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
 use crate::{RebornBuildError, RebornCompositionProfile, RebornServices, build_reborn_services};
 
 mod approval;
+#[cfg(test)]
+mod default_system_prompt_tests;
 mod local_dev;
 mod skills;
 
@@ -1020,7 +1022,14 @@ pub async fn build_reborn_runtime(
         cancellation_factory: None,
         skill_context_source,
         input_queue: None,
-        identity_context_source: Arc::new(EmptyIdentityContextSource),
+        identity_context_source: Arc::new(
+            DefaultSystemPromptIdentitySource::try_new(
+                local_runtime.default_system_prompt_path.clone(),
+            )
+            .map_err(|error| RebornRuntimeError::InvalidArgument {
+                reason: error.to_string(),
+            })?,
+        ),
         model_policy_guard: None,
         model_budget_accountant: None,
         safety_context: None,
@@ -1237,19 +1246,6 @@ impl CapabilitySurfaceProfileResolver for AllowAllCapabilitySurfaceResolver {
         _run_context: &LoopRunContext,
     ) -> Result<CapabilityAllowSet, CapabilityResolveError> {
         Ok(CapabilityAllowSet::All)
-    }
-}
-
-struct EmptyIdentityContextSource;
-
-#[async_trait::async_trait]
-impl HostIdentityContextSource for EmptyIdentityContextSource {
-    async fn load_identity_candidates(
-        &self,
-        _run_context: &LoopRunContext,
-        _mode: PromptMode,
-    ) -> Result<Vec<HostIdentityContextCandidate>, HostIdentityContextBuildError> {
-        Ok(Vec::new())
     }
 }
 
