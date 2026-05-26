@@ -87,7 +87,10 @@ pub use recording::{MemorySnapshotEntry, RecordingLlm};
 pub use registry::{ProviderDefinition, ProviderProtocol, ProviderRegistry};
 #[cfg(feature = "registry-provider-factory")]
 pub use resolution::{
-    ResolvedProviderConfig, build_llm_config_from_resolved_provider, resolve_llm_config_from_env,
+    ProviderSelection, ResolvedProviderConfig, build_llm_config_from_resolved_provider,
+    build_registry_provider_config_from_resolved_provider, resolve_llm_config_from_env,
+    resolve_llm_config_from_selection, resolve_provider_config_from_env,
+    resolve_provider_config_from_selection,
 };
 pub use response_cache::{CachedProvider, ResponseCacheConfig};
 pub use retry::{RetryConfig, RetryProvider};
@@ -103,8 +106,6 @@ use std::sync::Arc;
 
 use rig::client::CompletionClient;
 use secrecy::ExposeSecret;
-#[cfg(feature = "registry-provider-factory")]
-use secrecy::SecretString;
 
 // LlmConfig, NearAiConfig, RegistryProviderConfig, and LlmError are
 // re-exported via `pub use` above from config and error submodules.
@@ -213,191 +214,9 @@ pub fn create_registry_provider(
 pub fn resolve_registry_provider_from_env(
     user_providers_path: Option<&Path>,
 ) -> Result<Option<RegistryProviderConfig>, LlmError> {
-    if let Some(backend) = nonempty_env("LLM_BACKEND") {
-        if is_openai_codex_backend(&backend) {
-            return resolve_openai_codex_registry_provider_from_env().map(Some);
-        }
-        let registry = try_load_provider_registry(user_providers_path)?;
-        let provider = registry
-            .find(&backend)
-            .ok_or_else(|| LlmError::AuthFailed {
-                provider: backend.clone(),
-            })?;
-        return resolve_registry_provider_definition_from_env(provider).map(Some);
-    }
-
-    if codex_auth_enabled_from_env() {
-        return resolve_openai_codex_registry_provider_from_env().map(Some);
-    }
-
-    let registry = ProviderRegistry::load_from_path(user_providers_path);
-    let Some(provider) = registry
-        .all()
-        .iter()
-        .find(|provider| registry_provider_env_present(provider))
-    else {
-        return Ok(None);
-    };
-    resolve_registry_provider_definition_from_env(provider).map(Some)
-}
-
-#[cfg(feature = "registry-provider-factory")]
-fn try_load_provider_registry(
-    user_providers_path: Option<&Path>,
-) -> Result<ProviderRegistry, LlmError> {
-    ProviderRegistry::try_load_from_path(user_providers_path).map_err(|source| {
-        LlmError::RequestFailed {
-            provider: "provider_registry".to_string(),
-            reason: source.to_string(),
-        }
-    })
-}
-
-#[cfg(feature = "registry-provider-factory")]
-fn registry_provider_env_present(provider: &ProviderDefinition) -> bool {
-    provider
-        .api_key_env
-        .as_deref()
-        .and_then(nonempty_env)
-        .is_some()
-        || provider
-            .base_url_env
-            .as_deref()
-            .and_then(nonempty_env)
-            .is_some()
-}
-
-#[cfg(feature = "registry-provider-factory")]
-fn resolve_registry_provider_definition_from_env(
-    provider: &ProviderDefinition,
-) -> Result<RegistryProviderConfig, LlmError> {
-    let api_key = match provider.api_key_env.as_deref().and_then(nonempty_env) {
-        Some(value) => Some(SecretString::from(value)),
-        None if provider.api_key_required => {
-            return Err(LlmError::AuthFailed {
-                provider: provider.id.clone(),
-            });
-        }
-        None => None,
-    };
-    let base_url = provider
-        .base_url_env
-        .as_deref()
-        .and_then(nonempty_env)
-        .or_else(|| provider.default_base_url.clone())
-        .unwrap_or_default();
-    if provider.base_url_required && base_url.is_empty() {
-        return Err(LlmError::RequestFailed {
-            provider: provider.id.clone(),
-            reason: "base URL is required but no base URL environment variable is set".to_string(),
-        });
-    }
-    let model = nonempty_env(&provider.model_env)
-        .or_else(|| nonempty_env("LLM_MODEL"))
-        .unwrap_or_else(|| provider.default_model.clone());
-    let extra_headers = provider
-        .extra_headers_env
-        .as_deref()
-        .and_then(nonempty_env)
-        .map(|value| parse_registry_extra_headers(&provider.id, &value))
-        .transpose()?;
-
-    Ok(RegistryProviderConfig::generic(
-        provider.protocol,
-        provider.id.clone(),
-        api_key,
-        base_url,
-        model,
-    )
-    .with_extra_headers(extra_headers.unwrap_or_default())
-    .with_unsupported_params(provider.unsupported_params.clone()))
-}
-
-#[cfg(feature = "registry-provider-factory")]
-fn resolve_openai_codex_registry_provider_from_env() -> Result<RegistryProviderConfig, LlmError> {
-    let auth_path = std::env::var_os("CODEX_AUTH_PATH")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(codex_auth::default_codex_auth_path);
-    let credentials =
-        codex_auth::load_codex_credentials(&auth_path).ok_or_else(|| LlmError::AuthFailed {
-            provider: "openai_codex".to_string(),
-        })?;
-    let model = nonempty_env("OPENAI_CODEX_MODEL")
-        .or_else(|| nonempty_env("OPENAI_MODEL"))
-        .or_else(|| nonempty_env("LLM_MODEL"))
-        .unwrap_or_else(|| {
-            if credentials.is_chatgpt_mode {
-                "gpt-5.3-codex".to_string()
-            } else {
-                "gpt-4o-mini".to_string()
-            }
-        });
-    let base_url = credentials.base_url().to_string();
-
-    Ok(RegistryProviderConfig {
-        protocol: ProviderProtocol::OpenAiCompletions,
-        provider_id: if credentials.is_chatgpt_mode {
-            "codex_chatgpt".to_string()
-        } else {
-            "openai".to_string()
-        },
-        api_key: Some(credentials.token),
-        base_url,
-        model,
-        extra_headers: Vec::new(),
-        oauth_token: None,
-        is_codex_chatgpt: credentials.is_chatgpt_mode,
-        refresh_token: credentials.refresh_token,
-        auth_path: credentials.is_chatgpt_mode.then_some(auth_path),
-        cache_retention: CacheRetention::None,
-        unsupported_params: Vec::new(),
-    })
-}
-
-#[cfg(feature = "registry-provider-factory")]
-fn is_openai_codex_backend(backend: &str) -> bool {
-    matches!(backend, "openai_codex" | "openai-codex" | "codex")
-}
-
-#[cfg(feature = "registry-provider-factory")]
-fn codex_auth_enabled_from_env() -> bool {
-    std::env::var("LLM_USE_CODEX_AUTH")
-        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-        .unwrap_or(false)
-}
-
-#[cfg(feature = "registry-provider-factory")]
-fn nonempty_env(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|value| !value.is_empty())
-}
-
-#[cfg(feature = "registry-provider-factory")]
-fn parse_registry_extra_headers(
-    provider: &str,
-    value: &str,
-) -> Result<Vec<(String, String)>, LlmError> {
-    let mut headers = Vec::new();
-    for part in value.split(',') {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        let Some((key, header_value)) = part.split_once(':') else {
-            return Err(LlmError::RequestFailed {
-                provider: provider.to_string(),
-                reason: "extra header must use `Name:Value` format".to_string(),
-            });
-        };
-        let key = key.trim();
-        if key.is_empty() {
-            return Err(LlmError::RequestFailed {
-                provider: provider.to_string(),
-                reason: "extra header name must not be empty".to_string(),
-            });
-        }
-        headers.push((key.to_string(), header_value.trim().to_string()));
-    }
-    Ok(headers)
+    resolution::resolve_provider_config_from_env(user_providers_path)?
+        .map(resolution::build_registry_provider_config_from_resolved_provider)
+        .transpose()
 }
 
 fn create_registry_provider_inner(
@@ -1039,6 +858,14 @@ pub(crate) async fn build_provider_chain_components(
     config: &LlmConfig,
     session: Arc<SessionManager>,
 ) -> Result<ProviderChainComponents, LlmError> {
+    build_provider_chain_components_with_options(config, session, true).await
+}
+
+async fn build_provider_chain_components_with_options(
+    config: &LlmConfig,
+    session: Arc<SessionManager>,
+    include_standalone_cheap: bool,
+) -> Result<ProviderChainComponents, LlmError> {
     let llm: Arc<dyn LlmProvider> = if config.backend == "openai_codex" {
         create_openai_codex_provider(config).await?
     } else {
@@ -1163,7 +990,11 @@ pub(crate) async fn build_provider_chain_components(
     };
 
     // Standalone cheap LLM for heartbeat/evaluation (not part of the chain)
-    let cheap_llm = create_cheap_llm_provider(config, session)?;
+    let cheap_llm = if include_standalone_cheap {
+        create_cheap_llm_provider(config, session)?
+    } else {
+        None
+    };
     if let Some(ref cheap) = cheap_llm {
         tracing::debug!("Cheap LLM provider initialized: {}", cheap.model_name());
     }
@@ -1171,6 +1002,22 @@ pub(crate) async fn build_provider_chain_components(
     Ok(ProviderChainComponents {
         primary: llm,
         cheap: cheap_llm,
+    })
+}
+
+/// Build a primary provider chain for composition roots that do not own
+/// hot-reload or standalone cheap-provider lifecycle handles.
+pub async fn build_static_provider_chain(
+    config: &LlmConfig,
+    session: Arc<SessionManager>,
+) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    let components = build_provider_chain_components_with_options(config, session, false).await?;
+    let primary = components.primary;
+    let recording_handle = RecordingLlm::from_env(primary.clone());
+    Ok(if let Some(recorder) = recording_handle {
+        recorder as Arc<dyn LlmProvider>
+    } else {
+        primary
     })
 }
 

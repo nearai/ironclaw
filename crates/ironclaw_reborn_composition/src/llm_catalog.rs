@@ -30,7 +30,7 @@ use std::path::Path;
 
 use thiserror::Error;
 
-use ironclaw_llm::{ProviderRegistry, ResolvedProviderConfig, registry::ProviderDefinition};
+use ironclaw_llm::{ProviderRegistry, ProviderSelection, registry::ProviderDefinition};
 use ironclaw_reborn_config::{
     LlmSlotSelection, RebornBootConfig, RebornConfigFile, reject_inline_secret,
 };
@@ -99,13 +99,6 @@ pub enum RebornLlmCatalogError {
         #[source]
         source: ironclaw_llm::registry::ProviderRegistryLoadError,
     },
-    /// Provider extra headers env var is malformed.
-    #[error("llm provider `{provider}` extra headers env var `{env}` is invalid: {reason}")]
-    ExtraHeadersInvalid {
-        provider: String,
-        env: String,
-        reason: String,
-    },
     /// Environment fallback could not be resolved by the LLM provider layer.
     #[error("could not resolve LLM environment fallback: {source}")]
     EnvResolution {
@@ -149,11 +142,8 @@ fn resolve_llm_from_env(
 /// Steps:
 /// 1. Build the catalog (`ProviderRegistry::load_from_path(user)`).
 /// 2. Look up the requested `provider_id`.
-/// 3. Determine api_key_env (selection override > catalog default).
-/// 4. Read the API key value from that env var (fail-closed if absent).
-/// 5. Determine base_url (selection override > catalog default).
-/// 6. Determine model (selection override > catalog default).
-/// 7. Build and return a full `ironclaw_llm::LlmConfig`.
+/// 3. Validate Reborn-specific secret/env-var policy on catalog and selection.
+/// 4. Let `ironclaw_llm` resolve provider fields and build the full config.
 pub fn resolve_llm_selection_against_catalog(
     selection: &LlmSlotSelection,
     user_providers_path: Option<&Path>,
@@ -196,29 +186,88 @@ pub fn resolve_against_registry(
         .position(|candidate| std::ptr::eq(candidate, provider))
         .unwrap_or(0);
 
-    // API key resolution.
-    let api_key = read_api_key(selection, provider)?;
+    validate_selection(selection, provider, catalog_index)?;
 
-    // Base URL resolution (provider env override > selection > catalog default).
-    // An empty base URL is intentional for providers such as OpenAI: the
-    // `ironclaw_llm` client constructors use it to select protocol defaults.
-    let base_url = resolve_base_url(selection, provider, catalog_index)?;
+    let resolved = ironclaw_llm::resolve_provider_config_from_selection(
+        ProviderSelection {
+            provider_id: provider.id.clone(),
+            api_key_env: selection.api_key_env.clone(),
+            base_url: selection.base_url.clone(),
+            model: selection.model.clone(),
+        },
+        registry,
+    )
+    .map_err(|source| map_selection_resolution_error(source, selection, provider))?;
 
-    // Model resolution (provider env override > selection > catalog default).
-    let model = resolve_model(selection, provider, catalog_index)?;
+    validate_catalog_text(
+        provider,
+        catalog_index,
+        "resolved_base_url",
+        &resolved.base_url,
+    )?;
+    validate_catalog_text(provider, catalog_index, "resolved_model", &resolved.model)?;
 
-    let extra_headers = resolve_extra_headers(provider)?;
+    ironclaw_llm::build_llm_config_from_resolved_provider(resolved)
+        .map_err(|source| RebornLlmCatalogError::EnvResolution { source })
+}
 
-    ironclaw_llm::build_llm_config_from_resolved_provider(ResolvedProviderConfig {
-        protocol: provider.protocol,
-        provider_id: provider.id.clone(),
-        api_key,
-        base_url,
-        model,
-        extra_headers,
-        unsupported_params: provider.unsupported_params.clone(),
-    })
-    .map_err(|source| RebornLlmCatalogError::EnvResolution { source })
+fn validate_selection(
+    selection: &LlmSlotSelection,
+    provider: &ProviderDefinition,
+    catalog_index: usize,
+) -> Result<(), RebornLlmCatalogError> {
+    if let Some(env) = selection.api_key_env.as_deref() {
+        if reject_inline_secret("llm.<slot>.api_key_env", env).is_err() || !is_env_var_name(env) {
+            return Err(RebornLlmCatalogError::ApiKeyEnvInvalid {
+                provider: provider.id.clone(),
+            });
+        }
+    }
+    if let Some(base_url) = selection.base_url.as_deref() {
+        validate_catalog_text(provider, catalog_index, "selection_base_url", base_url)?;
+    }
+    if let Some(model) = selection.model.as_deref() {
+        validate_catalog_text(provider, catalog_index, "selection_model", model)?;
+    }
+    Ok(())
+}
+
+fn map_selection_resolution_error(
+    source: ironclaw_llm::LlmError,
+    selection: &LlmSlotSelection,
+    provider: &ProviderDefinition,
+) -> RebornLlmCatalogError {
+    match source {
+        ironclaw_llm::LlmError::AuthFailed {
+            provider: error_provider,
+        } if error_provider == provider.id && provider.api_key_required => {
+            match selection
+                .api_key_env
+                .clone()
+                .or_else(|| provider.api_key_env.clone())
+            {
+                Some(env) => RebornLlmCatalogError::ApiKeyEnvUnset {
+                    provider: provider.id.clone(),
+                    env,
+                },
+                None => RebornLlmCatalogError::ApiKeyEnvUnconfigured {
+                    provider: provider.id.clone(),
+                },
+            }
+        }
+        ironclaw_llm::LlmError::RequestFailed {
+            provider: error_provider,
+            reason,
+        } if error_provider == provider.id
+            && provider.base_url_required
+            && reason.contains("base URL is required") =>
+        {
+            RebornLlmCatalogError::BaseUrlUnconfigured {
+                provider: provider.id.clone(),
+            }
+        }
+        source => RebornLlmCatalogError::EnvResolution { source },
+    }
 }
 
 fn validate_catalog(registry: &ProviderRegistry) -> Result<(), RebornLlmCatalogError> {
@@ -302,45 +351,6 @@ fn safe_catalog_display_value(label: &'static str, value: &str) -> String {
     }
 }
 
-fn read_api_key(
-    selection: &LlmSlotSelection,
-    provider: &ProviderDefinition,
-) -> Result<Option<secrecy::SecretString>, RebornLlmCatalogError> {
-    let env_var = selection
-        .api_key_env
-        .clone()
-        .or_else(|| provider.api_key_env.clone());
-
-    match (env_var, provider.api_key_required) {
-        (Some(env), required) => {
-            if reject_inline_secret("llm.<slot>.api_key_env", &env).is_err()
-                || !is_env_var_name(&env)
-            {
-                return Err(RebornLlmCatalogError::ApiKeyEnvInvalid {
-                    provider: provider.id.clone(),
-                });
-            }
-            match std::env::var(&env) {
-                Ok(value) if !value.is_empty() => Ok(Some(secrecy::SecretString::from(value))),
-                Ok(_) if required => Err(RebornLlmCatalogError::ApiKeyEnvUnset {
-                    provider: provider.id.clone(),
-                    env,
-                }),
-                Ok(_) => Ok(None),
-                Err(_) if required => Err(RebornLlmCatalogError::ApiKeyEnvUnset {
-                    provider: provider.id.clone(),
-                    env,
-                }),
-                Err(_) => Ok(None),
-            }
-        }
-        (None, true) => Err(RebornLlmCatalogError::ApiKeyEnvUnconfigured {
-            provider: provider.id.clone(),
-        }),
-        (None, false) => Ok(None),
-    }
-}
-
 fn is_env_var_name(value: &str) -> bool {
     let mut chars = value.chars();
     let Some(first) = chars.next() else {
@@ -348,128 +358,6 @@ fn is_env_var_name(value: &str) -> bool {
     };
     (first.is_ascii_alphabetic() || first == '_')
         && chars.all(|character| character.is_ascii_alphanumeric() || character == '_')
-}
-
-fn resolve_base_url(
-    selection: &LlmSlotSelection,
-    provider: &ProviderDefinition,
-    catalog_index: usize,
-) -> Result<String, RebornLlmCatalogError> {
-    let base_url = provider
-        .base_url_env
-        .as_deref()
-        .and_then(nonempty_env)
-        .or_else(|| selection.base_url.clone())
-        .or_else(|| provider.default_base_url.clone())
-        .unwrap_or_default();
-
-    validate_catalog_text(provider, catalog_index, "resolved_base_url", &base_url)?;
-
-    if provider.base_url_required && base_url.is_empty() {
-        return Err(RebornLlmCatalogError::BaseUrlUnconfigured {
-            provider: provider.id.clone(),
-        });
-    }
-
-    Ok(base_url)
-}
-
-fn resolve_model(
-    selection: &LlmSlotSelection,
-    provider: &ProviderDefinition,
-    catalog_index: usize,
-) -> Result<String, RebornLlmCatalogError> {
-    let model = nonempty_env(&provider.model_env)
-        .or_else(|| selection.model.clone())
-        .unwrap_or_else(|| provider.default_model.clone());
-    validate_catalog_text(provider, catalog_index, "resolved_model", &model)?;
-    Ok(model)
-}
-
-fn resolve_extra_headers(
-    provider: &ProviderDefinition,
-) -> Result<Vec<(String, String)>, RebornLlmCatalogError> {
-    let env_headers = match provider.extra_headers_env.as_deref() {
-        Some(env) => {
-            // Header values intentionally come from env without inline-secret rejection:
-            // env vars are the approved secret-carrying channel. The catalog-supplied
-            // env var name is validated by `validate_catalog_env_var` before this runs,
-            // and `parse_extra_headers` never echoes header values in errors.
-            nonempty_env(env)
-                .map(|value| parse_extra_headers(&provider.id, env, &value))
-                .transpose()?
-                .unwrap_or_default()
-        }
-        None => Vec::new(),
-    };
-
-    if matches!(
-        provider.protocol,
-        ironclaw_llm::ProviderProtocol::GithubCopilot
-    ) {
-        Ok(merge_extra_headers(
-            ironclaw_llm::auth::default_headers(ironclaw_llm::auth::AuthBackend::GithubCopilot),
-            env_headers,
-        ))
-    } else {
-        Ok(env_headers)
-    }
-}
-
-fn nonempty_env(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|value| !value.is_empty())
-}
-
-fn parse_extra_headers(
-    provider: &str,
-    env: &str,
-    value: &str,
-) -> Result<Vec<(String, String)>, RebornLlmCatalogError> {
-    let mut headers = Vec::new();
-    for part in value.split(',') {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        let Some((key, header_value)) = part.split_once(':') else {
-            return Err(RebornLlmCatalogError::ExtraHeadersInvalid {
-                provider: provider.to_string(),
-                env: env.to_string(),
-                reason: "header must use `Name:Value` format".to_string(),
-            });
-        };
-        let key = key.trim();
-        if key.is_empty() {
-            return Err(RebornLlmCatalogError::ExtraHeadersInvalid {
-                provider: provider.to_string(),
-                env: env.to_string(),
-                reason: "header name must not be empty".to_string(),
-            });
-        }
-        // Empty values are allowed: some APIs use presence-only headers,
-        // and the env var is operator-controlled. Servers that reject an
-        // empty value will return a provider-specific HTTP error later.
-        headers.push((key.to_string(), header_value.trim().to_string()));
-    }
-    Ok(headers)
-}
-
-fn merge_extra_headers(
-    defaults: Vec<(String, String)>,
-    overrides: Vec<(String, String)>,
-) -> Vec<(String, String)> {
-    let mut merged = defaults;
-    for (key, value) in overrides {
-        if let Some((_, existing_value)) = merged
-            .iter_mut()
-            .find(|(existing_key, _)| existing_key.eq_ignore_ascii_case(&key))
-        {
-            *existing_value = value;
-        } else {
-            merged.push((key, value));
-        }
-    }
-    merged
 }
 
 #[cfg(test)]
@@ -914,39 +802,6 @@ mod tests {
             "gemini-test"
         );
         assert!(config.provider.is_none());
-    }
-
-    #[test]
-    fn parses_extra_headers_with_colons_in_values() {
-        let headers = parse_extra_headers(
-            "alpha",
-            "ALPHA_HEADERS",
-            "HTTP-Referer:https://example.test,X-Token:Bearer abc:def",
-        )
-        .expect("headers parse");
-
-        assert_eq!(
-            headers,
-            vec![
-                (
-                    "HTTP-Referer".to_string(),
-                    "https://example.test".to_string()
-                ),
-                ("X-Token".to_string(), "Bearer abc:def".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn malformed_extra_header_error_does_not_echo_value() {
-        let pasted_secret = format!("Authorization Bearer {}{}", "s", "k-proj-1234567890abcdef");
-        let err = parse_extra_headers("alpha", "ALPHA_HEADERS", &pasted_secret)
-            .expect_err("malformed header must error");
-        let rendered = err.to_string();
-        assert!(
-            !rendered.contains(&pasted_secret),
-            "error must not echo header value: {rendered}"
-        );
     }
 
     #[test]

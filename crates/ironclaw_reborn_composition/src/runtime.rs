@@ -1264,10 +1264,9 @@ async fn build_llm_gateway(
     let session = Arc::new(ironclaw_llm::SessionManager::new(
         llm.config.session.clone(),
     ));
-    let (provider, _cheap_provider, _recording_handle, _reload_handle) =
-        ironclaw_llm::build_provider_chain(&llm.config, session)
-            .await
-            .map_err(|error| RebornRuntimeError::LlmProvider(error.to_string()))?;
+    let provider = ironclaw_llm::build_static_provider_chain(&llm.config, session)
+        .await
+        .map_err(|error| RebornRuntimeError::LlmProvider(error.to_string()))?;
 
     let model_profile_id = ModelProfileId::new("interactive_model").map_err(|reason| {
         RebornRuntimeError::LlmProvider(format!("invalid interactive model profile id: {reason}"))
