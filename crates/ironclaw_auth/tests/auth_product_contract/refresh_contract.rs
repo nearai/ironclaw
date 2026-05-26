@@ -118,6 +118,103 @@ async fn credential_refresh_failure_becomes_recoverable_status() {
 }
 
 #[tokio::test]
+async fn stale_refresh_success_does_not_overwrite_concurrent_refresh() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+    let concurrent_access = SecretHandle::new("github-concurrent-access").unwrap();
+    let concurrent_refresh = SecretHandle::new("github-concurrent-refresh").unwrap();
+    let account = services
+        .create_account(NewCredentialAccount {
+            scope: owner.clone(),
+            provider: provider(),
+            label: label("work"),
+            status: CredentialAccountStatus::Expired,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("github-stale-access").unwrap()),
+            refresh_secret: Some(SecretHandle::new("github-stale-refresh").unwrap()),
+            scopes: provider_scopes(&["repo"]),
+        })
+        .await
+        .expect("expired account");
+    services.complete_refresh_during_next_provider_call_for_tests(
+        account.id,
+        concurrent_access.clone(),
+        concurrent_refresh.clone(),
+    );
+
+    let error = services
+        .refresh_account(CredentialRefreshRequest::new(
+            owner.clone(),
+            provider(),
+            account.id,
+        ))
+        .await
+        .expect_err("stale refresh result cannot overwrite newer credentials");
+
+    assert_eq!(error, AuthProductError::RefreshFailed);
+    let stored = services
+        .get_account(&owner, account.id)
+        .await
+        .expect("lookup")
+        .expect("account");
+    assert_eq!(stored.status, CredentialAccountStatus::Configured);
+    assert_eq!(stored.access_secret, Some(concurrent_access));
+    assert_eq!(stored.refresh_secret, Some(concurrent_refresh));
+}
+
+#[tokio::test]
+async fn stale_refresh_failure_does_not_mark_concurrent_refresh_failed() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+    let concurrent_access = SecretHandle::new("github-concurrent-failed-access").unwrap();
+    let concurrent_refresh = SecretHandle::new("github-concurrent-failed-refresh").unwrap();
+    let account = services
+        .create_account(NewCredentialAccount {
+            scope: owner.clone(),
+            provider: provider(),
+            label: label("work"),
+            status: CredentialAccountStatus::Expired,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("github-old-failed-access").unwrap()),
+            refresh_secret: Some(SecretHandle::new("github-old-failed-refresh").unwrap()),
+            scopes: provider_scopes(&["repo"]),
+        })
+        .await
+        .expect("expired account");
+    services.complete_refresh_during_next_provider_call_for_tests(
+        account.id,
+        concurrent_access.clone(),
+        concurrent_refresh.clone(),
+    );
+    services.fail_next_refresh_for_tests(account.id);
+
+    let report = services
+        .refresh_account(CredentialRefreshRequest::new(
+            owner.clone(),
+            provider(),
+            account.id,
+        ))
+        .await
+        .expect("stale failure reports current account state");
+
+    assert!(!report.refreshed);
+    assert_eq!(report.account.status, CredentialAccountStatus::Configured);
+    assert_eq!(report.recovery.kind(), CredentialRecoveryKind::Configured);
+    let stored = services
+        .get_account(&owner, account.id)
+        .await
+        .expect("lookup")
+        .expect("account");
+    assert_eq!(stored.status, CredentialAccountStatus::Configured);
+    assert_eq!(stored.access_secret, Some(concurrent_access));
+    assert_eq!(stored.refresh_secret, Some(concurrent_refresh));
+}
+
+#[tokio::test]
 async fn credential_refresh_without_refresh_secret_becomes_recoverable_status() {
     let services = InMemoryAuthProductServices::new();
     let owner = scope("alice");

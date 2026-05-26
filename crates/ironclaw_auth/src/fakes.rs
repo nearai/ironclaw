@@ -31,6 +31,7 @@ struct AuthState {
     accounts: HashMap<CredentialAccountId, CredentialAccount>,
     continuations: Vec<AuthContinuationEvent>,
     refresh_failures: HashSet<CredentialAccountId>,
+    refresh_race_completions: HashMap<CredentialAccountId, (SecretHandle, SecretHandle)>,
     cleanup_quarantines: HashMap<CredentialAccountId, SecretCleanupQuarantineReason>,
 }
 
@@ -55,6 +56,17 @@ impl InMemoryAuthProductServices {
 
     pub fn fail_next_refresh_for_tests(&self, account_id: CredentialAccountId) {
         self.lock_state().refresh_failures.insert(account_id);
+    }
+
+    pub fn complete_refresh_during_next_provider_call_for_tests(
+        &self,
+        account_id: CredentialAccountId,
+        access_secret: SecretHandle,
+        refresh_secret: SecretHandle,
+    ) {
+        self.lock_state()
+            .refresh_race_completions
+            .insert(account_id, (access_secret, refresh_secret));
     }
 
     pub fn quarantine_cleanup_for_tests(
@@ -513,6 +525,7 @@ impl CredentialAccountService for InMemoryAuthProductServices {
                 scopes: account.scopes.clone(),
             }
         };
+        let refresh_secret_used = provider_request.refresh_secret.clone();
 
         match self.refresh_token(provider_request).await {
             Ok(refresh) => {
@@ -522,6 +535,9 @@ impl CredentialAccountService for InMemoryAuthProductServices {
                     .get_mut(&request.account_id)
                     .ok_or(AuthProductError::CredentialMissing)?;
                 validate_refresh_target(account, &request)?;
+                if account.refresh_secret.as_ref() != Some(&refresh_secret_used) {
+                    return Err(AuthProductError::RefreshFailed);
+                }
                 if refresh.provider != account.provider {
                     return Err(AuthProductError::CrossScopeDenied);
                 }
@@ -548,8 +564,10 @@ impl CredentialAccountService for InMemoryAuthProductServices {
                     .get_mut(&request.account_id)
                     .ok_or(AuthProductError::CredentialMissing)?;
                 validate_refresh_target(account, &request)?;
-                account.status = CredentialAccountStatus::RefreshFailed;
-                account.updated_at = Utc::now();
+                if account.refresh_secret.as_ref() == Some(&refresh_secret_used) {
+                    account.status = CredentialAccountStatus::RefreshFailed;
+                    account.updated_at = Utc::now();
+                }
                 Ok(CredentialRefreshReport {
                     account: account.projection(),
                     recovery: recovery_projection_for_single_account(
@@ -682,10 +700,20 @@ impl AuthProviderClient for InMemoryAuthProductServices {
         &self,
         request: OAuthProviderRefreshRequest,
     ) -> Result<OAuthProviderRefresh, AuthProductError> {
-        let should_fail = self
-            .lock_state()
-            .refresh_failures
-            .remove(&request.account_id);
+        let should_fail = {
+            let mut state = self.lock_state();
+            let should_fail = state.refresh_failures.remove(&request.account_id);
+            if let Some((access_secret, refresh_secret)) =
+                state.refresh_race_completions.remove(&request.account_id)
+                && let Some(account) = state.accounts.get_mut(&request.account_id)
+            {
+                account.access_secret = Some(access_secret);
+                account.refresh_secret = Some(refresh_secret);
+                account.status = CredentialAccountStatus::Configured;
+                account.updated_at = Utc::now();
+            }
+            should_fail
+        };
         if should_fail {
             return Err(AuthProductError::RefreshFailed);
         }
