@@ -138,6 +138,102 @@ async fn capability_display_preview_store_redacts_unsafe_paths_and_secrets() {
 }
 
 #[tokio::test]
+async fn capability_display_preview_store_redacts_common_secret_text_shapes() {
+    let run_id = TurnRunId::new();
+    let invocation_id = InvocationId::new();
+    let capability = CapabilityId::new("script.output").unwrap();
+    let input_ref = preview_input_ref("common-secret-text-input");
+    let store = CapabilityDisplayPreviewStore::default();
+    store.record_result(CapabilityDisplayPreviewResult {
+        run_id: &run_id.to_string(),
+        input_ref: &input_ref,
+        invocation_id,
+        capability_id: &capability,
+        result_ref: "result:common-secret-text",
+        output: &serde_json::Value::String(
+            "password: secret123 file:///etc/passwd ghp_abcdefghijklmnopqrstuvwxyz xoxb-1234567890 AKIAIOSFODNN7EXAMPLE eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signature"
+                .to_string(),
+        ),
+        output_bytes: 256,
+    });
+
+    let preview = store
+        .preview(&CapabilityActivityProjection {
+            invocation_id,
+            run_id: Some(InvocationId::from_uuid(run_id.as_uuid())),
+            capability_id: capability,
+            thread_id: Some(ThreadId::new("webui-preview-thread").unwrap()),
+            status: ironclaw_event_projections::CapabilityActivityStatus::Completed,
+            provider: None,
+            runtime: None,
+            process_id: None,
+            output_bytes: Some(256),
+            error_kind: None,
+            last_cursor: ironclaw_events::EventCursor::new(1),
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    let rendered = serde_json::to_string(&preview).unwrap();
+    assert!(!rendered.contains("secret123"));
+    assert!(!rendered.contains("file:///etc/passwd"));
+    assert!(!rendered.contains("ghp_abcdefghijklmnopqrstuvwxyz"));
+    assert!(!rendered.contains("xoxb-1234567890"));
+    assert!(!rendered.contains("AKIAIOSFODNN7EXAMPLE"));
+    assert!(!rendered.contains("eyJhbGciOiJIUzI1NiJ9"));
+    assert!(rendered.contains("[redacted]"));
+}
+
+#[tokio::test]
+async fn capability_display_preview_store_redacts_camel_case_api_key_json() {
+    let run_id = TurnRunId::new();
+    let invocation_id = InvocationId::new();
+    let capability = CapabilityId::new("script.output").unwrap();
+    let input_ref = preview_input_ref("camel-case-api-key-input");
+    let store = CapabilityDisplayPreviewStore::default();
+    store.record_result(CapabilityDisplayPreviewResult {
+        run_id: &run_id.to_string(),
+        input_ref: &input_ref,
+        invocation_id,
+        capability_id: &capability,
+        result_ref: "result:camel-case-api-key",
+        output: &serde_json::json!({
+            "apiKey": "live-api-key-secret",
+            "nested": {
+                "serviceCredential": "credential-secret"
+            }
+        }),
+        output_bytes: 128,
+    });
+
+    let preview = store
+        .preview(&CapabilityActivityProjection {
+            invocation_id,
+            run_id: Some(InvocationId::from_uuid(run_id.as_uuid())),
+            capability_id: capability,
+            thread_id: Some(ThreadId::new("webui-preview-thread").unwrap()),
+            status: ironclaw_event_projections::CapabilityActivityStatus::Completed,
+            provider: None,
+            runtime: None,
+            process_id: None,
+            output_bytes: Some(128),
+            error_kind: None,
+            last_cursor: ironclaw_events::EventCursor::new(1),
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    let rendered = serde_json::to_string(&preview).unwrap();
+    assert!(!rendered.contains("live-api-key-secret"));
+    assert!(!rendered.contains("credential-secret"));
+    assert!(rendered.contains("[redacted]"));
+}
+
+#[tokio::test]
 async fn capability_display_preview_store_keys_completed_results_by_invocation() {
     let run_id = TurnRunId::new();
     let first_invocation = InvocationId::new();
@@ -548,11 +644,16 @@ async fn webui_projection_snapshot_resumes_preview_payload() {
         truncated: false,
     };
 
-    let first = snapshot_payloads(
+    let first_snapshot = snapshot.clone();
+    let first = runtime_payloads_for_item(
         &scope,
         &display_previews,
-        snapshot.clone(),
-        cursor.clone(),
+        RuntimePayloadItemInput {
+            runs: first_snapshot.runs,
+            capability_activities: first_snapshot.capability_activities,
+            cursor: cursor.clone(),
+            state_kind: StatePayloadKind::Snapshot,
+        },
         None,
         0,
         2,
@@ -571,11 +672,15 @@ async fn webui_projection_snapshot_resumes_preview_payload() {
         ProductOutboundPayload::CapabilityActivity(_)
     ));
 
-    let resumed = snapshot_payloads(
+    let resumed = runtime_payloads_for_item(
         &scope,
         &display_previews,
-        snapshot,
-        cursor,
+        RuntimePayloadItemInput {
+            runs: snapshot.runs,
+            capability_activities: snapshot.capability_activities,
+            cursor,
+            state_kind: StatePayloadKind::Snapshot,
+        },
         Some(first.item_cursor.runtime),
         2,
         2,

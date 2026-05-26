@@ -431,12 +431,14 @@ fn sanitize_json_value_at_depth(
 
 fn is_sensitive_key(key: &str) -> bool {
     let key = key.to_ascii_lowercase();
+    let compact_key = key.replace(['_', '-'], "");
     // Display previews bias toward over-redaction; benign counters like max_tokens can be hidden.
     key.contains("secret")
         || key.contains("password")
         || key.contains("token")
         || key.contains("credential")
         || key.contains("api_key")
+        || compact_key.contains("apikey")
         || key == "key"
 }
 
@@ -489,15 +491,23 @@ fn truncate_bytes(text: &str, max_bytes: usize) -> DisplayText {
 
 pub(crate) fn sanitize_text(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
+    let mut redact_next_value = false;
     for token in text.split_inclusive(char::is_whitespace) {
         let trimmed = token.trim_end();
+        if trimmed.is_empty() {
+            push_safe_text(&mut out, token);
+            continue;
+        }
         let suffix = &token[trimmed.len()..];
-        if is_secret_like(trimmed) || is_unsafe_path_like(trimmed) {
+        let redact_current =
+            redact_next_value || is_secret_like(trimmed) || is_unsafe_path_like(trimmed);
+        if redact_current {
             out.push_str("[redacted]");
             push_safe_text(&mut out, suffix);
         } else {
             push_safe_text(&mut out, token);
         }
+        redact_next_value = credential_key_expects_value(trimmed) && !suffix.is_empty();
     }
     out
 }
@@ -511,12 +521,22 @@ fn push_safe_text(out: &mut String, text: &str) {
 }
 
 fn is_secret_like(token: &str) -> bool {
-    let lower = token
-        .trim_matches(token_boundary_punctuation)
-        .to_ascii_lowercase();
+    let trimmed = token.trim_matches(token_boundary_punctuation);
+    let lower = trimmed.to_ascii_lowercase();
     lower.starts_with("sk-")
+        || lower.starts_with("ghp_")
+        || lower.starts_with("gho_")
+        || lower.starts_with("ghu_")
+        || lower.starts_with("ghs_")
+        || lower.starts_with("xoxb-")
+        || lower.starts_with("xoxa-")
+        || lower.starts_with("xoxp-")
+        || looks_like_aws_access_key(trimmed)
+        || looks_like_jwt(trimmed)
         || lower.contains("api_key=")
         || lower.contains("api_key:")
+        || lower.contains("apikey=")
+        || lower.contains("apikey:")
         || lower.contains("access_token=")
         || lower.contains("access_token:")
         || lower.contains("secret=")
@@ -529,10 +549,55 @@ fn is_secret_like(token: &str) -> bool {
 
 fn is_unsafe_path_like(token: &str) -> bool {
     let token = token.trim_matches(token_boundary_punctuation);
-    token_contains_absolute_posix_path(token)
+    token.to_ascii_lowercase().starts_with("file:/")
+        || token_contains_absolute_posix_path(token)
         || token.starts_with("\\\\")
         || token.contains("\\\\")
         || token.get(1..3) == Some(":\\")
+}
+
+fn credential_key_expects_value(token: &str) -> bool {
+    let lower = token
+        .trim_matches(non_credential_boundary_punctuation)
+        .to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "api_key:"
+            | "api_key="
+            | "apikey:"
+            | "apikey="
+            | "access_token:"
+            | "access_token="
+            | "secret:"
+            | "secret="
+            | "password:"
+            | "password="
+            | "token:"
+            | "token="
+    )
+}
+
+fn non_credential_boundary_punctuation(character: char) -> bool {
+    matches!(
+        character,
+        '"' | '\'' | '`' | ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}'
+    )
+}
+
+fn looks_like_aws_access_key(token: &str) -> bool {
+    (token.starts_with("AKIA") || token.starts_with("ASIA"))
+        && token.len() >= 16
+        && token
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric())
+}
+
+fn looks_like_jwt(token: &str) -> bool {
+    token.starts_with("eyJ")
+        && token.matches('.').count() >= 2
+        && token.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
 }
 
 fn token_contains_absolute_posix_path(token: &str) -> bool {

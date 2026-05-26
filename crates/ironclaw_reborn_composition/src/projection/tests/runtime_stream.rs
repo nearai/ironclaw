@@ -310,11 +310,15 @@ async fn webui_projection_snapshot_bounds_activity_fanout_before_payload_mapping
     };
 
     let display_previews = NoopCapabilityDisplayPreviewSource;
-    let item = snapshot_payloads(
+    let item = runtime_payloads_for_item(
         &scope,
         &display_previews,
-        snapshot,
-        cursor.clone(),
+        RuntimePayloadItemInput {
+            runs: snapshot.runs,
+            capability_activities: snapshot.capability_activities,
+            cursor: cursor.clone(),
+            state_kind: StatePayloadKind::Snapshot,
+        },
         None,
         0,
         WEBUI_PROJECTION_PAGE_LIMIT + 11,
