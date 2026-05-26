@@ -85,14 +85,14 @@ pub struct RebornOAuthCallbackResponse {
     pub continuation: AuthContinuationRef,
 }
 
-/// Stable sanitized callback failure safe for route rendering.
+/// Stable sanitized auth failure safe for route rendering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornOAuthCallbackError {
+pub struct RebornAuthProductError {
     pub code: AuthErrorCode,
     pub retryable: bool,
 }
 
-impl From<AuthProductError> for RebornOAuthCallbackError {
+impl From<AuthProductError> for RebornAuthProductError {
     fn from(error: AuthProductError) -> Self {
         let code = error.code();
         Self {
@@ -101,6 +101,9 @@ impl From<AuthProductError> for RebornOAuthCallbackError {
         }
     }
 }
+
+/// Stable sanitized callback failure safe for route rendering.
+pub type RebornOAuthCallbackError = RebornAuthProductError;
 
 /// Request to open a Reborn manual-token setup interaction.
 ///
@@ -116,6 +119,30 @@ pub struct RebornManualTokenSetupRequest {
     pub continuation: AuthContinuationRef,
     pub update_binding: Option<CredentialAccountUpdateBinding>,
     pub expires_at: Timestamp,
+}
+
+impl RebornManualTokenSetupRequest {
+    pub fn new(
+        scope: AuthProductScope,
+        provider: AuthProviderId,
+        label: CredentialAccountLabel,
+        continuation: AuthContinuationRef,
+        expires_at: Timestamp,
+    ) -> Self {
+        Self {
+            scope,
+            provider,
+            label,
+            continuation,
+            update_binding: None,
+            expires_at,
+        }
+    }
+
+    pub fn with_update_binding(mut self, update_binding: CredentialAccountUpdateBinding) -> Self {
+        self.update_binding = Some(update_binding);
+        self
+    }
 }
 
 /// Manual-token challenge safe to render to Web/CLI/API surfaces.
@@ -173,21 +200,7 @@ pub struct RebornManualTokenSubmitResponse {
 }
 
 /// Stable sanitized manual-token setup/submit failure safe for route rendering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornManualTokenError {
-    pub code: AuthErrorCode,
-    pub retryable: bool,
-}
-
-impl From<AuthProductError> for RebornManualTokenError {
-    fn from(error: AuthProductError) -> Self {
-        let code = error.code();
-        Self {
-            code,
-            retryable: is_retryable_auth_error(code),
-        }
-    }
-}
+pub type RebornManualTokenError = RebornAuthProductError;
 
 fn is_retryable_auth_error(code: AuthErrorCode) -> bool {
     matches!(code, AuthErrorCode::BackendUnavailable)

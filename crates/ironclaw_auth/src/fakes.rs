@@ -3,7 +3,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_host_api::SecretHandle;
+use ironclaw_host_api::{ExtensionId, SecretHandle};
 
 use crate::{
     AuthChallenge, AuthContinuationEvent, AuthFlowId, AuthFlowManager, AuthFlowRecord,
@@ -676,9 +676,14 @@ fn create_or_update_manual_token_account(
     state: &mut AuthState,
     pending: PendingSecretInteraction,
 ) -> Result<CredentialAccount, AuthProductError> {
-    let account_request = manual_token_account_request(&pending)?;
-    match pending.update_binding {
+    match pending.update_binding.as_ref() {
         Some(binding) => {
+            let account_request = manual_token_account_request(
+                &pending,
+                binding.ownership,
+                binding.owner_extension.clone(),
+                binding.granted_extensions.clone(),
+            )?;
             let now = Utc::now();
             let account = state
                 .accounts
@@ -687,22 +692,24 @@ fn create_or_update_manual_token_account(
             validate_account_update_target(account, &account_request)?;
             update_account_from_request(account, account_request, now)
         }
-        None => create_account_in_state(state, account_request),
+        None => create_account_in_state(
+            state,
+            manual_token_account_request(
+                &pending,
+                CredentialOwnership::UserReusable,
+                None,
+                Vec::new(),
+            )?,
+        ),
     }
 }
 
 fn manual_token_account_request(
     pending: &PendingSecretInteraction,
+    ownership: CredentialOwnership,
+    owner_extension: Option<ExtensionId>,
+    granted_extensions: Vec<ExtensionId>,
 ) -> Result<NewCredentialAccount, AuthProductError> {
-    let (ownership, owner_extension, granted_extensions) = match &pending.update_binding {
-        Some(binding) => (
-            binding.ownership,
-            binding.owner_extension.clone(),
-            binding.granted_extensions.clone(),
-        ),
-        None => (CredentialOwnership::UserReusable, None, Vec::new()),
-    };
-
     Ok(NewCredentialAccount {
         scope: pending.scope.clone(),
         provider: pending.provider.clone(),
@@ -763,7 +770,7 @@ fn validate_flow_update_binding(
         &request.scope,
         &request.provider,
         binding,
-        "auth flow update target provider mismatch",
+        UpdateBindingValidationContext::AuthFlow,
     )
 }
 
@@ -777,8 +784,14 @@ fn validate_manual_token_update_binding(
         &request.scope,
         &request.provider,
         binding,
-        "manual token update target provider mismatch",
+        UpdateBindingValidationContext::ManualToken,
     )
+}
+
+#[derive(Debug, Clone, Copy)]
+enum UpdateBindingValidationContext {
+    AuthFlow,
+    ManualToken,
 }
 
 fn validate_scoped_update_binding(
@@ -786,13 +799,18 @@ fn validate_scoped_update_binding(
     scope: &crate::AuthProductScope,
     provider: &crate::AuthProviderId,
     binding: &CredentialAccountUpdateBinding,
-    provider_mismatch_reason: &'static str,
+    context: UpdateBindingValidationContext,
 ) -> Result<(), AuthProductError> {
     if !scope_matches(scope, &account.scope) {
         return Err(AuthProductError::CrossScopeDenied);
     }
     if &account.provider != provider {
-        return Err(AuthProductError::invalid_request(provider_mismatch_reason));
+        return Err(AuthProductError::invalid_request(match context {
+            UpdateBindingValidationContext::AuthFlow => "auth flow update target provider mismatch",
+            UpdateBindingValidationContext::ManualToken => {
+                "manual token update target provider mismatch"
+            }
+        }));
     }
     validate_bound_update_authority(account, binding)
 }

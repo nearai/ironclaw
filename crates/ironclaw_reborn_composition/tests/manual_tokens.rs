@@ -9,7 +9,7 @@ use ironclaw_auth::{
     CredentialAccountListRequest, CredentialAccountService, CredentialAccountStatus,
     CredentialAccountUpdateBinding, CredentialOwnership, CredentialSetupService,
     InMemoryAuthProductServices, ManualTokenSetupRequest, NewCredentialAccount,
-    SecretCleanupService, SecretSubmitRequest, SecretSubmitResult,
+    OAuthAuthorizationUrl, SecretCleanupService, SecretSubmitRequest, SecretSubmitResult,
 };
 use ironclaw_host_api::{InvocationId, ResourceScope, SecretHandle, UserId};
 use ironclaw_reborn_composition::{
@@ -53,6 +53,31 @@ impl AuthInteractionService for FailingInteractionService {
         _request: SecretSubmitRequest,
     ) -> Result<SecretSubmitResult, AuthProductError> {
         Err(self.error.clone())
+    }
+}
+
+#[derive(Debug, Default)]
+struct UnexpectedChallengeInteractionService;
+
+#[async_trait]
+impl AuthInteractionService for UnexpectedChallengeInteractionService {
+    async fn request_secret_input(
+        &self,
+        _request: ManualTokenSetupRequest,
+    ) -> Result<AuthChallenge, AuthProductError> {
+        Ok(AuthChallenge::OAuthUrl {
+            authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
+                .unwrap(),
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+    }
+
+    async fn submit_manual_token(
+        &self,
+        _scope: &AuthProductScope,
+        _request: SecretSubmitRequest,
+    ) -> Result<SecretSubmitResult, AuthProductError> {
+        unreachable!("unexpected-challenge test does not submit manual tokens")
     }
 }
 
@@ -105,14 +130,13 @@ fn secret(value: &str) -> SecretString {
 }
 
 fn setup_request(scope: AuthProductScope) -> RebornManualTokenSetupRequest {
-    RebornManualTokenSetupRequest {
+    RebornManualTokenSetupRequest::new(
         scope,
-        provider: provider(),
-        label: label(),
-        continuation: AuthContinuationRef::SetupOnly,
-        update_binding: None,
-        expires_at: Utc::now() + Duration::minutes(5),
-    }
+        provider(),
+        label(),
+        AuthContinuationRef::SetupOnly,
+        Utc::now() + Duration::minutes(5),
+    )
 }
 
 fn expired_setup_request(scope: AuthProductScope) -> RebornManualTokenSetupRequest {
@@ -178,12 +202,8 @@ async fn manual_token_facade_updates_bound_account_without_exposing_token() {
         .expect("existing account");
     let challenge = services
         .request_manual_token_setup(RebornManualTokenSetupRequest {
-            scope: owner.clone(),
-            provider: provider(),
             label: CredentialAccountLabel::new("updated work github").unwrap(),
-            continuation: AuthContinuationRef::SetupOnly,
-            update_binding: Some(update_binding(&existing)),
-            expires_at: Utc::now() + Duration::minutes(5),
+            ..setup_request(owner.clone()).with_update_binding(update_binding(&existing))
         })
         .await
         .expect("manual-token update challenge");
@@ -384,4 +404,18 @@ async fn manual_token_facade_returns_sanitized_backend_and_canceled_failures() {
     assert_eq!(canceled_error.code, AuthErrorCode::Canceled);
     assert!(!canceled_error.retryable);
     assert_error_safe(&canceled_error);
+}
+
+#[tokio::test]
+async fn request_manual_token_setup_returns_error_on_unexpected_challenge() {
+    let services = auth_services_with_interaction(Arc::new(UnexpectedChallengeInteractionService));
+
+    let error = services
+        .request_manual_token_setup(setup_request(scope("alice")))
+        .await
+        .expect_err("unexpected challenge is rejected");
+
+    assert_eq!(error.code, AuthErrorCode::InvalidRequest);
+    assert!(!error.retryable);
+    assert_error_safe(&error);
 }

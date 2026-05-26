@@ -297,3 +297,61 @@ async fn manual_token_update_binding_is_scope_checked_before_challenge() {
     assert_eq!(accounts.accounts.len(), 1);
     assert_eq!(accounts.accounts[0].id, account.id);
 }
+
+#[tokio::test]
+async fn manual_token_update_binding_rejects_missing_account_before_challenge() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+
+    let error = services
+        .request_secret_input(ManualTokenSetupRequest {
+            scope: owner.clone(),
+            provider: provider(),
+            label: label("manual github"),
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: Some(CredentialAccountUpdateBinding {
+                account_id: ironclaw_auth::CredentialAccountId::new(),
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+            }),
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .expect_err("missing update target is rejected before challenge");
+
+    assert_eq!(error, AuthProductError::CredentialMissing);
+    let accounts = services
+        .list_accounts(CredentialAccountListRequest::new(owner, provider()).with_limit(10))
+        .await
+        .expect("list accounts");
+    assert!(accounts.accounts.is_empty());
+}
+
+#[tokio::test]
+async fn manual_token_update_binding_rejects_provider_mismatch_before_challenge() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+    let account = services
+        .create_account(account_request(
+            owner.clone(),
+            "manual github",
+            CredentialAccountStatus::Expired,
+        ))
+        .await
+        .expect("existing account");
+
+    let error = services
+        .request_secret_input(ManualTokenSetupRequest {
+            scope: owner,
+            provider: AuthProviderId::new("gitlab").expect("valid provider"),
+            label: label("manual gitlab"),
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: Some(update_binding(&account)),
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .expect_err("provider mismatch is rejected before challenge");
+
+    assert_eq!(error.code(), AuthErrorCode::InvalidRequest);
+}
