@@ -875,10 +875,36 @@ pub trait HostRuntime: Send + Sync {
         request: RuntimeCapabilityRequest,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError>;
 
+    async fn spawn_capability(
+        &self,
+        request: RuntimeCapabilityRequest,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        Ok(RuntimeCapabilityOutcome::Failed(
+            RuntimeCapabilityFailure::new(
+                request.capability_id,
+                RuntimeFailureKind::Unavailable,
+                Some("capability spawn is unsupported by this host runtime".to_string()),
+            ),
+        ))
+    }
+
     async fn resume_capability(
         &self,
         request: RuntimeCapabilityResumeRequest,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError>;
+
+    async fn resume_spawn_capability(
+        &self,
+        request: RuntimeCapabilityResumeRequest,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        Ok(RuntimeCapabilityOutcome::Failed(
+            RuntimeCapabilityFailure::new(
+                request.capability_id,
+                RuntimeFailureKind::Unavailable,
+                Some("capability spawn resume is unsupported by this host runtime".to_string()),
+            ),
+        ))
+    }
 
     async fn visible_capabilities(
         &self,
