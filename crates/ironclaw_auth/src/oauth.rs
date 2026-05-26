@@ -428,3 +428,21 @@ fn is_reserved_authorize_param(name: &str) -> bool {
             | "code_challenge_method"
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oauth_redirect_uri_rejects_non_loopback_http_and_non_url_values() {
+        assert!(OAuthRedirectUri::new("http://example.com/callback").is_err());
+        assert!(OAuthRedirectUri::new("not-a-url").is_err());
+    }
+
+    #[test]
+    fn oauth_redirect_uri_accepts_https_and_loopback_http_values() {
+        assert!(OAuthRedirectUri::new("https://example.com/callback").is_ok());
+        assert!(OAuthRedirectUri::new("http://localhost:8080/callback").is_ok());
+        assert!(OAuthRedirectUri::new("http://127.0.0.1:8080/callback").is_ok());
+    }
+}

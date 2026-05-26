@@ -269,3 +269,20 @@ async fn cleanup_partial_install(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_install_relative_path_rejects_injection_vectors() {
+        for path in [
+            r"nested\file.txt",
+            "nested/\0file.txt",
+            "nested/\nfile.txt",
+            "https://example.com/file.txt",
+        ] {
+            assert!(normalize_install_relative_path(path).is_err());
+        }
+    }
+}

@@ -440,6 +440,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn undelivered_terminal_states_returns_only_terminal_undelivered_states() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        assert!(store.undelivered_terminal_states().unwrap().is_empty());
+        let first_child = TurnRunId::new();
+        let second_child = TurnRunId::new();
+        let delivered_gate = GateRef::new("gate:subagent:delivered").unwrap();
+        store
+            .record_awaited_child(record("gate:subagent:pending", first_child))
+            .await
+            .unwrap();
+        store
+            .record_awaited_child(record(delivered_gate.as_str(), second_child))
+            .await
+            .unwrap();
+
+        assert!(store.undelivered_terminal_states().unwrap().is_empty());
+        store
+            .record_child_terminal(first_child, terminal_event(TurnStatus::Completed))
+            .unwrap();
+        store
+            .record_child_terminal(second_child, terminal_event(TurnStatus::Failed))
+            .unwrap();
+        store.mark_delivered(&delivered_gate).unwrap();
+
+        let states = store.undelivered_terminal_states().unwrap();
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].record.child_run_id, first_child);
+    }
+
+    #[tokio::test]
     async fn terminal_claim_release_allows_retry() {
         let store = BoundedSubagentGateResolutionStore::new();
         let child_run_id = TurnRunId::new();

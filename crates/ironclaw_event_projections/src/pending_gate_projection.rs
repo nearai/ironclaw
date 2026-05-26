@@ -236,6 +236,7 @@ impl PendingGateProjection {
                     TurnStatus::BlockedApproval
                         | TurnStatus::BlockedAuth
                         | TurnStatus::BlockedResource
+                        | TurnStatus::BlockedDependentRun
                 ) {
                     return Ok(());
                 }

@@ -669,6 +669,20 @@ mod tests {
     }
 
     #[test]
+    fn validate_env_rejects_empty_equals_and_nul_values() {
+        for (key, value) in [
+            ("", "value"),
+            ("BAD=KEY", "value"),
+            ("BAD\0KEY", "value"),
+            ("GOOD_KEY", "bad\0value"),
+        ] {
+            let error = validate_env(HashMap::from([(key.to_string(), value.to_string())]))
+                .expect_err("invalid env should be rejected");
+            assert!(matches!(error, RuntimeProcessError::ExecutionFailed(_)));
+        }
+    }
+
+    #[test]
     fn network_broker_exposes_proxy_env_without_none_network_mode() {
         let config = RebornSandboxConfig::new("/tmp/reborn-sandbox")
             .with_network_broker_proxy_url("http://broker.internal:8181")

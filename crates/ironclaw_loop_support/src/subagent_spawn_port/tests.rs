@@ -36,6 +36,11 @@ struct StaticDefinitionResolver {
 
 struct AuthPassPort;
 
+#[derive(Default)]
+struct RecordingBatchPort {
+    batches: std::sync::Mutex<Vec<CapabilityBatchInvocation>>,
+}
+
 struct NoopResultWriter;
 
 struct NoopGoalStore;
@@ -161,6 +166,41 @@ impl LoopCapabilityPort for AuthPassPort {
         _request: CapabilityBatchInvocation,
     ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
         unreachable!("batch auth is not used by these tests")
+    }
+}
+
+#[async_trait]
+impl LoopCapabilityPort for RecordingBatchPort {
+    async fn visible_capabilities(
+        &self,
+        _request: VisibleCapabilityRequest,
+    ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
+        Ok(VisibleCapabilitySurface {
+            version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
+            descriptors: Vec::new(),
+        })
+    }
+
+    async fn invoke_capability(
+        &self,
+        request: CapabilityInvocation,
+    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        Ok(completed_outcome(request.capability_id.as_str()))
+    }
+
+    async fn invoke_capability_batch(
+        &self,
+        request: CapabilityBatchInvocation,
+    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+        self.batches.lock().unwrap().push(request.clone());
+        Ok(CapabilityBatchOutcome {
+            outcomes: request
+                .invocations
+                .iter()
+                .map(|invocation| completed_outcome(invocation.capability_id.as_str()))
+                .collect(),
+            stopped_on_suspension: false,
+        })
     }
 }
 
@@ -532,6 +572,14 @@ fn input_ref() -> CapabilityInputRef {
     CapabilityInputRef::new("input:spawn").unwrap()
 }
 
+fn invocation(capability_id: &str) -> CapabilityInvocation {
+    CapabilityInvocation {
+        surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
+        capability_id: CapabilityId::new(capability_id).unwrap(),
+        input_ref: input_ref(),
+    }
+}
+
 async fn test_run_context(label: &str) -> LoopRunContext {
     let resolved = InMemoryRunProfileResolver::default()
         .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
@@ -649,6 +697,14 @@ async fn invoke_spawn(port: &SubagentSpawnCapabilityPort) -> CapabilityOutcome {
     })
     .await
     .unwrap()
+}
+
+fn completed_outcome(label: &str) -> CapabilityOutcome {
+    CapabilityOutcome::Completed(CapabilityResultMessage {
+        result_ref: LoopResultRef::new(format!("result:{label}")).unwrap(),
+        safe_summary: "completed".to_string(),
+        terminate_hint: false,
+    })
 }
 
 fn denied_reason(outcome: CapabilityOutcome) -> String {
@@ -878,6 +934,118 @@ async fn invoke_spawn_submits_child_run_through_spawn_tree_port() {
     assert_eq!(awaited[0].child_scope, request.child_scope);
     assert_eq!(awaited[0].result_ref.as_str(), "result:spawn");
     assert_eq!(awaited[0].mode, SpawnSubagentMode::Blocking);
+}
+
+#[tokio::test]
+async fn invoke_capability_batch_handles_mixed_spawn_and_non_spawn_invocations() {
+    let context = test_run_context_with_agent_actor("spawn-batch-mixed").await;
+    let turn_store = Arc::new(StaticTurnStateStore::new(Some(turn_record(&context, 0))));
+    let inner = Arc::new(RecordingBatchPort::default());
+    let deps = Arc::new(SubagentSpawnDeps {
+        coordinator: Arc::new(StaticCoordinator),
+        child_runs: Arc::new(RecordingChildRuns::default()),
+        turn_state_store: turn_store,
+        thread_service: Arc::new(InMemorySessionThreadService::default()),
+        goal_store: Arc::new(NoopGoalStore),
+        gate_store: Arc::new(InMemorySubagentGateResolutionStore::default()),
+        definition_resolver: Arc::new(StaticDefinitionResolver {
+            resolved: Some(subagent_definition(false)),
+            parent: None,
+        }),
+        spawn_input_codec: Arc::new(StaticSpawnInputCodec {
+            args: default_spawn_args(),
+        }),
+        result_writer: Arc::new(NoopResultWriter),
+    });
+    let port = SubagentSpawnCapabilityPort::new(
+        inner.clone(),
+        context,
+        CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+        SubagentSpawnLimits::default(),
+        deps,
+    );
+    port.auth_input_refs
+        .lock()
+        .unwrap()
+        .insert(input_ref(), CapabilityInputRef::new("input:auth").unwrap());
+
+    let outcome = port
+        .invoke_capability_batch(CapabilityBatchInvocation {
+            invocations: vec![
+                invocation("regular.one"),
+                invocation(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID),
+                invocation("regular.two"),
+            ],
+            stop_on_first_suspension: false,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.outcomes.len(), 3);
+    assert!(!outcome.stopped_on_suspension);
+    assert!(matches!(
+        outcome.outcomes[1],
+        CapabilityOutcome::AwaitDependentRun { .. }
+    ));
+    let batches = inner.batches.lock().unwrap();
+    assert_eq!(batches.len(), 2);
+    assert_eq!(
+        batches[0].invocations[0].capability_id.as_str(),
+        "regular.one"
+    );
+    assert_eq!(
+        batches[1].invocations[0].capability_id.as_str(),
+        "regular.two"
+    );
+}
+
+#[tokio::test]
+async fn invoke_capability_batch_stops_on_first_spawn_suspension_when_requested() {
+    let context = test_run_context_with_agent_actor("spawn-batch-stop").await;
+    let turn_store = Arc::new(StaticTurnStateStore::new(Some(turn_record(&context, 0))));
+    let inner = Arc::new(RecordingBatchPort::default());
+    let deps = Arc::new(SubagentSpawnDeps {
+        coordinator: Arc::new(StaticCoordinator),
+        child_runs: Arc::new(RecordingChildRuns::default()),
+        turn_state_store: turn_store,
+        thread_service: Arc::new(InMemorySessionThreadService::default()),
+        goal_store: Arc::new(NoopGoalStore),
+        gate_store: Arc::new(InMemorySubagentGateResolutionStore::default()),
+        definition_resolver: Arc::new(StaticDefinitionResolver {
+            resolved: Some(subagent_definition(false)),
+            parent: None,
+        }),
+        spawn_input_codec: Arc::new(StaticSpawnInputCodec {
+            args: default_spawn_args(),
+        }),
+        result_writer: Arc::new(NoopResultWriter),
+    });
+    let port = SubagentSpawnCapabilityPort::new(
+        inner.clone(),
+        context,
+        CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+        SubagentSpawnLimits::default(),
+        deps,
+    );
+    port.auth_input_refs
+        .lock()
+        .unwrap()
+        .insert(input_ref(), CapabilityInputRef::new("input:auth").unwrap());
+
+    let outcome = port
+        .invoke_capability_batch(CapabilityBatchInvocation {
+            invocations: vec![
+                invocation(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID),
+                invocation("regular.after"),
+            ],
+            stop_on_first_suspension: true,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.outcomes.len(), 1);
+    assert!(outcome.stopped_on_suspension);
+    assert!(inner.batches.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

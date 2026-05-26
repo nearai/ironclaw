@@ -827,6 +827,7 @@ where
     S: SessionThreadService + ?Sized + Send + Sync + 'static,
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
 {
+    // arch-exempt: too_many_args, needs LoopHostDependencies aggregation, plan #4088
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         thread_service: Arc<S>,

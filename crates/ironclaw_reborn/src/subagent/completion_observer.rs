@@ -836,6 +836,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parse_subagent_thread_metadata_filters_invalid_and_wrong_kind_metadata() {
+        assert!(parse_subagent_thread_metadata("{not json").is_none());
+        assert!(parse_subagent_thread_metadata(r#"{"kind":"parent"}"#).is_none());
+
+        let metadata = SubagentThreadMetadata {
+            kind: SubagentThreadKind::Subagent,
+            parent_run_id: TurnRunId::new(),
+            parent_thread_id: ThreadId::new("parent-thread").unwrap(),
+            tree_root_run_id: TurnRunId::new(),
+            child_run_id: TurnRunId::new(),
+            subagent_kind: SubagentKindId::new("general").unwrap(),
+            mode: SpawnSubagentMode::Blocking,
+            result_ref: LoopResultRef::new("result:subagent.metadata").unwrap(),
+            handoff: Some("handoff".to_string()),
+        };
+        let raw = serde_json::to_string(&metadata).unwrap();
+
+        assert_eq!(parse_subagent_thread_metadata(&raw), Some(metadata));
+    }
+
     struct RecordingResultWriter {
         result_ref: LoopResultRef,
         writes: Mutex<Vec<serde_json::Value>>,

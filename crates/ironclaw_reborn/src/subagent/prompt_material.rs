@@ -294,6 +294,18 @@ fn map_goal_error(error: SubagentGoalStoreError) -> AgentLoopHostError {
 mod tests {
     use std::sync::Arc;
 
+    use ironclaw_host_api::{AgentId, CapabilityId, TenantId, ThreadId};
+    use ironclaw_loop_support::{
+        AwaitedChildSetRecord, SpawnSubagentMode, SubagentGateResolutionStore, SubagentKindId,
+    };
+    use ironclaw_threads::{
+        AcceptInboundMessageRequest, EnsureThreadRequest, InMemorySessionThreadService,
+        MessageContent,
+    };
+    use ironclaw_turns::{
+        GateRef, LoopResultRef, ReplyTargetBindingRef, SourceBindingRef, TurnRunId, TurnScope,
+    };
+
     use crate::subagent::{
         flavors::SubagentFlavorId,
         goal_store::{InMemoryBoundedSubagentGoalStore, SubagentGoal},
@@ -339,5 +351,208 @@ mod tests {
                 .iter()
                 .any(|cap| cap.as_str() == ironclaw_host_runtime::HTTP_CAPABILITY_ID)
         );
+    }
+
+    #[tokio::test]
+    async fn gate_backed_material_source_uses_gate_flavor_and_goal_store() {
+        let store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+        let gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
+        let context = ironclaw_agent_loop::test_support::test_run_context("gate-backed-goal");
+        store
+            .put_goal(
+                &context.scope,
+                context.run_id,
+                SubagentGoal {
+                    task: "research task".to_string(),
+                    handoff: None,
+                },
+            )
+            .await
+            .unwrap();
+        gate_store
+            .record_awaited_child(awaited_child_record(
+                &context,
+                SubagentKindId::new("researcher").unwrap(),
+            ))
+            .await
+            .unwrap();
+        let source = GateBackedSubagentPromptMaterialSource::new(
+            store,
+            gate_store,
+            Arc::new(InMemorySessionThreadService::default()),
+        );
+
+        let material = source.material_for_run(&context).await.unwrap();
+
+        assert!(material.direction_markdown.contains("research subagent"));
+        assert_eq!(material.goal.task, "research task");
+    }
+
+    #[tokio::test]
+    async fn gate_backed_material_source_falls_back_to_thread_metadata() {
+        let store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+        let gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        let mut context = ironclaw_agent_loop::test_support::test_run_context("thread-flavor");
+        context.scope.agent_id = Some(AgentId::new("agent-thread-flavor").unwrap());
+        ensure_subagent_thread(
+            thread_service.as_ref(),
+            &context,
+            Some(SubagentKindId::new("general").unwrap()),
+            Some("task from thread"),
+        )
+        .await;
+        let source = GateBackedSubagentPromptMaterialSource::new(store, gate_store, thread_service);
+
+        let material = source.material_for_run(&context).await.unwrap();
+
+        assert_eq!(material.goal.task, "task from thread");
+        assert!(
+            material
+                .direction_markdown
+                .contains("general-purpose subagent")
+        );
+    }
+
+    #[tokio::test]
+    async fn gate_backed_material_source_errors_when_no_flavor_is_recorded() {
+        let store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+        let gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        let mut context = ironclaw_agent_loop::test_support::test_run_context("missing-flavor");
+        context.scope.agent_id = Some(AgentId::new("agent-missing-flavor").unwrap());
+        ensure_subagent_thread(thread_service.as_ref(), &context, None, None).await;
+        let source = GateBackedSubagentPromptMaterialSource::new(store, gate_store, thread_service);
+
+        let error = source.material_for_run(&context).await.unwrap_err();
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert!(error.safe_summary.contains("no recorded flavor"));
+    }
+
+    #[tokio::test]
+    async fn gate_backed_material_source_errors_when_flavor_is_unknown() {
+        let store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+        let gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        let mut context = ironclaw_agent_loop::test_support::test_run_context("unknown-flavor");
+        context.scope.agent_id = Some(AgentId::new("agent-unknown-flavor").unwrap());
+        ensure_subagent_thread(
+            thread_service.as_ref(),
+            &context,
+            Some(SubagentKindId::new("unknown").unwrap()),
+            None,
+        )
+        .await;
+        let source = GateBackedSubagentPromptMaterialSource::new(store, gate_store, thread_service);
+
+        let error = source.material_for_run(&context).await.unwrap_err();
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert!(error.safe_summary.contains("unknown flavor"));
+    }
+
+    #[test]
+    fn strip_persisted_handoff_removes_multiline_and_sanitized_suffixes() {
+        assert_eq!(
+            strip_persisted_handoff("task\n\nParent handoff:\nnotes", Some("notes")),
+            "task"
+        );
+        assert_eq!(
+            strip_persisted_handoff("task Parent handoff: notes", Some("notes")),
+            "task"
+        );
+        assert_eq!(
+            strip_persisted_handoff("task without handoff", Some("notes")),
+            "task without handoff"
+        );
+        assert_eq!(strip_persisted_handoff("task", None), "task");
+    }
+
+    fn awaited_child_record(
+        context: &LoopRunContext,
+        subagent_kind: SubagentKindId,
+    ) -> AwaitedChildSetRecord {
+        let tenant = TenantId::new("tenant").unwrap();
+        let agent = AgentId::new("agent").unwrap();
+        AwaitedChildSetRecord {
+            gate_ref: GateRef::new("gate:subagent:prompt-material").unwrap(),
+            parent_run_context: context.clone(),
+            tree_root_run_id: context.run_id,
+            child_scope: TurnScope::new(
+                tenant,
+                Some(agent),
+                None,
+                ThreadId::new("child-thread").unwrap(),
+            ),
+            child_run_id: context.run_id,
+            child_thread_id: context.thread_id.clone(),
+            source_binding_ref: SourceBindingRef::new("subagent-source:prompt").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("subagent-reply:prompt").unwrap(),
+            subagent_kind,
+            spawn_capability_id: CapabilityId::new(
+                ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID,
+            )
+            .unwrap(),
+            result_ref: LoopResultRef::new("result:subagent.prompt").unwrap(),
+            mode: SpawnSubagentMode::Blocking,
+        }
+    }
+
+    async fn ensure_subagent_thread(
+        thread_service: &InMemorySessionThreadService,
+        context: &LoopRunContext,
+        subagent_kind: Option<SubagentKindId>,
+        message: Option<&str>,
+    ) {
+        let metadata_json = subagent_kind.map(|subagent_kind| {
+            serde_json::to_string(&SubagentThreadMetadata {
+                kind: SubagentThreadKind::Subagent,
+                parent_run_id: TurnRunId::new(),
+                parent_thread_id: ThreadId::new("parent-thread").unwrap(),
+                tree_root_run_id: context.run_id,
+                child_run_id: context.run_id,
+                subagent_kind,
+                mode: SpawnSubagentMode::Blocking,
+                result_ref: LoopResultRef::new("result:subagent.prompt").unwrap(),
+                handoff: None,
+            })
+            .unwrap()
+        });
+        let scope = thread_scope_for_run(context).unwrap();
+        thread_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: scope.clone(),
+                thread_id: Some(context.thread_id.clone()),
+                created_by_actor_id: "test".to_string(),
+                title: None,
+                metadata_json,
+            })
+            .await
+            .unwrap();
+        if let Some(message) = message {
+            let accepted = thread_service
+                .accept_inbound_message(AcceptInboundMessageRequest {
+                    scope,
+                    thread_id: context.thread_id.clone(),
+                    actor_id: "test".to_string(),
+                    source_binding_id: None,
+                    reply_target_binding_id: None,
+                    external_event_id: None,
+                    content: MessageContent::text(message),
+                })
+                .await
+                .unwrap();
+            thread_service
+                .mark_message_submitted(
+                    &thread_scope_for_run(context).unwrap(),
+                    &context.thread_id,
+                    accepted.message_id,
+                    context.turn_id.to_string(),
+                    context.run_id.to_string(),
+                )
+                .await
+                .unwrap();
+        }
     }
 }

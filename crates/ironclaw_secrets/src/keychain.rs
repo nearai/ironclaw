@@ -156,7 +156,7 @@ mod platform {
         let key_hex: String = key.iter().map(|b| format!("{:02x}", b)).collect();
 
         set_generic_password(SERVICE_NAME, MASTER_KEY_ACCOUNT, key_hex.as_bytes())
-            .map_err(|e| SecretError::KeychainError(format!("Failed to store in keychain: {}", e)))
+            .map_err(|e| SecretError::KeychainError(format!("failed to store in keychain: {}", e)))
     }
 
     /// Retrieve the master key from the macOS Keychain.
@@ -165,13 +165,13 @@ mod platform {
             if error.code() == ERR_SEC_ITEM_NOT_FOUND {
                 SecretError::NotFound("master key".to_string())
             } else {
-                SecretError::KeychainError(format!("Failed to get from keychain: {error}"))
+                SecretError::KeychainError(format!("failed to get from keychain: {error}"))
             }
         })?;
 
         // Parse hex string back to bytes
         let hex_str = String::from_utf8(password)
-            .map_err(|_| SecretError::KeychainError("Invalid UTF-8 in keychain".to_string()))?;
+            .map_err(|_| SecretError::KeychainError("invalid UTF-8 in keychain".to_string()))?;
 
         hex_to_bytes(&hex_str)
     }
@@ -179,7 +179,7 @@ mod platform {
     /// Delete the master key from the macOS Keychain.
     pub async fn delete_master_key() -> Result<(), SecretError> {
         delete_generic_password(SERVICE_NAME, MASTER_KEY_ACCOUNT).map_err(|e| {
-            SecretError::KeychainError(format!("Failed to delete from keychain: {}", e))
+            SecretError::KeychainError(format!("failed to delete from keychain: {}", e))
         })
     }
 
@@ -204,18 +204,18 @@ mod platform {
         let ss = SecretService::connect(EncryptionType::Dh)
             .await
             .map_err(|e| {
-                SecretError::KeychainError(format!("Failed to connect to secret service: {}", e))
+                SecretError::KeychainError(format!("failed to connect to secret service: {}", e))
             })?;
 
         let collection = ss
             .get_default_collection()
             .await
-            .map_err(|e| SecretError::KeychainError(format!("Failed to get collection: {}", e)))?;
+            .map_err(|e| SecretError::KeychainError(format!("failed to get collection: {}", e)))?;
 
         // Unlock if needed
         if collection.is_locked().await.unwrap_or(true) {
             collection.unlock().await.map_err(|e| {
-                SecretError::KeychainError(format!("Failed to unlock collection: {}", e))
+                SecretError::KeychainError(format!("failed to unlock collection: {}", e))
             })?;
         }
 
@@ -233,7 +233,7 @@ mod platform {
                 "text/plain",
             )
             .await
-            .map_err(|e| SecretError::KeychainError(format!("Failed to create secret: {}", e)))?;
+            .map_err(|e| SecretError::KeychainError(format!("failed to create secret: {}", e)))?;
 
         Ok(())
     }
@@ -243,7 +243,7 @@ mod platform {
         let ss = SecretService::connect(EncryptionType::Dh)
             .await
             .map_err(|e| {
-                SecretError::KeychainError(format!("Failed to connect to secret service: {}", e))
+                SecretError::KeychainError(format!("failed to connect to secret service: {}", e))
             })?;
 
         let items = ss
@@ -253,7 +253,7 @@ mod platform {
                     .collect(),
             )
             .await
-            .map_err(|e| SecretError::KeychainError(format!("Failed to search: {}", e)))?;
+            .map_err(|e| SecretError::KeychainError(format!("failed to search: {}", e)))?;
 
         let item = items
             .unlocked
@@ -265,16 +265,16 @@ mod platform {
         if item.is_locked().await.unwrap_or(true) {
             item.unlock()
                 .await
-                .map_err(|e| SecretError::KeychainError(format!("Failed to unlock: {}", e)))?;
+                .map_err(|e| SecretError::KeychainError(format!("failed to unlock: {}", e)))?;
         }
 
         let secret = item
             .get_secret()
             .await
-            .map_err(|e| SecretError::KeychainError(format!("Failed to get secret: {}", e)))?;
+            .map_err(|e| SecretError::KeychainError(format!("failed to get secret: {}", e)))?;
 
         let hex_str = String::from_utf8(secret)
-            .map_err(|_| SecretError::KeychainError("Invalid UTF-8 in secret".to_string()))?;
+            .map_err(|_| SecretError::KeychainError("invalid UTF-8 in secret".to_string()))?;
 
         hex_to_bytes(&hex_str)
     }
@@ -284,7 +284,7 @@ mod platform {
         let ss = SecretService::connect(EncryptionType::Dh)
             .await
             .map_err(|e| {
-                SecretError::KeychainError(format!("Failed to connect to secret service: {}", e))
+                SecretError::KeychainError(format!("failed to connect to secret service: {}", e))
             })?;
 
         let items = ss
@@ -294,12 +294,12 @@ mod platform {
                     .collect(),
             )
             .await
-            .map_err(|e| SecretError::KeychainError(format!("Failed to search: {}", e)))?;
+            .map_err(|e| SecretError::KeychainError(format!("failed to search: {}", e)))?;
 
         for item in items.unlocked.iter().chain(items.locked.iter()) {
             item.delete()
                 .await
-                .map_err(|e| SecretError::KeychainError(format!("Failed to delete: {}", e)))?;
+                .map_err(|e| SecretError::KeychainError(format!("failed to delete: {}", e)))?;
         }
 
         Ok(())
@@ -338,7 +338,7 @@ mod platform {
 
     pub async fn store_master_key(_key: &[u8]) -> Result<(), SecretError> {
         Err(SecretError::KeychainError(
-            "Keychain not supported on this platform. Use SECRETS_MASTER_KEY env var.".to_string(),
+            "keychain not supported on this platform. use SECRETS_MASTER_KEY env var.".to_string(),
         ))
     }
 
@@ -348,7 +348,7 @@ mod platform {
 
     pub async fn delete_master_key() -> Result<(), SecretError> {
         Err(SecretError::KeychainError(
-            "Keychain not supported on this platform".to_string(),
+            "keychain not supported on this platform".to_string(),
         ))
     }
 
@@ -364,7 +364,7 @@ pub use platform::{delete_master_key, get_master_key, has_master_key, store_mast
 fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, SecretError> {
     if !hex.len().is_multiple_of(2) {
         return Err(SecretError::KeychainError(
-            "Invalid hex string length".to_string(),
+            "invalid hex string length".to_string(),
         ));
     }
 
@@ -372,7 +372,7 @@ fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, SecretError> {
         .step_by(2)
         .map(|i| {
             u8::from_str_radix(&hex[i..i + 2], 16)
-                .map_err(|_| SecretError::KeychainError("Invalid hex character".to_string()))
+                .map_err(|_| SecretError::KeychainError("invalid hex character".to_string()))
         })
         .collect()
 }
@@ -466,6 +466,22 @@ mod tests {
             .unwrap();
 
         assert_eq!(resolved, "bb".repeat(32));
+    }
+
+    #[test]
+    fn validate_master_key_hex_rejects_wrong_length_and_normalizes_case() {
+        assert!(matches!(
+            validate_master_key_hex(&"a".repeat(63)),
+            Err(SecretError::InvalidMasterKey)
+        ));
+        assert!(matches!(
+            validate_master_key_hex(&"a".repeat(65)),
+            Err(SecretError::InvalidMasterKey)
+        ));
+        assert_eq!(
+            validate_master_key_hex(&"AB".repeat(32)).unwrap(),
+            "ab".repeat(32)
+        );
     }
 
     #[test]

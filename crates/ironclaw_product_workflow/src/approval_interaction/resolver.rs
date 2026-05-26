@@ -250,3 +250,92 @@ fn map_approval_resolution_error(error: ApprovalResolutionError) -> ProductWorkf
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use ironclaw_authorization::InMemoryCapabilityLeaseStore;
+    use ironclaw_host_api::{
+        Action, ApprovalRequest, CapabilityId, CorrelationId, InvocationId, Principal,
+        ResourceEstimate, UserId,
+    };
+    use ironclaw_run_state::{ApprovalRequestStore, InMemoryApprovalRequestStore};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn matching_lease_exists_rejects_pending_approval_as_stale() {
+        let approvals = Arc::new(InMemoryApprovalRequestStore::new());
+        let leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+        let scope = resource_scope();
+        let request = approval_request(None);
+        let request_id = request.id;
+        approvals
+            .save_pending(scope.clone(), request)
+            .await
+            .expect("save pending approval");
+        let port = ApprovalResolverPort::new(approvals, leases);
+
+        let error = port
+            .matching_lease_exists(&scope, request_id, ApprovedApprovalAction::Dispatch)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ProductWorkflowError::ApprovalInteractionRejected {
+                kind: ApprovalInteractionRejectionKind::StaleGate
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn matching_lease_exists_rejects_approved_request_without_fingerprint_as_stale() {
+        let approvals = Arc::new(InMemoryApprovalRequestStore::new());
+        let leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+        let scope = resource_scope();
+        let request = approval_request(None);
+        let request_id = request.id;
+        approvals
+            .save_pending(scope.clone(), request)
+            .await
+            .expect("save pending approval");
+        approvals
+            .approve(&scope, request_id)
+            .await
+            .expect("approve request");
+        let port = ApprovalResolverPort::new(approvals, leases);
+
+        let error = port
+            .matching_lease_exists(&scope, request_id, ApprovedApprovalAction::Dispatch)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ProductWorkflowError::ApprovalInteractionRejected {
+                kind: ApprovalInteractionRejectionKind::StaleGate
+            }
+        ));
+    }
+
+    fn resource_scope() -> ResourceScope {
+        ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap()
+    }
+
+    fn approval_request(
+        invocation_fingerprint: Option<ironclaw_host_api::InvocationFingerprint>,
+    ) -> ApprovalRequest {
+        ApprovalRequest {
+            id: ApprovalRequestId::new(),
+            correlation_id: CorrelationId::new(),
+            requested_by: Principal::User(UserId::new("alice").unwrap()),
+            action: Box::new(Action::Dispatch {
+                capability: CapabilityId::new("fixture.search").unwrap(),
+                estimated_resources: ResourceEstimate::default(),
+            }),
+            invocation_fingerprint,
+            reason: "needs approval".to_string(),
+            reusable_scope: None,
+        }
+    }
+}

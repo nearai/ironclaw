@@ -62,3 +62,33 @@ fn validate_container_user(user: &str) -> Result<String, RuntimeProcessError> {
     }
     Ok(user.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn container_user_rejects_empty_whitespace_and_nul_values() {
+        for user in ["", " \t ", "1000\0:1000"] {
+            let identity = RebornSandboxContainerIdentity::configured_user(
+                user,
+                RebornSandboxWorkspaceMode::Private,
+            );
+
+            assert!(identity.container_user().is_err());
+        }
+    }
+
+    #[test]
+    fn container_user_accepts_configured_user() {
+        let identity = RebornSandboxContainerIdentity::configured_user(
+            "1000:1000",
+            RebornSandboxWorkspaceMode::Private,
+        );
+
+        assert_eq!(
+            identity.container_user().unwrap(),
+            Some("1000:1000".to_string())
+        );
+    }
+}
