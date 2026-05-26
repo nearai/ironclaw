@@ -52,6 +52,50 @@ async fn approval_resolution_is_scoped_to_tenant_and_user() {
 }
 
 #[tokio::test]
+async fn approval_resolution_by_guessed_request_id_is_opaque_outside_scope() {
+    let store = InMemoryApprovalRequestStore::new();
+    let invocation_id = InvocationId::new();
+    let owner_scope = sample_scope(invocation_id, "tenant1", "user1");
+    let guessed_scope = sample_scope(invocation_id, "tenant2", "user1");
+    let mut approval = approval_request(invocation_id);
+    approval.reason = "tenant1 secret approval reason".to_string();
+    let request_id = approval.id;
+    let action_capability = match approval.action.as_ref() {
+        Action::Dispatch { capability, .. } => capability.as_str().to_string(),
+        _ => unreachable!("approval fixture uses a dispatch action"),
+    };
+
+    store
+        .save_pending(owner_scope.clone(), approval)
+        .await
+        .unwrap();
+
+    assert!(
+        store
+            .get(&guessed_scope, request_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let err = store.deny(&guessed_scope, request_id).await.unwrap_err();
+    assert!(matches!(
+        err,
+        RunStateError::UnknownApprovalRequest { request_id: id } if id == request_id
+    ));
+    let rendered = err.to_string();
+    assert!(!rendered.contains("tenant1 secret approval reason"));
+    assert!(!rendered.contains(&action_capability));
+
+    let owner_record = store
+        .get(&owner_scope, request_id)
+        .await
+        .unwrap()
+        .expect("owner approval remains pending");
+    assert_eq!(owner_record.status, ApprovalStatus::Pending);
+}
+
+#[tokio::test]
 async fn approval_store_rejects_second_resolution_attempt() {
     let store = InMemoryApprovalRequestStore::new();
     let invocation_id = InvocationId::new();

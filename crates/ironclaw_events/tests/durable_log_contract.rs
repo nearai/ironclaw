@@ -226,6 +226,49 @@ async fn streams_partition_by_tenant_user_agent() {
 }
 
 #[tokio::test]
+async fn guessed_cursor_does_not_replay_events_from_other_stream() {
+    let log = InMemoryDurableEventLog::new();
+    let alice = local_scope("alice", Some("default"));
+    let bob = local_scope("bob", Some("default"));
+    let alice_stream = EventStreamKey::from_scope(&alice);
+    let bob_stream = EventStreamKey::from_scope(&bob);
+
+    let alice_entry = log
+        .append(RuntimeEvent::dispatch_requested(
+            alice.clone(),
+            capability_id(),
+        ))
+        .await
+        .expect("alice append");
+
+    let bob_replay = log
+        .read_after_cursor(&bob_stream, &ReadScope::any(), None, 10)
+        .await
+        .expect("bob replay from origin");
+    assert!(bob_replay.entries.is_empty());
+    assert_eq!(bob_replay.next_cursor, EventCursor::origin());
+
+    let err = log
+        .read_after_cursor(&bob_stream, &ReadScope::any(), Some(alice_entry.cursor), 10)
+        .await
+        .expect_err("foreign cursor should not replay another stream");
+    assert!(matches!(
+        err,
+        EventError::ReplayGap {
+            requested,
+            earliest,
+        } if requested == alice_entry.cursor && earliest == EventCursor::origin()
+    ));
+
+    let alice_replay = log
+        .read_after_cursor(&alice_stream, &ReadScope::any(), None, 10)
+        .await
+        .expect("alice replay");
+    assert_eq!(alice_replay.entries.len(), 1);
+    assert_eq!(alice_replay.entries[0].cursor, alice_entry.cursor);
+}
+
+#[tokio::test]
 async fn read_empty_stream_at_origin_returns_empty_replay() {
     let log = InMemoryDurableEventLog::new();
     let scope = local_scope("nobody", None);

@@ -4,7 +4,7 @@ use ironclaw_capabilities::{
 use ironclaw_events::InMemoryAuditSink;
 use ironclaw_host_api::{
     AgentId, CapabilityId, CapabilitySet, ExecutionContext, ExtensionId, InvocationId, MountView,
-    NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern, Obligation,
+    NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern, Obligation, ProjectId,
     ResourceEstimate, ResourceScope, RuntimeCredentialInjection, RuntimeCredentialSource,
     RuntimeCredentialTarget, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
     RuntimeKind, SecretHandle, TenantId, TrustClass, UserId,
@@ -1750,6 +1750,80 @@ fn host_http_egress_does_not_use_cross_scope_or_cross_capability_policy() {
         } if reason == "network_policy_missing"
     ));
     assert!(network_recorder.lock().unwrap().is_empty());
+}
+
+#[test]
+fn host_http_egress_does_not_use_policy_staged_for_other_tenant_user_or_project() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{"ok":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let services = test_obligation_services();
+    let requested_scope = sample_scope();
+    let capability_id = sample_capability_id();
+
+    let mut tenant_scope = requested_scope.clone();
+    tenant_scope.tenant_id = TenantId::new("tenant-b").unwrap();
+    let mut user_scope = requested_scope.clone();
+    user_scope.user_id = UserId::new("user-b").unwrap();
+    let mut project_scope = requested_scope.clone();
+    project_scope.project_id = Some(ProjectId::new("project-b").unwrap());
+
+    for scope in [&tenant_scope, &user_scope, &project_scope] {
+        stage_policy_sync(&services, scope, &capability_id, sample_policy());
+    }
+    let service = services.host_http_egress(network);
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Wasm,
+            scope: requested_scope.clone(),
+            capability_id: capability_id.clone(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            timeout_ms: None,
+        })
+        .expect_err("cross-tenant/user/project staged policies must not authorize egress");
+
+    assert!(matches!(
+        error,
+        RuntimeHttpEgressError::Network {
+            reason,
+            request_bytes: 0,
+            response_bytes: 0,
+        } if reason == "network_policy_missing"
+    ));
+    assert!(network_recorder.lock().unwrap().is_empty());
+    for scope in [&tenant_scope, &user_scope, &project_scope] {
+        service
+            .execute(RuntimeHttpEgressRequest {
+                runtime: RuntimeKind::Wasm,
+                scope: scope.clone(),
+                capability_id: capability_id.clone(),
+                method: NetworkMethod::Post,
+                url: "https://api.example.test/v1/run".to_string(),
+                headers: vec![],
+                body: b"hello".to_vec(),
+                network_policy: sample_policy(),
+                credential_injections: vec![],
+                response_body_limit: Some(4096),
+                timeout_ms: None,
+            })
+            .expect("policy for other scope must remain available to its owner");
+    }
+    assert_eq!(network_recorder.lock().unwrap().len(), 3);
 }
 
 #[test]

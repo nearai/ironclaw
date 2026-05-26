@@ -223,6 +223,104 @@ async fn libsql_root_filesystem_fails_closed_for_missing_paths_without_host_path
     assert!(!display.contains(".db"));
 }
 
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_root_filesystem_keeps_same_logical_workspace_paths_partitioned_by_scope() {
+    let filesystem = libsql_root().await;
+    let alice_path = VirtualPath::new(
+        "/engine/tenants/tenant-a/users/alice/projects/project-a/workspace/secret.txt",
+    )
+    .unwrap();
+    let bob_same_logical_path = VirtualPath::new(
+        "/engine/tenants/tenant-b/users/bob/projects/project-a/workspace/secret.txt",
+    )
+    .unwrap();
+
+    filesystem
+        .write_file(&alice_path, b"TENANT_A_PROJECT_A_SECRET")
+        .await
+        .unwrap();
+
+    let err = filesystem
+        .read_file(&bob_same_logical_path)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        FilesystemError::NotFound {
+            operation: FilesystemOperation::ReadFile,
+            ..
+        }
+    ));
+
+    match filesystem
+        .list_dir(
+            &VirtualPath::new("/engine/tenants/tenant-b/users/bob/projects/project-a/workspace")
+                .unwrap(),
+        )
+        .await
+    {
+        Ok(bob_entries) => assert!(
+            bob_entries.is_empty(),
+            "same logical workspace path in tenant B must not list tenant A files: {bob_entries:?}"
+        ),
+        Err(FilesystemError::NotFound {
+            operation: FilesystemOperation::ListDir,
+            ..
+        }) => {}
+        Err(error) => panic!("unexpected list_dir error: {error:?}"),
+    }
+
+    assert_eq!(
+        filesystem.read_file(&alice_path).await.unwrap(),
+        b"TENANT_A_PROJECT_A_SECRET"
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_root_filesystem_keeps_attachment_blobs_partitioned_by_thread_scope() {
+    let filesystem = libsql_root().await;
+    let alice_blob = VirtualPath::new(
+        "/engine/tenants/tenant-a/users/alice/threads/thread-a/attachments/blob-1",
+    )
+    .unwrap();
+    let bob_guess =
+        VirtualPath::new("/engine/tenants/tenant-b/users/bob/threads/thread-a/attachments/blob-1")
+            .unwrap();
+
+    filesystem
+        .write_file(&alice_blob, b"ALICE_ATTACHMENT_BYTES")
+        .await
+        .unwrap();
+
+    let err = filesystem.read_file(&bob_guess).await.unwrap_err();
+    assert!(matches!(
+        err,
+        FilesystemError::NotFound {
+            operation: FilesystemOperation::ReadFile,
+            ..
+        }
+    ));
+    match filesystem
+        .list_dir(
+            &VirtualPath::new("/engine/tenants/tenant-b/users/bob/threads/thread-a/attachments")
+                .unwrap(),
+        )
+        .await
+    {
+        Ok(entries) => assert!(
+            entries.is_empty(),
+            "bob must not discover alice attachment ids by listing the guessed thread path"
+        ),
+        Err(FilesystemError::NotFound {
+            operation: FilesystemOperation::ListDir,
+            ..
+        }) => {}
+        Err(error) => panic!("unexpected list_dir error: {error:?}"),
+    }
+}
+
 #[cfg(feature = "postgres")]
 #[test]
 fn postgres_root_filesystem_implements_root_filesystem_contract() {

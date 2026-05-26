@@ -82,6 +82,49 @@ async fn mcp_runtime_reserves_calls_adapter_and_reconciles_success() {
 }
 
 #[tokio::test]
+async fn mcp_runtime_keeps_same_tool_name_calls_partitioned_by_scope() {
+    let package = package_from_manifest(MCP_MANIFEST);
+    let client = RecordingMcpClient::new(Ok(McpClientOutput::json(json!({"ok": true}))));
+    let runtime = McpRuntime::new(McpRuntimeConfig::for_testing(), client.clone());
+    let governor = InMemoryResourceGovernor::new();
+    let alice_scope = sample_scope();
+    let mut bob_scope = sample_scope_for_user("bob");
+    bob_scope.tenant_id = TenantId::new("tenant2").unwrap();
+    bob_scope.project_id = Some(ProjectId::new("project2").unwrap());
+
+    for (scope, query) in [
+        (alice_scope.clone(), "alice-private"),
+        (bob_scope.clone(), "bob-private"),
+    ] {
+        runtime
+            .execute_extension_json(
+                &governor,
+                McpExecutionRequest {
+                    package: &package,
+                    capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
+                    scope,
+                    estimate: ResourceEstimate::default(),
+                    resource_reservation: None,
+                    invocation: McpInvocation {
+                        input: json!({"query": query}),
+                    },
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    let requests = client.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].capability_id, requests[1].capability_id);
+    assert_eq!(requests[0].provider, requests[1].provider);
+    assert_eq!(requests[0].scope, alice_scope);
+    assert_eq!(requests[1].scope, bob_scope);
+    assert_eq!(requests[0].input, json!({"query": "alice-private"}));
+    assert_eq!(requests[1].input, json!({"query": "bob-private"}));
+}
+
+#[tokio::test]
 async fn mcp_runtime_requires_host_mediated_egress_for_http_transports() {
     let package = package_from_manifest(MCP_MANIFEST);
     let client = RecordingMcpClient::direct_network(Ok(McpClientOutput::json(json!({
@@ -301,17 +344,24 @@ async fn concrete_mcp_http_client_scopes_session_ids_per_invocation() {
         StaticMcpHostHttpEgressPlanner::new(host_http_plan()),
     );
 
-    for user in ["user1", "user2"] {
+    let mut cross_tenant_scope = sample_scope_for_user("user2");
+    cross_tenant_scope.tenant_id = TenantId::new("tenant2").unwrap();
+    cross_tenant_scope.project_id = Some(ProjectId::new("project2").unwrap());
+
+    for (scope, query) in [
+        (sample_scope_for_user("user1"), "user1"),
+        (cross_tenant_scope, "user2"),
+    ] {
         client
             .call_tool(McpClientRequest {
                 provider: ExtensionId::new("github-mcp").unwrap(),
                 capability_id: CapabilityId::new("github-mcp.search").unwrap(),
-                scope: sample_scope_for_user(user),
+                scope,
                 transport: "http".to_string(),
                 command: None,
                 args: vec![],
                 url: Some("https://mcp.example.test/mcp".to_string()),
-                input: json!({"query": user}),
+                input: json!({"query": query}),
                 max_output_bytes: 4096,
             })
             .await

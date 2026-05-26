@@ -2,18 +2,20 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ironclaw_filesystem::{FilesystemError, FilesystemOperation, RootFilesystem};
+use ironclaw_filesystem::{FilesystemError, FilesystemOperation, InMemoryBackend, RootFilesystem};
 use ironclaw_host_api::VirtualPath;
 use ironclaw_memory::{
-    ChunkConfig, DefaultPromptWriteSafetyPolicy, InMemoryMemoryDocumentRepository,
-    MemoryAppendOutcome, MemoryBackend, MemoryBackendCapabilities, MemoryBackendFilesystemAdapter,
-    MemoryContext, MemoryDocumentFilesystem, MemoryDocumentIndexer, MemoryDocumentPath,
-    MemoryDocumentRepository, MemoryDocumentScope, MemoryEventSinkError, MemorySearchRequest,
-    PromptProtectedPathRegistry, PromptSafetyAllowanceId, PromptSafetyPolicyVersion,
-    PromptSafetyReasonCode, PromptSafetySeverity, PromptWriteOperation, PromptWriteSafetyDecision,
-    PromptWriteSafetyError, PromptWriteSafetyEvent, PromptWriteSafetyEventKind,
-    PromptWriteSafetyEventSink, PromptWriteSafetyPolicy, PromptWriteSafetyRequest,
-    PromptWriteSource, RepositoryMemoryBackend, chunk_document, content_sha256,
+    ChunkConfig, DefaultPromptWriteSafetyPolicy, FilesystemMemoryDocumentRepository,
+    InMemoryMemoryDocumentRepository, MemoryAppendOutcome, MemoryBackend,
+    MemoryBackendCapabilities, MemoryBackendFilesystemAdapter, MemoryChunkWrite, MemoryContext,
+    MemoryDocumentFilesystem, MemoryDocumentIndexRepository, MemoryDocumentIndexer,
+    MemoryDocumentPath, MemoryDocumentRepository, MemoryDocumentScope, MemoryEventSinkError,
+    MemorySearchRequest, PromptProtectedPathRegistry, PromptSafetyAllowanceId,
+    PromptSafetyPolicyVersion, PromptSafetyReasonCode, PromptSafetySeverity, PromptWriteOperation,
+    PromptWriteSafetyDecision, PromptWriteSafetyError, PromptWriteSafetyEvent,
+    PromptWriteSafetyEventKind, PromptWriteSafetyEventSink, PromptWriteSafetyPolicy,
+    PromptWriteSafetyRequest, PromptWriteSource, RepositoryMemoryBackend, chunk_document,
+    content_sha256,
 };
 
 #[tokio::test]
@@ -1149,6 +1151,130 @@ async fn repository_memory_backend_search_fails_closed_until_provider_is_supplie
     );
 }
 
+#[tokio::test]
+async fn repository_memory_backend_search_does_not_cross_tenant_user_or_project_scope() {
+    let repository = Arc::new(SearchableMemoryRepository::default());
+    let backend = RepositoryMemoryBackend::new(repository.clone()).with_capabilities(
+        MemoryBackendCapabilities {
+            file_documents: true,
+            full_text_search: true,
+            ..MemoryBackendCapabilities::default()
+        },
+    );
+    let alice_context = MemoryContext::new(
+        MemoryDocumentScope::new("tenant-a", "alice", Some("project-a")).unwrap(),
+    );
+    let bob_context =
+        MemoryContext::new(MemoryDocumentScope::new("tenant-b", "bob", Some("project-a")).unwrap());
+    let same_project_other_user =
+        MemoryContext::new(MemoryDocumentScope::new("tenant-a", "bob", Some("project-a")).unwrap());
+    let same_user_other_project = MemoryContext::new(
+        MemoryDocumentScope::new("tenant-a", "alice", Some("project-b")).unwrap(),
+    );
+    let alice_secret = "TENANT_A_ALICE_PROJECT_A_MEMORY_SECRET";
+    let path =
+        MemoryDocumentPath::new("tenant-a", "alice", Some("project-a"), "notes/secret.md").unwrap();
+
+    backend
+        .write_document(&alice_context, &path, alice_secret.as_bytes())
+        .await
+        .unwrap();
+
+    for context in [
+        &bob_context,
+        &same_project_other_user,
+        &same_user_other_project,
+    ] {
+        let results = backend
+            .search(
+                context,
+                MemorySearchRequest::new(alice_secret)
+                    .unwrap()
+                    .with_limit(5)
+                    .with_vector(false),
+            )
+            .await
+            .unwrap();
+        assert!(
+            results.is_empty(),
+            "memory search leaked alice's scoped document into {:?}: {results:?}",
+            context.scope()
+        );
+    }
+
+    let alice_results = backend
+        .search(
+            &alice_context,
+            MemorySearchRequest::new(alice_secret)
+                .unwrap()
+                .with_limit(5)
+                .with_vector(false),
+        )
+        .await
+        .unwrap();
+    assert_eq!(alice_results.len(), 1);
+    assert_eq!(alice_results[0].path.relative_path(), "notes/secret.md");
+    assert!(alice_results[0].snippet.contains(alice_secret));
+}
+
+#[tokio::test]
+async fn filesystem_memory_document_repository_search_does_not_cross_tenant_scope() {
+    let repository = FilesystemMemoryDocumentRepository::new(Arc::new(InMemoryBackend::new()));
+    let alice_secret = "TENANT_A_ALICE_PROJECT_A_FILESYSTEM_MEMORY_SECRET";
+    let alice_path =
+        MemoryDocumentPath::new("tenant-a", "alice", Some("project-a"), "notes/secret.md").unwrap();
+    repository
+        .write_document(&alice_path, alice_secret.as_bytes())
+        .await
+        .unwrap();
+    repository
+        .replace_document_chunks_if_current(
+            &alice_path,
+            &content_sha256(alice_secret),
+            &[MemoryChunkWrite {
+                content: alice_secret.to_string(),
+                embedding: None,
+            }],
+        )
+        .await
+        .unwrap();
+
+    for scope in [
+        MemoryDocumentScope::new("tenant-b", "bob", Some("project-a")).unwrap(),
+        MemoryDocumentScope::new("tenant-a", "bob", Some("project-a")).unwrap(),
+        MemoryDocumentScope::new("tenant-a", "alice", Some("project-b")).unwrap(),
+    ] {
+        let results = repository
+            .search_documents(
+                &scope,
+                &MemorySearchRequest::new(alice_secret)
+                    .unwrap()
+                    .with_limit(5)
+                    .with_vector(false),
+            )
+            .await
+            .unwrap();
+        assert!(
+            results.is_empty(),
+            "filesystem-backed search leaked alice's document into {scope:?}: {results:?}"
+        );
+    }
+
+    let alice_results = repository
+        .search_documents(
+            alice_path.scope(),
+            &MemorySearchRequest::new(alice_secret)
+                .unwrap()
+                .with_limit(5)
+                .with_vector(false),
+        )
+        .await
+        .unwrap();
+    assert_eq!(alice_results.len(), 1);
+    assert_eq!(alice_results[0].path.relative_path(), "notes/secret.md");
+    assert!(alice_results[0].snippet.contains(alice_secret));
+}
+
 #[test]
 fn memory_search_request_clamps_limits_to_db_safe_bounds() {
     let request = MemorySearchRequest::new("needle")
@@ -1346,6 +1472,85 @@ impl MemoryDocumentIndexer for RecordingIndexer {
     async fn reindex_document(&self, path: &MemoryDocumentPath) -> Result<(), FilesystemError> {
         self.paths.lock().unwrap().push(path.clone());
         Ok(())
+    }
+}
+
+#[derive(Default)]
+struct SearchableMemoryRepository {
+    documents: Mutex<Vec<(MemoryDocumentPath, Vec<u8>)>>,
+}
+
+#[async_trait]
+impl MemoryDocumentRepository for SearchableMemoryRepository {
+    async fn read_document(
+        &self,
+        path: &MemoryDocumentPath,
+    ) -> Result<Option<Vec<u8>>, FilesystemError> {
+        Ok(self
+            .documents
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(stored_path, _)| stored_path == path)
+            .map(|(_, bytes)| bytes.clone()))
+    }
+
+    async fn write_document(
+        &self,
+        path: &MemoryDocumentPath,
+        bytes: &[u8],
+    ) -> Result<(), FilesystemError> {
+        let mut documents = self.documents.lock().unwrap();
+        if let Some((_, stored_bytes)) = documents
+            .iter_mut()
+            .find(|(stored_path, _)| stored_path == path)
+        {
+            *stored_bytes = bytes.to_vec();
+        } else {
+            documents.push((path.clone(), bytes.to_vec()));
+        }
+        Ok(())
+    }
+
+    async fn list_documents(
+        &self,
+        scope: &MemoryDocumentScope,
+    ) -> Result<Vec<MemoryDocumentPath>, FilesystemError> {
+        Ok(self
+            .documents
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(path, _)| path.scope() == scope)
+            .map(|(path, _)| path.clone())
+            .collect())
+    }
+
+    async fn search_documents(
+        &self,
+        scope: &MemoryDocumentScope,
+        request: &MemorySearchRequest,
+    ) -> Result<Vec<ironclaw_memory::MemorySearchResult>, FilesystemError> {
+        Ok(self
+            .documents
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(path, bytes)| {
+                path.scope() == scope && String::from_utf8_lossy(bytes).contains(request.query())
+            })
+            .take(request.limit())
+            .enumerate()
+            .map(
+                |(index, (path, bytes))| ironclaw_memory::MemorySearchResult {
+                    path: path.clone(),
+                    score: 1.0 / (index + 1) as f32,
+                    snippet: String::from_utf8_lossy(bytes).to_string(),
+                    full_text_rank: Some((index + 1) as u32),
+                    vector_rank: None,
+                },
+            )
+            .collect())
     }
 }
 

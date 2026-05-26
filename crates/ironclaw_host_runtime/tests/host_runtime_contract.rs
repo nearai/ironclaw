@@ -406,6 +406,81 @@ async fn default_runtime_idempotency_key_is_advisory_and_does_not_dedupe() {
 }
 
 #[tokio::test]
+async fn default_runtime_same_idempotency_key_in_different_scopes_does_not_collide() {
+    let registry = Arc::new(registry_with_echo_capability());
+    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
+    let runtime = DefaultHostRuntime::new(
+        registry,
+        dispatcher.clone(),
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy()));
+    let key = IdempotencyKey::new("external-event-1/action-1").unwrap();
+
+    let mut tenant_a = execution_context_with_dispatch_grant();
+    tenant_a.tenant_id = TenantId::new("tenant-a").unwrap();
+    tenant_a.resource_scope.tenant_id = tenant_a.tenant_id.clone();
+
+    let mut tenant_b = execution_context_with_dispatch_grant();
+    tenant_b.tenant_id = TenantId::new("tenant-b").unwrap();
+    tenant_b.resource_scope.tenant_id = tenant_b.tenant_id.clone();
+
+    let mut project_b = execution_context_with_dispatch_grant();
+    project_b.project_id = Some(ProjectId::new("project-b").unwrap());
+    project_b.resource_scope.project_id = project_b.project_id.clone();
+
+    let expected_scopes = [
+        tenant_a.resource_scope.clone(),
+        tenant_b.resource_scope.clone(),
+        project_b.resource_scope.clone(),
+    ];
+    let expected_payloads = [
+        json!({"scope": "tenant-a"}),
+        json!({"scope": "tenant-b"}),
+        json!({"scope": "project-b"}),
+    ];
+    for (context, payload) in [
+        (tenant_a, json!({"scope": "tenant-a"})),
+        (tenant_b, json!({"scope": "tenant-b"})),
+        (project_b, json!({"scope": "project-b"})),
+    ] {
+        let request = RuntimeCapabilityRequest::new(
+            context,
+            capability_id(),
+            ResourceEstimate::default(),
+            payload,
+            trust_decision_with_dispatch_authority(),
+        )
+        .with_idempotency_key(key.clone());
+        let _ = runtime.invoke_capability(request).await.unwrap();
+    }
+
+    let requests = dispatcher.requests();
+    assert_eq!(
+        requests.len(),
+        3,
+        "identical external idempotency keys must not collapse work across tenant/project scopes"
+    );
+    for ((request, expected_scope), expected_payload) in requests
+        .iter()
+        .zip(expected_scopes.iter())
+        .zip(expected_payloads.iter())
+    {
+        assert_eq!(
+            &request.scope, expected_scope,
+            "dispatch must preserve the scope attached to each idempotency-keyed request"
+        );
+        assert_eq!(
+            &request.input, expected_payload,
+            "dispatch input order must match the tenant/project request order"
+        );
+    }
+}
+
+#[tokio::test]
 async fn default_runtime_status_returns_default_when_no_run_state_attached() {
     // Pins the no-run-state branch: callers must get an empty status rather
     // than a panic or an Unavailable error.
@@ -669,6 +744,72 @@ async fn default_runtime_status_reports_running_invocations_only() {
     );
     assert_eq!(status.active_work[0].capability_id, Some(capability_id()));
     assert_eq!(status.active_work[0].runtime, Some(RuntimeKind::Wasm));
+}
+
+#[tokio::test]
+async fn default_runtime_status_and_cancel_do_not_reveal_guessed_ids_from_other_scope() {
+    let registry = Arc::new(registry_with_echo_capability());
+    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let runtime = DefaultHostRuntime::new(
+        registry,
+        dispatcher,
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
+    )
+    .with_run_state(run_state.clone());
+
+    let context = execution_context_with_dispatch_grant();
+    run_state
+        .start(RunStart {
+            invocation_id: context.invocation_id,
+            capability_id: capability_id(),
+            scope: context.resource_scope.clone(),
+        })
+        .await
+        .unwrap();
+
+    let mut guessed_scope = context.resource_scope.clone();
+    guessed_scope.tenant_id = TenantId::new("tenant-b").unwrap();
+    guessed_scope.project_id = Some(ProjectId::new("project-b").unwrap());
+    let guessed_status = runtime
+        .runtime_status(RuntimeStatusRequest::new(
+            guessed_scope.clone(),
+            context.correlation_id,
+        ))
+        .await
+        .unwrap();
+    assert!(
+        guessed_status.active_work.is_empty(),
+        "wrong-scope status must not reveal guessed invocation ids or capability metadata"
+    );
+
+    let cancel = runtime
+        .cancel_work(CancelRuntimeWorkRequest::new(
+            guessed_scope,
+            context.correlation_id,
+            CancelReason::TurnCancelled,
+        ))
+        .await
+        .unwrap();
+    assert!(cancel.cancelled.is_empty());
+    assert!(cancel.already_terminal.is_empty());
+    assert!(cancel.unsupported.is_empty());
+
+    let owner_status = runtime
+        .runtime_status(RuntimeStatusRequest::new(
+            context.resource_scope,
+            context.correlation_id,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        owner_status.active_work[0].work_id,
+        RuntimeWorkId::Invocation(context.invocation_id),
+        "wrong-scope cancel must not affect the owning scope"
+    );
 }
 
 #[tokio::test]
@@ -1412,15 +1553,23 @@ impl TrustAwareCapabilityDispatchAuthorizer for DenyAuthorizer {
 
 #[derive(Default)]
 struct RecordingDispatcher {
-    request: Mutex<Option<CapabilityDispatchRequest>>,
+    requests: Mutex<Vec<CapabilityDispatchRequest>>,
 }
 
 impl RecordingDispatcher {
     fn has_request(&self) -> bool {
-        self.request
+        !self
+            .requests
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .is_some()
+            .is_empty()
+    }
+
+    fn requests(&self) -> Vec<CapabilityDispatchRequest> {
+        self.requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 }
 
@@ -1430,10 +1579,10 @@ impl CapabilityDispatcher for RecordingDispatcher {
         &self,
         request: CapabilityDispatchRequest,
     ) -> Result<CapabilityDispatchResult, DispatchError> {
-        *self
-            .request
+        self.requests
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(request.clone());
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(request.clone());
         Ok(CapabilityDispatchResult {
             capability_id: request.capability_id,
             provider: extension_id(),

@@ -492,6 +492,69 @@ async fn process_host_kill_does_not_cancel_other_tenant_process() {
 }
 
 #[tokio::test]
+async fn process_host_hides_guessed_process_from_other_scope() {
+    let store = Arc::new(InMemoryProcessStore::new());
+    let cancellation_registry = Arc::new(ProcessCancellationRegistry::new());
+    let executor = Arc::new(CancellationAwareExecutor::default());
+    let manager = BackgroundProcessManager::new(store.clone(), executor.clone())
+        .with_cancellation_registry(cancellation_registry.clone());
+    let host = ProcessHost::new(store.as_ref())
+        .with_cancellation_registry(cancellation_registry)
+        .with_poll_interval(Duration::from_millis(5));
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let owner_scope = sample_scope(invocation_id, "tenant1", "user1");
+    let other_scope = sample_scope_with_project(invocation_id, "tenant2", "user1", "project2");
+
+    manager
+        .spawn(process_start(
+            process_id,
+            invocation_id,
+            owner_scope.clone(),
+        ))
+        .await
+        .unwrap();
+
+    assert!(
+        host.status(&other_scope, process_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store.records_for_scope(&other_scope).await.unwrap(),
+        Vec::new()
+    );
+    assert!(matches!(
+        host.subscribe(&other_scope, process_id).await.unwrap_err(),
+        ProcessError::UnknownProcess { process_id: id } if id == process_id
+    ));
+    assert!(matches!(
+        host.kill(&other_scope, process_id).await.unwrap_err(),
+        ProcessError::UnknownProcess { process_id: id } if id == process_id
+    ));
+    assert!(
+        timeout(Duration::from_millis(30), executor.wait_for_cancellation())
+            .await
+            .is_err(),
+        "guessed process id from another scope must not signal cancellation"
+    );
+
+    assert_eq!(
+        host.status(&owner_scope, process_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        ProcessStatus::Running
+    );
+    host.kill(&owner_scope, process_id).await.unwrap();
+    timeout(Duration::from_millis(200), executor.wait_for_cancellation())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn background_process_manager_can_use_owned_filesystem_store() {
     let filesystem = engine_filesystem();
     let store = Arc::new(FilesystemProcessStore::from_arc(filesystem));
