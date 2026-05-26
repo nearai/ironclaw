@@ -367,3 +367,303 @@ async fn credential_account_selection_filters_by_requester_authority() {
         .expect("granted requester can select shared account");
     assert_eq!(selected_shared.id, shared.id);
 }
+
+#[tokio::test]
+async fn credential_recovery_projection_distinguishes_recoverable_states() {
+    let empty = InMemoryAuthProductServices::new();
+    let owner = scope("alice-empty");
+    let no_account = empty
+        .project_credential_recovery(CredentialRecoveryRequest::new(owner, provider()))
+        .await
+        .expect("empty recovery projection");
+    assert_eq!(no_account.kind, CredentialRecoveryKind::SetupRequired);
+    assert_eq!(no_account.reason, CredentialRecoveryReason::NoAccount);
+    assert!(no_account.selected_account.is_none());
+    assert!(no_account.choices.is_empty());
+
+    for (status, expected_kind, expected_reason, user) in [
+        (
+            CredentialAccountStatus::Configured,
+            CredentialRecoveryKind::Configured,
+            CredentialRecoveryReason::Configured,
+            "alice-configured",
+        ),
+        (
+            CredentialAccountStatus::Missing,
+            CredentialRecoveryKind::SetupRequired,
+            CredentialRecoveryReason::AccountMissing,
+            "alice-missing",
+        ),
+        (
+            CredentialAccountStatus::PendingSetup,
+            CredentialRecoveryKind::SetupRequired,
+            CredentialRecoveryReason::PendingSetup,
+            "alice-pending",
+        ),
+        (
+            CredentialAccountStatus::Inactive,
+            CredentialRecoveryKind::SetupRequired,
+            CredentialRecoveryReason::AccountInactive,
+            "alice-inactive",
+        ),
+        (
+            CredentialAccountStatus::Expired,
+            CredentialRecoveryKind::ReauthorizeRequired,
+            CredentialRecoveryReason::AccountExpired,
+            "alice-expired",
+        ),
+        (
+            CredentialAccountStatus::RefreshFailed,
+            CredentialRecoveryKind::ReauthorizeRequired,
+            CredentialRecoveryReason::RefreshFailed,
+            "alice-refresh-failed",
+        ),
+        (
+            CredentialAccountStatus::Revoked,
+            CredentialRecoveryKind::ReauthorizeRequired,
+            CredentialRecoveryReason::AccountRevoked,
+            "alice-revoked",
+        ),
+    ] {
+        let services = InMemoryAuthProductServices::new();
+        let owner = scope(user);
+        let account = services
+            .create_account(NewCredentialAccount {
+                scope: owner.clone(),
+                provider: provider(),
+                label: label("work"),
+                status,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(SecretHandle::new(format!("github-{user}-access")).unwrap()),
+                refresh_secret: Some(SecretHandle::new(format!("github-{user}-refresh")).unwrap()),
+                scopes: provider_scopes(&["repo"]),
+            })
+            .await
+            .expect("create account");
+
+        let projection = services
+            .project_credential_recovery(CredentialRecoveryRequest::new(owner, provider()))
+            .await
+            .expect("recovery projection");
+
+        assert_eq!(projection.kind, expected_kind);
+        assert_eq!(projection.reason, expected_reason);
+        if expected_kind == CredentialRecoveryKind::Configured {
+            assert_eq!(
+                projection.selected_account.as_ref().map(|choice| choice.id),
+                Some(account.id)
+            );
+            assert!(projection.choices.is_empty());
+        } else {
+            assert!(projection.selected_account.is_none());
+            assert_eq!(projection.choices.len(), 1);
+            assert_eq!(projection.choices[0].id, account.id);
+        }
+    }
+}
+
+#[tokio::test]
+async fn credential_recovery_projection_returns_redacted_authorized_choices() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+    let work = services
+        .create_account(NewCredentialAccount {
+            scope: owner.clone(),
+            provider: provider(),
+            label: label("work"),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("github-work-secret").unwrap()),
+            refresh_secret: Some(SecretHandle::new("github-work-refresh-secret").unwrap()),
+            scopes: provider_scopes(&["repo"]),
+        })
+        .await
+        .expect("work account");
+    services
+        .create_account(NewCredentialAccount {
+            scope: owner.clone(),
+            provider: provider(),
+            label: label("personal"),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("github-personal-secret").unwrap()),
+            refresh_secret: None,
+            scopes: provider_scopes(&["gist"]),
+        })
+        .await
+        .expect("personal account");
+
+    let projection = services
+        .project_credential_recovery(CredentialRecoveryRequest::new(owner.clone(), provider()))
+        .await
+        .expect("recovery projection");
+    assert_eq!(
+        projection.kind,
+        CredentialRecoveryKind::AccountSelectionRequired
+    );
+    assert_eq!(
+        projection.reason,
+        CredentialRecoveryReason::AmbiguousAccount
+    );
+    assert_eq!(projection.choices.len(), 2);
+    assert!(projection.selected_account.is_none());
+
+    let serialized = serde_json::to_string(&projection).unwrap();
+    let round_trip: CredentialRecoveryProjection = serde_json::from_str(&serialized).unwrap();
+    assert_eq!(round_trip, projection);
+    let wire = serde_json::to_value(&projection).unwrap();
+    assert_eq!(
+        wire["kind"],
+        serde_json::json!("account_selection_required")
+    );
+    assert_eq!(wire["reason"], serde_json::json!("ambiguous_account"));
+    assert!(!serialized.contains("github-work-secret"));
+    assert!(!serialized.contains("github-work-refresh-secret"));
+    assert!(!serialized.contains("github-personal-secret"));
+    assert!(!serialized.contains("raw provider body"));
+    assert!(!serialized.contains("/host/path"));
+    assert!(!serialized.contains("lease-"));
+
+    let selected = services
+        .select_configured_account(CredentialAccountChoiceRequest::new(
+            owner.clone(),
+            provider(),
+            work.id,
+        ))
+        .await
+        .expect("explicit policy selection");
+    assert_eq!(selected.id, work.id);
+
+    let cross_scope = services
+        .select_configured_account(CredentialAccountChoiceRequest::new(
+            scope("bob"),
+            provider(),
+            work.id,
+        ))
+        .await
+        .expect_err("another scope cannot bind an existing account id");
+    assert_eq!(cross_scope, AuthProductError::CrossScopeDenied);
+
+    let provider_mismatch = services
+        .select_configured_account(CredentialAccountChoiceRequest::new(
+            owner.clone(),
+            AuthProviderId::new("gitlab").unwrap(),
+            work.id,
+        ))
+        .await
+        .expect_err("provider mismatch cannot bind an existing account id");
+    assert_eq!(provider_mismatch, AuthProductError::CrossScopeDenied);
+
+    let missing = services
+        .select_configured_account(CredentialAccountChoiceRequest::new(
+            owner.clone(),
+            provider(),
+            ironclaw_auth::CredentialAccountId::new(),
+        ))
+        .await
+        .expect_err("arbitrary missing account id is rejected");
+    assert_eq!(missing, AuthProductError::CredentialMissing);
+
+    let expired = services
+        .create_account(NewCredentialAccount {
+            scope: owner.clone(),
+            provider: provider(),
+            label: label("expired"),
+            status: CredentialAccountStatus::Expired,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("github-expired-secret").unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .expect("expired account");
+    let unusable = services
+        .select_configured_account(CredentialAccountChoiceRequest::new(
+            owner,
+            provider(),
+            expired.id,
+        ))
+        .await
+        .expect_err("unusable account id is rejected");
+    assert_eq!(unusable, AuthProductError::CredentialMissing);
+}
+
+#[tokio::test]
+async fn shared_admin_managed_credentials_require_explicit_grants() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+    let github_extension = ExtensionId::new("github-extension").unwrap();
+    let other_extension = ExtensionId::new("other-extension").unwrap();
+    let shared = services
+        .create_account(NewCredentialAccount {
+            scope: owner.clone(),
+            provider: provider(),
+            label: label("shared"),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::SharedAdminManaged,
+            owner_extension: None,
+            granted_extensions: vec![github_extension.clone()],
+            access_secret: Some(SecretHandle::new("github-shared-secret").unwrap()),
+            refresh_secret: None,
+            scopes: provider_scopes(&["repo"]),
+        })
+        .await
+        .expect("shared account");
+
+    for request in [
+        CredentialRecoveryRequest::new(owner.clone(), provider()),
+        CredentialRecoveryRequest::new(owner.clone(), provider())
+            .for_extension(other_extension.clone()),
+    ] {
+        let projection = services
+            .project_credential_recovery(request)
+            .await
+            .expect("recovery projection");
+        assert_eq!(projection.kind, CredentialRecoveryKind::SetupRequired);
+        assert_eq!(
+            projection.reason,
+            CredentialRecoveryReason::NoAuthorizedAccount
+        );
+        assert!(projection.choices.is_empty());
+        assert!(projection.selected_account.is_none());
+    }
+
+    let granted = services
+        .project_credential_recovery(
+            CredentialRecoveryRequest::new(owner.clone(), provider())
+                .for_extension(github_extension.clone()),
+        )
+        .await
+        .expect("granted recovery projection");
+    assert_eq!(granted.kind, CredentialRecoveryKind::Configured);
+    assert_eq!(
+        granted.selected_account.as_ref().map(|account| account.id),
+        Some(shared.id)
+    );
+
+    let denied = services
+        .select_configured_account(
+            CredentialAccountChoiceRequest::new(owner.clone(), provider(), shared.id)
+                .for_extension(other_extension),
+        )
+        .await
+        .expect_err("ungranted extension cannot bind shared account id");
+    assert_eq!(denied, AuthProductError::CrossScopeDenied);
+
+    let selected = services
+        .select_configured_account(
+            CredentialAccountChoiceRequest::new(owner, provider(), shared.id)
+                .for_extension(github_extension),
+        )
+        .await
+        .expect("granted extension can bind shared account");
+    assert_eq!(selected.id, shared.id);
+}

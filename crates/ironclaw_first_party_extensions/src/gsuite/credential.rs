@@ -107,8 +107,9 @@ fn map_selection_error(error: AuthProductError) -> GoogleCredentialError {
 mod tests {
     use async_trait::async_trait;
     use ironclaw_auth::{
-        CredentialAccount, CredentialAccountLabel, CredentialAccountListPage,
-        CredentialAccountListRequest, CredentialAccountProjection, CredentialOwnership,
+        CredentialAccount, CredentialAccountChoiceRequest, CredentialAccountLabel,
+        CredentialAccountListPage, CredentialAccountListRequest, CredentialAccountProjection,
+        CredentialOwnership, CredentialRecoveryProjection, CredentialRecoveryRequest,
         InMemoryAuthProductServices, NewCredentialAccount,
     };
     use ironclaw_host_api::{InvocationId, UserId};
@@ -230,6 +231,20 @@ mod tests {
             _request: CredentialAccountSelectionRequest,
         ) -> Result<CredentialAccountProjection, AuthProductError> {
             Ok(self.account.projection())
+        }
+
+        async fn project_credential_recovery(
+            &self,
+            _request: CredentialRecoveryRequest,
+        ) -> Result<CredentialRecoveryProjection, AuthProductError> {
+            unreachable!("Google credential resolver tests do not project recovery")
+        }
+
+        async fn select_configured_account(
+            &self,
+            _request: CredentialAccountChoiceRequest,
+        ) -> Result<CredentialAccountProjection, AuthProductError> {
+            unreachable!("Google credential resolver tests use unique selection")
         }
     }
 }
