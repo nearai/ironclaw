@@ -54,8 +54,11 @@ CREATE TABLE IF NOT EXISTS hooks_predicate_invocations (
 );
 CREATE INDEX IF NOT EXISTS idx_hooks_predicate_invocations_key_ts
     ON hooks_predicate_invocations (key_hash, occurred_at);
+-- (scope_hash, occurred_at): serves per-tenant LRU victim selection
+-- (`WHERE scope_hash = ? ORDER BY occurred_at ASC LIMIT 1`) directly from the
+-- index, avoiding a global GROUP BY aggregation over the scope.
 CREATE INDEX IF NOT EXISTS idx_hooks_predicate_invocations_scope
-    ON hooks_predicate_invocations (scope_hash);
+    ON hooks_predicate_invocations (scope_hash, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_hooks_predicate_invocations_ts
     ON hooks_predicate_invocations (occurred_at);
 
@@ -69,7 +72,8 @@ CREATE TABLE IF NOT EXISTS hooks_predicate_values (
 );
 CREATE INDEX IF NOT EXISTS idx_hooks_predicate_values_key_ts
     ON hooks_predicate_values (key_hash, occurred_at);
+-- (scope_hash, occurred_at): see invocations table above.
 CREATE INDEX IF NOT EXISTS idx_hooks_predicate_values_scope
-    ON hooks_predicate_values (scope_hash);
+    ON hooks_predicate_values (scope_hash, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_hooks_predicate_values_ts
     ON hooks_predicate_values (occurred_at);

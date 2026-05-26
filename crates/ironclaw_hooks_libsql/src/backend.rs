@@ -155,7 +155,14 @@ impl LibSqlPredicateStateBackend {
         for attempt in 0..CONNECT_ATTEMPTS {
             match self.db.connect() {
                 Ok(conn) => {
-                    conn.query("PRAGMA busy_timeout = 5000", ())
+                    // `PRAGMA busy_timeout = N` echoes the new value back as a
+                    // result row in this libSQL build, so it must go through
+                    // `query` — `execute` rejects it with
+                    // `Execute returned rows`. (Gemini review #3936 suggested
+                    // `execute`; verified against the contract suite that it
+                    // fails here, so `query` is correct for this driver.)
+                    let _ = conn
+                        .query("PRAGMA busy_timeout = 5000", ())
                         .await
                         .map_err(map_err)?;
                     return Ok(conn);
@@ -630,9 +637,18 @@ async fn evict_oldest_key(
     table: &str,
     scope: &[u8],
 ) -> Result<bool, PredicateBackendError> {
+    // The victim is the tenant's key with the smallest `min(occurred_at)`.
+    // Equivalently, that is exactly the `key_hash` of the single oldest row in
+    // the scope: the key owning the globally-oldest row has the smallest
+    // per-key front timestamp. So we can pick it with an index-friendly
+    // `ORDER BY occurred_at ASC, key_hash ASC LIMIT 1` over the
+    // `idx_..._scope_ts` index instead of a global `GROUP BY` aggregation. The
+    // `key_hash ASC` tie-break makes the choice deterministic when several rows
+    // share the minimum timestamp, matching the prior grouped ordering
+    // (smallest `min(occurred_at)`, then smallest `key_hash`).
     let select_victim = format!(
         "SELECT key_hash FROM {table} WHERE scope_hash = ?1 \
-         GROUP BY key_hash ORDER BY min(occurred_at) ASC, key_hash ASC LIMIT 1"
+         ORDER BY occurred_at ASC, key_hash ASC LIMIT 1"
     );
     let mut rows = conn
         .query(&select_victim, params![scope.to_vec()])
