@@ -1,22 +1,21 @@
 use async_trait::async_trait;
-use chrono::Utc;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fmt,
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{Arc, Mutex},
 };
 use tracing::debug;
 
-const MAX_DELIVERED_EVENT_CURSORS: usize = 4096;
 const MAX_PREPARED_RUN_IDS: usize = 4096;
 
 use crate::{
     AdmissionRejection, CancelRunRequest, CancelRunResponse, GetRunStateRequest,
     InMemoryRunProfileResolver, ResumeTurnRequest, ResumeTurnResponse, RunProfileResolver,
     SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnCapacityResource, TurnError,
-    TurnEventKind, TurnEventSink, TurnLifecycleEvent, TurnRunId, TurnRunState, TurnScope,
-    TurnSpawnTreeStateStore, TurnStateStore, TurnStatus, events::EventCursor,
+    TurnRunId, TurnRunState, TurnScope, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
+    events::EventCursor,
+    lifecycle::{LifecyclePublicationErrorPort, NoopLifecyclePublicationErrorPort},
 };
 
 pub trait TurnAdmissionPolicy: Send + Sync {
@@ -112,8 +111,7 @@ pub struct DefaultTurnCoordinator<S: ?Sized> {
     admission_policy: Arc<dyn TurnAdmissionPolicy>,
     run_profile_resolver: Arc<dyn RunProfileResolver>,
     wake_notifier: Arc<dyn TurnRunWakeNotifier>,
-    event_sink: Option<Arc<dyn TurnEventSink>>,
-    delivered_event_cursors: Mutex<HashSet<EventCursor>>,
+    publication_error_port: Arc<dyn LifecyclePublicationErrorPort>,
     // Per-coordinator binding of run ids handed out by `prepare_turn` to the
     // scope they were prepared under. `submit_turn` consumes the reservation
     // when `requested_run_id` is set and rejects cross-scope submission so a
@@ -131,8 +129,7 @@ where
             admission_policy: Arc::new(AllowAllTurnAdmissionPolicy),
             run_profile_resolver: Arc::new(InMemoryRunProfileResolver::default()),
             wake_notifier: Arc::new(NoopTurnRunWakeNotifier),
-            event_sink: None,
-            delivered_event_cursors: Mutex::new(HashSet::new()),
+            publication_error_port: Arc::new(NoopLifecyclePublicationErrorPort),
             prepared_run_id_scopes: Mutex::new(HashMap::new()),
         }
     }
@@ -152,30 +149,12 @@ where
         self
     }
 
-    pub fn with_event_sink(mut self, sink: Arc<dyn TurnEventSink>) -> Self {
-        self.event_sink = Some(sink);
+    pub fn with_lifecycle_publication_error_port(
+        mut self,
+        port: Arc<dyn LifecyclePublicationErrorPort>,
+    ) -> Self {
+        self.publication_error_port = port;
         self
-    }
-
-    fn claim_event_cursor_for_publish(&self, cursor: EventCursor) -> bool {
-        if self.event_sink.is_none() {
-            return false;
-        }
-        match self.delivered_event_cursors.lock() {
-            Ok(mut delivered) => {
-                if delivered.len() >= MAX_DELIVERED_EVENT_CURSORS {
-                    delivered.clear();
-                }
-                delivered.insert(cursor)
-            }
-            Err(poisoned) => {
-                let mut delivered = poisoned.into_inner();
-                if delivered.len() >= MAX_DELIVERED_EVENT_CURSORS {
-                    delivered.clear();
-                }
-                delivered.insert(cursor)
-            }
-        }
     }
 
     fn record_prepared_run_id(&self, run_id: TurnRunId, scope: TurnScope) -> Result<(), TurnError> {
@@ -217,6 +196,11 @@ fn submit_wake(scope: TurnScope, response: &SubmitTurnResponse) -> TurnRunWake {
     }
 }
 
+fn submit_event_cursor(response: &SubmitTurnResponse) -> EventCursor {
+    let SubmitTurnResponse::Accepted { event_cursor, .. } = response;
+    *event_cursor
+}
+
 fn resume_wake(scope: TurnScope, response: &ResumeTurnResponse) -> TurnRunWake {
     TurnRunWake {
         scope,
@@ -243,15 +227,13 @@ fn notify_queued_run_best_effort(notifier: &dyn TurnRunWakeNotifier, wake: TurnR
     }
 }
 
-async fn publish_turn_event_best_effort(
-    sink: Option<&Arc<dyn TurnEventSink>>,
-    event: TurnLifecycleEvent,
-) {
-    let Some(sink) = sink else {
-        return;
-    };
-    if let Err(error) = sink.publish(event).await {
-        debug!(error = %error, "turn lifecycle event sink publish failed");
+fn deferred_publication_error(
+    port: &dyn LifecyclePublicationErrorPort,
+    cursor: EventCursor,
+) -> Result<(), TurnError> {
+    match port.take_lifecycle_publication_error(cursor) {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
 }
 
@@ -290,9 +272,6 @@ where
             return Err(TurnError::Unauthorized);
         }
         let scope = request.scope.clone();
-        let event_scope = request.scope.clone();
-        let actor = request.actor.clone();
-        let occurred_at = request.received_at;
         let response = self
             .store
             .submit_turn(
@@ -316,29 +295,10 @@ where
             "turn coordinator accepted turn with resolved run profile"
         );
         notify_queued_run_best_effort(self.wake_notifier.as_ref(), submit_wake(scope, &response));
-        let SubmitTurnResponse::Accepted {
-            run_id,
-            status,
-            event_cursor,
-            ..
-        } = &response;
-        if self.claim_event_cursor_for_publish(*event_cursor) {
-            publish_turn_event_best_effort(
-                self.event_sink.as_ref(),
-                TurnLifecycleEvent {
-                    cursor: *event_cursor,
-                    scope: event_scope,
-                    occurred_at: Some(occurred_at),
-                    owner_user_id: Some(actor.user_id),
-                    run_id: *run_id,
-                    status: *status,
-                    kind: TurnEventKind::Submitted,
-                    blocked_gate: None,
-                    sanitized_reason: None,
-                },
-            )
-            .await;
-        }
+        deferred_publication_error(
+            self.publication_error_port.as_ref(),
+            submit_event_cursor(&response),
+        )?;
         Ok(response)
     }
 
@@ -347,36 +307,17 @@ where
         request: ResumeTurnRequest,
     ) -> Result<ResumeTurnResponse, TurnError> {
         let scope = request.scope.clone();
-        let actor = request.actor.clone();
         let response = self.store.resume_turn(request).await?;
         notify_queued_run_best_effort(
             self.wake_notifier.as_ref(),
             resume_wake(scope.clone(), &response),
         );
-        if self.claim_event_cursor_for_publish(response.event_cursor) {
-            publish_turn_event_best_effort(
-                self.event_sink.as_ref(),
-                TurnLifecycleEvent {
-                    cursor: response.event_cursor,
-                    scope,
-                    occurred_at: Some(Utc::now()),
-                    owner_user_id: Some(actor.user_id),
-                    run_id: response.run_id,
-                    status: response.status,
-                    kind: TurnEventKind::Resumed,
-                    blocked_gate: None,
-                    sanitized_reason: None,
-                },
-            )
-            .await;
-        }
+        deferred_publication_error(self.publication_error_port.as_ref(), response.event_cursor)?;
         Ok(response)
     }
 
     async fn cancel_run(&self, request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
         let scope = request.scope.clone();
-        let actor = request.actor.clone();
-        let reason = request.reason;
         let response = self.store.request_cancel(request).await?;
         // Wake on `CancelRequested` (the cooperative case) AND on any terminal
         // transition. Registered handles otherwise rely solely on the polling
@@ -388,28 +329,11 @@ where
                 cancel_wake(scope.clone(), &response),
             );
         }
-        if !response.already_terminal && self.claim_event_cursor_for_publish(response.event_cursor)
-        {
-            let kind = if response.status == TurnStatus::CancelRequested {
-                TurnEventKind::CancelRequested
-            } else {
-                TurnEventKind::Cancelled
-            };
-            publish_turn_event_best_effort(
-                self.event_sink.as_ref(),
-                TurnLifecycleEvent {
-                    cursor: response.event_cursor,
-                    scope,
-                    occurred_at: Some(Utc::now()),
-                    owner_user_id: Some(actor.user_id),
-                    run_id: response.run_id,
-                    status: response.status,
-                    kind,
-                    blocked_gate: None,
-                    sanitized_reason: Some(reason.category().to_string()),
-                },
-            )
-            .await;
+        if !response.already_terminal {
+            deferred_publication_error(
+                self.publication_error_port.as_ref(),
+                response.event_cursor,
+            )?;
         }
         Ok(response)
     }
@@ -429,9 +353,6 @@ where
         request: SubmitChildRunRequest,
     ) -> Result<SubmitTurnResponse, TurnError> {
         let child_scope = request.child_scope.clone();
-        let event_scope = request.child_scope.clone();
-        let actor = request.actor.clone();
-        let occurred_at = request.received_at;
         let response = self
             .store
             .submit_child_turn(
@@ -444,29 +365,10 @@ where
             self.wake_notifier.as_ref(),
             submit_wake(child_scope, &response),
         );
-        let SubmitTurnResponse::Accepted {
-            run_id,
-            status,
-            event_cursor,
-            ..
-        } = &response;
-        if self.claim_event_cursor_for_publish(*event_cursor) {
-            publish_turn_event_best_effort(
-                self.event_sink.as_ref(),
-                TurnLifecycleEvent {
-                    cursor: *event_cursor,
-                    scope: event_scope,
-                    occurred_at: Some(occurred_at),
-                    owner_user_id: Some(actor.user_id),
-                    run_id: *run_id,
-                    status: *status,
-                    kind: TurnEventKind::Submitted,
-                    blocked_gate: None,
-                    sanitized_reason: None,
-                },
-            )
-            .await;
-        }
+        deferred_publication_error(
+            self.publication_error_port.as_ref(),
+            submit_event_cursor(&response),
+        )?;
         Ok(response)
     }
 }

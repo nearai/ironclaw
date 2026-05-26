@@ -6,11 +6,12 @@ use std::{
 };
 
 use chrono::{Duration as ChronoDuration, Utc};
+use ironclaw_host_api::UserId;
 
 use crate::{
     AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason,
     AllowAllTurnAdmissionLimitProvider, BlockedReason, CancelRunRequest, CancelRunResponse,
-    GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey, LoopCheckpointRecord,
+    GateRef, GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey, LoopCheckpointRecord,
     LoopCheckpointStore, LoopExitMapping, PutLoopCheckpointRequest, ReplyTargetBindingRef,
     ResumeTurnRequest, ResumeTurnResponse, RunProfileResolutionError, RunProfileResolutionRequest,
     RunProfileResolver, SanitizedFailure, SourceBindingRef, SpawnTreeReservation,
@@ -288,6 +289,72 @@ impl InMemoryTurnStateStore {
         }
     }
 
+    pub fn blocked_approval_runs_for_actor(
+        &self,
+        scope: &TurnScope,
+        actor: &TurnActor,
+    ) -> Result<Vec<TurnRunState>, TurnError> {
+        let inner = self.lock_inner()?;
+        let mut runs = inner
+            .records
+            .values()
+            .filter(|record| {
+                record.scope == *scope
+                    && record.actor == *actor
+                    && record.status == TurnStatus::BlockedApproval
+                    && record.gate_ref.is_some()
+            })
+            .map(RunRecord::state)
+            .collect::<Vec<_>>();
+        runs.sort_by_key(|run| run.run_id.as_uuid());
+        Ok(runs)
+    }
+
+    pub fn approval_run_for_actor_and_gate(
+        &self,
+        scope: &TurnScope,
+        actor: &TurnActor,
+        gate_ref: &GateRef,
+    ) -> Result<Option<TurnRunId>, TurnError> {
+        let inner = self.lock_inner()?;
+        let active = inner
+            .records
+            .values()
+            .find(|record| {
+                record.scope == *scope
+                    && record.actor == *actor
+                    && record.status == TurnStatus::BlockedApproval
+                    && record.gate_ref.as_ref() == Some(gate_ref)
+            })
+            .map(|record| record.run_id);
+        if active.is_some() {
+            return Ok(active);
+        }
+
+        let mut historical = inner
+            .checkpoints
+            .iter()
+            .filter(|checkpoint| {
+                checkpoint.status == TurnStatus::BlockedApproval
+                    && &checkpoint.gate_ref == gate_ref
+                    && checkpoint
+                        .scope
+                        .as_ref()
+                        .is_none_or(|stored| stored == scope)
+            })
+            .filter_map(|checkpoint| {
+                inner
+                    .records
+                    .get(&checkpoint.run_id)
+                    .filter(|record| record.scope == *scope && record.actor == *actor)
+                    .map(|record| record.run_id)
+            })
+            .collect::<Vec<_>>();
+        historical.sort_by_key(|run_id| run_id.as_uuid());
+        historical.dedup();
+        Ok(historical.into_iter().next())
+    }
+
     fn lock_inner(&self) -> Result<MutexGuard<'_, Inner>, TurnError> {
         self.inner.lock().map_err(|_| TurnError::Unavailable {
             reason: "turn state store mutex poisoned".to_string(),
@@ -311,6 +378,7 @@ impl TurnEventProjectionSource for InMemoryTurnStateStore {
     async fn read_turn_events_after(
         &self,
         scope: &TurnScope,
+        owner_user_id: Option<&UserId>,
         after: Option<EventCursor>,
         limit: usize,
     ) -> Result<TurnEventPage, TurnError> {
@@ -318,6 +386,7 @@ impl TurnEventProjectionSource for InMemoryTurnStateStore {
         Ok(project_turn_events(
             &inner.events,
             scope,
+            owner_user_id,
             after,
             limit,
             inner.event_retention_floor,
@@ -1879,6 +1948,7 @@ impl Inner {
                     status: record.status,
                     event_cursor: record.event_cursor,
                     already_terminal: true,
+                    actor: Some(record.actor.clone()),
                 });
             }
             let (next_status, event_kind) = match record.status {
@@ -1897,6 +1967,7 @@ impl Inner {
                         status,
                         event_cursor: record.event_cursor,
                         already_terminal: true,
+                        actor: Some(record.actor.clone()),
                     });
                 }
             };
@@ -1915,6 +1986,7 @@ impl Inner {
                 status: record.status,
                 event_cursor: record.event_cursor,
                 already_terminal: false,
+                actor: Some(record.actor.clone()),
             };
             self.push_event(
                 &record,

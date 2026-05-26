@@ -6,6 +6,8 @@ use std::{
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_authorization::FilesystemCapabilityLeaseStore;
 use ironclaw_authorization::GrantAuthorizer;
+#[cfg(not(feature = "libsql"))]
+use ironclaw_authorization::InMemoryCapabilityLeaseStore;
 #[cfg(feature = "libsql")]
 use ironclaw_events::{DurableAuditLog, DurableEventLog};
 #[cfg(not(feature = "libsql"))]
@@ -98,9 +100,16 @@ type LocalDevRunStateStore = FilesystemRunStateStore<LocalDevRootFilesystem>;
 type LocalDevRunStateStore = InMemoryRunStateStore;
 
 #[cfg(feature = "libsql")]
-type LocalDevApprovalRequestStore = FilesystemApprovalRequestStore<LocalDevRootFilesystem>;
+pub(crate) type LocalDevApprovalRequestStore =
+    FilesystemApprovalRequestStore<LocalDevRootFilesystem>;
 #[cfg(not(feature = "libsql"))]
-type LocalDevApprovalRequestStore = InMemoryApprovalRequestStore;
+pub(crate) type LocalDevApprovalRequestStore = InMemoryApprovalRequestStore;
+
+#[cfg(feature = "libsql")]
+pub(crate) type LocalDevCapabilityLeaseStore =
+    FilesystemCapabilityLeaseStore<LocalDevRootFilesystem>;
+#[cfg(not(feature = "libsql"))]
+pub(crate) type LocalDevCapabilityLeaseStore = InMemoryCapabilityLeaseStore;
 
 #[cfg(feature = "libsql")]
 type LocalDevProcessServices = ProcessServices<
@@ -159,10 +168,13 @@ pub struct RebornServices {
 }
 
 pub(crate) struct RebornLocalRuntimeServices {
+    pub(crate) approval_requests: Arc<LocalDevApprovalRequestStore>,
+    pub(crate) capability_leases: Arc<LocalDevCapabilityLeaseStore>,
     pub(crate) turn_state: Arc<LocalDevTurnStateStore>,
     pub(crate) checkpoint_state_store: Arc<dyn CheckpointStateStore>,
     pub(crate) loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
+    pub(crate) skill_mounts: MountView,
     pub(crate) skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     pub(crate) workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -175,12 +187,11 @@ pub(crate) struct RebornLocalRuntimeServices {
 struct RebornLocalDevStoreGraph {
     run_state: Arc<LocalDevRunStateStore>,
     approval_requests: Arc<LocalDevApprovalRequestStore>,
+    capability_leases: Arc<LocalDevCapabilityLeaseStore>,
     turn_state: Arc<LocalDevTurnStateStore>,
     local_runtime: Arc<RebornLocalRuntimeServices>,
     resource_governor: Arc<LocalDevResourceGovernor>,
     process_services: LocalDevProcessServices,
-    #[cfg(feature = "libsql")]
-    capability_leases: Arc<FilesystemCapabilityLeaseStore<LocalDevRootFilesystem>>,
 }
 
 impl std::fmt::Debug for RebornServices {
@@ -335,11 +346,8 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     ))?
     .with_run_state(Arc::clone(&store_graph.run_state))
     .with_approval_requests(Arc::clone(&store_graph.approval_requests))
+    .with_capability_leases(Arc::clone(&store_graph.capability_leases))
     .with_turn_state_and_transition_port(Arc::clone(&store_graph.turn_state));
-    #[cfg(feature = "libsql")]
-    {
-        services = services.with_capability_leases(Arc::clone(&store_graph.capability_leases));
-    }
     if let Some(runtime_policy) = runtime_policy {
         services = services.with_runtime_policy(runtime_policy);
     }
@@ -383,6 +391,9 @@ fn build_local_dev_store_graph(
     let approval_requests = Arc::new(FilesystemApprovalRequestStore::new(Arc::clone(
         &scoped_filesystem,
     )));
+    let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
+        &scoped_filesystem,
+    )));
     let turn_state = Arc::new(FilesystemTurnStateStore::new(Arc::clone(
         &scoped_filesystem,
     )));
@@ -393,11 +404,18 @@ fn build_local_dev_store_graph(
     let thread_service: Arc<dyn SessionThreadService> = Arc::new(
         FilesystemSessionThreadService::new(Arc::clone(&scoped_filesystem)),
     );
+    let skill_mounts =
+        skill_context_mount_view().map_err(|error| RebornBuildError::InvalidConfig {
+            reason: error.to_string(),
+        })?;
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
+        approval_requests: Arc::clone(&approval_requests),
+        capability_leases: Arc::clone(&capability_leases),
         turn_state: Arc::clone(&turn_state),
         checkpoint_state_store,
         loop_checkpoint_store,
         thread_service,
+        skill_mounts,
         skill_filesystem,
         workspace_filesystem,
         subagent_goal_filesystem: Arc::clone(&scoped_filesystem),
@@ -410,16 +428,15 @@ fn build_local_dev_store_graph(
             FilesystemResourceGovernorStore::new(Arc::clone(&scoped_filesystem)),
         ));
     let process_services = ProcessServices::filesystem(Arc::clone(&scoped_filesystem));
-    let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(scoped_filesystem));
 
     Ok(RebornLocalDevStoreGraph {
         run_state,
         approval_requests,
+        capability_leases,
         turn_state,
         local_runtime,
         resource_governor,
         process_services,
-        capability_leases,
     })
 }
 
@@ -436,6 +453,7 @@ fn build_local_dev_store_graph(
     let audit_log = local_dev_audit_log(filesystem)?;
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
     let turn_state = Arc::new(InMemoryTurnStateStore::default());
     let checkpoint_state_store: Arc<dyn CheckpointStateStore> =
         Arc::new(InMemoryCheckpointStateStore::default());
@@ -443,11 +461,18 @@ fn build_local_dev_store_graph(
         Arc::new(InMemoryLoopCheckpointStore::default());
     let thread_service: Arc<dyn SessionThreadService> =
         Arc::new(InMemorySessionThreadService::default());
+    let skill_mounts =
+        skill_context_mount_view().map_err(|error| RebornBuildError::InvalidConfig {
+            reason: error.to_string(),
+        })?;
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
+        approval_requests: Arc::clone(&approval_requests),
+        capability_leases: Arc::clone(&capability_leases),
         turn_state: Arc::clone(&turn_state),
         checkpoint_state_store,
         loop_checkpoint_store,
         thread_service,
+        skill_mounts,
         skill_filesystem,
         workspace_filesystem,
         #[cfg(feature = "postgres")]
@@ -463,6 +488,7 @@ fn build_local_dev_store_graph(
     Ok(RebornLocalDevStoreGraph {
         run_state,
         approval_requests,
+        capability_leases,
         turn_state,
         local_runtime,
         resource_governor,

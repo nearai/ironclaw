@@ -152,6 +152,32 @@ async fn filesystem_event_log_replay_returns_records_in_order() {
 }
 
 #[tokio::test]
+async fn filesystem_event_log_replays_host_written_privileged_runtime_kind() {
+    let fs = build_scoped_fs();
+    let log = FilesystemDurableEventLog::new(Arc::clone(&fs));
+    let scope = scope_for("alice", "project-a");
+    let stream = EventStreamKey::from_scope(&scope);
+
+    log.append(RuntimeEvent::dispatch_succeeded(
+        scope,
+        capability_id(),
+        extension_id(),
+        RuntimeKind::System,
+        7,
+    ))
+    .await
+    .expect("append host runtime event");
+
+    let replay = log
+        .read_after_cursor(&stream, &ReadScope::any(), None, 10)
+        .await
+        .expect("trusted runtime replay");
+
+    assert_eq!(replay.entries.len(), 1);
+    assert_eq!(replay.entries[0].record.runtime, Some(RuntimeKind::System));
+}
+
+#[tokio::test]
 async fn filesystem_event_log_replay_filters_by_read_scope() {
     let fs = build_scoped_fs();
     let log = FilesystemDurableEventLog::new(Arc::clone(&fs));

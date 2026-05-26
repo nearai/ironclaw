@@ -4370,6 +4370,7 @@ name = "ironclaw_first_party_extensions"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "blake3",
  "glob",
  "ironclaw_auth",
@@ -4472,6 +4473,7 @@ dependencies = [
  "ironclaw_safety",
  "ironclaw_scripts",
  "ironclaw_secrets",
+ "ironclaw_skills",
  "ironclaw_trust",
  "ironclaw_turns",
  "ironclaw_wasm",
@@ -4480,6 +4482,7 @@ dependencies = [
  "libsql",
  "rust_decimal",
  "secrecy",
+ "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
@@ -4492,6 +4495,7 @@ dependencies = [
  "wat",
  "wit-component 0.245.1",
  "wit-parser 0.245.1",
+ "zip",
 ]
 
 [[package]]
@@ -4691,9 +4695,12 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "ironclaw_approvals",
  "ironclaw_auth",
+ "ironclaw_authorization",
  "ironclaw_common",
  "ironclaw_conversations",
+ "ironclaw_events",
  "ironclaw_host_api",
  "ironclaw_host_runtime",
  "ironclaw_loop_support",
@@ -4701,6 +4708,7 @@ dependencies = [
  "ironclaw_product_workflow",
  "ironclaw_reborn",
  "ironclaw_reborn_composition",
+ "ironclaw_run_state",
  "ironclaw_threads",
  "ironclaw_trust",
  "ironclaw_turns",
@@ -4814,8 +4822,10 @@ dependencies = [
  "axum 0.8.9",
  "chrono",
  "deadpool-postgres",
+ "futures",
  "http 1.4.0",
  "http-body-util",
+ "ironclaw_approvals",
  "ironclaw_auth",
  "ironclaw_authorization",
  "ironclaw_event_projections",
