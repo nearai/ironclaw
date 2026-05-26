@@ -58,7 +58,6 @@ pub use self::channels::{
     SignalConfig, TuiChannelConfig, validate_telegram_v1_v2_exclusivity,
 };
 pub use self::database::{DatabaseBackend, DatabaseConfig, SslMode, default_libsql_path};
-pub use self::embeddings::{DEFAULT_EMBEDDING_CACHE_SIZE, EmbeddingsConfig};
 pub use self::heartbeat::HeartbeatConfig;
 pub use self::hygiene::HygieneConfig;
 pub use self::llm::default_session_path;
@@ -77,6 +76,7 @@ pub use self::transcription::TranscriptionConfig;
 pub use self::tunnel::TunnelConfig;
 pub use self::wasm::WasmConfig;
 pub use self::workspace::WorkspaceConfig;
+pub use ironclaw_embeddings::{DEFAULT_EMBEDDING_CACHE_SIZE, EmbeddingsConfig};
 // LLM config / session types live in `ironclaw_llm`. Re-exported here so
 // existing `crate::config::*Config` callers (notably `LlmConfig::resolve`
 // in `src/config/llm.rs`, plus the wizard / doctor) keep compiling without
@@ -211,6 +211,7 @@ impl Config {
                 configured_wasm_channels: Vec::new(),
                 wasm_channel_owner_ids: HashMap::new(),
                 reborn_telegram_v2_enabled: false,
+                wasm_channel_runtime_overrides: HashMap::new(),
             },
             agent: AgentConfig::for_testing(),
             safety: SafetyConfig {
@@ -584,11 +585,15 @@ impl Config {
         // handled separately by WorkspacePool.
         let workspace = WorkspaceConfig::resolve(&owner_id)?;
 
+        let llm = crate::config::llm::resolve(settings)?;
+        let embeddings =
+            self::embeddings::resolve_embeddings_config(settings, &llm.nearai.base_url)?;
+
         Ok(Self {
             owner_id: owner_id.clone(),
             database: DatabaseConfig::resolve()?,
-            llm: crate::config::llm::resolve(settings)?,
-            embeddings: EmbeddingsConfig::resolve(settings)?,
+            llm,
+            embeddings,
             tunnel,
             channels,
             agent: AgentConfig::resolve(settings)?,
@@ -1013,6 +1018,7 @@ mod tests {
                         api_key: None, // stripped during write
                         model: Some("gpt-4o".to_string()),
                         base_url: None,
+                        extras: Default::default(),
                     },
                 );
                 m
@@ -1446,6 +1452,7 @@ mod tests {
                         api_key: Some("sk-existing".to_string()),
                         model: None,
                         base_url: None,
+                        extras: Default::default(),
                     },
                 );
                 m

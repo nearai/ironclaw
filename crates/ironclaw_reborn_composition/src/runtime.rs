@@ -1306,6 +1306,10 @@ fn parse_provider_protocol(
         "deep_seek" | "deepseek" => Ok(ProviderProtocol::DeepSeek),
         "gemini" => Ok(ProviderProtocol::Gemini),
         "open_router" | "openrouter" => Ok(ProviderProtocol::OpenRouter),
+        "bedrock" => Ok(ProviderProtocol::Bedrock),
+        "openai_codex" | "open_ai_codex" => Ok(ProviderProtocol::OpenAiCodex),
+        "gemini_oauth" => Ok(ProviderProtocol::GeminiOauth),
+        "nearai" | "near_ai" => Ok(ProviderProtocol::NearAi),
         _ => Err(RebornRuntimeError::LlmProvider(format!(
             "unsupported llm protocol: {protocol}"
         ))),

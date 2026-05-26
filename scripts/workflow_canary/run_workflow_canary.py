@@ -146,6 +146,11 @@ SCENARIOS: dict[str, tuple[str, str, str]] = {
         "run",
         "Unauthenticated tool call surfaces graceful auth path (no 5xx / Error 400)",
     ),
+    "tool_install_chat": (
+        "scripts.workflow_canary.scenarios.tool_install_chat",
+        "run",
+        "Chat-driven tool_install reaches installed=true (regression #3366)",
+    ),
     # log_assertions intentionally registered LAST so it scans the
     # gateway log surface produced by every preceding probe.
     "log_assertions": (

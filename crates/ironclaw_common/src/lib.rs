@@ -1,4 +1,4 @@
-//! Shared types and utilities used across the IronClaw workspace.
+//! Shared types, paths, and platform helpers used across the IronClaw workspace.
 #![warn(unreachable_pub)]
 
 mod attachment;
