@@ -122,9 +122,7 @@ impl RebornLocalExtensionManagementPort {
             .await?;
         let previous_state = installation.activation_state();
         let package = self.lifecycle_package(&extension_id).await?;
-        if let Err(error) = self.enable_lifecycle_package(&extension_id).await {
-            return Err(error);
-        }
+        self.enable_lifecycle_package(&extension_id).await?;
         if let Err(error) = self
             .installation_store
             .set_activation_state(&installation_id, ExtensionActivationState::Enabled)
