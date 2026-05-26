@@ -22,7 +22,7 @@ Google Slides 扩展允许智能体操作演示文稿，包括创建演示、管
 <Step title="安装扩展">
 
 ```bash
-ironclaw registry install google-slides
+ironclaw registry install google_slides
 ```
 
 </Step>
@@ -30,7 +30,7 @@ ironclaw registry install google-slides
 <Step title="授权访问">
 
 ```bash
-ironclaw tool auth google-slides
+ironclaw tool auth google_slides
 ```
 
 IronClaw 会提供认证链接。请确保已按 [auth setup](./oauth-setup) 完成回调配置。若环境支持，会自动打开浏览器。授权成功后，令牌会被安全保存并自动刷新。

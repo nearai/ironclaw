@@ -22,7 +22,7 @@ In your Google Cloud project, navigate to **APIs & Services → Library**, searc
 <Step title="Install the Extension">
 
 ```bash
-ironclaw registry install google-slides
+ironclaw registry install google_slides
 ```
 
 </Step>
@@ -30,7 +30,7 @@ ironclaw registry install google-slides
 <Step title="Authorize Access">
 
 ```bash
-ironclaw tool auth google-slides
+ironclaw tool auth google_slides
 ```
 
 IronClaw will provide a URL for you to authenticate - remember to follow the [auth setup](./oauth-setup) to enable your agent to capture the callback. If possible, it will open a browser window. Once approved, the token is stored securely and refreshed automatically.

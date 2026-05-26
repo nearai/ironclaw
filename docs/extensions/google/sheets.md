@@ -22,7 +22,7 @@ In your Google Cloud project, navigate to **APIs & Services → Library**, searc
 <Step title="Install the Extension">
 
 ```bash
-ironclaw registry install google-sheets
+ironclaw registry install google_sheets
 ```
 
 </Step>
@@ -30,7 +30,7 @@ ironclaw registry install google-sheets
 <Step title="Authorize Access">
 
 ```bash
-ironclaw tool auth google-sheets
+ironclaw tool auth google_sheets
 ```
 
 IronClaw will provide a URL for you to authenticate - remember to follow the [auth setup](./oauth-setup) to enable your agent to capture the callback. If possible, it will open a browser window. Once approved, the token is stored securely and refreshed automatically.
