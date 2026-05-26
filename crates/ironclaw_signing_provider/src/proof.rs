@@ -7,6 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::{ApprovedTxHash, ProviderId};
+
 /// A provider-specific signing proof, carried back from the wallet / authn
 /// ceremony to the resume path.
 ///
@@ -42,20 +44,62 @@ impl SigningProof {
 
 /// A [`SigningProof`] that a provider's verifier has validated.
 ///
-/// Construction is intentionally gated through [`VerifiedProof::new`] so that a
-/// `VerifiedProof` value is evidence that verification *ran*. The actual
-/// verification logic (signature recovery, WebAuthn RP checks, scope checks)
-/// lives in the provider / attestation crates downstream; this type is the
-/// trait-level token they return.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// A `VerifiedProof` is a *trust token*: its mere existence is evidence that a
+/// provider's verifier ran and accepted the proof against a specific binding.
+/// To keep that guarantee meaningful, the type is deliberately
+/// **un-deserializable** — it derives [`Serialize`] but not [`Deserialize`], so
+/// an untrusted payload can never be rehydrated into a "verified" value off the
+/// wire. The only way to obtain one is [`VerifiedProof::new`], called by a
+/// provider's verifier after [`crate::SigningProvider::verify_resume`] succeeds.
+///
+/// It also binds the [`ProviderId`] and [`ApprovedTxHash`] that were checked, so
+/// a verified proof cannot be silently re-pointed at a different provider or
+/// transaction. The actual verification logic (signature recovery, WebAuthn RP
+/// checks, scope checks) lives in the provider / attestation crates downstream;
+/// this type is the trait-level token they return.
+///
+/// The following must not compile — `VerifiedProof` is intentionally not
+/// `Deserialize`, so it cannot be forged from an untrusted payload:
+///
+/// ```compile_fail
+/// use ironclaw_signing_provider::VerifiedProof;
+///
+/// fn requires_deserialize<'de, T: serde::Deserialize<'de>>() {}
+/// requires_deserialize::<VerifiedProof>();
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct VerifiedProof {
+    provider_id: ProviderId,
+    approved_tx_hash: ApprovedTxHash,
     proof: SigningProof,
 }
 
 impl VerifiedProof {
     /// Wrap a proof that a downstream verifier has accepted.
-    pub fn new(proof: SigningProof) -> Self {
-        Self { proof }
+    ///
+    /// Call this only from a provider's verifier *after* it has cryptographically
+    /// validated `proof` against `approved_tx_hash` and the signing context.
+    /// Constructing a `VerifiedProof` asserts that verification succeeded.
+    pub fn new(
+        provider_id: ProviderId,
+        approved_tx_hash: ApprovedTxHash,
+        proof: SigningProof,
+    ) -> Self {
+        Self {
+            provider_id,
+            approved_tx_hash,
+            proof,
+        }
+    }
+
+    /// The provider identity whose verifier accepted the proof.
+    pub fn provider_id(&self) -> ProviderId {
+        self.provider_id
+    }
+
+    /// The approved transaction hash the proof was checked against.
+    pub fn approved_tx_hash(&self) -> &ApprovedTxHash {
+        &self.approved_tx_hash
     }
 
     /// Borrow the underlying verified proof.
@@ -98,7 +142,15 @@ mod tests {
 
     #[test]
     fn payload_accessor_returns_inner_bytes_for_every_variant() {
+        assert_eq!(
+            SigningProof::WalletConnectProof(vec![7, 7]).payload(),
+            &[7, 7]
+        );
         assert_eq!(SigningProof::InjectedProof(vec![9, 9]).payload(), &[9, 9]);
+        assert_eq!(
+            SigningProof::NearRedirectProof(vec![3, 3]).payload(),
+            &[3, 3]
+        );
         assert_eq!(
             SigningProof::WebAuthnAssertionProof(vec![1]).payload(),
             &[1]
@@ -106,11 +158,28 @@ mod tests {
     }
 
     #[test]
-    fn verified_proof_wraps_and_round_trips() {
-        let verified = VerifiedProof::new(SigningProof::InjectedProof(vec![5, 6]));
-        assert_eq!(verified.proof().payload(), &[5, 6]);
-        let json = serde_json::to_string(&verified).expect("serialize");
-        let back: VerifiedProof = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(back, verified);
+    fn verified_proof_serializes_binding_but_is_not_deserializable() {
+        let approved_tx_hash = ApprovedTxHash::from_bytes([9u8; 32]);
+        let proof = SigningProof::InjectedProof(vec![5, 6]);
+        let verified = VerifiedProof::new(ProviderId::Injected, approved_tx_hash, proof.clone());
+
+        // Accessors expose the bound identity, hash, and proof.
+        assert_eq!(verified.provider_id(), ProviderId::Injected);
+        assert_eq!(verified.approved_tx_hash(), &approved_tx_hash);
+        assert_eq!(verified.proof(), &proof);
+
+        // It serializes (audit / observability), binding provider + hash + proof.
+        let json = serde_json::to_value(&verified).expect("serialize");
+        assert_eq!(json["provider_id"], "injected");
+        assert_eq!(
+            json["approved_tx_hash"],
+            serde_json::to_value(approved_tx_hash).expect("serialize hash")
+        );
+        assert_eq!(json["proof"]["kind"], "injected_proof");
+
+        // It is NOT deserializable — the `compile_fail` doctest on the type locks
+        // in that a `VerifiedProof` can never be rehydrated from an untrusted
+        // payload, so the only way to obtain one is through a verifier calling
+        // `VerifiedProof::new`.
     }
 }

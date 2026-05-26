@@ -212,11 +212,15 @@ mod tests {
         async fn verify_resume(
             &self,
             _context: &SigningContext,
-            _approved_tx_hash: &ApprovedTxHash,
+            approved_tx_hash: &ApprovedTxHash,
             proof: &SigningProof,
         ) -> Result<VerifiedProof, SigningProviderError> {
             if self.accept {
-                Ok(VerifiedProof::new(proof.clone()))
+                Ok(VerifiedProof::new(
+                    self.id,
+                    *approved_tx_hash,
+                    proof.clone(),
+                ))
             } else {
                 Err(SigningProviderError::SignerMismatch)
             }
