@@ -354,10 +354,14 @@ mod tests {
         );
 
         let skill_install_grant = grant_for(SKILL_INSTALL_CAPABILITY_ID);
+        assert_eq!(
+            skill_install_grant.constraints.allowed_effects,
+            local_dev_skill_install_allowed_effects()
+        );
         assert_eq!(skill_install_grant.constraints.mounts, skill_mounts);
         assert_eq!(
             skill_install_grant.constraints.network,
-            NetworkPolicy::default()
+            local_dev_shell_network_policy()
         );
     }
 

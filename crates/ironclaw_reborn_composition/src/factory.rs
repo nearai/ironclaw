@@ -1303,8 +1303,8 @@ mod tests {
     use ironclaw_host_api::{
         CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
         ExecutionContext, ExtensionId, GrantConstraints, InvocationId, MountAlias, MountGrant,
-        NetworkPolicy, Principal, ResourceEstimate, ResourceScope, RuntimeKind, ScopedPath,
-        TrustClass, UserId, VirtualPath,
+        NetworkPolicy, NetworkTargetPattern, Principal, ResourceEstimate, ResourceScope,
+        RuntimeKind, ScopedPath, TrustClass, UserId, VirtualPath,
     };
     use ironclaw_host_runtime::{
         RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind,
@@ -1669,7 +1669,7 @@ mod tests {
             constraints: GrantConstraints {
                 allowed_effects: allowed_effects(),
                 mounts,
-                network: NetworkPolicy::default(),
+                network: network_policy(),
                 secrets: Vec::new(),
                 resource_ceiling: None,
                 expires_at: None,
@@ -1708,7 +1708,20 @@ mod tests {
             EffectKind::DispatchCapability,
             EffectKind::ReadFilesystem,
             EffectKind::WriteFilesystem,
+            EffectKind::Network,
         ]
+    }
+
+    fn network_policy() -> NetworkPolicy {
+        NetworkPolicy {
+            allowed_targets: vec![NetworkTargetPattern {
+                scheme: None,
+                host_pattern: "*".to_string(),
+                port: None,
+            }],
+            deny_private_ip_ranges: true,
+            max_egress_bytes: None,
+        }
     }
 
     fn trust_decision() -> TrustDecision {

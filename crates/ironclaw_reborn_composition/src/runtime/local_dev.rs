@@ -752,6 +752,7 @@ enum LocalDevCapabilityKind {
     Workspace,
     AmbientShell,
     Network,
+    SkillInstall,
     SkillManagement,
 }
 
@@ -760,8 +761,9 @@ fn local_dev_capability_kind(capability_id: &str) -> LocalDevCapabilityKind {
         LocalDevCapabilityKind::AmbientShell
     } else if capability_id == HTTP_CAPABILITY_ID {
         LocalDevCapabilityKind::Network
+    } else if capability_id == SKILL_INSTALL_CAPABILITY_ID {
+        LocalDevCapabilityKind::SkillInstall
     } else if capability_id == SKILL_LIST_CAPABILITY_ID
-        || capability_id == SKILL_INSTALL_CAPABILITY_ID
         || capability_id == SKILL_REMOVE_CAPABILITY_ID
     {
         LocalDevCapabilityKind::SkillManagement
@@ -774,7 +776,10 @@ fn local_dev_skill_management_capability_ids() -> impl Iterator<Item = &'static 
     local_dev_builtin_capability_ids()
         .into_iter()
         .filter(|capability_id| {
-            local_dev_capability_kind(capability_id) == LocalDevCapabilityKind::SkillManagement
+            matches!(
+                local_dev_capability_kind(capability_id),
+                LocalDevCapabilityKind::SkillInstall | LocalDevCapabilityKind::SkillManagement
+            )
         })
 }
 
@@ -812,6 +817,15 @@ pub(super) fn local_dev_grant_constraints(
             allowed_effects: local_dev_allowed_effects(),
             mounts: workspace_mounts.clone(),
             network: NetworkPolicy::default(),
+            secrets: Vec::new(),
+            resource_ceiling: None,
+            expires_at: None,
+            max_invocations: None,
+        },
+        LocalDevCapabilityKind::SkillInstall => GrantConstraints {
+            allowed_effects: local_dev_skill_install_allowed_effects(),
+            mounts: skill_mounts.clone(),
+            network: local_dev_shell_network_policy(),
             secrets: Vec::new(),
             resource_ceiling: None,
             expires_at: None,
@@ -858,6 +872,12 @@ fn local_dev_allowed_effects() -> Vec<EffectKind> {
         EffectKind::ReadFilesystem,
         EffectKind::WriteFilesystem,
     ]
+}
+
+fn local_dev_skill_install_allowed_effects() -> Vec<EffectKind> {
+    let mut effects = local_dev_allowed_effects();
+    effects.push(EffectKind::Network);
+    effects
 }
 
 fn local_dev_shell_allowed_effects() -> Vec<EffectKind> {
