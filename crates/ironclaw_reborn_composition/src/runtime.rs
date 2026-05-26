@@ -68,7 +68,6 @@ use ironclaw_turns::{
 };
 
 use crate::factory::builtin_extension_registry;
-use crate::hooks::build_hook_dispatcher_builder_factory;
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
 use crate::{RebornBuildError, RebornCompositionProfile, RebornServices, build_reborn_services};
@@ -853,11 +852,14 @@ pub async fn build_reborn_runtime(
         .map_err(|error| RebornRuntimeError::InvalidArgument {
             reason: format!("hook projection registry assembly failed: {error}"),
         })?;
-        build_hook_dispatcher_builder_factory(hooks_config, &projection_registry).map_err(
-            |error| RebornRuntimeError::InvalidArgument {
-                reason: format!("hook framework activation failed: {error}"),
-            },
-        )?
+        crate::hooks::build_hook_dispatcher_builder_factory_for_tenant(
+            hooks_config,
+            &projection_registry,
+            &validated_identity.tenant_id,
+        )
+        .map_err(|error| RebornRuntimeError::InvalidArgument {
+            reason: format!("hook framework activation failed: {error}"),
+        })?
     };
 
     let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {

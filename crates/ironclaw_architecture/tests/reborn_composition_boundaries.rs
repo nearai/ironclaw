@@ -159,6 +159,15 @@ fn composition_crate_installs_installed_tier_only_through_registrar() {
 
     let mut saw_registrar_install = false;
     for (path, contents) in &sources {
+        // Dedicated unit-test module files (e.g. `hooks/tests.rs`, declared via
+        // `#[cfg(test)] mod tests;`) legitimately exercise builder APIs directly
+        // and are not production code. Skip them wholesale — the inline
+        // `#[cfg(test)] mod tests { .. }` stripping below covers same-file test
+        // modules. This keeps the invariant robust across the #3951 finding-#4
+        // decomposition (which moved the test matrix into its own file).
+        if is_test_module_file(path) {
+            continue;
+        }
         let production = strip_test_module(contents);
         if production.contains("registrar.install(") {
             saw_registrar_install = true;
@@ -193,6 +202,16 @@ fn strip_test_module(contents: &str) -> &str {
         Some(idx) => &contents[..idx],
         None => contents,
     }
+}
+
+/// A dedicated unit-test module file: a `tests.rs` module file, or any source
+/// under a `tests/` directory. These are test-only and may use builder APIs
+/// directly, so the production-only invariant scan skips them.
+fn is_test_module_file(path: &Path) -> bool {
+    path.file_name().and_then(|name| name.to_str()) == Some("tests.rs")
+        || path
+            .components()
+            .any(|component| component.as_os_str() == "tests")
 }
 
 /// Recursively collect `(path, contents)` for every `.rs` file under `dir`.
