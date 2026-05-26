@@ -35,7 +35,13 @@ pub trait TurnStateStore: Send + Sync {
     ) -> Result<CancelRunResponse, TurnError>;
 
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError>;
+}
 
+#[async_trait]
+pub trait TurnSpawnTreeStateStore: TurnStateStore {
+    /// Spawn-tree operations are only needed by child-run orchestration.
+    /// General turn submission should stay behind `TurnStateStore`.
+    ///
     /// List child runs only when the parent is visible in the supplied scope.
     ///
     /// Implementations must not leak whether a run exists in another tenant,

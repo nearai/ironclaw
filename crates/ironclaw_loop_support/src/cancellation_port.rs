@@ -477,10 +477,10 @@ mod tests {
     use ironclaw_turns::{
         AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GetRunStateRequest,
         ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
-        RunProfileResolver, RunProfileVersion, SourceBindingRef, SpawnTreeReservation,
-        SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnAdmissionPolicy, TurnError, TurnId,
-        TurnRunId, TurnRunRecord, TurnRunState, TurnRunWake, TurnRunWakeNotifier, TurnScope,
-        TurnStateStore, TurnStatus, run_profile::AgentLoopHostError,
+        RunProfileResolver, RunProfileVersion, SourceBindingRef, SubmitTurnRequest,
+        SubmitTurnResponse, TurnActor, TurnAdmissionPolicy, TurnError, TurnId, TurnRunId,
+        TurnRunState, TurnRunWake, TurnRunWakeNotifier, TurnScope, TurnStateStore, TurnStatus,
+        run_profile::AgentLoopHostError,
     };
 
     use super::{
@@ -544,41 +544,6 @@ mod tests {
             assert_eq!(request.scope, self.state.scope);
             assert_eq!(request.run_id, self.state.run_id);
             Ok(self.state.clone())
-        }
-
-        async fn children_of(
-            &self,
-            _scope: &TurnScope,
-            _run_id: TurnRunId,
-        ) -> Result<Vec<TurnRunRecord>, TurnError> {
-            panic!("children_of should not be called by cancellation factory tests")
-        }
-
-        async fn get_run_record(
-            &self,
-            _scope: &TurnScope,
-            _run_id: TurnRunId,
-        ) -> Result<Option<TurnRunRecord>, TurnError> {
-            panic!("get_run_record should not be called by cancellation factory tests")
-        }
-
-        async fn reserve_tree_descendants(
-            &self,
-            _scope: &TurnScope,
-            _root_run_id: TurnRunId,
-            _delta: u32,
-            _cap: u32,
-        ) -> Result<SpawnTreeReservation, TurnError> {
-            panic!("reserve_tree_descendants should not be called by cancellation factory tests")
-        }
-
-        async fn release_tree_descendants(
-            &self,
-            _scope: &TurnScope,
-            _root_run_id: TurnRunId,
-            _delta: u32,
-        ) -> Result<(), TurnError> {
-            panic!("release_tree_descendants should not be called by cancellation factory tests")
         }
     }
 
@@ -828,41 +793,6 @@ mod tests {
             _request: GetRunStateRequest,
         ) -> Result<TurnRunState, TurnError> {
             Ok(self.state.lock().unwrap().clone())
-        }
-
-        async fn children_of(
-            &self,
-            _scope: &TurnScope,
-            _run_id: TurnRunId,
-        ) -> Result<Vec<TurnRunRecord>, TurnError> {
-            panic!("children_of should not be called by cancellation factory tests")
-        }
-
-        async fn get_run_record(
-            &self,
-            _scope: &TurnScope,
-            _run_id: TurnRunId,
-        ) -> Result<Option<TurnRunRecord>, TurnError> {
-            panic!("get_run_record should not be called by cancellation factory tests")
-        }
-
-        async fn reserve_tree_descendants(
-            &self,
-            _scope: &TurnScope,
-            _root_run_id: TurnRunId,
-            _delta: u32,
-            _cap: u32,
-        ) -> Result<SpawnTreeReservation, TurnError> {
-            panic!("reserve_tree_descendants should not be called by cancellation factory tests")
-        }
-
-        async fn release_tree_descendants(
-            &self,
-            _scope: &TurnScope,
-            _root_run_id: TurnRunId,
-            _delta: u32,
-        ) -> Result<(), TurnError> {
-            panic!("release_tree_descendants should not be called by cancellation factory tests")
         }
     }
 

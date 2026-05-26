@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     fmt,
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{Arc, Mutex},
@@ -13,9 +13,9 @@ const MAX_DELIVERED_EVENT_CURSORS: usize = 4096;
 use crate::{
     AdmissionRejection, CancelRunRequest, CancelRunResponse, GetRunStateRequest,
     InMemoryRunProfileResolver, ResumeTurnRequest, ResumeTurnResponse, RunProfileResolver,
-    SubmitTurnRequest, SubmitTurnResponse, TurnError, TurnEventKind, TurnEventSink,
-    TurnLifecycleEvent, TurnRunId, TurnRunState, TurnScope, TurnStateStore, TurnStatus,
-    events::EventCursor,
+    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnError, TurnEventKind,
+    TurnEventSink, TurnLifecycleEvent, TurnRunId, TurnRunState, TurnScope, TurnSpawnTreeStateStore,
+    TurnStateStore, TurnStatus, events::EventCursor,
 };
 
 pub trait TurnAdmissionPolicy: Send + Sync {
@@ -70,9 +70,7 @@ impl TurnAdmissionPolicy for AllowAllTurnAdmissionPolicy {
 
 #[async_trait]
 pub trait TurnCoordinator: Send + Sync {
-    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
-        Ok(TurnRunId::new())
-    }
+    async fn prepare_turn(&self, scope: TurnScope) -> Result<TurnRunId, TurnError>;
 
     async fn submit_turn(
         &self,
@@ -89,6 +87,16 @@ pub trait TurnCoordinator: Send + Sync {
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError>;
 }
 
+#[async_trait]
+pub trait TurnSpawnTreePort: Send + Sync {
+    /// Submit a child run by deriving lineage from the persisted parent and
+    /// holding the spawn-tree reservation around the underlying turn submit.
+    async fn submit_child_run(
+        &self,
+        request: SubmitChildRunRequest,
+    ) -> Result<SubmitTurnResponse, TurnError>;
+}
+
 pub struct DefaultTurnCoordinator<S: ?Sized> {
     store: Arc<S>,
     admission_policy: Arc<dyn TurnAdmissionPolicy>,
@@ -96,11 +104,6 @@ pub struct DefaultTurnCoordinator<S: ?Sized> {
     wake_notifier: Arc<dyn TurnRunWakeNotifier>,
     event_sink: Option<Arc<dyn TurnEventSink>>,
     delivered_event_cursors: Mutex<HashSet<EventCursor>>,
-    // Per-coordinator binding of run ids handed out by `prepare_turn` to the
-    // scope they were prepared under. `submit_turn` consumes the reservation
-    // when `requested_run_id` is set and rejects cross-scope submission so a
-    // prepared id cannot be used to inject lineage into a different scope.
-    prepared_run_id_scopes: Mutex<HashMap<TurnRunId, TurnScope>>,
 }
 
 impl<S> DefaultTurnCoordinator<S>
@@ -115,7 +118,6 @@ where
             wake_notifier: Arc::new(NoopTurnRunWakeNotifier),
             event_sink: None,
             delivered_event_cursors: Mutex::new(HashSet::new()),
-            prepared_run_id_scopes: Mutex::new(HashMap::new()),
         }
     }
 
@@ -158,30 +160,6 @@ where
                 delivered.insert(cursor)
             }
         }
-    }
-
-    fn record_prepared_run_id(&self, run_id: TurnRunId, scope: TurnScope) {
-        let mut prepared = match self.prepared_run_id_scopes.lock() {
-            Ok(prepared) => prepared,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        prepared.insert(run_id, scope);
-    }
-
-    fn prepared_run_id_scope(&self, run_id: TurnRunId) -> Option<TurnScope> {
-        let prepared = match self.prepared_run_id_scopes.lock() {
-            Ok(prepared) => prepared,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        prepared.get(&run_id).cloned()
-    }
-
-    fn forget_prepared_run_id(&self, run_id: TurnRunId) {
-        let mut prepared = match self.prepared_run_id_scopes.lock() {
-            Ok(prepared) => prepared,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        prepared.remove(&run_id);
     }
 }
 
@@ -243,27 +221,14 @@ impl<S> TurnCoordinator for DefaultTurnCoordinator<S>
 where
     S: TurnStateStore + ?Sized + 'static,
 {
-    async fn prepare_turn(&self, scope: TurnScope) -> Result<TurnRunId, TurnError> {
-        let run_id = TurnRunId::new();
-        self.record_prepared_run_id(run_id, scope);
-        Ok(run_id)
+    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        Ok(TurnRunId::new())
     }
 
     async fn submit_turn(
         &self,
         request: SubmitTurnRequest,
     ) -> Result<SubmitTurnResponse, TurnError> {
-        // If the caller passed a run id that came out of prepare_turn, verify
-        // it is being submitted under the same scope it was prepared under.
-        // Keep the reservation through failed store submissions so a retry
-        // cannot rebind the prepared id under a different scope.
-        if let Some(requested) = request.requested_run_id
-            && let Some(prepared_scope) = self.prepared_run_id_scope(requested)
-            && prepared_scope != request.scope
-        {
-            return Err(TurnError::Unauthorized);
-        }
-        let requested_run_id = request.requested_run_id;
         let scope = request.scope.clone();
         let event_scope = request.scope.clone();
         let actor = request.actor.clone();
@@ -276,9 +241,6 @@ where
                 self.run_profile_resolver.as_ref(),
             )
             .await?;
-        if let Some(requested) = requested_run_id {
-            self.forget_prepared_run_id(requested);
-        }
         let SubmitTurnResponse::Accepted {
             run_id,
             status,
@@ -398,6 +360,72 @@ where
 }
 
 #[async_trait]
+impl<S> TurnSpawnTreePort for DefaultTurnCoordinator<S>
+where
+    S: TurnSpawnTreeStateStore + ?Sized + 'static,
+{
+    async fn submit_child_run(
+        &self,
+        request: SubmitChildRunRequest,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        let Some(parent) = self
+            .store
+            .get_run_record(&request.parent_scope, request.parent_run_id)
+            .await?
+        else {
+            return Err(TurnError::ScopeNotFound);
+        };
+        if parent.subagent_depth == u32::MAX {
+            return Err(TurnError::InvalidRequest {
+                reason: "subagent depth would overflow".to_string(),
+            });
+        }
+        let root_run_id = parent.spawn_tree_root_run_id.unwrap_or(parent.run_id);
+        self.store
+            .reserve_tree_descendants(
+                &request.child_scope,
+                root_run_id,
+                1,
+                request.spawn_tree_descendant_cap,
+            )
+            .await?;
+
+        let submit = SubmitTurnRequest {
+            scope: request.child_scope.clone(),
+            actor: request.actor,
+            accepted_message_ref: request.accepted_message_ref,
+            source_binding_ref: request.source_binding_ref,
+            reply_target_binding_ref: request.reply_target_binding_ref,
+            requested_run_profile: request.requested_run_profile,
+            idempotency_key: request.idempotency_key,
+            received_at: request.received_at,
+            requested_run_id: request.requested_run_id,
+            parent_run_id: Some(parent.run_id),
+            subagent_depth: parent.subagent_depth + 1,
+            spawn_tree_root_run_id: Some(root_run_id),
+        };
+
+        match self.submit_turn(submit).await {
+            Ok(response) => Ok(response),
+            Err(error) => {
+                if let Err(release_error) = self
+                    .store
+                    .release_tree_descendants(&request.child_scope, root_run_id, 1)
+                    .await
+                {
+                    debug!(
+                        error = %release_error,
+                        root_run_id = %root_run_id,
+                        "failed to release spawn-tree reservation after child submit failure"
+                    );
+                }
+                Err(error)
+            }
+        }
+    }
+}
+
+#[async_trait]
 impl<C> TurnCoordinator for Arc<C>
 where
     C: TurnCoordinator + ?Sized,
@@ -426,5 +454,18 @@ where
 
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
         self.as_ref().get_run_state(request).await
+    }
+}
+
+#[async_trait]
+impl<C> TurnSpawnTreePort for Arc<C>
+where
+    C: TurnSpawnTreePort + ?Sized,
+{
+    async fn submit_child_run(
+        &self,
+        request: SubmitChildRunRequest,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        self.as_ref().submit_child_run(request).await
     }
 }

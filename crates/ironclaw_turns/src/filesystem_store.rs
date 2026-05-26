@@ -47,7 +47,8 @@ use crate::{
     PutLoopCheckpointRequest, ResumeTurnRequest, ResumeTurnResponse, RunProfileResolver,
     SpawnTreeReservation, SubmitTurnRequest, SubmitTurnResponse, TurnAdmissionLimitProvider,
     TurnAdmissionPolicy, TurnError, TurnEventPage, TurnEventProjectionSource,
-    TurnPersistenceSnapshot, TurnRunId, TurnRunRecord, TurnRunState, TurnScope, TurnStateStore,
+    TurnPersistenceSnapshot, TurnRunId, TurnRunRecord, TurnRunState, TurnScope,
+    TurnSpawnTreeStateStore, TurnStateStore,
     events::project_turn_events,
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
@@ -262,7 +263,13 @@ where
             .get_run_state(request)
             .await
     }
+}
 
+#[async_trait]
+impl<F> TurnSpawnTreeStateStore for FilesystemTurnStateStore<F>
+where
+    F: RootFilesystem,
+{
     async fn children_of(
         &self,
         scope: &TurnScope,

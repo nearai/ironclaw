@@ -26,7 +26,7 @@ use ironclaw_turns::{
     RunProfileRequest, SanitizedCancelReason, SourceBindingRef, SpawnTreeReservation,
     SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId,
     TurnRunRecord, TurnRunState, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError,
-    TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
+    TurnRunnerId, TurnScope, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
         ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
@@ -300,7 +300,10 @@ impl TurnStateStore for DurableLikeTurnStore {
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
         self.inner.get_run_state(request).await
     }
+}
 
+#[async_trait]
+impl TurnSpawnTreeStateStore for DurableLikeTurnStore {
     async fn children_of(
         &self,
         scope: &TurnScope,
@@ -432,41 +435,6 @@ impl TurnStateStore for DurableTurnStoreStub {
 
     async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
         panic!("store stub should not read turns")
-    }
-
-    async fn children_of(
-        &self,
-        _scope: &TurnScope,
-        _run_id: TurnRunId,
-    ) -> Result<Vec<TurnRunRecord>, TurnError> {
-        panic!("store stub should not read child turns")
-    }
-
-    async fn get_run_record(
-        &self,
-        _scope: &TurnScope,
-        _run_id: TurnRunId,
-    ) -> Result<Option<TurnRunRecord>, TurnError> {
-        panic!("store stub should not read turn records")
-    }
-
-    async fn reserve_tree_descendants(
-        &self,
-        _scope: &TurnScope,
-        _root_run_id: TurnRunId,
-        _delta: u32,
-        _cap: u32,
-    ) -> Result<SpawnTreeReservation, TurnError> {
-        panic!("store stub should not reserve tree descendants")
-    }
-
-    async fn release_tree_descendants(
-        &self,
-        _scope: &TurnScope,
-        _root_run_id: TurnRunId,
-        _delta: u32,
-    ) -> Result<(), TurnError> {
-        panic!("store stub should not release tree descendants")
     }
 }
 

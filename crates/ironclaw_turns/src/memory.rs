@@ -20,8 +20,8 @@ use crate::{
     TurnCheckpointRecord, TurnError, TurnEventKind, TurnIdempotencyErrorReplay,
     TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind, TurnIdempotencyRecord,
     TurnIdempotencyReplay, TurnLifecycleEvent, TurnLockVersion, TurnPersistenceSnapshot,
-    TurnRecord, TurnRunId, TurnRunProfile, TurnRunRecord, TurnRunState, TurnScope, TurnStateStore,
-    TurnStatus,
+    TurnRecord, TurnRunId, TurnRunProfile, TurnRunRecord, TurnRunState, TurnScope,
+    TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
     admission::{TurnAdmissionBucket, admission_buckets},
     events::{EventCursor, TurnEventPage, TurnEventProjectionSource, project_turn_events},
     runner::{
@@ -692,7 +692,10 @@ impl TurnStateStore for InMemoryTurnStateStore {
             .map(RunRecord::state)
             .ok_or(TurnError::ScopeNotFound)
     }
+}
 
+#[async_trait]
+impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
     async fn children_of(
         &self,
         scope: &TurnScope,

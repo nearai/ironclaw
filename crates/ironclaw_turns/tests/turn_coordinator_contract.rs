@@ -18,8 +18,8 @@ use ironclaw_turns::{
     LoopGateRef, LoopResultRef, ReplyTargetBindingRef, ResolvedRunProfile, ResumeTurnRequest,
     RunProfileId, RunProfileRequest, RunProfileResolutionError, RunProfileResolutionRequest,
     RunProfileResolver, RunProfileVersion, SanitizedCancelReason, SanitizedFailure,
-    SourceBindingRef, StaticTurnAdmissionLimitProvider, SubmitTurnRequest, SubmitTurnResponse,
-    ThreadBusy, TurnActor, TurnAdmissionAxisKind, TurnAdmissionBucketKind,
+    SourceBindingRef, StaticTurnAdmissionLimitProvider, SubmitChildRunRequest, SubmitTurnRequest,
+    SubmitTurnResponse, ThreadBusy, TurnActor, TurnAdmissionAxisKind, TurnAdmissionBucketKind,
     TurnAdmissionBucketScope, TurnAdmissionCapacityDenial, TurnAdmissionClass, TurnAdmissionPolicy,
     TurnCapacityResource, TurnCheckpointId, TurnCoordinator, TurnError, TurnErrorCategory,
     TurnEventKind, TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
@@ -27,7 +27,8 @@ use ironclaw_turns::{
     TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind, TurnIdempotencyRecord,
     TurnIdempotencyReplay, TurnLeaseToken, TurnLifecycleEvent, TurnLockVersion, TurnRunId,
     TurnRunProfile, TurnRunState, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError,
-    TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
+    TurnRunnerId, TurnScope, TurnSpawnTreePort, TurnSpawnTreeStateStore, TurnStateStore,
+    TurnStatus,
     events::EventCursor,
     run_profile::{CapabilityOutcome, LoopGateKind, LoopModelRouteSnapshot},
     runner::{
@@ -399,6 +400,104 @@ async fn children_of_get_run_record_and_tree_reservation_are_scope_checked() {
             .await,
         Err(TurnError::CapacityExceeded { .. })
     ));
+}
+
+#[tokio::test]
+async fn spawn_tree_port_submits_child_with_computed_lineage_and_reservation() {
+    let (coordinator, store) = coordinator();
+    let parent = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-spawn-parent", "idem-spawn-parent"))
+            .await
+            .unwrap(),
+    );
+    let child_id = coordinator
+        .prepare_turn(scope("thread-spawn-child"))
+        .await
+        .unwrap();
+
+    let child = coordinator
+        .submit_child_run(child_run_request(
+            scope("thread-spawn-parent"),
+            parent,
+            "thread-spawn-child",
+            child_id,
+            "idem-spawn-child",
+            2,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(accepted_run_id(&child), child_id);
+    let child_record = store
+        .get_run_record(&scope("thread-spawn-child"), child_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(child_record.parent_run_id, Some(parent));
+    assert_eq!(child_record.subagent_depth, 1);
+    assert_eq!(child_record.spawn_tree_root_run_id, Some(parent));
+    assert_eq!(
+        store
+            .persistence_snapshot()
+            .spawn_tree_reservations
+            .iter()
+            .find(|reservation| reservation.root_run_id == parent)
+            .map(|reservation| reservation.descendant_count),
+        Some(1)
+    );
+}
+
+#[tokio::test]
+async fn spawn_tree_port_releases_reservation_when_child_submit_fails() {
+    let (coordinator, store) = coordinator();
+    let parent = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-spawn-rollback-parent",
+                "idem-spawn-rollback-parent",
+            ))
+            .await
+            .unwrap(),
+    );
+    coordinator
+        .submit_turn(submit_request(
+            "thread-spawn-rollback-child",
+            "idem-spawn-rollback-busy-child-thread",
+        ))
+        .await
+        .unwrap();
+    let child_id = coordinator
+        .prepare_turn(scope("thread-spawn-rollback-child"))
+        .await
+        .unwrap();
+
+    let error = coordinator
+        .submit_child_run(child_run_request(
+            scope("thread-spawn-rollback-parent"),
+            parent,
+            "thread-spawn-rollback-child",
+            child_id,
+            "idem-spawn-rollback-child",
+            2,
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, TurnError::ThreadBusy(_)));
+    assert!(
+        store
+            .persistence_snapshot()
+            .spawn_tree_reservations
+            .is_empty()
+    );
+    assert!(
+        store
+            .get_run_record(&scope("thread-spawn-rollback-child"), child_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -5091,25 +5190,16 @@ fn turn_blocked_gate_kind_await_dependent_run_maps_from_status_and_round_trips_w
 }
 
 #[tokio::test]
-async fn prepare_turn_rejects_cross_scope_submission_of_prepared_run_id() {
+async fn prepare_turn_is_pure_id_mint_and_does_not_bind_scope() {
     let (coordinator, _store) = coordinator();
-    let prepared_scope = scope("thread-prepared-cross-scope");
     let prepared = coordinator
-        .prepare_turn(prepared_scope.clone())
+        .prepare_turn(scope("thread-prepared-origin"))
         .await
         .unwrap();
 
-    // Submit the prepared run id under a different thread scope; coordinator
-    // must reject before delegating to the store, without consuming the
-    // prepared id's original scope binding.
-    let mut cross_scope = submit_request("thread-other-scope", "idem-cross-scope");
-    cross_scope.requested_run_id = Some(prepared);
-    let err = coordinator.submit_turn(cross_scope).await.unwrap_err();
-    assert!(matches!(err, TurnError::Unauthorized));
-
-    let mut original_scope = submit_request("thread-prepared-cross-scope", "idem-original-scope");
-    original_scope.requested_run_id = Some(prepared);
-    let accepted = coordinator.submit_turn(original_scope).await.unwrap();
+    let mut request = submit_request("thread-prepared-submit", "idem-prepared-submit");
+    request.requested_run_id = Some(prepared);
+    let accepted = coordinator.submit_turn(request).await.unwrap();
     assert_eq!(accepted_run_id(&accepted), prepared);
 }
 
@@ -5333,6 +5423,30 @@ fn submit_request(thread: &str, idempotency_key: &str) -> SubmitTurnRequest {
         parent_run_id: None,
         subagent_depth: 0,
         spawn_tree_root_run_id: None,
+    }
+}
+
+fn child_run_request(
+    parent_scope: TurnScope,
+    parent_run_id: TurnRunId,
+    child_thread: &str,
+    child_run_id: TurnRunId,
+    idempotency_key: &str,
+    spawn_tree_descendant_cap: u32,
+) -> SubmitChildRunRequest {
+    SubmitChildRunRequest {
+        parent_scope,
+        parent_run_id,
+        child_scope: scope(child_thread),
+        actor: actor(),
+        accepted_message_ref: AcceptedMessageRef::new(format!("message-{child_thread}")).unwrap(),
+        source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
+        requested_run_profile: Some(RunProfileRequest::new("default").unwrap()),
+        idempotency_key: IdempotencyKey::new(idempotency_key).unwrap(),
+        received_at: received_at(),
+        requested_run_id: Some(child_run_id),
+        spawn_tree_descendant_cap,
     }
 }
 

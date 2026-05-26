@@ -2817,6 +2817,10 @@ impl CapacityFailureTurnCoordinator {
 
 #[async_trait]
 impl TurnCoordinator for PermanentFailureTurnCoordinator {
+    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        Ok(TurnRunId::new())
+    }
+
     async fn submit_turn(
         &self,
         request: SubmitTurnRequest,
@@ -2845,6 +2849,10 @@ impl TurnCoordinator for PermanentFailureTurnCoordinator {
 
 #[async_trait]
 impl TurnCoordinator for CapacityFailureTurnCoordinator {
+    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        Ok(TurnRunId::new())
+    }
+
     async fn submit_turn(
         &self,
         request: SubmitTurnRequest,
@@ -2874,6 +2882,10 @@ impl TurnCoordinator for CapacityFailureTurnCoordinator {
 
 #[async_trait]
 impl TurnCoordinator for BusyFirstUniqueKeyCoordinator {
+    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        Ok(TurnRunId::new())
+    }
+
     async fn submit_turn(
         &self,
         request: SubmitTurnRequest,
@@ -2908,6 +2920,10 @@ impl TurnCoordinator for BusyFirstUniqueKeyCoordinator {
 
 #[async_trait]
 impl TurnCoordinator for FailFirstTurnCoordinator {
+    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        Ok(TurnRunId::new())
+    }
+
     async fn submit_turn(
         &self,
         request: SubmitTurnRequest,
@@ -2940,6 +2956,10 @@ impl TurnCoordinator for FailFirstTurnCoordinator {
 
 #[async_trait]
 impl TurnCoordinator for RecordingTurnCoordinator {
+    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        Ok(TurnRunId::new())
+    }
+
     async fn submit_turn(
         &self,
         request: SubmitTurnRequest,

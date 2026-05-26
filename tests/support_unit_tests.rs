@@ -2391,6 +2391,10 @@ mod reborn_support_tests {
 
     #[async_trait]
     impl TurnCoordinator for DryRunCapturingTurnCoordinator {
+        async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+            Ok(TurnRunId::new())
+        }
+
         async fn submit_turn(
             &self,
             request: SubmitTurnRequest,

@@ -57,6 +57,26 @@ pub struct SubmitTurnRequest {
     pub spawn_tree_root_run_id: Option<TurnRunId>,
 }
 
+/// Request shape for callers that are creating a child run from an existing
+/// parent. The coordinator derives the persisted lineage fields on
+/// `SubmitTurnRequest` from the parent record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubmitChildRunRequest {
+    pub parent_scope: TurnScope,
+    pub parent_run_id: TurnRunId,
+    pub child_scope: TurnScope,
+    pub actor: TurnActor,
+    pub accepted_message_ref: AcceptedMessageRef,
+    pub source_binding_ref: SourceBindingRef,
+    pub reply_target_binding_ref: ReplyTargetBindingRef,
+    pub requested_run_profile: Option<RunProfileRequest>,
+    pub idempotency_key: IdempotencyKey,
+    pub received_at: TurnTimestamp,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_run_id: Option<TurnRunId>,
+    pub spawn_tree_descendant_cap: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResumeTurnRequest {
     pub scope: TurnScope,
