@@ -21,7 +21,6 @@ use crate::available_extensions::{
 };
 use crate::lifecycle::response_with_payload;
 
-#[derive(Clone)]
 pub(crate) struct RebornLocalExtensionManagementPort {
     filesystem: Arc<LocalFilesystem>,
     catalog: AvailableExtensionCatalog,
@@ -51,9 +50,9 @@ impl RebornLocalExtensionManagementPort {
         &self,
         query: &str,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        let extensions = self.catalog.search(query)?;
+        let extensions = self.catalog.search(query);
         let summaries = extensions
-            .iter()
+            .into_iter()
             .map(|extension| extension.summary_json())
             .collect::<Vec<_>>();
         Ok(response_with_payload(
@@ -71,11 +70,11 @@ impl RebornLocalExtensionManagementPort {
         package_ref: LifecyclePackageRef,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let available = self.catalog.resolve(&package_ref)?;
-        let plan = prepare_install(&available)?;
+        let plan = prepare_install(available)?;
         let rollback = self.register_lifecycle_package(&available.package).await?;
 
         if let Err(error) =
-            materialize_available_extension(self.filesystem.as_ref(), &available).await
+            materialize_available_extension(self.filesystem.as_ref(), available).await
         {
             self.rollback_lifecycle_install(&available.package.id, rollback)
                 .await;
@@ -95,7 +94,7 @@ impl RebornLocalExtensionManagementPort {
             LifecyclePhase::Installed,
             json!({
                 "installed": true,
-                "visible_capability_ids": visible_capability_ids(&available).iter().map(|id| id.as_str()).collect::<Vec<_>>(),
+                "visible_capability_ids": visible_capability_ids(available).map(|id| id.as_str()).collect::<Vec<_>>(),
             }),
         ))
     }

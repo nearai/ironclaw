@@ -7,13 +7,13 @@ use ironclaw_host_api::{CapabilityId, ExtensionId, VirtualPath};
 use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef, ProductWorkflowError};
 use serde_json::{Value, json};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct AvailableExtensionAsset {
     pub(crate) path: String,
     pub(crate) bytes: Vec<u8>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct AvailableExtensionPackage {
     pub(crate) package_ref: LifecyclePackageRef,
     pub(crate) manifest_toml: String,
@@ -24,7 +24,6 @@ pub(crate) struct AvailableExtensionPackage {
 impl AvailableExtensionPackage {
     pub(crate) fn summary_json(&self) -> Value {
         let visible_read_only_capability_ids = visible_capability_ids(self)
-            .iter()
             .map(|id| id.as_str().to_string())
             .collect::<Vec<_>>();
         json!({
@@ -41,7 +40,7 @@ impl AvailableExtensionPackage {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub(crate) struct AvailableExtensionCatalog {
     packages: Vec<AvailableExtensionPackage>,
 }
@@ -63,48 +62,42 @@ impl AvailableExtensionCatalog {
         ))
     }
 
-    pub(crate) fn search(
-        &self,
+    pub(crate) fn search<'a>(
+        &'a self,
         query: &str,
-    ) -> Result<Vec<AvailableExtensionPackage>, ProductWorkflowError> {
+    ) -> impl Iterator<Item = &'a AvailableExtensionPackage> + 'a {
         let normalized_query = query.trim().to_ascii_lowercase();
-        Ok(self
-            .packages
-            .iter()
-            .filter(|package| {
-                normalized_query.is_empty()
-                    || package
-                        .package_ref
-                        .id
-                        .as_str()
-                        .to_ascii_lowercase()
-                        .contains(&normalized_query)
-                    || package
-                        .package
-                        .manifest
-                        .name
-                        .to_ascii_lowercase()
-                        .contains(&normalized_query)
-                    || package
-                        .package
-                        .manifest
-                        .description
-                        .to_ascii_lowercase()
-                        .contains(&normalized_query)
-            })
-            .cloned()
-            .collect())
+        self.packages.iter().filter(move |package| {
+            normalized_query.is_empty()
+                || package
+                    .package_ref
+                    .id
+                    .as_str()
+                    .to_ascii_lowercase()
+                    .contains(&normalized_query)
+                || package
+                    .package
+                    .manifest
+                    .name
+                    .to_ascii_lowercase()
+                    .contains(&normalized_query)
+                || package
+                    .package
+                    .manifest
+                    .description
+                    .to_ascii_lowercase()
+                    .contains(&normalized_query)
+        })
     }
 
     pub(crate) fn resolve(
         &self,
         package_ref: &LifecyclePackageRef,
-    ) -> Result<AvailableExtensionPackage, ProductWorkflowError> {
+    ) -> Result<&AvailableExtensionPackage, ProductWorkflowError> {
         package_ref.require_kind(LifecyclePackageKind::Extension)?;
         self.packages
             .iter()
             .find(|package| &package.package_ref == package_ref)
-            .cloned()
             .ok_or_else(|| ProductWorkflowError::InvalidBindingRequest {
                 reason: "available extension was not found".to_string(),
             })
@@ -259,7 +252,9 @@ fn map_binding_error(error: impl std::fmt::Display) -> ProductWorkflowError {
     }
 }
 
-pub(crate) fn visible_capability_ids(extension: &AvailableExtensionPackage) -> Vec<CapabilityId> {
+pub(crate) fn visible_capability_ids(
+    extension: &AvailableExtensionPackage,
+) -> impl Iterator<Item = &CapabilityId> {
     extension
         .package
         .manifest
@@ -267,8 +262,7 @@ pub(crate) fn visible_capability_ids(extension: &AvailableExtensionPackage) -> V
         .iter()
         .filter(|capability| capability.visibility == CapabilityVisibility::Model)
         .filter(|capability| !capability.effects.iter().any(|effect| effect.is_write()))
-        .map(|capability| capability.id.clone())
-        .collect()
+        .map(|capability| &capability.id)
 }
 
 #[cfg(test)]
@@ -289,7 +283,9 @@ mod tests {
     fn visible_capability_ids_excludes_write_effects() {
         let extension = test_extension_package();
 
-        let visible = visible_capability_ids(&extension);
+        let visible = visible_capability_ids(&extension)
+            .cloned()
+            .collect::<Vec<_>>();
 
         assert_eq!(visible, vec![CapabilityId::new("fixture.search").unwrap()]);
         assert!(EffectKind::ExternalWrite.is_write());
@@ -335,7 +331,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let results = catalog.search("fixture").unwrap();
+        let results = catalog.search("fixture").collect::<Vec<_>>();
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].package_ref, extension.package_ref);

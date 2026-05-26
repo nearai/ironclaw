@@ -288,21 +288,7 @@ impl Default for SharedExtensionRegistry {
 pub(crate) fn validate_package_consistency(
     package: &ExtensionPackage,
 ) -> Result<(), ExtensionError> {
-    let expected = ExtensionPackage::from_manifest(package.manifest.clone(), package.root.clone())?;
-    if package.id != expected.id {
-        return Err(ExtensionError::InvalidManifest {
-            reason: format!(
-                "package id {} does not match manifest/root id {}",
-                package.id, expected.id
-            ),
-        });
-    }
-    if package.capabilities != expected.capabilities {
-        return Err(ExtensionError::InvalidManifest {
-            reason: "package capability descriptors do not match manifest declarations".to_string(),
-        });
-    }
-    Ok(())
+    package.validate_consistency()
 }
 
 #[cfg(test)]
