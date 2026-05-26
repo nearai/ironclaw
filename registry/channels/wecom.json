@@ -16,7 +16,12 @@
     "capabilities": "wecom.capabilities.json",
     "crate_name": "wecom-channel"
   },
-  "artifacts": {},
+  "artifacts": {
+    "wasm32-wasip2": {
+      "sha256": "25d674b3d68c7689ab269be9b40b944c1d5a0f9b20378b81688c25c8b7859bda",
+      "url": "https://github.com/nearai/ironclaw/releases/download/ironclaw-v0.29.0/channel-wecom-0.1.0-wasm32-wasip2.tar.gz"
+    }
+  },
   "auth_summary": {
     "method": "manual",
     "provider": "WeCom",
