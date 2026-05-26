@@ -23,6 +23,7 @@ use ironclaw_turns::{
 };
 
 mod cursor_validation;
+mod display_preview;
 mod runtime_stream;
 mod turn_stream;
 
