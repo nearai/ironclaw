@@ -11,6 +11,12 @@ export function useHistory(threadId, options = {}) {
     nextCursor: null,
     isLoading: false,
   });
+  // Synchronous reentrancy guard — `isLoading` in state is async so
+  // it can't gate overlapping calls (scroll-to-load + onRunCompleted
+  // refetch can fire in the same tick). The ref flips before the
+  // first await and clears in `finally` so a thrown timeline call
+  // doesn't permanently wedge the next load.
+  const loadingRef = React.useRef(false);
 
   const loadHistory = React.useCallback(
     async (cursor) => {
@@ -18,6 +24,8 @@ export function useHistory(threadId, options = {}) {
         setState({ messages: [], nextCursor: null, isLoading: false });
         return;
       }
+      if (loadingRef.current) return;
+      loadingRef.current = true;
       setState((s) => ({ ...s, isLoading: true }));
       try {
         const data = await fetchTimeline({
@@ -48,6 +56,8 @@ export function useHistory(threadId, options = {}) {
         // Stay loud — surface to the SPA error boundary rather than
         // silently masking timeline outages.
         console.error("Failed to load timeline:", err);
+      } finally {
+        loadingRef.current = false;
       }
     },
     [threadId, getPendingMessages, setPendingMessages],

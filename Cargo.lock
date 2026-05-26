@@ -5268,6 +5268,7 @@ dependencies = [
  "rand 0.8.6",
  "tokio",
  "tower 0.5.3",
+ "tracing",
 ]
 
 [[package]]

@@ -128,14 +128,21 @@ fn render_index_with_nonce() -> Response {
          frame-ancestors 'none'; \
          base-uri 'self'",
     );
-    // `HeaderValue::from_str` cannot fail — the string above is
-    // built entirely from ASCII literals plus a hex nonce. A panic
-    // here would mean a misuse the build-time test catches.
-    if let Ok(value) = HeaderValue::from_str(&csp) {
-        response
-            .headers_mut()
-            .insert(axum::http::header::CONTENT_SECURITY_POLICY, value);
-    }
+    // `HeaderValue::from_str` cannot fail for the literal+hex-nonce
+    // input above; if a future edit introduces a non-ASCII byte the
+    // request fails closed with 500 rather than serving the SPA shell
+    // without a CSP header (silent fail-open is banned by the
+    // error-handling rule).
+    let value = match HeaderValue::from_str(&csp) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(?error, "csp header build produced invalid HeaderValue");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    response
+        .headers_mut()
+        .insert(axum::http::header::CONTENT_SECURITY_POLICY, value);
     response
 }
 

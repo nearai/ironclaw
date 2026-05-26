@@ -81,7 +81,8 @@ function ThreadItem({ thread, isActive, onSelect, onDelete }) {
           ${timeLabel}
         </span>`}
       </button>
-      <button
+      ${onDelete &&
+      html`<button
         type="button"
         onClick=${handleDelete}
         disabled=${isProcessing}
@@ -96,7 +97,7 @@ function ThreadItem({ thread, isActive, onSelect, onDelete }) {
         )}
       >
         <${Icon} name="trash" className="h-3.5 w-3.5" strokeWidth=${2} />
-      </button>
+      </button>`}
     </div>
   `;
 }

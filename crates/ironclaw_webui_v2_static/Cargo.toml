@@ -15,7 +15,7 @@ default = []
 # Compile in the static asset Router. Matches the gate on the JSON
 # route surface in `ironclaw_webui_v2` so host composition flips a
 # single feature to enable the full v2 WebUI.
-webui-v2-beta = ["dep:axum", "dep:tokio"]
+webui-v2-beta = ["dep:axum", "dep:tokio", "dep:tracing"]
 
 [dependencies]
 # Tiny RNG for per-request CSP nonces. `rand_core` keeps the dep
@@ -25,6 +25,7 @@ rand = { version = "0.8", default-features = false, features = ["std", "std_rng"
 # Optional — only when `webui-v2-beta` is enabled.
 axum = { version = "0.8", optional = true }
 tokio = { version = "1", features = ["sync"], optional = true }
+tracing = { version = "0.1", optional = true }
 
 [dev-dependencies]
 ironclaw_webui_v2_static = { path = ".", features = ["webui-v2-beta"] }

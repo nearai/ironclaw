@@ -46,14 +46,6 @@ export function useThreads() {
     return createPromise;
   }, []);
 
-  // TODO: v2 has no DELETE thread endpoint. The fork's sidebar
-  // wires a delete affordance; we keep the function name on the
-  // returned shape (so the sidebar component doesn't crash) but
-  // make it a no-op. Issue #3886 Hard Non-Goal: no v1 calls.
-  const deleteThread = React.useCallback(async (_threadId) => {
-    return Promise.resolve({ success: false, message: "TODO: requires v2 delete-thread endpoint" });
-  }, []);
-
   // Normalize v2 SessionThreadRecord → fork's expected shape:
   // - v2 carries `thread_id`; fork's thread-sidebar reads `thread.id`
   // - v2 has no `state`, `turn_count`, `updated_at` fields
@@ -77,8 +69,6 @@ export function useThreads() {
     setActiveThreadId,
     isLoading: query.isLoading,
     isCreating,
-    isDeleting: false,
     createThread: handleCreateThread,
-    deleteThread,
   };
 }

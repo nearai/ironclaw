@@ -1,8 +1,8 @@
-import { Outlet, useNavigate } from "react-router";
+import { Outlet } from "react-router";
 import { useInterfaceTheme } from "../design-system/theme.js";
 import { useGatewayStatus } from "../hooks/useGatewayStatus.js";
 import { useSidebar } from "../hooks/useSidebar.js";
-import { React, html } from "../lib/html.js";
+import { html } from "../lib/html.js";
 import { useT } from "../lib/i18n.js";
 import { useThreads } from "../pages/chat/hooks/useThreads.js";
 import { Sidebar } from "../components/sidebar.js";
@@ -11,7 +11,6 @@ import { cn } from "../utils/cn.js";
 
 export function GatewayLayout({ token, profile, isAdmin, onSignOut }) {
   const t = useT();
-  const navigate = useNavigate();
   const { theme, toggleTheme } = useInterfaceTheme();
   const statusQuery = useGatewayStatus(token);
   const threadsState = useThreads();
@@ -19,16 +18,9 @@ export function GatewayLayout({ token, profile, isAdmin, onSignOut }) {
     onNewChat: () => threadsState.setActiveThreadId(null),
   });
   const status = statusQuery.data;
-  const handleDeleteThread = React.useCallback(
-    async (threadId) => {
-      const wasActive = threadsState.activeThreadId === threadId;
-      await threadsState.deleteThread(threadId);
-      if (wasActive) {
-        navigate("/chat", { replace: true });
-      }
-    },
-    [navigate, threadsState]
-  );
+  // v2 has no DELETE thread endpoint, so the sidebar renders no
+  // delete affordance (SidebarThreads conditionally renders the
+  // trash button on `onDelete`).
 
   return html`
     <div className="flex h-[100dvh] overflow-hidden bg-[var(--v2-canvas)]">
@@ -56,7 +48,6 @@ export function GatewayLayout({ token, profile, isAdmin, onSignOut }) {
           onClose=${sidebar.close}
           onNewChat=${sidebar.newChat}
           onSelectThread=${sidebar.selectThread}
-          onDeleteThread=${handleDeleteThread}
         />
       </div>
 
