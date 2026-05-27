@@ -26,6 +26,7 @@
 //! collide, so a hidden / reordered / extra field always changes the bytes.
 
 use crate::decoded_tx::{DecodedTransaction, RenderingSchemaVersion};
+use crate::error::AttestationError;
 use crate::fields::project;
 
 /// Domain separator for the canonical signing-bytes encoding. Distinct from the
@@ -48,8 +49,8 @@ fn push_lp(out: &mut Vec<u8>, bytes: &[u8]) {
 pub fn canonical_signing_bytes(
     tx: &DecodedTransaction,
     schema_version: RenderingSchemaVersion,
-) -> Vec<u8> {
-    let fields = project(tx);
+) -> Result<Vec<u8>, AttestationError> {
+    let fields = project(tx)?;
     let mut out = Vec::new();
     out.extend_from_slice(CANONICAL_DOMAIN);
     push_lp(&mut out, tx.chain_tag().as_bytes());
@@ -61,5 +62,5 @@ pub fn canonical_signing_bytes(
         push_lp(&mut out, field.tag.as_bytes());
         push_lp(&mut out, &field.canonical_bytes);
     }
-    out
+    Ok(out)
 }

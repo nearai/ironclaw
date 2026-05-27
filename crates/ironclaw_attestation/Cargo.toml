@@ -17,16 +17,27 @@ publish = false
 dist = false
 
 [features]
+default = []
 # Test-only: re-exports the low-level component hasher so the binding test
 # suite can drive per-component tampering. Never enable from production
 # dependents — production callers must use `approved_tx_hash_for`.
 test-internals = []
+# Exposes the canonical contract suites (`sealed_grant_store_contract_cases!`,
+# `signing_ledger_contract_cases!`) and their `pub` helper functions so the
+# stacked durable PG / libSQL backend crates can run the same behavioural
+# contract against their impls. Mirrors `ironclaw_hooks`'s `contract-tests`
+# feature. Production builds MUST NOT enable this.
+contract-tests = ["dep:tokio"]
 
 [dependencies]
+async-trait = "0.1"
 ironclaw_signing_provider = { path = "../ironclaw_signing_provider" }
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 thiserror = "2"
+# Optional: only pulled in by the `contract-tests` feature so the contract
+# suites (which use `#[tokio::test]`) compile for out-of-crate consumers.
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"], optional = true }
 
 [dev-dependencies]
 # Self dev-dependency enabling `test-internals` so the integration test suite
@@ -34,3 +45,4 @@ thiserror = "2"
 # `approved_tx_hash_for`).
 ironclaw_attestation = { path = ".", features = ["test-internals"] }
 serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }

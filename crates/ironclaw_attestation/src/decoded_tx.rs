@@ -285,11 +285,21 @@ pub enum NearAction {
     },
     /// Meta-transaction delegate action (NEP-366). Carries the inner action's
     /// fields needed for the signed commitment.
+    ///
+    /// `inner_actions` MUST carry the exact delegated actions that were signed:
+    /// the NEP-366 `DelegateAction` borsh layout commits to `Vec<Action>` in
+    /// the middle of the struct, so dropping them (or hardcoding an empty vec)
+    /// would produce canonical bytes that differ from the signed payload —
+    /// breaking the WYSIWYS binding the crate exists to guarantee.
     Delegate {
         /// The account whose key signs the delegate action.
         sender_id: String,
         /// The receiver of the delegated actions.
         receiver_id: String,
+        /// The delegated inner actions, in signed order. Serialized recursively
+        /// into the canonical bytes so the binding hash matches the signed
+        /// `DelegateAction`.
+        inner_actions: Vec<NearAction>,
         /// Nonce for the delegate action.
         nonce: u64,
         /// Block height past which the delegate action is invalid.
