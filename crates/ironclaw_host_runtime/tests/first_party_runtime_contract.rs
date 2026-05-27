@@ -749,6 +749,7 @@ impl FirstPartyCapabilityHandler for HttpFirstPartyHandler {
                     required: true,
                 }],
                 response_body_limit: Some(4096),
+                save_body_to: None,
                 timeout_ms: Some(1000),
             })
             .map_err(|error| {

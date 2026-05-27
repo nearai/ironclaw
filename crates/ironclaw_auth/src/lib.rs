@@ -35,8 +35,8 @@ pub use error::{AuthErrorCode, AuthProductError};
 pub use fakes::InMemoryAuthProductServices;
 pub use flow::{
     AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthFlowKind, AuthFlowManager,
-    AuthFlowRecord, AuthFlowStatus, CredentialAccountUpdateBinding, NewAuthFlow,
-    OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
+    AuthFlowRecord, AuthFlowStatus, CredentialAccountUpdateBinding, CredentialSelectionInput,
+    NewAuthFlow, OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
     ProviderCallbackOutcome,
 };
 pub use ids::{

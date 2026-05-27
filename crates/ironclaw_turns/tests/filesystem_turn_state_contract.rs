@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use chrono::{TimeZone, Utc};
-use ironclaw_filesystem::{LocalFilesystem, RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{FilesystemError, LocalFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     AgentId, HostPath, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId,
     ThreadId, UserId, VirtualPath,
@@ -14,7 +14,9 @@ use ironclaw_turns::{
     AcceptedMessageRef, AllowAllTurnAdmissionPolicy, FilesystemTurnStateStore, GetRunStateRequest,
     IdempotencyKey, InMemoryRunProfileResolver, ReplyTargetBindingRef, RunProfileRequest,
     SourceBindingRef, SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-    TurnError, TurnRunId, TurnScope, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
+    TurnError, TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope, TurnSpawnTreeStateStore,
+    TurnStateStore, TurnStatus,
+    runner::{ClaimRunRequest, RecoverExpiredLeasesRequest, TurnRunTransitionPort},
 };
 
 /// Build a [`LocalFilesystem`] with `/engine` mounted to a tempdir; the
@@ -55,6 +57,10 @@ where
     scoped_turns_fs_at(backend, "test-tenant", "test-user")
 }
 
+fn snapshot_virtual_path() -> VirtualPath {
+    VirtualPath::new("/engine/tenants/test-tenant/users/test-user/turns/state.json").unwrap()
+}
+
 fn turn_scope(thread: &str) -> TurnScope {
     TurnScope::new(
         TenantId::new("tenant1").unwrap(),
@@ -89,6 +95,41 @@ fn submit_request_for(scope: TurnScope, idempotency_key: &str) -> SubmitTurnRequ
 fn accepted_run_id(response: &SubmitTurnResponse) -> TurnRunId {
     let SubmitTurnResponse::Accepted { run_id, .. } = response;
     *run_id
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_store_does_not_write_unchanged_idle_runner_snapshot() {
+    let backend = Arc::new(engine_filesystem());
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let store = FilesystemTurnStateStore::new(scoped);
+
+    let claimed = store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: None,
+        })
+        .await
+        .unwrap();
+    assert!(claimed.is_none());
+
+    let recovered = store
+        .recover_expired_leases(RecoverExpiredLeasesRequest {
+            now: Utc.with_ymd_and_hms(2026, 5, 27, 0, 12, 0).unwrap(),
+            scope_filter: None,
+        })
+        .await
+        .unwrap();
+    assert!(recovered.recovered.is_empty());
+
+    let err = backend
+        .read_file(&snapshot_virtual_path())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, FilesystemError::NotFound { .. }),
+        "idle no-op runner polling must not create or rewrite the snapshot: {err:?}"
+    );
 }
 
 fn child_run_request(

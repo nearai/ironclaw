@@ -63,6 +63,10 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                     "default": 10485760,
                     "description": "Maximum response body bytes. Defaults to 10 MiB; smaller values are raised to 10 MiB."
                 },
+                "save_to": {
+                    "type": "string",
+                    "description": "Scoped path to save the sanitized response body, e.g. /workspace/response.json"
+                },
                 "timeout_ms": {
                     "type": "integer",
                     "minimum": 1,
@@ -184,6 +188,24 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["path", "old_string", "new_string"],
             "additionalProperties": false
         }),
+        "schemas/builtin/extension_search.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "Search query for locally available Reborn extensions" }
+            },
+            "required": ["query"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/extension_install.input.v1.json"
+        | "schemas/builtin/extension_activate.input.v1.json"
+        | "schemas/builtin/extension_remove.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "extension_id": { "type": "string", "description": "Extension id from extension_search results" }
+            },
+            "required": ["extension_id"],
+            "additionalProperties": false
+        }),
         "schemas/builtin/skill_list.input.v1.json" => json!({
             "type": "object",
             "properties": {},
@@ -198,25 +220,17 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 },
                 "content": {
                     "type": "string",
-                    "description": "Raw SKILL.md content to install"
-                }
-            },
-            "required": ["content"],
-            "additionalProperties": false
-        }),
-        "schemas/builtin/skill_install_url.input.v1.json" => json!({
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "description": "Optional skill name to use for the installed SKILL.md document"
+                    "description": "Raw SKILL.md content to install, or plain Markdown when name is provided"
                 },
                 "url": {
                     "type": "string",
                     "description": "HTTPS URL to a SKILL.md document, ZIP bundle, or GitHub skill repository/tree to fetch and install"
                 }
             },
-            "required": ["url"],
+            "oneOf": [
+                { "required": ["content"] },
+                { "required": ["url"] }
+            ],
             "additionalProperties": false
         }),
         "schemas/builtin/skill_remove.input.v1.json" => json!({

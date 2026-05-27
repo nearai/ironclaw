@@ -2,9 +2,14 @@ use super::*;
 use ironclaw_turns::{
     TurnId,
     run_profile::{
-        InMemoryLoopHostMilestoneSink, LoopDriverId, LoopHostMilestone, LoopHostMilestoneKind,
+        CapabilityInputRef, InMemoryLoopHostMilestoneSink, LoopDriverId, LoopHostMilestone,
+        LoopHostMilestoneKind,
     },
 };
+
+fn preview_input_ref(label: &str) -> CapabilityInputRef {
+    CapabilityInputRef::new(format!("input:{label}")).unwrap()
+}
 
 #[tokio::test]
 async fn webui_event_stream_drains_run_status_projection_from_event_stream_manager() {
@@ -100,6 +105,142 @@ async fn webui_event_stream_drains_capability_activity_from_projection() {
                     && activity.status == CapabilityActivityStatusView::Started
         )
     }));
+}
+
+#[tokio::test]
+async fn webui_event_stream_enriches_activity_with_display_preview_from_store() {
+    let tenant_id = TenantId::new("webui-preview-tenant").unwrap();
+    let user_id = UserId::new("webui-preview-user").unwrap();
+    let agent_id = AgentId::new("webui-preview-agent").unwrap();
+    let thread_id = ThreadId::new("webui-preview-thread").unwrap();
+    let invocation_id = InvocationId::new();
+    let run_id = TurnRunId::new();
+    let capability = CapabilityId::new("builtin.read_file").unwrap();
+    let input_ref = preview_input_ref("webui-preview-input");
+    let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
+    display_previews.record_input(
+        &run_id.to_string(),
+        &input_ref,
+        "read_file",
+        &serde_json::json!({
+            "path": "src/main.rs",
+            "token": "sk-secret",
+            "max_bytes": 4096
+        }),
+    );
+    display_previews.record_result(CapabilityDisplayPreviewResult {
+        run_id: &run_id.to_string(),
+        input_ref: &input_ref,
+        invocation_id,
+        capability_id: &capability,
+        result_ref: "result:preview-output",
+        output: &serde_json::json!({"content": "fn main() {}"}),
+        output_bytes: 64,
+    });
+    let timeline_message_id = ironclaw_threads::ThreadMessageId::new();
+    let timeline_message_id_string = timeline_message_id.to_string();
+    display_previews.attach_timeline_message_id(invocation_id, timeline_message_id);
+    let event_log = Arc::new(InMemoryDurableEventLog::new());
+    event_log
+        .append(RuntimeEvent::dispatch_succeeded(
+            resource_scope(&tenant_id, &user_id, &agent_id, &thread_id, invocation_id),
+            capability.clone(),
+            ExtensionId::new("builtin").unwrap(),
+            RuntimeKind::FirstParty,
+            64,
+        ))
+        .await
+        .unwrap();
+
+    let event_log: Arc<dyn DurableEventLog> = event_log;
+    let services = build_reborn_projection_services(
+        event_log,
+        ReplyTargetBindingRef::new("webui-preview-reply").unwrap(),
+    )
+    .with_display_previews(Arc::clone(&display_previews));
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id),
+            scope: TurnScope::new(tenant_id, Some(agent_id), None, thread_id.clone()),
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                event.payload(),
+                ProductOutboundPayload::CapabilityDisplayPreview(preview)
+                    if preview.invocation_id == invocation_id
+                        && preview.thread_id.as_ref() == Some(&thread_id)
+                        && preview.capability_id == capability
+                        && preview.title == "read_file"
+                        && preview.subtitle.as_deref() == Some("src/main.rs")
+                        && preview.input_summary.as_deref().is_some_and(|summary| summary.contains("path: src/main.rs"))
+                        && preview.output_preview.as_deref() == Some("fn main() {}")
+                        && preview.timeline_message_id.as_deref() == Some(timeline_message_id_string.as_str())
+                        && preview.result_ref.as_deref() == Some("result:preview-output")
+                        && preview.output_bytes == Some(64)
+            )
+        }),
+        "events: {events:#?}"
+    );
+    let rendered = serde_json::to_string(&events).unwrap();
+    assert!(!rendered.contains("sk-secret"));
+}
+
+#[tokio::test]
+async fn capability_display_preview_store_redacts_unsafe_paths_and_secrets() {
+    let run_id = TurnRunId::new();
+    let capability = CapabilityId::new("builtin.read_file").unwrap();
+    let input_ref = preview_input_ref("redacted-preview-input");
+    let store = CapabilityDisplayPreviewStore::default();
+    store.record_input(
+        &run_id.to_string(),
+        &input_ref,
+        "read_file",
+        &serde_json::json!({
+            "path": "/Users/alice/secret.rs",
+            "api_key": "sk-secret"
+        }),
+    );
+    store.record_result(CapabilityDisplayPreviewResult {
+        run_id: &run_id.to_string(),
+        input_ref: &input_ref,
+        invocation_id: InvocationId::from_uuid(run_id.as_uuid()),
+        capability_id: &capability,
+        result_ref: "result:redacted-preview",
+        output: &serde_json::json!({"content": "{\"path\":\"/etc/passwd\", unc:\"\\\\host\\\\share\", token:\"sk-secret\"}"}),
+        output_bytes: 42,
+    });
+    let preview = store
+        .preview(&CapabilityActivityProjection {
+            invocation_id: InvocationId::from_uuid(run_id.as_uuid()),
+            run_id: Some(InvocationId::from_uuid(run_id.as_uuid())),
+            capability_id: capability,
+            thread_id: Some(ThreadId::new("webui-preview-thread").unwrap()),
+            status: ironclaw_event_projections::CapabilityActivityStatus::Completed,
+            provider: None,
+            runtime: None,
+            process_id: None,
+            output_bytes: Some(42),
+            error_kind: None,
+            last_cursor: ironclaw_events::EventCursor::new(1),
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(preview.subtitle.is_none());
+    let rendered = serde_json::to_string(&preview).unwrap();
+    assert!(!rendered.contains("sk-secret"));
+    assert!(!rendered.contains("/Users/alice"));
+    assert!(!rendered.contains("/etc/passwd"));
+    assert!(!rendered.contains("\\\\host\\\\share"));
+    assert!(rendered.contains("[redacted]"));
 }
 
 #[tokio::test]

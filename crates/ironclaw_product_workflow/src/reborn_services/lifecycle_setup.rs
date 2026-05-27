@@ -59,6 +59,7 @@ fn map_lifecycle_error(error: ProductWorkflowError) -> RebornServicesError {
         | ProductWorkflowError::TurnResumeRejected { .. }
         | ProductWorkflowError::TurnResumeDenied { .. }
         | ProductWorkflowError::ApprovalInteractionRejected { .. }
+        | ProductWorkflowError::AuthInteractionRejected { .. }
         | ProductWorkflowError::AuthContinuationRejected { .. }
         | ProductWorkflowError::BeforeInboundPolicyFailed { .. }
         | ProductWorkflowError::DuplicateAction { .. }

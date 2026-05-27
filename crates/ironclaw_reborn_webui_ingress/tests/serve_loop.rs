@@ -12,12 +12,17 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use axum::{Router, routing::get};
+use axum::{Router, extract::ConnectInfo, routing::get};
 use ironclaw_reborn_webui_ingress::{RebornWebuiServeOptions, serve_webui_v2};
 use tokio::sync::oneshot;
 
 async fn build_test_router() -> Router {
-    Router::new().route("/ping", get(|| async { "pong" }))
+    Router::new()
+        .route("/ping", get(|| async { "pong" }))
+        .route(
+            "/peer",
+            get(|ConnectInfo(peer): ConnectInfo<SocketAddr>| async move { peer.ip().to_string() }),
+        )
 }
 
 fn test_client() -> reqwest::Client {
@@ -61,6 +66,23 @@ async fn serve_webui_v2_binds_and_serves_until_graceful_shutdown() {
     assert_eq!(response.status().as_u16(), 200, "expected /ping → 200");
     let body = response.text().await.expect("body");
     assert_eq!(body, "pong", "handler must reach the bound serve loop");
+
+    let peer_url = format!("http://{bound}/peer");
+    let response = test_client()
+        .get(&peer_url)
+        .send()
+        .await
+        .expect("/peer request must succeed against the bound listener");
+    assert_eq!(
+        response.status().as_u16(),
+        200,
+        "ConnectInfo handler should be served"
+    );
+    let body = response.text().await.expect("peer body");
+    assert_eq!(
+        body, "127.0.0.1",
+        "serve_webui_v2 must inject peer ConnectInfo from the TCP listener"
+    );
 
     // Trigger graceful shutdown and confirm the serve future returns.
     shutdown_tx

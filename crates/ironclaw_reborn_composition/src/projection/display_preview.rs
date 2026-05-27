@@ -8,6 +8,7 @@ use ironclaw_product_adapters::{
     CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES, CapabilityDisplayPreviewView,
     CapabilityDisplayPreviewViewInput, ProductAdapterError,
 };
+use ironclaw_threads::ThreadMessageId;
 use ironclaw_turns::run_profile::CapabilityInputRef;
 
 use super::capability_activity_status_wire;
@@ -62,6 +63,7 @@ struct CapabilityDisplayInputPreview {
 
 #[derive(Debug, Clone)]
 pub(crate) struct CapabilityDisplayPreviewRecord {
+    pub(crate) timeline_message_id: Option<ThreadMessageId>,
     pub(crate) title: String,
     pub(crate) subtitle: Option<String>,
     pub(crate) input_summary: Option<String>,
@@ -123,6 +125,7 @@ impl CapabilityDisplayPreviewStore {
             .unwrap_or_else(|| safe_capability_title(result.capability_id.as_str()).to_string());
         let output = output_preview(result.output);
         let record = CapabilityDisplayPreviewRecord {
+            timeline_message_id: None,
             title,
             subtitle: input.as_ref().and_then(|input| input.subtitle.clone()),
             input_summary: input.as_ref().and_then(|input| input.input_summary.clone()),
@@ -174,6 +177,18 @@ impl CapabilityDisplayPreviewStore {
                 .cloned()
         })
     }
+
+    pub(crate) fn attach_timeline_message_id(
+        &self,
+        invocation_id: InvocationId,
+        timeline_message_id: ThreadMessageId,
+    ) {
+        if let Ok(mut completed) = self.completed.lock()
+            && let Some(record) = completed.by_invocation.get_mut(&invocation_id.to_string())
+        {
+            record.timeline_message_id = Some(timeline_message_id);
+        }
+    }
 }
 
 #[async_trait]
@@ -202,6 +217,9 @@ fn capability_display_preview_from_store(
         return failed_capability_display_preview(activity);
     };
     CapabilityDisplayPreviewView::new(CapabilityDisplayPreviewViewInput {
+        timeline_message_id: record
+            .timeline_message_id
+            .map(|message_id| message_id.to_string()),
         invocation_id: activity.invocation_id,
         thread_id: activity.thread_id.clone(),
         capability_id: activity.capability_id.clone(),
@@ -235,6 +253,7 @@ fn failed_capability_display_preview(
         .map(|kind| format!("tool failed: {}", sanitize_text(kind)))
         .unwrap_or_else(|| "tool failed".to_string());
     CapabilityDisplayPreviewView::new(CapabilityDisplayPreviewViewInput {
+        timeline_message_id: None,
         invocation_id: activity.invocation_id,
         thread_id: activity.thread_id.clone(),
         capability_id: activity.capability_id.clone(),

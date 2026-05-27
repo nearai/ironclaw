@@ -32,20 +32,31 @@ pub fn bundled_gsuite_extension_packages() -> Result<Vec<ExtensionPackage>, Exte
         .collect()
 }
 
-/// Build GSuite handlers for a GSuite surface that has already been activated.
+/// Build GSuite handlers for a surface that can install and activate GSuite packages.
+///
+/// Handler registration is allowed before lifecycle activation because runtime
+/// dispatch still requires active package descriptors.
 pub fn bundled_gsuite_first_party_handlers(
     accounts: Arc<dyn CredentialAccountService>,
 ) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
+    let mut registry = FirstPartyCapabilityRegistry::new();
+    register_bundled_gsuite_first_party_handlers(&mut registry, accounts)?;
+    Ok(registry)
+}
+
+pub(crate) fn register_bundled_gsuite_first_party_handlers(
+    registry: &mut FirstPartyCapabilityRegistry,
+    accounts: Arc<dyn CredentialAccountService>,
+) -> Result<(), HostApiError> {
     let handler = Arc::new(GsuiteFirstPartyHandler {
         executor: GsuiteExecutor::new(accounts),
     });
-    let mut registry = FirstPartyCapabilityRegistry::new();
     for package in gsuite_package_specs() {
         for capability in package.capabilities {
             registry.insert_handler(CapabilityId::new(capability.id)?, Arc::clone(&handler));
         }
     }
-    Ok(registry)
+    Ok(())
 }
 
 struct GsuiteFirstPartyHandler {

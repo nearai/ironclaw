@@ -11,8 +11,10 @@ use uuid::Uuid;
 use crate::identifiers::SummaryArtifactId;
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
-    AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextMessage, ContextMessages,
-    ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest, LatestThreadMessageRequest,
+    AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
+    AppendToolResultReferenceRequest, CapabilityDisplayPreviewEnvelope, ContextMessage,
+    ContextMessages, ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest,
+    LatestThreadMessageRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
     LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
     MessageStatus, RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
     SessionThreadRecord, SessionThreadService, SummaryArtifact, ThreadHistory,
@@ -337,6 +339,53 @@ impl SessionThreadService for InMemorySessionThreadService {
         Ok(message)
     }
 
+    async fn append_capability_display_preview(
+        &self,
+        request: AppendCapabilityDisplayPreviewRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        request
+            .preview
+            .validate()
+            .map_err(SessionThreadError::Serialization)?;
+        let mut state = self.state.lock().await;
+        let thread = get_thread_mut(&mut state, &request.scope, &request.thread_id)?;
+        for message in thread.messages.iter() {
+            if message.kind != MessageKind::CapabilityDisplayPreview
+                || message.status != MessageStatus::Finalized
+                || message.turn_run_id.as_deref() != Some(request.turn_run_id.as_str())
+            {
+                continue;
+            }
+            if CapabilityDisplayPreviewEnvelope::invocation_id_from_json(message.content.as_deref())
+                .map_err(SessionThreadError::Serialization)?
+                == Some(request.preview.invocation_id)
+            {
+                return Ok(message.clone());
+            }
+        }
+        let content = serde_json::to_string(&request.preview)
+            .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
+        let message = ThreadMessageRecord {
+            message_id: ThreadMessageId::new(),
+            thread_id: request.thread_id.clone(),
+            sequence: thread.next_sequence,
+            kind: MessageKind::CapabilityDisplayPreview,
+            status: MessageStatus::Finalized,
+            actor_id: None,
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            turn_id: None,
+            turn_run_id: Some(request.turn_run_id),
+            tool_result_ref: request.preview.result_ref.clone(),
+            tool_result_provider_call: None,
+            content: Some(content),
+            redaction_ref: None,
+        };
+        thread.next_sequence += 1;
+        thread.messages.push(message.clone());
+        Ok(message)
+    }
+
     async fn update_tool_result_reference(
         &self,
         request: UpdateToolResultReferenceRequest,
@@ -535,7 +584,79 @@ impl SessionThreadService for InMemorySessionThreadService {
         thread.summary_artifacts.push(artifact.clone());
         Ok(artifact)
     }
+
+    async fn list_threads_for_scope(
+        &self,
+        request: ListThreadsForScopeRequest,
+    ) -> Result<ListThreadsForScopeResponse, SessionThreadError> {
+        // In-memory enumeration for local-dev. Production backends
+        // (filesystem / postgres) override with their own pagination
+        // strategy; this impl is fine because the store is bounded
+        // by tenant memory in the first place.
+        let limit = request
+            .limit
+            .map(|n| (n as usize).clamp(1, LIST_THREADS_MAX_PAGE_SIZE))
+            .unwrap_or(LIST_THREADS_DEFAULT_PAGE_SIZE);
+
+        let state = self.state.lock().await;
+
+        // Scope filter is exact equality on the full `ThreadScope`
+        // tuple — tenant + agent + project + owner — so a caller
+        // cannot see threads owned by other users in the same
+        // (tenant, agent, project) triple. The trait contract
+        // documents this invariant.
+        //
+        // Filter before cloning: matching on the borrowed scope avoids
+        // cloning records owned by other tenants/projects only to throw
+        // them away. The store is bounded by tenant memory so a full
+        // scan is still acceptable here; a scope-indexed secondary
+        // map would help with very large stores but local-dev never
+        // gets close to that scale.
+        let mut matching: Vec<SessionThreadRecord> = state
+            .threads
+            .values()
+            .filter(|stored| stored.record.scope == request.scope)
+            .map(|stored| stored.record.clone())
+            .collect();
+        // Stable order so opaque cursor → resumption is deterministic.
+        matching.sort_by(|a, b| a.thread_id.as_str().cmp(b.thread_id.as_str()));
+
+        let start_index = match request.cursor.as_deref() {
+            Some(cursor) => matching
+                .iter()
+                .position(|record| record.thread_id.as_str() > cursor)
+                .unwrap_or(matching.len()),
+            None => 0,
+        };
+        let end_index = start_index.saturating_add(limit).min(matching.len());
+        // Cursor reflects the last *attempted* id in the slice (vs. the
+        // last successful), so a page that ends up empty due to
+        // upstream filtering still produces a cursor that moves
+        // forward. Today every entry in `matching` survives because
+        // the scope filter is the only predicate, but lining this up
+        // with the filesystem backend keeps the contract identical
+        // when future predicates land.
+        let next_cursor = if end_index < matching.len() {
+            matching[start_index..end_index]
+                .last()
+                .map(|record| record.thread_id.as_str().to_string())
+        } else {
+            None
+        };
+        let page: Vec<SessionThreadRecord> = matching[start_index..end_index].to_vec();
+
+        Ok(ListThreadsForScopeResponse {
+            threads: page,
+            next_cursor,
+        })
+    }
 }
+
+/// Default page size when the caller omits `limit`.
+const LIST_THREADS_DEFAULT_PAGE_SIZE: usize = 50;
+/// Maximum page size — caller-supplied `limit` is clamped here so a
+/// huge value cannot widen the response unboundedly.
+const LIST_THREADS_MAX_PAGE_SIZE: usize = 200;
 
 fn generated_thread_id() -> Result<ThreadId, SessionThreadError> {
     ThreadId::new(Uuid::new_v4().to_string())
@@ -642,7 +763,7 @@ fn context_messages_with_summary_replacements(thread: &StoredThread) -> Vec<Cont
     for message in thread
         .messages
         .iter()
-        .filter(|message| is_model_visible(message.status))
+        .filter(|message| is_model_context_visible(message))
     {
         if message.sequence <= skip_through {
             continue;
@@ -685,7 +806,7 @@ fn context_messages_by_id(
     let visible_messages = thread
         .messages
         .iter()
-        .filter(|message| is_model_visible(message.status))
+        .filter(|message| is_model_context_visible(message))
         .map(|message| (message.message_id, message))
         .collect::<HashMap<_, _>>();
     message_ids
@@ -750,7 +871,7 @@ fn summary_covers_hidden_content(thread: &StoredThread, summary: &SummaryArtifac
     thread.messages.iter().any(|message| {
         summary.start_sequence <= message.sequence
             && message.sequence <= summary.end_sequence
-            && !is_model_visible(message.status)
+            && !is_model_context_visible(message)
     })
 }
 
@@ -773,4 +894,8 @@ fn is_model_visible(status: MessageStatus) -> bool {
         status,
         MessageStatus::Accepted | MessageStatus::Submitted | MessageStatus::Finalized
     )
+}
+
+fn is_model_context_visible(message: &ThreadMessageRecord) -> bool {
+    is_model_visible(message.status) && message.kind != MessageKind::CapabilityDisplayPreview
 }

@@ -6,6 +6,7 @@ pub const CALENDAR_EXTENSION_ID: &str = "google-calendar";
 pub const GMAIL_EXTENSION_ID: &str = "gmail";
 
 pub const GSUITE_RESPONSE_BODY_LIMIT: u64 = 1024 * 1024;
+pub const GSUITE_REQUEST_BODY_LIMIT: usize = 64 * 1024;
 pub const GSUITE_OUTPUT_BYTES_LIMIT: u64 = GSUITE_RESPONSE_BODY_LIMIT + 4096;
 pub const GSUITE_TIMEOUT_MS: u32 = 30_000;
 const DEFAULT_NETWORK_EGRESS_BYTES: u64 = 16 * 1024;
