@@ -18,13 +18,16 @@ fn embed_reborn_skills(repo_root: &Path) {
     println!("cargo:rerun-if-changed={}", skills_dir.display());
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("out dir"));
-    let out_path = out_dir.join("embedded_reborn_skills.json");
+    let summaries_out_path = out_dir.join("embedded_reborn_skill_summaries.json");
+    let bundles_out_path = out_dir.join("embedded_reborn_skill_bundles.json");
     if !path_is_real_dir(&skills_dir) {
-        fs::write(out_path, "[]").expect("write empty embedded skills");
+        fs::write(summaries_out_path, "[]").expect("write empty embedded skill summaries");
+        fs::write(bundles_out_path, "[]").expect("write empty embedded skill bundles");
         return;
     }
 
-    let mut skill_entries = Vec::new();
+    let mut skill_summaries = Vec::new();
+    let mut skill_bundles = Vec::new();
     let mut entries = fs::read_dir(&skills_dir)
         .expect("read skills dir")
         .collect::<Result<Vec<_>, _>>()
@@ -60,22 +63,30 @@ fn embed_reborn_skills(repo_root: &Path) {
         }
 
         let files = collect_skill_files(&skill_dir);
-        skill_entries.push(serde_json::json!({
+        skill_summaries.push(serde_json::json!({
             "name": parsed.manifest.name,
             "version": parsed.manifest.version,
             "description": parsed.manifest.description,
             "keywords": parsed.manifest.activation.keywords,
             "tags": parsed.manifest.activation.tags,
             "requires_skills": parsed.manifest.requires.skills,
+        }));
+        skill_bundles.push(serde_json::json!({
+            "name": parsed.manifest.name,
             "files": files,
         }));
     }
 
     fs::write(
-        out_path,
-        serde_json::to_string(&skill_entries).expect("serialize embedded skills"),
+        summaries_out_path,
+        serde_json::to_string(&skill_summaries).expect("serialize embedded skill summaries"),
     )
-    .expect("write embedded skills");
+    .expect("write embedded skill summaries");
+    fs::write(
+        bundles_out_path,
+        serde_json::to_string(&skill_bundles).expect("serialize embedded skill bundles"),
+    )
+    .expect("write embedded skill bundles");
 }
 
 fn collect_skill_files(skill_dir: &Path) -> Vec<serde_json::Value> {
