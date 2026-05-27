@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, sync::LazyLock};
 
 use ironclaw_filesystem::{FilesystemError, FilesystemOperation, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
@@ -76,42 +76,35 @@ where
         let write = async {
             match target.mount_view.as_ref() {
                 Some(view) => {
-                    self.write_file_with_mount_view(view, &target.path, body)
+                    self.write_bytes_with_mount_view(view, &target.path, body)
                         .await
                 }
-                None => self.write_file(scope, &target.path, body).await,
+                None => self.write_bytes(scope, &target.path, body.to_vec()).await,
             }
         };
         block_on_filesystem(write).map(|_| ())
     }
 }
 
-fn block_on_filesystem<T>(
-    future: impl std::future::Future<Output = Result<T, FilesystemError>> + Send,
-) -> Result<T, RuntimeHttpBodyStoreError>
-where
-    T: Send,
-{
-    let joined = std::thread::scope(|scope| {
-        scope
-            .spawn(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map_err(|_| RuntimeHttpBodyStoreError {
-                        reason: "filesystem runtime unavailable".to_string(),
-                    })?;
-                runtime
-                    .block_on(future)
-                    .map_err(runtime_http_body_store_error)
+static FILESYSTEM_RUNTIME: LazyLock<Result<tokio::runtime::Runtime, RuntimeHttpBodyStoreError>> =
+    LazyLock::new(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("runtime-http-body-store")
+            .enable_all()
+            .build()
+            .map_err(|_| RuntimeHttpBodyStoreError {
+                reason: "filesystem runtime unavailable".to_string(),
             })
-            .join()
     });
-    joined.unwrap_or_else(|_| {
-        Err(RuntimeHttpBodyStoreError {
-            reason: "filesystem worker panicked".to_string(),
-        })
-    })
+
+fn block_on_filesystem<T>(
+    future: impl std::future::Future<Output = Result<T, FilesystemError>>,
+) -> Result<T, RuntimeHttpBodyStoreError> {
+    let runtime = FILESYSTEM_RUNTIME.as_ref().map_err(|error| error.clone())?;
+    runtime
+        .block_on(future)
+        .map_err(runtime_http_body_store_error)
 }
 
 fn runtime_http_body_store_error(error: impl std::fmt::Display) -> RuntimeHttpBodyStoreError {

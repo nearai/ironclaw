@@ -738,13 +738,71 @@ async fn builtin_http_passes_save_to_and_returns_saved_body_metadata() {
 
     let requests = egress.requests();
     assert_eq!(requests.len(), 1);
+    let save_target = requests[0]
+        .save_body_to
+        .as_ref()
+        .expect("save_to should be passed to host egress");
+    assert_eq!(save_target.path.as_str(), "/workspace/response.json");
+    let mount_view = save_target
+        .mount_view
+        .as_ref()
+        .expect("save_to should carry invocation mount authority");
+    let (virtual_path, grant) = mount_view
+        .resolve_with_grant(&save_target.path)
+        .expect("saved path should resolve through captured mount view");
     assert_eq!(
-        requests[0]
-            .save_body_to
-            .as_ref()
-            .map(|target| target.path.as_str()),
-        Some("/workspace/response.json")
+        virtual_path,
+        VirtualPath::new("/projects/workspace/response.json").unwrap()
     );
+    assert!(grant.permissions.write);
+}
+
+#[tokio::test]
+async fn builtin_http_rejects_save_to_without_mount_authority_before_egress() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::default());
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let error = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "save_to": "/workspace/response.json"
+        }),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert!(egress.requests().is_empty());
+}
+
+#[tokio::test]
+async fn builtin_http_rejects_save_to_without_write_mount_before_egress() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::default());
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/workspace").unwrap(),
+        MountPermissions::read_only(),
+    )])
+    .unwrap();
+
+    let error = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "save_to": "/workspace/response.json"
+        }),
+        execution_context_with_mounts_and_network([HTTP_CAPABILITY_ID], mounts, http_test_policy()),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert!(egress.requests().is_empty());
 }
 
 // arch-exempt: large-test-file, URL install tests share this first-party runtime harness; split plan #4062
@@ -2024,7 +2082,7 @@ async fn builtin_http_runtime_policy_denial_stops_before_egress() {
 }
 
 #[tokio::test]
-async fn builtin_http_rejects_hosted_allowlist_network_plan_before_egress() {
+async fn builtin_http_rejects_hosted_allowlist_plan_before_egress() {
     let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
         br#"{"ok":true}"#.to_vec(),
     ));
@@ -2039,7 +2097,7 @@ async fn builtin_http_rejects_hosted_allowlist_network_plan_before_egress() {
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::Network);
+    assert_eq!(error, RuntimeFailureKind::Authorization);
     assert!(egress.requests().is_empty());
 }
 

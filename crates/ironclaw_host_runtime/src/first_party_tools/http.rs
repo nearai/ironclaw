@@ -4,7 +4,7 @@ use ironclaw_host_api::{
     EffectKind, MountView, NetworkMethod, NetworkPolicy, PermissionMode, ResourceCeiling,
     ResourceEstimate, ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind,
     RuntimeHttpEgressError, RuntimeHttpEgressReasonCode, RuntimeHttpEgressRequest,
-    RuntimeHttpSaveTarget, RuntimeKind, SandboxQuota, ScopedPath, valid_http_field_name,
+    RuntimeHttpSaveTarget, RuntimeKind, SandboxQuota, valid_http_field_name,
 };
 use serde_json::{Map, Value, json};
 
@@ -33,7 +33,11 @@ pub(super) fn manifest() -> Result<CapabilityManifest, ExtensionError> {
     first_party_capability_manifest(
         HTTP_CAPABILITY_ID,
         "Perform an outbound HTTP request through host egress. Redirect responses are returned; the host transport does not follow them.",
-        vec![EffectKind::DispatchCapability, EffectKind::Network],
+        vec![
+            EffectKind::DispatchCapability,
+            EffectKind::Network,
+            EffectKind::WriteFilesystem,
+        ],
         PermissionMode::Ask,
         Some(ResourceProfile {
             default_estimate: ResourceEstimate {
@@ -339,14 +343,19 @@ fn save_body_to(
     if path.trim().is_empty() {
         return Ok(None);
     }
-    let path = match mounts {
-        Some(mounts) => mounts.scoped_path(path.to_string()),
-        None => ScopedPath::new(path.to_string()),
+    let mounts = mounts.ok_or_else(input_error)?;
+    let path = mounts
+        .scoped_path(path.to_string())
+        .map_err(|_| input_error())?;
+    let (_virtual_path, grant) = mounts
+        .resolve_with_grant(&path)
+        .map_err(|_| input_error())?;
+    if !grant.permissions.write {
+        return Err(input_error());
     }
-    .map_err(|_| input_error())?;
     Ok(Some(RuntimeHttpSaveTarget {
         path,
-        mount_view: mounts.cloned(),
+        mount_view: Some(mounts.clone()),
     }))
 }
 

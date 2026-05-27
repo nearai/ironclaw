@@ -1021,6 +1021,37 @@ fn runtime_http_egress_request_defaults_optional_body_controls() {
 }
 
 #[test]
+fn runtime_http_save_target_skips_mount_view_on_wire() {
+    let mount_view = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/workspace").unwrap(),
+        MountPermissions::read_write(),
+    )])
+    .unwrap();
+    let target = RuntimeHttpSaveTarget {
+        path: ScopedPath::new("/workspace/body.json").unwrap(),
+        mount_view: Some(mount_view),
+    };
+
+    let value = serde_json::to_value(&target).unwrap();
+    assert_eq!(value, json!({ "path": "/workspace/body.json" }));
+
+    let decoded: RuntimeHttpSaveTarget = serde_json::from_value(json!({
+        "path": "/workspace/body.json",
+        "mount_view": {
+            "mounts": [{
+                "alias": "/workspace",
+                "target": "/projects/workspace",
+                "permissions": { "read": true, "write": true }
+            }]
+        }
+    }))
+    .unwrap();
+    assert_eq!(decoded.path.as_str(), "/workspace/body.json");
+    assert_eq!(decoded.mount_view, None);
+}
+
+#[test]
 fn runtime_http_egress_response_defaults_optional_saved_body() {
     let mut value = serde_json::to_value(RuntimeHttpEgressResponse {
         status: 200,

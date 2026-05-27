@@ -181,7 +181,11 @@ fn local_dev_builtin_visible_request() -> VisibleCapabilityRequest {
             local_dev_grant("builtin.echo", vec![EffectKind::DispatchCapability]),
             local_dev_grant(
                 "builtin.http",
-                vec![EffectKind::DispatchCapability, EffectKind::Network],
+                vec![
+                    EffectKind::DispatchCapability,
+                    EffectKind::Network,
+                    EffectKind::WriteFilesystem,
+                ],
             ),
         ],
     };
@@ -201,7 +205,11 @@ fn local_dev_builtin_visible_request() -> VisibleCapabilityRequest {
         TrustDecision {
             effective_trust: EffectiveTrustClass::user_trusted(),
             authority_ceiling: AuthorityCeiling {
-                allowed_effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
+                allowed_effects: vec![
+                    EffectKind::DispatchCapability,
+                    EffectKind::Network,
+                    EffectKind::WriteFilesystem,
+                ],
                 max_resource_ceiling: None,
             },
             provenance: TrustProvenance::AdminConfig,
