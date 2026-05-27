@@ -642,6 +642,32 @@ async fn instruction_bundle_materializes_oversized_snippet_content_separate_from
     }));
 }
 
+fn skill_instruction_request(
+    model_content: impl Into<String>,
+    safe_summary: impl Into<String>,
+    trust_level: &str,
+) -> InstructionBundleRequest {
+    InstructionBundleRequest {
+        context_bundle: LoopContextBundle {
+            identity_messages: Vec::new(),
+            messages: Vec::new(),
+            instruction_snippets: vec![LoopContextSnippet {
+                snippet_ref: "skill:github".to_string(),
+                model_content: model_content.into(),
+                safe_summary: safe_summary.into(),
+                metadata: Some(LoopContextSnippetMetadata {
+                    source_name: "github".to_string(),
+                    trust_level: trust_level.to_string(),
+                }),
+            }],
+            memory_snippets: Vec::new(),
+        },
+        visible_surface: None,
+        safety_context: None,
+        inline_messages: Vec::new(),
+    }
+}
+
 #[tokio::test]
 async fn instruction_bundle_rejects_empty_model_content() {
     let context = claimed_run_context().await;
@@ -716,25 +742,11 @@ async fn instruction_bundle_allows_security_vocabulary_in_model_content() {
     .to_string();
 
     let bundle = InstructionBundleBuilder::new(context)
-        .build(InstructionBundleRequest {
-            context_bundle: LoopContextBundle {
-                identity_messages: Vec::new(),
-                messages: Vec::new(),
-                instruction_snippets: vec![LoopContextSnippet {
-                    snippet_ref: "skill:security-review".to_string(),
-                    model_content: model_content.clone(),
-                    safe_summary: "Security review skill".to_string(),
-                    metadata: Some(LoopContextSnippetMetadata {
-                        source_name: "security-review".to_string(),
-                        trust_level: "trusted".to_string(),
-                    }),
-                }],
-                memory_snippets: Vec::new(),
-            },
-            visible_surface: None,
-            safety_context: None,
-            inline_messages: Vec::new(),
-        })
+        .build(skill_instruction_request(
+            model_content.clone(),
+            "Security review skill",
+            "trusted",
+        ))
         .unwrap();
 
     assert!(bundle.materialized_messages.iter().any(|message| {
@@ -742,8 +754,64 @@ async fn instruction_bundle_allows_security_vocabulary_in_model_content() {
             && message
                 .content_ref
                 .as_str()
-                .starts_with("msg:snippet.skill.security-review.")
+                .starts_with("msg:snippet.skill.github.")
     }));
+}
+
+#[tokio::test]
+async fn instruction_bundle_rejects_trusted_skill_actual_secret_value() {
+    let context = claimed_run_context().await;
+    let error = InstructionBundleBuilder::new(context)
+        .build(skill_instruction_request(
+            "Use Authorization: Bearer ghp_secretvalue123",
+            "GitHub skill",
+            "trusted",
+        ))
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+}
+
+#[tokio::test]
+async fn instruction_bundle_rejects_trusted_skill_security_vocabulary_in_summary() {
+    let context = claimed_run_context().await;
+    let error = InstructionBundleBuilder::new(context)
+        .build(skill_instruction_request(
+            "Use the GitHub API with an Authorization header.",
+            "Use Authorization: Bearer",
+            "trusted",
+        ))
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+}
+
+#[tokio::test]
+async fn instruction_bundle_rejects_untrusted_skill_security_vocabulary() {
+    let context = claimed_run_context().await;
+    let error = InstructionBundleBuilder::new(context)
+        .build(skill_instruction_request(
+            "Use the GitHub API with an Authorization: Bearer header.",
+            "GitHub skill",
+            "installed",
+        ))
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+}
+
+#[tokio::test]
+async fn instruction_bundle_rejects_trusted_skill_host_path() {
+    let context = claimed_run_context().await;
+    let error = InstructionBundleBuilder::new(context)
+        .build(skill_instruction_request(
+            "Read /Users/alice/.config/token before calling GitHub",
+            "GitHub skill",
+            "trusted",
+        ))
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
 }
 
 #[tokio::test]

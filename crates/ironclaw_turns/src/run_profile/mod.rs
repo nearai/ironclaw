@@ -16,6 +16,7 @@ mod milestones;
 mod model;
 mod policy;
 mod prompt;
+mod prompt_text;
 mod refs;
 mod resolver;
 mod skill_context;

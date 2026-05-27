@@ -12,14 +12,13 @@ use sha2::{Digest, Sha256};
 use crate::LoopMessageRef;
 
 use super::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityDescriptorView,
-    LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES, LoopContextBundle, LoopContextMessage,
-    LoopContextSnippet, LoopInlineMessage, LoopInlineMessageRole, LoopModelMessage, LoopRunContext,
-    PromptSkillContextMetadata, VisibleCapabilitySurface, skill_snippet_model_message_ref,
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityDescriptorView, LoopContextBundle,
+    LoopContextMessage, LoopContextSnippet, LoopInlineMessage, LoopInlineMessageRole,
+    LoopModelMessage, LoopRunContext, PromptSkillContextMetadata, SkillTrustLevel,
+    VisibleCapabilitySurface,
+    prompt_text::{PromptTextSurface, validate_model_safe_text, validate_prompt_text},
+    skill_snippet_model_message_ref,
 };
-
-const MODEL_SAFE_SUMMARY_MAX_BYTES: usize = 4096;
-
 /// Stable fingerprint for an instruction bundle rebuild.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct InstructionBundleFingerprint(String);
@@ -463,8 +462,11 @@ fn push_snippet_message(
                     "instruction bundle rejected context snippet safe summary"
                 );
             })?;
-    let model_content =
-        validate_model_visible_content(snippet.model_content.clone(), "context snippet content")?;
+    let model_content = validate_prompt_text(
+        snippet.model_content.clone(),
+        "context snippet content",
+        snippet_model_content_surface(section, snippet),
+    )?;
     feed_field(fingerprint, b"section", section.as_bytes());
     feed_field(fingerprint, b"ref", content_ref.as_str().as_bytes());
     feed_field(fingerprint, b"source", snippet.snippet_ref.as_bytes());
@@ -480,6 +482,18 @@ fn push_snippet_message(
         content_ref,
     });
     Ok(())
+}
+
+fn snippet_model_content_surface(
+    section: &'static str,
+    snippet: &LoopContextSnippet,
+) -> PromptTextSurface {
+    match (section, snippet.metadata.as_ref()) {
+        ("skill", Some(metadata)) if metadata.trust_level == SkillTrustLevel::Trusted.as_str() => {
+            PromptTextSurface::TrustedSkillInstruction
+        }
+        _ => PromptTextSurface::GenericModelContent,
+    }
 }
 
 fn push_safety_context(
@@ -774,136 +788,8 @@ fn validate_context_ref(value: String, label: &'static str) -> Result<String, Ag
             format!("{label} is not model-safe"),
         ));
     }
-    reject_sensitive_text(&value, label)?;
+    validate_prompt_text(value.clone(), label, PromptTextSurface::SafeSummary)?;
     Ok(value)
-}
-
-fn validate_model_safe_text(
-    value: String,
-    label: &'static str,
-) -> Result<String, AgentLoopHostError> {
-    validate_model_text_with_limit(value, label, MODEL_SAFE_SUMMARY_MAX_BYTES, true)
-}
-
-fn validate_model_visible_content(
-    value: String,
-    label: &'static str,
-) -> Result<String, AgentLoopHostError> {
-    validate_model_text_with_limit(
-        value,
-        label,
-        LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES,
-        false,
-    )
-}
-
-fn validate_model_text_with_limit(
-    value: String,
-    label: &'static str,
-    max_bytes: usize,
-    reject_sensitive: bool,
-) -> Result<String, AgentLoopHostError> {
-    if value.is_empty() || value.len() > max_bytes {
-        return Err(AgentLoopHostError::new(
-            AgentLoopHostErrorKind::PolicyDenied,
-            format!("{label} is not model-safe"),
-        ));
-    }
-    if value
-        .chars()
-        .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t'))
-    {
-        return Err(AgentLoopHostError::new(
-            AgentLoopHostErrorKind::PolicyDenied,
-            format!("{label} contains control characters"),
-        ));
-    }
-    if reject_sensitive {
-        reject_sensitive_text(&value, label)?;
-    }
-    Ok(value)
-}
-
-fn reject_sensitive_text(value: &str, label: &'static str) -> Result<(), AgentLoopHostError> {
-    let lower = value.to_ascii_lowercase();
-    for forbidden_path in [
-        "/users/",
-        "/home/",
-        "/private/",
-        "/tmp/", // safety: model-safety denylist literal, not a filesystem temp path.
-        "/var/",
-        "/etc/",
-    ] {
-        if lower.contains(forbidden_path) {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::PolicyDenied,
-                format!("{label} contains non-model-safe content"),
-            ));
-        }
-    }
-    for forbidden_phrase in [
-        "access token",
-        "api key",
-        "api_key",
-        "api secret",
-        "authorization",
-        "bearer",
-        "client secret",
-        "invalid api key",
-        "password",
-        "passwd",
-        "secret key",
-        "secret-key",
-        "secret token",
-        "secret_token",
-        "shared secret",
-    ] {
-        if contains_token_phrase(&lower, forbidden_phrase) {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::PolicyDenied,
-                format!("{label} contains non-model-safe content"),
-            ));
-        }
-    }
-    if lower
-        .split(|character: char| !character.is_ascii_alphanumeric() && character != '-')
-        .any(|token| token.starts_with("sk-"))
-    {
-        return Err(AgentLoopHostError::new(
-            AgentLoopHostErrorKind::PolicyDenied,
-            format!("{label} contains non-model-safe content"),
-        ));
-    }
-    Ok(())
-}
-
-fn contains_token_phrase(value: &str, phrase: &str) -> bool {
-    value.match_indices(phrase).any(|(start, matched)| {
-        let end = start + matched.len();
-        is_token_boundary(char_before(value, start)) && is_token_boundary(char_at(value, end))
-    })
-}
-
-fn char_before(value: &str, byte_index: usize) -> Option<char> {
-    value
-        .char_indices()
-        .take_while(|(index, _)| *index < byte_index)
-        .last()
-        .map(|(_, character)| character)
-}
-
-fn char_at(value: &str, byte_index: usize) -> Option<char> {
-    value
-        .char_indices()
-        .find(|(index, _)| *index == byte_index)
-        .map(|(_, character)| character)
-}
-
-fn is_token_boundary(character: Option<char>) -> bool {
-    match character {
-        Some(character) => !character.is_ascii_alphanumeric() && character != '_',
-        None => true,
-    }
 }
 
 fn sanitize_ref_suffix(value: &str) -> String {
