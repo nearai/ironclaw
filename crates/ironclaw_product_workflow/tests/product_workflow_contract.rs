@@ -19,16 +19,17 @@ use ironclaw_product_adapters::{
 use ironclaw_product_workflow::{
     ActionDispatchKind, ActionFingerprintKey, ApprovalInteractionDecision,
     ApprovalInteractionScope, ApprovalInteractionService, AuthInteractionDecision,
-    AuthInteractionScope, AuthInteractionService, AuthRequestRef, BeforeInboundPolicy,
-    BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest, DefaultInboundTurnService,
-    DefaultProductWorkflow, FakeBeforeInboundPolicy, FakeConversationBindingService,
-    FakeIdempotencyLedger, FakeInboundTurnService, IdempotencyDecision, IdempotencyLedger,
-    InMemoryIdempotencyLedger, InboundTurnOutcome, InboundTurnService, InboundUserMessageDispatch,
-    LinkedThreadActionId, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
-    ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse,
-    PendingApprovalInteractionView, PendingAuthInteractionView, ProductCommandName,
-    ProductConversationBindingService, ProductInstallationKey, ProductInstallationScope,
-    ProductWorkflowError, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    AuthInteractionScope, AuthInteractionService, AuthInteractionStatus, AuthRequestRef,
+    BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,
+    DefaultInboundTurnService, DefaultProductWorkflow, FakeBeforeInboundPolicy,
+    FakeConversationBindingService, FakeIdempotencyLedger, FakeInboundTurnService,
+    IdempotencyDecision, IdempotencyLedger, InMemoryIdempotencyLedger, InboundTurnOutcome,
+    InboundTurnService, InboundUserMessageDispatch, LinkedThreadActionId,
+    ListPendingApprovalsRequest, ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
+    ListPendingAuthInteractionsResponse, PendingApprovalInteractionView,
+    PendingAuthInteractionView, ProductCommandName, ProductConversationBindingService,
+    ProductInstallationKey, ProductInstallationScope, ProductWorkflowError,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, ResolvedBinding,
     SourceBindingKey, StaticProductInstallationResolver, approval_gate_ref,
 };
@@ -267,12 +268,12 @@ impl AuthInteractionService for RecordingAuthInteractionService {
     ) -> Result<ListPendingAuthInteractionsResponse, ProductWorkflowError> {
         let scope = AuthInteractionScope::from_turn(&request.scope, &request.actor);
         Ok(ListPendingAuthInteractionsResponse {
-            auth: vec![PendingAuthInteractionView {
+            auth_interactions: vec![PendingAuthInteractionView {
                 scope,
                 run_id: self.run_id,
                 auth_request_ref: self.gate_ref.clone(),
                 flow_id: ironclaw_auth::AuthFlowId::new(),
-                status: ironclaw_auth::AuthFlowStatus::AwaitingUser,
+                status: AuthInteractionStatus::AwaitingUser,
                 provider: ironclaw_auth::AuthProviderId::new("gmail").expect("provider"),
                 summary: "Authentication required".to_string(),
                 challenge: None,

@@ -381,7 +381,9 @@ impl AuthInteractionService for RecordingAuthInteractionService {
         _request: ListPendingAuthInteractionsRequest,
     ) -> Result<ListPendingAuthInteractionsResponse, ironclaw_product_workflow::ProductWorkflowError>
     {
-        Ok(ListPendingAuthInteractionsResponse { auth: vec![] })
+        Ok(ListPendingAuthInteractionsResponse {
+            auth_interactions: vec![],
+        })
     }
 
     async fn resolve(

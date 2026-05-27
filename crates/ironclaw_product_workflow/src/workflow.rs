@@ -515,24 +515,27 @@ async fn dispatch_auth_resolution(
 fn approval_resolution_idempotency_key(
     fingerprint: &ActionFingerprintKey,
 ) -> Result<IdempotencyKey, ProductWorkflowError> {
-    let raw = format!(
-        "{}{}{}{}{}{}",
-        binding_ref_segment("adapter", fingerprint.adapter_id.as_str()),
-        binding_ref_segment("installation", fingerprint.installation_id.as_str()),
-        binding_ref_segment("actor_kind", fingerprint.external_actor_ref.kind()),
-        binding_ref_segment("actor_id", fingerprint.external_actor_ref.id()),
-        binding_ref_segment("source", fingerprint.source_binding_key.as_str()),
-        binding_ref_segment("event", fingerprint.external_event_id.as_str())
-    );
-    bounded_idempotency_key("product-approval", &raw, DEFAULT_BINDING_REF_RAW_MAX_BYTES).map_err(
-        |_| ProductWorkflowError::ApprovalInteractionRejected {
+    interaction_resolution_idempotency_key("product-approval", fingerprint, || {
+        ProductWorkflowError::ApprovalInteractionRejected {
             kind: ApprovalInteractionRejectionKind::InvalidBindingRef,
-        },
-    )
+        }
+    })
 }
 
 fn auth_resolution_idempotency_key(
     fingerprint: &ActionFingerprintKey,
+) -> Result<IdempotencyKey, ProductWorkflowError> {
+    interaction_resolution_idempotency_key("product-auth", fingerprint, || {
+        ProductWorkflowError::AuthInteractionRejected {
+            kind: AuthInteractionRejectionKind::InvalidBindingRef,
+        }
+    })
+}
+
+fn interaction_resolution_idempotency_key(
+    prefix: &str,
+    fingerprint: &ActionFingerprintKey,
+    invalid_binding_error: impl FnOnce() -> ProductWorkflowError,
 ) -> Result<IdempotencyKey, ProductWorkflowError> {
     let raw = format!(
         "{}{}{}{}{}{}",
@@ -543,11 +546,8 @@ fn auth_resolution_idempotency_key(
         binding_ref_segment("source", fingerprint.source_binding_key.as_str()),
         binding_ref_segment("event", fingerprint.external_event_id.as_str())
     );
-    bounded_idempotency_key("product-auth", &raw, DEFAULT_BINDING_REF_RAW_MAX_BYTES).map_err(|_| {
-        ProductWorkflowError::AuthInteractionRejected {
-            kind: AuthInteractionRejectionKind::InvalidBindingRef,
-        }
-    })
+    bounded_idempotency_key(prefix, &raw, DEFAULT_BINDING_REF_RAW_MAX_BYTES)
+        .map_err(|_| invalid_binding_error())
 }
 
 fn turn_scope_from_binding(binding: &ResolvedBinding) -> TurnScope {

@@ -5,17 +5,19 @@ use chrono::{Duration, Utc};
 use ironclaw_auth::{
     AuthChallenge, AuthContinuationRef, AuthFlowId, AuthFlowKind, AuthFlowManager, AuthFlowRecord,
     AuthFlowStatus, AuthGateRef, AuthProductError, AuthProductScope, AuthSurface,
-    CredentialAccountId, CredentialAccountUpdateBinding, NewAuthFlow, OAuthCallbackClaimRequest,
-    OAuthCallbackFailureInput, OAuthCallbackInput, TurnRunRef,
+    CredentialAccountId, CredentialAccountLabel, CredentialAccountProjection,
+    CredentialAccountStatus, CredentialAccountUpdateBinding, CredentialOwnership, NewAuthFlow,
+    OAuthAuthorizationUrl, OAuthCallbackClaimRequest, OAuthCallbackFailureInput,
+    OAuthCallbackInput, TurnRunRef,
 };
 use ironclaw_host_api::{
-    AgentId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
+    AgentId, ExtensionId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
 };
 use ironclaw_product_workflow::{
-    AuthGateRecord, AuthInteractionDecision, AuthInteractionReadModel,
-    AuthInteractionRejectionKind, AuthInteractionScope, AuthInteractionService,
-    DefaultAuthInteractionService, ListPendingAuthInteractionsRequest, ProductWorkflowError,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
+    AuthGateRecord, AuthInteractionChallengeView, AuthInteractionDecision,
+    AuthInteractionReadModel, AuthInteractionRejectionKind, AuthInteractionScope,
+    AuthInteractionService, DefaultAuthInteractionService, ListPendingAuthInteractionsRequest,
+    ProductWorkflowError, ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
@@ -269,18 +271,135 @@ async fn list_pending_auth_redacts_setup_message_and_filters_scope() {
         None,
         setup_challenge(),
     );
-    let service = service(flow.clone(), vec![flow, other], actor.clone(), gate_ref);
+    let failed = auth_flow(
+        AuthFlowStatus::Failed,
+        &scope,
+        &actor,
+        TurnRunId::new(),
+        &make_gate_ref("gate:auth-failed"),
+        None,
+        setup_challenge(),
+    );
+    let service = service(
+        flow.clone(),
+        vec![flow, other, failed],
+        actor.clone(),
+        gate_ref,
+    );
 
     let response = service
         .list_pending(ListPendingAuthInteractionsRequest { scope, actor })
         .await
         .expect("list pending auth");
 
-    assert_eq!(response.auth.len(), 1);
+    assert_eq!(response.auth_interactions.len(), 1);
     let serialized = serde_json::to_string(&response).expect("serialize");
     assert!(!serialized.contains("RAW_PROMPT_SENTINEL_3094"));
     assert!(!serialized.contains("/tmp/private-auth-path"));
     assert!(!serialized.contains("sk-live"));
+    assert!(!serialized.contains("gate:auth-failed"));
+}
+
+#[tokio::test]
+async fn list_pending_auth_projects_challenges_to_minimal_safe_views() {
+    let actor = TurnActor::new(UserId::new("alice").unwrap());
+    let scope = turn_scope("alice", "thread-a");
+    let oauth_gate = make_gate_ref("gate:auth-oauth");
+    let manual_gate = make_gate_ref("gate:auth-manual");
+    let account_gate = make_gate_ref("gate:auth-account");
+    let now = Utc::now();
+    let account_id = CredentialAccountId::new();
+    let flows = vec![
+        auth_flow(
+            AuthFlowStatus::AwaitingUser,
+            &scope,
+            &actor,
+            TurnRunId::new(),
+            &oauth_gate,
+            None,
+            AuthChallenge::OAuthUrl {
+                authorization_url: OAuthAuthorizationUrl::new(
+                    "https://auth.example.test/authorize?state=secret-state&code_challenge=pkce"
+                        .to_string(),
+                )
+                .expect("oauth url"),
+                expires_at: now + Duration::minutes(5),
+            },
+        ),
+        auth_flow(
+            AuthFlowStatus::AwaitingUser,
+            &scope,
+            &actor,
+            TurnRunId::new(),
+            &manual_gate,
+            None,
+            AuthChallenge::ManualTokenRequired {
+                interaction_id: ironclaw_auth::AuthInteractionId::new(),
+                provider: provider(),
+                label: CredentialAccountLabel::new("private user token label").expect("label"),
+                expires_at: now + Duration::minutes(5),
+            },
+        ),
+        auth_flow(
+            AuthFlowStatus::AwaitingUser,
+            &scope,
+            &actor,
+            TurnRunId::new(),
+            &account_gate,
+            None,
+            AuthChallenge::AccountSelectionRequired {
+                provider: provider(),
+                accounts: vec![CredentialAccountProjection {
+                    id: account_id,
+                    provider: provider(),
+                    label: CredentialAccountLabel::new("alice@example.test").expect("label"),
+                    status: CredentialAccountStatus::Configured,
+                    ownership: CredentialOwnership::UserReusable,
+                    owner_extension: Some(ExtensionId::new("private.extension").unwrap()),
+                    granted_extensions: vec![ExtensionId::new("granted.extension").unwrap()],
+                    secret_handle_count: 2,
+                }],
+            },
+        ),
+    ];
+    let service = service(
+        flows[0].clone(),
+        flows.clone(),
+        actor.clone(),
+        oauth_gate.clone(),
+    );
+
+    let response = service
+        .list_pending(ListPendingAuthInteractionsRequest { scope, actor })
+        .await
+        .expect("list pending auth");
+
+    assert_eq!(response.auth_interactions.len(), 3);
+    assert!(response.auth_interactions.iter().any(|pending| matches!(
+        pending.challenge,
+        Some(AuthInteractionChallengeView::OAuthRedirectRequired { .. })
+    )));
+    let account_view = response
+        .auth_interactions
+        .iter()
+        .find_map(|pending| match &pending.challenge {
+            Some(AuthInteractionChallengeView::AccountSelectionRequired { accounts, .. }) => {
+                Some(accounts)
+            }
+            _ => None,
+        })
+        .expect("account choices");
+    assert_eq!(account_view.len(), 1);
+    assert_eq!(account_view[0].credential_ref, account_id.to_string());
+    assert_eq!(account_view[0].status, CredentialAccountStatus::Configured);
+    let serialized = serde_json::to_string(&response).expect("serialize");
+    assert!(!serialized.contains("secret-state"));
+    assert!(!serialized.contains("code_challenge"));
+    assert!(!serialized.contains("private user token label"));
+    assert!(!serialized.contains("alice@example.test"));
+    assert!(!serialized.contains("private.extension"));
+    assert!(!serialized.contains("granted.extension"));
+    assert!(!serialized.contains("secret_handle_count"));
 }
 
 #[tokio::test]
@@ -327,6 +446,127 @@ async fn credential_provided_resumes_completed_auth_gate() {
         resumes[0].precondition,
         ResumeTurnPrecondition::BlockedAuthGate
     );
+}
+
+#[tokio::test]
+async fn callback_completed_resumes_completed_auth_gate() {
+    let actor = TurnActor::new(UserId::new("alice").unwrap());
+    let scope = turn_scope("alice", "thread-a");
+    let run_id = TurnRunId::new();
+    let gate_ref = make_gate_ref("gate:auth-callback");
+    let flow = auth_flow(
+        AuthFlowStatus::Completed,
+        &scope,
+        &actor,
+        run_id,
+        &gate_ref,
+        None,
+        setup_challenge(),
+    );
+    let callback_ref = flow.id.to_string();
+    let (service, flow_manager, coordinator) =
+        service_parts(flow.clone(), vec![flow], actor.clone(), gate_ref.clone());
+
+    let response = service
+        .resolve(ResolveAuthInteractionRequest {
+            scope,
+            actor,
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: AuthInteractionDecision::CallbackCompleted { callback_ref },
+            idempotency_key: IdempotencyKey::new("auth-action-callback").unwrap(),
+        })
+        .await
+        .expect("resolve callback auth");
+
+    assert!(matches!(
+        response,
+        ResolveAuthInteractionResponse::Resumed(_)
+    ));
+    assert!(flow_manager.cancellations().is_empty());
+    assert_eq!(coordinator.resumes().len(), 1);
+}
+
+#[tokio::test]
+async fn callback_completed_rejects_mismatched_callback_ref() {
+    let actor = TurnActor::new(UserId::new("alice").unwrap());
+    let scope = turn_scope("alice", "thread-a");
+    let run_id = TurnRunId::new();
+    let gate_ref = make_gate_ref("gate:auth-callback-mismatch");
+    let flow = auth_flow(
+        AuthFlowStatus::Completed,
+        &scope,
+        &actor,
+        run_id,
+        &gate_ref,
+        None,
+        setup_challenge(),
+    );
+    let (service, _flow_manager, coordinator) =
+        service_parts(flow.clone(), vec![flow], actor.clone(), gate_ref.clone());
+
+    let error = service
+        .resolve(ResolveAuthInteractionRequest {
+            scope,
+            actor,
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: AuthInteractionDecision::CallbackCompleted {
+                callback_ref: AuthFlowId::new().to_string(),
+            },
+            idempotency_key: IdempotencyKey::new("auth-action-callback-wrong").unwrap(),
+        })
+        .await
+        .expect_err("wrong callback ref must be rejected");
+
+    assert!(matches!(
+        error,
+        ProductWorkflowError::AuthInteractionRejected {
+            kind: AuthInteractionRejectionKind::InvalidCallbackRef
+        }
+    ));
+    assert!(coordinator.resumes().is_empty());
+}
+
+#[tokio::test]
+async fn credential_provided_rejects_completed_flow_without_account_id() {
+    let actor = TurnActor::new(UserId::new("alice").unwrap());
+    let scope = turn_scope("alice", "thread-a");
+    let run_id = TurnRunId::new();
+    let gate_ref = make_gate_ref("gate:auth-missing-account");
+    let flow = auth_flow(
+        AuthFlowStatus::Completed,
+        &scope,
+        &actor,
+        run_id,
+        &gate_ref,
+        None,
+        setup_challenge(),
+    );
+    let (service, _flow_manager, coordinator) =
+        service_parts(flow.clone(), vec![flow], actor.clone(), gate_ref.clone());
+
+    let error = service
+        .resolve(ResolveAuthInteractionRequest {
+            scope,
+            actor,
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: AuthInteractionDecision::CredentialProvided {
+                credential_ref: CredentialAccountId::new().to_string(),
+            },
+            idempotency_key: IdempotencyKey::new("auth-action-missing-account").unwrap(),
+        })
+        .await
+        .expect_err("missing account id must be stale");
+
+    assert!(matches!(
+        error,
+        ProductWorkflowError::AuthInteractionRejected {
+            kind: AuthInteractionRejectionKind::StaleAuth
+        }
+    ));
+    assert!(coordinator.resumes().is_empty());
 }
 
 #[tokio::test]
@@ -452,6 +692,52 @@ async fn cross_scope_auth_gate_is_denied_before_resume() {
         }
     ));
     assert!(coordinator.resumes().is_empty());
+}
+
+#[test]
+fn auth_gate_record_new_rejects_invalid_continuation_run_and_gate() {
+    let actor = TurnActor::new(UserId::new("alice").unwrap());
+    let scope = turn_scope("alice", "thread-a");
+    let run_id = TurnRunId::new();
+    let gate_ref = make_gate_ref("gate:auth-record");
+    let valid = auth_flow(
+        AuthFlowStatus::AwaitingUser,
+        &scope,
+        &actor,
+        run_id,
+        &gate_ref,
+        None,
+        setup_challenge(),
+    );
+
+    let mut wrong_continuation = valid.clone();
+    wrong_continuation.continuation = AuthContinuationRef::SetupOnly;
+    let error = AuthGateRecord::new(run_id, gate_ref.clone(), wrong_continuation)
+        .expect_err("non turn-gate continuation rejected");
+    assert!(matches!(
+        error,
+        ProductWorkflowError::AuthInteractionRejected {
+            kind: AuthInteractionRejectionKind::UnsupportedResult
+        }
+    ));
+
+    let error = AuthGateRecord::new(TurnRunId::new(), gate_ref.clone(), valid.clone())
+        .expect_err("mismatched run rejected");
+    assert!(matches!(
+        error,
+        ProductWorkflowError::AuthInteractionRejected {
+            kind: AuthInteractionRejectionKind::StaleAuth
+        }
+    ));
+
+    let error = AuthGateRecord::new(run_id, make_gate_ref("gate:auth-wrong"), valid)
+        .expect_err("mismatched gate rejected");
+    assert!(matches!(
+        error,
+        ProductWorkflowError::AuthInteractionRejected {
+            kind: AuthInteractionRejectionKind::InvalidGateRef
+        }
+    ));
 }
 
 fn service(

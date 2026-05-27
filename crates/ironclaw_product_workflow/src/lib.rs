@@ -63,9 +63,10 @@ pub use approval_interaction::{
 /// bridge product-auth continuations into the workflow-owned turn boundary.
 pub use auth_continuation::ProductAuthTurnGateResumeDispatcher;
 pub use auth_interaction::{
-    AuthGateRecord, AuthInteractionChallengeView, AuthInteractionDecision,
-    AuthInteractionReadModel, AuthInteractionRejectionKind, AuthInteractionScope,
-    AuthInteractionService, DefaultAuthInteractionService, ListPendingAuthInteractionsRequest,
+    AuthCredentialAccountChoiceView, AuthGateRecord, AuthInteractionChallengeView,
+    AuthInteractionDecision, AuthInteractionReadModel, AuthInteractionRejectionKind,
+    AuthInteractionScope, AuthInteractionService, AuthInteractionStatus,
+    DefaultAuthInteractionService, ListPendingAuthInteractionsRequest,
     ListPendingAuthInteractionsResponse, PendingAuthInteractionView, ResolveAuthInteractionRequest,
     ResolveAuthInteractionResponse, is_auth_gate_ref,
 };

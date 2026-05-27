@@ -84,6 +84,9 @@ adapter/UI-safe DTOs, and routes credential/callback/cancel decisions back
 through `AuthFlowManager` and `TurnCoordinator` with the `BlockedAuthGate`
 precondition. It consumes the auth-flow boundary here for auth gates; it must
 not create a second credential-account or OAuth-flow model.
+Only non-terminal auth-flow states are listed as pending interactions. Terminal
+states such as `failed`, `completed`, `expired`, and `canceled` must not be
+rendered as actionable auth gates.
 
 Legacy web/CLI/channel auth UX may remain behavior-compatible during
 migration, but Reborn paths should enter through `ProductWorkflow` or the

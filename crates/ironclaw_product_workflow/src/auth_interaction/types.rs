@@ -1,6 +1,6 @@
 use ironclaw_auth::{
     AuthChallenge, AuthContinuationRef, AuthFlowId, AuthFlowRecord, AuthFlowStatus,
-    AuthProductScope, CredentialAccountProjection, Timestamp,
+    AuthProductScope, CredentialAccountStatus, Timestamp,
 };
 use ironclaw_product_adapters::ProductWorkflowRejectionKind;
 use ironclaw_turns::{CancelRunResponse, GateRef, IdempotencyKey, ResumeTurnResponse, TurnActor};
@@ -10,9 +10,6 @@ use serde::{Deserialize, Serialize};
 use super::auth_rejected;
 use crate::error::ProductWorkflowError;
 
-const AUTH_GATE_REF: &str = "gate:auth";
-const AUTH_GATE_PREFIX: &str = "gate:auth-";
-const HOOK_AUTH_GATE_PREFIX: &str = "gate:hook-auth-";
 const FALLBACK_AUTH_SUMMARY: &str = "Authentication required";
 
 /// Stable reject reasons for product auth interactions.
@@ -59,24 +56,21 @@ impl AuthInteractionRejectionKind {
     }
 
     pub fn status_code(self) -> u16 {
-        match self.workflow_rejection_kind() {
-            ProductWorkflowRejectionKind::ScopeNotFound => 404,
-            ProductWorkflowRejectionKind::Unauthorized => 403,
-            ProductWorkflowRejectionKind::Conflict => 409,
-            ProductWorkflowRejectionKind::Unavailable => 503,
-            ProductWorkflowRejectionKind::InvalidRequest => 400,
-            ProductWorkflowRejectionKind::ThreadBusy
-            | ProductWorkflowRejectionKind::AdmissionRejected => 429,
+        match self {
+            Self::MissingAuth => 404,
+            Self::CrossScopeDenied => 403,
+            Self::StaleAuth => 409,
+            Self::FlowUnavailable => 503,
+            Self::InvalidGateRef
+            | Self::InvalidCredentialRef
+            | Self::InvalidCallbackRef
+            | Self::UnsupportedResult
+            | Self::InvalidBindingRef => 400,
         }
     }
 
     pub fn retryable(self) -> bool {
-        matches!(
-            self.workflow_rejection_kind(),
-            ProductWorkflowRejectionKind::Unavailable
-                | ProductWorkflowRejectionKind::AdmissionRejected
-                | ProductWorkflowRejectionKind::ThreadBusy
-        )
+        matches!(self, Self::FlowUnavailable)
     }
 }
 
@@ -123,19 +117,17 @@ impl AuthInteractionScope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AuthInteractionChallengeView {
-    OAuthUrl {
-        authorization_url: ironclaw_auth::OAuthAuthorizationUrl,
+    OAuthRedirectRequired {
         expires_at: Timestamp,
     },
     ManualTokenRequired {
         interaction_id: ironclaw_auth::AuthInteractionId,
         provider: ironclaw_auth::AuthProviderId,
-        label: ironclaw_auth::CredentialAccountLabel,
         expires_at: Timestamp,
     },
     AccountSelectionRequired {
         provider: ironclaw_auth::AuthProviderId,
-        accounts: Vec<CredentialAccountProjection>,
+        accounts: Vec<AuthCredentialAccountChoiceView>,
     },
     SetupRequired {
         provider: ironclaw_auth::AuthProviderId,
@@ -146,31 +138,62 @@ pub enum AuthInteractionChallengeView {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthCredentialAccountChoiceView {
+    pub credential_ref: String,
+    pub status: CredentialAccountStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthInteractionStatus {
+    Pending,
+    AwaitingUser,
+    CallbackReceived,
+    Completing,
+}
+
+impl AuthInteractionStatus {
+    fn from_flow_status(status: AuthFlowStatus) -> Option<Self> {
+        match status {
+            AuthFlowStatus::Pending => Some(Self::Pending),
+            AuthFlowStatus::AwaitingUser => Some(Self::AwaitingUser),
+            AuthFlowStatus::CallbackReceived => Some(Self::CallbackReceived),
+            AuthFlowStatus::Completing => Some(Self::Completing),
+            AuthFlowStatus::Completed
+            | AuthFlowStatus::Failed
+            | AuthFlowStatus::Expired
+            | AuthFlowStatus::Canceled => None,
+        }
+    }
+}
+
 impl AuthInteractionChallengeView {
     fn from_challenge(challenge: &AuthChallenge) -> Self {
         match challenge {
-            AuthChallenge::OAuthUrl {
-                authorization_url,
-                expires_at,
-            } => Self::OAuthUrl {
-                authorization_url: authorization_url.clone(),
+            AuthChallenge::OAuthUrl { expires_at, .. } => Self::OAuthRedirectRequired {
                 expires_at: *expires_at,
             },
             AuthChallenge::ManualTokenRequired {
                 interaction_id,
                 provider,
-                label,
                 expires_at,
+                ..
             } => Self::ManualTokenRequired {
                 interaction_id: *interaction_id,
                 provider: provider.clone(),
-                label: label.clone(),
                 expires_at: *expires_at,
             },
             AuthChallenge::AccountSelectionRequired { provider, accounts } => {
                 Self::AccountSelectionRequired {
                     provider: provider.clone(),
-                    accounts: accounts.clone(),
+                    accounts: accounts
+                        .iter()
+                        .map(|account| AuthCredentialAccountChoiceView {
+                            credential_ref: account.id.to_string(),
+                            status: account.status,
+                        })
+                        .collect(),
                 }
             }
             AuthChallenge::SetupRequired { provider, .. } => Self::SetupRequired {
@@ -194,7 +217,7 @@ pub struct PendingAuthInteractionView {
     pub run_id: TurnRunId,
     pub auth_request_ref: GateRef,
     pub flow_id: AuthFlowId,
-    pub status: AuthFlowStatus,
+    pub status: AuthInteractionStatus,
     pub provider: ironclaw_auth::AuthProviderId,
     pub summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -262,22 +285,23 @@ impl AuthGateRecord {
         self.flow.status
     }
 
-    pub(super) fn to_view(&self) -> PendingAuthInteractionView {
-        PendingAuthInteractionView {
+    pub(super) fn to_view(&self) -> Option<PendingAuthInteractionView> {
+        let status = AuthInteractionStatus::from_flow_status(self.flow.status)?;
+        Some(PendingAuthInteractionView {
             scope: self.scope.clone(),
             run_id: self.run_id,
             auth_request_ref: self.gate_ref.clone(),
             flow_id: self.flow.id,
-            status: self.flow.status,
+            status,
             provider: self.flow.provider.clone(),
-            summary: FALLBACK_AUTH_SUMMARY.to_string(),
+            summary: display_safe_auth_summary(),
             challenge: self
                 .flow
                 .challenge
                 .as_ref()
                 .map(AuthInteractionChallengeView::from_challenge),
             expires_at: self.flow.expires_at,
-        }
+        })
     }
 }
 
@@ -289,7 +313,7 @@ pub struct ListPendingAuthInteractionsRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListPendingAuthInteractionsResponse {
-    pub auth: Vec<PendingAuthInteractionView>,
+    pub auth_interactions: Vec<PendingAuthInteractionView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -316,20 +340,10 @@ pub enum ResolveAuthInteractionResponse {
     Canceled(CancelRunResponse),
 }
 
-pub fn is_auth_gate_ref(gate_ref: &GateRef) -> bool {
-    let value = gate_ref.as_str();
-    value == AUTH_GATE_REF
-        || value.starts_with(AUTH_GATE_PREFIX)
-        || value.starts_with(HOOK_AUTH_GATE_PREFIX)
+pub(super) fn is_pending_auth_status(status: AuthFlowStatus) -> bool {
+    AuthInteractionStatus::from_flow_status(status).is_some()
 }
 
-pub(super) fn is_pending_auth_status(status: AuthFlowStatus) -> bool {
-    matches!(
-        status,
-        AuthFlowStatus::Pending
-            | AuthFlowStatus::AwaitingUser
-            | AuthFlowStatus::CallbackReceived
-            | AuthFlowStatus::Completing
-            | AuthFlowStatus::Failed
-    )
+fn display_safe_auth_summary() -> String {
+    FALLBACK_AUTH_SUMMARY.to_string()
 }

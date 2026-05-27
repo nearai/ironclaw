@@ -3,9 +3,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_auth::{AuthFlowManager, AuthFlowStatus, AuthProductError};
 use ironclaw_turns::{
-    CancelRunRequest, GateRef, GetRunStateRequest, ReplyTargetBindingRef, ResumeTurnPrecondition,
-    ResumeTurnRequest, SanitizedCancelReason, SourceBindingRef, TurnCoordinator, TurnError,
-    TurnErrorCategory, TurnRunId, TurnStatus,
+    CancelRunRequest, GateRef, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
+    SanitizedCancelReason, TurnCoordinator, TurnError, TurnErrorCategory, TurnRunId, TurnStatus,
 };
 
 use super::types::is_pending_auth_status;
@@ -13,11 +12,9 @@ use super::{
     AuthGateRecord, AuthInteractionDecision, AuthInteractionRejectionKind, AuthInteractionScope,
     ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse,
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, auth_rejected,
+    auth_reply_binding_ref, auth_source_binding_ref,
 };
-use crate::binding_ref::{
-    DEFAULT_BINDING_REF_RAW_MAX_BYTES, binding_ref_segment, bounded_reply_target_binding_ref,
-    bounded_source_binding_ref,
-};
+use crate::binding_ref::binding_ref_segment;
 use crate::error::ProductWorkflowError;
 
 #[async_trait]
@@ -159,7 +156,20 @@ impl DefaultAuthInteractionService {
         gate: AuthGateRecord,
         run_id: TurnRunId,
     ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
-        validate_completion_ref(&gate, &request.decision)?;
+        let completion = match &request.decision {
+            AuthInteractionDecision::CredentialProvided { credential_ref } => {
+                AuthCompletionRef::CredentialProvided(credential_ref)
+            }
+            AuthInteractionDecision::CallbackCompleted { callback_ref } => {
+                AuthCompletionRef::CallbackCompleted(callback_ref)
+            }
+            AuthInteractionDecision::Deny => {
+                return Err(auth_rejected(
+                    AuthInteractionRejectionKind::UnsupportedResult,
+                ));
+            }
+        };
+        validate_completion_ref(&gate, completion)?;
         let binding_id = auth_interaction_binding_id(gate.flow().id, &run_id, gate.gate_ref());
         let response = self
             .turn_coordinator
@@ -227,7 +237,7 @@ impl AuthInteractionService for DefaultAuthInteractionService {
             .await?
             .into_iter()
             .filter(|gate| gate.scope() == &scope && is_pending_auth_status(gate.status()))
-            .map(|gate| gate.to_view())
+            .filter_map(|gate| gate.to_view())
             .collect::<Vec<_>>();
         auth.sort_by(|left, right| {
             left.run_id
@@ -239,7 +249,9 @@ impl AuthInteractionService for DefaultAuthInteractionService {
                         .cmp(right.auth_request_ref.as_str())
                 })
         });
-        Ok(ListPendingAuthInteractionsResponse { auth })
+        Ok(ListPendingAuthInteractionsResponse {
+            auth_interactions: auth,
+        })
     }
 
     async fn resolve(
@@ -272,36 +284,38 @@ impl AuthInteractionService for DefaultAuthInteractionService {
     }
 }
 
+enum AuthCompletionRef<'a> {
+    CredentialProvided(&'a str),
+    CallbackCompleted(&'a str),
+}
+
 fn validate_completion_ref(
     gate: &AuthGateRecord,
-    decision: &AuthInteractionDecision,
+    completion: AuthCompletionRef<'_>,
 ) -> Result<(), ProductWorkflowError> {
     if gate.status() != AuthFlowStatus::Completed {
         return Err(auth_rejected(AuthInteractionRejectionKind::StaleAuth));
     }
-    match decision {
-        AuthInteractionDecision::CredentialProvided { credential_ref } => {
+    match completion {
+        AuthCompletionRef::CredentialProvided(credential_ref) => {
             let Some(account_id) = gate.flow().credential_account_id else {
                 return Err(auth_rejected(AuthInteractionRejectionKind::StaleAuth));
             };
-            if credential_ref != &account_id.to_string() {
+            if credential_ref != account_id.to_string() {
                 return Err(auth_rejected(
                     AuthInteractionRejectionKind::InvalidCredentialRef,
                 ));
             }
             Ok(())
         }
-        AuthInteractionDecision::CallbackCompleted { callback_ref } => {
-            if callback_ref != &gate.flow().id.to_string() {
+        AuthCompletionRef::CallbackCompleted(callback_ref) => {
+            if callback_ref != gate.flow().id.to_string() {
                 return Err(auth_rejected(
                     AuthInteractionRejectionKind::InvalidCallbackRef,
                 ));
             }
             Ok(())
         }
-        AuthInteractionDecision::Deny => Err(auth_rejected(
-            AuthInteractionRejectionKind::UnsupportedResult,
-        )),
     }
 }
 
@@ -317,24 +331,6 @@ fn auth_interaction_binding_id(
         binding_ref_segment("run", &run_id.to_string()),
         binding_ref_segment("gate", gate_ref.as_str())
     )
-}
-
-fn auth_source_binding_ref(binding_id: &str) -> Result<SourceBindingRef, ProductWorkflowError> {
-    bounded_source_binding_ref(
-        "auth-interaction-src",
-        binding_id,
-        DEFAULT_BINDING_REF_RAW_MAX_BYTES,
-    )
-    .map_err(|_| auth_rejected(AuthInteractionRejectionKind::InvalidBindingRef))
-}
-
-fn auth_reply_binding_ref(binding_id: &str) -> Result<ReplyTargetBindingRef, ProductWorkflowError> {
-    bounded_reply_target_binding_ref(
-        "auth-interaction-reply",
-        binding_id,
-        DEFAULT_BINDING_REF_RAW_MAX_BYTES,
-    )
-    .map_err(|_| auth_rejected(AuthInteractionRejectionKind::InvalidBindingRef))
 }
 
 fn map_auth_product_error(error: AuthProductError) -> ProductWorkflowError {
