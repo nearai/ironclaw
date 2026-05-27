@@ -3,6 +3,47 @@ use super::{
 };
 
 const MODEL_SAFE_SUMMARY_MAX_BYTES: usize = 4096;
+const SENSITIVE_TERMS: &[SensitiveTerm] = &[
+    sensitive_term("access token", true, true),
+    sensitive_term("api key", true, true),
+    sensitive_term("api_key", true, true),
+    sensitive_term("api secret", true, true),
+    sensitive_term("authorization", true, true),
+    sensitive_term("bearer", true, true),
+    sensitive_term("client secret", true, true),
+    sensitive_term("invalid api key", true, false),
+    sensitive_term("password", true, true),
+    sensitive_term("passwd", true, true),
+    sensitive_term("secret key", true, true),
+    sensitive_term("secret-key", true, true),
+    sensitive_term("secret token", true, true),
+    sensitive_term("secret_token", true, true),
+    sensitive_term("shared secret", true, true),
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SensitiveTerm {
+    phrase: &'static str,
+    reject_as_phrase: bool,
+    reject_value_after_label: bool,
+}
+
+const fn sensitive_term(
+    phrase: &'static str,
+    reject_as_phrase: bool,
+    reject_value_after_label: bool,
+) -> SensitiveTerm {
+    SensitiveTerm {
+        phrase,
+        reject_as_phrase,
+        reject_value_after_label,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PromptTextPolicy {
+    reject_security_vocabulary: bool,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PromptTextSurface {
@@ -21,8 +62,10 @@ impl PromptTextSurface {
         }
     }
 
-    const fn allows_security_vocabulary(self) -> bool {
-        matches!(self, Self::TrustedSkillInstruction)
+    const fn policy(self) -> PromptTextPolicy {
+        PromptTextPolicy {
+            reject_security_vocabulary: !matches!(self, Self::TrustedSkillInstruction),
+        }
     }
 }
 
@@ -63,6 +106,7 @@ fn reject_sensitive_text(
     surface: PromptTextSurface,
 ) -> Result<(), AgentLoopHostError> {
     let lower = value.to_ascii_lowercase();
+    let policy = surface.policy();
     for forbidden_path in [
         "/users/",
         "/home/",
@@ -75,27 +119,17 @@ fn reject_sensitive_text(
             return non_model_safe(label);
         }
     }
-    if !surface.allows_security_vocabulary() {
-        for forbidden_phrase in [
-            "access token",
-            "api key",
-            "api_key",
-            "api secret",
-            "authorization",
-            "bearer",
-            "client secret",
-            "invalid api key",
-            "password",
-            "passwd",
-            "secret key",
-            "secret-key",
-            "secret token",
-            "secret_token",
-            "shared secret",
-        ] {
-            if contains_token_phrase(&lower, forbidden_phrase) {
-                return non_model_safe(label);
-            }
+    for term in SENSITIVE_TERMS {
+        if policy.reject_security_vocabulary
+            && term.reject_as_phrase
+            && contains_token_phrase(&lower, term.phrase)
+        {
+            return non_model_safe(label);
+        }
+        if term.reject_value_after_label
+            && contains_credential_value_after_label(&lower, term.phrase)
+        {
+            return non_model_safe(label);
         }
     }
     if lower
@@ -107,6 +141,123 @@ fn reject_sensitive_text(
     Ok(())
 }
 
+fn contains_credential_value_after_label(value: &str, label: &str) -> bool {
+    value.match_indices(label).any(|(start, matched)| {
+        let end = start + matched.len();
+        if !is_token_boundary(char_before(value, start)) || !is_token_boundary(char_at(value, end))
+        {
+            return false;
+        }
+        let suffix = &value[end..];
+        credential_value_candidate(suffix).is_some_and(is_secret_like_token)
+            || (label == "authorization"
+                && authorization_scheme_value_candidate(suffix).is_some_and(is_secret_like_token))
+    })
+}
+
+fn credential_value_candidate(suffix: &str) -> Option<&str> {
+    credential_value_candidates(suffix).next()
+}
+
+fn authorization_scheme_value_candidate(suffix: &str) -> Option<&str> {
+    let mut candidates = credential_value_candidates(suffix);
+    let scheme = candidates.next()?;
+    is_authorization_scheme(scheme)
+        .then(|| candidates.next())
+        .flatten()
+}
+
+fn credential_value_candidates(suffix: &str) -> impl Iterator<Item = &str> {
+    suffix
+        .trim_start_matches(|character: char| {
+            character.is_ascii_whitespace() || matches!(character, ':' | '=' | '\'' | '"' | '`')
+        })
+        .split(|character: char| character.is_ascii_whitespace() || matches!(character, ',' | ';'))
+        .map(|candidate| {
+            candidate.trim_matches(|character| {
+                matches!(
+                    character,
+                    '\'' | '"'
+                        | '`'
+                        | '.'
+                        | ','
+                        | ';'
+                        | ':'
+                        | '('
+                        | ')'
+                        | '['
+                        | ']'
+                        | '{'
+                        | '}'
+                        | '<'
+                        | '>'
+                )
+            })
+        })
+        .filter(|candidate| !candidate.is_empty())
+}
+
+fn is_authorization_scheme(candidate: &str) -> bool {
+    ["basic", "bearer", "digest", "negotiate", "oauth", "token"].contains(&candidate)
+}
+
+fn is_secret_like_token(candidate: &str) -> bool {
+    if candidate.starts_with('$') {
+        return false;
+    }
+    if [
+        "token",
+        "secret",
+        "password",
+        "key",
+        "value",
+        "example",
+        "placeholder",
+        "redacted",
+        "your-token",
+        "your_token",
+        "api-key",
+        "api_key",
+        "bearer",
+    ]
+    .contains(&candidate)
+        || candidate.contains("redacted")
+        || candidate.contains("placeholder")
+        || candidate.contains("example")
+        || candidate.contains("...")
+    {
+        return false;
+    }
+    if [
+        "ghp_",
+        "github_pat_",
+        "glpat-",
+        "xoxb-",
+        "xoxp-",
+        "akia",
+        "asiai",
+        "sk-",
+        "pk_",
+    ]
+    .iter()
+    .any(|prefix| candidate.starts_with(prefix))
+    {
+        return true;
+    }
+    let contains_alpha = candidate
+        .chars()
+        .any(|character| character.is_ascii_alphabetic());
+    let contains_digit = candidate
+        .chars()
+        .any(|character| character.is_ascii_digit());
+    if candidate.len() >= 6 && contains_alpha && contains_digit {
+        return true;
+    }
+    candidate.len() >= 16
+        && candidate.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+        })
+}
 fn non_model_safe<T>(label: &'static str) -> Result<T, AgentLoopHostError> {
     Err(AgentLoopHostError::new(
         AgentLoopHostErrorKind::PolicyDenied,

@@ -773,6 +773,20 @@ async fn instruction_bundle_rejects_trusted_skill_actual_secret_value() {
 }
 
 #[tokio::test]
+async fn instruction_bundle_rejects_trusted_skill_authorization_scheme_secret_value() {
+    let context = claimed_run_context().await;
+    let error = InstructionBundleBuilder::new(context)
+        .build(skill_instruction_request(
+            "Use Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZTEyMzQ",
+            "GitHub skill",
+            "trusted",
+        ))
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+}
+
+#[tokio::test]
 async fn instruction_bundle_rejects_trusted_skill_security_vocabulary_in_summary() {
     let context = claimed_run_context().await;
     let error = InstructionBundleBuilder::new(context)
