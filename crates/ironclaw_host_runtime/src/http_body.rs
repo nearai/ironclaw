@@ -99,12 +99,26 @@ static FILESYSTEM_RUNTIME: LazyLock<Result<tokio::runtime::Runtime, RuntimeHttpB
     });
 
 fn block_on_filesystem<T>(
-    future: impl std::future::Future<Output = Result<T, FilesystemError>>,
-) -> Result<T, RuntimeHttpBodyStoreError> {
+    future: impl std::future::Future<Output = Result<T, FilesystemError>> + Send,
+) -> Result<T, RuntimeHttpBodyStoreError>
+where
+    T: Send,
+{
     let runtime = FILESYSTEM_RUNTIME.as_ref().map_err(|error| error.clone())?;
-    runtime
-        .block_on(future)
-        .map_err(runtime_http_body_store_error)
+    let joined = std::thread::scope(|scope| {
+        scope
+            .spawn(move || {
+                runtime
+                    .block_on(future)
+                    .map_err(runtime_http_body_store_error)
+            })
+            .join()
+    });
+    joined.unwrap_or_else(|_| {
+        Err(RuntimeHttpBodyStoreError {
+            reason: "filesystem worker panicked".to_string(),
+        })
+    })
 }
 
 fn runtime_http_body_store_error(error: impl std::fmt::Display) -> RuntimeHttpBodyStoreError {

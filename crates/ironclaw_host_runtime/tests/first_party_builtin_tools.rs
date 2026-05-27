@@ -805,6 +805,39 @@ async fn builtin_http_rejects_save_to_without_write_mount_before_egress() {
     assert!(egress.requests().is_empty());
 }
 
+#[tokio::test]
+async fn builtin_http_rejects_invalid_or_unresolved_save_to_before_egress() {
+    for save_to in ["file:///tmp/response.json", "/other/response.json"] {
+        let egress = Arc::new(RecordingRuntimeHttpEgress::default());
+        let runtime = runtime_with_http_egress(Arc::clone(&egress));
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workspace").unwrap(),
+            VirtualPath::new("/projects/workspace").unwrap(),
+            MountPermissions::read_write(),
+        )])
+        .unwrap();
+
+        let error = invoke_with_context(
+            &runtime,
+            HTTP_CAPABILITY_ID,
+            json!({
+                "url": "https://api.example.test/v1/items",
+                "save_to": save_to
+            }),
+            execution_context_with_mounts_and_network(
+                [HTTP_CAPABILITY_ID],
+                mounts,
+                http_test_policy(),
+            ),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, RuntimeFailureKind::InvalidInput);
+        assert!(egress.requests().is_empty());
+    }
+}
+
 // arch-exempt: large-test-file, URL install tests share this first-party runtime harness; split plan #4062
 #[tokio::test]
 async fn builtin_skill_install_accepts_content_when_network_is_denied() {

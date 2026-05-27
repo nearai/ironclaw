@@ -404,9 +404,13 @@ mod tests {
         let http_grant = grant_for(HTTP_CAPABILITY_ID);
         assert_eq!(
             http_grant.constraints.allowed_effects,
-            vec![EffectKind::DispatchCapability, EffectKind::Network]
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::Network,
+                EffectKind::WriteFilesystem
+            ]
         );
-        assert!(http_grant.constraints.mounts.mounts.is_empty());
+        assert_eq!(http_grant.constraints.mounts, workspace_mounts);
         assert_eq!(
             http_grant.constraints.network,
             local_dev_shell_network_policy()

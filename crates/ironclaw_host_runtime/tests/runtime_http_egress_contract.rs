@@ -2111,6 +2111,68 @@ fn host_http_egress_saves_response_body_to_scoped_filesystem_store() {
     assert_eq!(saved, b"filesystem patch body".to_vec());
 }
 
+#[tokio::test]
+async fn host_http_egress_saves_response_body_to_scoped_filesystem_store_from_tokio_task() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![("content-type".to_string(), "text/plain".to_string())],
+        body: b"tokio filesystem body".to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 21,
+            resolved_ip: None,
+        },
+    });
+    let root = Arc::new(InMemoryBackend::new());
+    let scoped_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(&root),
+        MountView::new(Vec::new()).unwrap(),
+    ));
+    let save_mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/workspace").unwrap(),
+        MountPermissions::read_write(),
+    )])
+    .unwrap();
+    let service = HostHttpEgressService::new_with_request_policy_for_tests(
+        network,
+        InMemorySecretStore::new(),
+    )
+    .with_body_store(scoped_filesystem.clone());
+
+    let mut target = save_target("/workspace/from-tokio.txt");
+    target.mount_view = Some(save_mounts);
+    let response = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::FirstParty,
+            scope: sample_scope(),
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Get,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            save_body_to: Some(target),
+            timeout_ms: None,
+        })
+        .expect("response body should be saved without nested Tokio runtime panic");
+
+    assert_eq!(
+        response
+            .saved_body
+            .as_ref()
+            .map(|saved| saved.bytes_written),
+        Some(21)
+    );
+    let saved = root
+        .read_file(&VirtualPath::new("/projects/workspace/from-tokio.txt").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(saved, b"tokio filesystem body".to_vec());
+}
+
 #[test]
 fn host_http_egress_rejects_save_when_target_mount_view_is_read_only() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {

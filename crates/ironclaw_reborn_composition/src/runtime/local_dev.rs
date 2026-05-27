@@ -844,7 +844,7 @@ pub(super) fn local_dev_grant_constraints(
         },
         LocalDevCapabilityKind::Network => GrantConstraints {
             allowed_effects: local_dev_network_allowed_effects(),
-            mounts: MountView::default(),
+            mounts: workspace_mounts.clone(),
             network: local_dev_shell_network_policy(),
             secrets: Vec::new(),
             resource_ceiling: None,
@@ -923,7 +923,11 @@ fn local_dev_builtin_capability_ids() -> [&'static str; 18] {
 }
 
 fn local_dev_network_allowed_effects() -> Vec<EffectKind> {
-    vec![EffectKind::DispatchCapability, EffectKind::Network]
+    vec![
+        EffectKind::DispatchCapability,
+        EffectKind::Network,
+        EffectKind::WriteFilesystem,
+    ]
 }
 
 fn local_dev_extension_lifecycle_search_allowed_effects() -> Vec<EffectKind> {
