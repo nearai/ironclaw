@@ -5,7 +5,9 @@ use std::{
     time::Instant,
 };
 
-use ironclaw_auth::{CredentialAccountService, ProviderScope};
+use ironclaw_auth::{
+    CredentialAccountService, CredentialRecoveryKind, CredentialRecoveryReason, ProviderScope,
+};
 use ironclaw_host_api::{
     CapabilityId, ExtensionId, NetworkMethod, ResourceScope, ResourceUsage,
     RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
@@ -106,16 +108,47 @@ pub struct GsuiteDispatchResult {
     pub usage: ResourceUsage,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GsuiteDispatchReason {
+    Credential(GsuiteCredentialDispatchReason),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GsuiteCredentialDispatchReason {
+    MissingAccount,
+    AccountSelectionRequired,
+    MissingScopes { missing_scopes: Vec<ProviderScope> },
+    MissingAccessSecret,
+    PendingSetup,
+    Inactive,
+    Expired,
+    RefreshFailed,
+    Revoked,
+    UnknownRecovery,
+    BackendAuth,
+    HostApi,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("GSuite capability dispatch failed: {kind}")]
 pub struct GsuiteDispatchError {
     kind: RuntimeDispatchErrorKind,
+    reason: Option<GsuiteDispatchReason>,
     usage: Option<ResourceUsage>,
 }
 
 impl GsuiteDispatchError {
     pub fn new(kind: RuntimeDispatchErrorKind) -> Self {
-        Self { kind, usage: None }
+        Self {
+            kind,
+            reason: None,
+            usage: None,
+        }
+    }
+
+    pub fn with_reason(mut self, reason: GsuiteDispatchReason) -> Self {
+        self.reason = Some(reason);
+        self
     }
 
     pub fn with_usage(mut self, usage: ResourceUsage) -> Self {
@@ -125,6 +158,10 @@ impl GsuiteDispatchError {
 
     pub fn kind(&self) -> RuntimeDispatchErrorKind {
         self.kind
+    }
+
+    pub fn reason(&self) -> Option<&GsuiteDispatchReason> {
+        self.reason.as_ref()
     }
 
     pub fn usage(&self) -> Option<&ResourceUsage> {
@@ -561,17 +598,127 @@ fn runtime_request(
 }
 
 fn map_credential_error(error: GoogleCredentialError) -> GsuiteDispatchError {
-    let kind = match error {
-        GoogleCredentialError::Missing
-        | GoogleCredentialError::AccountSelectionRequired
-        | GoogleCredentialError::NotConfigured
-        | GoogleCredentialError::MissingAccessSecret
-        | GoogleCredentialError::MissingScopes => RuntimeDispatchErrorKind::Client,
-        GoogleCredentialError::Auth(_) | GoogleCredentialError::HostApi(_) => {
-            RuntimeDispatchErrorKind::Backend
+    match error {
+        GoogleCredentialError::Recovery(recovery) => {
+            let (kind, reason) = match (recovery.kind(), recovery.reason) {
+                (CredentialRecoveryKind::SetupRequired, CredentialRecoveryReason::NoAccount)
+                | (
+                    CredentialRecoveryKind::SetupRequired,
+                    CredentialRecoveryReason::AccountMissing,
+                ) => (
+                    RuntimeDispatchErrorKind::Client,
+                    GsuiteCredentialDispatchReason::MissingAccount,
+                ),
+                (CredentialRecoveryKind::SetupRequired, CredentialRecoveryReason::PendingSetup) => {
+                    (
+                        RuntimeDispatchErrorKind::Client,
+                        GsuiteCredentialDispatchReason::PendingSetup,
+                    )
+                }
+                (
+                    CredentialRecoveryKind::SetupRequired,
+                    CredentialRecoveryReason::AccountInactive,
+                ) => (
+                    RuntimeDispatchErrorKind::Client,
+                    GsuiteCredentialDispatchReason::Inactive,
+                ),
+                (
+                    CredentialRecoveryKind::ReauthorizeRequired,
+                    CredentialRecoveryReason::AccountExpired,
+                ) => (
+                    RuntimeDispatchErrorKind::Client,
+                    GsuiteCredentialDispatchReason::Expired,
+                ),
+                (
+                    CredentialRecoveryKind::ReauthorizeRequired,
+                    CredentialRecoveryReason::RefreshFailed,
+                ) => (
+                    RuntimeDispatchErrorKind::Client,
+                    GsuiteCredentialDispatchReason::RefreshFailed,
+                ),
+                (
+                    CredentialRecoveryKind::ReauthorizeRequired,
+                    CredentialRecoveryReason::AccountRevoked,
+                ) => (
+                    RuntimeDispatchErrorKind::Client,
+                    GsuiteCredentialDispatchReason::Revoked,
+                ),
+                (
+                    CredentialRecoveryKind::AccountSelectionRequired,
+                    CredentialRecoveryReason::AmbiguousAccount,
+                ) => (
+                    RuntimeDispatchErrorKind::Client,
+                    GsuiteCredentialDispatchReason::AccountSelectionRequired,
+                ),
+                (
+                    CredentialRecoveryKind::Configured,
+                    CredentialRecoveryReason::Configured
+                    | CredentialRecoveryReason::NoAccount
+                    | CredentialRecoveryReason::AccountMissing
+                    | CredentialRecoveryReason::PendingSetup
+                    | CredentialRecoveryReason::AccountExpired
+                    | CredentialRecoveryReason::RefreshFailed
+                    | CredentialRecoveryReason::AccountRevoked
+                    | CredentialRecoveryReason::AccountInactive
+                    | CredentialRecoveryReason::AmbiguousAccount,
+                )
+                | (
+                    CredentialRecoveryKind::SetupRequired,
+                    CredentialRecoveryReason::Configured
+                    | CredentialRecoveryReason::AccountExpired
+                    | CredentialRecoveryReason::RefreshFailed
+                    | CredentialRecoveryReason::AccountRevoked
+                    | CredentialRecoveryReason::AmbiguousAccount,
+                )
+                | (
+                    CredentialRecoveryKind::ReauthorizeRequired,
+                    CredentialRecoveryReason::Configured
+                    | CredentialRecoveryReason::NoAccount
+                    | CredentialRecoveryReason::AccountMissing
+                    | CredentialRecoveryReason::PendingSetup
+                    | CredentialRecoveryReason::AccountInactive
+                    | CredentialRecoveryReason::AmbiguousAccount,
+                )
+                | (
+                    CredentialRecoveryKind::AccountSelectionRequired,
+                    CredentialRecoveryReason::Configured
+                    | CredentialRecoveryReason::NoAccount
+                    | CredentialRecoveryReason::AccountMissing
+                    | CredentialRecoveryReason::PendingSetup
+                    | CredentialRecoveryReason::AccountExpired
+                    | CredentialRecoveryReason::RefreshFailed
+                    | CredentialRecoveryReason::AccountRevoked
+                    | CredentialRecoveryReason::AccountInactive,
+                ) => (
+                    RuntimeDispatchErrorKind::Backend,
+                    GsuiteCredentialDispatchReason::UnknownRecovery,
+                ),
+            };
+            GsuiteDispatchError::new(kind).with_reason(GsuiteDispatchReason::Credential(reason))
         }
-    };
-    GsuiteDispatchError::new(kind)
+        GoogleCredentialError::MissingScopes { missing_scopes } => GsuiteDispatchError::new(
+            RuntimeDispatchErrorKind::Client,
+        )
+        .with_reason(GsuiteDispatchReason::Credential(
+            GsuiteCredentialDispatchReason::MissingScopes { missing_scopes },
+        )),
+        GoogleCredentialError::MissingAccessSecret => GsuiteDispatchError::new(
+            RuntimeDispatchErrorKind::Client,
+        )
+        .with_reason(GsuiteDispatchReason::Credential(
+            GsuiteCredentialDispatchReason::MissingAccessSecret,
+        )),
+        GoogleCredentialError::Auth(_) => {
+            GsuiteDispatchError::new(RuntimeDispatchErrorKind::Backend).with_reason(
+                GsuiteDispatchReason::Credential(GsuiteCredentialDispatchReason::BackendAuth),
+            )
+        }
+        GoogleCredentialError::HostApi(_) => {
+            GsuiteDispatchError::new(RuntimeDispatchErrorKind::Backend).with_reason(
+                GsuiteDispatchReason::Credential(GsuiteCredentialDispatchReason::HostApi),
+            )
+        }
+    }
 }
 
 fn map_egress_error(error: RuntimeHttpEgressError) -> GsuiteDispatchError {
@@ -813,17 +960,42 @@ mod tests {
     #[test]
     fn map_credential_error_tests() {
         for error in [
-            GoogleCredentialError::Missing,
-            GoogleCredentialError::AccountSelectionRequired,
-            GoogleCredentialError::NotConfigured,
+            GoogleCredentialError::Recovery(
+                ironclaw_auth::CredentialRecoveryProjection::setup_required(
+                    ironclaw_auth::AuthProviderId::new("google").unwrap(),
+                    ironclaw_auth::CredentialRecoveryReason::NoAccount,
+                    Vec::new(),
+                ),
+            ),
+            GoogleCredentialError::Recovery(
+                ironclaw_auth::CredentialRecoveryProjection::account_selection_required(
+                    ironclaw_auth::AuthProviderId::new("google").unwrap(),
+                    Vec::new(),
+                ),
+            ),
             GoogleCredentialError::MissingAccessSecret,
-            GoogleCredentialError::MissingScopes,
+            GoogleCredentialError::MissingScopes {
+                missing_scopes: Vec::new(),
+            },
         ] {
             assert_eq!(
                 map_credential_error(error).kind(),
                 RuntimeDispatchErrorKind::Client
             );
         }
+
+        let selection = map_credential_error(GoogleCredentialError::Recovery(
+            ironclaw_auth::CredentialRecoveryProjection::account_selection_required(
+                ironclaw_auth::AuthProviderId::new("google").unwrap(),
+                Vec::new(),
+            ),
+        ));
+        assert!(matches!(
+            selection.reason(),
+            Some(GsuiteDispatchReason::Credential(
+                GsuiteCredentialDispatchReason::AccountSelectionRequired
+            ))
+        ));
 
         assert_eq!(
             map_credential_error(GoogleCredentialError::Auth(
@@ -832,6 +1004,15 @@ mod tests {
             .kind(),
             RuntimeDispatchErrorKind::Backend
         );
+        assert!(matches!(
+            map_credential_error(GoogleCredentialError::Auth(
+                ironclaw_auth::AuthProductError::BackendUnavailable,
+            ))
+            .reason(),
+            Some(GsuiteDispatchReason::Credential(
+                GsuiteCredentialDispatchReason::BackendAuth
+            ))
+        ));
         assert_eq!(
             map_credential_error(GoogleCredentialError::HostApi(
                 HostApiError::InvariantViolation {
@@ -841,6 +1022,35 @@ mod tests {
             .kind(),
             RuntimeDispatchErrorKind::Backend
         );
+        assert!(matches!(
+            map_credential_error(GoogleCredentialError::HostApi(
+                HostApiError::InvariantViolation {
+                    reason: "bad contract".to_string(),
+                },
+            ))
+            .reason(),
+            Some(GsuiteDispatchReason::Credential(
+                GsuiteCredentialDispatchReason::HostApi
+            ))
+        ));
+
+        let impossible_recovery = map_credential_error(GoogleCredentialError::Recovery(
+            ironclaw_auth::CredentialRecoveryProjection::setup_required(
+                ironclaw_auth::AuthProviderId::new("google").unwrap(),
+                ironclaw_auth::CredentialRecoveryReason::RefreshFailed,
+                Vec::new(),
+            ),
+        ));
+        assert_eq!(
+            impossible_recovery.kind(),
+            RuntimeDispatchErrorKind::Backend
+        );
+        assert!(matches!(
+            impossible_recovery.reason(),
+            Some(GsuiteDispatchReason::Credential(
+                GsuiteCredentialDispatchReason::UnknownRecovery
+            ))
+        ));
     }
 
     #[test]

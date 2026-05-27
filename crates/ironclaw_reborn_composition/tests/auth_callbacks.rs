@@ -14,7 +14,7 @@ use ironclaw_auth::{
     OAuthProviderRefresh, OAuthProviderRefreshRequest, OpaqueStateHash, PkceVerifierHash,
     PkceVerifierSecret, ProviderScope,
 };
-use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
+use ironclaw_host_api::{InvocationId, ResourceScope, SecretHandle, UserId};
 use ironclaw_reborn_composition::{
     RebornAuthContinuationDispatcher, RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
     RebornOAuthCallbackResponse, RebornProductAuthServices,
@@ -97,6 +97,37 @@ impl AuthProviderClient for CountingProviderClient {
     ) -> Result<OAuthProviderRefresh, AuthProductError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Err(AuthProductError::RefreshFailed)
+    }
+}
+
+#[derive(Default)]
+struct SuccessfulCountingProviderClient {
+    calls: AtomicUsize,
+}
+
+impl SuccessfulCountingProviderClient {
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl AuthProviderClient for SuccessfulCountingProviderClient {
+    async fn exchange_callback(
+        &self,
+        request: OAuthProviderCallbackRequest,
+    ) -> Result<OAuthProviderExchange, AuthProductError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(OAuthProviderExchange {
+            provider: request.provider,
+            account_label: request.account_label,
+            authorization_code_hash: request.authorization_code_hash,
+            pkce_verifier_hash: request.pkce_verifier_hash,
+            access_secret: SecretHandle::new("oauth-access").unwrap(),
+            refresh_secret: Some(SecretHandle::new("oauth-refresh").unwrap()),
+            scopes: request.scopes,
+            account_id: None,
+        })
     }
 }
 
@@ -255,7 +286,7 @@ async fn oauth_callback_handler_completes_flow_and_dispatches_typed_continuation
 }
 
 #[tokio::test]
-async fn oauth_callback_handler_preserves_continuation_dispatch_error() {
+async fn oauth_callback_handler_reports_completed_continuation_dispatch_failure_as_retryable() {
     let shared_auth = Arc::new(InMemoryAuthProductServices::new());
     let services = RebornProductAuthServices::from_shared(
         shared_auth.clone(),
@@ -271,17 +302,28 @@ async fn oauth_callback_handler_preserves_continuation_dispatch_error() {
         .await
         .expect_err("dispatch failure is reported to caller");
 
-    assert_eq!(error.code, AuthErrorCode::TokenExchangeFailed);
-    assert!(!error.retryable);
+    assert_eq!(error.code, AuthErrorCode::BackendUnavailable);
+    assert!(error.retryable);
 
     let dispatcher = Arc::new(RecordingContinuationDispatcher::default());
-    let retry = RebornProductAuthServices::from_shared(shared_auth, dispatcher.clone())
+    let provider_client = Arc::new(SuccessfulCountingProviderClient::default());
+    let retry_services = RebornProductAuthServices::new(
+        shared_auth.clone(),
+        shared_auth.clone(),
+        shared_auth.clone(),
+        shared_auth.clone(),
+        provider_client.clone(),
+        shared_auth,
+        dispatcher.clone(),
+    );
+    let retry = retry_services
         .handle_oauth_callback(authorized_request(owner.clone(), flow_id))
         .await
         .expect("completed callback can be retried for continuation dispatch");
 
     assert_eq!(retry.flow_id, flow_id);
     assert_eq!(retry.status, ironclaw_auth::AuthFlowStatus::Completed);
+    assert_eq!(provider_client.calls(), 0);
     assert_eq!(dispatcher.events().len(), 1);
 }
 

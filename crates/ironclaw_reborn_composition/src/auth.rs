@@ -621,6 +621,12 @@ impl RebornProductAuthServices {
                 error_code = ?error.code(),
                 "reborn auth callback completed but continuation dispatch failed"
             );
+            let error = match error {
+                AuthProductError::TokenExchangeFailed
+                | AuthProductError::ProviderDenied
+                | AuthProductError::MalformedCallback => AuthProductError::BackendUnavailable,
+                error => error,
+            };
             return Err(error.into());
         }
 
