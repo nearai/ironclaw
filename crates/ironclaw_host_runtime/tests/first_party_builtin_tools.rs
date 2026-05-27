@@ -236,6 +236,38 @@ async fn builtin_echo_invokes_through_host_runtime() {
 }
 
 #[tokio::test]
+async fn builtin_time_tolerates_null_string_sentinels_in_optional_fields() {
+    // Weaker models (e.g. quantized local models) tend to fill every optional
+    // parameter with the literal string "null" instead of omitting it. Those
+    // sentinels in optional fields must be treated as absent, not abort the run.
+    let output = invoke(
+        TIME_CAPABILITY_ID,
+        json!({
+            "operation": "now",
+            "timezone": "null",
+            "from_timezone": "null",
+            "format": "null"
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(
+        output.get("iso").and_then(Value::as_str).is_some(),
+        "time `now` should return an iso timestamp, got {output:?}"
+    );
+}
+
+#[tokio::test]
+async fn builtin_echo_preserves_null_string_in_required_field() {
+    // The optional-sentinel normalization must never touch required fields, so a
+    // deliberate "null" payload still round-trips unchanged.
+    let output = invoke(ECHO_CAPABILITY_ID, json!({"message": "null"}))
+        .await
+        .unwrap();
+    assert_eq!(output, Value::String("null".to_string()));
+}
+
+#[tokio::test]
 async fn builtin_spawn_subagent_authorization_invokes_through_host_runtime() {
     let output = invoke(SPAWN_SUBAGENT_CAPABILITY_ID, json!({}))
         .await
