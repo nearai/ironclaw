@@ -52,6 +52,8 @@ use crate::{
 };
 
 mod extension_surface;
+#[cfg(test)]
+mod shell_tests;
 mod surface_disclosure;
 
 use extension_surface::{LocalDevExtensionSurface, LocalDevExtensionSurfaceSource};
@@ -170,7 +172,11 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
             Arc::clone(&self.result_writer),
             Arc::clone(&self.milestone_sink),
         )
-        .with_execution_mounts(workspace_mounts);
+        .with_execution_mounts(workspace_mounts)
+        .with_capability_execution_mount(
+            CapabilityId::new(SHELL_CAPABILITY_ID).map_err(host_api_agent_loop_error)?,
+            MountView::default(),
+        );
         for capability_id in local_dev_skill_management_capability_ids() {
             factory = factory.with_capability_execution_mount(
                 CapabilityId::new(capability_id).map_err(host_api_agent_loop_error)?,
@@ -829,12 +835,9 @@ pub(super) fn local_dev_grant_constraints(
     match local_dev_capability_kind(capability_id) {
         LocalDevCapabilityKind::AmbientShell => GrantConstraints {
             allowed_effects: local_dev_shell_allowed_effects(),
-            // The first-party shell handler still uses direct host process
-            // execution. It fails closed when scoped mounts are attached
-            // because it cannot safely translate virtual cwd values like
-            // `/workspace` to host paths yet. Local-dev exposes shell as an
-            // explicitly ambient developer escape hatch until mount-aware
-            // process execution lands.
+            // Shell is an ambient local developer escape hatch. Keep scoped
+            // execution mounts off the handler; local-dev-yolo path aliases are
+            // translated by the selected local process port.
             mounts: MountView::default(),
             network: local_dev_shell_network_policy(),
             secrets: Vec::new(),
