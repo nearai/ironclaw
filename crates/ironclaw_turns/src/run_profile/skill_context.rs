@@ -18,9 +18,9 @@
 //! # Fail-closed semantics
 //!
 //! If trust or visibility data is missing, the snapshot version does not match entries,
-//! model-visible fields contain unsafe internal markers, or prompt content exceeds configured
-//! context budgets, the service returns an error rather than silently degrading. This ensures
-//! that an unconfigured or corrupt snapshot never leaks capabilities to the model.
+//! or model-visible fields contain unsafe internal markers, the service returns an error rather
+//! than silently degrading. Safe-but-oversized prompt content is omitted from model context so
+//! advisory skill context cannot block unrelated turns.
 //!
 //! # Determinism
 //!
@@ -38,6 +38,7 @@ use thiserror::Error;
 
 use crate::LoopMessageRef;
 
+use super::host::MODEL_SAFE_TEXT_MAX_BYTES;
 use super::snippet_ref::stable_skill_snippet_display_hash;
 use super::{
     AgentLoopHostError, AgentLoopHostErrorKind, LoopContextSnippet, LoopContextSnippetMetadata,
@@ -72,7 +73,7 @@ pub enum SkillContextError {
     #[error("skill context: budget misconfigured")]
     BudgetMisconfigured,
 
-    /// Model-visible skill context exceeds configured context budgets.
+    /// Model-visible skill context exceeded a budget in a path that cannot degrade.
     #[error("skill context: context budget exceeded")]
     ContextBudgetExceeded,
 
@@ -129,13 +130,14 @@ impl SkillTrustLevel {
 // ---------------------------------------------------------------------------
 
 const EMPTY_SNAPSHOT_VERSION: &str = "empty";
-const DEFAULT_MAX_SKILL_SNIPPET_BYTES: usize = 4 * 1024;
+const DEFAULT_MAX_SKILL_SNIPPET_BYTES: usize = MODEL_SAFE_TEXT_MAX_BYTES;
 const DEFAULT_MAX_SKILL_CONTEXT_BYTES: usize = 32 * 1024;
 
 /// Byte budgets for model-visible skill context produced by [`SkillContextService`].
 ///
 /// Hosts can map a run's context profile to these limits via
-/// [`SkillContextService::with_budget`]. Both limits fail closed when exceeded.
+/// [`SkillContextService::with_budget`]. Valid budgets are enforced by omitting
+/// oversized advisory snippets; invalid budget configuration fails closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SkillContextBudget {
     /// Maximum bytes for one snippet summary.
@@ -336,15 +338,32 @@ impl SkillContextSource for SkillContextService {
 
         for entry in visible {
             validate_model_visible_skill_name(&entry.name)?;
-            let safe_summary = skill_safe_summary(entry, self.budget)?;
+            let Some(safe_summary) = skill_safe_summary(entry, self.budget)? else {
+                continue;
+            };
 
             let snippet_ref = format!("skill:{}", entry.name);
-            total_bytes = checked_context_total_bytes(
+            let next_total = match checked_context_total_bytes(
                 total_bytes,
                 snippet_ref.len(),
                 safe_summary.len(),
                 self.budget.max_context_bytes,
-            )?;
+            ) {
+                Ok(total) => total,
+                Err(SkillContextError::ContextBudgetExceeded) => {
+                    tracing::debug!(
+                        skill_name = %entry.name,
+                        snippet_ref,
+                        current_context_bytes = total_bytes,
+                        safe_summary_bytes = safe_summary.len(),
+                        max_context_bytes = self.budget.max_context_bytes,
+                        "skill context aggregate budget exhausted; omitting skill snippet"
+                    );
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            total_bytes = next_total;
 
             snippets.push(SkillContextSnippet {
                 snippet_ref,
@@ -361,26 +380,34 @@ impl SkillContextSource for SkillContextService {
 fn skill_safe_summary(
     entry: &InstalledSkillSnapshot,
     budget: SkillContextBudget,
-) -> Result<String, SkillContextError> {
+) -> Result<Option<String>, SkillContextError> {
     let description = entry.safe_description.clone();
     validate_model_visible_text(&description)?;
 
     match entry.trust {
         SkillTrustLevel::Installed => {
-            validate_summary_budget(&entry.name, &description, budget.max_snippet_bytes)?;
-            Ok(description)
+            if summary_fits_budget(&entry.name, &description, budget.max_snippet_bytes) {
+                Ok(Some(description))
+            } else {
+                Ok(None)
+            }
         }
         SkillTrustLevel::Trusted => {
             let Some(content) = entry.prompt_content.as_ref() else {
-                validate_summary_budget(&entry.name, &description, budget.max_snippet_bytes)?;
-                return Ok(description);
+                return if summary_fits_budget(&entry.name, &description, budget.max_snippet_bytes) {
+                    Ok(Some(description))
+                } else {
+                    Ok(None)
+                };
             };
             let combined = format!("{description}\n\n{content}");
             validate_model_visible_text(&combined)?;
             if combined.len() <= budget.max_snippet_bytes {
-                return Ok(combined);
+                return Ok(Some(combined));
             }
-            validate_summary_budget(&entry.name, &description, budget.max_snippet_bytes)?;
+            if !summary_fits_budget(&entry.name, &description, budget.max_snippet_bytes) {
+                return Ok(None);
+            }
             tracing::debug!(
                 skill_name = %entry.name,
                 combined_safe_summary_bytes = combined.len(),
@@ -388,16 +415,12 @@ fn skill_safe_summary(
                 max_snippet_bytes = budget.max_snippet_bytes,
                 "trusted skill prompt context exceeded snippet budget; using description only"
             );
-            Ok(description)
+            Ok(Some(description))
         }
     }
 }
 
-fn validate_summary_budget(
-    skill_name: &str,
-    safe_summary: &str,
-    max_snippet_bytes: usize,
-) -> Result<(), SkillContextError> {
+fn summary_fits_budget(skill_name: &str, safe_summary: &str, max_snippet_bytes: usize) -> bool {
     if safe_summary.len() > max_snippet_bytes {
         tracing::debug!(
             skill_name,
@@ -405,9 +428,9 @@ fn validate_summary_budget(
             max_snippet_bytes,
             "skill context summary exceeded snippet budget"
         );
-        return Err(SkillContextError::ContextBudgetExceeded);
+        return false;
     }
-    Ok(())
+    true
 }
 
 // ---------------------------------------------------------------------------

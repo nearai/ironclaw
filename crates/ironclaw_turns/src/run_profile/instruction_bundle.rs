@@ -15,7 +15,7 @@ use super::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityDescriptorView, LoopContextBundle,
     LoopContextMessage, LoopContextSnippet, LoopInlineMessage, LoopInlineMessageRole,
     LoopModelMessage, LoopRunContext, PromptSkillContextMetadata, VisibleCapabilitySurface,
-    skill_snippet_model_message_ref,
+    host::MODEL_SAFE_TEXT_MAX_BYTES, skill_snippet_model_message_ref,
 };
 
 /// Stable fingerprint for an instruction bundle rebuild.
@@ -779,7 +779,7 @@ fn validate_model_safe_text(
     value: String,
     label: &'static str,
 ) -> Result<String, AgentLoopHostError> {
-    if value.is_empty() || value.len() > 4096 {
+    if value.is_empty() || value.len() > MODEL_SAFE_TEXT_MAX_BYTES {
         return Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::PolicyDenied,
             format!("{label} is not model-safe"),

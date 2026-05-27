@@ -33,6 +33,8 @@ const FORBIDDEN_MODEL_ROUTE_MARKERS: &[&str] = &[
 
 const FORBIDDEN_EXACT_MODEL_ROUTE_MARKERS: &[&str] = &["bearer"];
 
+pub(super) const MODEL_SAFE_TEXT_MAX_BYTES: usize = 4 * 1024;
+
 fn validate_bounded_loop_string(
     value: String,
     label: &'static str,

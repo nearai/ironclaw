@@ -272,18 +272,18 @@ async fn tampered_snapshot_version_fails_closed() {
 }
 
 #[tokio::test]
-async fn oversized_single_snippet_fails_budget() {
+async fn oversized_single_snippet_is_omitted_from_context() {
     let snapshot =
         SkillRunSnapshot::from_entries(vec![visible_installed("alpha", &"x".repeat(128))]);
     let service =
         SkillContextService::with_budget(snapshot.clone(), SkillContextBudget::new(64, 512));
 
-    let err = service.skill_snippets(&snapshot).await.unwrap_err();
-    assert_eq!(err, SkillContextError::ContextBudgetExceeded);
+    let snippets = service.skill_snippets(&snapshot).await.unwrap();
+    assert!(snippets.is_empty());
 }
 
 #[tokio::test]
-async fn aggregate_skill_context_fails_budget() {
+async fn aggregate_skill_context_omits_entries_after_budget_exhaustion() {
     let snapshot = SkillRunSnapshot::from_entries(vec![
         visible_trusted("alpha", "first description", "first prompt"),
         visible_trusted("beta", "second description", "second prompt"),
@@ -291,8 +291,9 @@ async fn aggregate_skill_context_fails_budget() {
     let service =
         SkillContextService::with_budget(snapshot.clone(), SkillContextBudget::new(40, 64));
 
-    let err = service.skill_snippets(&snapshot).await.unwrap_err();
-    assert_eq!(err, SkillContextError::ContextBudgetExceeded);
+    let snippets = service.skill_snippets(&snapshot).await.unwrap();
+    assert_eq!(snippets.len(), 1);
+    assert_eq!(snippets[0].snippet_ref, "skill:alpha");
 }
 
 #[tokio::test]
