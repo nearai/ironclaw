@@ -28,7 +28,7 @@ use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
 use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
 use ironclaw_host_api::runtime_policy::FilesystemBackendKind;
 use ironclaw_host_api::{
-    EffectKind, HostPath, MountPermissions, MountView, PackageId, UserId, VirtualPath,
+    EffectKind, ExtensionId, HostPath, MountPermissions, MountView, PackageId, UserId, VirtualPath,
 };
 #[cfg(feature = "libsql")]
 use ironclaw_host_api::{MountAlias, MountGrant};
@@ -80,6 +80,9 @@ use crate::{
     },
     extension_installation_store::FilesystemExtensionInstallationStore,
     extension_lifecycle::{RebornLocalExtensionManagementPort, restore_extension_lifecycle_state},
+    extension_lifecycle_capabilities::{
+        extend_builtin_first_party_package, insert_handlers as insert_extension_lifecycle_handlers,
+    },
     gsuite::register_bundled_gsuite_first_party_handlers,
 };
 
@@ -391,14 +394,13 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     })?;
 
     let mut services = HostRuntimeServices::new(
-        Arc::new(builtin_extension_registry()?),
+        Arc::new(local_dev_builtin_extension_registry()?),
         Arc::clone(&filesystem),
         Arc::clone(&store_graph.resource_governor),
         Arc::new(GrantAuthorizer::new()),
         store_graph.process_services.clone(),
         CapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
-    .with_first_party_capabilities(Arc::new(first_party_registry))
     .with_trust_policy(Arc::new(local_dev_first_party_trust_policy()?))
     .with_secret_store(Arc::new(ironclaw_secrets::InMemorySecretStore::new()))
     .try_with_host_http_egress_with_body_store(
@@ -459,6 +461,14 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         extension_lifecycle_service,
         active_registry,
     ));
+    insert_extension_lifecycle_handlers(
+        &mut first_party_registry,
+        Arc::clone(&extension_management),
+    )
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("local-dev extension lifecycle handlers are invalid: {error}"),
+    })?;
+    services = services.with_first_party_capabilities(Arc::new(first_party_registry));
     if let Some(local_runtime) = Arc::get_mut(&mut store_graph.local_runtime) {
         local_runtime.extension_management = Some(extension_management);
     } else {
@@ -953,6 +963,30 @@ fn builtin_first_party_registry() -> Result<FirstPartyCapabilityRegistry, Reborn
     builtin_first_party_handlers().map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("built-in first-party handlers are invalid: {error}"),
     })
+}
+
+fn local_dev_builtin_extension_registry() -> Result<ExtensionRegistry, RebornBuildError> {
+    let mut registry = builtin_extension_registry()?;
+    let builtin_id =
+        ExtensionId::new("builtin").map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("built-in first-party package id is invalid: {error}"),
+        })?;
+    let package = registry
+        .remove(&builtin_id)
+        .ok_or_else(|| RebornBuildError::InvalidConfig {
+            reason: "built-in first-party package is missing".to_string(),
+        })?;
+    let package = extend_builtin_first_party_package(package).map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("local-dev extension lifecycle package is invalid: {error}"),
+        }
+    })?;
+    registry
+        .insert(package)
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("local-dev built-in first-party registry is invalid: {error}"),
+        })?;
+    Ok(registry)
 }
 
 fn local_dev_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuildError> {

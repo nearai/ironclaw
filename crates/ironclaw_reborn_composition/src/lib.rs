@@ -26,6 +26,7 @@ mod default_system_prompt;
 mod error;
 mod extension_installation_store;
 mod extension_lifecycle;
+mod extension_lifecycle_capabilities;
 mod extension_lifecycle_command;
 mod factory;
 mod gsuite;

@@ -40,6 +40,11 @@ use ironclaw_turns::{
     },
 };
 
+use crate::extension_lifecycle_capabilities::{
+    EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID,
+    EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SEARCH_CAPABILITY_ID,
+};
+
 use crate::local_dev_mounts::skill_management_mount_view;
 use crate::{
     RebornServices,
@@ -771,6 +776,8 @@ enum LocalDevCapabilityKind {
     Workspace,
     AmbientShell,
     Network,
+    ExtensionLifecycleSearch,
+    ExtensionLifecycleMutation,
     SkillInstall,
     SkillManagement,
 }
@@ -780,6 +787,13 @@ fn local_dev_capability_kind(capability_id: &str) -> LocalDevCapabilityKind {
         LocalDevCapabilityKind::AmbientShell
     } else if capability_id == HTTP_CAPABILITY_ID {
         LocalDevCapabilityKind::Network
+    } else if capability_id == EXTENSION_SEARCH_CAPABILITY_ID {
+        LocalDevCapabilityKind::ExtensionLifecycleSearch
+    } else if capability_id == EXTENSION_INSTALL_CAPABILITY_ID
+        || capability_id == EXTENSION_ACTIVATE_CAPABILITY_ID
+        || capability_id == EXTENSION_REMOVE_CAPABILITY_ID
+    {
+        LocalDevCapabilityKind::ExtensionLifecycleMutation
     } else if capability_id == SKILL_INSTALL_CAPABILITY_ID {
         LocalDevCapabilityKind::SkillInstall
     } else if capability_id == SKILL_LIST_CAPABILITY_ID
@@ -832,6 +846,24 @@ pub(super) fn local_dev_grant_constraints(
             expires_at: None,
             max_invocations: None,
         },
+        LocalDevCapabilityKind::ExtensionLifecycleSearch => GrantConstraints {
+            allowed_effects: local_dev_extension_lifecycle_search_allowed_effects(),
+            mounts: MountView::default(),
+            network: NetworkPolicy::default(),
+            secrets: Vec::new(),
+            resource_ceiling: None,
+            expires_at: None,
+            max_invocations: None,
+        },
+        LocalDevCapabilityKind::ExtensionLifecycleMutation => GrantConstraints {
+            allowed_effects: local_dev_allowed_effects(),
+            mounts: MountView::default(),
+            network: NetworkPolicy::default(),
+            secrets: Vec::new(),
+            resource_ceiling: None,
+            expires_at: None,
+            max_invocations: None,
+        },
         LocalDevCapabilityKind::Workspace => GrantConstraints {
             allowed_effects: local_dev_allowed_effects(),
             mounts: workspace_mounts.clone(),
@@ -862,7 +894,7 @@ pub(super) fn local_dev_grant_constraints(
     }
 }
 
-fn local_dev_builtin_capability_ids() -> [&'static str; 14] {
+fn local_dev_builtin_capability_ids() -> [&'static str; 18] {
     [
         ECHO_CAPABILITY_ID,
         TIME_CAPABILITY_ID,
@@ -875,6 +907,10 @@ fn local_dev_builtin_capability_ids() -> [&'static str; 14] {
         GLOB_CAPABILITY_ID,
         GREP_CAPABILITY_ID,
         APPLY_PATCH_CAPABILITY_ID,
+        EXTENSION_SEARCH_CAPABILITY_ID,
+        EXTENSION_INSTALL_CAPABILITY_ID,
+        EXTENSION_ACTIVATE_CAPABILITY_ID,
+        EXTENSION_REMOVE_CAPABILITY_ID,
         SKILL_LIST_CAPABILITY_ID,
         SKILL_INSTALL_CAPABILITY_ID,
         SKILL_REMOVE_CAPABILITY_ID,
@@ -883,6 +919,10 @@ fn local_dev_builtin_capability_ids() -> [&'static str; 14] {
 
 fn local_dev_network_allowed_effects() -> Vec<EffectKind> {
     vec![EffectKind::DispatchCapability, EffectKind::Network]
+}
+
+fn local_dev_extension_lifecycle_search_allowed_effects() -> Vec<EffectKind> {
+    vec![EffectKind::DispatchCapability, EffectKind::ReadFilesystem]
 }
 
 fn local_dev_allowed_effects() -> Vec<EffectKind> {
