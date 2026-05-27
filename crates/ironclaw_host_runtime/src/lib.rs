@@ -1022,14 +1022,6 @@ impl<N, S> HostHttpEgressService<N, S> {
         self
     }
 
-    pub fn network(&self) -> &N {
-        &self.network
-    }
-
-    pub fn secrets(&self) -> &S {
-        &self.secrets
-    }
-
     fn network_policy_for_request(
         &self,
         request: &mut RuntimeHttpEgressRequest,

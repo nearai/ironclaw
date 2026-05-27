@@ -19,6 +19,11 @@ ironclaw-reborn completion --shell bash
 ironclaw-reborn completion --shell zsh
 ironclaw-reborn config path
 ironclaw-reborn doctor
+ironclaw-reborn extension search github
+ironclaw-reborn extension search github --json
+ironclaw-reborn extension install github-mcp
+ironclaw-reborn extension activate github-mcp
+ironclaw-reborn extension remove github-mcp
 ironclaw-reborn hooks list
 ironclaw-reborn hooks list --json
 ironclaw-reborn hooks list --verbose
@@ -69,6 +74,28 @@ Expected fields include:
 - `configured: 0`
 - `status: not-wired`
 - `v1_state: not-used`
+
+### `extension`
+
+Searches and manages local-dev Reborn extensions through the same lifecycle facade exposed to product surfaces. Available extension packages are read from `/system/extensions`, which maps to `<reborn-home>/local-dev/system/extensions` for the local-dev profile.
+
+```bash
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- extension search github
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- extension search github --json
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- extension install github-mcp
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- extension activate github-mcp
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- extension remove github-mcp
+```
+
+The commands are scoped to Reborn boot/config resolution and do not create or read v1 state directories.
+
+Expected fields include:
+
+- `phase`
+- `package_ref.id` for package-specific commands
+- `payload.kind`
+- `payload.count` and `payload.extensions[].package_ref.id` for search
+- `payload.installed`, `payload.activated`, or `payload.removed` for lifecycle mutations
 
 ### `completion`
 
