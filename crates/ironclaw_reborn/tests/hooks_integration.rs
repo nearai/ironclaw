@@ -967,6 +967,7 @@ impl Fixture {
             gate_ref: None,
             failure: None,
             event_cursor: EventCursor(1),
+            expected_tx_hash: None,
         };
         let claimed = ClaimedTurnRun {
             state,

@@ -2,8 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AcceptedMessageRef, GateRef, IdempotencyKey, ReplyTargetBindingRef, RunProfileRequest,
-    SanitizedCancelReason, SourceBindingRef, TurnActor, TurnRunId, TurnScope,
+    AcceptedMessageRef, AttestationClaimRef, GateRef, IdempotencyKey, ReplyTargetBindingRef,
+    RunProfileRequest, SanitizedCancelReason, SourceBindingRef, TurnActor, TurnRunId, TurnScope,
 };
 
 pub type TurnTimestamp = DateTime<Utc>;
@@ -29,6 +29,12 @@ pub struct ResumeTurnRequest {
     pub source_binding_ref: SourceBindingRef,
     pub reply_target_binding_ref: ReplyTargetBindingRef,
     pub idempotency_key: IdempotencyKey,
+    /// Opaque, untrusted attestation claim for resuming a `BlockedAttested`
+    /// gate. Required for attested resumes (absent → fail closed); ignored for
+    /// `Approval`/`Auth`/`Resource` resumes. `ironclaw_turns` never verifies
+    /// this value — it forwards it to the injected `AttestedResumePort`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation: Option<AttestationClaimRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

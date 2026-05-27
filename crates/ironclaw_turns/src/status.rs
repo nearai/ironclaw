@@ -15,6 +15,17 @@ pub enum TurnStatus {
     BlockedApproval,
     BlockedAuth,
     BlockedResource,
+    /// Blocked awaiting an attested-signing ceremony. Resume validates the
+    /// untrusted attestation claim through the injected `AttestedResumePort`
+    /// and, on success, transitions to [`Self::AttestedResolved`] — never back
+    /// onto the normal agent-loop queue.
+    BlockedAttested,
+    /// An attested-signing gate has been validated and the run is handed off to
+    /// a straight-line signer continuation in the reborn/runner layer. This is
+    /// the deterministic terminal-of-turns transition for a resolved attested
+    /// gate: the crypto-free store sets this status only, and never invokes a
+    /// signer or performs chain I/O itself.
+    AttestedResolved,
     CancelRequested,
     Cancelled,
     Completed,
@@ -102,9 +113,23 @@ fn compatibility_profile_id(resolved: &ResolvedRunProfile) -> RunProfileId {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BlockedReason {
-    Approval { gate_ref: GateRef },
-    Auth { gate_ref: GateRef },
-    Resource { gate_ref: GateRef },
+    Approval {
+        gate_ref: GateRef,
+    },
+    Auth {
+        gate_ref: GateRef,
+    },
+    Resource {
+        gate_ref: GateRef,
+    },
+    /// Blocked awaiting an attested-signing ceremony. Carries the opaque
+    /// expected-transaction-hash binding alongside the gate so that, on resume,
+    /// the store can hand the binding to the injected `AttestedResumePort`. The
+    /// binding is metadata only — turns never verifies it.
+    Attested {
+        gate_ref: GateRef,
+        expected_tx_hash: crate::ApprovedTxHashRef,
+    },
 }
 
 impl BlockedReason {
@@ -113,14 +138,27 @@ impl BlockedReason {
             Self::Approval { .. } => TurnStatus::BlockedApproval,
             Self::Auth { .. } => TurnStatus::BlockedAuth,
             Self::Resource { .. } => TurnStatus::BlockedResource,
+            Self::Attested { .. } => TurnStatus::BlockedAttested,
         }
     }
 
     pub fn gate_ref(&self) -> &GateRef {
         match self {
-            Self::Approval { gate_ref } | Self::Auth { gate_ref } | Self::Resource { gate_ref } => {
-                gate_ref
-            }
+            Self::Approval { gate_ref }
+            | Self::Auth { gate_ref }
+            | Self::Resource { gate_ref }
+            | Self::Attested { gate_ref, .. } => gate_ref,
+        }
+    }
+
+    /// The opaque expected-transaction-hash binding, present only for an
+    /// attested-signing gate.
+    pub fn expected_tx_hash(&self) -> Option<&crate::ApprovedTxHashRef> {
+        match self {
+            Self::Attested {
+                expected_tx_hash, ..
+            } => Some(expected_tx_hash),
+            Self::Approval { .. } | Self::Auth { .. } | Self::Resource { .. } => None,
         }
     }
 }
@@ -279,6 +317,12 @@ pub struct TurnRunState {
     pub received_at: TurnTimestamp,
     pub checkpoint_id: Option<TurnCheckpointId>,
     pub gate_ref: Option<GateRef>,
+    /// Opaque expected-transaction-hash binding for a `BlockedAttested` gate.
+    /// Persisted alongside `gate_ref` when an attested gate is raised so resume
+    /// can pass it to the injected `AttestedResumePort`. `None` for every other
+    /// blocked reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_tx_hash: Option<crate::ApprovedTxHashRef>,
     pub failure: Option<SanitizedFailure>,
     pub event_cursor: EventCursor,
 }

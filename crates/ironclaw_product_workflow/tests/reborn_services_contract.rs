@@ -240,6 +240,7 @@ impl TurnCoordinator for FakeTurnCoordinator {
             run_id: TurnRunId::new(),
             status: TurnStatus::Queued,
             event_cursor: EventCursor(11),
+            replayed: false,
         })
     }
 
@@ -280,6 +281,7 @@ impl TurnCoordinator for FakeTurnCoordinator {
             gate_ref,
             failure: None,
             event_cursor: EventCursor(17),
+            expected_tx_hash: None,
         })
     }
 }

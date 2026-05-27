@@ -90,6 +90,11 @@ pub struct TurnRunRecord {
     pub resolved_model_route: Option<LoopModelRouteSnapshot>,
     pub checkpoint_id: Option<TurnCheckpointId>,
     pub gate_ref: Option<GateRef>,
+    /// Opaque expected-transaction-hash binding for a `BlockedAttested` gate.
+    /// `None` for every other blocked reason and for non-blocked runs. Defaults
+    /// to `None` when deserializing snapshots that predate attested signing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_tx_hash: Option<crate::ApprovedTxHashRef>,
     pub failure: Option<crate::SanitizedFailure>,
     pub event_cursor: EventCursor,
     pub runner_id: Option<TurnRunnerId>,

@@ -60,6 +60,11 @@ pub struct InMemoryTurnStateStore {
     inner: Mutex<Inner>,
     submit_idempotency_ready: Condvar,
     admission_limit_provider: Arc<dyn TurnAdmissionLimitProvider>,
+    /// Injected verifier for `BlockedAttested` resumes. `None` means no attested
+    /// gate can be resumed (resume fails closed). Mirrors how the admission
+    /// limit provider is injected; the implementation lives outside this
+    /// crypto-free crate.
+    attested_resume_port: Option<Arc<dyn crate::AttestedResumePort>>,
 }
 
 impl Default for InMemoryTurnStateStore {
@@ -119,6 +124,7 @@ struct RunRecord {
     reply_target_binding_ref: ReplyTargetBindingRef,
     checkpoint_id: Option<TurnCheckpointId>,
     gate_ref: Option<crate::GateRef>,
+    expected_tx_hash: Option<crate::ApprovedTxHashRef>,
     failure: Option<SanitizedFailure>,
     event_cursor: EventCursor,
     runner_id: Option<crate::TurnRunnerId>,
@@ -148,6 +154,16 @@ struct PersistedIdempotencyKey {
     operation: TurnIdempotencyOperationKind,
     run_id: Option<TurnRunId>,
     key: IdempotencyKey,
+}
+
+/// Owned bindings extracted under the store lock for an attested resume, so the
+/// external `verify_attested_resume` call can run without holding the lock. The
+/// values are re-validated against the live record when the lock is
+/// re-acquired, so this struct never substitutes for the canonical record.
+struct AttestedResumePrep {
+    gate_ref: crate::GateRef,
+    attestation: crate::AttestationClaimRef,
+    expected_tx_hash: crate::ApprovedTxHashRef,
 }
 
 fn profile_resolution_error_to_turn_error(error: RunProfileResolutionError) -> TurnError {
@@ -197,7 +213,18 @@ impl InMemoryTurnStateStore {
             }),
             submit_idempotency_ready: Condvar::new(),
             admission_limit_provider: Arc::new(AllowAllTurnAdmissionLimitProvider),
+            attested_resume_port: None,
         }
+    }
+
+    /// Inject the verifier used to validate `BlockedAttested` resumes.
+    ///
+    /// The implementation lives outside `ironclaw_turns`. Without it, attested
+    /// resumes fail closed. This is a builder so existing construction paths are
+    /// unchanged.
+    pub fn with_attested_resume_port(mut self, port: Arc<dyn crate::AttestedResumePort>) -> Self {
+        self.attested_resume_port = Some(port);
+        self
     }
 
     pub fn with_admission_limit_provider(
@@ -220,6 +247,7 @@ impl InMemoryTurnStateStore {
             }),
             submit_idempotency_ready: Condvar::new(),
             admission_limit_provider,
+            attested_resume_port: None,
         }
     }
 
@@ -257,6 +285,7 @@ impl InMemoryTurnStateStore {
             inner: Mutex::new(Inner::from_persistence_snapshot(snapshot, limits)?),
             submit_idempotency_ready: Condvar::new(),
             admission_limit_provider,
+            attested_resume_port: None,
         })
     }
 
@@ -481,6 +510,7 @@ impl TurnStateStore for InMemoryTurnStateStore {
             reply_target_binding_ref: request.reply_target_binding_ref.clone(),
             checkpoint_id: None,
             gate_ref: None,
+            expected_tx_hash: None,
             failure: None,
             event_cursor: cursor,
             runner_id: None,
@@ -537,9 +567,92 @@ impl TurnStateStore for InMemoryTurnStateStore {
             key: request.idempotency_key.clone(),
         };
         if let Some(result) = inner.resume_idempotency.get(&idempotency_key) {
-            return result.clone();
+            // Idempotency-cache hit: this is a same-key *replay* of a resume
+            // that already executed. Mark the returned success as `replayed` so
+            // the reborn signer-continuation layer can distinguish it from the
+            // original fresh transition and never fire the one-shot external
+            // signer twice for one attested gate. The cached/persisted record
+            // itself keeps the canonical fresh value (`replayed = false`).
+            return match result {
+                Ok(response) => Ok(ResumeTurnResponse {
+                    replayed: true,
+                    ..response.clone()
+                }),
+                Err(error) => Err(error.clone()),
+            };
         }
-        let result = inner.resume_turn_once(&request);
+        // Dispatch by the blocked reason the run is parked in. Standard gates
+        // (Approval/Auth/Resource) complete entirely under this lock. The
+        // attested gate must NOT hold the lock across the external
+        // `verify_attested_resume` call: that port may perform heavy crypto,
+        // network I/O, or re-enter this same store, so holding the synchronous
+        // `Mutex` across it risks serializing the whole store or deadlocking.
+        let status = match inner.record_status(request.run_id) {
+            Ok(status) => status,
+            Err(error) => {
+                let result = Err(error);
+                inner.remember_resume_idempotency(idempotency_key, result.clone(), Utc::now());
+                return result;
+            }
+        };
+
+        if status != TurnStatus::BlockedAttested {
+            // Standard gates and all rejected statuses resolve synchronously
+            // under the held lock with no external call.
+            let result = inner.resume_standard_once(&request);
+            inner.remember_resume_idempotency(idempotency_key, result.clone(), Utc::now());
+            return result;
+        }
+
+        // Attested gate: validate flat checks and extract the owned bindings
+        // under the lock WITHOUT mutating the record, then drop the lock before
+        // the external verification.
+        let prep = match inner.prepare_attested_resume(&request) {
+            Ok(prep) => prep,
+            Err(error) => {
+                let result = Err(error);
+                inner.remember_resume_idempotency(idempotency_key, result.clone(), Utc::now());
+                return result;
+            }
+        };
+        drop(inner);
+
+        // External verification runs with NO lock held. Crypto-free store: the
+        // verdict is the only thing that comes back; we never call a signer or
+        // touch the chain here.
+        let verdict = match self.attested_resume_port.as_deref() {
+            Some(port) => port.verify_attested_resume(crate::AttestedResumeRequest {
+                gate_ref: &prep.gate_ref,
+                attestation: &prep.attestation,
+                expected_tx_hash: &prep.expected_tx_hash,
+            }),
+            None => {
+                let result = Err(TurnError::Unavailable {
+                    reason: "attested resume port not configured".to_string(),
+                });
+                let mut inner = self.lock_inner()?;
+                inner.remember_resume_idempotency(idempotency_key, result.clone(), Utc::now());
+                return result;
+            }
+        };
+
+        // Re-acquire the lock and apply the verdict. `commit_attested_resume`
+        // re-validates that the run is still in `BlockedAttested` with the same
+        // gate and binding, so a concurrent transition between the lock windows
+        // cannot let a stale verdict drive a one-shot resume.
+        let mut inner = self.lock_inner()?;
+        // A concurrent caller may have resolved this exact idempotency key while
+        // the lock was released; honor that cached result as a replay.
+        if let Some(result) = inner.resume_idempotency.get(&idempotency_key) {
+            return match result {
+                Ok(response) => Ok(ResumeTurnResponse {
+                    replayed: true,
+                    ..response.clone()
+                }),
+                Err(error) => Err(error.clone()),
+            };
+        }
+        let result = inner.commit_attested_resume(&request, &prep, verdict);
         inner.remember_resume_idempotency(idempotency_key, result.clone(), Utc::now());
         result
     }
@@ -685,6 +798,7 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
             record.status = request.reason.status();
             record.checkpoint_id = Some(request.checkpoint_id);
             record.gate_ref = Some(request.reason.gate_ref().clone());
+            record.expected_tx_hash = request.reason.expected_tx_hash().cloned();
             record.runner_id = None;
             record.lease_token = None;
             record.lease_expires_at = None;
@@ -807,6 +921,7 @@ impl Inner {
                     reply_target_binding_ref: run.reply_target_binding_ref,
                     checkpoint_id: run.checkpoint_id,
                     gate_ref: run.gate_ref,
+                    expected_tx_hash: run.expected_tx_hash,
                     failure: run.failure,
                     event_cursor: run.event_cursor,
                     runner_id: run.runner_id,
@@ -1203,35 +1318,64 @@ impl Inner {
             .retain(|queued_run_id| *queued_run_id != run_id);
     }
 
-    fn resume_turn_once(
+    /// Peek the current status of a run for resume dispatch, without taking the
+    /// record out of the map. `ScopeNotFound` if the run is unknown.
+    fn record_status(&self, run_id: TurnRunId) -> Result<TurnStatus, TurnError> {
+        self.records
+            .get(&run_id)
+            .map(|record| record.status)
+            .ok_or(TurnError::ScopeNotFound)
+    }
+
+    /// Flat checks shared by every resume path: scope, the resuming actor, and a
+    /// matching gate reference. Status is checked by the caller because the
+    /// standard and attested paths accept disjoint status sets.
+    fn check_resume_preconditions(
+        record: &RunRecord,
+        request: &ResumeTurnRequest,
+    ) -> Result<(), TurnError> {
+        if record.scope != request.scope {
+            return Err(TurnError::ScopeNotFound);
+        }
+        if record.actor != request.actor {
+            return Err(TurnError::Unauthorized);
+        }
+        if record.gate_ref.as_ref() != Some(&request.gate_resolution_ref) {
+            return Err(TurnError::InvalidRequest {
+                reason: "gate resolution reference mismatch".to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Resume an `Approval`/`Auth`/`Resource` gate entirely under the store
+    /// lock: clear the gate and requeue the run onto the normal agent loop.
+    /// Behavior is intentionally unchanged from the pre-split implementation.
+    /// Any non-standard-blocked status (including `BlockedAttested`, which is
+    /// dispatched separately) is rejected as an invalid transition.
+    fn resume_standard_once(
         &mut self,
         request: &ResumeTurnRequest,
     ) -> Result<ResumeTurnResponse, TurnError> {
         let mut record = self.take_record(request.run_id)?;
         let result = (|| {
-            if record.scope != request.scope {
-                return Err(TurnError::ScopeNotFound);
+            match record.status {
+                TurnStatus::BlockedApproval
+                | TurnStatus::BlockedAuth
+                | TurnStatus::BlockedResource => {}
+                status => {
+                    return Err(TurnError::InvalidTransition {
+                        from: status,
+                        to: TurnStatus::Queued,
+                    });
+                }
             }
-            if !matches!(
-                record.status,
-                TurnStatus::BlockedApproval | TurnStatus::BlockedAuth | TurnStatus::BlockedResource
-            ) {
-                return Err(TurnError::InvalidTransition {
-                    from: record.status,
-                    to: TurnStatus::Queued,
-                });
-            }
-            if record.actor != request.actor {
-                return Err(TurnError::Unauthorized);
-            }
-            if record.gate_ref.as_ref() != Some(&request.gate_resolution_ref) {
-                return Err(TurnError::InvalidRequest {
-                    reason: "gate resolution reference mismatch".to_string(),
-                });
-            }
+            Self::check_resume_preconditions(&record, request)?;
+
             let now = Utc::now();
             record.status = TurnStatus::Queued;
             record.gate_ref = None;
+            record.expected_tx_hash = None;
             record.source_binding_ref = request.source_binding_ref.clone();
             record.reply_target_binding_ref = request.reply_target_binding_ref.clone();
             record.event_cursor = self.next_cursor();
@@ -1241,6 +1385,110 @@ impl Inner {
                 run_id: record.run_id,
                 status: record.status,
                 event_cursor: record.event_cursor,
+                replayed: false,
+            };
+            self.push_event(&record, TurnEventKind::Resumed, None);
+            Ok(response)
+        })();
+        self.records.insert(record.run_id, record);
+        result
+    }
+
+    /// Validate a `BlockedAttested` resume and extract the owned bindings the
+    /// external port needs, WITHOUT mutating the record. The caller drops the
+    /// store lock before invoking `verify_attested_resume` so the lock is never
+    /// held across that external call. Requires the untrusted attestation claim
+    /// to be present (else fail closed) and the persisted expected-tx-hash
+    /// binding to exist.
+    fn prepare_attested_resume(
+        &self,
+        request: &ResumeTurnRequest,
+    ) -> Result<AttestedResumePrep, TurnError> {
+        let record = self
+            .records
+            .get(&request.run_id)
+            .ok_or(TurnError::ScopeNotFound)?;
+        if record.status != TurnStatus::BlockedAttested {
+            return Err(TurnError::InvalidTransition {
+                from: record.status,
+                to: TurnStatus::AttestedResolved,
+            });
+        }
+        Self::check_resume_preconditions(record, request)?;
+        let attestation = request
+            .attestation
+            .as_ref()
+            .ok_or_else(|| TurnError::InvalidRequest {
+                reason: "attested resume requires an attestation claim".to_string(),
+            })?
+            .clone();
+        let expected_tx_hash = record
+            .expected_tx_hash
+            .as_ref()
+            .ok_or_else(|| {
+                // A run in BlockedAttested without a persisted binding is a
+                // store invariant violation; fail closed rather than resume.
+                TurnError::Conflict {
+                    reason: "attested gate missing expected transaction binding".to_string(),
+                }
+            })?
+            .clone();
+        Ok(AttestedResumePrep {
+            gate_ref: request.gate_resolution_ref.clone(),
+            attestation,
+            expected_tx_hash,
+        })
+    }
+
+    /// Apply the external verification verdict for a `BlockedAttested` resume
+    /// under the re-acquired store lock. Re-validates that the run is still in
+    /// `BlockedAttested` with the same gate and binding it had when
+    /// [`Self::prepare_attested_resume`] ran, so a concurrent transition while
+    /// the lock was released cannot let a stale verdict drive the one-shot
+    /// resume. On success, transitions to the deterministic signer-continuation
+    /// status `AttestedResolved`; the crypto-free store never calls a signer or
+    /// performs chain I/O, and never requeues the agent loop for this reason.
+    fn commit_attested_resume(
+        &mut self,
+        request: &ResumeTurnRequest,
+        prep: &AttestedResumePrep,
+        verdict: Result<(), crate::AttestedResumeRejection>,
+    ) -> Result<ResumeTurnResponse, TurnError> {
+        let mut record = self.take_record(request.run_id)?;
+        let result = (|| {
+            // Re-validate the live state under the re-acquired lock: the run
+            // must still be the same attested gate with an unchanged binding.
+            if record.status != TurnStatus::BlockedAttested {
+                return Err(TurnError::InvalidTransition {
+                    from: record.status,
+                    to: TurnStatus::AttestedResolved,
+                });
+            }
+            Self::check_resume_preconditions(&record, request)?;
+            if record.expected_tx_hash.as_ref() != Some(&prep.expected_tx_hash) {
+                return Err(TurnError::Conflict {
+                    reason: "attested gate binding changed during verification".to_string(),
+                });
+            }
+
+            verdict.map_err(|rejection| TurnError::InvalidRequest {
+                reason: format!("attested resume rejected: {}", rejection.category()),
+            })?;
+
+            let now = Utc::now();
+            record.status = TurnStatus::AttestedResolved;
+            // The binding stays on the record for the signer continuation; only
+            // the gate reference is cleared because the gate is resolved.
+            record.gate_ref = None;
+            record.source_binding_ref = request.source_binding_ref.clone();
+            record.reply_target_binding_ref = request.reply_target_binding_ref.clone();
+            record.event_cursor = self.next_cursor();
+            self.update_active_lock(&record, now);
+            let response = ResumeTurnResponse {
+                run_id: record.run_id,
+                status: record.status,
+                event_cursor: record.event_cursor,
+                replayed: false,
             };
             self.push_event(&record, TurnEventKind::Resumed, None);
             Ok(response)
@@ -1274,8 +1522,14 @@ impl Inner {
                 | TurnStatus::BlockedApproval
                 | TurnStatus::BlockedAuth
                 | TurnStatus::BlockedResource
+                | TurnStatus::BlockedAttested
                 | TurnStatus::RecoveryRequired => (TurnStatus::Cancelled, TurnEventKind::Cancelled),
-                TurnStatus::Running | TurnStatus::CancelRequested => {
+                // A resolved attested gate has handed off to a signer
+                // continuation that may be mid-flight; treat it like `Running`
+                // and request a two-phase cancel rather than terminating here.
+                TurnStatus::Running
+                | TurnStatus::CancelRequested
+                | TurnStatus::AttestedResolved => {
                     (TurnStatus::CancelRequested, TurnEventKind::CancelRequested)
                 }
                 status => {
@@ -1527,6 +1781,7 @@ impl Inner {
         record.status = reason.status();
         record.checkpoint_id = Some(checkpoint_id);
         record.gate_ref = Some(reason.gate_ref().clone());
+        record.expected_tx_hash = reason.expected_tx_hash().cloned();
         record.runner_id = None;
         record.lease_token = None;
         record.lease_expires_at = None;
@@ -1834,6 +2089,7 @@ impl RunRecord {
             resolved_model_route: self.resolved_model_route.clone(),
             checkpoint_id: self.checkpoint_id,
             gate_ref: self.gate_ref.clone(),
+            expected_tx_hash: self.expected_tx_hash.clone(),
             failure: self.failure.clone(),
             event_cursor: self.event_cursor,
             runner_id: self.runner_id,
@@ -1861,6 +2117,7 @@ impl RunRecord {
             received_at: self.received_at,
             checkpoint_id: self.checkpoint_id,
             gate_ref: self.gate_ref.clone(),
+            expected_tx_hash: self.expected_tx_hash.clone(),
             failure: self.failure.clone(),
             event_cursor: self.event_cursor,
         }

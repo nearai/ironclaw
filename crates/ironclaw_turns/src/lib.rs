@@ -7,6 +7,7 @@
 #![warn(unreachable_pub)]
 
 mod admission;
+mod attested_resume;
 mod checkpoint_state;
 mod coordinator;
 pub mod events;
@@ -28,6 +29,7 @@ pub use admission::{
     TurnAdmissionCapacityDenial, TurnAdmissionClass, TurnAdmissionLimit,
     TurnAdmissionLimitProvider, TurnAdmissionLimitUnavailable, TurnAdmissionReservationRecord,
 };
+pub use attested_resume::{AttestedResumePort, AttestedResumeRejection, AttestedResumeRequest};
 pub use checkpoint_state::{
     CheckpointStateRecord, CheckpointStateStore, GetCheckpointStateRequest,
     GetLoopCheckpointRequest, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
@@ -45,10 +47,10 @@ pub use events::{
 };
 pub use filesystem_store::FilesystemTurnStateStore;
 pub use ids::{
-    AcceptedMessageRef, GateRef, IdempotencyKey, LoopDiagnosticRef, LoopExitId, LoopGateRef,
-    LoopMessageRef, LoopResultRef, LoopUsageSummaryRef, ReplyTargetBindingRef, RunProfileId,
-    RunProfileRequest, RunProfileVersion, SourceBindingRef, TurnCheckpointId, TurnId,
-    TurnLeaseToken, TurnRunId, TurnRunnerId,
+    AcceptedMessageRef, ApprovedTxHashRef, AttestationClaimRef, GateRef, IdempotencyKey,
+    LoopDiagnosticRef, LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef, LoopUsageSummaryRef,
+    ReplyTargetBindingRef, RunProfileId, RunProfileRequest, RunProfileVersion, SourceBindingRef,
+    TurnCheckpointId, TurnId, TurnLeaseToken, TurnRunId, TurnRunnerId,
 };
 pub use loop_exit::{
     BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,

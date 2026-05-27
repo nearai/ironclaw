@@ -1033,6 +1033,7 @@ fn blocked_exit(kind: LoopBlockedKind) -> LoopExit {
     LoopExit::Blocked(LoopBlocked {
         kind,
         gate_ref: LoopGateRef::new("gate:test").expect("valid"),
+        expected_tx_hash: None,
         checkpoint_id: TurnCheckpointId::new(),
         state_ref: LoopCheckpointStateRef::new("checkpoint:blocked-state").expect("valid"),
         exit_id: test_exit_id(),
@@ -1090,6 +1091,7 @@ fn claimed_run() -> ClaimedTurnRun {
             received_at: chrono::Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
+            expected_tx_hash: None,
             failure: None,
             event_cursor: EventCursor(0),
         },
@@ -1345,6 +1347,7 @@ fn state_for_mapping(
         received_at: chrono::Utc::now(),
         checkpoint_id: None,
         gate_ref,
+        expected_tx_hash: None,
         failure,
         event_cursor: EventCursor(0),
     }

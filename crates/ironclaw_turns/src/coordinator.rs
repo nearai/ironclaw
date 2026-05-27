@@ -185,7 +185,19 @@ where
     ) -> Result<ResumeTurnResponse, TurnError> {
         let scope = request.scope.clone();
         let response = self.store.resume_turn(request).await?;
-        notify_queued_run_best_effort(self.wake_notifier.as_ref(), resume_wake(scope, &response));
+        // Only the agent-loop requeue path (`Queued`) actually enqueues work
+        // that a wake should pick up. A `BlockedAttested` resume transitions to
+        // `AttestedResolved` and hands off to a straight-line signer
+        // continuation — it never re-enters the agent loop, so waking the
+        // scheduler queue for it would be misleading. Idempotency replays
+        // (`response.replayed`) also did not enqueue anything fresh. Gate the
+        // notification to a genuine fresh requeue.
+        if response.status == TurnStatus::Queued && !response.replayed {
+            notify_queued_run_best_effort(
+                self.wake_notifier.as_ref(),
+                resume_wake(scope, &response),
+            );
+        }
         Ok(response)
     }
 
