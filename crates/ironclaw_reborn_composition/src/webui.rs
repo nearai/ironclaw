@@ -6,7 +6,7 @@ use ironclaw_product_workflow::{
     RebornServicesErrorCode, RebornServicesErrorKind,
 };
 
-use crate::{RebornBuildError, RebornReadiness, RebornRuntime};
+use crate::{RebornAttestedContinuation, RebornBuildError, RebornReadiness, RebornRuntime};
 
 /// WebUI-facing Reborn service bundle for host composition.
 ///
@@ -79,6 +79,15 @@ pub fn build_webui_services(
         );
     }
     api = api.with_event_stream(event_stream.unwrap_or_else(|| runtime.webui_event_stream()));
+
+    // Attested-signing continuation port (PR11): wire the WebUI `resolve_gate`
+    // attested path to the runtime's signer-continuation driver + shared gate
+    // binding store. The facade stays crypto-free; this port (in the composition
+    // layer, over `ironclaw_attested_runtime`) does the decode + driver
+    // dispatch. The same driver/binding/ledger the resume port reads is reused.
+    api = api.with_attested_continuation(Arc::new(RebornAttestedContinuation::new(
+        runtime.attested_signing(),
+    )));
 
     Ok(RebornWebuiBundle {
         api: Arc::new(api),

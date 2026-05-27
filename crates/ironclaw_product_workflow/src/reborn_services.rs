@@ -20,13 +20,15 @@ use ironclaw_threads::{
     ThreadHistoryRequest, ThreadMessageId, ThreadScope,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, GateRef, GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef,
-    ResumeTurnRequest, SanitizedCancelReason, SourceBindingRef, SubmitTurnRequest,
-    SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnScope,
+    AcceptedMessageRef, AttestationClaimRef, GateRef, GetRunStateRequest, IdempotencyKey,
+    ReplyTargetBindingRef, ResumeTurnRequest, SanitizedCancelReason, SourceBindingRef,
+    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId,
+    TurnScope,
 };
 use uuid::Uuid;
 
 use crate::{
+    AttestedContinuationRejection, AttestedGateContinuationPort, AttestedProofClaim,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiGateResolution,
     WebUiInboundCommand, WebUiInboundValidationCode, WebUiInboundValidationError,
     WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
@@ -137,6 +139,13 @@ pub struct RebornServices {
     event_stream: Option<Arc<dyn ProjectionStream>>,
     skill_activation_recorder: Option<Arc<SkillActivationRecorder>>,
     skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
+    /// Injected, crypto-free attested-signing continuation port (PR11). When
+    /// wired, an `attested` gate resolution resumes the turn to
+    /// `AttestedResolved` and then drives the deterministic sign + broadcast
+    /// continuation through this port (implemented in the composition layer over
+    /// `ironclaw_attested_runtime`). When `None`, attested resolutions fail
+    /// closed (attested signing not enabled on this deployment).
+    attested_continuation: Option<Arc<dyn AttestedGateContinuationPort>>,
 }
 
 impl RebornServices {
@@ -150,7 +159,18 @@ impl RebornServices {
             event_stream: None,
             skill_activation_recorder: None,
             skill_activation_clearer: None,
+            attested_continuation: None,
         }
+    }
+
+    /// Wire the attested-signing continuation port (PR11). Without it, an
+    /// `attested` gate resolution fails closed.
+    pub fn with_attested_continuation(
+        mut self,
+        continuation: Arc<dyn AttestedGateContinuationPort>,
+    ) -> Self {
+        self.attested_continuation = Some(continuation);
+        self
     }
 
     pub fn with_event_stream(mut self, event_stream: Arc<dyn ProjectionStream>) -> Self {
@@ -206,6 +226,105 @@ impl RebornServices {
             clearer(scope, accepted_message_ref)?;
         }
         Ok(())
+    }
+
+    /// Resolve a `BlockedAttested` gate with an external-wallet / custodial
+    /// attested-signing proof — atomic verify-before-resume (PR11 item B).
+    ///
+    /// Flow (v2 path — `gate_ref` carries the `request_id` binding):
+    /// 1. `verify_and_claim`: the FULL cryptographic signature verification AND
+    ///    the one-shot sealed-grant claim run BEFORE any turn-state mutation,
+    ///    through the injected `AttestedGateContinuationPort` (composition layer
+    ///    over `ironclaw_attested_runtime`). On ANY failure (malformed/forged
+    ///    proof, signer/hash mismatch, grant already claimed, missing binding)
+    ///    we return a clean error and the turn stays `BlockedAttested` with no
+    ///    state-machine mutation — `resume_turn` is never called.
+    /// 2. Only on a successful verify+claim, `resume_turn` transitions
+    ///    `BlockedAttested -> AttestedResolved`. The injected `AttestedResumePort`
+    ///    (composition-layer `RuntimeAttestedResumePort`) runs a synchronous
+    ///    authoritative-binding re-check + one-shot resume guard as defense in
+    ///    depth — it does NOT re-claim the grant.
+    /// 3. `broadcast_resolved`: drive the sign-output broadcast through the same
+    ///    port, consuming the verified handle from step 1. No re-verification,
+    ///    no re-claim.
+    ///
+    /// Single-drive guarantee: a same-`client_action_id` retry re-enters
+    /// `verify_and_claim`, where the grant/ledger one-shot CAS rejects the second
+    /// claim (a clean replay error) before any resume or broadcast — so the
+    /// continuation can never sign/broadcast twice. The facade therefore needs no
+    /// separate idempotency fingerprint.
+    ///
+    /// This facade stays crypto-free: all signature decode + provider verify
+    /// live behind the port in `ironclaw_reborn_composition` /
+    /// `ironclaw_attested_runtime`.
+    async fn resolve_attested_gate(
+        &self,
+        scope: TurnScope,
+        actor: TurnActor,
+        run_id: TurnRunId,
+        gate_ref: GateRef,
+        client_action_id: IdempotencyKey,
+        claim: AttestedProofClaim,
+    ) -> Result<RebornResolveGateResponse, RebornServicesError> {
+        let Some(continuation) = self.attested_continuation.clone() else {
+            // Attested signing not wired on this deployment: fail closed rather
+            // than resume a gate we cannot complete.
+            return Err(RebornServicesError::from_status_kind(
+                RebornServicesErrorCode::Unavailable,
+                RebornServicesErrorKind::BlockedApproval,
+                503,
+                false,
+            ));
+        };
+
+        // The untrusted attestation claim is the proof's bound-hash hex. The
+        // resume port re-checks it against the authoritative persisted binding;
+        // a claim that does not even name the bound hash fails closed there.
+        let attestation = AttestationClaimRef::new(claim.approved_tx_hash_hex.clone())
+            .map_err(|_| attested_invalid_field("attested_approved_tx_hash"))?;
+
+        // ATOMIC VERIFY-BEFORE-RESUME. Run the FULL cryptographic verification +
+        // one-shot grant claim BEFORE `resume_turn`. `resume_turn` transitions
+        // `BlockedAttested -> AttestedResolved`, clears the gate_ref, and consumes
+        // the one-shot resume guard; we must not commit that transition for a
+        // proof that fails verification. On any failure here the turn stays
+        // `BlockedAttested` and NO run/mission/gate state-machine transition
+        // occurs.
+        let verified = continuation
+            .verify_and_claim(&scope, &actor, run_id, &gate_ref, &claim)
+            .await
+            .map_err(map_attested_continuation_rejection)?;
+
+        let binding_id = webui_gate_binding_id(&scope, &gate_ref_string(&gate_ref));
+        let resume = self
+            .turn_coordinator
+            .resume_turn(ResumeTurnRequest {
+                scope: scope.clone(),
+                actor,
+                run_id,
+                gate_resolution_ref: gate_ref.clone(),
+                source_binding_ref: bounded_ref::<SourceBindingRef>("webui-gate-src", &binding_id)?,
+                reply_target_binding_ref: bounded_ref::<ReplyTargetBindingRef>(
+                    "webui-gate-reply",
+                    &binding_id,
+                )?,
+                idempotency_key: client_action_id,
+                attestation: Some(attestation),
+            })
+            .await
+            .map_err(map_turn_error)?;
+
+        // The turn is `AttestedResolved` and the grant is already claimed. Drive
+        // the sign-output broadcast exactly once with the verified handle. A
+        // broadcast failure does NOT roll the turn back (the resume guard already
+        // consumed the one-shot); it surfaces as a sanitized error so the client
+        // can observe the failure category.
+        continuation
+            .broadcast_resolved(&scope, run_id, &gate_ref, verified)
+            .await
+            .map_err(map_attested_continuation_rejection)?;
+
+        Ok(RebornResolveGateResponse::Resumed(resume.into()))
     }
 }
 
@@ -593,6 +712,25 @@ impl RebornServicesApi for RebornServices {
                     503,
                     false,
                 ))
+            }
+            WebUiGateResolution::Attested {
+                kind,
+                approved_tx_hash_hex,
+                proof_json,
+            } => {
+                self.resolve_attested_gate(
+                    scope,
+                    actor,
+                    run_id,
+                    gate_ref,
+                    client_action_id,
+                    AttestedProofClaim {
+                        kind,
+                        approved_tx_hash_hex,
+                        proof_json,
+                    },
+                )
+                .await
             }
             WebUiGateResolution::Denied | WebUiGateResolution::Cancelled => {
                 // `cancel_run` is not gate-aware, so without this check a
@@ -1182,6 +1320,48 @@ fn webui_gate_binding_id(scope: &TurnScope, gate_ref: &str) -> String {
 
 fn gate_ref_string(gate_ref: &ironclaw_turns::GateRef) -> String {
     gate_ref.as_str().to_string()
+}
+
+/// A malformed attested-resolution field, mapped to the standard validation
+/// error shape (400) so the client sees which field was rejected.
+fn attested_invalid_field(field: &str) -> RebornServicesError {
+    RebornServicesError::validation(WebUiInboundValidationError {
+        field: field.to_string(),
+        code: WebUiInboundValidationCode::InvalidValue,
+    })
+}
+
+/// Map a sanitized attested-continuation rejection to the WebUI error surface.
+/// The continuation runs after the resume guard already consumed the one-shot,
+/// so every category here is non-retryable from the client's perspective.
+fn map_attested_continuation_rejection(
+    rejection: AttestedContinuationRejection,
+) -> RebornServicesError {
+    let (code, kind, status) = match rejection {
+        AttestedContinuationRejection::MissingBinding => (
+            RebornServicesErrorCode::NotFound,
+            RebornServicesErrorKind::NotFound,
+            404,
+        ),
+        AttestedContinuationRejection::ProviderMismatch
+        | AttestedContinuationRejection::ProofRejected
+        | AttestedContinuationRejection::MalformedProof => (
+            RebornServicesErrorCode::InvalidRequest,
+            RebornServicesErrorKind::Validation,
+            400,
+        ),
+        AttestedContinuationRejection::LedgerGuard => (
+            RebornServicesErrorCode::Conflict,
+            RebornServicesErrorKind::Conflict,
+            409,
+        ),
+        AttestedContinuationRejection::Unavailable => (
+            RebornServicesErrorCode::Unavailable,
+            RebornServicesErrorKind::ServiceUnavailable,
+            503,
+        ),
+    };
+    RebornServicesError::from_status_kind(code, kind, status, false)
 }
 
 fn segment(name: &str, value: &str) -> String {

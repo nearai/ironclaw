@@ -31,7 +31,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use ironclaw_attestation::InMemorySealedGrantStore;
+use ironclaw_attestation::{InMemorySealedGrantStore, SealedGrantStore};
 use ironclaw_attested_runtime::{
     CustodialMainnetShipGate, InMemoryAttestedGateBindingStore, ProviderRegistry,
 };
@@ -72,6 +72,7 @@ use ironclaw_turns::{
     TurnScope, TurnStatus,
     run_profile::{LoopHostMilestoneSink, LoopRunContext, PromptMode},
 };
+use ironclaw_wallet_external::InjectedSigningProvider;
 
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
@@ -941,16 +942,27 @@ fn build_attested_composition(
     let ship_gate = CustodialMainnetShipGate::from_env().build_chain_ship_gate(None);
 
     let grants = Arc::new(InMemorySealedGrantStore::new());
-    // Provider-registration seam: local-dev wires no external-wallet providers
-    // (custodial-only). PR13's `AttestedProvidersConfig` layers on this closure
-    // to register WalletConnect / Injected / NEAR providers over the SAME shared
-    // `grants` store the driver uses (shared one-shot CAS, threat #1).
+    // Provider-registration seam: register the external-wallet providers that
+    // need no per-ceremony server secret over the SAME sealed-grant store the
+    // custodial signer uses (handed to the closure), so the one-shot grant CAS
+    // (threat #1) is authoritative across both the custodial and external-wallet
+    // paths. The injected-wallet provider (`window.ethereum` / `window.solana`)
+    // is stateless: it recovers the signer from the proof and claims the grant.
+    // The NEAR-redirect and WalletConnect providers require ceremony config
+    // (state_secret + wallet/callback URLs; a session-binding store) the
+    // local-dev runtime does not yet own — their wire variants still decode and
+    // reach the driver, which fails closed as `ProviderMismatch` until that
+    // config is wired (PR12/PR13).
     Ok(RebornAttestedComposition::new(
         bindings,
         keystore,
         ship_gate,
         grants,
-        |_grants| ProviderRegistry::new(),
+        |grants| {
+            ProviderRegistry::new().with_provider(Arc::new(InjectedSigningProvider::new(
+                Arc::clone(grants) as Arc<dyn SealedGrantStore>,
+            )))
+        },
     ))
 }
 

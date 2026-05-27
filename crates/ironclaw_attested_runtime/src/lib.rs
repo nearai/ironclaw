@@ -58,9 +58,9 @@ pub use binding::{
     validate_binding,
 };
 pub use driver::{
-    AttestedSignerContinuationDriver, BroadcastDisposition, BroadcastOutcome, Broadcaster,
-    ContinuationError, CustodialSignerLike, EvmSignable, ProviderRegistry, RebuildError,
-    SignerContinuationOutcome,
+    AttestedSignerContinuationDriver, BindingOwner, BroadcastDisposition, BroadcastOutcome,
+    Broadcaster, ContinuationError, CustodialSignerLike, EvmSignable, ProviderRegistry,
+    RebuildError, SignerContinuationOutcome, VerifiedContinuation,
 };
 pub use port::{
     InMemoryResumeGuard, ResumeGuard, RuntimeAttestedResumePort, approved_tx_hash_ref_hex,

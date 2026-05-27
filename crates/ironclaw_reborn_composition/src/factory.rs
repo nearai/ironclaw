@@ -173,22 +173,9 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
 
-    // Attested-signing composition (PR10): wire the production
-    // `AttestedResumePort` so a `BlockedAttested` gate can actually be resolved.
-    // Without the port the turn store fails attested resumes closed. The port
-    // and the signer-continuation driver share the same authoritative gate
-    // binding store and one-shot resume guard (in-memory here; durable backends
-    // are PR12). The driver itself is owned by the reborn runtime where
-    // `AttestedSignerContinuation` is dispatched.
-    let attested_gate_bindings = Arc::new(InMemoryAttestedGateBindingStore::new());
-    let attested_resume_guard: Arc<dyn ResumeGuard> = Arc::new(InMemoryResumeGuard::new());
-    let attested_resume_port: Arc<dyn AttestedResumePort> =
-        Arc::new(RuntimeAttestedResumePort::new(
-            Arc::clone(&attested_gate_bindings),
-            Arc::clone(&attested_resume_guard),
-        ));
-    let turn_state =
-        Arc::new(InMemoryTurnStateStore::default().with_attested_resume_port(attested_resume_port));
+    // Attested-signing composition (PR10): assemble the binding store + the
+    // turn store with the production `AttestedResumePort` wired in.
+    let (attested_gate_bindings, turn_state) = local_dev_attested_turn_state();
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
         turn_state: Arc::clone(&turn_state),
         checkpoint_state_store: Arc::new(InMemoryCheckpointStateStore::default()),
@@ -241,6 +228,29 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         readiness: readiness_for(profile, true, true, product_auth_ready),
         local_runtime: Some(local_runtime),
     })
+}
+
+/// Assemble the local-dev attested-signing turn-state wiring: the authoritative
+/// gate-binding store and a turn store with the production `AttestedResumePort`
+/// installed.
+///
+/// Without the port the turn store fails attested resumes closed. The port and
+/// the signer-continuation driver share the same authoritative gate-binding
+/// store and one-shot resume guard (in-memory here; durable backends are PR12).
+/// The driver itself is owned by the reborn runtime where
+/// `AttestedSignerContinuation` is dispatched.
+fn local_dev_attested_turn_state() -> (
+    Arc<InMemoryAttestedGateBindingStore>,
+    Arc<InMemoryTurnStateStore>,
+) {
+    let attested_gate_bindings = Arc::new(InMemoryAttestedGateBindingStore::new());
+    let attested_resume_guard: Arc<dyn ResumeGuard> = Arc::new(InMemoryResumeGuard::new());
+    let attested_resume_port: Arc<dyn AttestedResumePort> = Arc::new(
+        RuntimeAttestedResumePort::new(Arc::clone(&attested_gate_bindings), attested_resume_guard),
+    );
+    let turn_state =
+        Arc::new(InMemoryTurnStateStore::default().with_attested_resume_port(attested_resume_port));
+    (attested_gate_bindings, turn_state)
 }
 
 fn canonicalize_local_dev_path(path: &Path, label: &str) -> Result<PathBuf, RebornBuildError> {

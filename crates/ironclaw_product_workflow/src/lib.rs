@@ -25,6 +25,7 @@
 #![forbid(unsafe_code)]
 
 mod action;
+mod attested_continuation;
 mod binding;
 mod conversation_binding;
 mod error;
@@ -41,6 +42,10 @@ mod workflow;
 pub use action::{
     ActionDispatchKind, ActionFingerprintKey, ActionPhase, AuthRequestRef, LinkedThreadActionId,
     ProductActionId, ProductCommandName, ProductInboundAction, SourceBindingKey,
+};
+pub use attested_continuation::{
+    AttestedContinuationOutcome, AttestedContinuationRejection, AttestedGateContinuationPort,
+    AttestedProofClaim, AttestedProofKind, VerifiedAttestedContinuation,
 };
 pub use binding::{
     ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,

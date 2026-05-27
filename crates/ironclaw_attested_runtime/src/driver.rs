@@ -129,12 +129,51 @@ pub struct SignerContinuationOutcome {
     pub signer: String,
 }
 
+/// The product of the verify + claim + sign half of the continuation
+/// ([`AttestedSignerContinuationDriver::verify_and_sign`]). Holds everything the
+/// broadcast half needs and PROVES the heavyweight crypto already ran: the
+/// proof was verified, the one-shot sealed grant was claimed, and the signed
+/// bytes ready to broadcast were produced.
+///
+/// [`AttestedSignerContinuationDriver::broadcast_signed_continuation`] consumes
+/// it to advance the ledger to `BroadcastSubmitted` and submit. The signed
+/// bytes never re-trigger verification or a second grant claim: the heavyweight
+/// crypto runs exactly once, in `verify_and_sign`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedContinuation {
+    gate_ref: GateRef,
+    context: SigningContext,
+    signed: Vec<u8>,
+    signer: String,
+}
+
+impl VerifiedContinuation {
+    /// The gate this verified continuation belongs to.
+    pub fn gate_ref(&self) -> &GateRef {
+        &self.gate_ref
+    }
+
+    /// The signer/account the eventual broadcast is attributed to (public).
+    pub fn signer(&self) -> &str {
+        &self.signer
+    }
+}
+
 /// Errors the signer-continuation driver can surface. Every variant is
 /// fail-closed: the ledger is never advanced past where the failure occurred.
 #[derive(Debug)]
 pub enum ContinuationError {
     /// No authoritative binding exists for the resolved `gate_ref`.
     MissingBinding,
+    /// The calling identity does not own the binding addressed by `gate_ref`
+    /// (cross-user / cross-tenant IDOR). The binding's authoritative
+    /// `tenant`/`user` (recorded when the gate was raised by the original
+    /// raiser) does not match the caller resolving the gate. Fail-closed
+    /// BEFORE any provider verify / custodial sign / grant claim, so a member
+    /// who merely learns another user's `gate_ref` can never drive that user's
+    /// signing continuation. Surfaced to clients indistinguishably from
+    /// `MissingBinding` (a 404) so it is not an existence oracle.
+    OwnerMismatch,
     /// The carried proof's provider does not match the bound provider, or no
     /// provider is registered for it.
     ProviderMismatch {
@@ -164,12 +203,26 @@ pub enum ContinuationError {
         /// Opaque description (never key material).
         reason: String,
     },
+    /// A broadcast-idempotency ledger row already exists for this `gate_ref`
+    /// (a prior continuation attempt). This is the one-shot guard firing on
+    /// re-entry — distinct from a generic invalid ledger transition. Carries the
+    /// existing ledger state for diagnostics.
+    LedgerRowExists {
+        /// The state the existing row is currently in.
+        current: SigningLedgerState,
+    },
 }
 
 impl std::fmt::Display for ContinuationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::MissingBinding => write!(f, "no authoritative binding for the resolved gate"),
+            Self::OwnerMismatch => {
+                write!(
+                    f,
+                    "calling identity does not own the addressed gate binding"
+                )
+            }
             Self::ProviderMismatch { bound } => {
                 write!(f, "provider mismatch: bound provider is {bound:?}")
             }
@@ -184,6 +237,12 @@ impl std::fmt::Display for ContinuationError {
             }
             Self::Rebuild(e) => write!(f, "decoded-binding rebuild failed: {e}"),
             Self::Broadcast { reason } => write!(f, "broadcast failed: {reason}"),
+            Self::LedgerRowExists { current } => {
+                write!(
+                    f,
+                    "broadcast-idempotency ledger row already exists (current state: {current:?})"
+                )
+            }
         }
     }
 }
@@ -230,6 +289,19 @@ pub struct AttestedSignerContinuationDriver<B, L, S> {
     custodial_signer: Arc<S>,
     ledger: Arc<L>,
     broadcaster: Arc<B>,
+}
+
+/// The calling identity asserting ownership of an attested-gate binding on
+/// resume. Compared against the binding's authoritative `tenant`/`user`
+/// (recorded by the original raiser) before any verify/sign/claim, so a member
+/// who merely learns another user's `gate_ref` cannot drive that user's signing
+/// continuation (IDOR defense). Both axes must match.
+#[derive(Debug, Clone, Copy)]
+pub struct BindingOwner<'a> {
+    /// The caller's tenant boundary.
+    pub tenant_id: &'a str,
+    /// The caller's user identity.
+    pub user_id: &'a str,
 }
 
 impl<B, L, S> AttestedSignerContinuationDriver<B, L, S>
@@ -285,53 +357,158 @@ where
     where
         S: CustodialSignerLike,
     {
+        // Legacy single-shot entrypoint, retained for the threat-matrix tests
+        // and any caller that drives both halves under one lock. The
+        // verify-before-resume facade (PR11 item B) instead calls
+        // [`Self::verify_and_sign`] BEFORE the turn transitions and
+        // [`Self::broadcast_signed_continuation`] AFTER, so the heavyweight
+        // verification + grant claim gate the `BlockedAttested ->
+        // AttestedResolved` transition. The crypto runs exactly once in either
+        // arrangement.
+        let verified = self.verify_and_sign(gate_ref, proof).await?;
+        self.broadcast_signed_continuation(verified).await
+    }
+
+    /// Verify + claim + sign half of the continuation. Runs BEFORE the turn
+    /// transitions to `AttestedResolved`, so the FULL cryptographic verification
+    /// and the one-shot grant claim gate the transition: a malformed or forged
+    /// proof is rejected here, with no broadcast and no `AttestedResolved`
+    /// transition (the facade only calls `resume_turn` after this returns `Ok`).
+    ///
+    /// The driver NEVER accepts a caller-supplied signable transaction: the
+    /// custodial path reconstructs the signable *from the authoritative decoded
+    /// binding* and signs exactly that, so a resolver cannot pass an unapproved
+    /// tx (or a mainnet tx aimed past a testnet `binding.chain` ship-gate) after
+    /// approval (byte-drift defense, same class as PR6's `CustodialSigner`).
+    ///
+    /// 1. Read the authoritative binding for `gate_ref` (never trust the
+    ///    caller).
+    /// 2. Route to the bound provider / custodial signer to verify + claim the
+    ///    sealed grant (threat #1) and produce the signature, under the
+    ///    broadcast-idempotency ledger guard (threats #6 / #7).
+    ///
+    /// Fail-closed retry semantics: each path creates / advances the ledger only
+    /// once verification is committed to, so a proof that fails verification
+    /// (malformed, forged, signer/hash mismatch) leaves NO blocking ledger row
+    /// and does NOT claim the grant — a follow-up VALID proof for the same gate
+    /// can still succeed. After a SUCCESSFUL verify+claim, the grant CAS and the
+    /// ledger row are both consumed, so a same-key retry fails closed (the
+    /// continuation is genuinely single-drive).
+    ///
+    /// The returned [`VerifiedContinuation`] is the only way to reach
+    /// [`Self::broadcast_signed_continuation`]; the broadcast half NEVER
+    /// re-verifies or re-claims.
+    pub async fn verify_and_sign(
+        &self,
+        gate_ref: &GateRef,
+        proof: &SigningProof,
+    ) -> Result<VerifiedContinuation, ContinuationError>
+    where
+        S: CustodialSignerLike,
+    {
         let binding = self
             .bindings
             .get(gate_ref)
             .await
             .ok_or(ContinuationError::MissingBinding)?;
 
-        // One-shot ledger create. If a row already exists for this gate_ref
-        // (e.g. a previous broadcast attempt), `create` fails AlreadyExists and
-        // we must NOT proceed to a fresh broadcast — the existing row's state
-        // governs (threats #6 / #7). We surface that as a ledger error.
-        match self.ledger.create(gate_ref).await {
-            Ok(()) => {}
-            Err(ironclaw_attestation::LedgerError::AlreadyExists) => {
-                // A row exists. If it is already broadcast, refuse re-broadcast
-                // fail-closed; otherwise this is a genuine retry we still refuse
-                // because the deterministic continuation is one-shot.
-                let state = self.ledger.state(gate_ref).await?;
-                return Err(ContinuationError::Ledger(
-                    ironclaw_attestation::LedgerError::InvalidTransition {
-                        from: state,
-                        to: SigningLedgerState::Signing,
-                    },
-                ));
-            }
-            Err(other) => return Err(other.into()),
-        }
-
         match binding.provider_id {
-            ProviderId::Custodial => self.continue_custodial(gate_ref, &binding).await,
+            ProviderId::Custodial => self.sign_custodial(gate_ref, &binding).await,
             external => {
-                self.continue_external_wallet(gate_ref, external, &binding, proof)
+                self.verify_external_wallet(gate_ref, external, &binding, proof)
                     .await
             }
         }
     }
 
-    /// External-wallet continuation: the wallet already signed natively. We
+    /// Assert the caller owns the binding addressed by `gate_ref` BEFORE any
+    /// verify / custodial sign / grant claim (IDOR defense).
+    ///
+    /// The binding's authoritative `SigningContext` carries the original
+    /// raiser's `tenant`/`user`. A second tenant member who learns another
+    /// user's `gate_ref` (returned in the gate-raise response) must not be able
+    /// to drive that user's signing continuation — most acutely on the
+    /// custodial path, where the proof payload is ignored and the driver signs
+    /// from the authoritative binding regardless of who presents the gate_ref.
+    ///
+    /// Fail-closed `OwnerMismatch` on either a missing binding *or* an identity
+    /// divergence, so the result is indistinguishable from a non-existent gate
+    /// (no existence oracle). Both tenant and user axes must match. The binding
+    /// is immutable once written, so re-reading it here (separately from
+    /// [`Self::verify_and_sign`]) is race-free; the sealed-grant CAS remains the
+    /// authoritative one-shot guard.
+    pub async fn assert_binding_owner(
+        &self,
+        gate_ref: &GateRef,
+        caller: BindingOwner<'_>,
+    ) -> Result<(), ContinuationError> {
+        let binding = self
+            .bindings
+            .get(gate_ref)
+            .await
+            .ok_or(ContinuationError::MissingBinding)?;
+        if binding.context.tenant.as_str() != caller.tenant_id
+            || binding.context.user.as_str() != caller.user_id
+        {
+            return Err(ContinuationError::OwnerMismatch);
+        }
+        Ok(())
+    }
+
+    /// One-shot broadcast-idempotency ledger create (threats #6 / #7): an
+    /// existing row for this `gate_ref` (a prior attempt) makes any re-entry fail
+    /// closed. Surfaced as a dedicated idempotency-guard error carrying the
+    /// existing state, rather than fabricating an `InvalidTransition` with a
+    /// synthetic `to` that never actually occurred.
+    async fn create_ledger_row(&self, gate_ref: &GateRef) -> Result<(), ContinuationError> {
+        match self.ledger.create(gate_ref).await {
+            Ok(()) => Ok(()),
+            Err(ironclaw_attestation::LedgerError::AlreadyExists) => {
+                let current = self.ledger.state(gate_ref).await?;
+                Err(ContinuationError::LedgerRowExists { current })
+            }
+            Err(other) => Err(other.into()),
+        }
+    }
+
+    /// Broadcast half of the continuation. Consumes a [`VerifiedContinuation`]
+    /// (proof already verified + grant already claimed in
+    /// [`Self::verify_and_sign`]) and broadcasts the signed bytes under the
+    /// ledger guard. This NEVER calls `verify_resume` and NEVER re-claims the
+    /// grant. The broadcast-failure recovery (item C) lives in the shared
+    /// [`Self::broadcast_signed`] tail: a network error / ambiguous outcome moves
+    /// the row to the `Unknown` terminal and surfaces a fail-closed error rather
+    /// than reporting a false success.
+    pub async fn broadcast_signed_continuation(
+        &self,
+        verified: VerifiedContinuation,
+    ) -> Result<SignerContinuationOutcome, ContinuationError> {
+        let VerifiedContinuation {
+            gate_ref,
+            context,
+            signed,
+            signer,
+        } = verified;
+        self.broadcast_signed(&gate_ref, &context, &signed, signer)
+            .await
+    }
+
+    /// External-wallet verify + claim: the wallet already signed natively. We
     /// verify the proof through the bound provider (signer recovery + hash
-    /// binding + one-shot sealed-grant CAS), then broadcast the wallet-signed
-    /// transaction under the ledger guard.
-    async fn continue_external_wallet(
+    /// binding + one-shot sealed-grant CAS) FIRST, so a rejected proof
+    /// (malformed, forged, signer/hash mismatch) never touches the ledger and
+    /// never claims the grant — leaving the gate cleanly retryable. Only after
+    /// the proof verifies + the grant is claimed do we create the
+    /// broadcast-idempotency ledger row and advance it `Approved -> Signing ->
+    /// Signed`. The wallet-signed bytes (the proof payload) become the
+    /// [`VerifiedContinuation`] to broadcast.
+    async fn verify_external_wallet(
         &self,
         gate_ref: &GateRef,
         provider_id: ProviderId,
         binding: &AttestedGateBinding,
         proof: &SigningProof,
-    ) -> Result<SignerContinuationOutcome, ContinuationError> {
+    ) -> Result<VerifiedContinuation, ContinuationError> {
         let provider = self
             .providers
             .get(provider_id)
@@ -339,17 +516,20 @@ where
         debug_assert_eq!(provider.trust_model(), TrustModel::ExternalWallet);
 
         // Verify + claim the sealed one-shot grant (threat #1 lives inside
-        // `verify_resume`) BEFORE touching the ledger. A rejected proof must
-        // leave the row at `Approved`, never advance it to the in-flight
-        // `Signing` state: `continue_after_resolved` is one-shot per `gate_ref`,
-        // so a row stranded at `Signing` by a failed verify could never be
-        // re-entered and would be stuck permanently. Verify-before-advance keeps
-        // the transition atomic from the ledger's perspective — the row only
-        // moves once we hold a verified proof.
+        // `verify_resume`) BEFORE touching the ledger. A rejected proof returns
+        // here with no ledger row created and the grant unclaimed, so the gate
+        // stays cleanly retryable. Verify-before-advance keeps the transition
+        // atomic from the ledger's perspective — the row only moves once we hold
+        // a verified proof.
         let verified = provider
             .verify_resume(&binding.context, &binding.approved_tx_hash, proof)
             .await
             .map_err(ContinuationError::ProofRejected)?;
+
+        // Proof verified + grant claimed. Now open the broadcast-idempotency
+        // ledger row and advance it to `Signed`. The grant CAS already made this
+        // single-drive; the ledger guards broadcast retry (threats #6/#7).
+        self.create_ledger_row(gate_ref).await?;
         self.ledger
             .advance(gate_ref, SigningLedgerState::Signing)
             .await?;
@@ -357,30 +537,27 @@ where
             .advance(gate_ref, SigningLedgerState::Signed)
             .await?;
 
-        // The wallet-signed bytes are the proof payload; broadcast under the
-        // ledger guard.
         let signer = binding.context.key_or_account_id.to_string();
-        self.broadcast_signed(
-            gate_ref,
-            &binding.context,
-            verified.proof().payload(),
+        Ok(VerifiedContinuation {
+            gate_ref: gate_ref.clone(),
+            context: binding.context.clone(),
+            signed: verified.proof().payload().to_vec(),
             signer,
-        )
-        .await
+        })
     }
 
-    /// Custodial continuation: IronClaw holds the key. The driver reconstructs
+    /// Custodial verify + sign: IronClaw holds the key. The driver reconstructs
     /// the signable *from `binding.decoded`* (never from any caller-supplied tx)
     /// and delegates to the [`CustodialSigner`], which runs the ship-gate,
     /// claims the sealed grant (threat #1), re-checks the approved hash
     /// (threat #3), and signs with the ecrecover binding check (threat #5). The
-    /// signer advances the ledger Signing->Signed itself; here we broadcast and
-    /// advance to BroadcastSubmitted.
-    async fn continue_custodial(
+    /// signer advances the ledger `Approved -> Signing -> Signed` itself; the
+    /// produced signature becomes the [`VerifiedContinuation`] to broadcast.
+    async fn sign_custodial(
         &self,
         gate_ref: &GateRef,
         binding: &AttestedGateBinding,
-    ) -> Result<SignerContinuationOutcome, ContinuationError>
+    ) -> Result<VerifiedContinuation, ContinuationError>
     where
         S: CustodialSignerLike,
     {
@@ -417,6 +594,11 @@ where
         let signable =
             rebuild::rebuild_evm_signable(&binding.decoded).map_err(ContinuationError::Rebuild)?;
 
+        // Open the broadcast-idempotency ledger row (threats #6/#7) before the
+        // custodial signer advances it `Approved -> Signing -> Signed` itself. A
+        // pre-existing row (a prior attempt) fails closed here.
+        self.create_ledger_row(gate_ref).await?;
+
         let req = CustodialSignRequest {
             context: binding.context.clone(),
             scope: binding.scope.clone(),
@@ -432,13 +614,12 @@ where
             .await
             .map_err(ContinuationError::ChainSigning)?;
 
-        self.broadcast_signed(
-            gate_ref,
-            &binding.context,
-            &outcome.signature,
-            outcome.signer,
-        )
-        .await
+        Ok(VerifiedContinuation {
+            gate_ref: gate_ref.clone(),
+            context: binding.context.clone(),
+            signed: outcome.signature,
+            signer: outcome.signer,
+        })
     }
 
     /// Shared broadcast tail. For a broadcaster that actually submits
@@ -558,24 +739,25 @@ where
             // An `InvalidTransition` is expected and benign here: the row is
             // already at or past a terminal. Any OTHER ledger error (e.g. a
             // backend failure) means we could NOT confirm the row is safely
-            // terminal — surface it at `warn!` so it is visible in release
-            // builds, not silently swallowed by a `debug_assert!` that compiles
-            // out. The original broadcast error stays authoritative.
-            if matches!(
+            // terminal. This recovery runs on the background broadcast-failure
+            // path, so per CLAUDE.md ("Background tasks must NEVER use `info!`
+            // — it breaks the interactive display"; the same applies to
+            // `warn!`) we log at `debug!` with a structured `recoverable` field
+            // rather than corrupting the REPL/TUI stream. The original
+            // broadcast error stays authoritative; a ledger row that could not
+            // be confirmed terminal is flagged here for operator triage via a
+            // structured field, not a user-facing warning.
+            let recoverable = matches!(
                 e,
                 ironclaw_attestation::LedgerError::InvalidTransition { .. }
-            ) {
-                tracing::debug!(
-                    gate_ref = %gate_ref.as_str(),
-                    "recover_unknown: row already at/past a terminal state ({e:?})"
-                );
-            } else {
-                tracing::warn!(
-                    gate_ref = %gate_ref.as_str(),
-                    "recover_unknown: failed to move row to Unknown terminal after a \
-                     broadcast failure ({e:?}); the row may be left non-terminal"
-                );
-            }
+            );
+            tracing::debug!(
+                gate_ref = %gate_ref.as_str(),
+                recoverable,
+                "recover_unknown: ledger advance to Unknown terminal returned an error \
+                 ({e:?}); recoverable=true means the row was already terminal (benign), \
+                 recoverable=false means the row may be left non-terminal"
+            );
         }
     }
 
