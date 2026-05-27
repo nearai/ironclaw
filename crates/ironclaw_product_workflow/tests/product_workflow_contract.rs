@@ -5,6 +5,7 @@ use std::time::Duration as StdDuration;
 
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
+use ironclaw_auth::{AuthFlowId, CredentialAccountId};
 use ironclaw_conversations::InMemoryConversationServices;
 use ironclaw_host_api::{AgentId, ApprovalRequestId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_adapters::{
@@ -628,6 +629,7 @@ async fn auth_resolution_payload_routes_through_auth_interaction_service() {
     let binding = Arc::new(FakeConversationBindingService::new());
     let gate_ref = GateRef::new("gate:auth-product").expect("auth gate ref");
     let run_id = TurnRunId::new();
+    let credential_ref = CredentialAccountId::new();
     let auth_service = Arc::new(RecordingAuthInteractionService::new(
         gate_ref.clone(),
         run_id,
@@ -640,7 +642,7 @@ async fn auth_resolution_payload_routes_through_auth_interaction_service() {
             AuthResolutionPayload::new(
                 gate_ref.as_str(),
                 AuthResolutionResult::CredentialProvided {
-                    credential_ref: "credential-account-1".to_string(),
+                    credential_ref: credential_ref.to_string(),
                 },
             )
             .expect("auth payload"),
@@ -662,10 +664,53 @@ async fn auth_resolution_payload_routes_through_auth_interaction_service() {
     );
     assert_eq!(
         resolutions[0].decision,
-        AuthInteractionDecision::CredentialProvided {
-            credential_ref: "credential-account-1".to_string()
-        }
+        AuthInteractionDecision::CredentialProvided { credential_ref }
     );
+}
+
+#[tokio::test]
+async fn auth_callback_and_denied_payloads_route_through_auth_interaction_service() {
+    let callback_ref = AuthFlowId::new();
+    for (event_suffix, result, expected) in [
+        (
+            "auth-callback-resolution",
+            AuthResolutionResult::CallbackCompleted {
+                callback_ref: callback_ref.to_string(),
+            },
+            AuthInteractionDecision::CallbackCompleted { callback_ref },
+        ),
+        (
+            "auth-denied-resolution",
+            AuthResolutionResult::Denied,
+            AuthInteractionDecision::Deny,
+        ),
+    ] {
+        let inbound = Arc::new(FakeInboundTurnService::new());
+        let ledger = Arc::new(FakeIdempotencyLedger::new());
+        let binding = Arc::new(FakeConversationBindingService::new());
+        let gate_ref = GateRef::new(format!("gate:{event_suffix}")).expect("auth gate ref");
+        let run_id = TurnRunId::new();
+        let auth_service = Arc::new(RecordingAuthInteractionService::new(
+            gate_ref.clone(),
+            run_id,
+        ));
+        let workflow = DefaultProductWorkflow::new(inbound, ledger, binding)
+            .with_auth_interaction_service(auth_service.clone());
+        let envelope = sample_envelope_with_payload(
+            event_suffix,
+            ProductInboundPayload::AuthResolution(
+                AuthResolutionPayload::new(gate_ref.as_str(), result).expect("auth payload"),
+            ),
+        );
+
+        let ack = workflow.accept_inbound(envelope).await.expect("accept");
+
+        assert_eq!(ack, ProductInboundAck::NoOp);
+        let resolutions = auth_service.resolutions();
+        assert_eq!(resolutions.len(), 1);
+        assert_eq!(resolutions[0].gate_ref, gate_ref);
+        assert_eq!(resolutions[0].decision, expected);
+    }
 }
 
 #[tokio::test]

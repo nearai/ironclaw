@@ -850,6 +850,14 @@ mod tests {
             unreachable!("constructor tests do not call auth-flow methods")
         }
 
+        async fn complete_credential_selection(
+            &self,
+            _scope: &AuthProductScope,
+            _input: ironclaw_auth::CredentialSelectionInput,
+        ) -> Result<AuthFlowRecord, AuthProductError> {
+            unreachable!("constructor tests do not call auth-flow methods")
+        }
+
         async fn fail_oauth_callback(
             &self,
             _scope: &AuthProductScope,

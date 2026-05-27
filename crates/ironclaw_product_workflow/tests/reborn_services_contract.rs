@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_auth::CredentialAccountId;
 use ironclaw_host_api::{AgentId, ApprovalRequestId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductOutboundEnvelope, ProductWorkflowRejectionKind, ProjectionCursor,
@@ -160,6 +161,7 @@ struct FakeTurnCoordinator {
     submit_error: Mutex<Option<TurnError>>,
     run_state_error: Mutex<Option<TurnError>>,
     parked_gate_ref: Mutex<Option<GateRef>>,
+    parked_auth_gate: Mutex<bool>,
 }
 
 impl FakeTurnCoordinator {
@@ -183,6 +185,12 @@ impl FakeTurnCoordinator {
     /// on the supplied gate before issuing cancellation.
     fn set_parked_gate(&self, gate_ref: GateRef) {
         *self.parked_gate_ref.lock().expect("lock") = Some(gate_ref);
+        *self.parked_auth_gate.lock().expect("lock") = false;
+    }
+
+    fn set_parked_auth_gate(&self, gate_ref: GateRef) {
+        *self.parked_gate_ref.lock().expect("lock") = Some(gate_ref);
+        *self.parked_auth_gate.lock().expect("lock") = true;
     }
 
     fn submission_count(&self) -> usize {
@@ -281,6 +289,11 @@ impl TurnCoordinator for FakeTurnCoordinator {
             return Err(error);
         }
         let gate_ref = self.parked_gate_ref.lock().expect("lock").clone();
+        let status = if *self.parked_auth_gate.lock().expect("lock") {
+            TurnStatus::BlockedAuth
+        } else {
+            TurnStatus::Queued
+        };
         let scope = request.scope.clone();
         let run_id = request.run_id;
         self.run_state_requests.lock().expect("lock").push(request);
@@ -289,7 +302,7 @@ impl TurnCoordinator for FakeTurnCoordinator {
             actor: None,
             turn_id: TurnId::new(),
             run_id,
-            status: TurnStatus::Queued,
+            status,
             accepted_message_ref: AcceptedMessageRef::new("msg:replayed").expect("valid ref"),
             source_binding_ref: SourceBindingRef::new("webui-src:replayed").expect("valid ref"),
             reply_target_binding_ref: ReplyTargetBindingRef::new("webui-reply:replayed")
@@ -2363,6 +2376,36 @@ async fn approved_gate_resolution_resumes_turn() {
 }
 
 #[tokio::test]
+async fn generic_gate_resolution_rejects_blocked_auth_run() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    );
+    create_thread_for(&services, caller(), "thread-alpha").await;
+    coordinator.set_parked_auth_gate(GateRef::new("custom-auth-gate").expect("gate"));
+
+    let err = services
+        .resolve_gate(
+            caller(),
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "gate-auth-fallback",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string(),
+                "gate_ref": "custom-auth-gate",
+                "resolution": "approved"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("generic resolver must not resume auth gate");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(err.kind, RebornServicesErrorKind::BlockedAuthentication);
+    assert_eq!(coordinator.resumption_count(), 0);
+}
+
+#[tokio::test]
 async fn approval_gate_resolution_uses_approval_interaction_service() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let approval_interactions = Arc::new(RecordingApprovalInteractionService::default());
@@ -2448,6 +2491,7 @@ async fn credential_gate_resolution_returns_sanitized_stable_error_until_gate_po
         coordinator.clone(),
     );
     create_thread_for(&services, caller(), "thread-alpha").await;
+    let credential_ref = CredentialAccountId::new();
 
     let err = services
         .resolve_gate(
@@ -2458,7 +2502,7 @@ async fn credential_gate_resolution_returns_sanitized_stable_error_until_gate_po
                 "run_id": run_id_string(),
                 "gate_ref": "gate-alpha",
                 "resolution": "credential_provided",
-                "credential_ref": "credential-alpha"
+                "credential_ref": credential_ref.to_string()
             }))
             .expect("request"),
         )
@@ -2470,7 +2514,7 @@ async fn credential_gate_resolution_returns_sanitized_stable_error_until_gate_po
     assert_eq!(err.status_code, 503);
     assert_eq!(coordinator.resumption_count(), 0);
     let rendered = format!("{err:?} {}", serde_json::to_string(&err).expect("json"));
-    assert!(!rendered.contains("credential-alpha"));
+    assert!(!rendered.contains(credential_ref.to_string().as_str()));
 }
 
 #[tokio::test]
@@ -2483,6 +2527,7 @@ async fn auth_gate_credential_resolution_uses_auth_interaction_service() {
     )
     .with_auth_interactions(auth_interactions.clone());
     create_thread_for(&services, caller(), "thread-alpha").await;
+    let credential_ref = CredentialAccountId::new();
 
     let response = services
         .resolve_gate(
@@ -2493,7 +2538,7 @@ async fn auth_gate_credential_resolution_uses_auth_interaction_service() {
                 "run_id": run_id_string(),
                 "gate_ref": "gate:auth-alpha",
                 "resolution": "credential_provided",
-                "credential_ref": "credential-alpha"
+                "credential_ref": credential_ref.to_string()
             }))
             .expect("request"),
         )
@@ -2506,9 +2551,7 @@ async fn auth_gate_credential_resolution_uses_auth_interaction_service() {
     assert_eq!(resolution.gate_ref.as_str(), "gate:auth-alpha");
     assert_eq!(
         resolution.decision,
-        AuthInteractionDecision::CredentialProvided {
-            credential_ref: "credential-alpha".to_string()
-        }
+        AuthInteractionDecision::CredentialProvided { credential_ref }
     );
     assert_eq!(coordinator.resumption_count(), 0);
 }

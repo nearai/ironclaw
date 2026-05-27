@@ -174,6 +174,14 @@ pub struct OAuthCallbackFailureInput {
     pub error: AuthErrorCode,
 }
 
+/// User-selected configured credential that completes an account-selection
+/// auth flow without exposing credential internals to product surfaces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialSelectionInput {
+    pub flow_id: AuthFlowId,
+    pub credential_account_id: CredentialAccountId,
+}
+
 /// Pre-egress claim for an authorized OAuth callback. This validates and marks
 /// the scoped flow before one-shot provider exchange can consume a raw code.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,6 +212,12 @@ pub trait AuthFlowManager: Send + Sync {
         &self,
         scope: &AuthProductScope,
         input: OAuthCallbackInput,
+    ) -> Result<AuthFlowRecord, AuthProductError>;
+
+    async fn complete_credential_selection(
+        &self,
+        scope: &AuthProductScope,
+        input: CredentialSelectionInput,
     ) -> Result<AuthFlowRecord, AuthProductError>;
 
     async fn fail_oauth_callback(

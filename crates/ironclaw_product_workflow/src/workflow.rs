@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_auth::{AuthFlowId, CredentialAccountId};
 use ironclaw_product_adapters::{
     ApprovalDecision, ProductAdapterError, ProductInboundAck, ProductInboundEnvelope,
     ProductInboundPayload, ProductRejection, ProductRejectionKind, ProductTriggerReason,
@@ -475,12 +476,12 @@ async fn dispatch_auth_resolution(
     let decision = match &payload.result {
         ironclaw_product_adapters::AuthResolutionResult::CredentialProvided { credential_ref } => {
             AuthInteractionDecision::CredentialProvided {
-                credential_ref: credential_ref.clone(),
+                credential_ref: parse_credential_account_id(credential_ref)?,
             }
         }
         ironclaw_product_adapters::AuthResolutionResult::CallbackCompleted { callback_ref } => {
             AuthInteractionDecision::CallbackCompleted {
-                callback_ref: callback_ref.clone(),
+                callback_ref: parse_auth_flow_id(callback_ref)?,
             }
         }
         ironclaw_product_adapters::AuthResolutionResult::Denied => AuthInteractionDecision::Deny,
@@ -530,6 +531,22 @@ fn auth_resolution_idempotency_key(
             kind: AuthInteractionRejectionKind::InvalidBindingRef,
         }
     })
+}
+
+fn parse_credential_account_id(value: &str) -> Result<CredentialAccountId, ProductWorkflowError> {
+    uuid::Uuid::parse_str(value)
+        .map(CredentialAccountId::from_uuid)
+        .map_err(|_| ProductWorkflowError::AuthInteractionRejected {
+            kind: AuthInteractionRejectionKind::InvalidCredentialRef,
+        })
+}
+
+fn parse_auth_flow_id(value: &str) -> Result<AuthFlowId, ProductWorkflowError> {
+    uuid::Uuid::parse_str(value)
+        .map(AuthFlowId::from_uuid)
+        .map_err(|_| ProductWorkflowError::AuthInteractionRejected {
+            kind: AuthInteractionRejectionKind::InvalidCallbackRef,
+        })
 }
 
 fn interaction_resolution_idempotency_key(

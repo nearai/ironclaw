@@ -1,6 +1,6 @@
 use ironclaw_auth::{
     AuthChallenge, AuthContinuationRef, AuthFlowId, AuthFlowRecord, AuthFlowStatus,
-    AuthProductScope, CredentialAccountStatus, Timestamp,
+    AuthProductScope, CredentialAccountId, CredentialAccountStatus, Timestamp,
 };
 use ironclaw_product_adapters::ProductWorkflowRejectionKind;
 use ironclaw_turns::{CancelRunResponse, GateRef, IdempotencyKey, ResumeTurnResponse, TurnActor};
@@ -319,8 +319,8 @@ pub struct ListPendingAuthInteractionsResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "result")]
 pub enum AuthInteractionDecision {
-    CredentialProvided { credential_ref: String },
-    CallbackCompleted { callback_ref: String },
+    CredentialProvided { credential_ref: CredentialAccountId },
+    CallbackCompleted { callback_ref: AuthFlowId },
     Deny,
 }
 

@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_auth::CredentialAccountId;
 use ironclaw_common::ExtensionName;
 use ironclaw_host_api::{AgentId, ThreadId};
 use ironclaw_product_adapters::{
@@ -22,14 +23,14 @@ use ironclaw_threads::{
 use ironclaw_turns::{
     AcceptedMessageRef, GateRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
     ResumeTurnRequest, SanitizedCancelReason, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-    TurnCoordinator, TurnError, TurnRunId, TurnScope,
+    TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
 };
 use uuid::Uuid;
 
 use crate::{
     ApprovalInteractionDecision, ApprovalInteractionService, AuthInteractionDecision,
-    AuthInteractionService, LifecycleProductFacade, ProductWorkflowError,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    AuthInteractionRejectionKind, AuthInteractionService, LifecycleProductFacade,
+    ProductWorkflowError, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
     UnsupportedLifecycleProductFacade, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
     WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundCommand, WebUiInboundValidationCode,
@@ -960,7 +961,10 @@ impl RebornServices {
     ) -> Result<RebornResolveGateResponse, RebornServicesError> {
         let decision = match resolution {
             WebUiGateResolution::CredentialProvided { credential_ref } => {
-                AuthInteractionDecision::CredentialProvided { credential_ref }
+                AuthInteractionDecision::CredentialProvided {
+                    credential_ref: parse_credential_account_id(&credential_ref)
+                        .map_err(map_auth_interaction_error)?,
+                }
             }
             WebUiGateResolution::Denied | WebUiGateResolution::Cancelled => {
                 AuthInteractionDecision::Deny
@@ -1002,6 +1006,8 @@ impl RebornServices {
     ) -> Result<RebornResolveGateResponse, RebornServicesError> {
         match resolution {
             WebUiGateResolution::Approved { always } => {
+                reject_generic_auth_gate_resolution(self.turn_coordinator.as_ref(), &scope, run_id)
+                    .await?;
                 // `always: true` requests a *persistent* approval but this
                 // facade has only one-shot `resume_turn` and no approval-policy
                 // port. Fail loud rather than silently downgrade.
@@ -1035,16 +1041,16 @@ impl RebornServices {
                 Err(blocked_authentication_unavailable())
             }
             WebUiGateResolution::Denied | WebUiGateResolution::Cancelled => {
-                // `cancel_run` is not gate-aware, so without this check a
-                // denied/cancelled resolution for a stale or attacker-supplied
-                // gate_ref would terminate any non-terminal run sharing run_id.
-                assert_run_parked_on_gate(
+                assert_generic_run_parked_on_gate(
                     self.turn_coordinator.as_ref(),
                     &scope,
                     run_id,
                     &gate_ref,
                 )
                 .await?;
+                // `cancel_run` is not gate-aware, so without this check a
+                // denied/cancelled resolution for a stale or attacker-supplied
+                // gate_ref would terminate any non-terminal run sharing run_id.
                 let response = self
                     .turn_coordinator
                     .cancel_run(ironclaw_turns::CancelRunRequest {
@@ -1078,11 +1084,11 @@ fn map_ownership_probe_error(error: SessionThreadError) -> RebornServicesError {
     }
 }
 
-/// Reject denied/cancelled gate resolutions whose `gate_ref` does not match the
-/// gate the run is actually parked on. `cancel_run` is not gate-aware, so
-/// without this guard a stale or attacker-supplied `gate_ref` would cancel any
-/// non-terminal run sharing the same `run_id`.
-async fn assert_run_parked_on_gate(
+/// Reject denied/cancelled generic gate resolutions whose `gate_ref` does not
+/// match the gate the run is actually parked on. `cancel_run` is not gate-aware,
+/// so without this guard a stale or attacker-supplied `gate_ref` would cancel
+/// any non-terminal run sharing the same `run_id`.
+async fn assert_generic_run_parked_on_gate(
     turn_coordinator: &dyn TurnCoordinator,
     scope: &TurnScope,
     run_id: TurnRunId,
@@ -1095,6 +1101,9 @@ async fn assert_run_parked_on_gate(
         })
         .await
         .map_err(map_turn_error)?;
+    if state.status == TurnStatus::BlockedAuth {
+        return Err(blocked_authentication_unavailable());
+    }
     match state.gate_ref.as_ref() {
         Some(parked) if parked == expected_gate_ref => Ok(()),
         _ => Err(RebornServicesError::from_status_kind(
@@ -1104,6 +1113,36 @@ async fn assert_run_parked_on_gate(
             false,
         )),
     }
+}
+
+/// Generic WebUI gate handling is intentionally not allowed to resume or
+/// cancel auth-blocked runs. Auth gates must pass through
+/// AuthInteractionService so completed-flow/credential validation and
+/// BlockedAuthGate preconditions are enforced.
+async fn reject_generic_auth_gate_resolution(
+    turn_coordinator: &dyn TurnCoordinator,
+    scope: &TurnScope,
+    run_id: TurnRunId,
+) -> Result<(), RebornServicesError> {
+    let state = turn_coordinator
+        .get_run_state(GetRunStateRequest {
+            scope: scope.clone(),
+            run_id,
+        })
+        .await
+        .map_err(map_turn_error)?;
+    if state.status == TurnStatus::BlockedAuth {
+        return Err(blocked_authentication_unavailable());
+    }
+    Ok(())
+}
+
+fn parse_credential_account_id(value: &str) -> Result<CredentialAccountId, ProductWorkflowError> {
+    uuid::Uuid::parse_str(value)
+        .map(CredentialAccountId::from_uuid)
+        .map_err(|_| ProductWorkflowError::AuthInteractionRejected {
+            kind: AuthInteractionRejectionKind::InvalidCredentialRef,
+        })
 }
 
 fn thread_scope_from_turn_scope(

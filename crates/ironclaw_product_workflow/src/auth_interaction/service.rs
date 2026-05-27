@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_auth::{AuthFlowManager, AuthFlowStatus, AuthProductError};
+use ironclaw_auth::{
+    AuthChallenge, AuthFlowId, AuthFlowManager, AuthFlowStatus, AuthProductError,
+    CredentialAccountId, CredentialSelectionInput,
+};
 use ironclaw_turns::{
     CancelRunRequest, GateRef, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
     SanitizedCancelReason, TurnCoordinator, TurnError, TurnErrorCategory, TurnRunId, TurnStatus,
@@ -188,6 +191,31 @@ impl DefaultAuthInteractionService {
         Ok(ResolveAuthInteractionResponse::Resumed(response))
     }
 
+    async fn complete_selected_credential(
+        &self,
+        gate: AuthGateRecord,
+        credential_ref: CredentialAccountId,
+    ) -> Result<AuthGateRecord, ProductWorkflowError> {
+        if gate.status() == AuthFlowStatus::Completed {
+            return Ok(gate);
+        }
+        let Some(AuthChallenge::AccountSelectionRequired { .. }) = &gate.flow().challenge else {
+            return Ok(gate);
+        };
+        let completed = self
+            .flow_manager
+            .complete_credential_selection(
+                &gate.flow().scope,
+                CredentialSelectionInput {
+                    flow_id: gate.flow().id,
+                    credential_account_id: credential_ref,
+                },
+            )
+            .await
+            .map_err(map_credential_selection_error)?;
+        AuthGateRecord::new(gate.run_id(), gate.gate_ref().clone(), completed)
+    }
+
     async fn cancel_auth(
         &self,
         request: ResolveAuthInteractionRequest,
@@ -273,20 +301,43 @@ impl AuthInteractionService for DefaultAuthInteractionService {
             }
             (
                 AuthTurnGateState::ParkedOnGate,
+                AuthInteractionDecision::CredentialProvided { credential_ref },
+            ) => {
+                let gate = self.refresh_gate(&gate).await?;
+                let gate = self
+                    .complete_selected_credential(gate, credential_ref)
+                    .await?;
+                self.resume_completed_auth(request, gate, run_id).await
+            }
+            (
+                AuthTurnGateState::ParkedOnGate,
+                AuthInteractionDecision::CallbackCompleted { .. },
+            ) => {
+                let gate = self.refresh_gate(&gate).await?;
+                self.resume_completed_auth(request, gate, run_id).await
+            }
+            (
+                AuthTurnGateState::NotParkedOnGate,
                 AuthInteractionDecision::CredentialProvided { .. }
                 | AuthInteractionDecision::CallbackCompleted { .. },
             ) => {
                 let gate = self.refresh_gate(&gate).await?;
                 self.resume_completed_auth(request, gate, run_id).await
             }
-            _ => Err(auth_rejected(AuthInteractionRejectionKind::StaleAuth)),
+            (AuthTurnGateState::NotParkedOnGate, AuthInteractionDecision::Deny) => {
+                let gate = self.refresh_gate(&gate).await?;
+                if gate.status() != AuthFlowStatus::Canceled {
+                    return Err(auth_rejected(AuthInteractionRejectionKind::StaleAuth));
+                }
+                self.cancel_auth(request, gate, run_id).await
+            }
         }
     }
 }
 
 enum AuthCompletionRef<'a> {
-    CredentialProvided(&'a str),
-    CallbackCompleted(&'a str),
+    CredentialProvided(&'a CredentialAccountId),
+    CallbackCompleted(&'a AuthFlowId),
 }
 
 fn validate_completion_ref(
@@ -301,7 +352,7 @@ fn validate_completion_ref(
             let Some(account_id) = gate.flow().credential_account_id else {
                 return Err(auth_rejected(AuthInteractionRejectionKind::StaleAuth));
             };
-            if credential_ref != account_id.to_string() {
+            if credential_ref != &account_id {
                 return Err(auth_rejected(
                     AuthInteractionRejectionKind::InvalidCredentialRef,
                 ));
@@ -309,7 +360,7 @@ fn validate_completion_ref(
             Ok(())
         }
         AuthCompletionRef::CallbackCompleted(callback_ref) => {
-            if callback_ref != gate.flow().id.to_string() {
+            if callback_ref != &gate.flow().id {
                 return Err(auth_rejected(
                     AuthInteractionRejectionKind::InvalidCallbackRef,
                 ));
@@ -353,6 +404,32 @@ fn map_auth_product_error(error: AuthProductError) -> ProductWorkflowError {
         | AuthProductError::CredentialMissing
         | AuthProductError::AccountSelectionRequired
         | AuthProductError::InvalidRequest { .. } => {
+            auth_rejected(AuthInteractionRejectionKind::UnsupportedResult)
+        }
+    }
+}
+
+fn map_credential_selection_error(error: AuthProductError) -> ProductWorkflowError {
+    match error {
+        AuthProductError::UnknownOrExpiredFlow => {
+            auth_rejected(AuthInteractionRejectionKind::MissingAuth)
+        }
+        AuthProductError::CrossScopeDenied => {
+            auth_rejected(AuthInteractionRejectionKind::CrossScopeDenied)
+        }
+        AuthProductError::BackendUnavailable => {
+            auth_rejected(AuthInteractionRejectionKind::FlowUnavailable)
+        }
+        AuthProductError::CredentialMissing
+        | AuthProductError::AccountSelectionRequired
+        | AuthProductError::InvalidRequest { .. } => {
+            auth_rejected(AuthInteractionRejectionKind::InvalidCredentialRef)
+        }
+        AuthProductError::Canceled
+        | AuthProductError::FlowAlreadyTerminal
+        | AuthProductError::ProviderDenied
+        | AuthProductError::RefreshFailed => auth_rejected(AuthInteractionRejectionKind::StaleAuth),
+        AuthProductError::MalformedCallback | AuthProductError::TokenExchangeFailed => {
             auth_rejected(AuthInteractionRejectionKind::UnsupportedResult)
         }
     }

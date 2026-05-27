@@ -6,9 +6,9 @@ use ironclaw_auth::{
     AuthChallenge, AuthContinuationRef, AuthFlowId, AuthFlowKind, AuthFlowManager, AuthFlowRecord,
     AuthFlowStatus, AuthGateRef, AuthProductError, AuthProductScope, AuthSurface,
     CredentialAccountId, CredentialAccountLabel, CredentialAccountProjection,
-    CredentialAccountStatus, CredentialAccountUpdateBinding, CredentialOwnership, NewAuthFlow,
-    OAuthAuthorizationUrl, OAuthCallbackClaimRequest, OAuthCallbackFailureInput,
-    OAuthCallbackInput, TurnRunRef,
+    CredentialAccountStatus, CredentialAccountUpdateBinding, CredentialOwnership,
+    CredentialSelectionInput, NewAuthFlow, OAuthAuthorizationUrl, OAuthCallbackClaimRequest,
+    OAuthCallbackFailureInput, OAuthCallbackInput, TurnRunRef,
 };
 use ironclaw_host_api::{
     AgentId, ExtensionId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
@@ -126,6 +126,37 @@ impl AuthFlowManager for RecordingFlowManager {
         Err(AuthProductError::BackendUnavailable)
     }
 
+    async fn complete_credential_selection(
+        &self,
+        scope: &AuthProductScope,
+        input: CredentialSelectionInput,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        let mut flow = self.flow.lock().expect("lock");
+        let Some(record) = flow.as_mut() else {
+            return Err(AuthProductError::UnknownOrExpiredFlow);
+        };
+        if record.id != input.flow_id {
+            return Err(AuthProductError::UnknownOrExpiredFlow);
+        }
+        if &record.scope != scope {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        let Some(AuthChallenge::AccountSelectionRequired { accounts, .. }) = &record.challenge
+        else {
+            return Err(AuthProductError::AccountSelectionRequired);
+        };
+        if !accounts
+            .iter()
+            .any(|account| account.id == input.credential_account_id)
+        {
+            return Err(AuthProductError::CredentialMissing);
+        }
+        record.status = AuthFlowStatus::Completed;
+        record.credential_account_id = Some(input.credential_account_id);
+        record.updated_at = Utc::now();
+        Ok(record.clone())
+    }
+
     async fn fail_oauth_callback(
         &self,
         _scope: &AuthProductScope,
@@ -181,6 +212,10 @@ impl RecordingTurnCoordinator {
 
     fn cancellations(&self) -> Vec<CancelRunRequest> {
         self.cancellations.lock().expect("lock").clone()
+    }
+
+    fn set_status(&self, status: TurnStatus) {
+        *self.status.lock().expect("lock") = status;
     }
 }
 
@@ -428,12 +463,70 @@ async fn credential_provided_resumes_completed_auth_gate() {
             run_id_hint: Some(run_id),
             gate_ref,
             decision: AuthInteractionDecision::CredentialProvided {
-                credential_ref: account_id.to_string(),
+                credential_ref: account_id,
             },
             idempotency_key: IdempotencyKey::new("auth-action-1").unwrap(),
         })
         .await
         .expect("resolve auth");
+
+    assert!(matches!(
+        response,
+        ResolveAuthInteractionResponse::Resumed(_)
+    ));
+    assert!(flow_manager.cancellations().is_empty());
+    let resumes = coordinator.resumes();
+    assert_eq!(resumes.len(), 1);
+    assert_eq!(
+        resumes[0].precondition,
+        ResumeTurnPrecondition::BlockedAuthGate
+    );
+}
+
+#[tokio::test]
+async fn credential_selection_completes_pending_auth_gate_before_resume() {
+    let actor = TurnActor::new(UserId::new("alice").unwrap());
+    let scope = turn_scope("alice", "thread-a");
+    let run_id = TurnRunId::new();
+    let gate_ref = make_gate_ref("gate:auth-account-selection");
+    let account_id = CredentialAccountId::new();
+    let flow = auth_flow(
+        AuthFlowStatus::AwaitingUser,
+        &scope,
+        &actor,
+        run_id,
+        &gate_ref,
+        None,
+        AuthChallenge::AccountSelectionRequired {
+            provider: provider(),
+            accounts: vec![CredentialAccountProjection {
+                id: account_id,
+                provider: provider(),
+                label: CredentialAccountLabel::new("alice@example.test").expect("label"),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: vec![],
+                secret_handle_count: 1,
+            }],
+        },
+    );
+    let (service, flow_manager, coordinator) =
+        service_parts(flow.clone(), vec![flow], actor.clone(), gate_ref.clone());
+
+    let response = service
+        .resolve(ResolveAuthInteractionRequest {
+            scope,
+            actor,
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: AuthInteractionDecision::CredentialProvided {
+                credential_ref: account_id,
+            },
+            idempotency_key: IdempotencyKey::new("auth-action-selection").unwrap(),
+        })
+        .await
+        .expect("credential selection resumes auth");
 
     assert!(matches!(
         response,
@@ -463,7 +556,7 @@ async fn callback_completed_resumes_completed_auth_gate() {
         None,
         setup_challenge(),
     );
-    let callback_ref = flow.id.to_string();
+    let callback_ref = flow.id;
     let (service, flow_manager, coordinator) =
         service_parts(flow.clone(), vec![flow], actor.clone(), gate_ref.clone());
 
@@ -512,7 +605,7 @@ async fn callback_completed_rejects_mismatched_callback_ref() {
             run_id_hint: Some(run_id),
             gate_ref,
             decision: AuthInteractionDecision::CallbackCompleted {
-                callback_ref: AuthFlowId::new().to_string(),
+                callback_ref: AuthFlowId::new(),
             },
             idempotency_key: IdempotencyKey::new("auth-action-callback-wrong").unwrap(),
         })
@@ -553,7 +646,7 @@ async fn credential_provided_rejects_completed_flow_without_account_id() {
             run_id_hint: Some(run_id),
             gate_ref,
             decision: AuthInteractionDecision::CredentialProvided {
-                credential_ref: CredentialAccountId::new().to_string(),
+                credential_ref: CredentialAccountId::new(),
             },
             idempotency_key: IdempotencyKey::new("auth-action-missing-account").unwrap(),
         })
@@ -609,6 +702,87 @@ async fn denied_auth_cancels_flow_and_run() {
 }
 
 #[tokio::test]
+async fn duplicate_completed_auth_resolution_replays_through_turn_coordinator() {
+    let actor = TurnActor::new(UserId::new("alice").unwrap());
+    let scope = turn_scope("alice", "thread-a");
+    let run_id = TurnRunId::new();
+    let gate_ref = make_gate_ref("gate:auth-replay-completed");
+    let account_id = CredentialAccountId::new();
+    let flow = auth_flow(
+        AuthFlowStatus::Completed,
+        &scope,
+        &actor,
+        run_id,
+        &gate_ref,
+        Some(account_id),
+        setup_challenge(),
+    );
+    let (service, _flow_manager, coordinator) =
+        service_parts(flow.clone(), vec![flow], actor.clone(), gate_ref.clone());
+    coordinator.set_status(TurnStatus::Queued);
+
+    let response = service
+        .resolve(ResolveAuthInteractionRequest {
+            scope,
+            actor,
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: AuthInteractionDecision::CredentialProvided {
+                credential_ref: account_id,
+            },
+            idempotency_key: IdempotencyKey::new("auth-action-replay-completed").unwrap(),
+        })
+        .await
+        .expect("duplicate completed auth resolution replays");
+
+    assert!(matches!(
+        response,
+        ResolveAuthInteractionResponse::Resumed(_)
+    ));
+    assert_eq!(coordinator.resumes().len(), 1);
+    assert_eq!(coordinator.cancellations().len(), 0);
+}
+
+#[tokio::test]
+async fn duplicate_denied_auth_resolution_replays_through_turn_coordinator() {
+    let actor = TurnActor::new(UserId::new("alice").unwrap());
+    let scope = turn_scope("alice", "thread-a");
+    let run_id = TurnRunId::new();
+    let gate_ref = make_gate_ref("gate:auth-replay-denied");
+    let flow = auth_flow(
+        AuthFlowStatus::Canceled,
+        &scope,
+        &actor,
+        run_id,
+        &gate_ref,
+        None,
+        setup_challenge(),
+    );
+    let (service, _flow_manager, coordinator) =
+        service_parts(flow.clone(), vec![flow], actor.clone(), gate_ref.clone());
+    coordinator.set_status(TurnStatus::Queued);
+
+    let response = service
+        .resolve(ResolveAuthInteractionRequest {
+            scope,
+            actor,
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: AuthInteractionDecision::Deny,
+            idempotency_key: IdempotencyKey::new("auth-action-replay-denied").unwrap(),
+        })
+        .await
+        .expect("duplicate denied auth resolution replays");
+
+    assert!(matches!(
+        response,
+        ResolveAuthInteractionResponse::Canceled(_)
+    ));
+    assert_eq!(coordinator.cancellations().len(), 1);
+    assert_eq!(coordinator.resumes().len(), 0);
+}
+
+#[tokio::test]
 async fn credential_resolution_requires_completed_flow() {
     let actor = TurnActor::new(UserId::new("alice").unwrap());
     let scope = turn_scope("alice", "thread-a");
@@ -634,7 +808,7 @@ async fn credential_resolution_requires_completed_flow() {
             run_id_hint: Some(run_id),
             gate_ref,
             decision: AuthInteractionDecision::CredentialProvided {
-                credential_ref: account_id.to_string(),
+                credential_ref: account_id,
             },
             idempotency_key: IdempotencyKey::new("auth-action-stale").unwrap(),
         })
@@ -678,7 +852,7 @@ async fn cross_scope_auth_gate_is_denied_before_resume() {
             run_id_hint: Some(run_id),
             gate_ref,
             decision: AuthInteractionDecision::CredentialProvided {
-                credential_ref: account_id.to_string(),
+                credential_ref: account_id,
             },
             idempotency_key: IdempotencyKey::new("auth-action-cross-scope").unwrap(),
         })
@@ -692,6 +866,50 @@ async fn cross_scope_auth_gate_is_denied_before_resume() {
         }
     ));
     assert!(coordinator.resumes().is_empty());
+}
+
+#[tokio::test]
+async fn auth_resolution_rejects_run_state_actor_mismatch() {
+    let caller = TurnActor::new(UserId::new("alice").unwrap());
+    let state_actor = TurnActor::new(UserId::new("bob").unwrap());
+    let scope = turn_scope("alice", "thread-a");
+    let run_id = TurnRunId::new();
+    let gate_ref = make_gate_ref("gate:auth-actor-mismatch");
+    let account_id = CredentialAccountId::new();
+    let flow = auth_flow(
+        AuthFlowStatus::Completed,
+        &scope,
+        &caller,
+        run_id,
+        &gate_ref,
+        Some(account_id),
+        setup_challenge(),
+    );
+    let (service, _flow_manager, coordinator) =
+        service_parts(flow.clone(), vec![flow], state_actor, gate_ref.clone());
+
+    let error = service
+        .resolve(ResolveAuthInteractionRequest {
+            scope,
+            actor: caller,
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: AuthInteractionDecision::CredentialProvided {
+                credential_ref: account_id,
+            },
+            idempotency_key: IdempotencyKey::new("auth-action-actor-mismatch").unwrap(),
+        })
+        .await
+        .expect_err("run-state actor mismatch must be denied");
+
+    assert!(matches!(
+        error,
+        ProductWorkflowError::AuthInteractionRejected {
+            kind: AuthInteractionRejectionKind::CrossScopeDenied
+        }
+    ));
+    assert!(coordinator.resumes().is_empty());
+    assert!(coordinator.cancellations().is_empty());
 }
 
 #[test]
