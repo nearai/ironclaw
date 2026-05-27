@@ -17,6 +17,8 @@ const COMMAND_MAX_SAVED_STREAM_SIZE: usize = 16 * 1024 * 1024;
 const COMMAND_OUTPUT_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
 const COMMAND_OUTPUT_TEMP_PREFIX: &str = "ironclaw-command-output-";
 const COMMAND_OUTPUT_SCRATCH_PREFIX: &str = "ironclaw-command-output-scratch-";
+const COMMAND_OUTPUT_BLOCKED_MARKER: &str =
+    "[Full command output blocked due to potential secret leakage]\n";
 const STREAM_READ_BUF_SIZE: usize = 16 * 1024;
 
 /// Metadata for full process output persisted outside the model preview.
@@ -211,8 +213,9 @@ pub(crate) fn capture_command_output(
     stderr: StreamCapture,
 ) -> Result<CapturedCommandOutput, RuntimeProcessError> {
     if !requires_saved_output(&stdout, &stderr) {
+        let preview = sanitize_preview_bytes(&combined_inline_output(&stdout, &stderr));
         return Ok(CapturedCommandOutput {
-            preview: String::from_utf8_lossy(&combined_inline_output(&stdout, &stderr)).to_string(),
+            preview,
             saved_output: None,
         });
     }
@@ -220,9 +223,13 @@ pub(crate) fn capture_command_output(
     let mut preview = PreviewBytes::default();
     (|| {
         let raw_path = materialize_combined_output(&stdout, &stderr, &mut preview)?;
-        match finalize_saved_output(raw_path.clone(), stdout.was_capped || stderr.was_capped) {
-            Ok(saved_output) => Ok(CapturedCommandOutput {
-                preview: preview.render(),
+        match finalize_saved_output(
+            raw_path.clone(),
+            stdout.was_capped || stderr.was_capped,
+            preview,
+        ) {
+            Ok((saved_output, preview)) => Ok(CapturedCommandOutput {
+                preview,
                 saved_output: Some(saved_output),
             }),
             Err(error) => {
@@ -267,7 +274,7 @@ fn materialize_combined_output(
     preview: &mut PreviewBytes,
 ) -> Result<PathBuf, RuntimeProcessError> {
     cleanup_stale_command_outputs();
-    let (path, mut file) = create_private_temp_file(COMMAND_OUTPUT_TEMP_PREFIX)?;
+    let (path, mut file) = create_private_temp_file(COMMAND_OUTPUT_SCRATCH_PREFIX)?;
     let result = (|| {
         append_stream(stdout, &mut file, preview)?;
         if stdout.has_output() && stderr.has_output() {
@@ -317,49 +324,77 @@ fn append_bytes(
 }
 
 fn finalize_saved_output(
-    path: PathBuf,
+    raw_path: PathBuf,
     stream_was_capped: bool,
-) -> Result<SavedCommandOutput, RuntimeProcessError> {
-    let sanitization = sanitize_saved_output_file(&path)?;
-    Ok(SavedCommandOutput {
-        path,
-        sanitization,
+    raw_preview: PreviewBytes,
+) -> Result<(SavedCommandOutput, String), RuntimeProcessError> {
+    let content =
+        fs::read(&raw_path).map_err(file_error("read saved command output for sanitization"))?;
+    let sanitized = sanitize_command_output_bytes(&content, raw_preview.render());
+    let final_path = if let Some(saved_replacement) = sanitized.saved_replacement.as_deref() {
+        write_final_saved_output(saved_replacement.as_bytes())?
+    } else {
+        write_final_saved_output(&content)?
+    };
+    let _ = fs::remove_file(raw_path);
+    let saved_output = SavedCommandOutput {
+        path: final_path,
+        sanitization: sanitized.sanitization,
         stream_was_capped,
         max_saved_stream_size: COMMAND_MAX_SAVED_STREAM_SIZE,
         expires_at_unix_secs: expires_at_unix_secs(),
-    })
+    };
+    Ok((saved_output, sanitized.preview))
 }
 
-fn sanitize_saved_output_file(
-    path: &Path,
-) -> Result<SavedCommandOutputSanitization, RuntimeProcessError> {
-    let content =
-        fs::read(path).map_err(file_error("read saved command output for sanitization"))?;
-    let content_text = String::from_utf8_lossy(&content);
+fn write_final_saved_output(content: &[u8]) -> Result<PathBuf, RuntimeProcessError> {
+    let (path, mut file) = create_private_temp_file(COMMAND_OUTPUT_TEMP_PREFIX)?;
+    if let Err(error) = file.write_all(content) {
+        let _ = fs::remove_file(&path);
+        return Err(file_error("write sanitized command output")(error));
+    }
+    Ok(path)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SanitizedCommandOutput {
+    preview: String,
+    sanitization: SavedCommandOutputSanitization,
+    saved_replacement: Option<String>,
+}
+
+fn sanitize_preview_bytes(bytes: &[u8]) -> String {
+    sanitize_command_output_bytes(bytes, String::from_utf8_lossy(bytes).to_string()).preview
+}
+
+fn sanitize_command_output_bytes(content: &[u8], raw_preview: String) -> SanitizedCommandOutput {
+    let content_text = String::from_utf8_lossy(content);
     let detector = ironclaw_safety::LeakDetector::new();
-    let (output, sanitization) = match detector.scan_and_clean(&content_text) {
+    let (preview, saved_replacement, sanitization) = match detector.scan_and_clean(&content_text) {
         Ok(cleaned) => {
-            let sanitization = if cleaned == content_text {
-                SavedCommandOutputSanitization::Clean
+            if cleaned == content_text {
+                (raw_preview, None, SavedCommandOutputSanitization::Clean)
             } else {
-                SavedCommandOutputSanitization::Redacted
-            };
-            (cleaned, sanitization)
+                let mut preview = PreviewBytes::default();
+                preview.push(cleaned.as_bytes());
+                (
+                    preview.render(),
+                    Some(cleaned),
+                    SavedCommandOutputSanitization::Redacted,
+                )
+            }
         }
         Err(_) => (
-            "[Full command output blocked due to potential secret leakage]\n".to_string(),
+            COMMAND_OUTPUT_BLOCKED_MARKER.to_string(),
+            Some(COMMAND_OUTPUT_BLOCKED_MARKER.to_string()),
             SavedCommandOutputSanitization::Blocked,
         ),
     };
-    if sanitization != SavedCommandOutputSanitization::Clean {
-        OpenOptions::new()
-            .write(true)
-            .truncate(true)
-            .open(path)
-            .and_then(|mut file| file.write_all(output.as_bytes()))
-            .map_err(file_error("write sanitized command output"))?;
+    SanitizedCommandOutput {
+        preview,
+        sanitization,
+        saved_replacement,
     }
-    Ok(sanitization)
 }
 
 fn cleanup_stale_command_outputs() {
@@ -506,6 +541,21 @@ mod tests {
     }
 
     #[test]
+    fn capture_command_output_blocks_secret_like_small_preview() {
+        let secret = "sk-proj-test1234567890abcdefghij";
+        let stdout = StreamCapture {
+            storage: StreamStorage::Inline(secret.as_bytes().to_vec()),
+            ..StreamCapture::default()
+        };
+
+        let output =
+            capture_command_output(stdout, StreamCapture::default()).expect("capture succeeds");
+
+        assert_eq!(output.preview, COMMAND_OUTPUT_BLOCKED_MARKER);
+        assert_eq!(output.saved_output, None);
+    }
+
+    #[test]
     fn capture_command_output_saves_large_output_file() {
         let middle = "middle content that current preview would omit";
         let raw = format!(
@@ -547,11 +597,9 @@ mod tests {
             saved_output.sanitization,
             SavedCommandOutputSanitization::Blocked
         );
-        assert_eq!(
-            saved,
-            "[Full command output blocked due to potential secret leakage]\n"
-        );
+        assert_eq!(saved, COMMAND_OUTPUT_BLOCKED_MARKER);
         assert!(!saved.contains(secret));
+        assert_eq!(output.preview, saved);
     }
 
     #[test]
