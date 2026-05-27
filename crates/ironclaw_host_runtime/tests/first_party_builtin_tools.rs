@@ -166,6 +166,23 @@ async fn builtin_first_party_surface_lists_allowed_tools_in_registry_order() {
         .find(|capability| capability.descriptor.id.as_str() == SHELL_CAPABILITY_ID)
         .expect("shell capability must be visible");
     assert_eq!(shell.estimated_resources.process_count, Some(1));
+
+    let spawn = surface
+        .capabilities
+        .iter()
+        .find(|capability| capability.descriptor.id.as_str() == SPAWN_SUBAGENT_CAPABILITY_ID)
+        .expect("spawn_subagent capability must be visible");
+    let properties = spawn
+        .descriptor
+        .parameters_schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .expect("spawn_subagent schema properties");
+    assert!(properties.contains_key("flavor_id"));
+    assert!(properties.contains_key("task"));
+    assert!(properties.contains_key("handoff"));
+    assert!(!properties.contains_key("mode"));
+    assert!(!properties.contains_key("run_in_background"));
 }
 
 #[tokio::test]

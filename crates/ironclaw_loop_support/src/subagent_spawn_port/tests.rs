@@ -1167,7 +1167,7 @@ async fn invoke_spawn_rejects_subagent_parent_without_resolved_parent_flavor() {
 }
 
 #[tokio::test]
-async fn json_spawn_input_codec_decodes_legacy_background_flag() {
+async fn json_spawn_input_codec_rejects_legacy_background_flag() {
     let codec = JsonSpawnSubagentInputCodec::new(Arc::new(StaticInputResolver {
         value: Ok(json!({
             "flavor_id": "general",
@@ -1177,11 +1177,193 @@ async fn json_spawn_input_codec_decodes_legacy_background_flag() {
     }));
     let context = test_run_context("spawn-codec").await;
 
+    let error = codec.decode(&context, &input_ref()).await.unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    assert!(
+        error
+            .safe_summary
+            .contains("background subagents are disabled")
+    );
+}
+
+#[tokio::test]
+async fn json_spawn_input_codec_rejects_background_mode() {
+    let codec = JsonSpawnSubagentInputCodec::new(Arc::new(StaticInputResolver {
+        value: Ok(json!({
+            "flavor_id": "general",
+            "task": "investigate",
+            "mode": "background"
+        })),
+    }));
+    let context = test_run_context("spawn-codec-background").await;
+
+    let error = codec.decode(&context, &input_ref()).await.unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    assert!(
+        error
+            .safe_summary
+            .contains("background subagents are disabled")
+    );
+}
+
+#[tokio::test]
+async fn json_spawn_input_codec_defaults_to_blocking_when_mode_is_absent() {
+    let codec = JsonSpawnSubagentInputCodec::new(Arc::new(StaticInputResolver {
+        value: Ok(json!({
+            "flavor_id": "general",
+            "task": "investigate"
+        })),
+    }));
+    let context = test_run_context("spawn-codec-default").await;
+
     let args = codec.decode(&context, &input_ref()).await.unwrap();
 
     assert_eq!(args.subagent_kind.as_str(), "general");
     assert_eq!(args.task, "investigate");
-    assert_eq!(args.spawn_mode(), SpawnSubagentMode::Background);
+    assert_eq!(args.spawn_mode(), SpawnSubagentMode::Blocking);
+}
+
+#[tokio::test]
+async fn json_spawn_input_codec_accepts_legacy_blocking_inputs() {
+    for value in [
+        json!({
+            "flavor_id": "general",
+            "task": "investigate",
+            "mode": "blocking"
+        }),
+        json!({
+            "flavor_id": "general",
+            "task": "investigate",
+            "run_in_background": false
+        }),
+    ] {
+        let codec =
+            JsonSpawnSubagentInputCodec::new(Arc::new(StaticInputResolver { value: Ok(value) }));
+        let context = test_run_context("spawn-codec-legacy-blocking").await;
+
+        let args = codec.decode(&context, &input_ref()).await.unwrap();
+
+        assert_eq!(args.spawn_mode(), SpawnSubagentMode::Blocking);
+    }
+}
+
+#[tokio::test]
+async fn invoke_spawn_rejects_background_mode_before_side_effects() {
+    let context = test_run_context_with_agent_actor("spawn-background-disabled").await;
+    let child_runs = Arc::new(RecordingChildRuns::default());
+    let goal_store = Arc::new(RecordingGoalStore::default());
+    let gate_store = Arc::new(InMemorySubagentGateResolutionStore::default());
+    let deps = Arc::new(SubagentSpawnDeps {
+        coordinator: Arc::new(StaticCoordinator),
+        child_runs: child_runs.clone(),
+        turn_state_store: Arc::new(StaticTurnStateStore::new(Some(turn_record(&context, 0)))),
+        thread_service: Arc::new(InMemorySessionThreadService::default()),
+        goal_store: goal_store.clone(),
+        gate_store: gate_store.clone(),
+        definition_resolver: Arc::new(StaticDefinitionResolver {
+            resolved: Some(subagent_definition(false)),
+            parent: None,
+        }),
+        spawn_input_codec: Arc::new(StaticSpawnInputCodec {
+            args: SpawnSubagentArgs {
+                subagent_kind: SubagentKindId::new("general").unwrap(),
+                task: "task".to_string(),
+                handoff: None,
+                mode: SpawnSubagentMode::Background,
+            },
+        }),
+        result_writer: Arc::new(NoopResultWriter),
+    });
+    let port = SubagentSpawnCapabilityPort::new(
+        Arc::new(AuthPassPort),
+        context,
+        CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+        SubagentSpawnLimits::default(),
+        deps,
+    );
+    port.auth_input_refs
+        .lock()
+        .unwrap()
+        .insert(input_ref(), CapabilityInputRef::new("input:auth").unwrap());
+
+    let error = port
+        .invoke_capability(CapabilityInvocation {
+            surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
+            capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+            input_ref: input_ref(),
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    assert!(
+        error
+            .safe_summary
+            .contains("background subagents are disabled")
+    );
+    assert!(child_runs.requests().is_empty());
+    assert!(goal_store.puts().is_empty());
+    assert!(gate_store.records().is_empty());
+}
+
+#[tokio::test]
+async fn invoke_spawn_batch_rejects_background_mode_before_side_effects() {
+    let context = test_run_context_with_agent_actor("spawn-background-disabled-batch").await;
+    let child_runs = Arc::new(RecordingChildRuns::default());
+    let goal_store = Arc::new(RecordingGoalStore::default());
+    let gate_store = Arc::new(InMemorySubagentGateResolutionStore::default());
+    let deps = Arc::new(SubagentSpawnDeps {
+        coordinator: Arc::new(StaticCoordinator),
+        child_runs: child_runs.clone(),
+        turn_state_store: Arc::new(StaticTurnStateStore::new(Some(turn_record(&context, 0)))),
+        thread_service: Arc::new(InMemorySessionThreadService::default()),
+        goal_store: goal_store.clone(),
+        gate_store: gate_store.clone(),
+        definition_resolver: Arc::new(StaticDefinitionResolver {
+            resolved: Some(subagent_definition(false)),
+            parent: None,
+        }),
+        spawn_input_codec: Arc::new(StaticSpawnInputCodec {
+            args: SpawnSubagentArgs {
+                subagent_kind: SubagentKindId::new("general").unwrap(),
+                task: "task".to_string(),
+                handoff: None,
+                mode: SpawnSubagentMode::Background,
+            },
+        }),
+        result_writer: Arc::new(NoopResultWriter),
+    });
+    let port = SubagentSpawnCapabilityPort::new(
+        Arc::new(AuthPassPort),
+        context,
+        CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+        SubagentSpawnLimits::default(),
+        deps,
+    );
+
+    let error = port
+        .invoke_capability_batch(CapabilityBatchInvocation {
+            invocations: vec![CapabilityInvocation {
+                surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
+                capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+                input_ref: input_ref(),
+            }],
+            stop_on_first_suspension: true,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    assert!(
+        error
+            .safe_summary
+            .contains("background subagents are disabled")
+    );
+    assert!(child_runs.requests().is_empty());
+    assert!(goal_store.puts().is_empty());
+    assert!(gate_store.records().is_empty());
 }
 
 #[tokio::test]

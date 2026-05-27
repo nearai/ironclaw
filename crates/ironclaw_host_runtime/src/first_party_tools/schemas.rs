@@ -103,15 +103,6 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 "handoff": {
                     "type": "string",
                     "description": "Optional context to pass to the child subagent"
-                },
-                "mode": {
-                    "type": "string",
-                    "enum": ["blocking", "background"],
-                    "description": "Whether the parent waits for completion"
-                },
-                "run_in_background": {
-                    "type": "boolean",
-                    "description": "Legacy background-mode flag"
                 }
             },
             "required": ["flavor_id", "task"],

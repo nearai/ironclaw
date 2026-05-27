@@ -146,8 +146,10 @@ struct SpawnSubagentWireArgs {
     run_in_background: bool,
 }
 
-impl From<SpawnSubagentWireArgs> for SpawnSubagentArgs {
-    fn from(value: SpawnSubagentWireArgs) -> Self {
+impl TryFrom<SpawnSubagentWireArgs> for SpawnSubagentArgs {
+    type Error = AgentLoopHostError;
+
+    fn try_from(value: SpawnSubagentWireArgs) -> Result<Self, Self::Error> {
         let mode = value.mode.unwrap_or({
             if value.run_in_background {
                 SpawnSubagentMode::Background
@@ -155,12 +157,15 @@ impl From<SpawnSubagentWireArgs> for SpawnSubagentArgs {
                 SpawnSubagentMode::Blocking
             }
         });
-        Self {
+        if mode == SpawnSubagentMode::Background {
+            return Err(background_subagents_disabled());
+        }
+        Ok(Self {
             subagent_kind: value.subagent_kind,
             task: value.task,
             handoff: value.handoff,
             mode,
-        }
+        })
     }
 }
 
@@ -860,6 +865,7 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
                 .spawn_input_codec
                 .decode(&self.run_context, &request.input_ref)
                 .await?;
+            reject_background_mode(args.spawn_mode())?;
             return self.handle_spawn_with_gate(&request, args, None).await;
         }
         self.inner.invoke_capability(request).await
@@ -885,6 +891,7 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
                 .spawn_input_codec
                 .decode(&self.run_context, &invocation.input_ref)
                 .await?;
+            reject_background_mode(args.spawn_mode())?;
             if args.spawn_mode() == SpawnSubagentMode::Blocking {
                 blocking_count += 1;
             }
@@ -988,13 +995,13 @@ impl SpawnSubagentInputCodec for JsonSpawnSubagentInputCodec {
             .resolve_capability_input(run_context, input_ref)
             .await?;
         serde_json::from_value::<SpawnSubagentWireArgs>(value)
-            .map(Into::into)
             .map_err(|error| {
                 AgentLoopHostError::new(
                     AgentLoopHostErrorKind::InvalidInvocation,
                     format!("invalid spawn_subagent input: {error}"),
                 )
-            })
+            })?
+            .try_into()
     }
 
     async fn register_provider_tool_call_input(
@@ -1041,6 +1048,20 @@ fn spawn_rejected(reason: &'static str) -> CapabilityOutcome {
             .unwrap_or(CapabilityDeniedReasonKind::EmptySurface),
         safe_summary: format!("subagent spawn rejected: {reason}"),
     })
+}
+
+fn reject_background_mode(mode: SpawnSubagentMode) -> Result<(), AgentLoopHostError> {
+    if mode == SpawnSubagentMode::Background {
+        return Err(background_subagents_disabled());
+    }
+    Ok(())
+}
+
+fn background_subagents_disabled() -> AgentLoopHostError {
+    AgentLoopHostError::new(
+        AgentLoopHostErrorKind::InvalidInvocation,
+        "background subagents are disabled pending durable completion delivery design (#4147)",
+    )
 }
 
 fn map_turn_error(error: TurnError) -> AgentLoopHostError {
