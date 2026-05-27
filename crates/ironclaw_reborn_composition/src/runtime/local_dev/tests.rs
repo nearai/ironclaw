@@ -77,6 +77,30 @@ mod tests {
         }
     }
 
+    async fn assert_github_capabilities_visible(
+        wiring: &LocalDevCapabilityWiring,
+        run_context: &LoopRunContext,
+    ) {
+        let port = wiring
+            .capability_factory
+            .create_capability_port(run_context)
+            .await
+            .expect("capability port");
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible surface");
+        let capability_ids = surface
+            .descriptors
+            .iter()
+            .map(|descriptor| descriptor.capability_id.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(capability_ids.contains(&"github.search_issues"));
+        assert!(capability_ids.contains(&"github.get_issue"));
+        assert!(capability_ids.contains(&"github.comment_issue"));
+    }
+
     #[tokio::test]
     async fn capability_io_writes_durable_preview_message_and_live_upsert_id() {
         let run_context = run_context("durable-preview").await;
@@ -541,24 +565,69 @@ mod tests {
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
         )
         .expect("local-dev capability wiring");
-        let port = wiring
-            .capability_factory
-            .create_capability_port(&run_context)
-            .await
-            .expect("capability port");
-        let surface = port
-            .visible_capabilities(VisibleCapabilityRequest {})
-            .await
-            .expect("visible surface");
-        let capability_ids = surface
-            .descriptors
-            .iter()
-            .map(|descriptor| descriptor.capability_id.as_str())
-            .collect::<Vec<_>>();
+        assert_github_capabilities_visible(&wiring, &run_context).await;
+    }
 
-        assert!(capability_ids.contains(&"github.search_issues"));
-        assert!(capability_ids.contains(&"github.get_issue"));
-        assert!(capability_ids.contains(&"github.comment_issue"));
+    #[tokio::test]
+    async fn local_dev_capability_port_snapshots_extensions_when_port_is_created() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+            "local-dev-live-github-surface-owner",
+            storage_root,
+        ))
+        .await
+        .expect("local-dev services build");
+        let run_context = run_context("github-live-surface").await;
+        let thread_scope = ThreadScope {
+            tenant_id: run_context.scope.tenant_id.clone(),
+            agent_id: run_context.scope.agent_id.clone().expect("agent id"),
+            project_id: run_context.scope.project_id.clone(),
+            owner_user_id: None,
+            mission_id: None,
+        };
+        let wiring = capability_wiring(
+            &services,
+            Arc::new(InMemorySessionThreadService::default()),
+            thread_scope,
+            UserId::new("local-dev-live-github-user").expect("user id"),
+            Arc::new(UnavailableModelGateway),
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        )
+        .expect("local-dev capability wiring");
+        let local_runtime = services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime substrate");
+        let extension_management = local_runtime
+            .extension_management
+            .as_ref()
+            .expect("extension management")
+            .clone();
+        let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
+            local_runtime.skill_management.clone(),
+        )
+        .with_extension_management(extension_management);
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
+            .expect("valid github ref");
+        facade
+            .execute(
+                lifecycle_context("github-live-install"),
+                LifecycleProductAction::ExtensionInstall {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("install github extension");
+        facade
+            .execute(
+                lifecycle_context("github-live-activate"),
+                LifecycleProductAction::ExtensionActivate { package_ref },
+            )
+            .await
+            .expect("activate github extension");
+
+        assert_github_capabilities_visible(&wiring, &run_context).await;
     }
 
     #[test]
