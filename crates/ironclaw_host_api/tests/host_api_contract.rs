@@ -1005,6 +1005,7 @@ fn runtime_http_egress_request_defaults_optional_body_controls() {
         response_body_limit: Some(4096),
         save_body_to: Some(RuntimeHttpSaveTarget {
             path: ScopedPath::new("/workspace/body.json").unwrap(),
+            mount_view: None,
         }),
         timeout_ms: None,
     })

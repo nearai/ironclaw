@@ -24,6 +24,7 @@ use super::{
     production_wiring_report, set_runtime_http_egress,
 };
 use crate::LocalHostProcessPort;
+use crate::RuntimeHttpBodyStore;
 use crate::wasm_credentials::SharedHostWasmRuntimeCredentials;
 
 impl<F, G, S, R> HostRuntimeServices<F, G, S, R>
@@ -740,6 +741,30 @@ where
     where
         N: NetworkHttpEgress + 'static,
     {
+        self.try_with_host_http_egress_internal(network, None)
+    }
+
+    pub fn try_with_host_http_egress_with_body_store<N, T>(
+        self,
+        network: N,
+        body_store: Arc<T>,
+    ) -> Result<Self, ProductionWiringReport>
+    where
+        N: NetworkHttpEgress + 'static,
+        T: RuntimeHttpBodyStore + 'static,
+    {
+        let body_store: Arc<dyn RuntimeHttpBodyStore> = body_store;
+        self.try_with_host_http_egress_internal(network, Some(body_store))
+    }
+
+    fn try_with_host_http_egress_internal<N>(
+        self,
+        network: N,
+        body_store: Option<Arc<dyn RuntimeHttpBodyStore>>,
+    ) -> Result<Self, ProductionWiringReport>
+    where
+        N: NetworkHttpEgress + 'static,
+    {
         let Some(secret_store) = self.secret_store.clone() else {
             return Err(production_wiring_report(
                 ProductionWiringComponent::SecretStore,
@@ -747,7 +772,7 @@ where
                 None,
             ));
         };
-        let runtime_http_egress = Arc::new(
+        let mut service =
             crate::HostHttpEgressService::new(network, SharedSecretStore(secret_store))
                 .with_network_policy_store(Arc::clone(&self.network_policy_store))
                 .with_secret_injection_store(Arc::clone(&self.secret_injection_store))
@@ -755,8 +780,11 @@ where
                     crate::runtime_policy_allows_unsafe_raw_http_diagnostics(
                         self.runtime_policy.as_ref(),
                     ),
-                ),
-        );
+                );
+        if let Some(store) = body_store {
+            service = service.with_body_store(store);
+        }
+        let runtime_http_egress = Arc::new(service);
         Ok(self.with_host_http_egress_service(runtime_http_egress))
     }
 

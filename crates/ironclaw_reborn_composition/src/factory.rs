@@ -352,6 +352,10 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         build_local_dev_root_filesystem(&root, &workspace_root, host_home_root.as_ref()).await?;
     let (skill_filesystem, workspace_filesystem, runtime_workspace_mounts) =
         build_workspace_filesystems(Arc::clone(&filesystem), host_home_root.as_ref())?;
+    let http_body_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(&filesystem),
+        runtime_workspace_mounts.clone(),
+    ));
     let owner_user_id = UserId::new(owner_id).map_err(|error| RebornBuildError::InvalidConfig {
         reason: error.to_string(),
     })?;
@@ -376,9 +380,12 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     .with_first_party_capabilities(Arc::new(builtin_first_party_registry()?))
     .with_trust_policy(Arc::new(local_dev_first_party_trust_policy()?))
     .with_secret_store(Arc::new(ironclaw_secrets::InMemorySecretStore::new()))
-    .try_with_host_http_egress(ironclaw_network::PolicyNetworkHttpEgress::new(
-        ironclaw_network::ReqwestNetworkTransport::default(),
-    ))?
+    .try_with_host_http_egress_with_body_store(
+        ironclaw_network::PolicyNetworkHttpEgress::new(
+            ironclaw_network::ReqwestNetworkTransport::default(),
+        ),
+        http_body_filesystem,
+    )?
     .with_run_state(Arc::clone(&store_graph.run_state))
     .with_approval_requests(Arc::clone(&store_graph.approval_requests))
     .with_capability_leases(Arc::clone(&store_graph.capability_leases))
@@ -1177,9 +1184,12 @@ where
     .with_first_party_capabilities(Arc::new(builtin_first_party_registry()?))
     .with_capability_leases(stores.leases)
     .with_secret_store(stores.secret_store)
-    .try_with_host_http_egress(ironclaw_network::PolicyNetworkHttpEgress::new(
-        ironclaw_network::ReqwestNetworkTransport::default(),
-    ))?
+    .try_with_host_http_egress_with_body_store(
+        ironclaw_network::PolicyNetworkHttpEgress::new(
+            ironclaw_network::ReqwestNetworkTransport::default(),
+        ),
+        Arc::clone(&stores.scoped_filesystem),
+    )?
     .with_filesystem_resource_governor(Arc::clone(&stores.scoped_filesystem))
     .with_reborn_event_store_config(profile.to_event_store_profile(), stores.event_store)
     .await?

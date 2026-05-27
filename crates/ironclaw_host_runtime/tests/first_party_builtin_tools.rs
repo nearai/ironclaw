@@ -657,8 +657,62 @@ async fn builtin_http_invokes_through_host_runtime_egress() {
     assert_eq!(request.url, "https://api.example.test/v1/items");
     assert_eq!(request.body, br#"{"ok":true}"#);
     assert_eq!(request.response_body_limit, Some(10 * 1024 * 1024));
+    assert_eq!(request.save_body_to, None);
     assert_eq!(request.timeout_ms, Some(2500));
     assert!(request.credential_injections.is_empty());
+}
+
+#[tokio::test]
+async fn builtin_http_passes_save_to_and_returns_saved_body_metadata() {
+    let egress = Arc::new(
+        RecordingRuntimeHttpEgress::with_body(br#"{"accepted":true}"#.to_vec())
+            .with_saved_body("/workspace/response.json", 17),
+    );
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/workspace").unwrap(),
+        MountPermissions::read_write(),
+    )])
+    .unwrap();
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "save_to": "/workspace/response.json"
+        }),
+        execution_context_with_mounts_and_network([HTTP_CAPABILITY_ID], mounts, http_test_policy()),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "expected saved-body HTTP success, got {error:?}; recorded requests: {:?}",
+            egress.requests()
+        )
+    });
+
+    assert_eq!(output["status"], json!(200));
+    assert_eq!(
+        output["saved_body"],
+        json!({
+            "path": "/workspace/response.json",
+            "bytes_written": 17
+        })
+    );
+    assert!(output.get("body_text").is_none());
+    assert!(output.get("body_base64").is_none());
+
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0]
+            .save_body_to
+            .as_ref()
+            .map(|target| target.path.as_str()),
+        Some("/workspace/response.json")
+    );
 }
 
 // arch-exempt: large-test-file, URL install tests share this first-party runtime harness; split plan #4062
@@ -3960,6 +4014,7 @@ struct RecordingRuntimeHttpEgress {
     requests: Arc<std::sync::Mutex<Vec<RuntimeHttpEgressRequest>>>,
     status: u16,
     body: Vec<u8>,
+    saved_body: Option<RuntimeHttpSavedBody>,
     error: Option<RuntimeHttpEgressError>,
     responses: Option<BTreeMap<String, (u16, Vec<u8>)>>,
 }
@@ -3970,6 +4025,7 @@ impl RecordingRuntimeHttpEgress {
             requests: Arc::new(std::sync::Mutex::new(Vec::new())),
             status: 200,
             body,
+            saved_body: None,
             error: None,
             responses: None,
         }
@@ -3980,6 +4036,7 @@ impl RecordingRuntimeHttpEgress {
             requests: Arc::new(std::sync::Mutex::new(Vec::new())),
             status,
             body,
+            saved_body: None,
             error: None,
             responses: None,
         }
@@ -3990,9 +4047,18 @@ impl RecordingRuntimeHttpEgress {
             requests: Arc::new(std::sync::Mutex::new(Vec::new())),
             status: 200,
             body: Vec::new(),
+            saved_body: None,
             error: Some(error),
             responses: None,
         }
+    }
+
+    fn with_saved_body(mut self, path: &str, bytes_written: u64) -> Self {
+        self.saved_body = Some(RuntimeHttpSavedBody {
+            path: ScopedPath::new(path).unwrap(),
+            bytes_written,
+        });
+        self
     }
 
     fn with_url_bodies(responses: BTreeMap<String, (u16, Vec<u8>)>) -> Self {
@@ -4000,6 +4066,7 @@ impl RecordingRuntimeHttpEgress {
             requests: Arc::new(std::sync::Mutex::new(Vec::new())),
             status: 200,
             body: Vec::new(),
+            saved_body: None,
             error: None,
             responses: Some(responses),
         }
@@ -4033,7 +4100,7 @@ impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
             status,
             headers: vec![("content-type".to_string(), "application/json".to_string())],
             body: body.clone(),
-            saved_body: None,
+            saved_body: self.saved_body.clone(),
             request_bytes: request.body.len() as u64,
             response_bytes: body.len() as u64,
             redaction_applied: false,

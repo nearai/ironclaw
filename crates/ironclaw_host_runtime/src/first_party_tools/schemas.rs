@@ -63,6 +63,10 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                     "default": 10485760,
                     "description": "Maximum response body bytes. Defaults to 10 MiB; smaller values are raised to 10 MiB."
                 },
+                "save_to": {
+                    "type": "string",
+                    "description": "Scoped path to save the sanitized response body, e.g. /workspace/response.json"
+                },
                 "timeout_ms": {
                     "type": "integer",
                     "minimum": 1,

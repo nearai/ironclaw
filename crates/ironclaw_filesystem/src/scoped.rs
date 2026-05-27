@@ -221,6 +221,22 @@ where
         self.root.write_file(&virtual_path, bytes).await
     }
 
+    /// Write bytes using an already-authorized mount view instead of the
+    /// filesystem's configured resolver.
+    ///
+    /// This is for host adapters that parse a scoped path against the exact
+    /// invocation-visible mounts and need the write to use that same authority.
+    pub async fn write_file_with_mount_view(
+        &self,
+        view: &MountView,
+        path: &ScopedPath,
+        bytes: &[u8],
+    ) -> Result<(), FilesystemError> {
+        let virtual_path =
+            resolve_with_permission_view(view, path, FilesystemOperation::WriteFile)?;
+        self.root.write_file(&virtual_path, bytes).await
+    }
+
     /// **DEPRECATED — no direct replacement on the unified surface.** Use
     /// `append`/`tail` for log-shaped mounts or `get`+`put` for
     /// read-modify-write.

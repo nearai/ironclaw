@@ -284,6 +284,7 @@ const PER_USER_ALIASES: &[&str] = &[
     "/resources",
     "/engine",
     "/skills",
+    "/workspace",
 ];
 
 /// Per-invocation [`MountView`] used as the production resolver.
@@ -488,9 +489,10 @@ where
     // `Missing(SecretStore)` wiring report if the host-runtime builder API
     // regresses; treat that as infallible here.
     let services = services
-        .try_with_host_http_egress(PolicyNetworkHttpEgress::new(
-            ReqwestNetworkTransport::default(),
-        ))
+        .try_with_host_http_egress_with_body_store(
+            PolicyNetworkHttpEgress::new(ReqwestNetworkTransport::default()),
+            Arc::clone(&scoped_filesystem),
+        )
         .expect("secret_store wired above guarantees host HTTP egress is buildable"); // safety: see comment above
 
     Ok(services)
@@ -557,9 +559,10 @@ where
     // `Missing(SecretStore)` wiring report if the host-runtime builder API
     // regresses; treat that as infallible here.
     let services = services
-        .try_with_host_http_egress(PolicyNetworkHttpEgress::new(
-            ReqwestNetworkTransport::default(),
-        ))
+        .try_with_host_http_egress_with_body_store(
+            PolicyNetworkHttpEgress::new(ReqwestNetworkTransport::default()),
+            Arc::clone(&scoped_filesystem),
+        )
         .expect("secret_store wired above guarantees host HTTP egress is buildable"); // safety: see comment above
 
     Ok(services)
