@@ -38,6 +38,8 @@ Skills pass through four stages before injection:
 
     Scoring is fully deterministic — no LLM involved. A skill must declare its activation criteria in the frontmatter so the scorer knows what to match.
 
+    Set `SKILLS_REGEX_ACTIVATION_ENABLED=false` to disable regex pattern auto-activation. Keyword/tag activation and explicit skill mentions, such as `$my-skill`, still inject skills.
+
     <Warning>
     A skill without an `activation` block scores zero on every message and is never injected.
     </Warning>

@@ -64,6 +64,8 @@ pub struct RebornConfigFile {
     pub drivers: Option<DriversSection>,
     pub harness: Option<HarnessSection>,
     pub runner: Option<RunnerSection>,
+    /// Skill activation selection settings for local-dev runtime skill context.
+    pub skills: Option<SkillsSection>,
     /// Per-slot LLM selection. Keyed by Reborn model slot name. Today
     /// composition wires only the `default` slot; the `mission` slot
     /// becomes live when the planned driver lands. Operators are free
@@ -137,6 +139,14 @@ pub struct HarnessSection {
 pub struct RunnerSection {
     pub heartbeat_interval_secs: Option<u64>,
     pub poll_interval_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillsSection {
+    /// When false, regex activation criteria no longer auto-load full skill context.
+    /// Keyword/tag activation and explicit skill mentions still work.
+    pub regex_activation_enabled: Option<bool>,
 }
 
 /// WebChat v2 HTTP gateway configuration.
@@ -588,6 +598,7 @@ mod tests {
         assert!(cfg.drivers.is_none());
         assert!(cfg.harness.is_none());
         assert!(cfg.runner.is_none());
+        assert!(cfg.skills.is_none());
         assert!(cfg.llm.is_none());
     }
 
@@ -620,6 +631,9 @@ id = "red-team"
 heartbeat_interval_secs = 5
 poll_interval_ms = 200
 
+[skills]
+regex_activation_enabled = false
+
 [llm.default]
 provider_id = "openai"
 model = "gpt-4o-mini"
@@ -643,6 +657,10 @@ api_key_env = "ANTHROPIC_API_KEY"
         assert_eq!(
             cfg.drivers.as_ref().unwrap().additional.as_deref(),
             Some(&["planned".to_string()][..])
+        );
+        assert_eq!(
+            cfg.skills.as_ref().unwrap().regex_activation_enabled,
+            Some(false)
         );
         let default_slot = cfg.default_llm_slot().expect("default slot present");
         assert_eq!(default_slot.provider_id.as_deref(), Some("openai"));

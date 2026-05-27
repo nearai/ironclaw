@@ -11,8 +11,8 @@ use ironclaw_loop_support::{
     SkillSourceKind, sort_skill_bundle_descriptors,
 };
 use ironclaw_skills::{
-    LoadedSkill, SkillSource, extract_skill_mentions, parse_skill_md, prefilter_skills,
-    skill_token_cost,
+    LoadedSkill, SkillSelectionOptions, SkillSource, extract_skill_mentions, parse_skill_md,
+    prefilter_skills_with_options, skill_token_cost,
 };
 use ironclaw_turns::run_profile::{LoopRunContext, SkillVisibility};
 use ironclaw_turns::{AcceptedMessageRef, TurnRunId, TurnScope};
@@ -63,6 +63,7 @@ pub enum SkillActivationMode {
 pub struct SkillActivationSelectorConfig {
     pub max_active_skills: usize,
     pub max_context_tokens: usize,
+    pub regex_activation_enabled: bool,
 }
 
 impl Default for SkillActivationSelectorConfig {
@@ -70,6 +71,7 @@ impl Default for SkillActivationSelectorConfig {
         Self {
             max_active_skills: DEFAULT_MAX_ACTIVE_SKILLS,
             max_context_tokens: DEFAULT_MAX_SKILL_CONTEXT_TOKENS,
+            regex_activation_enabled: true,
         }
     }
 }
@@ -664,12 +666,13 @@ fn select_skill_activations(
         }
     }
 
-    let outcome = prefilter_skills(
+    let outcome = prefilter_skills_with_options(
         &rewritten_message,
         &loaded_skills,
         remaining_slots,
         remaining_tokens,
         satisfied_setup_markers,
+        SkillSelectionOptions::regex_activation_enabled(config.regex_activation_enabled),
     );
     feedback.extend(outcome.notes);
 
@@ -1225,6 +1228,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn selector_can_disable_regex_activation_criteria() {
+        let source = Arc::new(StaticSkillBundleSource::new(vec![
+            (
+                SkillSourceKind::User,
+                "regex-review",
+                &skill_md_with_activation(
+                    "regex-review",
+                    "  patterns: [\"review\\\\s+this\"]",
+                    "REGEX_REVIEW_SENTINEL",
+                ),
+            ),
+            (
+                SkillSourceKind::User,
+                "keyword-review",
+                &skill_md(
+                    "keyword-review",
+                    "Review code",
+                    &["review"],
+                    "KEYWORD_REVIEW_SENTINEL",
+                ),
+            ),
+        ]));
+        let selectable = SelectableSkillContextSource::new(
+            source,
+            SkillActivationSelectorConfig {
+                regex_activation_enabled: false,
+                ..SkillActivationSelectorConfig::default()
+            },
+        );
+        let context = run_context().await;
+        selectable
+            .record_user_message(
+                context.scope.clone(),
+                accepted_message_ref(&context),
+                "please review this PR",
+            )
+            .expect("record message");
+
+        let selected = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("selection succeeds");
+
+        let combined = selected
+            .iter()
+            .map(|candidate| candidate.skill_md.as_deref().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(selected.len(), 1);
+        assert!(combined.contains("KEYWORD_REVIEW_SENTINEL"));
+        assert!(!combined.contains("REGEX_REVIEW_SENTINEL"));
+    }
+
+    #[tokio::test]
+    async fn selector_keeps_explicit_activation_when_regex_activation_is_disabled() {
+        let source = Arc::new(StaticSkillBundleSource::new(vec![(
+            SkillSourceKind::User,
+            "code-review",
+            &skill_md("code-review", "Review code", &[], "CODE_REVIEW_SENTINEL"),
+        )]));
+        let selectable = SelectableSkillContextSource::new(
+            source,
+            SkillActivationSelectorConfig {
+                regex_activation_enabled: false,
+                ..SkillActivationSelectorConfig::default()
+            },
+        );
+        let context = run_context().await;
+        selectable
+            .record_user_message(
+                context.scope.clone(),
+                accepted_message_ref(&context),
+                "$code-review this PR",
+            )
+            .expect("record message");
+
+        let selected = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("selection succeeds");
+
+        assert_eq!(selected.len(), 1);
+        assert!(
+            selected[0]
+                .skill_md
+                .as_ref()
+                .expect("skill context")
+                .contains("CODE_REVIEW_SENTINEL")
+        );
+    }
+
+    #[tokio::test]
     async fn selector_suppresses_explicit_skill_when_setup_marker_is_satisfied() {
         let source = Arc::new(StaticSkillBundleSource::new(vec![(
             SkillSourceKind::User,
@@ -1550,6 +1646,7 @@ mod tests {
             SkillActivationSelectorConfig {
                 max_active_skills: 1,
                 max_context_tokens: 4,
+                ..SkillActivationSelectorConfig::default()
             },
         );
         let context = run_context().await;

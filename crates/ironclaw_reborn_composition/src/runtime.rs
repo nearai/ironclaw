@@ -848,6 +848,7 @@ pub async fn build_reborn_runtime(
         runner,
         poll,
         identity,
+        regex_skill_activation_enabled,
         skill_context_source: configured_skill_context_source,
         #[cfg(test)]
         model_gateway_override,
@@ -899,6 +900,7 @@ pub async fn build_reborn_runtime(
                 let local_dev_skills = local_dev_filesystem_skill_context_source(
                     local_runtime,
                     &validated_identity.tenant_id,
+                    regex_skill_activation_enabled,
                 )?;
                 (
                     Some(local_dev_skills.source),
@@ -1210,6 +1212,7 @@ struct LocalDevSkillContextSource {
 fn local_dev_filesystem_skill_context_source(
     local_runtime: &crate::factory::RebornLocalRuntimeServices,
     tenant_id: &TenantId,
+    regex_skill_activation_enabled: bool,
 ) -> Result<LocalDevSkillContextSource, RebornRuntimeError> {
     let extension = FirstPartySkillsExtension::new(
         Arc::clone(&local_runtime.skill_filesystem),
@@ -1223,8 +1226,12 @@ fn local_dev_filesystem_skill_context_source(
     .map_err(|reason| RebornRuntimeError::InvalidArgument {
         reason: format!("first-party skills extension source: {reason}"),
     })?;
+    let selector_config = SkillActivationSelectorConfig {
+        regex_activation_enabled: regex_skill_activation_enabled,
+        ..SkillActivationSelectorConfig::default()
+    };
     let selectable_skills = extension.selectable_skill_runtime_with_setup_markers(
-        SkillActivationSelectorConfig::default(),
+        selector_config,
         Arc::clone(&local_runtime.workspace_filesystem),
     );
     Ok(LocalDevSkillContextSource {

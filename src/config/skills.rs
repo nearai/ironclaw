@@ -22,6 +22,11 @@ pub struct SkillsConfig {
     pub max_active_skills: usize,
     /// Maximum total context tokens allocated to skill prompts.
     pub max_context_tokens: usize,
+    /// Whether regex activation criteria may auto-load skills.
+    ///
+    /// Keyword/tag activation and explicit `/skill`/`$skill` style mentions remain available
+    /// when this is false.
+    pub regex_activation_enabled: bool,
     /// Maximum recursion depth when scanning skill directories for bundle layouts.
     /// Subdirectories without `SKILL.md` are recursed into up to this depth.
     pub max_scan_depth: usize,
@@ -43,6 +48,7 @@ impl Default for SkillsConfig {
             // retires the setup skill, the full budget goes to
             // reactive skills (commitment-triage, decision-capture, etc.).
             max_context_tokens: 6000,
+            regex_activation_enabled: true,
             max_scan_depth: 3,
         }
     }
@@ -81,6 +87,11 @@ impl SkillsConfig {
                 &ss.max_context_tokens,
                 &defaults.max_context_tokens,
                 "SKILLS_MAX_CONTEXT_TOKENS",
+            )?,
+            regex_activation_enabled: db_first_bool(
+                ss.regex_activation_enabled,
+                defaults.regex_activation_enabled,
+                "SKILLS_REGEX_ACTIVATION_ENABLED",
             )?,
             max_scan_depth: parse_optional_env("SKILLS_MAX_SCAN_DEPTH", 3)?,
         })

@@ -992,6 +992,10 @@ pub struct SkillsSettings {
     /// Maximum total context tokens allocated to skill prompts.
     #[serde(default = "default_skills_max_context_tokens")]
     pub max_context_tokens: usize,
+
+    /// Whether regex activation criteria may auto-load skills.
+    #[serde(default = "default_true")]
+    pub regex_activation_enabled: bool,
 }
 
 fn default_skills_max_active() -> usize {
@@ -1008,6 +1012,7 @@ impl Default for SkillsSettings {
             enabled: true,
             max_active_skills: default_skills_max_active(),
             max_context_tokens: default_skills_max_context_tokens(),
+            regex_activation_enabled: true,
         }
     }
 }

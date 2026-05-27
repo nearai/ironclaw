@@ -268,6 +268,7 @@ The HTTP webhook binds to `127.0.0.1:8080` by default. To receive webhooks from 
 |----------|------|---------|-------------|
 | `SKILLS_ENABLED` | bool | `true` | Enable skills system |
 | `SKILLS_MAX_CONTEXT_TOKENS` | int | `4000` | Max prompt budget for skills |
+| `SKILLS_REGEX_ACTIVATION_ENABLED` | bool | `true` | Enable regex pattern skill auto-activation |
 
 ## Heartbeat
 
@@ -441,6 +442,7 @@ These variables are resolved by the current `src/config/` modules but are less c
 | `SKILLS_DIR` | Local trusted skills directory. |
 | `SKILLS_INSTALLED_DIR` | Registry-installed skills directory. |
 | `SKILLS_MAX_ACTIVE` | Maximum active skills. |
+| `SKILLS_REGEX_ACTIVATION_ENABLED` | Enables regex pattern skill auto-activation. Keyword/tag activation and explicit skill mentions still work when disabled. |
 | `SKILLS_MAX_SCAN_DEPTH` | Skill directory scan depth. |
 | `HEARTBEAT_FIRE_AT` | Time-of-day heartbeat schedule. |
 | `HEARTBEAT_TIMEZONE` | Heartbeat timezone. |
