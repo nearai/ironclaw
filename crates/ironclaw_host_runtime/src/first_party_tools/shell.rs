@@ -176,3 +176,68 @@ fn process_error(error: RuntimeProcessError) -> FirstPartyCapabilityError {
     };
     FirstPartyCapabilityError::new(kind)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_shell_output_preserves_unsaved_output() {
+        assert_eq!(render_shell_output("hello", None), "hello");
+    }
+
+    #[test]
+    fn render_shell_output_reports_redacted_saved_output() {
+        let saved = saved_output();
+
+        let rendered = render_shell_output(
+            "preview",
+            Some(&SavedCommandOutput {
+                secret_redacted: true,
+                ..saved
+            }),
+        );
+
+        assert!(rendered.contains("Full output saved to: /tmp/command.log"));
+        assert!(rendered.contains("secret-like values redacted"));
+    }
+
+    #[test]
+    fn render_shell_output_reports_blocked_saved_output() {
+        let rendered = render_shell_output(
+            "preview",
+            Some(&SavedCommandOutput {
+                secret_blocked: true,
+                ..saved_output()
+            }),
+        );
+
+        assert!(rendered.contains("Full output was not saved because"));
+        assert!(rendered.contains("marker saved to: /tmp/command.log"));
+    }
+
+    #[test]
+    fn render_shell_output_reports_stream_cap() {
+        let rendered = render_shell_output(
+            "preview",
+            Some(&SavedCommandOutput {
+                stream_was_capped: true,
+                max_saved_stream_size: 123,
+                ..saved_output()
+            }),
+        );
+
+        assert!(rendered.contains("saved output capped at 123 bytes per stream"));
+    }
+
+    fn saved_output() -> SavedCommandOutput {
+        SavedCommandOutput {
+            path: std::path::PathBuf::from("/tmp/command.log"),
+            secret_redacted: false,
+            secret_blocked: false,
+            stream_was_capped: false,
+            max_saved_stream_size: 16,
+            expires_at_unix_secs: 1,
+        }
+    }
+}

@@ -17,7 +17,7 @@ use tokio::process::Command;
 
 use crate::process_output::{
     CapturedCommandOutput, SavedCommandOutput, StreamCapture, capture_command_output,
-    combine_streams, read_stream_capped, truncate_output,
+    read_stream_capped, truncate_output,
 };
 
 const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
@@ -299,16 +299,12 @@ async fn execute_local_command(
 
         let (stdout, stderr, wait_result) = tokio::join!(stdout_fut, stderr_fut, child.wait());
         let status = wait_result?;
-        let output = combine_streams(&stdout.output, &stderr.output);
-        let stream_was_capped = stdout.was_capped || stderr.was_capped;
-        Ok::<_, std::io::Error>((output, stream_was_capped, status.code().unwrap_or(-1)))
+        Ok::<_, std::io::Error>((stdout, stderr, status.code().unwrap_or(-1)))
     })
     .await;
 
     match result {
-        Ok(Ok((output, stream_was_capped, code))) => {
-            Ok((capture_command_output(&output, stream_was_capped)?, code))
-        }
+        Ok(Ok((stdout, stderr, code))) => Ok((capture_command_output(stdout, stderr)?, code)),
         Ok(Err(e)) => Err(RuntimeProcessError::ExecutionFailed(format!(
             "Command execution failed: {e}"
         ))),

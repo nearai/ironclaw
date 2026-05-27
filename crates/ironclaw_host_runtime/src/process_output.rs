@@ -1,14 +1,23 @@
-use std::{fs::OpenOptions, io::Write, path::PathBuf};
+use std::{
+    fs::{self, File, OpenOptions},
+    io::{Read, Write},
+    path::{Path, PathBuf},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
 use crate::RuntimeProcessError;
 
-/// Maximum captured output before middle truncation.
+/// Maximum model-facing process output preview before middle truncation.
 pub(crate) const COMMAND_MAX_OUTPUT_SIZE: usize = 64 * 1024;
+const COMMAND_PREVIEW_HALF_SIZE: usize = COMMAND_MAX_OUTPUT_SIZE / 2;
 const COMMAND_MAX_SAVED_STREAM_SIZE: usize = 16 * 1024 * 1024;
-const SHELL_OUTPUT_TEMP_PREFIX: &str = "ironclaw-shell-output-";
+const COMMAND_OUTPUT_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
+const COMMAND_OUTPUT_TEMP_PREFIX: &str = "ironclaw-command-output-";
+const COMMAND_OUTPUT_SCRATCH_PREFIX: &str = "ironclaw-command-output-scratch-";
+const STREAM_READ_BUF_SIZE: usize = 16 * 1024;
 
 /// Metadata for full process output persisted outside the model preview.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,6 +27,7 @@ pub struct SavedCommandOutput {
     pub secret_blocked: bool,
     pub stream_was_capped: bool,
     pub max_saved_stream_size: usize,
+    pub expires_at_unix_secs: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,69 +38,300 @@ pub(crate) struct CapturedCommandOutput {
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct StreamCapture {
-    pub(crate) output: String,
+    inline_output: Vec<u8>,
+    saved_path: Option<PathBuf>,
     pub(crate) was_capped: bool,
+}
+
+impl StreamCapture {
+    fn has_output(&self) -> bool {
+        !self.inline_output.is_empty() || self.saved_path.is_some()
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct PreviewBytes {
+    total_len: usize,
+    head: Vec<u8>,
+    tail: Vec<u8>,
+}
+
+impl PreviewBytes {
+    fn push(&mut self, bytes: &[u8]) {
+        self.total_len = self.total_len.saturating_add(bytes.len());
+        if self.head.len() < COMMAND_PREVIEW_HALF_SIZE {
+            let remaining = COMMAND_PREVIEW_HALF_SIZE - self.head.len();
+            self.head
+                .extend_from_slice(&bytes[..bytes.len().min(remaining)]);
+        }
+        self.tail.extend_from_slice(bytes);
+        if self.tail.len() > COMMAND_PREVIEW_HALF_SIZE {
+            let excess = self.tail.len() - COMMAND_PREVIEW_HALF_SIZE;
+            self.tail.drain(..excess);
+        }
+    }
+
+    fn render(&self) -> String {
+        if self.total_len <= COMMAND_MAX_OUTPUT_SIZE {
+            return String::from_utf8_lossy(&self.head).to_string();
+        }
+        format!(
+            "{}\n\n... [truncated {} bytes] ...\n\n{}",
+            String::from_utf8_lossy(&self.head),
+            self.total_len - COMMAND_MAX_OUTPUT_SIZE,
+            String::from_utf8_lossy(&self.tail)
+        )
+    }
 }
 
 pub(crate) async fn read_stream_capped<R>(mut stream: R) -> StreamCapture
 where
     R: tokio::io::AsyncRead + Unpin,
 {
-    let mut buf = Vec::new();
-    (&mut stream)
-        .take((COMMAND_MAX_SAVED_STREAM_SIZE + 1) as u64)
-        .read_to_end(&mut buf)
-        .await
-        .ok();
-    let was_capped = buf.len() > COMMAND_MAX_SAVED_STREAM_SIZE;
-    if was_capped {
-        buf.truncate(COMMAND_MAX_SAVED_STREAM_SIZE);
-    }
-    tokio::io::copy(&mut stream, &mut tokio::io::sink())
-        .await
-        .ok();
-    StreamCapture {
-        output: String::from_utf8_lossy(&buf).to_string(),
-        was_capped,
-    }
-}
+    let mut capture = StreamCapture::default();
+    let mut saved_file: Option<tokio::fs::File> = None;
+    let mut saved_bytes = 0usize;
+    let mut buf = [0u8; STREAM_READ_BUF_SIZE];
 
-pub(crate) fn combine_streams(stdout: &str, stderr: &str) -> String {
-    if stderr.is_empty() {
-        stdout.to_string()
-    } else if stdout.is_empty() {
-        stderr.to_string()
-    } else {
-        format!("{stdout}\n\n--- stderr ---\n{stderr}")
+    loop {
+        let read = stream.read(&mut buf).await.unwrap_or(0);
+        if read == 0 {
+            break;
+        }
+        let chunk = &buf[..read];
+
+        if saved_file.is_none()
+            && capture.inline_output.len().saturating_add(chunk.len()) <= COMMAND_MAX_OUTPUT_SIZE
+        {
+            capture.inline_output.extend_from_slice(chunk);
+            continue;
+        }
+
+        if saved_file.is_none() {
+            match create_private_temp_file(COMMAND_OUTPUT_SCRATCH_PREFIX) {
+                Ok((path, file)) => {
+                    let mut file = tokio::fs::File::from_std(file);
+                    if file.write_all(&capture.inline_output).await.is_err() {
+                        capture.was_capped = true;
+                        continue;
+                    }
+                    saved_bytes = capture.inline_output.len();
+                    capture.inline_output.clear();
+                    capture.saved_path = Some(path);
+                    saved_file = Some(file);
+                }
+                Err(_) => {
+                    capture.was_capped = true;
+                    continue;
+                }
+            }
+        }
+
+        let Some(file) = saved_file.as_mut() else {
+            continue;
+        };
+        if saved_bytes >= COMMAND_MAX_SAVED_STREAM_SIZE {
+            capture.was_capped = true;
+            continue;
+        }
+        let remaining = COMMAND_MAX_SAVED_STREAM_SIZE - saved_bytes;
+        let to_write = chunk.len().min(remaining);
+        if file.write_all(&chunk[..to_write]).await.is_ok() {
+            saved_bytes += to_write;
+        } else {
+            capture.was_capped = true;
+        }
+        if to_write < chunk.len() {
+            capture.was_capped = true;
+        }
     }
+
+    if let Some(mut file) = saved_file {
+        let _ = file.flush().await;
+    }
+    capture
 }
 
 pub(crate) fn capture_command_output(
-    output: &str,
-    stream_was_capped: bool,
+    stdout: StreamCapture,
+    stderr: StreamCapture,
 ) -> Result<CapturedCommandOutput, RuntimeProcessError> {
-    if output.len() <= COMMAND_MAX_OUTPUT_SIZE && !stream_was_capped {
+    if !requires_saved_output(&stdout, &stderr) {
         return Ok(CapturedCommandOutput {
-            preview: output.to_string(),
+            preview: String::from_utf8_lossy(&combined_inline_output(&stdout, &stderr)).to_string(),
             saved_output: None,
         });
     }
 
-    let preview = truncate_output(output);
-    let saved_output = persist_shell_output(output, stream_was_capped)?;
+    let mut preview = PreviewBytes::default();
+    let raw_path = materialize_combined_output(&stdout, &stderr, &mut preview)?;
+    remove_stream_scratch(&stdout);
+    remove_stream_scratch(&stderr);
+    let saved_output = finalize_saved_output(raw_path, stdout.was_capped || stderr.was_capped)?;
     Ok(CapturedCommandOutput {
-        preview,
+        preview: preview.render(),
         saved_output: Some(saved_output),
     })
 }
 
-fn persist_shell_output(
-    output: &str,
+fn requires_saved_output(stdout: &StreamCapture, stderr: &StreamCapture) -> bool {
+    stdout.saved_path.is_some()
+        || stderr.saved_path.is_some()
+        || stdout.was_capped
+        || stderr.was_capped
+        || combined_inline_output_len(stdout, stderr) > COMMAND_MAX_OUTPUT_SIZE
+}
+
+fn combined_inline_output(stdout: &StreamCapture, stderr: &StreamCapture) -> Vec<u8> {
+    let mut output = Vec::with_capacity(combined_inline_output_len(stdout, stderr));
+    output.extend_from_slice(&stdout.inline_output);
+    if !stdout.inline_output.is_empty() && !stderr.inline_output.is_empty() {
+        output.extend_from_slice(b"\n\n--- stderr ---\n");
+    }
+    output.extend_from_slice(&stderr.inline_output);
+    output
+}
+
+fn combined_inline_output_len(stdout: &StreamCapture, stderr: &StreamCapture) -> usize {
+    stdout.inline_output.len()
+        + stderr.inline_output.len()
+        + if !stdout.inline_output.is_empty() && !stderr.inline_output.is_empty() {
+            b"\n\n--- stderr ---\n".len()
+        } else {
+            0
+        }
+}
+
+fn materialize_combined_output(
+    stdout: &StreamCapture,
+    stderr: &StreamCapture,
+    preview: &mut PreviewBytes,
+) -> Result<PathBuf, RuntimeProcessError> {
+    cleanup_stale_command_outputs();
+    let (path, mut file) = create_private_temp_file(COMMAND_OUTPUT_TEMP_PREFIX)?;
+    append_stream(stdout, &mut file, preview)?;
+    if stdout.has_output() && stderr.has_output() {
+        append_bytes(b"\n\n--- stderr ---\n", &mut file, preview)?;
+    }
+    append_stream(stderr, &mut file, preview)?;
+    Ok(path)
+}
+
+fn append_stream(
+    stream: &StreamCapture,
+    output: &mut File,
+    preview: &mut PreviewBytes,
+) -> Result<(), RuntimeProcessError> {
+    if let Some(path) = &stream.saved_path {
+        let mut file = File::open(path).map_err(file_error("open saved stream output"))?;
+        let mut buf = [0u8; STREAM_READ_BUF_SIZE];
+        loop {
+            let read = file
+                .read(&mut buf)
+                .map_err(file_error("read saved stream output"))?;
+            if read == 0 {
+                break;
+            }
+            append_bytes(&buf[..read], output, preview)?;
+        }
+        return Ok(());
+    }
+    append_bytes(&stream.inline_output, output, preview)
+}
+
+fn append_bytes(
+    bytes: &[u8],
+    output: &mut File,
+    preview: &mut PreviewBytes,
+) -> Result<(), RuntimeProcessError> {
+    output
+        .write_all(bytes)
+        .map_err(file_error("write saved command output"))?;
+    preview.push(bytes);
+    Ok(())
+}
+
+fn finalize_saved_output(
+    path: PathBuf,
     stream_was_capped: bool,
 ) -> Result<SavedCommandOutput, RuntimeProcessError> {
-    let sanitized = sanitize_saved_shell_output(output);
-    let path =
-        std::env::temp_dir().join(format!("{SHELL_OUTPUT_TEMP_PREFIX}{}.log", Uuid::new_v4()));
+    let (secret_redacted, secret_blocked) = sanitize_saved_output_file(&path)?;
+    Ok(SavedCommandOutput {
+        path,
+        secret_redacted,
+        secret_blocked,
+        stream_was_capped,
+        max_saved_stream_size: COMMAND_MAX_SAVED_STREAM_SIZE,
+        expires_at_unix_secs: expires_at_unix_secs(),
+    })
+}
+
+fn sanitize_saved_output_file(path: &Path) -> Result<(bool, bool), RuntimeProcessError> {
+    let mut content = String::new();
+    File::open(path)
+        .and_then(|mut file| file.read_to_string(&mut content))
+        .map_err(file_error("read saved command output for sanitization"))?;
+    let detector = ironclaw_safety::LeakDetector::new();
+    let (output, secret_redacted, secret_blocked) = match detector.scan_and_clean(&content) {
+        Ok(cleaned) => {
+            let secret_redacted = cleaned != content;
+            (cleaned, secret_redacted, false)
+        }
+        Err(_) => (
+            "[Full command output blocked due to potential secret leakage]\n".to_string(),
+            false,
+            true,
+        ),
+    };
+    if secret_redacted || secret_blocked {
+        OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(path)
+            .and_then(|mut file| file.write_all(output.as_bytes()))
+            .map_err(file_error("write sanitized command output"))?;
+    }
+    Ok((secret_redacted, secret_blocked))
+}
+
+fn remove_stream_scratch(stream: &StreamCapture) {
+    if let Some(path) = &stream.saved_path {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn cleanup_stale_command_outputs() {
+    let Ok(entries) = fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    let now = SystemTime::now();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !name.starts_with(COMMAND_OUTPUT_TEMP_PREFIX)
+            && !name.starts_with(COMMAND_OUTPUT_SCRATCH_PREFIX)
+        {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        if now
+            .duration_since(modified)
+            .is_ok_and(|age| age > COMMAND_OUTPUT_RETENTION)
+        {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+fn create_private_temp_file(prefix: &str) -> Result<(PathBuf, File), RuntimeProcessError> {
+    let path = std::env::temp_dir().join(format!("{prefix}{}.log", Uuid::new_v4()));
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -98,42 +339,21 @@ fn persist_shell_output(
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let mut file = options.open(&path).map_err(|e| {
-        RuntimeProcessError::ExecutionFailed(format!("Failed to create shell output file: {e}"))
-    })?;
-    file.write_all(sanitized.output.as_bytes()).map_err(|e| {
-        RuntimeProcessError::ExecutionFailed(format!("Failed to write shell output file: {e}"))
-    })?;
-    Ok(SavedCommandOutput {
-        path,
-        secret_redacted: sanitized.was_redacted,
-        secret_blocked: sanitized.was_blocked,
-        stream_was_capped,
-        max_saved_stream_size: COMMAND_MAX_SAVED_STREAM_SIZE,
-    })
+    let file = options
+        .open(&path)
+        .map_err(file_error("create saved command output"))?;
+    Ok((path, file))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SanitizedSavedOutput {
-    output: String,
-    was_redacted: bool,
-    was_blocked: bool,
+fn file_error(action: &'static str) -> impl Fn(std::io::Error) -> RuntimeProcessError {
+    move |error| RuntimeProcessError::ExecutionFailed(format!("Failed to {action}: {error}"))
 }
 
-fn sanitize_saved_shell_output(output: &str) -> SanitizedSavedOutput {
-    let detector = ironclaw_safety::LeakDetector::new();
-    match detector.scan_and_clean(output) {
-        Ok(cleaned) => SanitizedSavedOutput {
-            was_redacted: cleaned != output,
-            was_blocked: false,
-            output: cleaned,
-        },
-        Err(_) => SanitizedSavedOutput {
-            output: "[Full shell output blocked due to potential secret leakage]\n".to_string(),
-            was_redacted: false,
-            was_blocked: true,
-        },
-    }
+fn expires_at_unix_secs() -> u64 {
+    SystemTime::now()
+        .checked_add(COMMAND_OUTPUT_RETENTION)
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |duration| duration.as_secs())
 }
 
 pub(crate) fn truncate_output(s: &str) -> String {
@@ -192,18 +412,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_stream_capped_keeps_output_beyond_preview_limit() {
+    async fn read_stream_capped_keeps_large_output_out_of_inline_buffer() {
         let input = "x".repeat(COMMAND_MAX_OUTPUT_SIZE + 1);
 
         let output = read_stream_capped(input.as_bytes()).await;
+        let saved_path = output.saved_path.expect("saved stream path");
+        let saved = fs::read_to_string(&saved_path).expect("saved stream readable");
+        let _ = fs::remove_file(&saved_path);
 
-        assert_eq!(output.output.len(), COMMAND_MAX_OUTPUT_SIZE + 1);
+        assert!(output.inline_output.is_empty());
+        assert_eq!(saved.len(), COMMAND_MAX_OUTPUT_SIZE + 1);
         assert!(!output.was_capped);
     }
 
     #[test]
     fn capture_command_output_preserves_small_output() {
-        let output = capture_command_output("small output", false).expect("capture succeeds");
+        let stdout = StreamCapture {
+            inline_output: b"small output".to_vec(),
+            ..StreamCapture::default()
+        };
+        let output =
+            capture_command_output(stdout, StreamCapture::default()).expect("capture succeeds");
 
         assert_eq!(output.preview, "small output");
         assert_eq!(output.saved_output, None);
@@ -217,11 +446,13 @@ mod tests {
             "a".repeat(COMMAND_MAX_OUTPUT_SIZE),
             "z".repeat(COMMAND_MAX_OUTPUT_SIZE)
         );
+        let stdout = saved_stream_capture(raw.as_bytes());
 
-        let output = capture_command_output(&raw, false).expect("capture succeeds");
+        let output =
+            capture_command_output(stdout, StreamCapture::default()).expect("capture succeeds");
         let saved_output = output.saved_output.expect("saved output metadata");
-        let saved = std::fs::read_to_string(&saved_output.path).expect("saved output readable");
-        let _ = std::fs::remove_file(&saved_output.path);
+        let saved = fs::read_to_string(&saved_output.path).expect("saved output readable");
+        let _ = fs::remove_file(&saved_output.path);
 
         assert!(output.preview.contains("... [truncated "));
         assert!(!output.preview.contains(middle));
@@ -235,34 +466,49 @@ mod tests {
     fn capture_command_output_blocks_secret_like_saved_output() {
         let secret = "sk-proj-test1234567890abcdefghij";
         let raw = format!("{}{}", "x".repeat(COMMAND_MAX_OUTPUT_SIZE + 1), secret);
+        let stdout = saved_stream_capture(raw.as_bytes());
 
-        let output = capture_command_output(&raw, false).expect("capture succeeds");
+        let output =
+            capture_command_output(stdout, StreamCapture::default()).expect("capture succeeds");
         let saved_output = output.saved_output.expect("saved output metadata");
-        let saved = std::fs::read_to_string(&saved_output.path).expect("saved output readable");
-        let _ = std::fs::remove_file(&saved_output.path);
+        let saved = fs::read_to_string(&saved_output.path).expect("saved output readable");
+        let _ = fs::remove_file(&saved_output.path);
 
         assert!(saved_output.secret_blocked);
         assert_eq!(
             saved,
-            "[Full shell output blocked due to potential secret leakage]\n"
+            "[Full command output blocked due to potential secret leakage]\n"
         );
         assert!(!saved.contains(secret));
     }
 
     #[cfg(unix)]
     #[test]
-    fn persist_shell_output_uses_owner_only_permissions() {
+    fn saved_output_uses_owner_only_permissions() {
         use std::os::unix::fs::PermissionsExt;
 
-        let persisted =
-            persist_shell_output("large clean output", false).expect("persist succeeds");
-        let mode = std::fs::metadata(&persisted.path)
+        let stdout = saved_stream_capture(b"large clean output");
+        let output =
+            capture_command_output(stdout, StreamCapture::default()).expect("capture succeeds");
+        let saved_output = output.saved_output.expect("saved output metadata");
+        let mode = fs::metadata(&saved_output.path)
             .expect("metadata")
             .permissions()
             .mode()
             & 0o777;
-        let _ = std::fs::remove_file(&persisted.path);
+        let _ = fs::remove_file(&saved_output.path);
 
         assert_eq!(mode, 0o600);
+    }
+
+    fn saved_stream_capture(bytes: &[u8]) -> StreamCapture {
+        let (path, mut file) =
+            create_private_temp_file(COMMAND_OUTPUT_SCRATCH_PREFIX).expect("stream file");
+        file.write_all(bytes).expect("write stream file");
+        StreamCapture {
+            inline_output: Vec::new(),
+            saved_path: Some(path),
+            was_capped: false,
+        }
     }
 }
