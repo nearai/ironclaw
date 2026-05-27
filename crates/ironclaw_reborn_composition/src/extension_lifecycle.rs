@@ -895,6 +895,147 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn extension_lifecycle_installs_activates_and_removes_gsuite() {
+        let (_dir, storage_root, facade, active_registry, _installation_store) =
+            github_extension_lifecycle_fixture();
+
+        let search = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionSearch {
+                    query: "google".to_string(),
+                },
+            )
+            .await
+            .expect("search extensions");
+        assert_eq!(search.phase, LifecyclePhase::Discovered);
+        let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) =
+            search.payload.as_ref()
+        else {
+            panic!("expected extension search payload");
+        };
+        assert_eq!(extensions.len(), 1);
+        assert_eq!(extensions[0].package_ref.id.as_str(), "google-calendar");
+        assert_eq!(
+            extensions[0].visible_read_only_capability_ids,
+            vec![
+                "google-calendar.list_calendars",
+                "google-calendar.list_events",
+                "google-calendar.get_event",
+                "google-calendar.find_free_slots",
+            ]
+        );
+        let search = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionSearch {
+                    query: "gmail".to_string(),
+                },
+            )
+            .await
+            .expect("search Gmail extension");
+        assert_eq!(search.phase, LifecyclePhase::Discovered);
+        let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) =
+            search.payload.as_ref()
+        else {
+            panic!("expected extension search payload");
+        };
+        assert_eq!(extensions.len(), 1);
+        assert_eq!(extensions[0].package_ref.id.as_str(), "gmail");
+        assert_eq!(
+            extensions[0].visible_read_only_capability_ids,
+            vec!["gmail.list_messages", "gmail.get_message"]
+        );
+
+        let calendar_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "google-calendar")
+                .expect("valid ref");
+        let gmail_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "gmail").expect("valid ref");
+        for package_ref in [calendar_ref.clone(), gmail_ref.clone()] {
+            let install = facade
+                .execute(
+                    lifecycle_surface_context(),
+                    LifecycleProductAction::ExtensionInstall {
+                        package_ref: package_ref.clone(),
+                    },
+                )
+                .await
+                .expect("install extension");
+            assert_eq!(install.phase, LifecyclePhase::Installed);
+        }
+        for path in [
+            "system/extensions/google-calendar/manifest.toml",
+            "system/extensions/google-calendar/schemas/google-calendar/list_events.input.v1.json",
+            "system/extensions/google-calendar/prompts/google-calendar/create_event.md",
+            "system/extensions/gmail/manifest.toml",
+            "system/extensions/gmail/schemas/gmail/send_message.input.v1.json",
+            "system/extensions/gmail/prompts/gmail/send_message.md",
+        ] {
+            assert!(storage_root.join(path).exists(), "missing {path}");
+        }
+        assert!(
+            active_registry
+                .snapshot()
+                .get_extension(&ExtensionId::new("google-calendar").unwrap())
+                .is_none()
+        );
+
+        for package_ref in [calendar_ref.clone(), gmail_ref.clone()] {
+            let activate = facade
+                .execute(
+                    lifecycle_surface_context(),
+                    LifecycleProductAction::ExtensionActivate { package_ref },
+                )
+                .await
+                .expect("activate extension");
+            assert_eq!(activate.phase, LifecyclePhase::Active);
+        }
+        let active = active_registry.snapshot();
+        assert!(
+            active
+                .get_capability(
+                    &ironclaw_host_api::CapabilityId::new("google-calendar.list_events").unwrap()
+                )
+                .is_some()
+        );
+        assert!(
+            active
+                .get_capability(
+                    &ironclaw_host_api::CapabilityId::new("gmail.send_message").unwrap()
+                )
+                .is_some()
+        );
+
+        for package_ref in [calendar_ref, gmail_ref] {
+            let remove = facade
+                .execute(
+                    lifecycle_surface_context(),
+                    LifecycleProductAction::ExtensionRemove { package_ref },
+                )
+                .await
+                .expect("remove extension");
+            assert_eq!(remove.phase, LifecyclePhase::Removed);
+        }
+        assert!(
+            active_registry
+                .snapshot()
+                .get_extension(&ExtensionId::new("gmail").unwrap())
+                .is_none()
+        );
+        assert!(
+            !storage_root
+                .join("system/extensions/google-calendar/manifest.toml")
+                .exists()
+        );
+        assert!(
+            !storage_root
+                .join("system/extensions/gmail/manifest.toml")
+                .exists()
+        );
+    }
+
+    #[tokio::test]
     async fn extension_install_rejects_skill_package_ref() {
         let (_dir, _storage_root, facade, _active_registry, _installation_store) =
             extension_lifecycle_fixture();

@@ -3,13 +3,14 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_auth::{
-    AuthContinuationEvent, AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowManager,
-    AuthFlowStatus, AuthInteractionId, AuthInteractionService, AuthProductError, AuthProductScope,
-    AuthProviderClient, AuthProviderId, CredentialAccountId, CredentialAccountLabel,
-    CredentialAccountService, CredentialAccountStatus, CredentialAccountUpdateBinding,
-    CredentialRefreshReport, CredentialRefreshRequest, CredentialSetupService,
-    InMemoryAuthProductServices, ManualTokenSetupRequest, OAuthCallbackClaimRequest,
-    OAuthCallbackFailureInput, OAuthCallbackInput, OAuthProviderCallbackRequest, OpaqueStateHash,
+    AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthErrorCode, AuthFlowId,
+    AuthFlowKind, AuthFlowManager, AuthFlowRecord, AuthFlowStatus, AuthInteractionId,
+    AuthInteractionService, AuthProductError, AuthProductScope, AuthProviderClient, AuthProviderId,
+    CredentialAccountId, CredentialAccountLabel, CredentialAccountService, CredentialAccountStatus,
+    CredentialAccountUpdateBinding, CredentialRefreshReport, CredentialRefreshRequest,
+    CredentialSetupService, InMemoryAuthProductServices, ManualTokenSetupRequest, NewAuthFlow,
+    OAuthAuthorizationUrl, OAuthCallbackClaimRequest, OAuthCallbackFailureInput,
+    OAuthCallbackInput, OAuthProviderCallbackRequest, OpaqueStateHash, PkceVerifierHash,
     ProviderCallbackOutcome, SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
     SecretSubmitRequest, Timestamp,
 };
@@ -64,6 +65,21 @@ pub struct RebornOAuthCallbackRequest {
     pub flow_id: AuthFlowId,
     pub opaque_state_hash: OpaqueStateHash,
     pub outcome: RebornOAuthCallbackOutcome,
+}
+
+/// Typed setup OAuth start request after host-route parsing and hashing.
+///
+/// The browser-facing route chooses neither flow kind nor continuation. Those
+/// product-auth semantics stay here with the auth service boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code, reason = "used by upcoming Reborn OAuth setup route wiring")]
+pub(crate) struct RebornOAuthStartFlowRequest {
+    pub(crate) scope: AuthProductScope,
+    pub(crate) provider: AuthProviderId,
+    pub(crate) authorization_url: OAuthAuthorizationUrl,
+    pub(crate) opaque_state_hash: OpaqueStateHash,
+    pub(crate) pkce_verifier_hash: PkceVerifierHash,
+    pub(crate) expires_at: ironclaw_auth::Timestamp,
 }
 
 /// Host-route OAuth callback parse result.
@@ -596,6 +612,49 @@ impl RebornProductAuthServices {
             credential_account_id: completed.credential_account_id,
             continuation: completed.continuation,
         })
+    }
+
+    #[allow(dead_code, reason = "used by upcoming Reborn OAuth setup route wiring")]
+    pub(crate) async fn ensure_oauth_callback_flow_known(
+        &self,
+        scope: &AuthProductScope,
+        flow_id: AuthFlowId,
+    ) -> Result<(), RebornOAuthCallbackError> {
+        let Some(record) = self
+            .flow_manager
+            .get_flow(scope, flow_id)
+            .await
+            .map_err(RebornOAuthCallbackError::from)?
+        else {
+            return Err(AuthProductError::UnknownOrExpiredFlow.into());
+        };
+        if record.expires_at <= Utc::now() {
+            return Err(AuthProductError::UnknownOrExpiredFlow.into());
+        }
+        Ok(())
+    }
+
+    #[allow(dead_code, reason = "used by upcoming Reborn OAuth setup route wiring")]
+    pub(crate) async fn start_setup_oauth_flow(
+        &self,
+        request: RebornOAuthStartFlowRequest,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        self.flow_manager
+            .create_flow(NewAuthFlow {
+                scope: request.scope,
+                kind: AuthFlowKind::IntegrationCredential,
+                provider: request.provider,
+                challenge: AuthChallenge::OAuthUrl {
+                    authorization_url: request.authorization_url,
+                    expires_at: request.expires_at,
+                },
+                continuation: AuthContinuationRef::SetupOnly,
+                update_binding: None,
+                opaque_state_hash: Some(request.opaque_state_hash),
+                pkce_verifier_hash: Some(request.pkce_verifier_hash),
+                expires_at: request.expires_at,
+            })
+            .await
     }
 
     pub async fn request_manual_token_setup(

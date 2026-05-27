@@ -35,6 +35,8 @@ mod lifecycle;
 mod llm_catalog;
 mod local_dev_mounts;
 mod local_runtime_profile;
+#[cfg(feature = "webui-v2-beta")]
+mod product_auth_serve;
 mod product_live_adapters;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 mod production_runtime_policy;
