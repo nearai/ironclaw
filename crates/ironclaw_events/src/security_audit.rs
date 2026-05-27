@@ -80,6 +80,18 @@ pub enum SecurityBoundary {
     HookDeny,
     /// MCP direct-lease boundary that gates raw protocol access.
     McpDirectLease,
+    /// Attestation boundary: WebAuthn assertion / challenge verification in the
+    /// custodial attested-signing path. (attested-signing stack.)
+    Attestation,
+    /// Custody key-access boundary: a custodial signing key is about to be used
+    /// to produce a signature. (attested-signing stack.)
+    CustodyKeyAccess,
+    /// Chain-signing boundary: signing bytes are about to be signed for a
+    /// specific chain/account. (attested-signing stack.)
+    ChainSigning,
+    /// Broadcast-submit boundary: a signed transaction is about to be submitted
+    /// to a network. (attested-signing stack.)
+    BroadcastSubmit,
 }
 
 impl SecurityBoundary {
@@ -93,6 +105,10 @@ impl SecurityBoundary {
             Self::AuthContinuation => "auth_continuation",
             Self::HookDeny => "hook_deny",
             Self::McpDirectLease => "mcp_direct_lease",
+            Self::Attestation => "attestation",
+            Self::CustodyKeyAccess => "custody_key_access",
+            Self::ChainSigning => "chain_signing",
+            Self::BroadcastSubmit => "broadcast_submit",
         }
     }
 }
@@ -267,6 +283,157 @@ impl SecurityAuditSink for InMemorySecurityAuditSink {
     }
 }
 
+/// Error surfaced by a [`DurableSecurityAudit`] when a security-boundary
+/// decision could NOT be durably recorded.
+///
+/// Unlike [`SecurityAuditSink`] (best-effort, infallible-by-contract), a
+/// `DurableSecurityAudit` failure is **load-bearing**: the protected action
+/// (pre-sign, pre-broadcast) MUST be refused when recording fails. See the
+/// trait docs for the fail-closed contract.
+#[derive(Debug, thiserror::Error)]
+pub enum DurableAuditError {
+    /// The durable backend failed to persist the event. Carries an opaque
+    /// description only — never the rejected secret/header/path (the
+    /// payload-free invariant of [`SecurityAuditEvent`] still holds).
+    #[error("durable security-audit record failed: {reason}")]
+    Backend {
+        /// Human-readable description of the backend failure.
+        reason: String,
+    },
+}
+
+/// Durable, **fail-closed** security-audit contract for pre-sign / pre-broadcast
+/// checkpoints.
+///
+/// This is the strict counterpart to [`SecurityAuditSink`]. The existing sink
+/// is best-effort observability: it fires *after* a boundary has already
+/// decided and its failure must never change the outcome. `DurableSecurityAudit`
+/// is the opposite — it is awaited *before* a high-value, irreversible action
+/// (using a custody key, broadcasting a signed transaction) and its failure
+/// MUST block that action. "We could not write the audit record" is treated as
+/// "do not perform the action": no un-audited custody-key use or broadcast.
+///
+/// Contract for implementations and call sites:
+///
+/// - `record` is `async` and returns `Result<(), DurableAuditError>`.
+/// - A call site that gates a protected action MUST `.await` `record` and
+///   refuse the action on `Err`.
+/// - Implementations must persist durably before returning `Ok`. A backend
+///   that merely buffers in volatile memory and could lose the record on crash
+///   does NOT satisfy the durable contract for production use (the in-memory
+///   impl below is test-only).
+/// - The existing best-effort [`SecurityAuditSink`] is unchanged and its
+///   callers are untouched; this is an additive, stricter path.
+#[async_trait::async_trait]
+pub trait DurableSecurityAudit: Send + Sync + std::fmt::Debug {
+    /// Durably record a security-boundary decision. The caller awaits this and
+    /// fails closed (refuses the protected action) on `Err`.
+    async fn record(&self, event: SecurityAuditEvent) -> Result<(), DurableAuditError>;
+}
+
+#[async_trait::async_trait]
+impl<T> DurableSecurityAudit for Arc<T>
+where
+    T: DurableSecurityAudit + ?Sized,
+{
+    async fn record(&self, event: SecurityAuditEvent) -> Result<(), DurableAuditError> {
+        (**self).record(event).await
+    }
+}
+
+/// Fail-closed pre-action checkpoint.
+///
+/// This is the single production entry point a high-value, irreversible
+/// action (custody-key use, transaction broadcast) MUST funnel through before
+/// proceeding. It durably records `event` via `audit` and returns `Ok(())`
+/// **only** if the record succeeded. On any [`DurableAuditError`] it returns
+/// `Err` and the caller MUST NOT perform the protected action — an un-audited
+/// custody-key use or broadcast is forbidden ("we could not write the audit
+/// record" ⇒ "do not perform the action").
+///
+/// The record happens *before* the action by construction: the action is only
+/// reachable on the `Ok` path. Callers therefore cannot accidentally swallow a
+/// failed audit and proceed anyway.
+///
+/// durable adapter: the real PG/libSQL-backed [`DurableSecurityAudit`]
+/// implementation that this checkpoint awaits in production is delivered by the
+/// attested-signing durable-store track (separate PR). Until then, wire a
+/// production-durable adapter here; the in-memory impl below is test-only and
+/// does NOT satisfy the durable contract for production use.
+pub async fn checkpoint_or_refuse<A: DurableSecurityAudit + ?Sized>(
+    audit: &A,
+    event: SecurityAuditEvent,
+) -> Result<(), DurableAuditError> {
+    audit.record(event).await
+}
+
+/// Test-only durable audit that captures every successfully-recorded event in
+/// memory. Not production-durable (volatile, unbounded). Use the `fail_after`
+/// constructor to simulate a backend that starts failing, exercising the
+/// fail-closed call-site contract.
+#[derive(Debug, Default)]
+pub struct InMemoryDurableSecurityAudit {
+    events: std::sync::Mutex<Vec<SecurityAuditEvent>>,
+    /// When `Some(n)`, `record` fails once `n` events have already been
+    /// recorded — lets tests drive the `Err` branch deterministically.
+    fail_after: Option<usize>,
+}
+
+impl InMemoryDurableSecurityAudit {
+    /// An always-succeeding in-memory durable audit.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// An audit that records the first `n` events then fails every subsequent
+    /// `record` with [`DurableAuditError::Backend`].
+    pub fn fail_after(n: usize) -> Self {
+        Self {
+            events: std::sync::Mutex::new(Vec::new()),
+            fail_after: Some(n),
+        }
+    }
+
+    /// Snapshot of durably-recorded events.
+    pub fn snapshot(&self) -> Vec<SecurityAuditEvent> {
+        self.events
+            .lock()
+            .expect("InMemoryDurableSecurityAudit mutex poisoned") // safety: test-only
+            .clone()
+    }
+
+    /// Number of durably-recorded events.
+    pub fn len(&self) -> usize {
+        self.events
+            .lock()
+            .expect("InMemoryDurableSecurityAudit mutex poisoned") // safety: test-only
+            .len()
+    }
+
+    /// Whether no events have been recorded.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+#[async_trait::async_trait]
+impl DurableSecurityAudit for InMemoryDurableSecurityAudit {
+    async fn record(&self, event: SecurityAuditEvent) -> Result<(), DurableAuditError> {
+        let mut events = self.events.lock().map_err(|e| DurableAuditError::Backend {
+            reason: e.to_string(),
+        })?;
+        if let Some(limit) = self.fail_after
+            && events.len() >= limit
+        {
+            return Err(DurableAuditError::Backend {
+                reason: "simulated durable-backend failure".to_string(),
+            });
+        }
+        events.push(event);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,6 +460,17 @@ mod tests {
         assert_eq!(
             SecurityBoundary::McpDirectLease.as_str(),
             "mcp_direct_lease"
+        );
+        // attested-signing boundaries — wire-stable snake_case tokens.
+        assert_eq!(SecurityBoundary::Attestation.as_str(), "attestation");
+        assert_eq!(
+            SecurityBoundary::CustodyKeyAccess.as_str(),
+            "custody_key_access"
+        );
+        assert_eq!(SecurityBoundary::ChainSigning.as_str(), "chain_signing");
+        assert_eq!(
+            SecurityBoundary::BroadcastSubmit.as_str(),
+            "broadcast_submit"
         );
 
         assert_eq!(SecurityDecision::Blocked.as_str(), "blocked");
@@ -370,5 +548,86 @@ mod tests {
             "passthrough",
         ));
         assert_eq!(sink.len(), 1);
+    }
+
+    /// Drive the *production* [`checkpoint_or_refuse`] and perform the protected
+    /// action ONLY on its `Ok` path — exactly the real call-site contract.
+    async fn guarded_action<A: DurableSecurityAudit>(
+        audit: &A,
+        event: SecurityAuditEvent,
+    ) -> Result<&'static str, DurableAuditError> {
+        checkpoint_or_refuse(audit, event).await?;
+        Ok("signed")
+    }
+
+    #[tokio::test]
+    async fn durable_audit_ok_allows_protected_action() {
+        let audit = InMemoryDurableSecurityAudit::new();
+        let event = SecurityAuditEvent::new(
+            SecurityBoundary::CustodyKeyAccess,
+            SecurityDecision::Allowed,
+            "custody_key_use",
+        );
+        let outcome = guarded_action(&audit, event).await;
+        assert_eq!(outcome.expect("audit ok must allow action"), "signed");
+        assert_eq!(audit.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn durable_audit_err_blocks_protected_action() {
+        // Backend fails on the very first record -> checkpoint_or_refuse returns
+        // Err and the protected action must not run (fail-closed).
+        let audit = InMemoryDurableSecurityAudit::fail_after(0);
+        let event = SecurityAuditEvent::new(
+            SecurityBoundary::BroadcastSubmit,
+            SecurityDecision::Allowed,
+            "broadcast_submit",
+        );
+        let outcome = guarded_action(&audit, event).await;
+        assert!(
+            matches!(outcome, Err(DurableAuditError::Backend { .. })),
+            "a failed durable audit must block the protected action"
+        );
+        assert!(
+            audit.is_empty(),
+            "no event recorded and (critically) no action performed"
+        );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_or_refuse_returns_err_on_audit_failure() {
+        // Direct test of the production checkpoint API: a failing backend makes
+        // the checkpoint itself refuse (the gate, not just a downstream caller).
+        let audit = InMemoryDurableSecurityAudit::fail_after(0);
+        let res = checkpoint_or_refuse(
+            &audit,
+            SecurityAuditEvent::new(
+                SecurityBoundary::CustodyKeyAccess,
+                SecurityDecision::Allowed,
+                "custody_key_use",
+            ),
+        )
+        .await;
+        assert!(
+            matches!(res, Err(DurableAuditError::Backend { .. })),
+            "checkpoint must refuse when the durable audit write fails"
+        );
+        assert!(audit.is_empty());
+    }
+
+    #[tokio::test]
+    async fn durable_audit_arc_passthrough() {
+        let audit: Arc<InMemoryDurableSecurityAudit> =
+            Arc::new(InMemoryDurableSecurityAudit::new());
+        let handle: Arc<dyn DurableSecurityAudit> = audit.clone();
+        handle
+            .record(SecurityAuditEvent::new(
+                SecurityBoundary::ChainSigning,
+                SecurityDecision::Allowed,
+                "chain_sign",
+            ))
+            .await
+            .expect("record");
+        assert_eq!(audit.len(), 1);
     }
 }

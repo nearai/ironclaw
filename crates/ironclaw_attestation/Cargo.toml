@@ -3,7 +3,7 @@ name = "ironclaw_attestation"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.92"
-description = "Canonical signing-bytes + ApprovedTxHash core for the IronClaw attested-signing substrate (chain-SDK-free, no secrets/webauthn)"
+description = "Canonical signing-bytes + ApprovedTxHash core + WebAuthn registry/verifier for the IronClaw attested-signing substrate (chain-SDK-free, no secrets, openssl-free pure-Rust crypto)"
 authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/nearai/ironclaw"
@@ -33,8 +33,20 @@ contract-tests = ["dep:tokio"]
 async-trait = "0.1"
 ironclaw_signing_provider = { path = "../ironclaw_signing_provider" }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
+# WebAuthn assertion crypto — PURE RUST, openssl-free (this tree is a
+# ring/rustls tree and does NOT accept the openssl native C dep). We parse the
+# COSE_Key with `coset` (Google, pure-Rust, Apache-2.0) and verify the leaf
+# assertion signature ourselves with RustCrypto `p256` (ES256) and the vendored
+# `ed25519-dalek` (EdDSA). All Relying-Party policy checks (UV, type, challenge
+# echo, rpIdHash, origin, signCount regression, BE/BS, userHandle ownership)
+# live in verify.rs. authenticatorData is a fixed binary layout we parse by
+# hand, so no general CBOR decoder is pulled in beyond coset's own ciborium.
+coset = "0.4"
+ed25519-dalek = { version = "2.2.0", features = ["std"] }
+p256 = { version = "0.13", features = ["ecdsa"] }
 # Optional: only pulled in by the `contract-tests` feature so the contract
 # suites (which use `#[tokio::test]`) compile for out-of-crate consumers.
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"], optional = true }
@@ -44,5 +56,10 @@ tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"], optiona
 # can reach the low-level component hasher (production callers use
 # `approved_tx_hash_for`).
 ironclaw_attestation = { path = ".", features = ["test-internals"] }
-serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+# Test-only software authenticator: mint ES256 (P-256) and EdDSA (Ed25519)
+# assertions to drive the verifier through valid + adversarial paths. The
+# `rand_core` feature on ed25519-dalek enables `SigningKey::generate` (test
+# keygen only); production verification needs no RNG.
+ed25519-dalek = { version = "2.2.0", features = ["std", "rand_core"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
