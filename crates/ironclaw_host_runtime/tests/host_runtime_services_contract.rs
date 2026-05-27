@@ -3087,6 +3087,40 @@ async fn host_runtime_spawn_process_sandbox_runtime_policy_denial_fails_before_e
 }
 
 #[tokio::test]
+async fn host_runtime_spawn_process_sandbox_host_failure_fails_after_preflight() {
+    let sandbox_executor = Arc::new(RecordingSandboxProcessExecutor::default());
+    let runtime = HostRuntimeServices::new(
+        Arc::new(registry_with_host_bundled_manifest(
+            PROCESS_SANDBOX_MANIFEST,
+        )),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "system.process_sandbox",
+        process_sandbox_authority_effects(),
+    )))
+    .with_process_sandbox_executor(Arc::clone(&sandbox_executor))
+    .host_runtime_for_local_testing()
+    .with_process_manager(Arc::new(FailingSpawnManager));
+    let scope = sample_scope(InvocationId::new());
+
+    let outcome = runtime
+        .spawn_capability(process_sandbox_runtime_request_for_scope(scope))
+        .await
+        .unwrap();
+
+    assert_failed_outcome(outcome, RuntimeFailureKind::Backend);
+    assert!(
+        sandbox_executor.requests().is_empty(),
+        "host spawn failure must not reach the process sandbox executor"
+    );
+}
+
+#[tokio::test]
 async fn host_runtime_spawn_process_sandbox_blocks_for_approval_before_executor() {
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
@@ -3314,6 +3348,74 @@ async fn host_runtime_spawn_process_sandbox_resume_invalid_plan_fails_before_exe
             .status,
         CapabilityLeaseStatus::Active,
         "invalid resume input must fail before lease claim/consume"
+    );
+}
+
+#[tokio::test]
+async fn host_runtime_spawn_process_sandbox_resume_host_failure_fails_after_approval() {
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let sandbox_executor = Arc::new(RecordingSandboxProcessExecutor::default());
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_host_bundled_manifest(
+            PROCESS_SANDBOX_MANIFEST,
+        )),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ApprovalThenGrantAuthorizer),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "system.process_sandbox",
+        process_sandbox_authority_effects(),
+    )))
+    .with_run_state(Arc::clone(&run_state))
+    .with_approval_requests(Arc::clone(&approval_requests))
+    .with_capability_leases(Arc::clone(&capability_leases))
+    .with_process_sandbox_executor(Arc::clone(&sandbox_executor));
+    let runtime = services
+        .host_runtime_for_local_testing()
+        .with_process_manager(Arc::new(FailingSpawnManager));
+    let scope = sample_scope(InvocationId::new());
+    let context = execution_context_without_grants_for_scope(scope.clone());
+    let input = process_sandbox_input();
+    let estimate = process_sandbox_estimate();
+
+    let blocked = runtime
+        .spawn_capability(RuntimeCapabilityRequest::new(
+            context.clone(),
+            process_sandbox_capability_id(),
+            estimate.clone(),
+            input.clone(),
+            process_sandbox_trust_decision(),
+        ))
+        .await
+        .unwrap();
+
+    let approval_request_id = match blocked {
+        RuntimeCapabilityOutcome::ApprovalRequired(gate) => gate.approval_request_id,
+        other => panic!("expected approval gate, got {other:?}"),
+    };
+    approve_spawn_for_services(&services, &scope, approval_request_id, None).await;
+
+    let outcome = runtime
+        .resume_spawn_capability(RuntimeCapabilityResumeRequest::new(
+            context,
+            approval_request_id,
+            process_sandbox_capability_id(),
+            estimate,
+            input,
+            process_sandbox_trust_decision(),
+        ))
+        .await
+        .unwrap();
+
+    assert_failed_outcome(outcome, RuntimeFailureKind::Backend);
+    assert!(
+        sandbox_executor.requests().is_empty(),
+        "host resume-spawn failure must not reach the process sandbox executor"
     );
 }
 

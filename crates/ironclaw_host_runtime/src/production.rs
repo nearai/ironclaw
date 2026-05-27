@@ -1564,6 +1564,21 @@ mod tests {
     }
 
     #[test]
+    fn host_runtime_spawn_input_for_capability_passthrough_for_non_sandbox() {
+        let input = serde_json::json!({
+            "run": {
+                "command": "",
+            },
+            "other": ["unchanged"],
+        });
+
+        let output = host_runtime_spawn_input_for_capability(&cap(), input.clone())
+            .expect("non-sandbox capability input should pass through");
+
+        assert_eq!(output, input);
+    }
+
+    #[test]
     fn sanitized_failure_message_redacts_dispatch_kind_to_stable_form() {
         let error = dispatch(DispatchFailureKind::Runtime(
             RuntimeDispatchErrorKind::NetworkDenied,
