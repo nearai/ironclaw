@@ -73,7 +73,17 @@ impl AvailableExtensionCatalog {
     }
 
     pub(crate) fn extend(&mut self, other: Self) {
-        self.packages.extend(other.packages);
+        for package in other.packages {
+            if let Some(existing) = self
+                .packages
+                .iter_mut()
+                .find(|existing| existing.package_ref == package.package_ref)
+            {
+                *existing = package;
+            } else {
+                self.packages.push(package);
+            }
+        }
     }
 
     pub(crate) async fn from_filesystem_root<F>(
@@ -782,6 +792,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn catalog_extend_replaces_duplicate_package_refs() {
+        let stale = test_extension_package_with_wasm_bytes(b"stale");
+        let bundled = test_extension_package_with_wasm_bytes(b"bundled");
+        let mut catalog = AvailableExtensionCatalog::from_packages(vec![stale]);
+        catalog.extend(AvailableExtensionCatalog::from_packages(vec![bundled]));
+
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture").unwrap();
+        let package = catalog.resolve(&package_ref).unwrap();
+        let wasm = package
+            .assets
+            .iter()
+            .find(|asset| asset.path == "wasm/fixture.wasm")
+            .expect("wasm asset");
+
+        assert_eq!(
+            wasm.content,
+            AvailableExtensionAssetContent::Bytes(b"bundled".to_vec())
+        );
+        assert_eq!(catalog.search("fixture").count(), 1);
+    }
+
     #[tokio::test]
     async fn materialize_fails_on_filesystem_error_and_rolls_back_written_assets() {
         let fs = FailingWriteFilesystem::default();
@@ -900,6 +933,10 @@ mod tests {
     }
 
     fn test_extension_package() -> AvailableExtensionPackage {
+        test_extension_package_with_wasm_bytes(b"wasm")
+    }
+
+    fn test_extension_package_with_wasm_bytes(wasm_bytes: &[u8]) -> AvailableExtensionPackage {
         static MANIFEST: &str = r#"
 schema_version = "reborn.extension_manifest.v2"
 id = "fixture"
@@ -953,7 +990,7 @@ output_schema_ref = "schemas/write.output.json"
                 },
                 AvailableExtensionAsset {
                     path: "wasm/fixture.wasm".to_string(),
-                    content: AvailableExtensionAssetContent::Bytes(b"wasm".to_vec()),
+                    content: AvailableExtensionAssetContent::Bytes(wasm_bytes.to_vec()),
                 },
             ],
         }
