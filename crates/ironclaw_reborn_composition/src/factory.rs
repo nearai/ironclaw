@@ -26,9 +26,7 @@ use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
 use ironclaw_host_api::runtime_policy::FilesystemBackendKind;
-use ironclaw_host_api::{
-    EffectKind, HostPath, MountPermissions, MountView, PackageId, UserId, VirtualPath,
-};
+use ironclaw_host_api::{HostPath, MountPermissions, MountView, PackageId, UserId, VirtualPath};
 #[cfg(feature = "libsql")]
 use ironclaw_host_api::{MountAlias, MountGrant};
 use ironclaw_host_runtime::{
@@ -67,6 +65,7 @@ use ironclaw_turns::{
 use crate::default_system_prompt::seed_default_system_prompt;
 use crate::input::{RebornRuntimeProcessBinding, RebornStorageInput};
 use crate::lifecycle::RebornLocalSkillManagementPort;
+use crate::local_dev_capability_policy::local_dev_capability_policy;
 use crate::local_dev_mounts::{
     skill_context_mount_view, skill_management_mount_view, workspace_mount_view,
 };
@@ -871,22 +870,21 @@ fn builtin_first_party_registry() -> Result<FirstPartyCapabilityRegistry, Reborn
 }
 
 fn local_dev_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuildError> {
+    let policy =
+        local_dev_capability_policy().map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("local-dev capability policy is invalid: {error}"),
+        })?;
     HostTrustPolicy::new(vec![Box::new(AdminConfig::with_entries(vec![
         AdminEntry::for_local_manifest(
-            PackageId::new("builtin").map_err(|error| RebornBuildError::InvalidConfig {
-                reason: format!("built-in first-party package id is invalid: {error}"),
+            PackageId::new(&policy.provider.id).map_err(|error| {
+                RebornBuildError::InvalidConfig {
+                    reason: format!("built-in first-party package id is invalid: {error}"),
+                }
             })?,
-            "/system/extensions/builtin/manifest.toml".to_string(),
+            policy.provider.manifest_path,
             None,
             HostTrustAssignment::first_party(),
-            vec![
-                EffectKind::DispatchCapability,
-                EffectKind::ReadFilesystem,
-                EffectKind::WriteFilesystem,
-                EffectKind::Network,
-                EffectKind::SpawnProcess,
-                EffectKind::ExecuteCode,
-            ],
+            policy.provider.authority_effects,
             None,
         ),
     ]))])

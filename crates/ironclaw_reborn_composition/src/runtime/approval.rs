@@ -56,11 +56,22 @@ impl ApprovalLeaseTermsProvider for LocalDevApprovalLeaseTermsProvider {
         gate: &ApprovalGateRecord,
     ) -> Result<LeaseApproval, ProductWorkflowError> {
         let action = LocalDevApprovalAction::from_action(gate.request().action.as_ref())?;
-        let mut constraints = local_dev::local_dev_grant_constraints(
-            action.capability().as_str(),
-            &self.workspace_mounts,
-            &self.skill_mounts,
-        );
+        let mut constraints = if action.requires_spawn_process() {
+            local_dev::local_dev_spawn_capability_constraints(
+                action.capability().as_str(),
+                &self.workspace_mounts,
+                &self.skill_mounts,
+            )
+        } else {
+            local_dev::local_dev_grant_constraints(
+                action.capability().as_str(),
+                &self.workspace_mounts,
+                &self.skill_mounts,
+            )
+        }
+        .map_err(|_| ProductWorkflowError::ApprovalInteractionRejected {
+            kind: ApprovalInteractionRejectionKind::LeaseTermsUnavailable,
+        })?;
         if action.requires_spawn_process()
             && !constraints
                 .allowed_effects

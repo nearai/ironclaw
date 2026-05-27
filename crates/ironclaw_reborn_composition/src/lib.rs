@@ -29,6 +29,7 @@ mod input;
 mod lifecycle;
 #[cfg(feature = "root-llm-provider")]
 mod llm_catalog;
+mod local_dev_capability_policy;
 mod local_dev_mounts;
 mod local_runtime_profile;
 mod product_live_adapters;

@@ -6,18 +6,18 @@ use std::{
 use chrono::Utc;
 use uuid::Uuid;
 
+#[cfg(test)]
+use ironclaw_host_api::EffectKind;
 use ironclaw_host_api::{
-    CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind, ExecutionContext,
-    ExtensionId, GrantConstraints, InvocationId, MountView, NetworkPolicy, NetworkTargetPattern,
-    Principal, RuntimeKind, TrustClass, UserId,
+    CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, ExecutionContext, ExtensionId,
+    GrantConstraints, InvocationId, MountView, NetworkPolicy, NetworkTargetPattern, Principal,
+    RuntimeKind, TrustClass, UserId,
 };
+#[cfg(test)]
+use ironclaw_host_runtime::READ_FILE_CAPABILITY_ID;
 use ironclaw_host_runtime::{
-    APPLY_PATCH_CAPABILITY_ID, CapabilitySurfacePolicy, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID,
-    GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HostRuntime, JSON_CAPABILITY_ID,
-    LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
-    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SurfaceKind,
-    TIME_CAPABILITY_ID, VisibleCapabilityRequest as HostVisibleCapabilityRequest,
-    WRITE_FILE_CAPABILITY_ID,
+    CapabilitySurfacePolicy, HostRuntime, SurfaceKind,
+    VisibleCapabilityRequest as HostVisibleCapabilityRequest,
 };
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
@@ -36,6 +36,10 @@ use ironclaw_turns::{
     },
 };
 
+use crate::local_dev_capability_policy::{
+    LocalDevCapabilityPolicyError, LocalDevConstraintPolicy, LocalDevMountProfile,
+    LocalDevNetworkProfile, local_dev_capability_policy,
+};
 use crate::local_dev_mounts::skill_management_mount_view;
 use crate::{
     RebornServices,
@@ -139,9 +143,9 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
             Arc::clone(&self.milestone_sink),
         )
         .with_execution_mounts(workspace_mounts);
-        for capability_id in local_dev_skill_management_capability_ids() {
+        for capability_id in local_dev_skill_management_capability_ids()? {
             factory = factory.with_capability_execution_mount(
-                CapabilityId::new(capability_id).map_err(host_api_agent_loop_error)?,
+                CapabilityId::new(&capability_id).map_err(host_api_agent_loop_error)?,
                 skill_mounts.clone(),
             );
         }
@@ -580,6 +584,7 @@ fn local_dev_visible_capability_request(
     skill_mounts: MountView,
 ) -> Result<HostVisibleCapabilityRequest, AgentLoopHostError> {
     let extension_id = loop_driver_execution_extension_id(run_context)?;
+    let policy = local_dev_capability_policy().map_err(local_dev_capability_policy_error)?;
     let grants = local_dev_builtin_grants(&extension_id, &workspace_mounts, &skill_mounts)?;
     let mut context = ExecutionContext::local_default(
         user_id,
@@ -600,14 +605,15 @@ fn local_dev_visible_capability_request(
     context.resource_scope.thread_id = context.thread_id.clone();
     context.validate().map_err(host_api_agent_loop_error)?;
 
-    let builtin_provider = ExtensionId::new("builtin").map_err(host_api_agent_loop_error)?;
+    let builtin_provider =
+        ExtensionId::new(&policy.provider.id).map_err(host_api_agent_loop_error)?;
     let mut provider_trust = BTreeMap::new();
     provider_trust.insert(
         builtin_provider,
         TrustDecision {
             effective_trust: EffectiveTrustClass::user_trusted(),
             authority_ceiling: AuthorityCeiling {
-                allowed_effects: local_dev_provider_allowed_effects(),
+                allowed_effects: policy.provider.authority_effects,
                 max_resource_ceiling: None,
             },
             provenance: TrustProvenance::AdminConfig,
@@ -628,144 +634,122 @@ fn local_dev_builtin_grants(
     workspace_mounts: &MountView,
     skill_mounts: &MountView,
 ) -> Result<CapabilitySet, AgentLoopHostError> {
+    let policy = local_dev_capability_policy().map_err(local_dev_capability_policy_error)?;
     let mut grants = Vec::new();
-    for capability_id in local_dev_builtin_capability_ids() {
+    for grant_policy in &policy.grants {
         grants.push(CapabilityGrant {
             id: CapabilityGrantId::new(),
-            capability: CapabilityId::new(capability_id).map_err(host_api_agent_loop_error)?,
+            capability: CapabilityId::new(&grant_policy.capability)
+                .map_err(host_api_agent_loop_error)?,
             grantee: Principal::Extension(grantee.clone()),
             issued_by: Principal::HostRuntime,
-            constraints: local_dev_grant_constraints(capability_id, workspace_mounts, skill_mounts),
+            constraints: local_dev_grant_constraints(
+                &grant_policy.capability,
+                workspace_mounts,
+                skill_mounts,
+            )
+            .map_err(local_dev_capability_policy_error)?,
         });
     }
     Ok(CapabilitySet { grants })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LocalDevCapabilityKind {
-    Workspace,
-    AmbientShell,
-    Network,
-    SkillManagement,
-}
-
-fn local_dev_capability_kind(capability_id: &str) -> LocalDevCapabilityKind {
-    if capability_id == SHELL_CAPABILITY_ID {
-        LocalDevCapabilityKind::AmbientShell
-    } else if capability_id == HTTP_CAPABILITY_ID {
-        LocalDevCapabilityKind::Network
-    } else if capability_id == SKILL_LIST_CAPABILITY_ID
-        || capability_id == SKILL_INSTALL_CAPABILITY_ID
-        || capability_id == SKILL_REMOVE_CAPABILITY_ID
-    {
-        LocalDevCapabilityKind::SkillManagement
-    } else {
-        LocalDevCapabilityKind::Workspace
-    }
-}
-
-fn local_dev_skill_management_capability_ids() -> impl Iterator<Item = &'static str> {
-    local_dev_builtin_capability_ids()
+fn local_dev_skill_management_capability_ids() -> Result<Vec<String>, AgentLoopHostError> {
+    Ok(local_dev_capability_policy()
+        .map_err(local_dev_capability_policy_error)?
+        .grants
         .into_iter()
-        .filter(|capability_id| {
-            local_dev_capability_kind(capability_id) == LocalDevCapabilityKind::SkillManagement
-        })
+        .filter(|grant| grant.constraints.mounts == LocalDevMountProfile::SkillManagement)
+        .map(|grant| grant.capability)
+        .collect())
 }
 
 pub(super) fn local_dev_grant_constraints(
     capability_id: &str,
     workspace_mounts: &MountView,
     skill_mounts: &MountView,
-) -> GrantConstraints {
-    match local_dev_capability_kind(capability_id) {
-        LocalDevCapabilityKind::AmbientShell => GrantConstraints {
-            allowed_effects: local_dev_shell_allowed_effects(),
-            // The first-party shell handler still uses direct host process
-            // execution. It fails closed when scoped mounts are attached
-            // because it cannot safely translate virtual cwd values like
-            // `/workspace` to host paths yet. Local-dev exposes shell as an
-            // explicitly ambient developer escape hatch until mount-aware
-            // process execution lands.
-            mounts: MountView::default(),
-            network: local_dev_shell_network_policy(),
-            secrets: Vec::new(),
-            resource_ceiling: None,
-            expires_at: None,
-            max_invocations: None,
-        },
-        LocalDevCapabilityKind::Network => GrantConstraints {
-            allowed_effects: local_dev_network_allowed_effects(),
-            mounts: MountView::default(),
-            network: local_dev_shell_network_policy(),
-            secrets: Vec::new(),
-            resource_ceiling: None,
-            expires_at: None,
-            max_invocations: None,
-        },
-        LocalDevCapabilityKind::Workspace => GrantConstraints {
-            allowed_effects: local_dev_allowed_effects(),
-            mounts: workspace_mounts.clone(),
-            network: NetworkPolicy::default(),
-            secrets: Vec::new(),
-            resource_ceiling: None,
-            expires_at: None,
-            max_invocations: None,
-        },
-        LocalDevCapabilityKind::SkillManagement => GrantConstraints {
-            allowed_effects: local_dev_allowed_effects(),
-            mounts: skill_mounts.clone(),
-            network: NetworkPolicy::default(),
-            secrets: Vec::new(),
-            resource_ceiling: None,
-            expires_at: None,
-            max_invocations: None,
-        },
+) -> Result<GrantConstraints, LocalDevCapabilityPolicyError> {
+    let policy = local_dev_capability_policy()?;
+    let grant = policy.grant(capability_id)?;
+    Ok(local_dev_constraints_from_policy(
+        &grant.constraints,
+        workspace_mounts,
+        skill_mounts,
+    ))
+}
+
+pub(super) fn local_dev_spawn_capability_constraints(
+    capability_id: &str,
+    workspace_mounts: &MountView,
+    skill_mounts: &MountView,
+) -> Result<GrantConstraints, LocalDevCapabilityPolicyError> {
+    match local_dev_grant_constraints(capability_id, workspace_mounts, skill_mounts) {
+        Ok(constraints) => Ok(constraints),
+        Err(LocalDevCapabilityPolicyError::MissingGrant { .. }) => {
+            let policy = local_dev_capability_policy()?;
+            Ok(local_dev_constraints_from_policy(
+                &policy.approval_defaults.spawn_capability,
+                workspace_mounts,
+                skill_mounts,
+            ))
+        }
+        Err(error) => Err(error),
     }
 }
 
-fn local_dev_builtin_capability_ids() -> [&'static str; 14] {
-    [
-        ECHO_CAPABILITY_ID,
-        TIME_CAPABILITY_ID,
-        JSON_CAPABILITY_ID,
-        HTTP_CAPABILITY_ID,
-        SHELL_CAPABILITY_ID,
-        READ_FILE_CAPABILITY_ID,
-        WRITE_FILE_CAPABILITY_ID,
-        LIST_DIR_CAPABILITY_ID,
-        GLOB_CAPABILITY_ID,
-        GREP_CAPABILITY_ID,
-        APPLY_PATCH_CAPABILITY_ID,
-        SKILL_LIST_CAPABILITY_ID,
-        SKILL_INSTALL_CAPABILITY_ID,
-        SKILL_REMOVE_CAPABILITY_ID,
-    ]
+fn local_dev_constraints_from_policy(
+    constraints: &LocalDevConstraintPolicy,
+    workspace_mounts: &MountView,
+    skill_mounts: &MountView,
+) -> GrantConstraints {
+    let mounts = match constraints.mounts {
+        LocalDevMountProfile::Workspace => workspace_mounts.clone(),
+        LocalDevMountProfile::Ambient => MountView::default(),
+        LocalDevMountProfile::SkillManagement => skill_mounts.clone(),
+    };
+    let network = match constraints.network {
+        LocalDevNetworkProfile::Default => NetworkPolicy::default(),
+        LocalDevNetworkProfile::LocalDevWildcard => local_dev_shell_network_policy(),
+    };
+    GrantConstraints {
+        allowed_effects: constraints.effects.clone(),
+        mounts,
+        network,
+        secrets: Vec::new(),
+        resource_ceiling: None,
+        expires_at: None,
+        max_invocations: None,
+    }
 }
 
-fn local_dev_network_allowed_effects() -> Vec<EffectKind> {
-    vec![EffectKind::DispatchCapability, EffectKind::Network]
+#[cfg(test)]
+fn local_dev_builtin_capability_ids() -> Result<Vec<String>, LocalDevCapabilityPolicyError> {
+    Ok(local_dev_capability_policy()?
+        .grants
+        .into_iter()
+        .map(|grant| grant.capability)
+        .collect())
 }
 
-fn local_dev_allowed_effects() -> Vec<EffectKind> {
-    vec![
-        EffectKind::DispatchCapability,
-        EffectKind::ReadFilesystem,
-        EffectKind::WriteFilesystem,
-    ]
+#[cfg(test)]
+fn local_dev_allowed_effects() -> Result<Vec<EffectKind>, LocalDevCapabilityPolicyError> {
+    Ok(local_dev_capability_policy()?
+        .grant(READ_FILE_CAPABILITY_ID)?
+        .constraints
+        .effects
+        .clone())
 }
 
-fn local_dev_shell_allowed_effects() -> Vec<EffectKind> {
-    let mut effects = local_dev_allowed_effects();
-    effects.extend([
-        EffectKind::SpawnProcess,
-        EffectKind::ExecuteCode,
-        EffectKind::Network,
-    ]);
-    effects
+#[cfg(test)]
+fn local_dev_provider_allowed_effects() -> Result<Vec<EffectKind>, LocalDevCapabilityPolicyError> {
+    Ok(local_dev_capability_policy()?.provider.authority_effects)
 }
 
-fn local_dev_provider_allowed_effects() -> Vec<EffectKind> {
-    local_dev_shell_allowed_effects()
+fn local_dev_capability_policy_error(error: LocalDevCapabilityPolicyError) -> AgentLoopHostError {
+    AgentLoopHostError::new(
+        AgentLoopHostErrorKind::Internal,
+        format!("local-dev capability policy is invalid: {error}"),
+    )
 }
 
 fn local_dev_shell_network_policy() -> NetworkPolicy {
