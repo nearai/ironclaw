@@ -1353,7 +1353,8 @@ mod tests {
     use super::*;
     use ironclaw_auth::{
         AuthProductScope, AuthSurface, CredentialAccountLabel, CredentialAccountStatus,
-        CredentialOwnership, GOOGLE_GMAIL_SEND_SCOPE, NewCredentialAccount, ProviderScope,
+        CredentialOwnership, GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_GMAIL_SEND_SCOPE,
+        NewCredentialAccount, ProviderScope,
     };
     use ironclaw_filesystem::FilesystemError;
     use ironclaw_host_api::{
@@ -1410,6 +1411,9 @@ mod tests {
             .expect("extension management");
         let gmail_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "gmail").expect("valid ref");
+        let calendar_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "google-calendar")
+                .expect("valid ref");
 
         extension_management
             .install(gmail_ref.clone())
@@ -1419,9 +1423,18 @@ mod tests {
             .activate(gmail_ref)
             .await
             .expect("activate Gmail");
+        extension_management
+            .install(calendar_ref.clone())
+            .await
+            .expect("install Google Calendar");
+        extension_management
+            .activate(calendar_ref)
+            .await
+            .expect("activate Google Calendar");
 
-        let context = gsuite_context("gmail.send_message");
-        let auth_scope = AuthProductScope::new(context.resource_scope.clone(), AuthSurface::Api);
+        let gmail_context = gsuite_context("gmail.send_message");
+        let auth_scope =
+            AuthProductScope::new(gmail_context.resource_scope.clone(), AuthSurface::Api);
         services
             .product_auth
             .as_ref()
@@ -1438,7 +1451,10 @@ mod tests {
                 granted_extensions: Vec::new(),
                 access_secret: Some(SecretHandle::new("missing-google-access-token").unwrap()),
                 refresh_secret: None,
-                scopes: vec![ProviderScope::new(GOOGLE_GMAIL_SEND_SCOPE).unwrap()],
+                scopes: vec![
+                    ProviderScope::new(GOOGLE_GMAIL_SEND_SCOPE).unwrap(),
+                    ProviderScope::new(GOOGLE_CALENDAR_EVENTS_SCOPE).unwrap(),
+                ],
             })
             .await
             .expect("create Google account");
@@ -1448,7 +1464,7 @@ mod tests {
             .as_ref()
             .expect("host runtime")
             .invoke_capability(RuntimeCapabilityRequest::new(
-                context,
+                gmail_context,
                 CapabilityId::new("gmail.send_message").unwrap(),
                 ResourceEstimate::default(),
                 serde_json::json!({ "message": { "raw": "base64url-rfc822" } }),
@@ -1461,6 +1477,33 @@ mod tests {
             panic!("expected fail-closed handler outcome, got {outcome:?}");
         };
         assert_eq!(failure.capability_id.as_str(), "gmail.send_message");
+        assert_ne!(failure.kind, RuntimeFailureKind::MissingRuntime);
+
+        let calendar_context = gsuite_context("google-calendar.create_event");
+        let outcome = services
+            .host_runtime
+            .as_ref()
+            .expect("host runtime")
+            .invoke_capability(RuntimeCapabilityRequest::new(
+                calendar_context,
+                CapabilityId::new("google-calendar.create_event").unwrap(),
+                ResourceEstimate::default(),
+                serde_json::json!({
+                    "calendar_id": "primary",
+                    "event": { "summary": "Review" }
+                }),
+                trust_decision(),
+            ))
+            .await
+            .expect("runtime invocation completes");
+
+        let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
+            panic!("expected fail-closed handler outcome, got {outcome:?}");
+        };
+        assert_eq!(
+            failure.capability_id.as_str(),
+            "google-calendar.create_event"
+        );
         assert_ne!(failure.kind, RuntimeFailureKind::MissingRuntime);
     }
 
