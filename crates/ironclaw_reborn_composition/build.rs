@@ -1,5 +1,5 @@
 use std::env;
-use std::fs;
+use std::fs::{self, FileType};
 use std::path::{Path, PathBuf};
 
 use ironclaw_skills::{normalize_safe_relative_path, parse_skill_md, validate_skill_name};
@@ -19,7 +19,7 @@ fn embed_reborn_skills(repo_root: &Path) {
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("out dir"));
     let out_path = out_dir.join("embedded_reborn_skills.json");
-    if !skills_dir.is_dir() {
+    if !path_is_real_dir(&skills_dir) {
         fs::write(out_path, "[]").expect("write empty embedded skills");
         return;
     }
@@ -29,13 +29,16 @@ fn embed_reborn_skills(repo_root: &Path) {
         .expect("read skills dir")
         .collect::<Result<Vec<_>, _>>()
         .expect("read skills dir entries");
-    entries.retain(|entry| entry.path().is_dir());
+    entries.retain(|entry| {
+        let file_type = non_symlink_file_type(entry);
+        file_type.is_dir()
+    });
     entries.sort_by_key(|entry| entry.file_name());
 
     for entry in entries {
         let skill_dir = entry.path();
         let skill_md = skill_dir.join("SKILL.md");
-        if !skill_md.is_file() {
+        if !path_is_real_file(&skill_md) {
             continue;
         }
 
@@ -94,13 +97,55 @@ fn collect_files_recursive(dir: &Path, paths: &mut Vec<PathBuf>) {
 
     for entry in entries {
         let path = entry.path();
-        if path.is_dir() {
+        let file_type = non_symlink_file_type(&entry);
+        if file_type.is_dir() {
             collect_files_recursive(&path, paths);
-        } else if path.is_file() {
+        } else if file_type.is_file() {
             println!("cargo:rerun-if-changed={}", path.display());
             paths.push(path);
         }
     }
+}
+
+fn path_is_real_dir(path: &Path) -> bool {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            panic!(
+                "bundled Reborn skills path must not be a symlink: {}",
+                path.display()
+            );
+        }
+        Ok(metadata) => metadata.is_dir(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => panic!("inspect bundled Reborn skills path: {error}"),
+    }
+}
+
+fn path_is_real_file(path: &Path) -> bool {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            panic!(
+                "bundled Reborn skill file must not be a symlink: {}",
+                path.display()
+            );
+        }
+        Ok(metadata) => metadata.is_file(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => panic!("inspect bundled Reborn skill file: {error}"),
+    }
+}
+
+fn non_symlink_file_type(entry: &fs::DirEntry) -> FileType {
+    let file_type = entry
+        .file_type()
+        .unwrap_or_else(|error| panic!("inspect bundled Reborn skill entry: {error}"));
+    if file_type.is_symlink() {
+        panic!(
+            "bundled Reborn skill entry must not be a symlink: {}",
+            entry.path().display()
+        );
+    }
+    file_type
 }
 
 fn skill_file_json(skill_dir: &Path, source_path: &Path) -> serde_json::Value {

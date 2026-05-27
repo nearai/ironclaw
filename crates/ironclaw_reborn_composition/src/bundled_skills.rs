@@ -1,7 +1,10 @@
 use std::collections::HashSet;
 use std::fs;
 use std::hash::Hasher;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use ironclaw_loop_support::SkillFilePath;
 use ironclaw_skills::{ManagedSkillSource, SkillSummary};
@@ -13,7 +16,10 @@ use crate::RebornBuildError;
 const EMBEDDED_REBORN_SKILLS_JSON: &str =
     include_str!(concat!(env!("OUT_DIR"), "/embedded_reborn_skills.json"));
 const BUNDLED_MARKER_FILE: &str = ".ironclaw-reborn-bundled.json";
+const BUNDLED_INSTALL_LOCK_DIR: &str = ".ironclaw-reborn-bundled.lock";
 const BUNDLED_MARKER_OWNER: &str = "ironclaw_reborn_composition_bundled_skill";
+const BUNDLED_INSTALL_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
+const BUNDLED_INSTALL_LOCK_RETRY: Duration = Duration::from_millis(25);
 
 #[derive(Debug, Deserialize)]
 struct EmbeddedRebornSkill {
@@ -43,10 +49,8 @@ pub(crate) fn ensure_bundled_reborn_skills_installed(
     local_dev_storage_root: &Path,
 ) -> Result<(), RebornBuildError> {
     let bundled_skills = embedded_reborn_skills()?;
-    fs::create_dir_all(local_dev_storage_root).map_err(invalid_config)?;
-
-    let system_skills_root = local_dev_storage_root.join("system").join("skills");
-    fs::create_dir_all(&system_skills_root).map_err(invalid_config)?;
+    let system_skills_root = prepare_system_skills_root(local_dev_storage_root)?;
+    let _install_lock = BundledSkillInstallLock::acquire(&system_skills_root)?;
 
     let bundled_names = bundled_skills
         .iter()
@@ -78,6 +82,89 @@ pub(crate) fn bundled_reborn_skill_summaries() -> Result<Vec<SkillSummary>, Rebo
 fn embedded_reborn_skills() -> Result<Vec<EmbeddedRebornSkill>, RebornBuildError> {
     serde_json::from_str(EMBEDDED_REBORN_SKILLS_JSON)
         .map_err(|error| invalid_config(format!("failed to parse embedded Reborn skills: {error}")))
+}
+
+fn prepare_system_skills_root(local_dev_storage_root: &Path) -> Result<PathBuf, RebornBuildError> {
+    fs::create_dir_all(local_dev_storage_root).map_err(invalid_config)?;
+    ensure_real_directory(local_dev_storage_root, "local-dev skill storage root")?;
+    let storage_root = local_dev_storage_root
+        .canonicalize()
+        .map_err(invalid_config)?;
+
+    let system_root = local_dev_storage_root.join("system");
+    ensure_real_directory(&system_root, "local-dev system skill storage root")?;
+    let system_skills_root = system_root.join("skills");
+    ensure_real_directory(
+        &system_skills_root,
+        "local-dev system skill storage skills root",
+    )?;
+
+    let canonical_system_skills_root = system_skills_root.canonicalize().map_err(invalid_config)?;
+    if !canonical_system_skills_root.starts_with(&storage_root) {
+        return Err(invalid_config(format!(
+            "local-dev system skills root escapes storage root: {}",
+            system_skills_root.display()
+        )));
+    }
+    Ok(canonical_system_skills_root)
+}
+
+fn ensure_real_directory(path: &Path, label: &str) -> Result<(), RebornBuildError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(invalid_config(format!(
+            "{label} must not be a symlink: {}",
+            path.display()
+        ))),
+        Ok(metadata) if !metadata.is_dir() => Err(invalid_config(format!(
+            "{label} is not a directory: {}",
+            path.display()
+        ))),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            if let Err(error) = fs::create_dir(path)
+                && error.kind() != ErrorKind::AlreadyExists
+            {
+                return Err(invalid_config(error));
+            }
+            ensure_real_directory(path, label)
+        }
+        Err(error) => Err(invalid_config(error)),
+    }
+}
+
+struct BundledSkillInstallLock {
+    path: PathBuf,
+}
+
+impl BundledSkillInstallLock {
+    fn acquire(system_skills_root: &Path) -> Result<Self, RebornBuildError> {
+        let path = system_skills_root.join(BUNDLED_INSTALL_LOCK_DIR);
+        let started_at = Instant::now();
+        loop {
+            match fs::create_dir(&path) {
+                Ok(()) => return Ok(Self { path }),
+                Err(error)
+                    if error.kind() == ErrorKind::AlreadyExists
+                        && started_at.elapsed() < BUNDLED_INSTALL_LOCK_TIMEOUT =>
+                {
+                    thread::sleep(BUNDLED_INSTALL_LOCK_RETRY);
+                }
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                    return Err(invalid_config(format!(
+                        "timed out waiting for bundled skill install lock: {}",
+                        path.display()
+                    )));
+                }
+                Err(error) => return Err(invalid_config(error)),
+            }
+        }
+    }
+}
+
+impl Drop for BundledSkillInstallLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir(&self.path);
+    }
 }
 
 fn remove_stale_managed_skills(
@@ -306,5 +393,63 @@ mod tests {
                 .expect("modified"),
             first_modified
         );
+    }
+
+    #[test]
+    fn bundled_reborn_skills_replace_changed_managed_dirs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let local_dev_root = dir.path().join("local-dev");
+        let skill_dir = local_dev_root.join("system/skills/code-review");
+        let skill_md = skill_dir.join("SKILL.md");
+
+        ensure_bundled_reborn_skills_installed(&local_dev_root).expect("install bundled skills");
+        let bundled_skill_md = fs::read_to_string(&skill_md).expect("read bundled skill");
+        fs::write(&skill_md, "old managed skill").expect("write old skill");
+        fs::write(skill_dir.join("OLD_SENTINEL"), "old").expect("write old sentinel");
+        write_marker(&skill_dir, "stale-content-hash").expect("write stale marker");
+
+        ensure_bundled_reborn_skills_installed(&local_dev_root).expect("replace bundled skills");
+
+        assert_eq!(
+            fs::read_to_string(&skill_md).expect("read replaced skill"),
+            bundled_skill_md
+        );
+        assert!(!skill_dir.join("OLD_SENTINEL").exists());
+        assert_no_bundle_scratch_dirs(&local_dev_root.join("system/skills"));
+    }
+
+    #[test]
+    fn bundled_reborn_skills_remove_stale_managed_dirs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let local_dev_root = dir.path().join("local-dev");
+        let system_skills_root = local_dev_root.join("system/skills");
+        let obsolete_dir = system_skills_root.join("obsolete-managed");
+        let operator_dir = system_skills_root.join("operator-owned");
+        fs::create_dir_all(&obsolete_dir).expect("obsolete dir");
+        fs::write(obsolete_dir.join("SKILL.md"), "obsolete").expect("obsolete skill");
+        write_marker(&obsolete_dir, "obsolete-hash").expect("obsolete marker");
+        fs::create_dir_all(&operator_dir).expect("operator dir");
+        fs::write(operator_dir.join("SKILL.md"), "operator").expect("operator skill");
+        fs::write(
+            operator_dir.join(BUNDLED_MARKER_FILE),
+            r#"{"owner":"operator","format":1,"content_hash":"operator-hash"}"#,
+        )
+        .expect("operator marker");
+
+        ensure_bundled_reborn_skills_installed(&local_dev_root).expect("install bundled skills");
+
+        assert!(!obsolete_dir.exists());
+        assert!(operator_dir.join("SKILL.md").is_file());
+    }
+
+    fn assert_no_bundle_scratch_dirs(system_skills_root: &Path) {
+        for entry in fs::read_dir(system_skills_root).expect("read system skills") {
+            let entry = entry.expect("system skill entry");
+            let name = entry.file_name().to_string_lossy().to_string();
+            assert!(
+                !name.contains(".tmp-") && !name.contains(".previous-"),
+                "unexpected bundled skill scratch dir: {name}"
+            );
+        }
     }
 }
