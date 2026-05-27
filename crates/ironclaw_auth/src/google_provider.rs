@@ -14,6 +14,7 @@ use url::form_urlencoded::Serializer;
 use crate::{
     AuthProductError, AuthProviderClient, GOOGLE_PROVIDER_ID, GOOGLE_TOKEN_ENDPOINT, OAuthClientId,
     OAuthProviderCallbackRequest, OAuthProviderExchange, OAuthRedirectUri, OAuthTokenResponse,
+    ProviderScope,
 };
 
 const GOOGLE_OAUTH_CAPABILITY: &str = "ironclaw_auth.google_oauth";
@@ -24,10 +25,11 @@ const DEFAULT_RESPONSE_BODY_LIMIT: u64 = 16 * 1024;
 ///
 /// `ironclaw_auth` intentionally does not own durable secret storage; the
 /// caller injects the storage boundary via this trait.
+#[async_trait]
 pub trait GoogleProviderTokenSink: Send + Sync {
-    fn store_tokens(
+    async fn store_tokens(
         &self,
-        tokens: GoogleProviderTokenSet,
+        request: GoogleProviderTokenStorageRequest,
     ) -> Result<GoogleProviderStoredTokens, AuthProductError>;
 }
 
@@ -36,8 +38,9 @@ pub trait GoogleProviderTokenSink: Send + Sync {
 /// Production Reborn egress uses staged policy handoffs instead of trusting the
 /// policy embedded in `RuntimeHttpEgressRequest`; callers must inject this
 /// authority boundary before token exchange is attempted.
+#[async_trait]
 pub trait GoogleProviderEgressPolicyAuthorizer: Send + Sync {
-    fn authorize_google_token_exchange(
+    async fn authorize_google_token_exchange(
         &self,
         scope: &ResourceScope,
         capability_id: &CapabilityId,
@@ -65,6 +68,23 @@ impl fmt::Debug for GoogleProviderTokenSet {
     }
 }
 
+/// Scoped token-storage request. Raw provider token material must be bound to
+/// the callback's already-claimed resource scope before it reaches storage.
+pub struct GoogleProviderTokenStorageRequest {
+    pub scope: ResourceScope,
+    pub tokens: GoogleProviderTokenSet,
+}
+
+impl fmt::Debug for GoogleProviderTokenStorageRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GoogleProviderTokenStorageRequest")
+            .field("scope", &self.scope)
+            .field("tokens", &self.tokens)
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GoogleProviderStoredTokens {
     pub access_secret: SecretHandle,
@@ -80,7 +100,6 @@ pub struct GoogleProviderClient {
     client_secret: Option<SecretString>,
     redirect_uri: OAuthRedirectUri,
     runtime: RuntimeKind,
-    scope: ResourceScope,
     capability_id: CapabilityId,
     timeout_ms: u32,
     response_body_limit: u64,
@@ -102,7 +121,6 @@ impl GoogleProviderClient {
             client_secret: None,
             redirect_uri,
             runtime: RuntimeKind::System,
-            scope: ResourceScope::system(),
             capability_id: CapabilityId::new(GOOGLE_OAUTH_CAPABILITY).map_err(|_| {
                 AuthProductError::invalid_request("google provider capability id is invalid")
             })?,
@@ -113,11 +131,6 @@ impl GoogleProviderClient {
 
     pub fn with_runtime(mut self, runtime: RuntimeKind) -> Self {
         self.runtime = runtime;
-        self
-    }
-
-    pub fn with_scope(mut self, scope: ResourceScope) -> Self {
-        self.scope = scope;
         self
     }
 
@@ -144,7 +157,6 @@ impl fmt::Debug for GoogleProviderClient {
             .field("client_id", &self.client_id)
             .field("redirect_uri", &self.redirect_uri)
             .field("runtime", &self.runtime)
-            .field("scope", &self.scope)
             .field("capability_id", &self.capability_id)
             .field("timeout_ms", &self.timeout_ms)
             .field("response_body_limit", &self.response_body_limit)
@@ -172,6 +184,10 @@ impl AuthProviderClient for GoogleProviderClient {
             return Err(AuthProductError::TokenExchangeFailed);
         }
         crate::provider::validate_provider_callback_request(&request)?;
+        let callback_scope = request.scope.resource.clone();
+        if callback_scope.is_system() {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
 
         let body = serialize_token_request(
             self.client_id.as_str(),
@@ -182,12 +198,13 @@ impl AuthProviderClient for GoogleProviderClient {
         );
         let network_policy = google_token_network_policy(self.response_body_limit);
         self.egress_policy_authorizer
-            .authorize_google_token_exchange(&self.scope, &self.capability_id, &network_policy)?;
+            .authorize_google_token_exchange(&callback_scope, &self.capability_id, &network_policy)
+            .await?;
 
         let egress = Arc::clone(&self.egress);
         let egress_request = RuntimeHttpEgressRequest {
             runtime: self.runtime,
-            scope: self.scope.clone(),
+            scope: callback_scope.clone(),
             capability_id: self.capability_id.clone(),
             method: NetworkMethod::Post,
             url: GOOGLE_TOKEN_ENDPOINT.to_string(),
@@ -215,16 +232,17 @@ impl AuthProviderClient for GoogleProviderClient {
         }
 
         let token_response = parse_token_response(&response.body)?;
-        let scopes = token_response.scopes;
+        let scopes = scopes_for_exchange(&token_response, &request.scopes);
         let token_sink = Arc::clone(&self.token_sink);
-        let stored_tokens = tokio::task::spawn_blocking(move || {
-            token_sink.store_tokens(GoogleProviderTokenSet {
-                access_token: token_response.access_token,
-                refresh_token: token_response.refresh_token,
+        let stored_tokens = token_sink
+            .store_tokens(GoogleProviderTokenStorageRequest {
+                scope: callback_scope,
+                tokens: GoogleProviderTokenSet {
+                    access_token: token_response.response.access_token,
+                    refresh_token: token_response.response.refresh_token,
+                },
             })
-        })
-        .await
-        .map_err(|_| AuthProductError::BackendUnavailable)??;
+            .await?;
 
         Ok(OAuthProviderExchange {
             provider: request.provider,
@@ -265,9 +283,16 @@ struct GoogleTokenResponseBody {
     token_type: Option<String>,
 }
 
-fn parse_token_response(body: &[u8]) -> Result<OAuthTokenResponse, AuthProductError> {
+#[derive(Debug)]
+struct ParsedGoogleTokenResponse {
+    response: OAuthTokenResponse,
+    scope_was_present: bool,
+}
+
+fn parse_token_response(body: &[u8]) -> Result<ParsedGoogleTokenResponse, AuthProductError> {
     let parsed: GoogleTokenResponseBody =
         serde_json::from_slice(body).map_err(|_| AuthProductError::TokenExchangeFailed)?;
+    let scope_was_present = parsed.scope.is_some();
     let response = OAuthTokenResponse::new(
         parsed.access_token,
         parsed.refresh_token,
@@ -277,7 +302,21 @@ fn parse_token_response(body: &[u8]) -> Result<OAuthTokenResponse, AuthProductEr
     .map_err(|_| AuthProductError::TokenExchangeFailed)?;
 
     let _ = parsed.token_type;
-    Ok(response)
+    Ok(ParsedGoogleTokenResponse {
+        response,
+        scope_was_present,
+    })
+}
+
+fn scopes_for_exchange(
+    token_response: &ParsedGoogleTokenResponse,
+    requested_scopes: &[ProviderScope],
+) -> Vec<ProviderScope> {
+    if token_response.scope_was_present {
+        token_response.response.scopes.clone()
+    } else {
+        requested_scopes.to_vec()
+    }
 }
 
 fn serialize_token_request(
@@ -310,8 +349,25 @@ mod tests {
             br#"{"access_token":"access","refresh_token":"refresh","scope":"repo gmail.readonly","expires_in":3600,"token_type":"Bearer"}"#,
         )
         .expect("response");
-        assert_eq!(response.scopes.len(), 2);
-        assert_eq!(response.expires_in_seconds, Some(3600));
+        assert!(response.scope_was_present);
+        assert_eq!(response.response.scopes.len(), 2);
+        assert_eq!(response.response.expires_in_seconds, Some(3600));
+    }
+
+    #[test]
+    fn missing_response_scope_falls_back_to_requested_scopes() {
+        let response = parse_token_response(br#"{"access_token":"access","expires_in":3600}"#)
+            .expect("response");
+        let requested_scopes = vec![
+            ProviderScope::new("https://www.googleapis.com/auth/gmail.readonly").expect("scope"),
+            ProviderScope::new("https://www.googleapis.com/auth/gmail.send").expect("scope"),
+        ];
+
+        assert!(!response.scope_was_present);
+        assert_eq!(
+            scopes_for_exchange(&response, &requested_scopes),
+            requested_scopes
+        );
     }
 
     #[test]

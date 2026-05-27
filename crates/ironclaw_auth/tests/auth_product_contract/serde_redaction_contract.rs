@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use ironclaw_auth::{
     AuthProviderClient, GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE,
     GOOGLE_TOKEN_ENDPOINT, GoogleProviderClient, GoogleProviderEgressPolicyAuthorizer,
-    GoogleProviderStoredTokens, GoogleProviderTokenSet, GoogleProviderTokenSink,
+    GoogleProviderStoredTokens, GoogleProviderTokenSink, GoogleProviderTokenStorageRequest,
     OAuthAuthorizationCode, OAuthClientId, OAuthProviderCallbackRequest, OAuthRedirectUri,
     PkceVerifierSecret,
 };
@@ -131,6 +131,7 @@ async fn serializable_records_never_include_raw_oauth_or_token_material() {
     let flow = oauth_flow(&services, owner.clone()).await;
     let exchange = services
         .exchange_callback(OAuthProviderCallbackRequest {
+            scope: owner.clone(),
             provider: provider(),
             account_label: label("work github"),
             authorization_code: OAuthAuthorizationCode::new(secret("raw-auth-code"))
@@ -178,6 +179,8 @@ async fn serializable_records_never_include_raw_oauth_or_token_material() {
 
 #[tokio::test]
 async fn google_provider_uses_host_egress_and_returns_secret_handles_only() {
+    let owner = scope("google-provider");
+    let resource_scope = owner.resource.clone();
     let egress = Arc::new(RecordingEgress::ok(RuntimeHttpEgressResponse {
         status: 200,
         headers: vec![("content-type".to_string(), "application/json".to_string())],
@@ -215,6 +218,7 @@ async fn google_provider_uses_host_egress_and_returns_secret_handles_only() {
     assert!(client_debug.contains("Arc<dyn GoogleProviderEgressPolicyAuthorizer>"));
 
     let request = OAuthProviderCallbackRequest {
+        scope: owner,
         provider: google_provider(),
         account_label: label("work gmail"),
         authorization_code: OAuthAuthorizationCode::new(secret("raw-auth-code"))
@@ -255,7 +259,7 @@ async fn google_provider_uses_host_egress_and_returns_secret_handles_only() {
     assert_eq!(requests.len(), 1);
     let request = &requests[0];
     assert_eq!(request.runtime, RuntimeKind::System);
-    assert!(request.scope.is_system());
+    assert_eq!(request.scope, resource_scope);
     assert_eq!(request.capability_id.as_str(), "ironclaw_auth.google_oauth");
     assert_eq!(request.method, NetworkMethod::Post);
     assert_eq!(request.url, GOOGLE_TOKEN_ENDPOINT);
@@ -305,7 +309,7 @@ async fn google_provider_uses_host_egress_and_returns_secret_handles_only() {
     );
     let authorizations = policy_authorizer.authorizations();
     assert_eq!(authorizations.len(), 1);
-    assert!(authorizations[0].scope.is_system());
+    assert_eq!(authorizations[0].scope, resource_scope);
     assert_eq!(
         authorizations[0].capability_id.as_str(),
         "ironclaw_auth.google_oauth"
@@ -319,6 +323,97 @@ async fn google_provider_uses_host_egress_and_returns_secret_handles_only() {
         sink.refresh_tokens(),
         vec!["provider-refresh-token".to_string()]
     );
+    assert_eq!(sink.scopes(), vec![resource_scope]);
+}
+
+#[tokio::test]
+async fn google_provider_preserves_requested_scopes_when_response_omits_scope() {
+    let egress = Arc::new(RecordingEgress::ok(RuntimeHttpEgressResponse {
+        status: 200,
+        headers: vec![("content-type".to_string(), "application/json".to_string())],
+        body: br#"{"access_token":"provider-access-token","expires_in":3600}"#.to_vec(),
+        request_bytes: 0,
+        response_bytes: 0,
+        saved_body: None,
+        redaction_applied: true,
+    }));
+    let client = GoogleProviderClient::new(
+        egress,
+        Arc::new(RecordingTokenSink::new(
+            SecretHandle::new("google-access-secret").expect("valid handle"),
+            None,
+        )),
+        Arc::new(RecordingPolicyAuthorizer::default()),
+        OAuthClientId::new("google-client-123").expect("client id"),
+        OAuthRedirectUri::new("https://app.example/oauth/callback").expect("redirect uri"),
+    )
+    .expect("client");
+
+    let requested_scopes = provider_scopes(&[GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE]);
+    let exchange = client
+        .exchange_callback(OAuthProviderCallbackRequest {
+            scope: scope("google-provider-scope-fallback"),
+            provider: google_provider(),
+            account_label: label("work gmail"),
+            authorization_code: OAuthAuthorizationCode::new(secret("raw-auth-code"))
+                .expect("valid code"),
+            authorization_code_hash: code_hash("code-hash"),
+            pkce_verifier: PkceVerifierSecret::new(secret("raw-pkce-verifier"))
+                .expect("valid verifier"),
+            pkce_verifier_hash: pkce_hash("pkce-hash"),
+            scopes: requested_scopes.clone(),
+        })
+        .await
+        .expect("exchange");
+
+    assert_eq!(exchange.scopes, requested_scopes);
+}
+
+#[tokio::test]
+async fn google_provider_rejects_system_scoped_callbacks_before_side_effects() {
+    let egress = Arc::new(RecordingEgress::ok(RuntimeHttpEgressResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{"access_token":"provider-access-token"}"#.to_vec(),
+        request_bytes: 0,
+        response_bytes: 0,
+        saved_body: None,
+        redaction_applied: false,
+    }));
+    let sink = Arc::new(RecordingTokenSink::new(
+        SecretHandle::new("google-access-secret").expect("valid handle"),
+        None,
+    ));
+    let policy_authorizer = Arc::new(RecordingPolicyAuthorizer::default());
+    let client = GoogleProviderClient::new(
+        egress.clone(),
+        sink.clone(),
+        policy_authorizer.clone(),
+        OAuthClientId::new("google-client-123").expect("client id"),
+        OAuthRedirectUri::new("https://app.example/oauth/callback").expect("redirect uri"),
+    )
+    .expect("client");
+
+    let error = client
+        .exchange_callback(OAuthProviderCallbackRequest {
+            scope: AuthProductScope::new(ResourceScope::system(), AuthSurface::Callback),
+            provider: google_provider(),
+            account_label: label("work gmail"),
+            authorization_code: OAuthAuthorizationCode::new(secret("raw-auth-code"))
+                .expect("valid code"),
+            authorization_code_hash: code_hash("code-hash"),
+            pkce_verifier: PkceVerifierSecret::new(secret("raw-pkce-verifier"))
+                .expect("valid verifier"),
+            pkce_verifier_hash: pkce_hash("pkce-hash"),
+            scopes: provider_scopes(&[GOOGLE_GMAIL_READONLY_SCOPE]),
+        })
+        .await
+        .expect_err("system-scoped callback is rejected");
+
+    assert_eq!(error, ironclaw_auth::AuthProductError::CrossScopeDenied);
+    assert!(egress.requests().is_empty());
+    assert!(policy_authorizer.authorizations().is_empty());
+    assert!(sink.access_tokens().is_empty());
 }
 
 #[tokio::test]
@@ -347,6 +442,7 @@ async fn google_provider_sanitizes_provider_errors() {
 
     let error = client
         .exchange_callback(OAuthProviderCallbackRequest {
+            scope: scope("google-provider-errors"),
             provider: google_provider(),
             account_label: label("work gmail"),
             authorization_code: OAuthAuthorizationCode::new(secret("raw-auth-code"))
@@ -385,6 +481,7 @@ async fn google_provider_sanitizes_provider_errors() {
 
     let malformed_error = malformed_client
         .exchange_callback(OAuthProviderCallbackRequest {
+            scope: scope("google-provider-malformed"),
             provider: google_provider(),
             account_label: label("work gmail"),
             authorization_code: OAuthAuthorizationCode::new(secret("raw-auth-code"))
@@ -430,6 +527,7 @@ async fn google_provider_maps_egress_failures_to_backend_unavailable() {
 
     let error = client
         .exchange_callback(OAuthProviderCallbackRequest {
+            scope: scope("google-provider-egress"),
             provider: google_provider(),
             account_label: label("work gmail"),
             authorization_code: OAuthAuthorizationCode::new(secret("raw-auth-code"))
@@ -474,6 +572,7 @@ async fn google_provider_rejects_non_google_provider_before_side_effects() {
 
     let error = client
         .exchange_callback(OAuthProviderCallbackRequest {
+            scope: scope("google-provider-rejects"),
             provider: provider(),
             account_label: label("work github"),
             authorization_code: OAuthAuthorizationCode::new(secret("raw-auth-code"))
@@ -523,6 +622,7 @@ async fn google_provider_sends_optional_client_secret_without_debug_leakage() {
 
     client
         .exchange_callback(OAuthProviderCallbackRequest {
+            scope: scope("google-provider-secret"),
             provider: google_provider(),
             account_label: label("work gmail"),
             authorization_code: OAuthAuthorizationCode::new(secret("raw-auth-code"))
@@ -567,6 +667,7 @@ async fn google_provider_propagates_token_sink_errors() {
 
     let error = client
         .exchange_callback(OAuthProviderCallbackRequest {
+            scope: scope("google-provider-sink"),
             provider: google_provider(),
             account_label: label("work gmail"),
             authorization_code: OAuthAuthorizationCode::new(secret("raw-auth-code"))
@@ -629,6 +730,7 @@ impl RuntimeHttpEgress for RecordingEgress {
 }
 
 struct RecordingTokenSink {
+    scopes: Mutex<Vec<ResourceScope>>,
     access_tokens: Mutex<Vec<String>>,
     refresh_tokens: Mutex<Vec<String>>,
     access_handle: SecretHandle,
@@ -638,6 +740,7 @@ struct RecordingTokenSink {
 impl RecordingTokenSink {
     fn new(access_handle: SecretHandle, refresh_handle: Option<SecretHandle>) -> Self {
         Self {
+            scopes: Mutex::new(Vec::new()),
             access_tokens: Mutex::new(Vec::new()),
             refresh_tokens: Mutex::new(Vec::new()),
             access_handle,
@@ -649,16 +752,26 @@ impl RecordingTokenSink {
         self.access_tokens.lock().expect("access tokens").clone()
     }
 
+    fn scopes(&self) -> Vec<ResourceScope> {
+        self.scopes.lock().expect("scopes").clone()
+    }
+
     fn refresh_tokens(&self) -> Vec<String> {
         self.refresh_tokens.lock().expect("refresh tokens").clone()
     }
 }
 
+#[async_trait::async_trait]
 impl GoogleProviderTokenSink for RecordingTokenSink {
-    fn store_tokens(
+    async fn store_tokens(
         &self,
-        tokens: GoogleProviderTokenSet,
+        request: GoogleProviderTokenStorageRequest,
     ) -> Result<GoogleProviderStoredTokens, ironclaw_auth::AuthProductError> {
+        self.scopes
+            .lock()
+            .expect("scopes")
+            .push(request.scope.clone());
+        let tokens = request.tokens;
         self.access_tokens
             .lock()
             .expect("access tokens")
@@ -694,8 +807,9 @@ impl RecordingPolicyAuthorizer {
     }
 }
 
+#[async_trait::async_trait]
 impl GoogleProviderEgressPolicyAuthorizer for RecordingPolicyAuthorizer {
-    fn authorize_google_token_exchange(
+    async fn authorize_google_token_exchange(
         &self,
         scope: &ResourceScope,
         capability_id: &CapabilityId,
@@ -717,10 +831,11 @@ struct FailingTokenSink {
     error: ironclaw_auth::AuthProductError,
 }
 
+#[async_trait::async_trait]
 impl GoogleProviderTokenSink for FailingTokenSink {
-    fn store_tokens(
+    async fn store_tokens(
         &self,
-        _tokens: GoogleProviderTokenSet,
+        _request: GoogleProviderTokenStorageRequest,
     ) -> Result<GoogleProviderStoredTokens, ironclaw_auth::AuthProductError> {
         Err(self.error.clone())
     }

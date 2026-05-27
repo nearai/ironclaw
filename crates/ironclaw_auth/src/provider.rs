@@ -5,8 +5,8 @@ use ironclaw_host_api::SecretHandle;
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::{
-    AuthProductError, AuthorizationCodeHash, CredentialAccountId, CredentialAccountLabel,
-    PkceVerifierHash, ProviderScope, ids::AuthProviderId,
+    AuthProductError, AuthProductScope, AuthorizationCodeHash, CredentialAccountId,
+    CredentialAccountLabel, PkceVerifierHash, ProviderScope, ids::AuthProviderId,
 };
 
 macro_rules! one_shot_secret {
@@ -56,6 +56,7 @@ one_shot_secret!(PkceVerifierSecret, "pkce verifier");
 /// One-shot provider exchange input. This type intentionally does not implement
 /// serde traits because it may carry raw OAuth code and PKCE verifier material.
 pub struct OAuthProviderCallbackRequest {
+    pub scope: AuthProductScope,
     pub provider: AuthProviderId,
     pub account_label: CredentialAccountLabel,
     pub authorization_code: OAuthAuthorizationCode,
@@ -69,6 +70,7 @@ impl fmt::Debug for OAuthProviderCallbackRequest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("OAuthProviderCallbackRequest")
+            .field("scope", &self.scope)
             .field("provider", &self.provider)
             .field("account_label", &self.account_label)
             .field("authorization_code", &"[REDACTED]")

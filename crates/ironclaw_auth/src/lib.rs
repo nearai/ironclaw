@@ -44,7 +44,7 @@ pub use flow::{
 };
 pub use google_provider::{
     GoogleProviderClient, GoogleProviderEgressPolicyAuthorizer, GoogleProviderStoredTokens,
-    GoogleProviderTokenSet, GoogleProviderTokenSink,
+    GoogleProviderTokenSet, GoogleProviderTokenSink, GoogleProviderTokenStorageRequest,
 };
 pub use ids::{
     AuthFlowId, AuthGateRef, AuthInteractionId, AuthProviderId, AuthSessionId,

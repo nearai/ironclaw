@@ -7,6 +7,7 @@ async fn oauth_callback_exchanges_provider_code_then_completes_once() {
     let flow = oauth_flow(&services, owner.clone()).await;
 
     let request = OAuthProviderCallbackRequest {
+        scope: owner.clone(),
         provider: provider(),
         account_label: label("work github"),
         authorization_code: OAuthAuthorizationCode::new(secret("raw-auth-code"))

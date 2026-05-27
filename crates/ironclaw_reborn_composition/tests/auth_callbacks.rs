@@ -223,12 +223,14 @@ async fn create_flow(services: &RebornProductAuthServices, scope: AuthProductSco
 }
 
 fn authorized_request(scope: AuthProductScope, flow_id: AuthFlowId) -> RebornOAuthCallbackRequest {
+    let callback_scope = scope.clone();
     RebornOAuthCallbackRequest {
         scope,
         flow_id,
         opaque_state_hash: state_hash("state-hash"),
         outcome: RebornOAuthCallbackOutcome::Authorized {
-            provider_request: OAuthProviderCallbackRequest {
+            provider_request: Box::new(OAuthProviderCallbackRequest {
+                scope: callback_scope,
                 provider: provider(),
                 account_label: label(),
                 authorization_code: OAuthAuthorizationCode::new(secret("raw-auth-code")).unwrap(),
@@ -236,7 +238,7 @@ fn authorized_request(scope: AuthProductScope, flow_id: AuthFlowId) -> RebornOAu
                 pkce_verifier: PkceVerifierSecret::new(secret("raw-pkce-verifier")).unwrap(),
                 pkce_verifier_hash: pkce_hash("pkce-hash"),
                 scopes: vec![provider_scope("repo")],
-            },
+            }),
         },
     }
 }

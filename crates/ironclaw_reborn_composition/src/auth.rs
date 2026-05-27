@@ -89,7 +89,7 @@ pub(crate) struct RebornOAuthStartFlowRequest {
 #[derive(Debug)]
 pub enum RebornOAuthCallbackOutcome {
     Authorized {
-        provider_request: OAuthProviderCallbackRequest,
+        provider_request: Box<OAuthProviderCallbackRequest>,
     },
     ProviderDenied,
     Malformed,
@@ -323,6 +323,11 @@ impl RebornProductAuthServicePorts {
             continuation_dispatcher,
         )
     }
+
+    pub fn with_provider_client(mut self, provider_client: Arc<dyn AuthProviderClient>) -> Self {
+        self.provider_client = provider_client;
+        self
+    }
 }
 
 /// Reborn product-auth service bundle exposed by the composition root.
@@ -526,7 +531,9 @@ impl RebornProductAuthServices {
         request: RebornOAuthCallbackRequest,
     ) -> Result<RebornOAuthCallbackResponse, RebornOAuthCallbackError> {
         let completed = match request.outcome {
-            RebornOAuthCallbackOutcome::Authorized { provider_request } => {
+            RebornOAuthCallbackOutcome::Authorized {
+                mut provider_request,
+            } => {
                 let claimed = self
                     .flow_manager
                     .claim_oauth_callback(
@@ -544,9 +551,10 @@ impl RebornProductAuthServices {
                 if claimed.status == AuthFlowStatus::Completed {
                     claimed
                 } else {
+                    provider_request.scope = request.scope.clone();
                     let exchange = match self
                         .provider_client
-                        .exchange_callback(provider_request)
+                        .exchange_callback(*provider_request)
                         .await
                     {
                         Ok(exchange) => exchange,
