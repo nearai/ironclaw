@@ -11,6 +11,11 @@ use super::{
     StageContext,
 };
 
+/// Stop-stage helper for callers that can observe and decide back-to-back.
+///
+/// Reply-only executor paths that need to drain queued follow-up input before
+/// the terminal stop decision must call `observe`, perform the drain, then
+/// call `decide` instead of using the combined `process` entry point.
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct StopStage;
 
@@ -110,6 +115,8 @@ impl StopStage {
     ) -> Result<StopStep, AgentLoopExecutorError> {
         let mut state = input.state;
         let pending_input_ack = input.pending_input_ack;
+        // `decide` is also a cancellation boundary for callers that split
+        // observation from the terminal decision.
         match ctx
             .planner
             .stop()
