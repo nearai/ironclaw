@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use crate::{
     CommandExecutionRequest, FirstPartyCapabilityError, FirstPartyCapabilityRequest,
-    RuntimeProcessError,
+    RuntimeProcessError, SavedCommandOutput,
 };
 
 use super::{FIRST_PARTY_MAX_OUTPUT_BYTES, first_party_capability_manifest};
@@ -22,12 +22,12 @@ pub const SHELL_CAPABILITY_ID: &str = "builtin.shell";
 const DEFAULT_SHELL_WALL_CLOCK_MS: u64 = 120_000;
 const MAX_SHELL_WALL_CLOCK_MS: u64 = 120_000;
 const MAX_SHELL_TIMEOUT_SECS: u64 = MAX_SHELL_WALL_CLOCK_MS / 1000;
-const DEFAULT_SHELL_OUTPUT_BYTES: u64 = crate::process_port::COMMAND_MAX_OUTPUT_SIZE as u64;
+const DEFAULT_SHELL_OUTPUT_BYTES: u64 = crate::process_output::COMMAND_MAX_OUTPUT_SIZE as u64;
 
 pub(super) fn manifest() -> Result<CapabilityManifest, ExtensionError> {
     first_party_capability_manifest(
         SHELL_CAPABILITY_ID,
-        "Execute shell commands with the copied v1 shell validation and output shape",
+        "Execute shell commands with copied v1 validation and saved-file references for large local output",
         vec![
             EffectKind::DispatchCapability,
             EffectKind::SpawnProcess,
@@ -87,13 +87,40 @@ pub(super) async fn dispatch(
         .await
         .map_err(process_error)?;
 
+    let rendered_output = render_shell_output(&output.output, output.saved_output.as_ref());
     let output_value = json!({
-        "output": output.output,
+        "output": rendered_output,
         "exit_code": output.exit_code,
         "success": output.exit_code == 0,
         "sandboxed": output.sandboxed,
     });
     Ok((output_value, output.duration))
+}
+
+fn render_shell_output(output: &str, saved_output: Option<&SavedCommandOutput>) -> String {
+    let Some(saved_output) = saved_output else {
+        return output.to_string();
+    };
+    let mut note = if saved_output.secret_blocked {
+        format!(
+            "Full output was not saved because it matched secret-leak blocking rules; marker saved to: {}",
+            saved_output.path.display()
+        )
+    } else if saved_output.secret_redacted {
+        format!(
+            "Full output saved to: {} (secret-like values redacted)",
+            saved_output.path.display()
+        )
+    } else {
+        format!("Full output saved to: {}", saved_output.path.display())
+    };
+    if saved_output.stream_was_capped {
+        note.push_str(&format!(
+            " (saved output capped at {} bytes per stream)",
+            saved_output.max_saved_stream_size
+        ));
+    }
+    format!("{output}\n\n{note}")
 }
 
 fn reject_unbacked_scoped_workdir(

@@ -461,6 +461,7 @@ async fn builtin_shell_truncates_large_output_without_output_overflow() {
 
     let output = output["output"].as_str().expect("shell output is text");
     assert!(output.contains("[truncated"));
+    assert!(output.contains("Full output saved to: "));
     assert!(output.len() <= 66_000);
 }
 
@@ -4053,6 +4054,7 @@ impl RuntimeProcessPort for RecordingProcessPort {
         self.requests.lock().unwrap().push(request.clone());
         Ok(CommandExecutionOutput {
             output: format!("process port: {}", request.command),
+            saved_output: None,
             exit_code: 0,
             sandboxed: true,
             duration: Duration::from_millis(7),
@@ -4074,6 +4076,7 @@ impl SandboxCommandTransport for RecordingSandboxTransport {
         self.requests.lock().unwrap().push(request.clone());
         Ok(CommandExecutionOutput {
             output: format!("process port: {}", request.command),
+            saved_output: None,
             exit_code: 0,
             sandboxed: false,
             duration: Duration::from_millis(7),

@@ -305,6 +305,7 @@ mod tests {
         ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
             Ok(CommandExecutionOutput {
                 output: self.0.to_string(),
+                saved_output: None,
                 exit_code: 0,
                 sandboxed: false,
                 duration: std::time::Duration::ZERO,

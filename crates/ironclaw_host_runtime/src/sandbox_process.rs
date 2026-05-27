@@ -361,6 +361,7 @@ impl RebornScopedSandboxCommandTransport {
                 collect_logs(&self.docker, &container_id, self.config.max_output_bytes).await?;
             Ok(CommandExecutionOutput {
                 output,
+                saved_output: None,
                 exit_code,
                 sandboxed: true,
                 duration: started_at.elapsed(),

@@ -55,6 +55,7 @@ mod invocation_services;
 pub mod memory_context;
 mod obligations;
 mod planner;
+mod process_output;
 mod process_port;
 mod production;
 mod sandbox_process;
@@ -95,6 +96,7 @@ pub use obligations::{
 };
 use obligations::{NetworkObligationPolicyStore, RuntimeSecretInjectionStore};
 pub use planner::{ExecutionPlan, PlannerError, plan_capability};
+pub use process_output::SavedCommandOutput;
 pub use process_port::{
     CommandExecutionOutput, CommandExecutionRequest, LocalHostProcessPort, RuntimeProcessError,
     RuntimeProcessPort, SandboxCommandTransport, TenantSandboxProcessPort,
