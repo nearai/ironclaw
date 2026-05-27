@@ -4,7 +4,7 @@ use ironclaw_extensions::{
     CapabilityVisibility, ExtensionActivationState, ExtensionError, ExtensionInstallation,
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
     ExtensionLifecycleService, ExtensionManifestRecord, ExtensionManifestRef, ExtensionPackage,
-    ManifestHash, ManifestSource, SharedExtensionRegistry,
+    ManifestHash, ManifestSource,
 };
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
@@ -17,11 +17,17 @@ use ironclaw_product_workflow::{
 };
 use tokio::sync::Mutex;
 
+mod active_publication;
+
 use crate::available_extensions::{
     AvailableExtensionCatalog, AvailableExtensionPackage, materialize_available_extension,
     visible_capability_ids,
 };
 use crate::lifecycle::response_with_payload;
+
+pub(crate) use active_publication::ActiveExtensionPublisher;
+#[cfg(test)]
+use active_publication::extension_trust_policy_input;
 
 // This port is deliberately scoped to LocalSingleUser composition. The
 // lifecycle service models the installed extension set, while active_registry
@@ -35,7 +41,7 @@ pub(crate) struct RebornLocalExtensionManagementPort {
     catalog: AvailableExtensionCatalog,
     installation_store: Arc<dyn ExtensionInstallationStore>,
     lifecycle_service: Arc<Mutex<ExtensionLifecycleService>>,
-    active_registry: Arc<SharedExtensionRegistry>,
+    active_extensions: ActiveExtensionPublisher,
     operation_lock: Arc<Mutex<()>>,
 }
 
@@ -62,7 +68,7 @@ pub(crate) async fn restore_extension_lifecycle_state(
     catalog: &AvailableExtensionCatalog,
     installation_store: &Arc<dyn ExtensionInstallationStore>,
     lifecycle_service: &Arc<Mutex<ExtensionLifecycleService>>,
-    active_registry: &Arc<SharedExtensionRegistry>,
+    active_extensions: &ActiveExtensionPublisher,
 ) -> Result<(), ProductWorkflowError> {
     for installation in installation_store
         .list_installations()
@@ -74,6 +80,7 @@ pub(crate) async fn restore_extension_lifecycle_state(
             installation.extension_id().as_str(),
         )?;
         let available = catalog.resolve(&package_ref)?;
+        validate_restored_manifest_hash(&installation, available)?;
         {
             let mut lifecycle = lifecycle_service.lock().await;
             lifecycle
@@ -96,9 +103,7 @@ pub(crate) async fn restore_extension_lifecycle_state(
             }
         }
         if installation.activation_state() == ExtensionActivationState::Enabled {
-            active_registry
-                .upsert(available.package.clone())
-                .map_err(map_extension_error)?;
+            active_extensions.publish(&available.package)?;
         }
     }
     Ok(())
@@ -110,14 +115,14 @@ impl RebornLocalExtensionManagementPort {
         catalog: AvailableExtensionCatalog,
         installation_store: Arc<dyn ExtensionInstallationStore>,
         lifecycle_service: Arc<Mutex<ExtensionLifecycleService>>,
-        active_registry: Arc<SharedExtensionRegistry>,
+        active_extensions: ActiveExtensionPublisher,
     ) -> Self {
         Self {
             filesystem,
             catalog,
             installation_store,
             lifecycle_service,
-            active_registry,
+            active_extensions,
             operation_lock: Arc::new(Mutex::new(())),
         }
     }
@@ -153,7 +158,7 @@ impl RebornLocalExtensionManagementPort {
             .into_iter()
             .map(|installation| installation.extension_id().clone())
             .collect::<BTreeSet<_>>();
-        let registry = self.active_registry.snapshot();
+        let registry = self.active_extensions.snapshot();
         Ok(registry
             .capabilities()
             .filter(|descriptor| enabled_extension_ids.contains(&descriptor.provider))
@@ -240,16 +245,19 @@ impl RebornLocalExtensionManagementPort {
             self.disable_lifecycle_package(&extension_id).await;
             return Err(map_extension_installation_error(error));
         }
-        if let Err(error) = self
-            .active_registry
-            .upsert(package)
-            .map_err(map_extension_error)
-        {
+        if let Err(error) = self.active_extensions.publish(&package) {
             self.disable_lifecycle_package(&extension_id).await;
-            let _ = self
+            if let Err(cleanup_error) = self
                 .installation_store
                 .set_activation_state(&installation_id, previous_state)
-                .await;
+                .await
+            {
+                return Err(compensation_failure(
+                    "extension activation failed to publish active package and activation restore failed",
+                    error,
+                    map_extension_installation_error(cleanup_error),
+                ));
+            }
             return Err(error);
         }
 
@@ -290,10 +298,41 @@ impl RebornLocalExtensionManagementPort {
             return Err(map_extension_installation_error(error));
         }
         if let Err(error) = self.remove_lifecycle_package(&extension_id).await {
-            let _ = self
+            if let Err(cleanup_error) = self
                 .installation_store
                 .set_activation_state(&installation_id, previous_state)
-                .await;
+                .await
+            {
+                return Err(compensation_failure(
+                    "extension remove failed to remove lifecycle package and activation restore failed",
+                    error,
+                    map_extension_installation_error(cleanup_error),
+                ));
+            }
+            return Err(error);
+        }
+        if let Err(error) = self.active_extensions.unpublish(&lifecycle_package) {
+            if let Err(restore_error) = self
+                .restore_lifecycle_package(&lifecycle_package, previous_state)
+                .await
+            {
+                return Err(compensation_failure(
+                    "extension remove failed to unpublish active package and lifecycle restore failed",
+                    error,
+                    restore_error,
+                ));
+            }
+            if let Err(cleanup_error) = self
+                .installation_store
+                .set_activation_state(&installation_id, previous_state)
+                .await
+            {
+                return Err(compensation_failure(
+                    "extension remove failed to unpublish active package and activation restore failed",
+                    error,
+                    map_extension_installation_error(cleanup_error),
+                ));
+            }
             return Err(error);
         }
 
@@ -309,6 +348,15 @@ impl RebornLocalExtensionManagementPort {
             {
                 return Err(compensation_failure(
                     "extension remove failed to delete installation and lifecycle restore failed",
+                    original_error,
+                    restore_error,
+                ));
+            }
+            if let Err(restore_error) =
+                self.restore_active_publication(&lifecycle_package, previous_state)
+            {
+                return Err(compensation_failure(
+                    "extension remove failed to delete installation and active publication restore failed",
                     original_error,
                     restore_error,
                 ));
@@ -339,6 +387,15 @@ impl RebornLocalExtensionManagementPort {
                     restore_error,
                 ));
             }
+            if let Err(restore_error) =
+                self.restore_active_publication(&lifecycle_package, previous_state)
+            {
+                return Err(compensation_failure(
+                    "extension remove failed to delete manifest and active publication restore failed",
+                    original_error,
+                    restore_error,
+                ));
+            }
             if let Err(restore_error) = self.restore_installation(&installation).await {
                 return Err(compensation_failure(
                     "extension remove failed to delete manifest and installation restore failed",
@@ -362,6 +419,15 @@ impl RebornLocalExtensionManagementPort {
                     restore_error,
                 ));
             }
+            if let Err(restore_error) =
+                self.restore_active_publication(&lifecycle_package, previous_state)
+            {
+                return Err(compensation_failure(
+                    "extension remove failed to delete files and active publication restore failed",
+                    error,
+                    restore_error,
+                ));
+            }
             if let Err(restore_error) = self
                 .restore_installation_records(manifest, installation)
                 .await
@@ -374,7 +440,6 @@ impl RebornLocalExtensionManagementPort {
             }
             return Err(error);
         }
-        self.active_registry.remove(&extension_id);
 
         Ok(response_with_payload(
             Some(package_ref),
@@ -565,6 +630,17 @@ impl RebornLocalExtensionManagementPort {
             .map_err(map_extension_installation_error)
     }
 
+    fn restore_active_publication(
+        &self,
+        package: &ExtensionPackage,
+        previous_state: ExtensionActivationState,
+    ) -> Result<(), ProductWorkflowError> {
+        if previous_state == ExtensionActivationState::Enabled {
+            self.active_extensions.publish(package)?;
+        }
+        Ok(())
+    }
+
     async fn persist_install_plan(
         &self,
         plan: ExtensionInstallPlan,
@@ -614,8 +690,7 @@ struct ExtensionInstallPlan {
 fn prepare_install(
     available: &AvailableExtensionPackage,
 ) -> Result<ExtensionInstallPlan, ProductWorkflowError> {
-    let manifest_hash = ManifestHash::new(sha256_digest_token(available.manifest_toml.as_bytes()))
-        .map_err(map_extension_installation_error)?;
+    let manifest_hash = available_manifest_hash(available)?;
     let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
         ProductWorkflowError::InvalidBindingRequest {
             reason: format!("host port catalog rejected extension install: {error}"),
@@ -650,6 +725,28 @@ fn prepare_install(
         manifest_record,
         installation,
     })
+}
+
+fn validate_restored_manifest_hash(
+    installation: &ExtensionInstallation,
+    available: &AvailableExtensionPackage,
+) -> Result<(), ProductWorkflowError> {
+    let manifest_hash = available_manifest_hash(available)?;
+    match installation.manifest_ref().manifest_hash() {
+        Some(installed_hash) if installed_hash == &manifest_hash => Ok(()),
+        _ => Err(map_extension_installation_error(
+            ExtensionInstallationError::ManifestHashMismatch {
+                extension_id: installation.extension_id().clone(),
+            },
+        )),
+    }
+}
+
+fn available_manifest_hash(
+    available: &AvailableExtensionPackage,
+) -> Result<ManifestHash, ProductWorkflowError> {
+    ManifestHash::new(sha256_digest_token(available.manifest_toml.as_bytes()))
+        .map_err(map_extension_installation_error)
 }
 
 fn extension_ids_from_package_ref(
@@ -709,17 +806,21 @@ mod tests {
     use ironclaw_extensions::{
         ExtensionLifecycleEvent, ExtensionLifecycleEventSink, ExtensionLifecycleService,
         ExtensionManifest, ExtensionRegistry, InMemoryExtensionInstallationStore,
+        SharedExtensionRegistry,
     };
-    use ironclaw_filesystem::LocalFilesystem;
+    use ironclaw_filesystem::{
+        DirEntry, FileStat, FilesystemError, FilesystemOperation, LocalFilesystem,
+    };
     use ironclaw_host_api::{
         CapabilityId, ExtensionLifecycleOperation, HostPath, HostPortCatalog, MountAlias,
-        MountGrant, MountPermissions, MountView, TenantId, UserId,
+        MountGrant, MountPermissions, MountView, TenantId, TrustClass, UserId,
     };
     use ironclaw_host_runtime::{SPAWN_SUBAGENT_CAPABILITY_ID, builtin_first_party_package};
     use ironclaw_product_workflow::{
         LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
         LifecycleProductSurfaceContext, LifecycleReadinessBlocker,
     };
+    use ironclaw_trust::{HostTrustPolicy, InvalidationBus, TrustPolicy};
 
     #[tokio::test]
     async fn extension_lifecycle_installs_activates_and_removes_catalog_package() {
@@ -861,6 +962,287 @@ mod tests {
         assert!(!capability_ids.contains(&CapabilityId::new("fixture.write").unwrap()));
         assert!(
             !capability_ids.contains(&CapabilityId::new(SPAWN_SUBAGENT_CAPABILITY_ID).unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn extension_activation_updates_local_dev_host_trust_policy() {
+        let (_dir, _storage_root, port, _active_registry, _installation_store, trust_policy) =
+            extension_management_port_fixture_with_catalog_service_and_trust(
+                AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let package = fixture_extension_package().package;
+        let trust_input = extension_trust_policy_input(&package).expect("trust input");
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
+            .expect("valid ref");
+
+        assert_eq!(
+            trust_policy
+                .evaluate(&trust_input)
+                .expect("pre-activation trust")
+                .effective_trust
+                .class(),
+            TrustClass::Sandbox
+        );
+
+        port.install(package_ref.clone())
+            .await
+            .expect("install fixture extension");
+        port.activate(package_ref.clone())
+            .await
+            .expect("activate fixture extension");
+        let active_decision = trust_policy
+            .evaluate(&trust_input)
+            .expect("active extension trust");
+        assert_eq!(
+            active_decision.effective_trust.class(),
+            TrustClass::UserTrusted
+        );
+        assert_eq!(
+            active_decision.provenance,
+            ironclaw_trust::TrustProvenance::AdminConfig
+        );
+        assert_eq!(
+            active_decision.authority_ceiling.allowed_effects,
+            vec![EffectKind::Network, EffectKind::ExternalWrite]
+        );
+
+        port.remove(package_ref)
+            .await
+            .expect("remove fixture extension");
+        let removed_decision = trust_policy
+            .evaluate(&trust_input)
+            .expect("removed extension trust");
+        assert_eq!(
+            removed_decision.effective_trust.class(),
+            TrustClass::Sandbox
+        );
+        assert!(
+            removed_decision
+                .authority_ceiling
+                .allowed_effects
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn active_extension_trust_policy_is_digest_pinned() {
+        let (_dir, _storage_root, port, _active_registry, _installation_store, trust_policy) =
+            extension_management_port_fixture_with_catalog_service_and_trust(
+                AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
+            .expect("valid ref");
+
+        port.install(package_ref.clone())
+            .await
+            .expect("install fixture extension");
+        port.activate(package_ref)
+            .await
+            .expect("activate fixture extension");
+
+        let changed_package = fixture_extension_package_with_description(
+            "Lifecycle fixture extension with changed manifest",
+        )
+        .package;
+        let changed_trust_input =
+            extension_trust_policy_input(&changed_package).expect("changed trust input");
+        let changed_decision = trust_policy
+            .evaluate(&changed_trust_input)
+            .expect("changed active extension trust");
+        assert_eq!(
+            changed_decision.effective_trust.class(),
+            TrustClass::Sandbox
+        );
+        assert_eq!(
+            changed_decision.provenance,
+            ironclaw_trust::TrustProvenance::Default
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_enabled_extension_updates_local_dev_host_trust_policy() {
+        let (_dir, _storage_root, port, _active_registry, installation_store, _trust_policy) =
+            extension_management_port_fixture_with_catalog_service_and_trust(
+                AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
+            .expect("valid ref");
+        port.install(package_ref.clone())
+            .await
+            .expect("install fixture extension");
+        port.activate(package_ref)
+            .await
+            .expect("activate fixture extension");
+
+        let restored_catalog =
+            AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]);
+        let restored_lifecycle = Arc::new(Mutex::new(ExtensionLifecycleService::new(
+            ExtensionRegistry::new(),
+        )));
+        let restored_active_registry =
+            Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        let restored_trust_policy = test_extension_trust_policy();
+        let restored_active_extensions = test_active_extension_publisher(
+            Arc::clone(&restored_active_registry),
+            Arc::clone(&restored_trust_policy),
+        );
+        let installation_store: Arc<dyn ExtensionInstallationStore> = installation_store;
+
+        restore_extension_lifecycle_state(
+            &restored_catalog,
+            &installation_store,
+            &restored_lifecycle,
+            &restored_active_extensions,
+        )
+        .await
+        .expect("restore enabled extension lifecycle state");
+
+        let package = fixture_extension_package().package;
+        let trust_input = extension_trust_policy_input(&package).expect("trust input");
+        assert_eq!(
+            restored_trust_policy
+                .evaluate(&trust_input)
+                .expect("restored active extension trust")
+                .effective_trust
+                .class(),
+            TrustClass::UserTrusted
+        );
+        assert!(
+            restored_active_registry
+                .snapshot()
+                .get_extension(&ExtensionId::new("fixture").unwrap())
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_enabled_extension_rejects_manifest_hash_mismatch_without_trusting_package() {
+        let (_dir, _storage_root, port, _active_registry, installation_store, _trust_policy) =
+            extension_management_port_fixture_with_catalog_service_and_trust(
+                AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
+            .expect("valid ref");
+        port.install(package_ref.clone())
+            .await
+            .expect("install fixture extension");
+        port.activate(package_ref)
+            .await
+            .expect("activate fixture extension");
+
+        let changed_catalog = AvailableExtensionCatalog::from_packages(vec![
+            fixture_extension_package_with_description(
+                "Lifecycle fixture extension with changed manifest",
+            ),
+        ]);
+        let restored_lifecycle = Arc::new(Mutex::new(ExtensionLifecycleService::new(
+            ExtensionRegistry::new(),
+        )));
+        let restored_active_registry =
+            Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        let restored_trust_policy = test_extension_trust_policy();
+        let restored_active_extensions = test_active_extension_publisher(
+            Arc::clone(&restored_active_registry),
+            Arc::clone(&restored_trust_policy),
+        );
+        let installation_store: Arc<dyn ExtensionInstallationStore> = installation_store;
+
+        let error = restore_extension_lifecycle_state(
+            &changed_catalog,
+            &installation_store,
+            &restored_lifecycle,
+            &restored_active_extensions,
+        )
+        .await
+        .expect_err("manifest hash mismatch fails closed");
+
+        assert!(matches!(
+            error,
+            ProductWorkflowError::InvalidBindingRequest { .. }
+        ));
+        let changed_package = fixture_extension_package_with_description(
+            "Lifecycle fixture extension with changed manifest",
+        )
+        .package;
+        let trust_input = extension_trust_policy_input(&changed_package).expect("trust input");
+        assert_eq!(
+            restored_trust_policy
+                .evaluate(&trust_input)
+                .expect("mismatched extension trust")
+                .effective_trust
+                .class(),
+            TrustClass::Sandbox
+        );
+        assert!(
+            restored_active_registry
+                .snapshot()
+                .get_extension(&ExtensionId::new("fixture").unwrap())
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_enabled_extension_rejects_missing_manifest_hash_without_trusting_package() {
+        let available = fixture_extension_package();
+        let package = available.package.clone();
+        let catalog = AvailableExtensionCatalog::from_packages(vec![available]);
+        let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
+        let manifest_record = fixture_manifest_record(fixture_extension_manifest(), None);
+        installation_store
+            .upsert_manifest(manifest_record)
+            .await
+            .expect("upsert manifest");
+        installation_store
+            .upsert_installation(fixture_installation(
+                None,
+                ExtensionActivationState::Enabled,
+            ))
+            .await
+            .expect("upsert installation");
+        let restored_lifecycle = Arc::new(Mutex::new(ExtensionLifecycleService::new(
+            ExtensionRegistry::new(),
+        )));
+        let restored_active_registry =
+            Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        let restored_trust_policy = test_extension_trust_policy();
+        let restored_active_extensions = test_active_extension_publisher(
+            Arc::clone(&restored_active_registry),
+            Arc::clone(&restored_trust_policy),
+        );
+        let installation_store: Arc<dyn ExtensionInstallationStore> = installation_store;
+
+        let error = restore_extension_lifecycle_state(
+            &catalog,
+            &installation_store,
+            &restored_lifecycle,
+            &restored_active_extensions,
+        )
+        .await
+        .expect_err("missing manifest hash fails closed");
+
+        assert!(matches!(
+            error,
+            ProductWorkflowError::InvalidBindingRequest { .. }
+        ));
+        let trust_input = extension_trust_policy_input(&package).expect("trust input");
+        assert_eq!(
+            restored_trust_policy
+                .evaluate(&trust_input)
+                .expect("missing-hash extension trust")
+                .effective_trust
+                .class(),
+            TrustClass::Sandbox
+        );
+        assert!(
+            restored_active_registry
+                .snapshot()
+                .get_extension(&ExtensionId::new("fixture").unwrap())
+                .is_none()
         );
     }
 
@@ -1205,7 +1587,10 @@ mod tests {
             Arc::new(Mutex::new(ExtensionLifecycleService::new(
                 lifecycle_registry,
             ))),
-            Arc::clone(&active_registry),
+            test_active_extension_publisher(
+                Arc::clone(&active_registry),
+                test_extension_trust_policy(),
+            ),
         );
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
@@ -1330,6 +1715,135 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn extension_remove_installation_delete_failure_restores_active_trust_policy() {
+        let (_dir, port, active_registry, failing_store, trust_policy) =
+            extension_port_with_delete_installation_failing_store(ExtensionRegistry::new());
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
+            .expect("valid ref");
+
+        port.install(package_ref.clone())
+            .await
+            .expect("install extension");
+        port.activate(package_ref.clone())
+            .await
+            .expect("activate extension");
+        let package = fixture_extension_package().package;
+        let trust_input = extension_trust_policy_input(&package).expect("trust input");
+        assert_eq!(
+            trust_policy
+                .evaluate(&trust_input)
+                .expect("active extension trust")
+                .effective_trust
+                .class(),
+            TrustClass::UserTrusted
+        );
+
+        let error = port
+            .remove(package_ref)
+            .await
+            .expect_err("delete installation failure is reported");
+
+        assert!(matches!(
+            error,
+            ProductWorkflowError::InvalidBindingRequest { .. }
+        ));
+        let extension_id = ExtensionId::new("fixture").expect("valid extension id");
+        let installation_id = ExtensionInstallationId::new("fixture").expect("valid installation");
+        let installation = failing_store
+            .get_installation(&installation_id)
+            .await
+            .expect("read installation")
+            .expect("installation remains");
+        assert_eq!(
+            installation.activation_state(),
+            ExtensionActivationState::Enabled
+        );
+        assert!(
+            active_registry
+                .snapshot()
+                .get_extension(&extension_id)
+                .is_some()
+        );
+        assert_eq!(
+            trust_policy
+                .evaluate(&trust_input)
+                .expect("restored active extension trust")
+                .effective_trust
+                .class(),
+            TrustClass::UserTrusted
+        );
+    }
+
+    #[tokio::test]
+    async fn extension_remove_manifest_delete_failure_restores_active_trust_policy() {
+        let (_dir, port, active_registry, failing_store, trust_policy) =
+            extension_port_with_delete_manifest_failing_store();
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
+            .expect("valid ref");
+
+        port.install(package_ref.clone())
+            .await
+            .expect("install extension");
+        port.activate(package_ref.clone())
+            .await
+            .expect("activate extension");
+        let package = fixture_extension_package().package;
+        let trust_input = extension_trust_policy_input(&package).expect("trust input");
+
+        let error = port
+            .remove(package_ref)
+            .await
+            .expect_err("delete manifest failure is reported");
+
+        assert!(matches!(
+            error,
+            ProductWorkflowError::InvalidBindingRequest { .. }
+        ));
+        assert_enabled_active_extension_state(&active_registry, failing_store.as_ref()).await;
+        assert_eq!(
+            trust_policy
+                .evaluate(&trust_input)
+                .expect("restored active extension trust")
+                .effective_trust
+                .class(),
+            TrustClass::UserTrusted
+        );
+    }
+
+    #[tokio::test]
+    async fn extension_remove_file_delete_failure_restores_active_trust_policy() {
+        let (_dir, port, active_registry, installation_store, trust_policy) =
+            extension_port_with_file_delete_failing_filesystem();
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
+            .expect("valid ref");
+
+        port.install(package_ref.clone())
+            .await
+            .expect("install extension");
+        port.activate(package_ref.clone())
+            .await
+            .expect("activate extension");
+        let package = fixture_extension_package().package;
+        let trust_input = extension_trust_policy_input(&package).expect("trust input");
+
+        let error = port
+            .remove(package_ref)
+            .await
+            .expect_err("delete files failure is reported");
+
+        assert!(matches!(error, ProductWorkflowError::Transient { .. }));
+        assert_enabled_active_extension_state(&active_registry, installation_store.as_ref()).await;
+        assert_eq!(
+            trust_policy
+                .evaluate(&trust_input)
+                .expect("restored active extension trust")
+                .effective_trust
+                .class(),
+            TrustClass::UserTrusted
+        );
+    }
+
+    #[tokio::test]
     async fn extension_auth_and_configure_return_unsupported() {
         let (_dir, _storage_root, facade, _active_registry, _installation_store) =
             extension_lifecycle_fixture();
@@ -1426,6 +1940,31 @@ mod tests {
         Arc<SharedExtensionRegistry>,
         Arc<InMemoryExtensionInstallationStore>,
     ) {
+        let (dir, storage_root, extension_management, active_registry, installation_store, _) =
+            extension_management_port_fixture_with_catalog_service_and_trust(
+                catalog,
+                lifecycle_service,
+            );
+        (
+            dir,
+            storage_root,
+            extension_management,
+            active_registry,
+            installation_store,
+        )
+    }
+
+    fn extension_management_port_fixture_with_catalog_service_and_trust(
+        catalog: AvailableExtensionCatalog,
+        lifecycle_service: ExtensionLifecycleService,
+    ) -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        Arc<RebornLocalExtensionManagementPort>,
+        Arc<SharedExtensionRegistry>,
+        Arc<InMemoryExtensionInstallationStore>,
+        Arc<HostTrustPolicy>,
+    ) {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
         std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
@@ -1447,12 +1986,16 @@ mod tests {
         let root_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
         let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
         let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
+        let trust_policy = test_extension_trust_policy();
         let extension_management = Arc::new(RebornLocalExtensionManagementPort::new(
             root_filesystem,
             catalog,
             installation_store.clone(),
             Arc::new(Mutex::new(lifecycle_service)),
-            Arc::clone(&active_registry),
+            test_active_extension_publisher(
+                Arc::clone(&active_registry),
+                Arc::clone(&trust_policy),
+            ),
         ));
         (
             dir,
@@ -1460,6 +2003,7 @@ mod tests {
             extension_management,
             active_registry,
             installation_store,
+            trust_policy,
         )
     }
 
@@ -1509,7 +2053,10 @@ mod tests {
             catalog,
             installation_store.clone(),
             Arc::new(Mutex::new(lifecycle_service)),
-            Arc::clone(&active_registry),
+            test_active_extension_publisher(
+                Arc::clone(&active_registry),
+                test_extension_trust_policy(),
+            ),
         ));
         let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(skill_management)
             .with_extension_management(extension_management);
@@ -1520,6 +2067,127 @@ mod tests {
             active_registry,
             installation_store,
         )
+    }
+
+    fn extension_port_with_delete_installation_failing_store(
+        initial_active_registry: ExtensionRegistry,
+    ) -> (
+        tempfile::TempDir,
+        RebornLocalExtensionManagementPort,
+        Arc<SharedExtensionRegistry>,
+        Arc<DeleteInstallationFailingStore>,
+        Arc<HostTrustPolicy>,
+    ) {
+        extension_port_with_delete_failing_store(
+            initial_active_registry,
+            DeleteInstallationFailingStore::default(),
+        )
+    }
+
+    fn extension_port_with_delete_manifest_failing_store() -> (
+        tempfile::TempDir,
+        RebornLocalExtensionManagementPort,
+        Arc<SharedExtensionRegistry>,
+        Arc<DeleteInstallationFailingStore>,
+        Arc<HostTrustPolicy>,
+    ) {
+        extension_port_with_delete_failing_store(
+            ExtensionRegistry::new(),
+            DeleteInstallationFailingStore::fail_manifest_delete(),
+        )
+    }
+
+    fn extension_port_with_delete_failing_store(
+        initial_active_registry: ExtensionRegistry,
+        failing_store: DeleteInstallationFailingStore,
+    ) -> (
+        tempfile::TempDir,
+        RebornLocalExtensionManagementPort,
+        Arc<SharedExtensionRegistry>,
+        Arc<DeleteInstallationFailingStore>,
+        Arc<HostTrustPolicy>,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
+        let mut filesystem = LocalFilesystem::new();
+        filesystem
+            .mount_local(
+                VirtualPath::new("/projects").expect("valid virtual path"),
+                HostPath::from_path_buf(storage_root.clone()),
+            )
+            .expect("mount storage root");
+        filesystem
+            .mount_local(
+                VirtualPath::new("/system/extensions").expect("valid virtual path"),
+                HostPath::from_path_buf(storage_root.join("system/extensions")),
+            )
+            .expect("mount system extensions");
+        let filesystem = Arc::new(filesystem);
+        let root_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
+        let active_registry = Arc::new(SharedExtensionRegistry::new(initial_active_registry));
+        let trust_policy = test_extension_trust_policy();
+        let failing_store = Arc::new(failing_store);
+        let installation_store: Arc<dyn ExtensionInstallationStore> = failing_store.clone();
+        let port = RebornLocalExtensionManagementPort::new(
+            root_filesystem,
+            AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]),
+            installation_store,
+            Arc::new(Mutex::new(ExtensionLifecycleService::new(
+                ExtensionRegistry::new(),
+            ))),
+            test_active_extension_publisher(
+                Arc::clone(&active_registry),
+                Arc::clone(&trust_policy),
+            ),
+        );
+        (dir, port, active_registry, failing_store, trust_policy)
+    }
+
+    fn extension_port_with_file_delete_failing_filesystem() -> (
+        tempfile::TempDir,
+        RebornLocalExtensionManagementPort,
+        Arc<SharedExtensionRegistry>,
+        Arc<InMemoryExtensionInstallationStore>,
+        Arc<HostTrustPolicy>,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
+        let mut filesystem = LocalFilesystem::new();
+        filesystem
+            .mount_local(
+                VirtualPath::new("/projects").expect("valid virtual path"),
+                HostPath::from_path_buf(storage_root.clone()),
+            )
+            .expect("mount storage root");
+        filesystem
+            .mount_local(
+                VirtualPath::new("/system/extensions").expect("valid virtual path"),
+                HostPath::from_path_buf(storage_root.join("system/extensions")),
+            )
+            .expect("mount system extensions");
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(filesystem);
+        let root_filesystem: Arc<dyn RootFilesystem> =
+            Arc::new(DeleteFailingRootFilesystem { inner: filesystem });
+        let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        let trust_policy = test_extension_trust_policy();
+        let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
+        let extension_installation_store: Arc<dyn ExtensionInstallationStore> =
+            installation_store.clone();
+        let port = RebornLocalExtensionManagementPort::new(
+            root_filesystem,
+            AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]),
+            extension_installation_store,
+            Arc::new(Mutex::new(ExtensionLifecycleService::new(
+                ExtensionRegistry::new(),
+            ))),
+            test_active_extension_publisher(
+                Arc::clone(&active_registry),
+                Arc::clone(&trust_policy),
+            ),
+        );
+        (dir, port, active_registry, installation_store, trust_policy)
     }
 
     struct FailingRemoveLifecycleSink;
@@ -1540,6 +2208,178 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct DeleteInstallationFailingStore {
+        inner: InMemoryExtensionInstallationStore,
+        fail_manifest_delete: bool,
+    }
+
+    impl DeleteInstallationFailingStore {
+        fn fail_manifest_delete() -> Self {
+            Self {
+                inner: InMemoryExtensionInstallationStore::default(),
+                fail_manifest_delete: true,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ExtensionInstallationStore for DeleteInstallationFailingStore {
+        async fn list_manifests(
+            &self,
+        ) -> Result<Vec<ExtensionManifestRecord>, ExtensionInstallationError> {
+            self.inner.list_manifests().await
+        }
+
+        async fn get_manifest(
+            &self,
+            extension_id: &ExtensionId,
+        ) -> Result<Option<ExtensionManifestRecord>, ExtensionInstallationError> {
+            self.inner.get_manifest(extension_id).await
+        }
+
+        async fn upsert_manifest(
+            &self,
+            manifest: ExtensionManifestRecord,
+        ) -> Result<(), ExtensionInstallationError> {
+            self.inner.upsert_manifest(manifest).await
+        }
+
+        async fn list_installations(
+            &self,
+        ) -> Result<Vec<ExtensionInstallation>, ExtensionInstallationError> {
+            self.inner.list_installations().await
+        }
+
+        async fn list_enabled_installations(
+            &self,
+        ) -> Result<Vec<ExtensionInstallation>, ExtensionInstallationError> {
+            self.inner.list_enabled_installations().await
+        }
+
+        async fn get_installation(
+            &self,
+            installation_id: &ExtensionInstallationId,
+        ) -> Result<Option<ExtensionInstallation>, ExtensionInstallationError> {
+            self.inner.get_installation(installation_id).await
+        }
+
+        async fn upsert_installation(
+            &self,
+            installation: ExtensionInstallation,
+        ) -> Result<(), ExtensionInstallationError> {
+            self.inner.upsert_installation(installation).await
+        }
+
+        async fn set_activation_state(
+            &self,
+            installation_id: &ExtensionInstallationId,
+            state: ExtensionActivationState,
+        ) -> Result<(), ExtensionInstallationError> {
+            self.inner
+                .set_activation_state(installation_id, state)
+                .await
+        }
+
+        async fn delete_installation(
+            &self,
+            installation_id: &ExtensionInstallationId,
+        ) -> Result<(), ExtensionInstallationError> {
+            if self.fail_manifest_delete {
+                self.inner.delete_installation(installation_id).await
+            } else {
+                Err(ExtensionInstallationError::InvalidInstallation {
+                    reason: "delete installation failed".to_string(),
+                })
+            }
+        }
+
+        async fn delete_manifest(
+            &self,
+            extension_id: &ExtensionId,
+        ) -> Result<(), ExtensionInstallationError> {
+            if self.fail_manifest_delete {
+                Err(ExtensionInstallationError::InvalidInstallation {
+                    reason: "delete manifest failed".to_string(),
+                })
+            } else {
+                self.inner.delete_manifest(extension_id).await
+            }
+        }
+
+        async fn update_health(
+            &self,
+            installation_id: &ExtensionInstallationId,
+            health: ironclaw_extensions::ExtensionHealthSnapshot,
+        ) -> Result<(), ExtensionInstallationError> {
+            self.inner.update_health(installation_id, health).await
+        }
+    }
+
+    struct DeleteFailingRootFilesystem {
+        inner: Arc<dyn RootFilesystem>,
+    }
+
+    #[async_trait]
+    impl RootFilesystem for DeleteFailingRootFilesystem {
+        fn capabilities(&self) -> ironclaw_filesystem::BackendCapabilities {
+            self.inner.capabilities()
+        }
+
+        async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+            self.inner.list_dir(path).await
+        }
+
+        async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+            self.inner.stat(path).await
+        }
+
+        async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
+            self.inner.read_file(path).await
+        }
+
+        async fn write_file(
+            &self,
+            path: &VirtualPath,
+            bytes: &[u8],
+        ) -> Result<(), FilesystemError> {
+            self.inner.write_file(path, bytes).await
+        }
+
+        async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+            Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::Delete,
+                reason: "delete failed".to_string(),
+            })
+        }
+    }
+
+    async fn assert_enabled_active_extension_state<S>(
+        active_registry: &SharedExtensionRegistry,
+        installation_store: &S,
+    ) where
+        S: ExtensionInstallationStore + ?Sized,
+    {
+        let extension_id = ExtensionId::new("fixture").expect("valid extension id");
+        let installation_id = ExtensionInstallationId::new("fixture").expect("valid installation");
+        let installation = installation_store
+            .get_installation(&installation_id)
+            .await
+            .expect("read installation")
+            .expect("installation remains");
+        assert_eq!(
+            installation.activation_state(),
+            ExtensionActivationState::Enabled
+        );
+        assert!(
+            active_registry
+                .snapshot()
+                .get_extension(&extension_id)
+                .is_some()
+        );
+    }
+
     fn lifecycle_surface_context() -> LifecycleProductContext {
         LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
             tenant_id: TenantId::new("lifecycle-tenant").expect("valid tenant"),
@@ -1549,8 +2389,38 @@ mod tests {
         })
     }
 
+    fn test_extension_trust_policy() -> Arc<HostTrustPolicy> {
+        Arc::new(
+            HostTrustPolicy::new(vec![Box::new(ironclaw_trust::AdminConfig::new())])
+                .expect("test trust policy"),
+        )
+    }
+
+    fn test_active_extension_publisher(
+        active_registry: Arc<SharedExtensionRegistry>,
+        trust_policy: Arc<HostTrustPolicy>,
+    ) -> ActiveExtensionPublisher {
+        ActiveExtensionPublisher::new(
+            active_registry,
+            trust_policy,
+            Arc::new(InvalidationBus::new()),
+        )
+    }
+
     fn fixture_extension_package() -> AvailableExtensionPackage {
-        static MANIFEST: &str = r#"
+        fixture_extension_package_from_manifest(fixture_extension_manifest())
+    }
+
+    fn fixture_extension_package_with_description(description: &str) -> AvailableExtensionPackage {
+        let manifest = fixture_extension_manifest().replace(
+            "description = \"Lifecycle fixture extension\"",
+            &format!("description = \"{description}\""),
+        );
+        fixture_extension_package_from_manifest(&manifest)
+    }
+
+    fn fixture_extension_manifest() -> &'static str {
+        r#"
 schema_version = "reborn.extension_manifest.v2"
 id = "fixture"
 name = "Fixture Extension"
@@ -1579,24 +2449,38 @@ default_permission = "ask"
 visibility = "host_internal"
 input_schema_ref = "schemas/write.input.json"
 output_schema_ref = "schemas/write.output.json"
-"#;
+"#
+    }
+
+    fn fixture_extension_package_from_manifest(manifest_toml: &str) -> AvailableExtensionPackage {
+        fixture_extension_package_from_manifest_with_root(manifest_toml, "fixture")
+    }
+
+    fn fixture_extension_package_from_manifest_with_root(
+        manifest_toml: &str,
+        root_id: &str,
+    ) -> AvailableExtensionPackage {
         let manifest = ExtensionManifest::parse(
-            MANIFEST,
+            manifest_toml,
             ManifestSource::HostBundled,
             &HostPortCatalog::empty(),
         )
         .expect("fixture manifest");
-        let root = VirtualPath::new("/system/extensions/fixture").expect("extension root");
-        let package = ExtensionPackage::from_manifest(manifest, root).expect("fixture package");
+        let root =
+            VirtualPath::new(format!("/system/extensions/{root_id}")).expect("extension root");
+        let package = ExtensionPackage::from_manifest_toml(manifest, root, manifest_toml)
+            .expect("fixture package");
         AvailableExtensionPackage {
-            package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
+            package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, root_id)
                 .expect("fixture package ref"),
-            manifest_toml: MANIFEST.to_string(),
+            manifest_toml: manifest_toml.to_string(),
             package,
             assets: vec![
                 AvailableExtensionAsset {
                     path: "manifest.toml".to_string(),
-                    content: AvailableExtensionAssetContent::Bytes(MANIFEST.as_bytes().to_vec()),
+                    content: AvailableExtensionAssetContent::Bytes(
+                        manifest_toml.as_bytes().to_vec(),
+                    ),
                 },
                 AvailableExtensionAsset {
                     path: "wasm/fixture.wasm".to_string(),
@@ -1604,6 +2488,44 @@ output_schema_ref = "schemas/write.output.json"
                 },
             ],
         }
+    }
+
+    fn fixture_manifest_record(
+        manifest_toml: &str,
+        manifest_hash: Option<String>,
+    ) -> ExtensionManifestRecord {
+        ExtensionManifestRecord::from_toml(
+            manifest_toml,
+            ManifestSource::HostBundled,
+            &HostPortCatalog::empty(),
+            manifest_hash
+                .map(ManifestHash::new)
+                .transpose()
+                .expect("valid manifest hash"),
+        )
+        .expect("fixture manifest record")
+    }
+
+    fn fixture_installation(
+        manifest_hash: Option<String>,
+        activation_state: ExtensionActivationState,
+    ) -> ExtensionInstallation {
+        let extension_id = ExtensionId::new("fixture").expect("valid extension id");
+        ExtensionInstallation::new(
+            ExtensionInstallationId::new("fixture").expect("valid installation"),
+            extension_id.clone(),
+            activation_state,
+            ExtensionManifestRef::new(
+                extension_id,
+                manifest_hash
+                    .map(ManifestHash::new)
+                    .transpose()
+                    .expect("valid manifest hash"),
+            ),
+            Vec::new(),
+            chrono::Utc::now(),
+        )
+        .expect("fixture installation")
     }
 
     fn assert_unsupported_extension_response(

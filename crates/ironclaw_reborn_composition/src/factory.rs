@@ -79,7 +79,10 @@ use crate::{
         AvailableExtensionCatalog, gmail_manifest_digest, google_calendar_manifest_digest,
     },
     extension_installation_store::FilesystemExtensionInstallationStore,
-    extension_lifecycle::{RebornLocalExtensionManagementPort, restore_extension_lifecycle_state},
+    extension_lifecycle::{
+        ActiveExtensionPublisher, RebornLocalExtensionManagementPort,
+        restore_extension_lifecycle_state,
+    },
     extension_lifecycle_capabilities::{
         extend_builtin_first_party_package, insert_handlers as insert_extension_lifecycle_handlers,
     },
@@ -393,6 +396,8 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         reason: format!("GSuite first-party handlers are invalid: {error}"),
     })?;
 
+    let local_dev_trust_policy = Arc::new(local_dev_first_party_trust_policy()?);
+    let local_dev_trust_invalidation_bus = Arc::new(ironclaw_trust::InvalidationBus::new());
     let mut services = HostRuntimeServices::new(
         Arc::new(local_dev_builtin_extension_registry()?),
         Arc::clone(&filesystem),
@@ -401,7 +406,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         store_graph.process_services.clone(),
         CapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
-    .with_trust_policy(Arc::new(local_dev_first_party_trust_policy()?))
+    .with_trust_policy(Arc::clone(&local_dev_trust_policy))
     .with_secret_store(Arc::new(ironclaw_secrets::InMemorySecretStore::new()))
     .try_with_host_http_egress_with_body_store(
         ironclaw_network::PolicyNetworkHttpEgress::new(
@@ -444,11 +449,16 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         ExtensionLifecycleService::new(services.shared_extension_registry().snapshot_owned()),
     ));
     let active_registry = services.shared_extension_registry();
+    let active_extensions = ActiveExtensionPublisher::new(
+        active_registry,
+        local_dev_trust_policy,
+        local_dev_trust_invalidation_bus,
+    );
     restore_extension_lifecycle_state(
         &available_extensions,
         &extension_installation_store,
         &extension_lifecycle_service,
-        &active_registry,
+        &active_extensions,
     )
     .await
     .map_err(|error| RebornBuildError::InvalidConfig {
@@ -459,7 +469,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         available_extensions,
         extension_installation_store,
         extension_lifecycle_service,
-        active_registry,
+        active_extensions,
     ));
     insert_extension_lifecycle_handlers(
         &mut first_party_registry,
@@ -1511,6 +1521,7 @@ mod tests {
             panic!("expected fail-closed handler outcome, got {outcome:?}");
         };
         assert_eq!(failure.capability_id.as_str(), "gmail.send_message");
+        assert_ne!(failure.kind, RuntimeFailureKind::Authorization);
         assert_ne!(failure.kind, RuntimeFailureKind::MissingRuntime);
 
         let calendar_context = gsuite_context("google-calendar.create_event");
@@ -1538,6 +1549,7 @@ mod tests {
             failure.capability_id.as_str(),
             "google-calendar.create_event"
         );
+        assert_ne!(failure.kind, RuntimeFailureKind::Authorization);
         assert_ne!(failure.kind, RuntimeFailureKind::MissingRuntime);
     }
 
@@ -1858,7 +1870,7 @@ mod tests {
                         allowed_effects: gsuite_allowed_effects(),
                         mounts: MountView::new(Vec::new()).expect("valid empty mount view"),
                         network: NetworkPolicy::default(),
-                        secrets: Vec::new(),
+                        secrets: vec![SecretHandle::new("missing-google-access-token").unwrap()],
                         resource_ceiling: None,
                         expires_at: None,
                         max_invocations: None,
