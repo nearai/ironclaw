@@ -3,6 +3,7 @@ use std::{
     sync::{Arc, LazyLock, Mutex, Weak},
 };
 
+use crate::parser::starts_with_frontmatter_delimiter;
 use crate::{
     MAX_PROMPT_FILE_SIZE, ParsedSkill, SkillParseError, normalize_line_endings, parse_skill_md,
     validate_skill_name,
@@ -206,6 +207,11 @@ pub struct SkillInstallResult {
     pub source: SkillSource,
 }
 
+struct PreparedSkillInstall {
+    content: String,
+    parsed: ParsedSkill,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SkillRemoveRequest<'a> {
     pub name: &'a str,
@@ -304,18 +310,22 @@ pub async fn install_skill(
         ));
     }
 
-    let normalized = normalize_line_endings(request.content);
-    let install_content = normalize_install_content(&normalized, request.name)?;
-    let parsed = parse_skill_md(&install_content).map_err(|error| {
-        tracing::debug!(%error, "skill install failed to parse SKILL.md content");
-        skill_parse_error(error)
-    })?;
+    let prepared = prepare_install_content(request.content, request.name)?;
+    if prepared.content.len() as u64 > MAX_PROMPT_FILE_SIZE {
+        tracing::debug!(
+            max_bytes = MAX_PROMPT_FILE_SIZE,
+            "skill install rejected oversized persisted content"
+        );
+        return Err(SkillManagementError::new(
+            SkillManagementErrorKind::Resource,
+        ));
+    }
     if let Some(requested_name) = request.name
-        && requested_name != parsed.manifest.name
+        && requested_name != prepared.parsed.manifest.name
     {
         tracing::debug!(
             requested_name,
-            parsed_name = %parsed.manifest.name,
+            parsed_name = %prepared.parsed.manifest.name,
             "skill install rejected name mismatch"
         );
         return Err(SkillManagementError::new(
@@ -324,7 +334,7 @@ pub async fn install_skill(
     }
     validate_install_bundle_files(request.files)?;
 
-    let skill_name = parsed.manifest.name;
+    let skill_name = prepared.parsed.manifest.name;
     let mutation_lock = skill_mutation_lock(&skill_name);
     let _mutation_guard = mutation_lock.lock().await;
     let skill_dir = skill_root_scoped_path(USER_SKILLS_ROOT, &skill_name)?;
@@ -357,7 +367,7 @@ pub async fn install_skill(
     publish_skill_install(
         context,
         &skill_name,
-        &install_content,
+        &prepared.content,
         request.files,
         request.source,
         request.source_url,
@@ -377,27 +387,31 @@ pub async fn install_skill(
     })
 }
 
-fn normalize_install_content(
-    normalized_content: &str,
+fn prepare_install_content(
+    content: &str,
     requested_name: Option<&str>,
-) -> Result<String, SkillManagementError> {
-    match parse_skill_md(normalized_content) {
-        Ok(_) => Ok(normalized_content.to_string()),
+) -> Result<PreparedSkillInstall, SkillManagementError> {
+    let normalized_content = normalize_line_endings(content);
+    match parse_skill_md(&normalized_content) {
+        Ok(parsed) => Ok(PreparedSkillInstall {
+            content: normalized_content,
+            parsed,
+        }),
         Err(SkillParseError::MissingFrontmatter)
-            if !starts_with_frontmatter_delimiter(normalized_content) =>
+            if !starts_with_frontmatter_delimiter(&normalized_content) =>
         {
-            synthesize_install_frontmatter(normalized_content, requested_name)
+            let content = synthesize_install_frontmatter(&normalized_content, requested_name)?;
+            let parsed = parse_skill_md(&content).map_err(|error| {
+                tracing::debug!(%error, "skill install failed to parse synthesized SKILL.md content");
+                skill_parse_error(error)
+            })?;
+            Ok(PreparedSkillInstall { content, parsed })
         }
         Err(error) => {
             tracing::debug!(%error, "skill install failed to parse SKILL.md content");
             Err(skill_parse_error(error))
         }
     }
-}
-
-fn starts_with_frontmatter_delimiter(content: &str) -> bool {
-    let stripped = content.strip_prefix('\u{feff}').unwrap_or(content);
-    stripped.trim_start_matches(['\n', '\r']).starts_with("---")
 }
 
 fn synthesize_install_frontmatter(

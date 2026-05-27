@@ -155,6 +155,34 @@ async fn install_rejects_malformed_frontmatter_even_with_requested_name() {
 }
 
 #[tokio::test]
+async fn install_rejects_plain_markdown_when_synthesized_content_exceeds_prompt_limit() {
+    let filesystem = Arc::new(InMemoryBackend::default());
+    let context = skill_management_context(filesystem.clone(), skill_mounts());
+    let header = "---\nname: qa-smoke-skill\n---\n\n";
+    let content = "x".repeat(MAX_PROMPT_FILE_SIZE as usize - header.len() + 1);
+
+    let error = install_skill(
+        &context,
+        SkillInstallRequest {
+            name: Some("qa-smoke-skill"),
+            content: &content,
+            files: &[],
+            source: SkillInstallSource::User,
+            source_url: None,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.kind(), SkillManagementErrorKind::Resource);
+    assert_missing(
+        filesystem.as_ref(),
+        "/projects/skills/qa-smoke-skill/SKILL.md",
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn install_preserves_parse_error_context() {
     let filesystem = Arc::new(InMemoryBackend::default());
     let context = skill_management_context(filesystem, skill_mounts());

@@ -761,6 +761,8 @@ async fn builtin_skill_install_accepts_named_plain_markdown_content() {
             "name": "qa-smoke-skill",
             "content": "# QA Smoke\n\nSay \"qa skill loaded\" when asked.\n"
         }),
+        // skill_install currently declares Network for URL installs too, so the
+        // first-party harness needs a non-empty policy even for content input.
         execution_context_with_mounts_and_network(
             [SKILL_INSTALL_CAPABILITY_ID],
             mounts.clone(),
