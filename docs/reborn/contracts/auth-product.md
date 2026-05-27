@@ -1,7 +1,7 @@
 # Reborn Product Auth Contract
 
 - **Status:** contract and composition seam
-- **Issue:** #3289 / #3810 / #3811 / #3812 / #3881 / #3882 / #3883
+- **Issue:** #3289 / #3810 / #3811 / #3812 / #3881 / #3882 / #3883 / #3884
 - **Crate:** `crates/ironclaw_auth`
 - **Composition:** `ironclaw_reborn_composition::RebornProductAuthServices`
 
@@ -18,9 +18,10 @@ This slice is contract-first. It defines Reborn-native vocabulary and fake
 services, #3811 adds a Reborn composition seam, #3812 adds callback completion
 handling, #3881 mounts the first Reborn-native OAuth start/callback HTTP routes
 through `ironclaw_reborn_composition`, #3882 adds the composition-facing
-manual-token secure-submit entrypoint, and #3883 adds recovery/selection
-facade coverage. It does not migrate production extension setup routes,
-CLI/setup flows, durable secret storage, token refresh execution, or runtime
+manual-token secure-submit entrypoint, #3883 adds recovery/selection facade
+coverage, and #3884 adds refresh/cleanup lifecycle contracts. It does not
+migrate production extension setup routes, CLI/setup flows, durable secret
+storage, a production refresh scheduler/HTTP provider implementation, or runtime
 credential injection.
 
 Behavior may remain compatible with legacy UX. Code paths must not mingle V1
@@ -215,6 +216,16 @@ Rules:
   completion.
 - Account listing uses explicit limit/cursor pagination and returns only
   authorized redacted projections.
+- Credential refresh must go through `CredentialAccountService::refresh_account`
+  or `RebornProductAuthServices::refresh_credential_account`. Refresh requests
+  revalidate scope, provider, account status, ownership, and requester grants;
+  a refreshable account id is never authority by itself.
+- Refresh is allowed only for recoverable/configured accounts that still carry
+  refresh authority. Revoked, inactive, pending-setup, missing, cross-scope, or
+  unauthorized accounts fail closed even if a stale refresh handle still exists.
+- Refresh results project only redacted account metadata and stable recovery
+  state. They must not expose raw provider error text, response bodies, host
+  paths, access-token handles, refresh-token handles, or secret values.
 
 ---
 
@@ -265,14 +276,33 @@ OAuthProviderCallbackRequest {
   account_label,
   ProviderScope[]
 }
+
+OAuthProviderRefreshRequest {
+  provider,
+  account_id,
+  refresh_secret,
+  ProviderScope[]
+}
 ```
 
-The request is intentionally not serializable. The exchange result is safe to
-store because it contains only hashes, handles, ids, scopes, and redacted
-metadata.
+The request types are intentionally not serializable. Exchange/refresh results
+are safe to store because they contain only hashes, handles, ids, scopes, and
+redacted metadata.
 
-Future production implementations must route provider HTTP through Reborn
-network/egress policy and return sanitized errors.
+Production implementations must route provider HTTP through Reborn
+network/egress policy, use bounded retry/backoff and per-account/provider rate
+limits, and return sanitized errors. Refresh implementations must never log raw
+refresh tokens, access tokens, provider response bodies, authorization codes,
+PKCE verifiers, or backend secret handles; provider diagnostics must be mapped
+to stable categories before they reach route responses, projections, traces, or
+audit logs.
+
+Refresh writes must be stale-safe. A production account store should use an
+optimistic version, token generation, refresh-handle equality check, or an
+equivalent compare-and-swap guard so a late refresh response cannot overwrite
+newer credentials. Similarly, a failed refresh should mark an account
+`refresh_failed` only if the account is still in the same pre-refresh
+generation that initiated the provider call.
 
 The composition root may expose an in-memory product-auth bundle only for
 local-dev/testing. Production profiles must receive durable Reborn-native auth
@@ -290,8 +320,11 @@ Cleanup is ownership-aware:
 | `deactivate` | retain account metadata, remove active visibility/grants | remove extension grant/visibility only |
 | `uninstall` | revoke/delete/tombstone owned account and grants | keep account, remove extension grant/visibility |
 
-Reports contain account ids only, never secret handles or backend detail
-strings.
+Reports contain account ids and stable quarantine categories only, never secret
+handles or backend detail strings. If a revoke, grant removal, tombstone, or
+backend cleanup step cannot be completed safely, the report must quarantine the
+affected account id and leave account metadata/grants unchanged rather than
+pretending cleanup succeeded.
 
 ---
 
@@ -332,6 +365,9 @@ strings.
   expired, refresh-failed, revoked, ambiguous, and hidden unauthorized accounts;
 - explicit account-choice validation plus lookup, listing, extension-owned, and
   shared-admin grant filtering;
-- extension-owned owner validation and deactivate/uninstall cleanup behavior;
+- refresh success/failure, terminal-status rejection, stale concurrent refresh
+  guards, request redaction, and scope/provider/grant revalidation;
+- extension-owned owner validation, deactivate/uninstall cleanup behavior, and
+  cleanup quarantine reporting;
 - serde validation for newtypes and snake_case wire enums;
 - serialization checks proving raw code/verifier/token material is absent.

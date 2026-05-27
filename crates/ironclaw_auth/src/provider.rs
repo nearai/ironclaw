@@ -93,12 +93,49 @@ pub struct OAuthProviderExchange {
     pub account_id: Option<CredentialAccountId>,
 }
 
+/// One-shot provider refresh input. This type intentionally does not implement
+/// serde traits because refresh authority must stay behind host-mediated
+/// credential/egress boundaries.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OAuthProviderRefreshRequest {
+    pub provider: AuthProviderId,
+    pub account_id: CredentialAccountId,
+    pub refresh_secret: SecretHandle,
+    pub scopes: Vec<ProviderScope>,
+}
+
+impl fmt::Debug for OAuthProviderRefreshRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OAuthProviderRefreshRequest")
+            .field("provider", &self.provider)
+            .field("account_id", &self.account_id)
+            .field("refresh_secret", &"[REDACTED]")
+            .field("scopes", &self.scopes)
+            .finish()
+    }
+}
+
+/// Provider refresh result safe to store back into credential-account records.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthProviderRefresh {
+    pub provider: AuthProviderId,
+    pub access_secret: SecretHandle,
+    pub refresh_secret: Option<SecretHandle>,
+    pub scopes: Vec<ProviderScope>,
+}
+
 #[async_trait]
 pub trait AuthProviderClient: Send + Sync {
     async fn exchange_callback(
         &self,
         request: OAuthProviderCallbackRequest,
     ) -> Result<OAuthProviderExchange, AuthProductError>;
+
+    async fn refresh_token(
+        &self,
+        request: OAuthProviderRefreshRequest,
+    ) -> Result<OAuthProviderRefresh, AuthProductError>;
 }
 
 pub(crate) fn validate_provider_callback_request(

@@ -61,11 +61,11 @@ mod webui_serve;
 mod webui_ws_origin;
 
 pub use auth::{
-    RebornAuthContinuationDispatcher, RebornAuthProductError, RebornManualTokenChallenge,
-    RebornManualTokenError, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,
-    RebornManualTokenSubmitResponse, RebornOAuthCallbackError, RebornOAuthCallbackOutcome,
-    RebornOAuthCallbackRequest, RebornOAuthCallbackResponse, RebornProductAuthServicePorts,
-    RebornProductAuthServices,
+    RebornAuthContinuationDispatcher, RebornAuthProductError, RebornCredentialLifecycleError,
+    RebornManualTokenChallenge, RebornManualTokenError, RebornManualTokenSetupRequest,
+    RebornManualTokenSubmitRequest, RebornManualTokenSubmitResponse, RebornOAuthCallbackError,
+    RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest, RebornOAuthCallbackResponse,
+    RebornProductAuthServicePorts, RebornProductAuthServices,
 };
 pub use error::RebornBuildError;
 pub use extension_lifecycle_command::{
