@@ -139,7 +139,7 @@ const DEFAULT_MAX_SKILL_CONTEXT_BYTES: usize = LOOP_CONTEXT_TOTAL_MODEL_CONTENT_
 /// Byte budgets for model-visible skill context produced by [`SkillContextService`].
 ///
 /// Hosts can map a run's context profile to these limits via
-/// [`SkillContextService::with_budget`]. Both limits fail closed when exceeded.
+/// [`SkillContextService::with_budget`]. The aggregate limit fails closed when exceeded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SkillContextBudget {
     /// Maximum bytes for one model-visible skill snippet.
@@ -150,9 +150,9 @@ pub struct SkillContextBudget {
 
 impl SkillContextBudget {
     /// Create explicit skill-context budget limits.
-    pub const fn new(max_snippet_bytes: usize, max_context_bytes: usize) -> Self {
+    pub const fn new(max_context_bytes: usize) -> Self {
         Self {
-            max_snippet_bytes,
+            max_snippet_bytes: DEFAULT_MAX_SKILL_SNIPPET_BYTES,
             max_context_bytes,
         }
     }
@@ -492,10 +492,7 @@ fn validate_snapshot(snapshot: &SkillRunSnapshot) -> Result<(), SkillContextErro
 }
 
 fn validate_budget(budget: SkillContextBudget) -> Result<(), SkillContextError> {
-    if budget.max_snippet_bytes == 0
-        || budget.max_context_bytes == 0
-        || budget.max_snippet_bytes > budget.max_context_bytes
-    {
+    if budget.max_context_bytes == 0 {
         return Err(SkillContextError::BudgetMisconfigured);
     }
 

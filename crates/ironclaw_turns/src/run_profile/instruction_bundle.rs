@@ -276,6 +276,7 @@ impl InstructionBundleBuilder {
                     &mut materialized_messages,
                     &mut fingerprint,
                     "skill",
+                    skill_ordinal,
                     content_ref,
                     &snippet,
                 )?;
@@ -287,17 +288,15 @@ impl InstructionBundleBuilder {
                 skill_ordinal += 1;
             } else {
                 requires_materialization_store = true;
-                let content_ref = snippet_message_ref(
-                    "instruction",
-                    &snippet,
-                    messages.len(),
-                    &mut synthetic_refs,
-                )?;
+                let ordinal = messages.len();
+                let content_ref =
+                    snippet_message_ref("instruction", &snippet, ordinal, &mut synthetic_refs)?;
                 push_snippet_message(
                     &mut messages,
                     &mut materialized_messages,
                     &mut fingerprint,
                     "instruction",
+                    ordinal,
                     content_ref,
                     &snippet,
                 )?;
@@ -317,6 +316,7 @@ impl InstructionBundleBuilder {
                 &mut materialized_messages,
                 &mut fingerprint,
                 "memory",
+                ordinal,
                 content_ref,
                 &snippet,
             )?;
@@ -444,12 +444,25 @@ fn push_snippet_message(
     materialized_messages: &mut Vec<InstructionBundleMaterializedMessage>,
     fingerprint: &mut Sha256,
     section: &'static str,
+    ordinal: usize,
     content_ref: LoopMessageRef,
     snippet: &LoopContextSnippet,
 ) -> Result<(), AgentLoopHostError> {
     validate_context_ref(snippet.snippet_ref.clone(), "context snippet ref")?;
     let safe_summary =
-        validate_model_safe_text(snippet.safe_summary.clone(), "context snippet summary")?;
+        validate_model_safe_text(snippet.safe_summary.clone(), "context snippet summary")
+            .inspect_err(|error| {
+                tracing::debug!(
+                    section,
+                    ordinal,
+                    snippet_ref = %snippet.snippet_ref,
+                    content_ref = %content_ref.as_str(),
+                    safe_summary_bytes = snippet.safe_summary.len(),
+                    error_kind = ?error.kind,
+                    error_safe_summary = %error.safe_summary,
+                    "instruction bundle rejected context snippet safe summary"
+                );
+            })?;
     let model_content =
         validate_model_visible_content(snippet.model_content.clone(), "context snippet content")?;
     feed_field(fingerprint, b"section", section.as_bytes());

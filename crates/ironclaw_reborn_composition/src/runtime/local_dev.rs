@@ -40,11 +40,22 @@ use ironclaw_turns::{
     },
 };
 
+use crate::extension_lifecycle_capabilities::{
+    EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID,
+    EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SEARCH_CAPABILITY_ID,
+};
+
 use crate::local_dev_mounts::skill_management_mount_view;
 use crate::{
     RebornServices,
     projection::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore},
 };
+
+mod extension_surface;
+mod surface_disclosure;
+
+use extension_surface::{LocalDevExtensionSurface, LocalDevExtensionSurfaceSource};
+use surface_disclosure::wrap_local_dev_surface_disclosure;
 
 pub(super) struct LocalDevCapabilityWiring {
     pub(super) capability_factory: Arc<dyn LoopCapabilityPortFactory>,
@@ -63,10 +74,10 @@ pub(super) fn capability_wiring(
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
 ) -> Option<LocalDevCapabilityWiring> {
     let runtime = services.host_runtime.clone()?;
-    let workspace_mounts = services
-        .local_runtime
-        .as_ref()
-        .map(|runtime| runtime.workspace_mounts.clone())?;
+    let local_runtime = services.local_runtime.as_ref()?;
+    let workspace_mounts = local_runtime.workspace_mounts.clone();
+    let extension_surface_source =
+        LocalDevExtensionSurfaceSource::new(local_runtime.extension_management.clone());
     let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
     let capability_io = Arc::new(LocalDevCapabilityIo::new_with_durable_previews(
         Arc::clone(&display_previews),
@@ -80,6 +91,7 @@ pub(super) fn capability_wiring(
             runtime,
             user_id,
             workspace_mounts,
+            extension_surface_source,
             Arc::clone(&capability_input_resolver),
             Arc::clone(&capability_result_writer),
             milestone_sink,
@@ -102,6 +114,7 @@ struct LocalDevLoopCapabilityPortFactory {
     runtime: Arc<dyn HostRuntime>,
     user_id: UserId,
     workspace_mounts: MountView,
+    extension_surface_source: LocalDevExtensionSurfaceSource,
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
@@ -112,6 +125,7 @@ impl LocalDevLoopCapabilityPortFactory {
         runtime: Arc<dyn HostRuntime>,
         user_id: UserId,
         workspace_mounts: MountView,
+        extension_surface_source: LocalDevExtensionSurfaceSource,
         input_resolver: Arc<dyn LoopCapabilityInputResolver>,
         result_writer: Arc<dyn LoopCapabilityResultWriter>,
         milestone_sink: Arc<dyn LoopHostMilestoneSink>,
@@ -120,6 +134,7 @@ impl LocalDevLoopCapabilityPortFactory {
             runtime,
             user_id,
             workspace_mounts,
+            extension_surface_source,
             input_resolver,
             result_writer,
             milestone_sink,
@@ -135,12 +150,19 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
         let workspace_mounts = self.workspace_mounts.clone();
         let skill_mounts = skill_management_mount_view().map_err(host_api_agent_loop_error)?;
+        let extension_surface = self
+            .extension_surface_source
+            .snapshot()
+            .await
+            .map_err(host_api_agent_loop_error)?;
         let visible_request = local_dev_visible_capability_request(
             run_context,
             self.user_id.clone(),
             workspace_mounts.clone(),
             skill_mounts.clone(),
+            &extension_surface,
         )?;
+        let disclosure_mounts = workspace_mounts.clone();
         let mut factory = HostRuntimeLoopCapabilityPortFactory::new(
             Arc::clone(&self.runtime),
             visible_request,
@@ -155,7 +177,8 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
                 skill_mounts.clone(),
             );
         }
-        Ok(factory.for_run_context(run_context.clone()))
+        let port = factory.for_run_context(run_context.clone());
+        Ok(wrap_local_dev_surface_disclosure(port, &disclosure_mounts))
     }
 }
 
@@ -655,9 +678,13 @@ fn local_dev_visible_capability_request(
     user_id: UserId,
     workspace_mounts: MountView,
     skill_mounts: MountView,
+    extension_surface: &LocalDevExtensionSurface,
 ) -> Result<HostVisibleCapabilityRequest, AgentLoopHostError> {
     let extension_id = loop_driver_execution_extension_id(run_context)?;
-    let grants = local_dev_builtin_grants(&extension_id, &workspace_mounts, &skill_mounts)?;
+    let mut grants = local_dev_builtin_grants(&extension_id, &workspace_mounts, &skill_mounts)?;
+    grants
+        .grants
+        .extend(extension_surface.grants(&extension_id));
     let mut context = ExecutionContext::local_default(
         user_id,
         extension_id,
@@ -691,6 +718,7 @@ fn local_dev_visible_capability_request(
             evaluated_at: Utc::now(),
         },
     );
+    provider_trust.extend(extension_surface.provider_trust());
 
     Ok(HostVisibleCapabilityRequest::new(
         context,
@@ -723,6 +751,8 @@ enum LocalDevCapabilityKind {
     Workspace,
     AmbientShell,
     Network,
+    ExtensionLifecycleSearch,
+    ExtensionLifecycleMutation,
     SkillInstall,
     SkillManagement,
 }
@@ -732,6 +762,13 @@ fn local_dev_capability_kind(capability_id: &str) -> LocalDevCapabilityKind {
         LocalDevCapabilityKind::AmbientShell
     } else if capability_id == HTTP_CAPABILITY_ID {
         LocalDevCapabilityKind::Network
+    } else if capability_id == EXTENSION_SEARCH_CAPABILITY_ID {
+        LocalDevCapabilityKind::ExtensionLifecycleSearch
+    } else if capability_id == EXTENSION_INSTALL_CAPABILITY_ID
+        || capability_id == EXTENSION_ACTIVATE_CAPABILITY_ID
+        || capability_id == EXTENSION_REMOVE_CAPABILITY_ID
+    {
+        LocalDevCapabilityKind::ExtensionLifecycleMutation
     } else if capability_id == SKILL_INSTALL_CAPABILITY_ID {
         LocalDevCapabilityKind::SkillInstall
     } else if capability_id == SKILL_LIST_CAPABILITY_ID
@@ -784,6 +821,24 @@ pub(super) fn local_dev_grant_constraints(
             expires_at: None,
             max_invocations: None,
         },
+        LocalDevCapabilityKind::ExtensionLifecycleSearch => GrantConstraints {
+            allowed_effects: local_dev_extension_lifecycle_search_allowed_effects(),
+            mounts: MountView::default(),
+            network: NetworkPolicy::default(),
+            secrets: Vec::new(),
+            resource_ceiling: None,
+            expires_at: None,
+            max_invocations: None,
+        },
+        LocalDevCapabilityKind::ExtensionLifecycleMutation => GrantConstraints {
+            allowed_effects: local_dev_allowed_effects(),
+            mounts: MountView::default(),
+            network: NetworkPolicy::default(),
+            secrets: Vec::new(),
+            resource_ceiling: None,
+            expires_at: None,
+            max_invocations: None,
+        },
         LocalDevCapabilityKind::Workspace => GrantConstraints {
             allowed_effects: local_dev_allowed_effects(),
             mounts: workspace_mounts.clone(),
@@ -814,7 +869,7 @@ pub(super) fn local_dev_grant_constraints(
     }
 }
 
-fn local_dev_builtin_capability_ids() -> [&'static str; 14] {
+fn local_dev_builtin_capability_ids() -> [&'static str; 18] {
     [
         ECHO_CAPABILITY_ID,
         TIME_CAPABILITY_ID,
@@ -827,6 +882,10 @@ fn local_dev_builtin_capability_ids() -> [&'static str; 14] {
         GLOB_CAPABILITY_ID,
         GREP_CAPABILITY_ID,
         APPLY_PATCH_CAPABILITY_ID,
+        EXTENSION_SEARCH_CAPABILITY_ID,
+        EXTENSION_INSTALL_CAPABILITY_ID,
+        EXTENSION_ACTIVATE_CAPABILITY_ID,
+        EXTENSION_REMOVE_CAPABILITY_ID,
         SKILL_LIST_CAPABILITY_ID,
         SKILL_INSTALL_CAPABILITY_ID,
         SKILL_REMOVE_CAPABILITY_ID,
@@ -835,6 +894,10 @@ fn local_dev_builtin_capability_ids() -> [&'static str; 14] {
 
 fn local_dev_network_allowed_effects() -> Vec<EffectKind> {
     vec![EffectKind::DispatchCapability, EffectKind::Network]
+}
+
+fn local_dev_extension_lifecycle_search_allowed_effects() -> Vec<EffectKind> {
+    vec![EffectKind::DispatchCapability, EffectKind::ReadFilesystem]
 }
 
 fn local_dev_allowed_effects() -> Vec<EffectKind> {

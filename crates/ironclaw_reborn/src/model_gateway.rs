@@ -15,7 +15,7 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_host_api::sha256_digest_token;
 use ironclaw_llm::{
-    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider,
+    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider, Role,
     ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
 };
 use ironclaw_loop_support::{
@@ -1042,6 +1042,13 @@ fn convert_messages(
                     index += 1;
                     continue;
                 };
+                if !provider_replay_matches_identity(&provider_call, replay_identity) {
+                    converted.push(ChatMessage::user(tool_summary_message(
+                        replay.model_content,
+                    )));
+                    index += 1;
+                    continue;
+                }
                 validate_provider_replay_identity(&provider_call, replay_identity)?;
                 let provider_turn_id = provider_call.provider_turn_id.clone();
                 let mut provider_results = vec![(provider_call, replay.model_content)];
@@ -1056,6 +1063,11 @@ fn convert_messages(
                         index += 1;
                         continue;
                     };
+                    if !provider_replay_matches_identity(&next_provider_call, replay_identity) {
+                        plain_tool_results.push(next.model_content);
+                        index += 1;
+                        continue;
+                    }
                     validate_provider_replay_identity(&next_provider_call, replay_identity)?;
                     if next_provider_call.provider_turn_id != provider_turn_id {
                         break;
@@ -1070,7 +1082,39 @@ fn convert_messages(
         }
         index += 1;
     }
-    Ok(converted)
+    Ok(coalesce_system_messages_at_start(converted))
+}
+
+fn coalesce_system_messages_at_start(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    let mut system_content = Vec::new();
+    let mut transcript = Vec::with_capacity(messages.len());
+    for message in messages {
+        if message.role == Role::System {
+            system_content.push(message.content);
+        } else {
+            transcript.push(message);
+        }
+    }
+    if system_content.is_empty() {
+        return transcript;
+    }
+
+    let mut normalized = Vec::with_capacity(transcript.len() + 1);
+    normalized.push(ChatMessage::system(system_content.join("\n\n")));
+    normalized.extend(transcript);
+    normalized
+}
+
+fn tool_summary_message(summary: String) -> String {
+    format!("[Tool result summary]: {summary}")
+}
+
+fn provider_replay_matches_identity(
+    provider_call: &ProviderToolCallReferenceEnvelope,
+    expected: &ProviderReplayIdentity,
+) -> bool {
+    provider_call.provider_id == expected.provider_id
+        && provider_call.provider_model_id == expected.provider_model_id
 }
 
 fn validate_provider_replay_identity(

@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    CapabilityId, HostApiError, NetworkMethod, NetworkPolicy, ResourceScope, RuntimeKind,
-    ScopedPath, SecretHandle,
+    CapabilityId, HostApiError, MountView, NetworkMethod, NetworkPolicy, ResourceScope,
+    RuntimeKind, ScopedPath, SecretHandle,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,6 +51,14 @@ pub struct RuntimeHttpEgressRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeHttpSaveTarget {
     pub path: ScopedPath,
+    /// Host-derived mount authority used to parse and authorize `path`.
+    ///
+    /// This is skipped on the wire so guest/runtime-provided requests cannot
+    /// grant themselves filesystem authority by serializing a custom mount
+    /// view. Host translators that already hold an invocation mount view may
+    /// attach it before dispatching to the host egress service.
+    #[serde(skip)]
+    pub mount_view: Option<MountView>,
 }
 
 /// One host-approved credential injection.

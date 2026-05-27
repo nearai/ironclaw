@@ -175,9 +175,13 @@ where
         let _guard = record_lock.lock().await;
         for _ in 0..FILESYSTEM_CAS_RETRIES {
             let (snapshot, version) = self.read_snapshot_unlocked().await?;
+            let old_snapshot = snapshot.clone();
             let store = self.build_in_memory_store(snapshot)?;
             let (outcome, store) = apply(store).await;
             let new_snapshot = store.persistence_snapshot();
+            if new_snapshot == old_snapshot {
+                return outcome;
+            }
             let entry = snapshot_entry(&new_snapshot)?;
             let cas = match version {
                 Some(v) => CasExpectation::Version(v),

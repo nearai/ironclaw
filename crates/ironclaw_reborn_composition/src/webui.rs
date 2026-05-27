@@ -7,20 +7,22 @@ use ironclaw_product_workflow::{
 };
 
 use crate::{
-    RebornBuildError, RebornReadiness, RebornRuntime, lifecycle::RebornLocalLifecycleFacade,
+    RebornBuildError, RebornProductAuthServices, RebornReadiness, RebornRuntime,
+    lifecycle::RebornLocalLifecycleFacade,
 };
 
 /// WebUI-facing Reborn service bundle for host composition.
 ///
-/// This bundle deliberately exposes only the product facade consumed by
-/// WebChat v2 routes. HTTP routing, auth middleware, static assets, and
-/// SSE transport stay in the WebUI crate (or, when the `webui-v2-beta`
-/// feature is on, the [`crate::webui_serve`] module in this crate);
-/// lower runtime handles stay behind the existing Reborn runtime /
-/// composition services.
+/// This bundle deliberately exposes facade-shaped product handles consumed
+/// by WebChat v2 and the optional product-auth OAuth routes. HTTP
+/// routing, auth middleware, static assets, and SSE transport stay in the
+/// WebUI crate (or, when the `webui-v2-beta` feature is on, the
+/// [`crate::webui_serve`] module in this crate); lower runtime handles stay
+/// behind the existing Reborn runtime / composition services.
 #[derive(Clone)]
 pub struct RebornWebuiBundle {
     pub api: Arc<dyn RebornServicesApi>,
+    pub product_auth: Option<Arc<RebornProductAuthServices>>,
     pub readiness: RebornReadiness,
 }
 
@@ -29,6 +31,7 @@ impl std::fmt::Debug for RebornWebuiBundle {
         formatter
             .debug_struct("RebornWebuiBundle")
             .field("api", &"Arc<dyn RebornServicesApi>")
+            .field("product_auth", &self.product_auth.is_some())
             .field("readiness", &self.readiness)
             .finish()
     }
@@ -50,7 +53,8 @@ pub fn build_webui_services(
         runtime.webui_thread_service(),
         runtime.webui_turn_coordinator(),
     )
-    .with_approval_interactions(runtime.webui_approval_interaction_service());
+    .with_approval_interactions(runtime.webui_approval_interaction_service())
+    .with_auth_interactions(runtime.webui_auth_interaction_service());
     if let Some(skill_activation_source) = runtime.webui_skill_activation_source() {
         let activation_recorder = Arc::clone(&skill_activation_source);
         let activation_clearer = skill_activation_source;
@@ -94,6 +98,7 @@ pub fn build_webui_services(
 
     Ok(RebornWebuiBundle {
         api: Arc::new(api),
+        product_auth: services.product_auth.clone(),
         readiness: services.readiness,
     })
 }

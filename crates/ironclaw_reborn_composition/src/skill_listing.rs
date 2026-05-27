@@ -1,7 +1,10 @@
-use ironclaw_skills::{SkillManagementError, SkillManagementErrorKind};
+use std::collections::HashSet;
+
+use ironclaw_skills::{ManagedSkillSource, SkillManagementError, SkillManagementErrorKind};
 
 use crate::{
     RebornBuildError,
+    bundled_skills::bundled_reborn_skill_summaries,
     lifecycle::{RebornLocalSkillManagementError, build_existing_local_dev_skill_management_port},
 };
 
@@ -9,15 +12,38 @@ pub async fn list_reborn_local_skills(
     owner_id: impl Into<String>,
     local_dev_storage_root: impl Into<std::path::PathBuf>,
 ) -> Result<Vec<ironclaw_skills::SkillSummary>, RebornSkillListError> {
-    let Some(skill_management) =
-        build_existing_local_dev_skill_management_port(owner_id, local_dev_storage_root)?
-    else {
-        return Ok(Vec::new());
-    };
-    skill_management
-        .list()
-        .await
-        .map_err(map_local_skill_management_error)
+    let mut skills =
+        match build_existing_local_dev_skill_management_port(owner_id, local_dev_storage_root)? {
+            Some(skill_management) => skill_management
+                .list()
+                .await
+                .map_err(map_local_skill_management_error)?,
+            None => Vec::new(),
+        };
+    let bundled_skills = bundled_reborn_skill_summaries()?;
+    let bundled_names = bundled_skills
+        .iter()
+        .map(|skill| skill.name.clone())
+        .collect::<HashSet<_>>();
+    skills.retain(|skill| {
+        !(skill.source == ManagedSkillSource::System && bundled_names.contains(&skill.name))
+    });
+
+    let existing_keys = skills
+        .iter()
+        .map(|skill| (skill.name.clone(), skill.source.as_str()))
+        .collect::<HashSet<_>>();
+    skills.extend(
+        bundled_skills
+            .into_iter()
+            .filter(|skill| !existing_keys.contains(&(skill.name.clone(), skill.source.as_str()))),
+    );
+    skills.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.source.as_str().cmp(right.source.as_str()))
+    });
+    Ok(skills)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -78,17 +104,23 @@ mod tests {
             .await
             .expect("list skills");
 
-        assert_eq!(result.len(), 55);
         assert!(result.iter().any(|skill| skill.name == "list-skill-54"));
         assert!(
             result
                 .iter()
+                .any(|skill| skill.name == "code-review"
+                    && skill.source == ManagedSkillSource::System)
+        );
+        assert!(
+            result
+                .iter()
+                .filter(|skill| skill.name.starts_with("list-skill-"))
                 .all(|skill| skill.source == ManagedSkillSource::User)
         );
     }
 
     #[tokio::test]
-    async fn local_skill_list_missing_storage_is_empty_without_creating_state() {
+    async fn local_skill_list_missing_storage_reports_bundled_without_creating_state() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("missing-local-dev");
 
@@ -96,7 +128,12 @@ mod tests {
             .await
             .expect("list skills");
 
-        assert!(result.is_empty());
+        assert!(
+            result
+                .iter()
+                .any(|skill| skill.name == "code-review"
+                    && skill.source == ManagedSkillSource::System)
+        );
         assert!(!storage_root.exists());
     }
 
@@ -148,12 +185,88 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn local_skill_list_prefers_user_skill_over_bundled_duplicate_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        write_skill(&storage_root, "code-review");
+
+        let result = list_reborn_local_skills("list-owner", &storage_root)
+            .await
+            .expect("list skills");
+
+        let code_review_skills = result
+            .iter()
+            .filter(|skill| skill.name == "code-review")
+            .collect::<Vec<_>>();
+        assert_eq!(code_review_skills.len(), 2);
+        assert!(
+            code_review_skills
+                .iter()
+                .any(|skill| skill.source == ManagedSkillSource::User)
+        );
+        assert!(
+            code_review_skills
+                .iter()
+                .any(|skill| skill.source == ManagedSkillSource::System)
+        );
+
+        let mut seen = std::collections::HashSet::new();
+        for skill in result {
+            assert!(
+                seen.insert((skill.name.clone(), skill.source.as_str())),
+                "duplicate skill entry for {} from {}",
+                skill.name,
+                skill.source.as_str()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn local_skill_list_prefers_embedded_bundled_summary_over_storage_system_skill() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        write_system_skill(&storage_root, "code-review", "old system description");
+        let bundled_code_review = bundled_reborn_skill_summaries()
+            .expect("bundled summaries")
+            .into_iter()
+            .find(|skill| skill.name == "code-review")
+            .expect("bundled code-review");
+
+        let result = list_reborn_local_skills("list-owner", &storage_root)
+            .await
+            .expect("list skills");
+
+        let system_code_reviews = result
+            .iter()
+            .filter(|skill| {
+                skill.name == "code-review" && skill.source == ManagedSkillSource::System
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(system_code_reviews.len(), 1);
+        assert_eq!(
+            system_code_reviews[0].description,
+            bundled_code_review.description
+        );
+        assert_ne!(system_code_reviews[0].description, "old system description");
+    }
+
     fn write_skill(storage_root: &std::path::Path, name: &str) {
         let skill_dir = storage_root.join("skills").join(name);
         std::fs::create_dir_all(&skill_dir).expect("skill dir");
         std::fs::write(
             skill_dir.join("SKILL.md"),
             format!("---\nname: {name}\ndescription: list test\n---\nUse list.\n"),
+        )
+        .expect("skill file");
+    }
+
+    fn write_system_skill(storage_root: &std::path::Path, name: &str, description: &str) {
+        let skill_dir = storage_root.join("system/skills").join(name);
+        std::fs::create_dir_all(&skill_dir).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: {description}\n---\nUse system.\n"),
         )
         .expect("skill file");
     }

@@ -545,7 +545,7 @@ mod tests {
         let invalid_install = facade
             .execute_action(LifecycleProductAction::SkillInstall {
                 name: Some(LifecyclePackageId::new("broken-skill").expect("valid skill id")),
-                content: "not a skill manifest".to_string(),
+                content: "---\nname: broken-skill\n\nmissing closing delimiter".to_string(),
             })
             .await
             .expect_err("invalid skill content should fail");

@@ -25,6 +25,7 @@ handling, gate routing, mission routing, and redacted acknowledgements.
 | `ProductCommandService` | Reborn-native product command execution port for already-admitted typed commands |
 | `ApprovalInteractionService` / `DefaultApprovalInteractionService` | Approval-only product/WebUI boundary for listing redacted pending approval gates and resolving click approve/deny through canonical approval resolver + turn coordinator ports |
 | `RunStateApprovalInteractionReadModel` | Canonical read model that returns status-bearing approval gates from scoped approval-request records plus the parked turn-run locator; `ApprovalInteractionService::list_pending` filters those records to pending UI DTOs |
+| `AuthInteractionService` / `DefaultAuthInteractionService` | Auth-required product/WebUI boundary for listing redacted pending auth gates and resolving credential/callback/cancel decisions through typed auth-flow manager + turn coordinator ports |
 | `RebornServicesApi` / `RebornServices` | Native WebChat v2 facade — stable surface beta WebUI route handlers consume in place of reaching into turn coordination, thread stores, runtime lanes, dispatchers, or capability hosts. Enforces caller ownership of the thread before any turn mutation; rejects stale or attacker-supplied `gate_ref` on denied/cancelled gate resolutions; refuses persistent (`always: true`) approvals until an approval-policy port lands |
 
 ## Dependencies
@@ -65,6 +66,16 @@ directly execute tools, mutate approval stores ad hoc, or implement
 `AlwaysAllow` before a durable approval-policy port exists. High-value signing
 and attested approvals require a separate service shape with canonical payload
 attestation and must not be folded into this redacted click-approval DTO.
+
+Auth interactions are auth-required gates only. Pending auth DTOs must be
+redacted, scoped, and derived from typed auth-flow state plus the parked
+turn-run locator. Credential/callback completion refs are opaque host-issued
+references; raw tokens, OAuth codes, verifier material, provider errors, host
+paths, or backend diagnostics must not enter product payloads or projection
+DTOs. Resume/cancel decisions must go through `AuthFlowManager` and
+`TurnCoordinator`; product/WebUI code must not handle raw credentials, mutate
+auth-flow records directly, or resume blocked auth gates without the
+`BlockedAuthGate` precondition.
 
 WebUI-facing facade methods must bind browser thread ids through
 `SessionThreadService` using a `ThreadScope` derived from the authenticated

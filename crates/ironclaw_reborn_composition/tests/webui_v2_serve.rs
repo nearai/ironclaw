@@ -231,6 +231,7 @@ fn build_app() -> (axum::Router, Arc<StubServices>) {
     let services = Arc::new(StubServices::default());
     let bundle = RebornWebuiBundle {
         api: services.clone(),
+        product_auth: None,
         readiness: RebornReadiness::disabled(),
     };
     // Match the host-installation pattern the CLI's `serve` command
@@ -535,6 +536,7 @@ async fn malformed_user_id_from_authenticator_rejects_with_401() {
     let services = Arc::new(StubServices::default());
     let bundle = RebornWebuiBundle {
         api: services.clone(),
+        product_auth: None,
         readiness: RebornReadiness::disabled(),
     };
     let config = WebuiServeConfig::new(
@@ -807,6 +809,7 @@ async fn ws_upgrade_uses_canonical_host_over_client_host_when_configured() {
     let services = Arc::new(StubServices::default());
     let bundle = RebornWebuiBundle {
         api: services.clone(),
+        product_auth: None,
         readiness: RebornReadiness::disabled(),
     };
     let config = WebuiServeConfig::new(
@@ -976,6 +979,7 @@ async fn rate_limit_is_independent_per_caller() {
     let services = Arc::new(StubServices::default());
     let bundle = RebornWebuiBundle {
         api: services.clone(),
+        product_auth: None,
         readiness: RebornReadiness::disabled(),
     };
     let config = WebuiServeConfig::new(

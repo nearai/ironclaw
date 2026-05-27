@@ -22,10 +22,12 @@ use std::sync::Arc;
 
 mod auth;
 mod available_extensions;
+mod bundled_skills;
 mod default_system_prompt;
 mod error;
 mod extension_installation_store;
 mod extension_lifecycle;
+mod extension_lifecycle_capabilities;
 mod extension_lifecycle_command;
 mod factory;
 mod gsuite;
@@ -35,6 +37,8 @@ mod lifecycle;
 mod llm_catalog;
 mod local_dev_mounts;
 mod local_runtime_profile;
+#[cfg(feature = "webui-v2-beta")]
+mod product_auth_serve;
 mod product_live_adapters;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 mod production_runtime_policy;
@@ -294,6 +298,7 @@ const PER_USER_ALIASES: &[&str] = &[
     "/resources",
     "/engine",
     "/skills",
+    "/workspace",
 ];
 
 /// Per-invocation [`MountView`] used as the production resolver.
@@ -498,9 +503,10 @@ where
     // `Missing(SecretStore)` wiring report if the host-runtime builder API
     // regresses; treat that as infallible here.
     let services = services
-        .try_with_host_http_egress(PolicyNetworkHttpEgress::new(
-            ReqwestNetworkTransport::default(),
-        ))
+        .try_with_host_http_egress_with_body_store(
+            PolicyNetworkHttpEgress::new(ReqwestNetworkTransport::default()),
+            Arc::clone(&scoped_filesystem),
+        )
         .expect("secret_store wired above guarantees host HTTP egress is buildable"); // safety: see comment above
 
     Ok(services)
@@ -567,9 +573,10 @@ where
     // `Missing(SecretStore)` wiring report if the host-runtime builder API
     // regresses; treat that as infallible here.
     let services = services
-        .try_with_host_http_egress(PolicyNetworkHttpEgress::new(
-            ReqwestNetworkTransport::default(),
-        ))
+        .try_with_host_http_egress_with_body_store(
+            PolicyNetworkHttpEgress::new(ReqwestNetworkTransport::default()),
+            Arc::clone(&scoped_filesystem),
+        )
         .expect("secret_store wired above guarantees host HTTP egress is buildable"); // safety: see comment above
 
     Ok(services)
