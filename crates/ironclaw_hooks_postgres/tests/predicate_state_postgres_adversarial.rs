@@ -678,3 +678,99 @@ async fn eviction_try_lock_does_not_block_on_in_flight_victim() {
     tx_l.rollback().await.expect("rollback L");
     tx_v.rollback().await.expect("rollback V");
 }
+
+/// `evict_older_than` is the time-based reaper (distinct from the per-scope
+/// LRU eviction): it deletes every row with `occurred_at < cutoff` from BOTH
+/// typed tables and returns the total rows removed. This proves the Postgres
+/// override actually reaps both tables and spares in-window rows — the two
+/// `DELETE` statements had no integration coverage (henrypark tests finding).
+///
+/// Gated on a reachable Postgres via `IRONCLAW_HOOKS_POSTGRES_URL` /
+/// `DATABASE_URL`; skipped (passing) otherwise.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn evict_older_than_removes_stale_rows_from_both_tables() {
+    let (url, _guard) = guarded!();
+    let hs = hosts(&url, 1).await;
+    let backend = &hs[0];
+    let window = Duration::from_secs(86_400);
+
+    // Unique tenant so this test's rows are isolated from sibling tests that
+    // share the truncated-once schema.
+    let tenant = "reaper-tenant";
+    let inv = inv_key(tenant, "cap.reap");
+    let val = val_key(tenant, "cap.reap", "amount");
+
+    // Two stale rows (well before the cutoff) and one fresh row (after it),
+    // on EACH table — so we can prove the reaper hits both tables and spares
+    // the fresh rows.
+    let stale_a = base();
+    let stale_b = base() + chrono::Duration::seconds(10);
+    let fresh = base() + chrono::Duration::seconds(1_000);
+
+    backend
+        .record_invocation(&inv, &ev("inv-stale-a"), stale_a, window)
+        .await
+        .expect("inv stale a");
+    backend
+        .record_invocation(&inv, &ev("inv-stale-b"), stale_b, window)
+        .await
+        .expect("inv stale b");
+    backend
+        .record_invocation(&inv, &ev("inv-fresh"), fresh, window)
+        .await
+        .expect("inv fresh");
+
+    backend
+        .record_value(&val, &ev("val-stale-a"), stale_a, Decimal::from(5), window)
+        .await
+        .expect("val stale a");
+    backend
+        .record_value(&val, &ev("val-fresh"), fresh, Decimal::from(7), window)
+        .await
+        .expect("val fresh");
+
+    // Cutoff between the stale and fresh rows: reaps 2 invocation + 1 value
+    // stale rows = 3 total, leaving 1 invocation + 1 value fresh row.
+    let cutoff = base() + chrono::Duration::seconds(100);
+    let removed = backend
+        .evict_older_than(cutoff)
+        .await
+        .expect("evict_older_than");
+    assert_eq!(
+        removed, 3,
+        "reaper must delete all 3 stale rows across both tables, got {removed}"
+    );
+
+    // Verify directly: only the fresh rows survive in each table.
+    let pool = build_pool(&url).expect("pool");
+    let client = pool.get().await.expect("client");
+    let inv_hash = ironclaw_hooks_postgres::test_support::invocation_key_hash_bytes(&inv);
+    let inv_remaining: i64 = client
+        .query_one(
+            "SELECT COUNT(*)::BIGINT FROM hooks_predicate_invocations WHERE key_hash = $1",
+            &[&&inv_hash[..]],
+        )
+        .await
+        .expect("count inv")
+        .get(0);
+    assert_eq!(
+        inv_remaining, 1,
+        "only the fresh invocation row must survive the reap"
+    );
+
+    // The value table shares the key derivation; query its surviving rows by
+    // the value key's hash directly via a fresh dedup record-and-read would
+    // mutate state, so count rows for this tenant's value key instead. We
+    // re-derive the value key's hash the same way the backend does by
+    // recording a replay of the fresh id (a no-op that returns the live sum).
+    let live_sum = backend
+        .record_value(&val, &ev("val-fresh"), fresh, Decimal::from(7), window)
+        .await
+        .expect("replay fresh value");
+    assert_eq!(
+        live_sum,
+        Decimal::from(7),
+        "only the fresh value row must survive the reap (stale value row gone)"
+    );
+}

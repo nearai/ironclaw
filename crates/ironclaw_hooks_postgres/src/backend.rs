@@ -127,14 +127,6 @@ impl RecordPlan {
         }
     }
 
-    /// The SQL table name this plan records into.
-    fn table(&self) -> &'static str {
-        match self {
-            RecordPlan::Invocation(_) => INVOCATIONS_TABLE,
-            RecordPlan::Value { .. } => VALUES_TABLE,
-        }
-    }
-
     /// One-byte discriminant folded into the per-scope advisory-lock key so
     /// the invocation and value scope-quota passes lock independently (they
     /// touch disjoint tables, so they must not serialize against each other).
@@ -142,6 +134,83 @@ impl RecordPlan {
         match self {
             RecordPlan::Invocation(_) => b"i",
             RecordPlan::Value { .. } => b"v",
+        }
+    }
+}
+
+/// Per-table SQL statements with the table name already interpolated.
+///
+/// The table name folded into every `record()` statement is fixed per kind
+/// (`hooks_predicate_invocations` for counts, `hooks_predicate_values` for
+/// sums), so the statement strings are built ONCE at backend construction
+/// rather than re-`format!`'d on every hot-path `record()` call (which
+/// allocated 5-6 throwaway `String`s per invocation — henrypark perf
+/// finding). `record()` selects the matching set via [`RecordPlan::table`].
+struct TableStatements {
+    trim: String,
+    dedup_precount: String,
+    insert: String,
+    aggregate_count: String,
+    aggregate_sum: String,
+    scope_distinct: String,
+    scope_candidates: String,
+    evict_victim: String,
+    reap: String,
+}
+
+impl TableStatements {
+    /// Pre-format every statement for one typed table. `insert` differs by
+    /// table (the value table carries a NOT NULL `value` column the
+    /// invocation table lacks), so it is built per kind here.
+    fn new(table: &str, with_value_column: bool) -> Self {
+        let insert = if with_value_column {
+            format!(
+                "INSERT INTO {table} (scope_hash, key_hash, event_id, occurred_at, value)
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (key_hash, event_id) DO NOTHING"
+            )
+        } else {
+            format!(
+                "INSERT INTO {table} (scope_hash, key_hash, event_id, occurred_at)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (key_hash, event_id) DO NOTHING"
+            )
+        };
+        Self {
+            trim: format!("DELETE FROM {table} WHERE key_hash = $1 AND occurred_at < $2"),
+            dedup_precount: format!(
+                "SELECT COUNT(*)::BIGINT AS cnt,
+                        BOOL_OR(event_id = $3) AS dup
+                   FROM {table}
+                  WHERE key_hash = $1 AND occurred_at >= $2"
+            ),
+            insert,
+            aggregate_count: format!(
+                "SELECT COUNT(*)::BIGINT FROM {table}
+                  WHERE key_hash = $1 AND occurred_at >= $2"
+            ),
+            aggregate_sum: format!(
+                "SELECT COALESCE(SUM(value), 0)::NUMERIC FROM {table}
+                  WHERE key_hash = $1 AND occurred_at >= $2"
+            ),
+            scope_distinct: format!(
+                "SELECT COUNT(DISTINCT key_hash)::BIGINT
+                   FROM {table}
+                  WHERE scope_hash = $1"
+            ),
+            scope_candidates: format!(
+                "SELECT key_hash FROM (
+                     SELECT key_hash, MIN(occurred_at) AS oldest_ts
+                       FROM {table}
+                      WHERE scope_hash = $1
+                        AND key_hash <> $2
+                      GROUP BY key_hash
+                      ORDER BY oldest_ts ASC
+                      LIMIT $3
+                 ) victims"
+            ),
+            evict_victim: format!("DELETE FROM {table} WHERE scope_hash = $1 AND key_hash = $2"),
+            reap: format!("DELETE FROM {table} WHERE occurred_at < $1"),
         }
     }
 }
@@ -155,6 +224,10 @@ pub struct PostgresPredicateStateBackend {
     /// matching the in-memory backend's `evictions_observed()` contract
     /// (a process-local monitoring counter, not a global DB total).
     evictions: AtomicU64,
+    /// Pre-formatted SQL for the invocation (count) table.
+    invocation_sql: TableStatements,
+    /// Pre-formatted SQL for the value (sum) table.
+    value_sql: TableStatements,
 }
 
 impl PostgresPredicateStateBackend {
@@ -164,6 +237,16 @@ impl PostgresPredicateStateBackend {
         Self {
             pool,
             evictions: AtomicU64::new(0),
+            invocation_sql: TableStatements::new(INVOCATIONS_TABLE, false),
+            value_sql: TableStatements::new(VALUES_TABLE, true),
+        }
+    }
+
+    /// Select the pre-formatted statement set matching a plan's typed table.
+    fn statements(&self, plan: &RecordPlan) -> &TableStatements {
+        match plan {
+            RecordPlan::Invocation(_) => &self.invocation_sql,
+            RecordPlan::Value { .. } => &self.value_sql,
         }
     }
 
@@ -210,7 +293,7 @@ impl PostgresPredicateStateBackend {
     ) -> Result<Decimal, PredicateBackendError> {
         let PlanCommon { scope, key, label } = plan.common();
         let (scope, key, label) = (*scope, *key, label.clone());
-        let table = plan.table();
+        let sql = self.statements(&plan);
         let cutoff = Self::cutoff(now, window);
         let mut client = self.client().await?;
         // READ COMMITTED + a transaction-scoped advisory lock keyed on the
@@ -255,12 +338,9 @@ impl PostgresPredicateStateBackend {
         // window, so a re-used id whose original entry is no longer
         // in-window records fresh — matching the in-memory backend, whose
         // dedup memory is exactly the in-window entry set.
-        tx.execute(
-            &format!("DELETE FROM {table} WHERE key_hash = $1 AND occurred_at < $2"),
-            &[&key_ref, &cutoff],
-        )
-        .await
-        .map_err(map_pg)?;
+        tx.execute(&sql.trim, &[&key_ref, &cutoff])
+            .await
+            .map_err(map_pg)?;
 
         // (2) Replay-dedup check + pre-insert count, computed atomically in
         // one statement under the advisory lock. `cnt` is the in-window
@@ -270,12 +350,7 @@ impl PostgresPredicateStateBackend {
         // in-memory backend's `if !dedup_ids.contains(event_id)` guard.
         let pre_row = tx
             .query_one(
-                &format!(
-                    "SELECT COUNT(*)::BIGINT AS cnt,
-                            BOOL_OR(event_id = $3) AS dup
-                       FROM {table}
-                      WHERE key_hash = $1 AND occurred_at >= $2"
-                ),
+                &sql.dedup_precount,
                 &[&key_ref, &cutoff, &event_id.as_str()],
             )
             .await
@@ -324,11 +399,7 @@ impl PostgresPredicateStateBackend {
         match &plan {
             RecordPlan::Invocation(_) => {
                 tx.execute(
-                    &format!(
-                        "INSERT INTO {table} (scope_hash, key_hash, event_id, occurred_at)
-                         VALUES ($1, $2, $3, $4)
-                         ON CONFLICT (key_hash, event_id) DO NOTHING"
-                    ),
+                    &sql.insert,
                     &[&scope_ref, &key_ref, &event_id.as_str(), &now],
                 )
                 .await
@@ -336,11 +407,7 @@ impl PostgresPredicateStateBackend {
             }
             RecordPlan::Value { value, .. } => {
                 tx.execute(
-                    &format!(
-                        "INSERT INTO {table} (scope_hash, key_hash, event_id, occurred_at, value)
-                         VALUES ($1, $2, $3, $4, $5)
-                         ON CONFLICT (key_hash, event_id) DO NOTHING"
-                    ),
+                    &sql.insert,
                     &[&scope_ref, &key_ref, &event_id.as_str(), &now, value],
                 )
                 .await
@@ -348,36 +415,25 @@ impl PostgresPredicateStateBackend {
             }
         }
 
-        // (6) Aggregate the in-window count/sum. This runs as a SEPARATE
-        // statement after the INSERT so it observes the inserted row —
-        // a data-modifying CTE's effects are NOT visible to a SELECT in
-        // the same statement (all CTEs share one snapshot), which would
-        // make the count always pre-insert. Sequential statements inside
-        // the transaction DO see prior statements' writes.
-        //
-        // The distinct-key count is needed independently of the returned
-        // aggregate (the value table's aggregate is a SUM, not a count), so
-        // read it explicitly to gate the quota pass.
-        let in_window_count: i64 = tx
-            .query_one(
-                &format!(
-                    "SELECT COUNT(*)::BIGINT FROM {table}
-                      WHERE key_hash = $1 AND occurred_at >= $2"
-                ),
-                &[&key_ref, &cutoff],
-            )
-            .await
-            .map_err(map_pg)?
-            .get(0);
+        // In-window sample count AFTER this call's insert. We DERIVE it as
+        // `pre_count + 1` rather than re-querying: we are under this key's
+        // per-key advisory lock (so no concurrent writer can add or remove a
+        // sample for this key), `is_replay` was false and the cap gate
+        // passed, and the `INSERT ... ON CONFLICT DO NOTHING` therefore added
+        // exactly one new in-window row (the dedup check already proved the
+        // id was absent, so the ON CONFLICT no-op branch cannot fire here).
+        // This eliminates a COUNT round trip on the record() hot path that
+        // would return the identical value (codex/henrypark perf finding).
+        let in_window_count: i64 = pre_count.max(0) + 1;
 
         // (5) Per-scope distinct-key LRU quota. Only scan when this key is
-        // newly material (count == 1 after insert means we may have just
-        // created the scope's Nth key). Distinct keys are counted by
-        // key_hash within the scope (one typed table per kind, so no kind
-        // filter is needed); if over quota, evict the least-recently-active
-        // key's rows entirely. Scope-LRU eviction only ever touches OTHER
-        // keys, so it cannot change this key's aggregate and does not require
-        // a re-read.
+        // newly material (count == 1 after insert — equivalently
+        // `pre_count == 0` — means we may have just created the scope's Nth
+        // key). Distinct keys are counted by key_hash within the scope (one
+        // typed table per kind, so no kind filter is needed); if over quota,
+        // evict the least-recently-active key's rows entirely. Scope-LRU
+        // eviction only ever touches OTHER keys, so it cannot change this
+        // key's aggregate and does not require a re-read.
         let evicted = if in_window_count == 1 {
             self.enforce_scope_quota(&tx, &plan, scope_ref, key_ref)
                 .await?
@@ -385,8 +441,15 @@ impl PostgresPredicateStateBackend {
             0
         };
 
-        // Final returned aggregate (COUNT for invocations, SUM for values).
-        let agg = self.aggregate(&tx, &plan, key_ref, &cutoff).await?;
+        // Final returned aggregate. For the invocation table the aggregate is
+        // exactly the in-window COUNT, which we already hold as the derived
+        // `in_window_count` — so return it directly and skip a third COUNT
+        // round trip. The value table's aggregate is a `SUM(value)`, which is
+        // NOT derivable from the sample count, so it still issues one query.
+        let agg = match &plan {
+            RecordPlan::Invocation(_) => Decimal::from(in_window_count.max(0) as u64),
+            RecordPlan::Value { .. } => self.aggregate(&tx, &plan, key_ref, &cutoff).await?,
+        };
 
         tx.commit().await.map_err(map_pg)?;
 
@@ -410,17 +473,11 @@ impl PostgresPredicateStateBackend {
         key_ref: &[u8],
         cutoff: &DateTime<Utc>,
     ) -> Result<Decimal, PredicateBackendError> {
-        let table = plan.table();
+        let sql = self.statements(plan);
         match plan {
             RecordPlan::Invocation(_) => {
                 let count: i64 = tx
-                    .query_one(
-                        &format!(
-                            "SELECT COUNT(*)::BIGINT FROM {table}
-                              WHERE key_hash = $1 AND occurred_at >= $2"
-                        ),
-                        &[&key_ref, &cutoff],
-                    )
+                    .query_one(&sql.aggregate_count, &[&key_ref, &cutoff])
                     .await
                     .map_err(map_pg)?
                     .get(0);
@@ -428,13 +485,7 @@ impl PostgresPredicateStateBackend {
             }
             RecordPlan::Value { .. } => {
                 let total: Decimal = tx
-                    .query_one(
-                        &format!(
-                            "SELECT COALESCE(SUM(value), 0)::NUMERIC FROM {table}
-                              WHERE key_hash = $1 AND occurred_at >= $2"
-                        ),
-                        &[&key_ref, &cutoff],
-                    )
+                    .query_one(&sql.aggregate_sum, &[&key_ref, &cutoff])
                     .await
                     .map_err(map_pg)?
                     .get(0);
@@ -497,7 +548,7 @@ impl PostgresPredicateStateBackend {
         scope_ref: &[u8],
         current_key: &[u8],
     ) -> Result<u64, PredicateBackendError> {
-        let table = plan.table();
+        let sql = self.statements(plan);
         // Serialize quota enforcement within the scope. Concurrent inserts
         // of DISTINCT new keys in the same scope each reach this path with
         // `count == 1`, but under READ COMMITTED neither sees the other's
@@ -533,14 +584,7 @@ impl PostgresPredicateStateBackend {
             // on later passes it reflects the rows this loop already deleted,
             // so the loop terminates exactly when the cap is met.
             let distinct: i64 = tx
-                .query_one(
-                    &format!(
-                        "SELECT COUNT(DISTINCT key_hash)::BIGINT
-                           FROM {table}
-                          WHERE scope_hash = $1"
-                    ),
-                    &[&scope_ref],
-                )
+                .query_one(&sql.scope_distinct, &[&scope_ref])
                 .await
                 .map_err(map_pg)?
                 .get(0);
@@ -572,17 +616,7 @@ impl PostgresPredicateStateBackend {
             // itself and mask the new entry.
             let candidate_rows = tx
                 .query(
-                    &format!(
-                        "SELECT key_hash FROM (
-                             SELECT key_hash, MIN(occurred_at) AS oldest_ts
-                               FROM {table}
-                              WHERE scope_hash = $1
-                                AND key_hash <> $2
-                              GROUP BY key_hash
-                              ORDER BY oldest_ts ASC
-                              LIMIT $3
-                         ) victims"
-                    ),
+                    &sql.scope_candidates,
                     &[&scope_ref, &current_key, &VICTIM_BATCH],
                 )
                 .await
@@ -617,12 +651,9 @@ impl PostgresPredicateStateBackend {
                     // next-staleest candidate rather than block (deadlock-free).
                     continue;
                 }
-                tx.execute(
-                    &format!("DELETE FROM {table} WHERE scope_hash = $1 AND key_hash = $2"),
-                    &[&scope_ref, &victim_key],
-                )
-                .await
-                .map_err(map_pg)?;
+                tx.execute(&sql.evict_victim, &[&scope_ref, &victim_key])
+                    .await
+                    .map_err(map_pg)?;
                 evicted += 1;
                 evicted_this_pass += 1;
                 progressed = true;
@@ -710,17 +741,11 @@ impl PredicateStateBackend for PostgresPredicateStateBackend {
         let client = self.client().await?;
         // Reap both typed tables; return the total rows deleted.
         let inv = client
-            .execute(
-                &format!("DELETE FROM {INVOCATIONS_TABLE} WHERE occurred_at < $1"),
-                &[&cutoff],
-            )
+            .execute(&self.invocation_sql.reap, &[&cutoff])
             .await
             .map_err(map_pg)?;
         let val = client
-            .execute(
-                &format!("DELETE FROM {VALUES_TABLE} WHERE occurred_at < $1"),
-                &[&cutoff],
-            )
+            .execute(&self.value_sql.reap, &[&cutoff])
             .await
             .map_err(map_pg)?;
         Ok(inv + val)
@@ -770,12 +795,23 @@ fn scope_advisory_lock_key(scope: &[u8], kind: &[u8]) -> i64 {
     ])
 }
 
+/// Sanitized message returned to callers for any database-layer failure.
+/// The raw error (which can embed connection strings, host names, schema
+/// details, or SQL fragments) is logged at `warn` for operators but NOT
+/// surfaced through [`PredicateBackendError::Unavailable`], whose payload
+/// can reach the evaluator/caller (henrypark security finding). The
+/// evaluator only needs to know the backend is unavailable to fail closed;
+/// it does not need the raw DB error text.
+const DB_UNAVAILABLE_MSG: &str = "predicate state backend unavailable (database error)";
+
 fn map_pg(e: tokio_postgres::Error) -> PredicateBackendError {
-    PredicateBackendError::Unavailable(e.to_string())
+    tracing::warn!(error = %e, "postgres predicate backend error");
+    PredicateBackendError::Unavailable(DB_UNAVAILABLE_MSG.to_string())
 }
 
 fn map_pool(e: deadpool_postgres::PoolError) -> PredicateBackendError {
-    PredicateBackendError::Unavailable(e.to_string())
+    tracing::warn!(error = %e, "postgres predicate backend pool error");
+    PredicateBackendError::Unavailable(DB_UNAVAILABLE_MSG.to_string())
 }
 
 #[cfg(test)]
