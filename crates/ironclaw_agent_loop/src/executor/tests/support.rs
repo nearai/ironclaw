@@ -27,11 +27,12 @@ use ironclaw_turns::{
 use crate::{
     default_planner::DefaultPlanner,
     family::{ComponentDigest, ComponentIdentity, LoopFamily, LoopFamilyId},
-    state::{CheckpointKind, GateStrategyState, LoopExecutionState},
+    state::{CheckpointKind, GateStrategyState, LoopExecutionState, StopStrategyState},
     strategies::{
         CapabilityErrorClass, CapabilityErrorSummary, CapabilityFilter, CapabilityStrategy,
         GateHandlingStrategy, GateOutcome, GateSummary, InputDrainStrategy, ModelErrorSummary,
-        RecoveryOutcome, RecoveryStrategy, RetryScope,
+        RecoveryOutcome, RecoveryStrategy, RetryScope, StopConditionStrategy, StopKind,
+        StopOutcome, TurnSummary,
     },
 };
 
@@ -282,6 +283,38 @@ pub(super) struct FixedGateStrategy {
 impl GateHandlingStrategy for FixedGateStrategy {
     async fn handle(&self, _state: &LoopExecutionState, _gate: &GateSummary) -> GateOutcome {
         self.outcome.clone()
+    }
+}
+
+pub(super) struct StopAfterObservedTurns {
+    turns_completed: u32,
+}
+
+#[async_trait]
+impl StopConditionStrategy for StopAfterObservedTurns {
+    async fn observe_completed_turn(
+        &self,
+        state: &LoopExecutionState,
+        _just_completed: &TurnSummary,
+    ) -> StopStrategyState {
+        StopStrategyState {
+            turns_completed: state.stop_state.turns_completed.saturating_add(1),
+            ..state.stop_state.clone()
+        }
+    }
+
+    async fn should_stop_after_observed_turn(
+        &self,
+        state: &LoopExecutionState,
+        _just_completed: &TurnSummary,
+    ) -> StopOutcome {
+        if state.stop_state.turns_completed >= self.turns_completed {
+            StopOutcome::Stop {
+                kind: StopKind::GracefulStop,
+            }
+        } else {
+            StopOutcome::Continue {}
+        }
     }
 }
 
@@ -815,6 +848,14 @@ pub(super) fn family_with_gate_outcome(outcome: GateOutcome) -> LoopFamily {
         DefaultPlanner::compose_default().with_gate(Arc::new(FixedGateStrategy { outcome }));
     let id = LoopFamilyId::new("executor-gate-test").expect("valid test family id");
     let version = ComponentIdentity::from_static("executor-gate-test", ComponentDigest([4; 32]));
+    LoopFamily::new(id, version, Arc::new(planner))
+}
+
+pub(super) fn family_with_stop_after_observed_turns(turns_completed: u32) -> LoopFamily {
+    let planner = DefaultPlanner::compose_default()
+        .with_stop(Arc::new(StopAfterObservedTurns { turns_completed }));
+    let id = LoopFamilyId::new("executor-stop-test").expect("valid test family id");
+    let version = ComponentIdentity::from_static("executor-stop-test", ComponentDigest([5; 32]));
     LoopFamily::new(id, version, Arc::new(planner))
 }
 
