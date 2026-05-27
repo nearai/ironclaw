@@ -341,6 +341,79 @@ async fn broadcast_idempotency_blocks_resigning_after_submitted() {
         .expect("finalize");
 }
 
+/// Grant/ledger atomicity (henrypark133 M3): a pre-flight failure AFTER
+/// authorization succeeds must NOT consume the one-shot grant, so the `gate_ref`
+/// stays retryable. We induce a post-authorize failure by binding a valid key
+/// under a malformed `public_address_hex` (authorize reads the binding and
+/// checks only its chain, so it passes; `bound_evm_address` then fails when
+/// rebuilding the digest). The grant claim now happens only after that
+/// pre-flight, so it must remain unclaimed and the ledger must stay at Approved.
+#[tokio::test]
+async fn preflight_failure_after_authorize_does_not_consume_grant() {
+    let chain = TESTNET_CHAIN;
+    let tx = sample_tx(11155111);
+    let key = signing_key();
+
+    let keystore = Arc::new(SecretsKeyStore::new(crypto()));
+    keystore
+        .bind(
+            &host_scope(),
+            // Malformed address hex: passes bind + authorize, fails in
+            // bound_evm_address during post-authorize digest pre-flight.
+            binding(chain, "zz_not_hex".to_string(), None),
+            key.to_bytes().to_vec(),
+        )
+        .await
+        .unwrap();
+
+    let decoded = evm::decode_eip1559(&tx);
+    let approved = recompute_approved_hash(&decoded, "custodial", SCHEMA).unwrap();
+    let grants = Arc::new(InMemorySealedGrantStore::new());
+    let ledger = Arc::new(InMemorySigningLedger::new());
+    let context = ctx(chain);
+    ledger.create(&context.gate_ref).await.unwrap();
+    let gk = GrantKey::from_context(&context, approved);
+    grants
+        .seal(AttestedSigningGrant::seal(gk.clone(), 0, None))
+        .await
+        .unwrap();
+
+    let signer = CustodialSigner::new(
+        keystore,
+        Arc::clone(&grants),
+        Arc::clone(&ledger),
+        ShipGate::new(false, None),
+        Arc::new(DenyFirstCustodyPolicy),
+    );
+    let req = CustodialSignRequest {
+        context: context.clone(),
+        scope: host_scope(),
+        chain: ChainKeyId::new(chain).expect("valid chain id in test"),
+        decoded,
+        approved_tx_hash: approved,
+        schema_version: SCHEMA,
+    };
+
+    let err = signer.sign_evm(&req).await.unwrap_err();
+    assert!(
+        matches!(err, ChainSigningError::KeyStore { .. }),
+        "expected pre-flight KeyStore error, got {err:?}"
+    );
+
+    // The ledger must still be at Approved (never advanced to Signing).
+    assert_eq!(
+        ledger.state(&context.gate_ref).await.unwrap(),
+        SigningLedgerState::Approved
+    );
+
+    // Crucially, the grant must NOT have been consumed: claiming it now must
+    // SUCCEED (proving the gate_ref is still retryable, not stranded).
+    grants
+        .claim(&gk)
+        .await
+        .expect("grant must remain claimable after a post-authorize pre-flight failure");
+}
+
 #[tokio::test]
 async fn wrong_chain_family_key_cannot_sign_other_chain_tx() {
     // Key bound to a Solana chain id; present an EVM tx for signing.
@@ -543,7 +616,7 @@ async fn secure_kms_configured_but_mainnet_hot_key_is_refused() {
         .unwrap();
 
     let kms: Arc<dyn ironclaw_chain_signing::KmsSigner> =
-        Arc::new(LocalKmsSigner::new("secure-kms"));
+        Arc::new(LocalKmsSigner::new_modeling_secure_custody("secure-kms"));
     let signer = CustodialSigner::with_kms(
         keystore,
         grants,
@@ -579,7 +652,7 @@ async fn mainnet_signs_via_kms_key_ref_path() {
     let bound = evm::address_of(&key);
 
     // The KMS holds the key behind its sealed boundary, referenced by "kms-evm".
-    let kms_backend = LocalKmsSigner::new("secure-kms");
+    let kms_backend = LocalKmsSigner::new_modeling_secure_custody("secure-kms");
     kms_backend
         .import_key("kms-evm", SignatureAlg::Secp256k1, key.to_bytes().to_vec())
         .unwrap();

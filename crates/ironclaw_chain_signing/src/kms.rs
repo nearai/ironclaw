@@ -27,9 +27,13 @@
 //! path end-to-end without a cloud account. It holds each key behind a sealed
 //! [`secrecy::SecretBox`] boundary keyed by an opaque `key_ref`, exposes ONLY
 //! `sign_digest` (never the key bytes), and implements both secp256k1 (EVM) and
-//! ed25519 (Solana/NEAR). It reports `is_secure_custody() == true` so the
-//! ship-gate accepts it for mainnet in tests/dev, while a real cloud backend is
-//! a flagged follow-up (see crate docs / PR body):
+//! ed25519 (Solana/NEAR). Because its keys live in process heap memory — the
+//! exact compromised-host attack surface threat #18 guards against — it reports
+//! `is_secure_custody() == false` **by default**, so it can NEVER satisfy the
+//! mainnet ship-gate in a normal build. Tests that need to exercise the
+//! mainnet/KMS path construct it via the explicit, clearly-labelled
+//! [`LocalKmsSigner::new_modeling_secure_custody`] test-only opt-in. A real
+//! cloud backend is a flagged follow-up (see crate docs / PR body):
 //!
 //! ```text
 //! // kms-backend: a concrete cloud backend (AWS KMS / GCP KMS / YubiHSM) is a
@@ -112,6 +116,12 @@ pub struct LocalKmsSigner {
     // key_ref -> sealed key material. The seal means even a stray `Debug`/log of
     // the map prints `[REDACTED]`, and the bytes are zeroized on drop.
     keys: Mutex<HashMap<String, SealedKey>>,
+    // Whether this backend reports secure custody to the ship-gate. Keys live in
+    // process heap memory, so this is `false` for any normal construction; it is
+    // only set `true` by the explicit test-only opt-in constructor so the KMS
+    // path can be exercised without a cloud account. A production deployment uses
+    // a real cloud KMS/HSM backend, never this one.
+    secure_custody: bool,
 }
 
 struct SealedKey {
@@ -130,10 +140,36 @@ impl std::fmt::Debug for LocalKmsSigner {
 
 impl LocalKmsSigner {
     /// Build an empty software-HSM with the given backend id.
+    ///
+    /// The resulting backend reports `is_secure_custody() == false`: its keys
+    /// live in process heap memory, so it MUST NOT be used as the production KMS
+    /// backend and can never satisfy the mainnet ship-gate. A production
+    /// deployment wires a real cloud KMS/HSM backend instead.
     pub fn new(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
             keys: Mutex::new(HashMap::new()),
+            secure_custody: false,
+        }
+    }
+
+    /// Test-only constructor that makes this backend *model* secure custody
+    /// (`is_secure_custody() == true`) so the mainnet/KMS ship-gate path can be
+    /// exercised end-to-end without a cloud account.
+    ///
+    /// # Safety / production warning
+    ///
+    /// This DOES NOT make the backend secure — keys still live in process heap
+    /// memory (the compromised-host threat #18). It exists solely so tests can
+    /// drive the KMS signing path. NEVER call this in production wiring; doing so
+    /// would let hot-key custodial signing service mainnet requests through what
+    /// the operator sees labelled as a "secure KMS".
+    #[doc(hidden)]
+    pub fn new_modeling_secure_custody(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            keys: Mutex::new(HashMap::new()),
+            secure_custody: true,
         }
     }
 
@@ -191,9 +227,10 @@ impl KmsSigner for LocalKmsSigner {
     }
 
     fn is_secure_custody(&self) -> bool {
-        // The reference backend models secure custody: callers never receive
-        // key bytes. (A real deployment would use a cloud KMS/HSM here.)
-        true
+        // Keys live in process heap memory (threat #18), so this is `false` for
+        // any normal construction and the ship-gate will refuse mainnet. Only the
+        // explicit `new_modeling_secure_custody` test opt-in sets it `true`.
+        self.secure_custody
     }
 
     async fn sign_digest(
@@ -380,7 +417,7 @@ mod tests {
     use super::*;
 
     fn secure() -> LocalKmsSigner {
-        LocalKmsSigner::new("test-secure-kms")
+        LocalKmsSigner::new_modeling_secure_custody("test-secure-kms")
     }
 
     struct HotBackend;
@@ -450,6 +487,19 @@ mod tests {
         let s = secure();
         let gate = ShipGate::new(false, Some(&s));
         assert!(gate.authorize_chain("eip155:1").is_err());
+    }
+
+    #[test]
+    fn default_local_kms_is_not_secure_custody_and_cannot_gate_mainnet() {
+        // The plain `new()` backend holds keys in process memory, so it must NOT
+        // satisfy the mainnet ship-gate even with the opt-in flag set (threat #18).
+        let insecure = LocalKmsSigner::new("heap-backend");
+        assert!(!insecure.is_secure_custody());
+        let gate = ShipGate::new(true, Some(&insecure));
+        assert!(gate.authorize_chain("eip155:1").is_err());
+        // Only the explicit test opt-in models secure custody.
+        let modeled = LocalKmsSigner::new_modeling_secure_custody("modeled");
+        assert!(modeled.is_secure_custody());
     }
 
     #[test]

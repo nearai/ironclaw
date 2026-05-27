@@ -134,6 +134,14 @@ impl SecretsCrypto {
     fn derive_key(&self, salt: &[u8]) -> Result<Zeroizing<[u8; KEY_SIZE]>, SecretError> {
         let hk = Hkdf::<Sha256>::new(Some(salt), self.master_key.expose_secret().as_bytes());
         let mut derived = Zeroizing::new([0u8; KEY_SIZE]);
+        // All secret domains (session tokens, credential accounts, chain keys,
+        // filesystem secrets) intentionally share this single HKDF info/label.
+        // Cross-domain separation is provided by the per-domain AAD prefix bytes
+        // (e.g. `b"reborn/v1/chain_key"`), which AES-GCM always verifies, plus the
+        // unique per-secret `salt` (HKDF guarantees a distinct derived key per
+        // salt). The shared label is therefore safe by design; AAD is the sole
+        // cross-domain separator. (Per-domain HKDF labels would be a defense-in-
+        // depth nicety but are not required for the binding property.)
         hk.expand(b"near-agent-secrets-v1", derived.as_mut())
             .map_err(|_| SecretError::EncryptionFailed("HKDF expansion failed".to_string()))?;
         Ok(derived)

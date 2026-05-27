@@ -133,6 +133,13 @@ pub(crate) fn bind_kms_signature(
         let parity = match v {
             0 | 27 => false,
             1 | 28 => true,
+            // EIP-155 ONLY: `v = chainId*2 + {35,36}`, so `35` (even chainId base)
+            // maps to y-parity 0 and `36` to 1 — i.e. `v % 2 == 0` recovers the
+            // parity for any chain id. EIP-7702 (type 4) authorization-list
+            // signatures carry their OWN `y_parity` field separate from the outer
+            // tx `v`; mixing them would mis-normalize here. That is not reachable:
+            // `rebuild_signable` rejects type 4 upstream ("unsupported EVM tx
+            // type"). Whoever later adds type 4 support MUST revisit this arm.
             _ => v % 2 == 0,
         };
         if let Some(sig) = try_v(parity) {

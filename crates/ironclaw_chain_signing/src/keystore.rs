@@ -323,12 +323,17 @@ impl KeyStore for SecretsKeyStore {
                 reason: e.to_string(),
             }
         })?;
-        let bytes = alloy_primitives::hex::decode(decrypted.expose()).map_err(|e| {
-            KeyStoreError::Decryption {
+        // The decoded raw private-key bytes are wrapped in `Zeroizing` so the
+        // decode buffer is wiped even if `ConsumedChainKey::new`'s
+        // `into_boxed_slice()` reallocates (e.g. when `hex::decode` over-allocates
+        // capacity), leaving the original allocation behind. Mirrors the `bind()`
+        // path. `ConsumedChainKey::new` then re-seals into a `SecretBox`.
+        let bytes = Zeroizing::new(alloy_primitives::hex::decode(decrypted.expose()).map_err(
+            |e| KeyStoreError::Decryption {
                 reason: e.to_string(),
-            }
-        })?;
-        Ok(ConsumedChainKey::new(binding, bytes))
+            },
+        )?);
+        Ok(ConsumedChainKey::new(binding, bytes.to_vec()))
     }
 }
 
