@@ -285,7 +285,7 @@ async fn execute_local_command(
             if let Some(out) = stdout_handle {
                 read_stream_capped(out).await
             } else {
-                StreamCapture::default()
+                Ok(StreamCapture::default())
             }
         };
 
@@ -293,21 +293,21 @@ async fn execute_local_command(
             if let Some(err) = stderr_handle {
                 read_stream_capped(err).await
             } else {
-                StreamCapture::default()
+                Ok(StreamCapture::default())
             }
         };
 
         let (stdout, stderr, wait_result) = tokio::join!(stdout_fut, stderr_fut, child.wait());
-        let status = wait_result?;
-        Ok::<_, std::io::Error>((stdout, stderr, status.code().unwrap_or(-1)))
+        let status = wait_result.map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!("Command execution failed: {error}"))
+        })?;
+        Ok::<_, RuntimeProcessError>((stdout?, stderr?, status.code().unwrap_or(-1)))
     })
     .await;
 
     match result {
         Ok(Ok((stdout, stderr, code))) => Ok((capture_command_output(stdout, stderr)?, code)),
-        Ok(Err(e)) => Err(RuntimeProcessError::ExecutionFailed(format!(
-            "Command execution failed: {e}"
-        ))),
+        Ok(Err(e)) => Err(e),
         Err(_) => {
             terminate_child_tree(&mut child).await;
             Err(RuntimeProcessError::Timeout(timeout))
@@ -331,7 +331,7 @@ async fn terminate_child_tree(child: &mut tokio::process::Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::process_output::COMMAND_MAX_OUTPUT_SIZE;
+    use crate::process_output::{COMMAND_MAX_OUTPUT_SIZE, SavedCommandOutputSanitization};
     use std::sync::Mutex;
 
     #[derive(Debug)]
@@ -525,7 +525,10 @@ mod tests {
 
         assert_eq!(exit_code, 0);
         assert!(!output.preview.contains(middle));
-        assert!(!saved_output.secret_blocked);
+        assert_eq!(
+            saved_output.sanitization,
+            SavedCommandOutputSanitization::Clean
+        );
         assert!(saved.contains(middle));
     }
 

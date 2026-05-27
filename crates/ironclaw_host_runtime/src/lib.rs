@@ -96,7 +96,7 @@ pub use obligations::{
 };
 use obligations::{NetworkObligationPolicyStore, RuntimeSecretInjectionStore};
 pub use planner::{ExecutionPlan, PlannerError, plan_capability};
-pub use process_output::SavedCommandOutput;
+pub use process_output::{SavedCommandOutput, SavedCommandOutputSanitization};
 pub use process_port::{
     CommandExecutionOutput, CommandExecutionRequest, LocalHostProcessPort, RuntimeProcessError,
     RuntimeProcessPort, SandboxCommandTransport, TenantSandboxProcessPort,

@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use crate::{
     CommandExecutionRequest, FirstPartyCapabilityError, FirstPartyCapabilityRequest,
-    RuntimeProcessError, SavedCommandOutput,
+    RuntimeProcessError, SavedCommandOutput, SavedCommandOutputSanitization,
 };
 
 use super::{FIRST_PARTY_MAX_OUTPUT_BYTES, first_party_capability_manifest};
@@ -101,18 +101,22 @@ fn render_shell_output(output: &str, saved_output: Option<&SavedCommandOutput>) 
     let Some(saved_output) = saved_output else {
         return output.to_string();
     };
-    let mut note = if saved_output.secret_blocked {
-        format!(
-            "Full output was not saved because it matched secret-leak blocking rules; marker saved to: {}",
-            saved_output.path.display()
-        )
-    } else if saved_output.secret_redacted {
-        format!(
-            "Full output saved to: {} (secret-like values redacted)",
-            saved_output.path.display()
-        )
-    } else {
-        format!("Full output saved to: {}", saved_output.path.display())
+    let mut note = match saved_output.sanitization {
+        SavedCommandOutputSanitization::Blocked => {
+            format!(
+                "Full output was not saved because it matched secret-leak blocking rules; marker saved to: {}",
+                saved_output.path.display()
+            )
+        }
+        SavedCommandOutputSanitization::Redacted => {
+            format!(
+                "Full output saved to: {} (secret-like values redacted)",
+                saved_output.path.display()
+            )
+        }
+        SavedCommandOutputSanitization::Clean => {
+            format!("Full output saved to: {}", saved_output.path.display())
+        }
     };
     if saved_output.stream_was_capped {
         note.push_str(&format!(
@@ -193,7 +197,7 @@ mod tests {
         let rendered = render_shell_output(
             "preview",
             Some(&SavedCommandOutput {
-                secret_redacted: true,
+                sanitization: SavedCommandOutputSanitization::Redacted,
                 ..saved
             }),
         );
@@ -207,7 +211,7 @@ mod tests {
         let rendered = render_shell_output(
             "preview",
             Some(&SavedCommandOutput {
-                secret_blocked: true,
+                sanitization: SavedCommandOutputSanitization::Blocked,
                 ..saved_output()
             }),
         );
@@ -233,8 +237,7 @@ mod tests {
     fn saved_output() -> SavedCommandOutput {
         SavedCommandOutput {
             path: std::path::PathBuf::from("/tmp/command.log"),
-            secret_redacted: false,
-            secret_blocked: false,
+            sanitization: SavedCommandOutputSanitization::Clean,
             stream_was_capped: false,
             max_saved_stream_size: 16,
             expires_at_unix_secs: 1,
