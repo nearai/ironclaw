@@ -413,7 +413,7 @@ fn resolve_extra_headers(
         ironclaw_llm::ProviderProtocol::GithubCopilot
     ) {
         Ok(merge_extra_headers(
-            ironclaw_llm::github_copilot_auth::default_headers(),
+            ironclaw_llm::auth::default_headers(ironclaw_llm::auth::AuthBackend::GithubCopilot),
             env_headers,
         ))
     } else {
@@ -489,6 +489,10 @@ fn serialize_protocol(protocol: ironclaw_llm::ProviderProtocol) -> String {
         ProviderProtocol::DeepSeek => "deep_seek",
         ProviderProtocol::Gemini => "gemini",
         ProviderProtocol::OpenRouter => "open_router",
+        ProviderProtocol::Bedrock => "bedrock",
+        ProviderProtocol::OpenAiCodex => "openai_codex",
+        ProviderProtocol::GeminiOauth => "gemini_oauth",
+        ProviderProtocol::NearAi => "nearai",
     }
     .to_string()
 }
@@ -786,6 +790,16 @@ mod tests {
             serialize_protocol(ProviderProtocol::GithubCopilot),
             "github_copilot"
         );
+        assert_eq!(serialize_protocol(ProviderProtocol::Bedrock), "bedrock");
+        assert_eq!(
+            serialize_protocol(ProviderProtocol::OpenAiCodex),
+            "openai_codex"
+        );
+        assert_eq!(
+            serialize_protocol(ProviderProtocol::GeminiOauth),
+            "gemini_oauth"
+        );
+        assert_eq!(serialize_protocol(ProviderProtocol::NearAi), "nearai");
     }
 
     #[test]

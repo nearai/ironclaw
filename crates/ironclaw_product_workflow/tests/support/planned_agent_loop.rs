@@ -145,6 +145,7 @@ pub fn capability_call_response(
 ) -> HostManagedModelResponse {
     HostManagedModelResponse {
         safe_text_deltas: Vec::new(),
+        safe_reasoning_deltas: Vec::new(),
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
             surface_version: harness_surface_version(),
             capability_id: harness_capability_id(capability_id.into()),
@@ -279,6 +280,7 @@ impl ProductLiveAgentLoopHarness {
             subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(Arc::new(
                 ProductLiveCapabilityIo::default(),
             ))),
+            subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
             loop_exit_evidence: Arc::new(
                 ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
                     Arc::new(thread_service.clone()),
@@ -297,6 +299,7 @@ impl ProductLiveAgentLoopHarness {
             model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
             model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
             safety_context: Some(test_safety_context()),
+            turn_event_sink: None,
         })
         .expect("product-live planned AgentLoop harness should build");
 
@@ -544,6 +547,7 @@ impl ScriptedHostRuntimeToolCall {
         };
         Ok(Some(HostManagedModelResponse {
             safe_text_deltas: Vec::new(),
+            safe_reasoning_deltas: Vec::new(),
             output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
                 surface_version,
                 capability_id: self.capability_id.clone(),

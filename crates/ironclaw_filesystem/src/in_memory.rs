@@ -913,6 +913,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_dir_bounded_uses_trait_default_truncation() {
+        let fs = InMemoryBackend::new();
+        for p in ["/projects/a.md", "/projects/b.md", "/projects/c.md"] {
+            fs.put(&vpath(p), Entry::bytes(vec![]), CasExpectation::Absent)
+                .await
+                .unwrap();
+        }
+
+        let entries = fs.list_dir_bounded(&vpath("/projects"), 2).await.unwrap();
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "a.md");
+        assert_eq!(entries[1].name, "b.md");
+    }
+
+    #[tokio::test]
     async fn legacy_read_write_file_default_routes_through_put_get() {
         let fs = InMemoryBackend::new();
         let path = vpath("/tmp/legacy.bin");

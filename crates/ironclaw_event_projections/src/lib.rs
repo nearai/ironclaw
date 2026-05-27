@@ -11,9 +11,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_events::{
-    AuditSink, DurableAuditLog, DurableEventLog, EventCursor, EventError, EventLogEntry,
-    EventStreamKey, ReadScope, RuntimeEvent, RuntimeEventKind, UNCLASSIFIED_ERROR_KIND,
-    sanitize_error_kind,
+    AuditSink, DurableAuditLog, DurableEventLog, EventError, EventLogEntry, EventStreamKey,
+    ReadScope, RuntimeEvent, RuntimeEventKind, UNCLASSIFIED_ERROR_KIND, sanitize_error_kind,
 };
 use ironclaw_host_api::{
     ActionResultSummary, ActionSummary, AgentId, ApprovalRequestId, AuditEnvelope, AuditEventId,
@@ -30,6 +29,8 @@ use ironclaw_memory::{
 use ironclaw_turns::EventCursor as TurnEventCursor;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+pub use ironclaw_events::EventCursor;
 
 #[allow(dead_code)]
 mod pending_gate_projection;

@@ -12,7 +12,8 @@ use async_trait::async_trait;
 use lru::LruCache;
 use sha2::{Digest, Sha256};
 
-use crate::workspace::embeddings::{EmbeddingError, EmbeddingProvider};
+use crate::config::DEFAULT_EMBEDDING_CACHE_SIZE;
+use crate::provider::{EmbeddingError, EmbeddingProvider};
 
 /// Configuration for the embedding cache.
 #[derive(Debug, Clone)]
@@ -28,7 +29,7 @@ pub struct EmbeddingCacheConfig {
 impl Default for EmbeddingCacheConfig {
     fn default() -> Self {
         Self {
-            max_entries: crate::config::DEFAULT_EMBEDDING_CACHE_SIZE,
+            max_entries: DEFAULT_EMBEDDING_CACHE_SIZE,
         }
     }
 }

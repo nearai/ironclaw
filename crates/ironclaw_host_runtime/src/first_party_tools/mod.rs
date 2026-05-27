@@ -11,6 +11,7 @@ mod json;
 mod schemas;
 mod shell;
 mod skill_management;
+mod skill_url_install;
 mod spawn_subagent;
 mod time;
 

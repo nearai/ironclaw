@@ -1,8 +1,12 @@
-//! OAuth callback infrastructure used by the NEAR AI session login flow.
+//! Shared OAuth callback infrastructure used by every IronClaw OAuth flow
+//! (NEAR AI session login, WASM tool auth, MCP server auth, registry-provider
+//! OAuth backends).
 //!
-//! These utilities (callback server, landing pages, hostname detection) were
-//! originally in the old CLI OAuth module and are moved here so the `llm`
-//! module is self-contained.
+//! This crate owns the loopback callback listener, the branded landing pages,
+//! and the host-binding rules that keep the callback safe on remote hosts.
+//! It is deliberately small and free of LLM/auth-provider concerns — the
+//! provider-specific OAuth flows live in their owning crates and depend on
+//! this crate for the transport.
 
 use std::collections::HashMap;
 use std::time::Duration;

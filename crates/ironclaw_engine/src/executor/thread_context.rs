@@ -41,6 +41,11 @@ pub(crate) fn thread_execution_context(
         thread_goal: Some(thread.goal.clone()),
         available_actions_snapshot: None,
         available_action_inventory_snapshot: None,
+        conversation_scope: thread
+            .metadata
+            .get("conversation_scope")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok()),
         gate_controller,
         call_approval_granted: false,
         conversation_id: thread

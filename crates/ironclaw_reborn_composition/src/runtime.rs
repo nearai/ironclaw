@@ -43,8 +43,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
-    FilesystemSkillBundleSource, HostIdentityContextBuildError, HostIdentityContextCandidate,
-    HostIdentityContextSource, HostSkillContextSource, JsonSpawnSubagentInputCodec,
+    FilesystemSkillBundleSource, HostSkillContextSource, JsonSpawnSubagentInputCodec,
 };
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
@@ -78,15 +77,19 @@ use ironclaw_turns::{
     SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
     TurnEventProjectionSource, TurnPersistenceSnapshot, TurnRunId, TurnRunRecord, TurnScope,
     TurnStatus,
-    run_profile::{LoopHostMilestoneSink, LoopRunContext, PromptMode},
+    run_profile::{LoopHostMilestoneSink, LoopRunContext},
 };
 
+use crate::default_system_prompt::DefaultSystemPromptIdentitySource;
 use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore};
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
 use crate::{RebornBuildError, RebornCompositionProfile, RebornServices, build_reborn_services};
 
 mod approval;
+#[cfg(test)]
+#[path = "runtime/tests/default_system_prompt.rs"]
+mod default_system_prompt_tests;
 mod local_dev;
 mod skills;
 
@@ -963,7 +966,7 @@ pub async fn build_reborn_runtime(
         .map_err(|error| RebornRuntimeError::InvalidArgument {
             reason: error.to_string(),
         })?;
-    let milestone_sink: Arc<dyn LoopHostMilestoneSink> = Arc::new(
+    let durable_milestone_sink: Arc<dyn LoopHostMilestoneSink> = Arc::new(
         DurableLoopHostMilestoneSink::new(Arc::clone(&event_log), milestone_scope),
     );
     #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -975,8 +978,16 @@ pub async fn build_reborn_runtime(
     if trusted_laptop_access {
         append_trusted_laptop_access_audit(&audit_log, &thread_scope, &actor_user_id).await?;
     }
+    let projection_services = build_reborn_projection_services(
+        Arc::clone(&event_log),
+        validated_identity.reply_target_binding_ref.clone(),
+    );
+    let milestone_sink = projection_services
+        .with_live_reasoning_milestone_sink(durable_milestone_sink, actor_user_id.clone());
     let local_dev_capabilities = local_dev::capability_wiring(
         &services,
+        Arc::clone(&thread_service) as Arc<dyn SessionThreadService>,
+        thread_scope.clone(),
         actor_user_id.clone(),
         model_gateway,
         milestone_sink.clone(),
@@ -1006,6 +1017,7 @@ pub async fn build_reborn_runtime(
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(
             capability_input_resolver,
         )),
+        subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
         loop_exit_evidence,
         config: DefaultPlannedRuntimeConfig {
             worker: TurnRunnerWorkerConfig {
@@ -1019,10 +1031,21 @@ pub async fn build_reborn_runtime(
         cancellation_factory: None,
         skill_context_source,
         input_queue: None,
-        identity_context_source: Arc::new(EmptyIdentityContextSource),
+        identity_context_source: Arc::new(
+            // Local-dev seeding validates the prompt path first, so non-file prompt paths fail
+            // as build errors before this runtime-level identity-source guard is reached.
+            DefaultSystemPromptIdentitySource::try_new(
+                local_runtime.local_dev_storage_root.clone(),
+                local_runtime.default_system_prompt_path.clone(),
+            )
+            .map_err(|error| RebornRuntimeError::InvalidArgument {
+                reason: error.to_string(),
+            })?,
+        ),
         model_policy_guard: None,
         model_budget_accountant: None,
         safety_context: None,
+        turn_event_sink: None,
     })?;
     let default_resolved_run_profile = composition
         .run_profile_resolver
@@ -1059,12 +1082,9 @@ pub async fn build_reborn_runtime(
             Arc::clone(&planned_turn_coordinator),
         ));
     let turn_event_source: Arc<dyn TurnEventProjectionSource> = turn_state_store.clone();
-    let projection_services = build_reborn_projection_services(
-        Arc::clone(&event_log),
-        validated_identity.reply_target_binding_ref.clone(),
-    )
-    .with_turn_events(turn_event_source, Arc::clone(&planned_turn_coordinator))
-    .with_display_previews(Arc::clone(&local_dev_capabilities.display_previews));
+    let projection_services = projection_services
+        .with_turn_events(turn_event_source, Arc::clone(&planned_turn_coordinator))
+        .with_display_previews(Arc::clone(&local_dev_capabilities.display_previews));
     services.turn_coordinator = Some(Arc::clone(&planned_turn_coordinator));
 
     let worker_cancel = CancellationToken::new();
@@ -1238,19 +1258,6 @@ impl CapabilitySurfaceProfileResolver for AllowAllCapabilitySurfaceResolver {
     }
 }
 
-struct EmptyIdentityContextSource;
-
-#[async_trait::async_trait]
-impl HostIdentityContextSource for EmptyIdentityContextSource {
-    async fn load_identity_candidates(
-        &self,
-        _run_context: &LoopRunContext,
-        _mode: PromptMode,
-    ) -> Result<Vec<HostIdentityContextCandidate>, HostIdentityContextBuildError> {
-        Ok(Vec::new())
-    }
-}
-
 #[cfg(feature = "root-llm-provider")]
 fn build_llm_gateway(
     llm: ResolvedRebornLlm,
@@ -1304,6 +1311,10 @@ fn parse_provider_protocol(
         "deep_seek" | "deepseek" => Ok(ProviderProtocol::DeepSeek),
         "gemini" => Ok(ProviderProtocol::Gemini),
         "open_router" | "openrouter" => Ok(ProviderProtocol::OpenRouter),
+        "bedrock" => Ok(ProviderProtocol::Bedrock),
+        "openai_codex" | "open_ai_codex" => Ok(ProviderProtocol::OpenAiCodex),
+        "gemini_oauth" => Ok(ProviderProtocol::GeminiOauth),
+        "nearai" | "near_ai" => Ok(ProviderProtocol::NearAi),
         _ => Err(RebornRuntimeError::LlmProvider(format!(
             "unsupported llm protocol: {protocol}"
         ))),
@@ -1363,9 +1374,10 @@ mod tests {
     };
     use ironclaw_product_adapters::{ProductOutboundPayload, ProductProjectionItem};
     use ironclaw_product_workflow::{
-        RebornServicesErrorCode, RebornServicesErrorKind, RebornStreamEventsRequest,
-        RebornSubmitTurnResponse, WebUiAuthenticatedCaller, WebUiCreateThreadRequest,
-        WebUiResolveGateRequest, WebUiSendMessageRequest, approval_gate_ref,
+        ExtensionName, LifecycleReadinessBlocker, RebornServicesErrorCode, RebornServicesErrorKind,
+        RebornStreamEventsRequest, RebornSubmitTurnResponse, WebUiAuthenticatedCaller,
+        WebUiCreateThreadRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
+        WebUiSetupExtensionRequest, approval_gate_ref,
     };
     use ironclaw_run_state::ApprovalRequestStore;
     use ironclaw_skills::SkillTrust;
@@ -2794,6 +2806,71 @@ mod tests {
         );
         assert_eq!(bundle.readiness, runtime.services().readiness);
         assert_eq!(bundle.readiness.state, RebornReadinessState::DevOnly);
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn local_dev_webui_bundle_uses_local_lifecycle_facade_for_setup_extension() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "webui lifecycle ok".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-webui-lifecycle-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-webui-lifecycle-tenant".to_string(),
+            agent_id: "runtime-webui-lifecycle-agent".to_string(),
+            source_binding_id: "runtime-webui-lifecycle-source".to_string(),
+            reply_target_binding_id: "runtime-webui-lifecycle-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+        let caller = WebUiAuthenticatedCaller::new(
+            TenantId::new("runtime-webui-lifecycle-tenant").unwrap(),
+            UserId::new("runtime-webui-lifecycle-owner").unwrap(),
+            Some(AgentId::new("runtime-webui-lifecycle-agent").unwrap()),
+            None,
+        );
+
+        let setup = bundle
+            .api
+            .setup_extension(
+                caller,
+                ExtensionName::new("github").expect("valid extension name"),
+                WebUiSetupExtensionRequest::default(),
+            )
+            .await
+            .expect("setup extension lifecycle projection");
+
+        assert!(
+            setup.blockers.iter().any(|blocker| matches!(
+                blocker,
+                LifecycleReadinessBlocker::Runtime { ref_id: Some(ref_id) }
+                    if ref_id.as_str() == "extension_lifecycle_local_runtime_unwired"
+            )),
+            "local webui bundle should use the local lifecycle facade projection"
+        );
+        assert!(
+            !setup.blockers.iter().any(|blocker| matches!(
+                blocker,
+                LifecycleReadinessBlocker::Runtime { ref_id: Some(ref_id) }
+                    if ref_id.as_str() == "reborn_lifecycle_facade_unwired"
+            )),
+            "local webui bundle must not fall back to the default unwired facade"
+        );
 
         runtime.shutdown().await.expect("runtime shutdown");
     }

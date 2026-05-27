@@ -373,3 +373,90 @@ fn map_approval_resume_error(error: TurnError) -> ProductWorkflowError {
         _ => ProductWorkflowError::TurnResumeDenied { error },
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use ironclaw_turns::TurnCapacityResource;
+
+    use super::*;
+
+    #[test]
+    fn map_gate_state_error_covers_turn_error_categories() {
+        assert!(matches!(
+            map_gate_state_error(TurnError::ScopeNotFound),
+            ProductWorkflowError::ApprovalInteractionRejected {
+                kind: ApprovalInteractionRejectionKind::MissingGate
+            }
+        ));
+        assert!(matches!(
+            map_gate_state_error(TurnError::Unauthorized),
+            ProductWorkflowError::ApprovalInteractionRejected {
+                kind: ApprovalInteractionRejectionKind::CrossScopeDenied
+            }
+        ));
+        assert!(matches!(
+            map_gate_state_error(TurnError::Unavailable {
+                reason: "store down".to_string()
+            }),
+            ProductWorkflowError::Transient { .. }
+        ));
+        assert!(matches!(
+            map_gate_state_error(TurnError::InvalidRequest {
+                reason: "bad state".to_string()
+            }),
+            ProductWorkflowError::TurnResumeDenied { .. }
+        ));
+        assert!(matches!(
+            map_gate_state_error(TurnError::capacity_exceeded(
+                TurnCapacityResource::SubmitTurn,
+                1
+            )),
+            ProductWorkflowError::TurnResumeDenied { .. }
+        ));
+    }
+
+    #[test]
+    fn map_approval_resume_error_covers_turn_error_categories() {
+        assert!(matches!(
+            map_approval_resume_error(TurnError::ScopeNotFound),
+            ProductWorkflowError::ApprovalInteractionRejected {
+                kind: ApprovalInteractionRejectionKind::MissingGate
+            }
+        ));
+        assert!(matches!(
+            map_approval_resume_error(TurnError::Unauthorized),
+            ProductWorkflowError::ApprovalInteractionRejected {
+                kind: ApprovalInteractionRejectionKind::CrossScopeDenied
+            }
+        ));
+        assert!(matches!(
+            map_approval_resume_error(TurnError::InvalidRequest {
+                reason: "stale".to_string()
+            }),
+            ProductWorkflowError::ApprovalInteractionRejected {
+                kind: ApprovalInteractionRejectionKind::StaleGate
+            }
+        ));
+        assert!(matches!(
+            map_approval_resume_error(TurnError::Conflict {
+                reason: "stale".to_string()
+            }),
+            ProductWorkflowError::ApprovalInteractionRejected {
+                kind: ApprovalInteractionRejectionKind::StaleGate
+            }
+        ));
+        assert!(matches!(
+            map_approval_resume_error(TurnError::Unavailable {
+                reason: "store down".to_string()
+            }),
+            ProductWorkflowError::Transient { .. }
+        ));
+        assert!(matches!(
+            map_approval_resume_error(TurnError::capacity_exceeded(
+                TurnCapacityResource::SubmitTurn,
+                1
+            )),
+            ProductWorkflowError::TurnResumeDenied { .. }
+        ));
+    }
+}

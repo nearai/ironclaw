@@ -106,10 +106,10 @@ pub struct WebUiListThreadsRequest {
 ///
 /// This is the v2 entrypoint inventory's "extensions onboarding" row.
 /// The native facade exposes the route surface so callers can
-/// inventory the API without v1 dependency, but the underlying
-/// onboarding controller remains v1 today — concrete impl returns
-/// `RebornSetupExtensionStatus::NotImplemented` until a v2-aware
-/// extension lifecycle lands.
+/// inventory the API without v1 dependency. Concrete implementations return a
+/// product-safe lifecycle projection; auth, approval, and pairing requirements
+/// remain blockers owned by their dedicated Reborn services, not lifecycle
+/// phases.
 ///
 /// `extension_name` is not part of the body — it is bound from the
 /// route path as an [`ironclaw_common::ExtensionName`] and threaded

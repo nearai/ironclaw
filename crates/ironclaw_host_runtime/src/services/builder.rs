@@ -11,20 +11,20 @@ use super::{
     DurableEventLog, DurableEventSink, EffectiveRuntimePolicy, EventSink,
     FilesystemApprovalRequestStore, FilesystemResourceGovernorStore, FilesystemRunStateStore,
     FilesystemTurnStateStore, FirstPartyCapabilityRegistry, HostRuntimeServices, McpExecutor,
-    NetworkHttpEgress, PersistentResourceGovernor, ProcessBackendKind,
+    NetworkHttpEgress, PersistentResourceGovernor, ProcessBackendKind, ProcessExecutor,
     ProcessObligationLifecycleStore, ProcessResultStore, ProcessStore, ProductionComponentType,
     ProductionImplementationReadiness, ProductionWiringComponent, ProductionWiringIssueKind,
     ProductionWiringReport, RebornEventStoreConfig, RebornEventStoreError, RebornEventStores,
     RebornProfile, ResourceGovernor, RootFilesystem, RunProfileResolver, RunStateApprovalStore,
-    RunStateStore, RuntimeBackendHealth, RuntimeHttpEgress, RuntimeProcessPort, ScopedFilesystem,
-    ScriptExecutor, SecretMode, SecretStore, SharedSecretStore, TenantSandboxProcessPort,
-    TrustPolicy, TurnRunTransitionPort, TurnRunWakeNotifier, TurnStateStore, WasmError,
-    WasmRuntimeAdapter, WasmRuntimeCredentialProvider, WasmStagedRuntimeCredentials, WitToolHost,
-    WitToolRuntimeConfig, build_reborn_event_stores, production_wiring_report,
-    set_runtime_http_egress,
+    RunStateStore, RuntimeBackendHealth, RuntimeHttpEgress, RuntimeKind, RuntimeProcessPort,
+    ScopedFilesystem, ScriptExecutor, SecretMode, SecretStore, SharedSecretStore,
+    TenantSandboxProcessPort, TrustPolicy, TurnRunTransitionPort, TurnRunWakeNotifier,
+    TurnStateStore, WasmError, WasmRuntimeAdapter, WasmRuntimeCredentialProvider,
+    WasmStagedRuntimeCredentials, WitToolHost, WitToolRuntimeConfig, build_reborn_event_stores,
+    production_wiring_report, set_runtime_http_egress,
 };
 use crate::LocalHostProcessPort;
-use crate::wasm_credentials::{HostWasmRuntimeCredentials, wasm_runtime_credentials_from_registry};
+use crate::wasm_credentials::SharedHostWasmRuntimeCredentials;
 
 impl<F, G, S, R> HostRuntimeServices<F, G, S, R>
 where
@@ -64,6 +64,7 @@ where
             wasm_credential_provider,
             runtime_health,
             runtime_policy,
+            process_sandbox_executor,
             script_runtime,
             mcp_runtime,
             first_party_runtime,
@@ -101,6 +102,7 @@ where
             wasm_credential_provider,
             runtime_health,
             runtime_policy,
+            process_sandbox_executor,
             script_runtime,
             mcp_runtime,
             first_party_runtime,
@@ -159,6 +161,7 @@ where
             wasm_credential_provider,
             runtime_health,
             runtime_policy,
+            process_sandbox_executor,
             script_runtime,
             mcp_runtime,
             first_party_runtime,
@@ -206,6 +209,7 @@ where
             wasm_credential_provider,
             runtime_health,
             runtime_policy,
+            process_sandbox_executor,
             script_runtime,
             mcp_runtime,
             first_party_runtime,
@@ -555,6 +559,15 @@ where
         self
     }
 
+    pub fn with_secret_store_dyn(mut self, secret_store: Arc<dyn SecretStore>) -> Self {
+        self.component_types.secret_store = Some(ProductionComponentType::named(
+            "dyn SecretStore",
+            ProductionImplementationReadiness::ProductionCandidate,
+        ));
+        self.secret_store = Some(secret_store);
+        self
+    }
+
     pub fn with_runtime_http_egress<T>(mut self, runtime_http_egress: Arc<T>) -> Self
     where
         T: RuntimeHttpEgress + 'static,
@@ -642,6 +655,14 @@ where
         self
     }
 
+    pub fn with_process_sandbox_executor<T>(mut self, executor: Arc<T>) -> Self
+    where
+        T: ProcessExecutor + 'static,
+    {
+        self.process_sandbox_executor = Some(executor);
+        self
+    }
+
     pub fn with_runtime_policy(mut self, policy: EffectiveRuntimePolicy) -> Self {
         self.apply_local_process_policy(&policy);
         self.runtime_policy = Some(policy);
@@ -695,13 +716,15 @@ where
         self
     }
 
-    fn with_verified_manifest_wasm_runtime_credentials(
+    fn with_manifest_wasm_runtime_credentials(
         mut self,
-        provider: Arc<HostWasmRuntimeCredentials>,
+        provider: Arc<SharedHostWasmRuntimeCredentials>,
+        has_current_manifest_credentials: bool,
     ) -> Self {
-        self.component_types.wasm_credential_provider =
-            Some(ProductionComponentType::of::<HostWasmRuntimeCredentials>());
-        self.component_types.wasm_credential_provider_verified = !provider.credentials().is_empty();
+        self.component_types.wasm_credential_provider = Some(ProductionComponentType::of::<
+            SharedHostWasmRuntimeCredentials,
+        >());
+        self.component_types.wasm_credential_provider_verified = has_current_manifest_credentials;
         let provider: Arc<dyn WasmRuntimeCredentialProvider> = provider;
         self.wasm_credential_provider = Some(provider);
         self.component_types
@@ -778,10 +801,16 @@ where
         host: WitToolHost,
     ) -> Result<Self, WasmError> {
         if self.wasm_credential_provider.is_none() {
-            let credentials = wasm_runtime_credentials_from_registry(&self.registry);
-            if !credentials.credentials().is_empty() {
-                self = self.with_verified_manifest_wasm_runtime_credentials(Arc::new(credentials));
-            }
+            let registry = self.registry.snapshot();
+            let has_current_manifest_credentials = registry.capabilities().any(|descriptor| {
+                descriptor.runtime == RuntimeKind::Wasm
+                    && !descriptor.runtime_credentials.is_empty()
+            });
+            let provider = Arc::new(SharedHostWasmRuntimeCredentials::new(
+                (*self.registry).clone(),
+            ));
+            self = self
+                .with_manifest_wasm_runtime_credentials(provider, has_current_manifest_credentials);
         }
         let adapter = Arc::new(WasmRuntimeAdapter::try_new(
             config,

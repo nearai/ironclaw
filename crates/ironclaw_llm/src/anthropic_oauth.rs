@@ -316,6 +316,7 @@ impl LlmProvider for AnthropicOAuthProvider {
             finish_reason,
             input_tokens: response.usage.input_tokens,
             output_tokens: response.usage.output_tokens,
+            reasoning: None,
             cache_creation_input_tokens: response.usage.cache_creation_input_tokens,
             cache_read_input_tokens: response.usage.cache_read_input_tokens,
         })

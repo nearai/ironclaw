@@ -199,9 +199,16 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 "content": {
                     "type": "string",
                     "description": "Raw SKILL.md content to install"
+                },
+                "url": {
+                    "type": "string",
+                    "description": "HTTPS URL to a SKILL.md document, ZIP bundle, or GitHub skill repository/tree to fetch and install"
                 }
             },
-            "required": ["content"],
+            "oneOf": [
+                { "required": ["content"] },
+                { "required": ["url"] }
+            ],
             "additionalProperties": false
         }),
         "schemas/builtin/skill_remove.input.v1.json" => json!({

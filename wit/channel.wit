@@ -1,4 +1,4 @@
-package near:agent@0.3.0;
+package near:agent@0.3.1;
 
 // WASM Channel Sandbox Interface
 //
@@ -193,6 +193,16 @@ interface channel-host {
     /// - Path validation fails (traversal attempt, absolute path)
     /// - Write operation fails
     workspace-write: func(path: string, content: string) -> result<_, string>;
+
+    /// Send a raw websocket text frame through the host-managed websocket runtime.
+    ///
+    /// This is intentionally transport-agnostic: the channel is responsible for
+    /// constructing any protocol-specific payload.
+    ///
+    /// Returns Err if:
+    /// - the channel has no active websocket runtime
+    /// - the websocket runtime is shutting down
+    websocket-send-text: func(payload: string) -> result<_, string>;
 
     // ==================== DM Pairing ====================
 

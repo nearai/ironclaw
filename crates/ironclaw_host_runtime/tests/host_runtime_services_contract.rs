@@ -2945,6 +2945,35 @@ async fn host_runtime_services_health_fails_closed_for_unregistered_required_run
 }
 
 #[tokio::test]
+async fn host_runtime_routes_system_process_sandbox_to_configured_executor() {
+    let process_services = ProcessServices::in_memory();
+    let result_store = process_services.result_store();
+    let sandbox_executor = Arc::new(RecordingSandboxProcessExecutor::default());
+    let runtime = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        process_services,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_process_sandbox_executor(Arc::clone(&sandbox_executor))
+    .host_runtime_for_local_testing();
+    let scope = sample_scope(InvocationId::new());
+    let process_id = ProcessId::new();
+
+    let handle = runtime
+        .spawn_process(process_sandbox_start(process_id, scope.clone()))
+        .await
+        .unwrap();
+
+    assert_eq!(handle.process_id, process_id);
+    assert_eq!(handle.capability_id, process_sandbox_capability_id());
+    wait_for_sandbox_process_result(&sandbox_executor, &scope, process_id, result_store.as_ref())
+        .await;
+}
+
+#[tokio::test]
 async fn host_runtime_services_installs_builtin_obligation_handler_with_audit_sink() {
     let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
     let filesystem = Arc::new(LocalFilesystem::new());
@@ -5918,6 +5947,30 @@ impl ProcessExecutor for BackgroundExecutor {
     }
 }
 
+#[derive(Default)]
+struct RecordingSandboxProcessExecutor {
+    requests: std::sync::Mutex<Vec<ProcessExecutionRequest>>,
+}
+
+impl RecordingSandboxProcessExecutor {
+    fn requests(&self) -> Vec<ProcessExecutionRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl ProcessExecutor for RecordingSandboxProcessExecutor {
+    async fn execute(
+        &self,
+        request: ProcessExecutionRequest,
+    ) -> Result<ProcessExecutionResult, ironclaw_processes::ProcessExecutionError> {
+        self.requests.lock().unwrap().push(request);
+        Ok(ProcessExecutionResult {
+            output: json!({"executor": "process_sandbox"}),
+        })
+    }
+}
+
 struct FailingSpawnManager;
 
 #[async_trait]
@@ -5959,6 +6012,29 @@ async fn wait_for_status(
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     panic!("process {process_id} did not reach {status:?}");
+}
+
+async fn wait_for_sandbox_process_result(
+    executor: &RecordingSandboxProcessExecutor,
+    scope: &ResourceScope,
+    process_id: ProcessId,
+    result_store: &dyn ProcessResultStore,
+) {
+    for _ in 0..100 {
+        let requests = executor.requests();
+        if let Some(request) = requests.first()
+            && request.process_id == process_id
+            && request.capability_id == process_sandbox_capability_id()
+            && request.runtime == RuntimeKind::System
+            && let Some(result) = result_store.get(scope, process_id).await.unwrap()
+        {
+            assert_eq!(result.status, ProcessStatus::Completed);
+            assert_eq!(result.output, Some(json!({"executor": "process_sandbox"})));
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("process sandbox executor did not complete process {process_id}");
 }
 
 async fn wait_for_result_store_attempt(store: &FailingProcessResultStore, attempt: &'static str) {
@@ -6366,6 +6442,24 @@ fn process_start(
     }
 }
 
+fn process_sandbox_start(process_id: ProcessId, scope: ResourceScope) -> ProcessStart {
+    let invocation_id = scope.invocation_id;
+    ProcessStart {
+        process_id,
+        parent_process_id: None,
+        invocation_id,
+        scope,
+        extension_id: ExtensionId::new("system.process_sandbox").unwrap(),
+        capability_id: process_sandbox_capability_id(),
+        runtime: RuntimeKind::System,
+        grants: CapabilitySet::default(),
+        mounts: MountView::default(),
+        estimated_resources: ResourceEstimate::default(),
+        resource_reservation_id: None,
+        input: json!({"run": {"command": "echo", "args": ["ok"]}}),
+    }
+}
+
 fn script_extension_id() -> ExtensionId {
     ExtensionId::new("script").unwrap()
 }
@@ -6376,6 +6470,10 @@ fn script_capability_id() -> CapabilityId {
 
 fn mcp_capability_id() -> CapabilityId {
     CapabilityId::new("mcp.search").unwrap()
+}
+
+fn process_sandbox_capability_id() -> CapabilityId {
+    CapabilityId::new("system.process_sandbox.run").unwrap()
 }
 
 struct WasmRuntimeFixture {

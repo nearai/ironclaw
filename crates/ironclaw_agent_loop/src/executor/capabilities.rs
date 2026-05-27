@@ -164,10 +164,21 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             .await;
 
         let outcomes = batch.outcomes;
+        // Multiple AwaitDependentRun outcomes that share a single gate_ref
+        // must coalesce into ONE gate exit: each outcome's result_ref is
+        // appended as a completed result (so the parent observes every
+        // child's result on resume) and a single GateStage step transitions
+        // the loop to BlockedDependentRun. Firing one gate step per outcome
+        // would create duplicate gate records and race the resume attempts.
+        let coalesced_gate_step = if !batch.stopped_on_suspension {
+            shared_await_dependent_gate(&visible_calls, &outcomes)
+        } else {
+            None
+        };
         if !batch.stopped_on_suspension {
-            // Non-suspended batches record completed outcomes before gates so
-            // partial parallel progress is durable in any later suspension
-            // checkpoint.
+            // Non-suspended batches record completed (and coalesced-await)
+            // outcomes before handling any remaining gates so partial parallel
+            // progress is durable in any later suspension checkpoint.
             let mut pending_outcomes = Vec::new();
             for (call, outcome) in visible_calls.into_iter().zip(outcomes) {
                 match outcome {
@@ -191,11 +202,34 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                         )
                         .await?;
                     }
+                    CapabilityOutcome::AwaitDependentRun {
+                        gate_ref,
+                        result_ref,
+                        safe_summary,
+                    } if coalesced_gate_step
+                        .as_ref()
+                        .is_some_and(|(gate, _)| gate == &gate_ref) =>
+                    {
+                        push_call_signature_once(&mut state, &mut signatures, &call)?;
+                        let result = CapabilityResultMessage {
+                            result_ref,
+                            safe_summary,
+                            terminate_hint: false,
+                        };
+                        append_capability_result_ref(ctx.host, &call, &result).await?;
+                        push_completed_result(&mut state, result);
+                    }
                     other => {
                         pending_outcomes.push((call, other));
                     }
                 }
             }
+            // Drain non-await/non-completed outcomes (denied, failed, other
+            // gates) BEFORE the coalesced gate fires. The shared-gate fast
+            // path early-returns via `completed_turn` on `BatchStep::Continue`,
+            // so anything left in `pending_outcomes` after the gate step would
+            // be silently dropped — losing signature bookkeeping and side
+            // effects for outcomes the parent must observe on resume.
             for (call, outcome) in pending_outcomes {
                 push_call_signature_once(&mut state, &mut signatures, &call)?;
                 match self
@@ -204,6 +238,25 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                 {
                     BatchStep::Continue(next) => {
                         state = *next;
+                    }
+                    BatchStep::Exit(exit) => return Ok(TurnCompletedStep::Exit(exit)),
+                }
+            }
+            if let Some((shared_gate_ref, first_call)) = coalesced_gate_step {
+                match GateStage
+                    .process(
+                        ctx,
+                        GateInput {
+                            state,
+                            call: first_call,
+                            kind: GateKind::AwaitDependentRun,
+                            gate_ref: shared_gate_ref,
+                        },
+                    )
+                    .await?
+                {
+                    BatchStep::Continue(next) => {
+                        return self.completed_turn(ctx, *next, result_refs_start).await;
                     }
                     BatchStep::Exit(exit) => return Ok(TurnCompletedStep::Exit(exit)),
                 }
@@ -581,4 +634,143 @@ async fn append_spawned_child_result(
     append_capability_result_ref(host, call, &result).await?;
     push_completed_result(state, result);
     Ok(())
+}
+
+fn shared_await_dependent_gate(
+    calls: &[CapabilityCallCandidate],
+    outcomes: &[CapabilityOutcome],
+) -> Option<(ironclaw_turns::LoopGateRef, CapabilityCallCandidate)> {
+    let mut shared_gate: Option<ironclaw_turns::LoopGateRef> = None;
+    let mut first_call: Option<CapabilityCallCandidate> = None;
+    let mut count = 0_usize;
+    for (call, outcome) in calls.iter().zip(outcomes.iter()) {
+        match outcome {
+            CapabilityOutcome::AwaitDependentRun { gate_ref, .. } => {
+                if let Some(existing) = shared_gate.as_ref() {
+                    if existing != gate_ref {
+                        return None;
+                    }
+                } else {
+                    shared_gate = Some(gate_ref.clone());
+                    first_call = Some(call.clone());
+                }
+                count += 1;
+            }
+            other if other.is_suspension() => {
+                return None;
+            }
+            _ => {}
+        }
+    }
+    // Only coalesce when at least two AwaitDependentRun outcomes share the
+    // same gate — that is the case the fast path exists for. A single
+    // AwaitDependentRun (with or without sibling completed outcomes) has no
+    // coalescing benefit, and routing through this path would diverge the
+    // completed-first durability ordering the non-suspended branch
+    // guarantees. Fall back to the per-outcome path for single-await batches.
+    if count <= 1 {
+        return None;
+    }
+    shared_gate.zip(first_call)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_turns::{
+        LoopGateRef, LoopResultRef,
+        run_profile::{CapabilityInputRef, CapabilitySurfaceVersion},
+    };
+
+    fn call(input: &str) -> CapabilityCallCandidate {
+        let capability_id = ironclaw_host_api::CapabilityId::new("test.cap").unwrap();
+        CapabilityCallCandidate {
+            surface_version: CapabilitySurfaceVersion::new("test-v1").unwrap(),
+            capability_id: capability_id.clone(),
+            effective_capability_ids: vec![capability_id],
+            input_ref: CapabilityInputRef::new(format!("input:{input}")).unwrap(),
+            provider_replay: None,
+        }
+    }
+
+    fn await_dependent(gate: &str, result: &str) -> CapabilityOutcome {
+        CapabilityOutcome::AwaitDependentRun {
+            gate_ref: LoopGateRef::new(gate).unwrap(),
+            result_ref: LoopResultRef::new(format!("result:{result}")).unwrap(),
+            safe_summary: "summary".to_string(),
+        }
+    }
+
+    fn completed(result: &str) -> CapabilityOutcome {
+        CapabilityOutcome::Completed(CapabilityResultMessage {
+            result_ref: LoopResultRef::new(format!("result:{result}")).unwrap(),
+            safe_summary: "summary".to_string(),
+            terminate_hint: false,
+        })
+    }
+
+    #[test]
+    fn returns_some_for_two_outcomes_sharing_one_gate() {
+        let calls = vec![call("a"), call("b")];
+        let outcomes = vec![
+            await_dependent("gate:batch-1", "r1"),
+            await_dependent("gate:batch-1", "r2"),
+        ];
+        let result = shared_await_dependent_gate(&calls, &outcomes);
+        assert!(result.is_some());
+        let (gate, first) = result.unwrap();
+        assert_eq!(gate.as_str(), "gate:batch-1");
+        assert_eq!(first.input_ref.as_str(), "input:a");
+    }
+
+    #[test]
+    fn returns_none_for_divergent_gate_refs() {
+        let calls = vec![call("a"), call("b")];
+        let outcomes = vec![
+            await_dependent("gate:a", "r1"),
+            await_dependent("gate:b", "r2"),
+        ];
+        assert!(shared_await_dependent_gate(&calls, &outcomes).is_none());
+    }
+
+    #[test]
+    fn returns_none_for_single_await_with_completed_sibling() {
+        // Single AwaitDependentRun has no coalescing benefit; fall back to
+        // the per-outcome path for completed-first durability ordering.
+        let calls = vec![call("a"), call("b")];
+        let outcomes = vec![await_dependent("gate:1", "r1"), completed("r2")];
+        assert!(shared_await_dependent_gate(&calls, &outcomes).is_none());
+    }
+
+    #[test]
+    fn returns_none_when_non_await_suspension_present() {
+        let calls = vec![call("a"), call("b")];
+        let outcomes = vec![
+            await_dependent("gate:1", "r1"),
+            CapabilityOutcome::ApprovalRequired {
+                gate_ref: LoopGateRef::new("gate:approval").unwrap(),
+                safe_summary: "approval".to_string(),
+            },
+        ];
+        assert!(shared_await_dependent_gate(&calls, &outcomes).is_none());
+    }
+
+    #[test]
+    fn returns_none_for_empty_outcomes() {
+        assert!(shared_await_dependent_gate(&[], &[]).is_none());
+    }
+
+    #[test]
+    fn returns_some_for_two_awaits_with_completed_between() {
+        let calls = vec![call("a"), call("b"), call("c")];
+        let outcomes = vec![
+            await_dependent("gate:batch-2", "r1"),
+            completed("r2"),
+            await_dependent("gate:batch-2", "r3"),
+        ];
+        let result = shared_await_dependent_gate(&calls, &outcomes);
+        assert!(result.is_some());
+        let (gate, _) = result.unwrap();
+        assert_eq!(gate.as_str(), "gate:batch-2");
+    }
 }

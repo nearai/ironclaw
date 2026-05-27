@@ -9,7 +9,6 @@ publish = false
 [dependencies]
 async-trait = "0.1"
 ironclaw_event_projections = { path = "../ironclaw_event_projections" }
-ironclaw_events = { path = "../ironclaw_events" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_outbound = { path = "../ironclaw_outbound" }
 ironclaw_turns = { path = "../ironclaw_turns" }
@@ -21,4 +20,5 @@ tokio = { version = "1", features = ["macros", "sync", "rt"] }
 
 [dev-dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+ironclaw_events = { path = "../ironclaw_events" }
 tokio = { version = "1", features = ["macros", "rt", "time"] }

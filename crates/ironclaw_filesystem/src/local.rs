@@ -295,6 +295,14 @@ impl RootFilesystem for LocalFilesystem {
     }
 
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.list_dir_bounded(path, usize::MAX).await
+    }
+
+    async fn list_dir_bounded(
+        &self,
+        path: &VirtualPath,
+        max_entries: usize,
+    ) -> Result<Vec<DirEntry>, FilesystemError> {
         let resolved = self
             .resolve_existing(path, FilesystemOperation::ListDir)
             .await?;
@@ -302,11 +310,14 @@ impl RootFilesystem for LocalFilesystem {
             .await
             .map_err(|error| io_error(path.clone(), FilesystemOperation::ListDir, error))?;
         let mut entries = Vec::new();
-        while let Some(entry) = read_dir
-            .next_entry()
-            .await
-            .map_err(|error| io_error(path.clone(), FilesystemOperation::ListDir, error))?
-        {
+        while entries.len() < max_entries {
+            let Some(entry) = read_dir
+                .next_entry()
+                .await
+                .map_err(|error| io_error(path.clone(), FilesystemOperation::ListDir, error))?
+            else {
+                break;
+            };
             let name = entry.file_name().to_string_lossy().to_string();
             let entry_path =
                 VirtualPath::new(format!("{}/{}", path.as_str().trim_end_matches('/'), name))?;

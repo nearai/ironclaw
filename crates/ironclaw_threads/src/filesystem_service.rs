@@ -42,21 +42,24 @@ use ironclaw_filesystem::{
     CasExpectation, ContentType, Entry, FileType, FilesystemError, FilesystemOperation,
     RecordVersion, RootFilesystem, ScopedFilesystem,
 };
-use ironclaw_host_api::{HostApiError, ResourceScope, ScopedPath, ThreadId};
+use ironclaw_host_api::{HostApiError, InvocationId, ResourceScope, ScopedPath, ThreadId};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 use crate::identifiers::SummaryArtifactId;
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
-    AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextMessage, ContextMessages,
-    ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest, LatestThreadMessageRequest,
-    ListThreadsForScopeRequest, ListThreadsForScopeResponse, LoadContextMessagesRequest,
-    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
-    ProviderToolCallReferenceEnvelope, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
-    SessionThreadError, SessionThreadRecord, SessionThreadService, SummaryArtifact, ThreadHistory,
-    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
-    ToolResultReferenceEnvelope, UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
+    AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
+    AppendToolResultReferenceRequest, CapabilityDisplayPreviewEnvelope, ContextMessage,
+    ContextMessages, ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest,
+    LatestThreadMessageRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
+    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
+    MessageStatus, ProviderToolCallReferenceEnvelope, RedactMessageRequest,
+    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
+    SessionThreadService, SummaryArtifact, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
+    ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
+    UpdateToolResultReferenceRequest,
 };
 
 /// Bound on the CAS retry loop. Mirrors the run-state / authorization
@@ -237,6 +240,31 @@ where
         }
         messages.sort_by_key(|message| message.sequence);
         Ok(messages)
+    }
+
+    async fn find_capability_display_preview_message(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        turn_run_id: &str,
+        invocation_id: InvocationId,
+    ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        let messages = self.list_thread_messages(scope, thread_id).await?;
+        for message in messages {
+            if message.kind != MessageKind::CapabilityDisplayPreview
+                || message.status != MessageStatus::Finalized
+                || message.turn_run_id.as_deref() != Some(turn_run_id)
+            {
+                continue;
+            }
+            if CapabilityDisplayPreviewEnvelope::invocation_id_from_json(message.content.as_deref())
+                .map_err(SessionThreadError::Serialization)?
+                == Some(invocation_id)
+            {
+                return Ok(Some(message));
+            }
+        }
+        Ok(None)
     }
 
     async fn list_thread_summaries(
@@ -833,6 +861,78 @@ where
                 "filesystem CAS Absent rejected new tool result reference at {}",
                 path.as_str()
             ))),
+            Err(PutError::Other(error)) => Err(error),
+        }
+    }
+
+    async fn append_capability_display_preview(
+        &self,
+        request: AppendCapabilityDisplayPreviewRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        request
+            .preview
+            .validate()
+            .map_err(SessionThreadError::Serialization)?;
+        let existing = self
+            .find_capability_display_preview_message(
+                &request.scope,
+                &request.thread_id,
+                &request.turn_run_id,
+                request.preview.invocation_id,
+            )
+            .await?;
+        if let Some(existing) = existing {
+            return Ok(existing);
+        }
+        let message_id = capability_display_preview_message_id(
+            &request.scope,
+            &request.thread_id,
+            &request.turn_run_id,
+            request.preview.invocation_id,
+        )?;
+        let content = serde_json::to_string(&request.preview)
+            .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
+        let sequence = self
+            .reserve_sequence(&request.scope, &request.thread_id)
+            .await?;
+        let message = ThreadMessageRecord {
+            message_id,
+            thread_id: request.thread_id.clone(),
+            sequence,
+            kind: MessageKind::CapabilityDisplayPreview,
+            status: MessageStatus::Finalized,
+            actor_id: None,
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            turn_id: None,
+            turn_run_id: Some(request.turn_run_id),
+            tool_result_ref: request.preview.result_ref.clone(),
+            tool_result_provider_call: None,
+            content: Some(content),
+            redaction_ref: None,
+        };
+        let path = message_record_path(&request.scope, &request.thread_id, message.message_id)?;
+        let entry = Self::message_entry(&message)?;
+        match put_with_cas(
+            self.filesystem.as_ref(),
+            &request.scope.to_resource_scope(),
+            &path,
+            entry,
+            CasExpectation::Absent,
+        )
+        .await
+        {
+            Ok(()) => Ok(message),
+            Err(PutError::VersionMismatch) => self
+                .read_message_versioned(&request.scope, &request.thread_id, message_id)
+                .await?
+                .map(|(existing, _)| existing)
+                .ok_or_else(|| {
+                    SessionThreadError::Backend(format!(
+                        "filesystem CAS Absent rejected new capability display preview at {} but no existing message could be read",
+                        path.as_str()
+                    ))
+                }),
             Err(PutError::Other(error)) => Err(error),
         }
     }
@@ -1472,6 +1572,38 @@ fn is_model_visible(status: MessageStatus) -> bool {
     )
 }
 
+fn is_model_context_visible(message: &ThreadMessageRecord) -> bool {
+    is_model_visible(message.status) && message.kind != MessageKind::CapabilityDisplayPreview
+}
+
+fn capability_display_preview_message_id(
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+    turn_run_id: &str,
+    invocation_id: InvocationId,
+) -> Result<ThreadMessageId, SessionThreadError> {
+    #[derive(Serialize)]
+    struct PreviewMessageKey<'a> {
+        scope: &'a ThreadScope,
+        thread_id: &'a ThreadId,
+        turn_run_id: &'a str,
+        invocation_id: InvocationId,
+    }
+    let key = serde_json::to_vec(&PreviewMessageKey {
+        scope,
+        thread_id,
+        turn_run_id,
+        invocation_id,
+    })
+    .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
+    let digest = Sha256::digest(&key);
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Ok(ThreadMessageId::from_uuid(Uuid::from_bytes(bytes)))
+}
+
 fn matches_tool_result_reference(
     message: &ThreadMessageRecord,
     turn_run_id: &str,
@@ -1501,7 +1633,7 @@ fn context_messages_with_summary_replacements(
     let mut context = Vec::new();
     for message in messages
         .iter()
-        .filter(|message| is_model_visible(message.status))
+        .filter(|message| is_model_context_visible(message))
     {
         if message.sequence <= skip_through {
             continue;
@@ -1543,7 +1675,7 @@ fn context_messages_by_id(
 ) -> Vec<ContextMessage> {
     let visible_messages: std::collections::HashMap<_, _> = messages
         .iter()
-        .filter(|message| is_model_visible(message.status))
+        .filter(|message| is_model_context_visible(message))
         .map(|message| (message.message_id, message))
         .collect();
     message_ids
@@ -1611,7 +1743,7 @@ fn summary_covers_hidden_content(
     messages.iter().any(|message| {
         summary.start_sequence <= message.sequence
             && message.sequence <= summary.end_sequence
-            && !is_model_visible(message.status)
+            && !is_model_context_visible(message)
     })
 }
 

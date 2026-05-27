@@ -36,12 +36,12 @@ pub type MountViewResolver =
 /// [`ScopedFilesystem`] is the *single* per-process FS handle; tenant
 /// isolation comes from the resolver, not from a per-tenant store cache.
 #[derive(Clone)]
-pub struct ScopedFilesystem<F> {
+pub struct ScopedFilesystem<F: ?Sized> {
     root: Arc<F>,
     resolver: Arc<MountViewResolver>,
 }
 
-impl<F> std::fmt::Debug for ScopedFilesystem<F> {
+impl<F: ?Sized> std::fmt::Debug for ScopedFilesystem<F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ScopedFilesystem")
             .field("root", &"<RootFilesystem>")
@@ -52,7 +52,7 @@ impl<F> std::fmt::Debug for ScopedFilesystem<F> {
 
 impl<F> ScopedFilesystem<F>
 where
-    F: RootFilesystem,
+    F: RootFilesystem + ?Sized,
 {
     /// Construct a scope-aware filesystem. `resolver` is invoked on every op
     /// to produce the [`MountView`] that authorizes that op.
@@ -243,6 +243,17 @@ where
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::ListDir)?;
         self.root.list_dir(&virtual_path).await
+    }
+
+    pub async fn list_dir_bounded(
+        &self,
+        scope: &ResourceScope,
+        path: &ScopedPath,
+        max_entries: usize,
+    ) -> Result<Vec<DirEntry>, FilesystemError> {
+        let virtual_path =
+            self.resolve_with_permission(scope, path, FilesystemOperation::ListDir)?;
+        self.root.list_dir_bounded(&virtual_path, max_entries).await
     }
 
     pub async fn stat(

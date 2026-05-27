@@ -118,6 +118,45 @@ mod tests {
     }
 
     #[test]
+    fn scope_key_covers_agent_project_and_invocation_fallbacks() {
+        let root = Path::new("/tmp/reborn-sandbox");
+        let with_agent = scope("tenant", "user", Some("project"), None);
+        let mut without_agent = with_agent.clone();
+        without_agent.agent_id = None;
+        assert_ne!(
+            RebornSandboxScopeKey::from_scope(&with_agent).workspace_path(root),
+            RebornSandboxScopeKey::from_scope(&without_agent).workspace_path(root)
+        );
+
+        let project_preferred_a = scope("tenant", "user", Some("project"), Some("thread-a"));
+        let mut project_preferred_b = project_preferred_a.clone();
+        project_preferred_b.thread_id = Some(ThreadId::new("thread-b").unwrap());
+        project_preferred_b.invocation_id = InvocationId::new();
+        assert_eq!(
+            RebornSandboxScopeKey::from_scope(&project_preferred_a),
+            RebornSandboxScopeKey::from_scope(&project_preferred_b)
+        );
+
+        let mut thread_a = project_preferred_a.clone();
+        let mut thread_b = project_preferred_b.clone();
+        thread_a.project_id = None;
+        thread_b.project_id = None;
+        assert_ne!(
+            RebornSandboxScopeKey::from_scope(&thread_a),
+            RebornSandboxScopeKey::from_scope(&thread_b)
+        );
+
+        let mut invocation_a = scope("tenant", "user", None, None);
+        let mut invocation_b = invocation_a.clone();
+        invocation_a.invocation_id = InvocationId::new();
+        invocation_b.invocation_id = InvocationId::new();
+        assert_ne!(
+            RebornSandboxScopeKey::from_scope(&invocation_a),
+            RebornSandboxScopeKey::from_scope(&invocation_b)
+        );
+    }
+
+    #[test]
     fn scope_key_does_not_collapse_path_special_characters() {
         let root = Path::new("/tmp/reborn-sandbox");
         let left = RebornSandboxScopeKey::from_scope(&scope("tenant:a", "user", Some("p"), None));

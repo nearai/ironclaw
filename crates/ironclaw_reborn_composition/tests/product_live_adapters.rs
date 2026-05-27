@@ -775,6 +775,11 @@ async fn local_dev_adapter_exposes_skill_install_provider_tool_schema_requires_s
     let io = Arc::new(ProductLiveCapabilityIo::default());
     let capability_id = capability_id(SKILL_INSTALL_CAPABILITY_ID);
     let user_id = UserId::new("user-provider-skill-install").unwrap();
+    let skill_install_effects = vec![
+        EffectKind::ReadFilesystem,
+        EffectKind::WriteFilesystem,
+        EffectKind::Network,
+    ];
     let adapters = ProductLivePlannedRuntimeAdapters::from_services(
         &services,
         ProductLivePlannedRuntimeAdapterConfig {
@@ -786,15 +791,16 @@ async fn local_dev_adapter_exposes_skill_install_provider_tool_schema_requires_s
                     SurfaceKind::new("agent_loop").unwrap(),
                     CapabilitySurfacePolicy::allow_all(),
                 )
-                .with_grants(grants_for_principal_with_effects(
+                .with_grants(grants_for_principal_with_effects_and_network(
                     Principal::User(user_id),
                     [SKILL_INSTALL_CAPABILITY_ID],
-                    vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
+                    skill_install_effects.clone(),
+                    local_dev_network_policy(),
                 ))
                 .with_provider_trust_for_effects(
                     ExtensionId::new("builtin").unwrap(),
                     EffectiveTrustClass::user_trusted(),
-                    vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
+                    skill_install_effects,
                 ),
             ),
             capability_input_resolver: io.clone(),
@@ -832,13 +838,26 @@ async fn local_dev_adapter_exposes_skill_install_provider_tool_schema_requires_s
         Some(&serde_json::json!("string")),
         "skill_install content input should be advertised as a string"
     );
+    assert_eq!(
+        properties.get("url").and_then(|schema| schema.get("type")),
+        Some(&serde_json::json!("string")),
+        "skill_install URL input should be advertised as a string"
+    );
     assert!(
         tool_definition
             .parameters
-            .get("required")
+            .get("oneOf")
             .and_then(serde_json::Value::as_array)
-            .is_some_and(|required| required.iter().any(|field| field == "content")),
-        "skill_install content input should be required"
+            .is_some_and(|branches| branches.len() == 2
+                && branches.iter().any(|branch| branch
+                    .get("required")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|required| required.iter().any(|field| field == "content")))
+                && branches.iter().any(|branch| branch
+                    .get("required")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|required| required.iter().any(|field| field == "url")))),
+        "skill_install should require either content or url"
     );
 }
 
@@ -1213,6 +1232,7 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(
             adapters.capability_input_resolver,
         )),
+        subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
         loop_exit_evidence: Arc::new(ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
             thread_service,
             turn_state_for_evidence,
@@ -1228,6 +1248,7 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
         model_policy_guard: Some(adapters.model_policy_guard),
         model_budget_accountant: Some(adapters.model_budget_accountant),
         safety_context: Some(adapters.safety_context),
+        turn_event_sink: None,
     })
     .expect("adapter bundle should satisfy the product-live readiness gate");
 
@@ -1499,6 +1520,29 @@ fn grants_for_principal_with_effects_and_mounts<const N: usize>(
     }
 }
 
+fn grants_for_principal_with_effects_and_network<const N: usize>(
+    grantee: Principal,
+    capabilities: [&str; N],
+    allowed_effects: Vec<EffectKind>,
+    network: NetworkPolicy,
+) -> CapabilitySet {
+    CapabilitySet {
+        grants: capabilities
+            .into_iter()
+            .map(|capability| {
+                let mut grant = grant_for_principal_with_effects(
+                    grantee.clone(),
+                    capability,
+                    allowed_effects.clone(),
+                    MountView::default(),
+                );
+                grant.constraints.network = network.clone();
+                grant
+            })
+            .collect(),
+    }
+}
+
 fn grant_for_principal_with_effects(
     grantee: Principal,
     capability: &str,
@@ -1519,6 +1563,18 @@ fn grant_for_principal_with_effects(
             expires_at: None,
             max_invocations: None,
         },
+    }
+}
+
+fn local_dev_network_policy() -> NetworkPolicy {
+    NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: None,
+            host_pattern: "*".to_string(),
+            port: None,
+        }],
+        deny_private_ip_ranges: true,
+        max_egress_bytes: None,
     }
 }
 

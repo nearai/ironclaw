@@ -10,23 +10,23 @@
 #![warn(unreachable_pub)]
 
 mod anthropic_oauth;
+pub mod auth;
 #[cfg(feature = "bedrock")]
 mod bedrock;
 pub mod circuit_breaker;
-pub mod codex_auth;
+pub(crate) mod codex_auth;
 mod codex_chatgpt;
 pub mod config;
 pub mod costs;
 pub mod error;
 pub mod failover;
-pub mod gemini_oauth;
+pub(crate) mod gemini_oauth;
 mod github_copilot;
-pub mod github_copilot_auth;
+pub(crate) mod github_copilot_auth;
 pub mod host;
 pub mod nearai_chat;
-pub mod oauth_helpers;
 pub mod openai_codex_provider;
-pub mod openai_codex_session;
+pub(crate) mod openai_codex_session;
 mod provider;
 mod reasoning;
 pub mod recording;
@@ -57,9 +57,9 @@ pub use config::{
     BedrockConfig, CacheRetention, GeminiOauthConfig, LlmBackendKind, LlmConfig, NearAiConfig,
     OAUTH_PLACEHOLDER, OpenAiCodexConfig, RegistryProviderConfig,
 };
-pub use error::LlmError;
+pub use error::{LlmConfigError, LlmError};
 pub use failover::{CooldownConfig, FailoverProvider};
-pub use gemini_oauth::GeminiOauthProvider;
+pub(crate) use gemini_oauth::GeminiOauthProvider;
 pub use host::{
     NoopKeyPersistor, NoopSessionRenewer, SessionDb, SessionKeyPersistor, SessionRenewer,
     SessionSecrets, SharedSessionDb, SharedSessionKeyPersistor, SharedSessionRenewer,
@@ -67,7 +67,7 @@ pub use host::{
 };
 pub use nearai_chat::{DEFAULT_MODEL, ModelInfo, NearAiChatProvider, default_models};
 pub use openai_codex_provider::OpenAiCodexProvider;
-pub use openai_codex_session::{OpenAiCodexSession, OpenAiCodexSessionManager};
+pub(crate) use openai_codex_session::OpenAiCodexSessionManager;
 pub use provider::sanitize_tool_messages;
 pub use provider::{
     ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, ImageUrl,
@@ -421,6 +421,22 @@ fn create_registry_provider_inner(
             );
             Ok(Arc::new(provider))
         }
+        // Protocols with a dedicated config slot on `LlmConfig` are
+        // dispatched in `create_llm_provider` before this function is
+        // reached. They never carry a `RegistryProviderConfig`, so this
+        // arm is only reachable as an internal logic bug.
+        ProviderProtocol::Bedrock
+        | ProviderProtocol::OpenAiCodex
+        | ProviderProtocol::GeminiOauth
+        | ProviderProtocol::NearAi => Err(LlmError::RequestFailed {
+            provider: config.provider_id.clone(),
+            reason: format!(
+                "Provider '{}' uses a dedicated config slot on LlmConfig and \
+                 must be dispatched in create_llm_provider, not via \
+                 RegistryProviderConfig.",
+                config.provider_id
+            ),
+        }),
     }
 }
 

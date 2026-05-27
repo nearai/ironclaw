@@ -603,6 +603,7 @@ pub(super) fn reply_response() -> LoopModelResponse {
         chunks: vec![ModelStreamChunk {
             safe_text_delta: "hello".to_string(),
         }],
+        safe_reasoning_deltas: Vec::new(),
         output: ParentLoopOutput::AssistantReply(ironclaw_turns::run_profile::AssistantReply {
             content: "hello".to_string(),
         }),
@@ -613,6 +614,7 @@ pub(super) fn reply_response() -> LoopModelResponse {
 pub(super) fn calls_response() -> LoopModelResponse {
     LoopModelResponse {
         chunks: Vec::new(),
+        safe_reasoning_deltas: Vec::new(),
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
             surface_version: surface_version(),
             capability_id: capability_id(),
@@ -627,6 +629,7 @@ pub(super) fn calls_response() -> LoopModelResponse {
 pub(super) fn two_calls_response() -> LoopModelResponse {
     LoopModelResponse {
         chunks: Vec::new(),
+        safe_reasoning_deltas: Vec::new(),
         output: ParentLoopOutput::CapabilityCalls(vec![
             CapabilityCallCandidate {
                 surface_version: surface_version(),
@@ -650,6 +653,7 @@ pub(super) fn two_calls_response() -> LoopModelResponse {
 pub(super) fn provider_calls_response() -> LoopModelResponse {
     LoopModelResponse {
         chunks: Vec::new(),
+        safe_reasoning_deltas: Vec::new(),
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
             surface_version: surface_version(),
             capability_id: capability_id(),
@@ -674,6 +678,7 @@ pub(super) fn provider_calls_response() -> LoopModelResponse {
 pub(super) fn provider_two_calls_response() -> LoopModelResponse {
     LoopModelResponse {
         chunks: Vec::new(),
+        safe_reasoning_deltas: Vec::new(),
         output: ParentLoopOutput::CapabilityCalls(vec![
             CapabilityCallCandidate {
                 surface_version: surface_version(),
@@ -717,6 +722,7 @@ pub(super) fn provider_two_calls_response() -> LoopModelResponse {
 pub(super) fn stale_surface_calls_response() -> LoopModelResponse {
     LoopModelResponse {
         chunks: Vec::new(),
+        safe_reasoning_deltas: Vec::new(),
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
             surface_version: stale_surface_version(),
             capability_id: capability_id(),
@@ -731,6 +737,7 @@ pub(super) fn stale_surface_calls_response() -> LoopModelResponse {
 pub(super) fn mixed_surface_calls_response() -> LoopModelResponse {
     LoopModelResponse {
         chunks: Vec::new(),
+        safe_reasoning_deltas: Vec::new(),
         output: ParentLoopOutput::CapabilityCalls(vec![
             CapabilityCallCandidate {
                 surface_version: stale_surface_version(),

@@ -6,11 +6,13 @@
 
 use std::sync::Arc;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{MountView, ResourceScope, RuntimeDispatchErrorKind};
 use ironclaw_skills::{
-    SkillInstallRequest, SkillManagementContext, SkillManagementError, SkillManagementErrorKind,
-    SkillRemoveRequest, SkillSummary, install_skill, list_skills, remove_skill,
+    InstalledSkillMetadataSource, SkillInstallFile, SkillInstallRequest, SkillInstallSource,
+    SkillManagementContext, SkillManagementError, SkillManagementErrorKind, SkillRemoveRequest,
+    SkillSummary, install_skill, list_skills, remove_skill,
 };
 use serde_json::{Value, json};
 
@@ -64,6 +66,12 @@ impl SkillManagementCapabilityError {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedInstallFile {
+    path: String,
+    contents: Vec<u8>,
+}
+
 #[tracing::instrument(
     level = "debug",
     skip(request),
@@ -106,6 +114,10 @@ async fn dispatch_list(
 async fn dispatch_install(
     request: &SkillManagementCapabilityRequest<'_>,
 ) -> Result<Value, SkillManagementCapabilityError> {
+    if request.input.get("url").is_some() {
+        tracing::debug!("skill management install received unresolved url input");
+        return Err(input_error());
+    }
     let content = request
         .input
         .get("content")
@@ -114,14 +126,34 @@ async fn dispatch_install(
             tracing::debug!("skill management install missing string content input");
             input_error()
         })?;
+    let parsed_files = parse_install_files(request.input)?;
+    let files = parsed_files
+        .iter()
+        .map(|file| SkillInstallFile {
+            relative_path: file.path.as_str(),
+            contents: file.contents.as_slice(),
+        })
+        .collect::<Vec<_>>();
     let name = request.input.get("name").and_then(Value::as_str);
+    let source = parse_install_source(request.input)?;
+    let source_url = request.input.get("source_url").and_then(Value::as_str);
     let context = management_context(request)?;
-    let installed = install_skill(&context, SkillInstallRequest { name, content })
-        .await
-        .map_err(capability_error)?;
+    let installed = install_skill(
+        &context,
+        SkillInstallRequest {
+            name,
+            content,
+            files: &files,
+            source,
+            source_url,
+        },
+    )
+    .await
+    .map_err(capability_error)?;
     tracing::debug!(
         skill_name = %installed.name,
         scoped_path = %installed.scoped_path,
+        bundle_file_count = files.len(),
         "skill management install completed"
     );
 
@@ -129,6 +161,8 @@ async fn dispatch_install(
         "installed": true,
         "name": installed.name,
         "path": installed.scoped_path,
+        "source": installed.source.as_str(),
+        "files_installed": files.len(),
     }))
 }
 
@@ -195,6 +229,51 @@ fn input_error() -> SkillManagementCapabilityError {
     SkillManagementCapabilityError::new(RuntimeDispatchErrorKind::InputEncode)
 }
 
+fn parse_install_files(
+    input: &Value,
+) -> Result<Vec<ParsedInstallFile>, SkillManagementCapabilityError> {
+    let Some(files) = input.get("files") else {
+        return Ok(Vec::new());
+    };
+    let files = files.as_array().ok_or_else(input_error)?;
+    let mut parsed = Vec::with_capacity(files.len());
+    for file in files {
+        let path = file
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or_else(input_error)?
+            .to_string();
+        let contents = if let Some(encoded) = file.get("bytes_base64") {
+            let encoded = encoded.as_str().ok_or_else(input_error)?;
+            BASE64_STANDARD.decode(encoded).map_err(|_| input_error())?
+        } else {
+            file.get("bytes")
+                .and_then(Value::as_array)
+                .ok_or_else(input_error)?
+                .iter()
+                .map(|value| {
+                    let byte = value.as_u64().ok_or_else(input_error)?;
+                    u8::try_from(byte).map_err(|_| input_error())
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        parsed.push(ParsedInstallFile { path, contents });
+    }
+    Ok(parsed)
+}
+
+fn parse_install_source(
+    input: &Value,
+) -> Result<SkillInstallSource, SkillManagementCapabilityError> {
+    match input.get("source").and_then(Value::as_str) {
+        None => Ok(SkillInstallSource::User),
+        Some(value) if value == InstalledSkillMetadataSource::InstalledUrl.as_str() => {
+            Ok(SkillInstallSource::InstalledUrl)
+        }
+        Some(_) => Err(input_error()),
+    }
+}
+
 fn capability_error(error: SkillManagementError) -> SkillManagementCapabilityError {
     let skill_error_kind = error.kind();
     let kind = match error.kind() {
@@ -211,4 +290,35 @@ fn capability_error(error: SkillManagementError) -> SkillManagementCapabilityErr
         "skill management error mapped to runtime dispatch error"
     );
     SkillManagementCapabilityError::new(kind)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use ironclaw_filesystem::InMemoryBackend;
+    use ironclaw_host_api::{InvocationId, MountView, ResourceScope, UserId};
+    use serde_json::json;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn install_rejects_unresolved_url_input() {
+        let scope =
+            ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
+                .unwrap();
+        let mounts = MountView::default();
+        let input = json!({"url": "https://example.test/SKILL.md"});
+        let request = SkillManagementCapabilityRequest::new(
+            SkillManagementCapabilityKind::Install,
+            &scope,
+            Some(&mounts),
+            Arc::new(InMemoryBackend::new()),
+            &input,
+        );
+
+        let error = dispatch(&request).await.unwrap_err();
+
+        assert_eq!(error.kind(), RuntimeDispatchErrorKind::InputEncode);
+    }
 }
