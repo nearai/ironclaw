@@ -44,13 +44,15 @@ pub use identity::{AdapterInstallationId, ProductAdapterId, ProductSurfaceKind};
 pub use inbound::{
     ApprovalDecision, ApprovalResolutionPayload, AuthResolutionPayload, AuthResolutionResult,
     InboundCommandPayload, InboundRetryDisposition, LinkedThreadActionPayload,
-    ParsedProductInbound, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
-    ProductRejection, ProductRejectionDisposition, ProductRejectionKind,
+    ParsedProductInbound, ProductCommandResultPayload, ProductInboundAck, ProductInboundEnvelope,
+    ProductInboundPayload, ProductRejection, ProductRejectionDisposition, ProductRejectionKind,
     ProductSlashCommandParseError, ProductTriggerReason, ProjectionSubscriptionPayload,
     TrustedInboundContext, UserMessagePayload, parse_product_slash_command,
 };
 pub use outbound::{
-    AuthPromptView, CapabilityActivityStatusView, CapabilityActivityView,
+    AuthPromptView, CAPABILITY_DISPLAY_KIND_MAX_BYTES, CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES,
+    CAPABILITY_DISPLAY_PREVIEW_MAX_LINES, CAPABILITY_DISPLAY_RESULT_REF_MAX_BYTES,
+    CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES, CapabilityActivityStatusView, CapabilityActivityView,
     CapabilityActivityViewInput, CapabilityDisplayPreviewView, CapabilityDisplayPreviewViewInput,
     FinalReplyView, GatePromptView, ProductOutboundEnvelope, ProductOutboundPayload,
     ProductOutboundTarget, ProductProjectionItem, ProductProjectionState, ProductRenderOutcome,

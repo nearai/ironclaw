@@ -18,11 +18,19 @@
 //! import `TurnCoordinator`, `SessionThreadService`, `HostManagedModel
 //! Gateway`, etc.
 
+use std::sync::Arc;
+
 mod auth;
+mod available_extensions;
+mod default_system_prompt;
 mod error;
+mod extension_installation_store;
+mod extension_lifecycle;
+mod extension_lifecycle_command;
 mod factory;
 mod gsuite;
 mod input;
+mod lifecycle;
 #[cfg(feature = "root-llm-provider")]
 mod llm_catalog;
 mod local_dev_mounts;
@@ -35,6 +43,7 @@ mod projection;
 mod readiness;
 mod runtime;
 mod runtime_input;
+mod skill_listing;
 mod webui;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_body_limit;
@@ -48,14 +57,28 @@ mod webui_serve;
 mod webui_ws_origin;
 
 pub use auth::{
-    RebornAuthContinuationDispatcher, RebornCredentialLifecycleError, RebornOAuthCallbackError,
+    RebornAuthContinuationDispatcher, RebornAuthProductError, RebornCredentialLifecycleError,
+    RebornManualTokenChallenge, RebornManualTokenError, RebornManualTokenSetupRequest,
+    RebornManualTokenSubmitRequest, RebornManualTokenSubmitResponse, RebornOAuthCallbackError,
     RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest, RebornOAuthCallbackResponse,
     RebornProductAuthServicePorts, RebornProductAuthServices,
 };
 pub use error::RebornBuildError;
+pub use extension_lifecycle_command::{
+    RebornExtensionLifecycleCommand, RebornExtensionLifecycleCommandError,
+    execute_reborn_extension_lifecycle_command, render_reborn_extension_lifecycle_response,
+};
 pub use factory::{RebornServices, build_reborn_services};
 pub use gsuite::{bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers};
 pub use input::{RebornBuildInput, RebornRuntimeProcessBinding};
+pub use ironclaw_product_workflow::{
+    LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePhase, LifecycleProductPayload,
+    LifecycleProductResponse,
+};
+pub use ironclaw_skills::{
+    ManagedSkillSource as RebornSkillSource, SkillSummary as RebornSkillSummary,
+    skill_summary_json as reborn_skill_summary_json,
+};
 #[cfg(feature = "root-llm-provider")]
 pub use llm_catalog::{
     RebornLlmCatalogError, resolve_against_registry, resolve_llm_selection_against_catalog,
@@ -81,12 +104,13 @@ pub use runtime::{
     RebornSkillActivationMode, RebornSkillAsset, RebornSkillBundle, RebornSkillExecutionPlan,
     RebornSkillExecutionResult, RebornSkillSourceKind, build_reborn_runtime,
 };
+#[cfg(feature = "root-llm-provider")]
+pub use runtime_input::ResolvedRebornLlm;
 pub use runtime_input::{
     DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL, DEFAULT_TURN_RUNNER_POLL_INTERVAL, PollSettings,
     RebornRuntimeIdentity, RebornRuntimeInput, TurnRunnerSettings,
 };
-#[cfg(feature = "root-llm-provider")]
-pub use runtime_input::{RebornLlmConfig, ResolvedRebornLlm};
+pub use skill_listing::{RebornSkillListError, list_reborn_local_skills};
 pub use webui::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]
 pub use webui_rate_limit::RateLimitConfigError;
@@ -120,6 +144,7 @@ pub fn reborn_model_slot_names() -> Vec<&'static str> {
 pub struct RebornRuntimeReadinessSnapshot {
     pub text_only_driver: RebornRuntimeComponentStatus,
     pub planned_driver: RebornRuntimeComponentStatus,
+    pub subagent_planned_driver: RebornRuntimeComponentStatus,
     pub planned_default_profile: RebornRuntimeComponentStatus,
 }
 
@@ -158,9 +183,19 @@ pub fn reborn_runtime_readiness_snapshot() -> RebornRuntimeReadinessSnapshot {
             ironclaw_reborn::text_loop_driver::TextOnlyModelReplyDriverConfig::default(),
         ),
     );
-    let planned_driver = match ironclaw_reborn::app_loop_family::build_loop_family_registry() {
+    let family_registry = ironclaw_reborn::app_loop_family::build_loop_family_registry();
+    let planned_driver = match &family_registry {
         Ok(family_registry) => RebornRuntimeComponentStatus::from_result(
             ironclaw_reborn::planned_driver_factory::register_default_planned_driver(
+                &mut registry,
+                Arc::clone(family_registry),
+            ),
+        ),
+        Err(error) => RebornRuntimeComponentStatus::Failed(error.to_string()),
+    };
+    let subagent_planned_driver = match family_registry {
+        Ok(family_registry) => RebornRuntimeComponentStatus::from_result(
+            ironclaw_reborn::planned_driver_factory::register_subagent_planned_driver(
                 &mut registry,
                 family_registry,
             ),
@@ -173,12 +208,10 @@ pub fn reborn_runtime_readiness_snapshot() -> RebornRuntimeReadinessSnapshot {
     RebornRuntimeReadinessSnapshot {
         text_only_driver,
         planned_driver,
+        subagent_planned_driver,
         planned_default_profile,
     }
 }
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use std::sync::Arc;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use async_trait::async_trait;
@@ -261,6 +294,7 @@ const PER_USER_ALIASES: &[&str] = &[
     "/resources",
     "/engine",
     "/skills",
+    "/workspace",
 ];
 
 /// Per-invocation [`MountView`] used as the production resolver.
@@ -465,9 +499,10 @@ where
     // `Missing(SecretStore)` wiring report if the host-runtime builder API
     // regresses; treat that as infallible here.
     let services = services
-        .try_with_host_http_egress(PolicyNetworkHttpEgress::new(
-            ReqwestNetworkTransport::default(),
-        ))
+        .try_with_host_http_egress_with_body_store(
+            PolicyNetworkHttpEgress::new(ReqwestNetworkTransport::default()),
+            Arc::clone(&scoped_filesystem),
+        )
         .expect("secret_store wired above guarantees host HTTP egress is buildable"); // safety: see comment above
 
     Ok(services)
@@ -534,9 +569,10 @@ where
     // `Missing(SecretStore)` wiring report if the host-runtime builder API
     // regresses; treat that as infallible here.
     let services = services
-        .try_with_host_http_egress(PolicyNetworkHttpEgress::new(
-            ReqwestNetworkTransport::default(),
-        ))
+        .try_with_host_http_egress_with_body_store(
+            PolicyNetworkHttpEgress::new(ReqwestNetworkTransport::default()),
+            Arc::clone(&scoped_filesystem),
+        )
         .expect("secret_store wired above guarantees host HTTP egress is buildable"); // safety: see comment above
 
     Ok(services)

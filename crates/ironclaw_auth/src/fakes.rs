@@ -3,25 +3,26 @@ use std::sync::{Mutex, MutexGuard};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_host_api::SecretHandle;
+use ironclaw_host_api::{ExtensionId, SecretHandle};
 
 use crate::{
     AuthChallenge, AuthContinuationEvent, AuthFlowId, AuthFlowManager, AuthFlowRecord,
     AuthFlowStatus, AuthInteractionId, AuthInteractionService, AuthProductError,
     AuthProviderClient, CredentialAccount, CredentialAccountChoiceRequest, CredentialAccountId,
-    CredentialAccountListPage, CredentialAccountListRequest, CredentialAccountMutation,
-    CredentialAccountProjection, CredentialAccountSelectionRequest, CredentialAccountService,
-    CredentialAccountStatus, CredentialOwnership, CredentialRecoveryKind,
-    CredentialRecoveryProjection, CredentialRecoveryReason, CredentialRecoveryRequest,
-    CredentialRefreshReport, CredentialRefreshRequest, CredentialSetupService,
-    ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount, OAuthCallbackClaimRequest,
-    OAuthCallbackFailureInput, OAuthCallbackInput, OAuthProviderCallbackRequest,
-    OAuthProviderExchange, OAuthProviderRefresh, OAuthProviderRefreshRequest,
-    ProviderCallbackOutcome, SecretCleanupAction, SecretCleanupQuarantine,
-    SecretCleanupQuarantineReason, SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
-    SecretSubmitRequest, SecretSubmitResult, cleanup::SecretCleanupAction::Deactivate,
-    flow::credential_status_for_completed_flow, interaction::PendingSecretInteraction,
-    provider::validate_provider_callback_request, scope_matches,
+    CredentialAccountListPage, CredentialAccountListRequest, CredentialAccountLookupRequest,
+    CredentialAccountMutation, CredentialAccountProjection, CredentialAccountSelectionRequest,
+    CredentialAccountService, CredentialAccountStatus, CredentialAccountUpdateBinding,
+    CredentialOwnership, CredentialRecoveryKind, CredentialRecoveryProjection,
+    CredentialRecoveryReason, CredentialRecoveryRequest, CredentialRefreshReport,
+    CredentialRefreshRequest, CredentialSetupService, ManualTokenSetupRequest, NewAuthFlow,
+    NewCredentialAccount, OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
+    OAuthProviderCallbackRequest, OAuthProviderExchange, OAuthProviderRefresh,
+    OAuthProviderRefreshRequest, ProviderCallbackOutcome, SecretCleanupAction,
+    SecretCleanupQuarantine, SecretCleanupQuarantineReason, SecretCleanupReport,
+    SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest, SecretSubmitResult,
+    cleanup::SecretCleanupAction::Deactivate, flow::credential_status_for_completed_flow,
+    interaction::PendingSecretInteraction, provider::validate_provider_callback_request,
+    scope_matches,
 };
 
 #[derive(Default)]
@@ -30,9 +31,9 @@ struct AuthState {
     interactions: HashMap<AuthInteractionId, PendingSecretInteraction>,
     accounts: HashMap<CredentialAccountId, CredentialAccount>,
     continuations: Vec<AuthContinuationEvent>,
-    refresh_failures: HashSet<CredentialAccountId>,
-    refresh_race_completions: HashMap<CredentialAccountId, (SecretHandle, SecretHandle)>,
-    cleanup_quarantines: HashMap<CredentialAccountId, SecretCleanupQuarantineReason>,
+    refresh_fails: HashSet<CredentialAccountId>,
+    refresh_races: HashMap<CredentialAccountId, (SecretHandle, SecretHandle)>,
+    quarantines: HashMap<CredentialAccountId, SecretCleanupQuarantineReason>,
 }
 
 /// In-memory fake implementation of all product-auth service ports.
@@ -55,7 +56,7 @@ impl InMemoryAuthProductServices {
     }
 
     pub fn fail_next_refresh_for_tests(&self, account_id: CredentialAccountId) {
-        self.lock_state().refresh_failures.insert(account_id);
+        self.lock_state().refresh_fails.insert(account_id);
     }
 
     pub fn complete_refresh_during_next_provider_call_for_tests(
@@ -65,7 +66,7 @@ impl InMemoryAuthProductServices {
         refresh_secret: SecretHandle,
     ) {
         self.lock_state()
-            .refresh_race_completions
+            .refresh_races
             .insert(account_id, (access_secret, refresh_secret));
     }
 
@@ -74,9 +75,7 @@ impl InMemoryAuthProductServices {
         account_id: CredentialAccountId,
         reason: SecretCleanupQuarantineReason,
     ) {
-        self.lock_state()
-            .cleanup_quarantines
-            .insert(account_id, reason);
+        self.lock_state().quarantines.insert(account_id, reason);
     }
 
     fn lock_state(&self) -> MutexGuard<'_, AuthState> {
@@ -301,14 +300,16 @@ impl CredentialAccountService for InMemoryAuthProductServices {
 
     async fn get_account(
         &self,
-        scope: &crate::AuthProductScope,
-        account_id: CredentialAccountId,
+        request: CredentialAccountLookupRequest,
     ) -> Result<Option<CredentialAccount>, AuthProductError> {
         let state = self.lock_state();
-        let Some(account) = state.accounts.get(&account_id) else {
+        let Some(account) = state.accounts.get(&request.account_id) else {
             return Ok(None);
         };
-        if !scope_matches(scope, &account.scope) {
+        if !scope_matches(&request.scope, &account.scope) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if !account_is_authorized_for_requester(account, request.requester_extension.as_ref()) {
             return Err(AuthProductError::CrossScopeDenied);
         }
         Ok(Some(account.clone()))
@@ -327,6 +328,10 @@ impl CredentialAccountService for InMemoryAuthProductServices {
                 scope_matches(&request.scope, &account.scope)
                     && account.provider == request.provider
                     && request.cursor.is_none_or(|cursor| account.id > cursor)
+                    && account_is_authorized_for_requester(
+                        account,
+                        request.requester_extension.as_ref(),
+                    )
             })
             .map(CredentialAccount::projection)
             .collect::<Vec<_>>();
@@ -429,7 +434,7 @@ impl CredentialAccountService for InMemoryAuthProductServices {
         if authorized.is_empty() {
             return Ok(CredentialRecoveryProjection::setup_required(
                 request.provider,
-                CredentialRecoveryReason::NoAuthorizedAccount,
+                CredentialRecoveryReason::NoAccount,
                 Vec::new(),
             ));
         }
@@ -458,19 +463,16 @@ impl CredentialAccountService for InMemoryAuthProductServices {
             [] => {}
         }
 
-        if authorized.len() > 1 {
-            return Ok(CredentialRecoveryProjection::account_selection_required(
+        if let [account] = authorized.as_slice() {
+            return Ok(recovery_projection_for_single_account(
                 request.provider,
-                authorized
-                    .iter()
-                    .map(|account| account.projection())
-                    .collect(),
+                account,
             ));
         }
 
-        Ok(recovery_projection_for_single_account(
+        Ok(recovery_projection_for_unconfigured_accounts(
             request.provider,
-            authorized[0],
+            &authorized,
         ))
     }
 
@@ -613,13 +615,22 @@ impl AuthInteractionService for InMemoryAuthProductServices {
         request: ManualTokenSetupRequest,
     ) -> Result<AuthChallenge, AuthProductError> {
         let interaction_id = AuthInteractionId::new();
-        self.lock_state().interactions.insert(
+        let mut state = self.lock_state();
+        if let Some(binding) = &request.update_binding {
+            let account = state
+                .accounts
+                .get(&binding.account_id)
+                .ok_or(AuthProductError::CredentialMissing)?;
+            validate_manual_token_update_binding(account, &request, binding)?;
+        }
+        state.interactions.insert(
             interaction_id,
             PendingSecretInteraction {
                 scope: request.scope,
                 provider: request.provider.clone(),
                 label: request.label.clone(),
                 continuation: request.continuation,
+                update_binding: request.update_binding,
                 expires_at: request.expires_at,
             },
         );
@@ -654,25 +665,12 @@ impl AuthInteractionService for InMemoryAuthProductServices {
             .interactions
             .remove(&request.interaction_id)
             .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
-        let account = create_account_in_state(
-            &mut state,
-            NewCredentialAccount {
-                scope: pending.scope,
-                provider: pending.provider,
-                label: pending.label,
-                status: credential_status_for_completed_flow(),
-                ownership: CredentialOwnership::UserReusable,
-                owner_extension: None,
-                granted_extensions: Vec::new(),
-                access_secret: Some(generated_secret_handle("manual-access")?),
-                refresh_secret: None,
-                scopes: Vec::new(),
-            },
-        )?;
+        let continuation = pending.continuation.clone();
+        let account = create_or_update_manual_token_account(&mut state, pending)?;
         Ok(SecretSubmitResult {
             account_id: account.id,
             status: account.status,
-            continuation: pending.continuation,
+            continuation,
         })
     }
 }
@@ -702,9 +700,9 @@ impl AuthProviderClient for InMemoryAuthProductServices {
     ) -> Result<OAuthProviderRefresh, AuthProductError> {
         let should_fail = {
             let mut state = self.lock_state();
-            let should_fail = state.refresh_failures.remove(&request.account_id);
+            let should_fail = state.refresh_fails.remove(&request.account_id);
             if let Some((access_secret, refresh_secret)) =
-                state.refresh_race_completions.remove(&request.account_id)
+                state.refresh_races.remove(&request.account_id)
                 && let Some(account) = state.accounts.get_mut(&request.account_id)
             {
                 account.access_secret = Some(access_secret);
@@ -733,7 +731,7 @@ impl SecretCleanupService for InMemoryAuthProductServices {
         request: SecretCleanupRequest,
     ) -> Result<SecretCleanupReport, AuthProductError> {
         let mut state = self.lock_state();
-        let quarantines = state.cleanup_quarantines.clone();
+        let quarantines = state.quarantines.clone();
         let mut report = SecretCleanupReport::default();
         for account in state.accounts.values_mut() {
             if !scope_matches(&request.scope, &account.scope) {
@@ -935,6 +933,58 @@ fn update_account_from_request(
     Ok(account.clone())
 }
 
+fn create_or_update_manual_token_account(
+    state: &mut AuthState,
+    pending: PendingSecretInteraction,
+) -> Result<CredentialAccount, AuthProductError> {
+    match pending.update_binding.as_ref() {
+        Some(binding) => {
+            let account_request = manual_token_account_request(
+                &pending,
+                binding.ownership,
+                binding.owner_extension.clone(),
+                binding.granted_extensions.clone(),
+            )?;
+            let now = Utc::now();
+            let account = state
+                .accounts
+                .get_mut(&binding.account_id)
+                .ok_or(AuthProductError::CredentialMissing)?;
+            validate_account_update_target(account, &account_request)?;
+            update_account_from_request(account, account_request, now)
+        }
+        None => create_account_in_state(
+            state,
+            manual_token_account_request(
+                &pending,
+                CredentialOwnership::UserReusable,
+                None,
+                Vec::new(),
+            )?,
+        ),
+    }
+}
+
+fn manual_token_account_request(
+    pending: &PendingSecretInteraction,
+    ownership: CredentialOwnership,
+    owner_extension: Option<ExtensionId>,
+    granted_extensions: Vec<ExtensionId>,
+) -> Result<NewCredentialAccount, AuthProductError> {
+    Ok(NewCredentialAccount {
+        scope: pending.scope.clone(),
+        provider: pending.provider.clone(),
+        label: pending.label.clone(),
+        status: credential_status_for_completed_flow(),
+        ownership,
+        owner_extension,
+        granted_extensions,
+        access_secret: Some(generated_secret_handle("manual-access")?),
+        refresh_secret: None,
+        scopes: Vec::new(),
+    })
+}
+
 fn update_account_from_exchange(
     account: &mut CredentialAccount,
     exchange: &OAuthProviderExchange,
@@ -960,30 +1010,68 @@ fn validate_account_update_target(
             "credential account update target provider mismatch",
         ));
     }
-    if account.ownership != request.ownership
-        || account.owner_extension != request.owner_extension
-        || account.granted_extensions != request.granted_extensions
-    {
-        return Err(AuthProductError::CrossScopeDenied);
-    }
-    Ok(())
+    validate_update_authority_fields(
+        account,
+        request.ownership,
+        request.owner_extension.as_ref(),
+        &request.granted_extensions,
+    )
 }
 
 fn validate_flow_update_binding(
     account: &CredentialAccount,
     request: &NewAuthFlow,
 ) -> Result<(), AuthProductError> {
-    if !scope_matches(&request.scope, &account.scope) {
-        return Err(AuthProductError::CrossScopeDenied);
-    }
-    if account.provider != request.provider {
-        return Err(AuthProductError::invalid_request(
-            "auth flow update target provider mismatch",
-        ));
-    }
     let Some(binding) = request.update_binding.as_ref() else {
         return Ok(());
     };
+    validate_scoped_update_binding(
+        account,
+        &request.scope,
+        &request.provider,
+        binding,
+        UpdateBindingValidationContext::AuthFlow,
+    )
+}
+
+fn validate_manual_token_update_binding(
+    account: &CredentialAccount,
+    request: &ManualTokenSetupRequest,
+    binding: &CredentialAccountUpdateBinding,
+) -> Result<(), AuthProductError> {
+    validate_scoped_update_binding(
+        account,
+        &request.scope,
+        &request.provider,
+        binding,
+        UpdateBindingValidationContext::ManualToken,
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+enum UpdateBindingValidationContext {
+    AuthFlow,
+    ManualToken,
+}
+
+fn validate_scoped_update_binding(
+    account: &CredentialAccount,
+    scope: &crate::AuthProductScope,
+    provider: &crate::AuthProviderId,
+    binding: &CredentialAccountUpdateBinding,
+    context: UpdateBindingValidationContext,
+) -> Result<(), AuthProductError> {
+    if !scope_matches(scope, &account.scope) {
+        return Err(AuthProductError::CrossScopeDenied);
+    }
+    if &account.provider != provider {
+        return Err(AuthProductError::invalid_request(match context {
+            UpdateBindingValidationContext::AuthFlow => "auth flow update target provider mismatch",
+            UpdateBindingValidationContext::ManualToken => {
+                "manual token update target provider mismatch"
+            }
+        }));
+    }
     validate_bound_update_authority(account, binding)
 }
 
@@ -991,9 +1079,23 @@ fn validate_bound_update_authority(
     account: &CredentialAccount,
     binding: &crate::CredentialAccountUpdateBinding,
 ) -> Result<(), AuthProductError> {
-    if account.ownership != binding.ownership
-        || account.owner_extension != binding.owner_extension
-        || account.granted_extensions != binding.granted_extensions
+    validate_update_authority_fields(
+        account,
+        binding.ownership,
+        binding.owner_extension.as_ref(),
+        &binding.granted_extensions,
+    )
+}
+
+fn validate_update_authority_fields(
+    account: &CredentialAccount,
+    ownership: CredentialOwnership,
+    owner_extension: Option<&ExtensionId>,
+    granted_extensions: &[ExtensionId],
+) -> Result<(), AuthProductError> {
+    if account.ownership != ownership
+        || account.owner_extension.as_ref() != owner_extension
+        || account.granted_extensions.as_slice() != granted_extensions
     {
         return Err(AuthProductError::CrossScopeDenied);
     }
@@ -1004,7 +1106,61 @@ fn recovery_projection_for_single_account(
     provider: crate::AuthProviderId,
     account: &CredentialAccount,
 ) -> CredentialRecoveryProjection {
-    let (kind, reason) = match account.status {
+    let (kind, reason) = recovery_kind_and_reason_for_status(account.status);
+    match kind {
+        CredentialRecoveryKind::Configured => {
+            CredentialRecoveryProjection::configured(provider, account.projection())
+        }
+        CredentialRecoveryKind::SetupRequired => CredentialRecoveryProjection::setup_required(
+            provider,
+            reason,
+            vec![account.projection()],
+        ),
+        CredentialRecoveryKind::ReauthorizeRequired => {
+            CredentialRecoveryProjection::reauthorize_required(
+                provider,
+                reason,
+                vec![account.projection()],
+            )
+        }
+        CredentialRecoveryKind::AccountSelectionRequired => {
+            unreachable!("single account recovery cannot produce account selection required")
+        }
+    }
+}
+
+fn recovery_projection_for_unconfigured_accounts(
+    provider: crate::AuthProviderId,
+    accounts: &[&CredentialAccount],
+) -> CredentialRecoveryProjection {
+    let setup_reason = accounts
+        .iter()
+        .map(|account| recovery_kind_and_reason_for_status(account.status))
+        .find_map(|(kind, reason)| {
+            (kind == CredentialRecoveryKind::SetupRequired).then_some(reason)
+        });
+    let reason = setup_reason.unwrap_or_else(|| {
+        accounts
+            .iter()
+            .map(|account| recovery_kind_and_reason_for_status(account.status).1)
+            .next()
+            .unwrap_or(CredentialRecoveryReason::NoAccount)
+    });
+    let choices = accounts
+        .iter()
+        .map(|account| account.projection())
+        .collect::<Vec<_>>();
+    if setup_reason.is_some() {
+        CredentialRecoveryProjection::setup_required(provider, reason, choices)
+    } else {
+        CredentialRecoveryProjection::reauthorize_required(provider, reason, choices)
+    }
+}
+
+fn recovery_kind_and_reason_for_status(
+    status: CredentialAccountStatus,
+) -> (CredentialRecoveryKind, CredentialRecoveryReason) {
+    match status {
         CredentialAccountStatus::Configured => (
             CredentialRecoveryKind::Configured,
             CredentialRecoveryReason::Configured,
@@ -1033,26 +1189,6 @@ fn recovery_projection_for_single_account(
             CredentialRecoveryKind::ReauthorizeRequired,
             CredentialRecoveryReason::AccountRevoked,
         ),
-    };
-    match kind {
-        CredentialRecoveryKind::Configured => {
-            CredentialRecoveryProjection::configured(provider, account.projection())
-        }
-        CredentialRecoveryKind::SetupRequired => CredentialRecoveryProjection::setup_required(
-            provider,
-            reason,
-            vec![account.projection()],
-        ),
-        CredentialRecoveryKind::ReauthorizeRequired => {
-            CredentialRecoveryProjection::reauthorize_required(
-                provider,
-                reason,
-                vec![account.projection()],
-            )
-        }
-        CredentialRecoveryKind::AccountSelectionRequired => {
-            unreachable!("single account recovery cannot produce account selection required")
-        }
     }
 }
 

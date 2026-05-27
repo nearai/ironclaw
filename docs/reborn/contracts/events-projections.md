@@ -109,6 +109,9 @@ Reducer rules:
 - product-facing capability activity projections expose only metadata-safe
   lifecycle facts; raw tool arguments, raw output, command strings, host paths,
   and provider payloads stay outside the projection contract
+- product-facing model reasoning projections must use model-visible-sanitized
+  reasoning deltas only. They are live UI hints, not canonical transcript,
+  checkpoint, audit, or replay state.
 - transport adapters may bound activity fan-out per projection item; bounded
   snapshots must prefer the most recently updated activity facts and keep
   reconnect cursors resumable

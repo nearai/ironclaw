@@ -134,7 +134,10 @@ async fn credential_account_update_status_updates_owner_record_and_rejects_missi
     assert_eq!(cross_scope, AuthProductError::CrossScopeDenied);
 
     let still_owner = services
-        .get_account(&owner, account.id)
+        .get_account(CredentialAccountLookupRequest::new(
+            owner.clone(),
+            account.id,
+        ))
         .await
         .expect("lookup")
         .expect("owner account");
@@ -201,6 +204,127 @@ async fn credential_account_list_is_explicitly_paginated() {
         .await
         .expect_err("oversized limit rejected");
     assert_eq!(too_large.code(), AuthErrorCode::InvalidRequest);
+}
+
+#[tokio::test]
+async fn credential_account_list_filters_by_requester_authority() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice-list-authz");
+    let github_extension = ExtensionId::new("github-extension").unwrap();
+    let other_extension = ExtensionId::new("other-extension").unwrap();
+    let reusable = services
+        .create_account(account_request(
+            owner.clone(),
+            "reusable",
+            CredentialAccountStatus::Configured,
+        ))
+        .await
+        .expect("reusable account");
+    let extension_owned = services
+        .create_account(NewCredentialAccount {
+            scope: owner.clone(),
+            provider: provider(),
+            label: label("extension owned"),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::ExtensionOwned,
+            owner_extension: Some(github_extension.clone()),
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("github-extension-owned").unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .expect("extension-owned account");
+    let shared = services
+        .create_account(NewCredentialAccount {
+            scope: owner.clone(),
+            provider: provider(),
+            label: label("shared"),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::SharedAdminManaged,
+            owner_extension: None,
+            granted_extensions: vec![github_extension.clone()],
+            access_secret: Some(SecretHandle::new("github-shared").unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .expect("shared account");
+
+    let unscoped = services
+        .list_accounts(CredentialAccountListRequest::new(owner.clone(), provider()).with_limit(10))
+        .await
+        .expect("unscoped list");
+    assert_eq!(account_ids(&unscoped.accounts), vec![reusable.id]);
+
+    let wrong_extension = services
+        .list_accounts(
+            CredentialAccountListRequest::new(owner.clone(), provider())
+                .for_extension(other_extension)
+                .with_limit(10),
+        )
+        .await
+        .expect("wrong extension list");
+    assert_eq!(account_ids(&wrong_extension.accounts), vec![reusable.id]);
+
+    let owning_extension = services
+        .list_accounts(
+            CredentialAccountListRequest::new(owner, provider())
+                .for_extension(github_extension)
+                .with_limit(10),
+        )
+        .await
+        .expect("owning extension list");
+    let ids = account_ids(&owning_extension.accounts);
+    assert!(ids.contains(&reusable.id));
+    assert!(ids.contains(&extension_owned.id));
+    assert!(ids.contains(&shared.id));
+    assert_eq!(ids.len(), 3);
+}
+
+#[tokio::test]
+async fn credential_account_lookup_filters_by_requester_authority() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice-lookup-authz");
+    let github_extension = ExtensionId::new("github-extension").unwrap();
+    let other_extension = ExtensionId::new("other-extension").unwrap();
+    let extension_owned = services
+        .create_account(NewCredentialAccount {
+            scope: owner.clone(),
+            provider: provider(),
+            label: label("extension owned"),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::ExtensionOwned,
+            owner_extension: Some(github_extension.clone()),
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("github-extension-owned").unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .expect("extension-owned account");
+
+    for request in [
+        CredentialAccountLookupRequest::new(owner.clone(), extension_owned.id),
+        CredentialAccountLookupRequest::new(owner.clone(), extension_owned.id)
+            .for_extension(other_extension),
+    ] {
+        let denied = services
+            .get_account(request)
+            .await
+            .expect_err("unauthorized lookup is rejected");
+        assert_eq!(denied, AuthProductError::CrossScopeDenied);
+    }
+
+    let selected = services
+        .get_account(
+            CredentialAccountLookupRequest::new(owner, extension_owned.id)
+                .for_extension(github_extension),
+        )
+        .await
+        .expect("lookup")
+        .expect("authorized account");
+    assert_eq!(selected.id, extension_owned.id);
 }
 
 #[tokio::test]
@@ -597,6 +721,105 @@ async fn credential_recovery_projection_returns_redacted_authorized_choices() {
 }
 
 #[tokio::test]
+async fn credential_recovery_projection_does_not_offer_unselectable_nonconfigured_choices() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice-nonconfigured");
+    for name in ["missing work", "missing personal"] {
+        services
+            .create_account(account_request(
+                owner.clone(),
+                name,
+                CredentialAccountStatus::Missing,
+            ))
+            .await
+            .expect("missing account");
+    }
+
+    let setup = services
+        .project_credential_recovery(CredentialRecoveryRequest::new(owner.clone(), provider()))
+        .await
+        .expect("missing recovery projection");
+    assert_eq!(setup.kind(), CredentialRecoveryKind::SetupRequired);
+    assert_eq!(setup.reason, CredentialRecoveryReason::AccountMissing);
+    assert_eq!(setup.choices().len(), 2);
+    assert!(setup.selected_account().is_none());
+
+    let reauth_services = InMemoryAuthProductServices::new();
+    let reauth_owner = scope("alice-reauthorize");
+    for name in ["expired work", "expired personal"] {
+        reauth_services
+            .create_account(account_request(
+                reauth_owner.clone(),
+                name,
+                CredentialAccountStatus::Expired,
+            ))
+            .await
+            .expect("expired account");
+    }
+
+    let reauthorize = reauth_services
+        .project_credential_recovery(CredentialRecoveryRequest::new(reauth_owner, provider()))
+        .await
+        .expect("expired recovery projection");
+    assert_eq!(
+        reauthorize.kind(),
+        CredentialRecoveryKind::ReauthorizeRequired
+    );
+    assert_eq!(reauthorize.reason, CredentialRecoveryReason::AccountExpired);
+    assert_eq!(reauthorize.choices().len(), 2);
+    assert!(reauthorize.selected_account().is_none());
+}
+
+#[tokio::test]
+async fn extension_owned_credential_recovery_filters_by_owner_extension() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice-extension-recovery");
+    let github_extension = ExtensionId::new("github-extension").unwrap();
+    let other_extension = ExtensionId::new("other-extension").unwrap();
+    let extension_owned = services
+        .create_account(NewCredentialAccount {
+            scope: owner.clone(),
+            provider: provider(),
+            label: label("extension owned"),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::ExtensionOwned,
+            owner_extension: Some(github_extension.clone()),
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("github-extension-owned").unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .expect("extension-owned account");
+
+    for request in [
+        CredentialRecoveryRequest::new(owner.clone(), provider()),
+        CredentialRecoveryRequest::new(owner.clone(), provider()).for_extension(other_extension),
+    ] {
+        let projection = services
+            .project_credential_recovery(request)
+            .await
+            .expect("recovery projection");
+        assert_eq!(projection.kind(), CredentialRecoveryKind::SetupRequired);
+        assert_eq!(projection.reason, CredentialRecoveryReason::NoAccount);
+        assert!(projection.choices().is_empty());
+        assert!(projection.selected_account().is_none());
+    }
+
+    let selected = services
+        .project_credential_recovery(
+            CredentialRecoveryRequest::new(owner, provider()).for_extension(github_extension),
+        )
+        .await
+        .expect("owning extension recovery projection");
+    assert_eq!(selected.kind(), CredentialRecoveryKind::Configured);
+    assert_eq!(
+        selected.selected_account().map(|account| account.id),
+        Some(extension_owned.id)
+    );
+}
+
+#[tokio::test]
 async fn shared_admin_managed_credentials_require_explicit_grants() {
     let services = InMemoryAuthProductServices::new();
     let owner = scope("alice");
@@ -628,10 +851,7 @@ async fn shared_admin_managed_credentials_require_explicit_grants() {
             .await
             .expect("recovery projection");
         assert_eq!(projection.kind(), CredentialRecoveryKind::SetupRequired);
-        assert_eq!(
-            projection.reason,
-            CredentialRecoveryReason::NoAuthorizedAccount
-        );
+        assert_eq!(projection.reason, CredentialRecoveryReason::NoAccount);
         assert!(projection.choices().is_empty());
         assert!(projection.selected_account().is_none());
     }

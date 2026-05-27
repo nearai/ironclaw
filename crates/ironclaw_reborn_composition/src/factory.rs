@@ -6,14 +6,17 @@ use std::{
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_authorization::FilesystemCapabilityLeaseStore;
 use ironclaw_authorization::GrantAuthorizer;
+#[cfg(not(feature = "libsql"))]
+use ironclaw_authorization::InMemoryCapabilityLeaseStore;
 #[cfg(feature = "libsql")]
 use ironclaw_events::{DurableAuditLog, DurableEventLog};
 #[cfg(not(feature = "libsql"))]
 use ironclaw_events::{
     DurableAuditLog, DurableEventLog, InMemoryDurableAuditLog, InMemoryDurableEventLog,
 };
-use ironclaw_extensions::ExtensionRegistry;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_extensions::{
+    ExtensionInstallationStore, ExtensionLifecycleService, ExtensionRegistry,
+};
 use ironclaw_filesystem::RootFilesystem;
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::{
@@ -25,7 +28,7 @@ use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
 use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
 use ironclaw_host_api::runtime_policy::FilesystemBackendKind;
 use ironclaw_host_api::{
-    EffectKind, HostPath, MountPermissions, MountView, PackageId, VirtualPath,
+    EffectKind, HostPath, MountPermissions, MountView, PackageId, UserId, VirtualPath,
 };
 #[cfg(feature = "libsql")]
 use ironclaw_host_api::{MountAlias, MountGrant};
@@ -62,12 +65,19 @@ use ironclaw_turns::{
     InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore, InMemoryTurnStateStore,
 };
 
+use crate::default_system_prompt::seed_default_system_prompt;
 use crate::input::{RebornRuntimeProcessBinding, RebornStorageInput};
+use crate::lifecycle::{RebornLocalSkillManagementPort, build_local_skill_management_port};
 use crate::local_dev_mounts::{skill_context_mount_view, workspace_mount_view};
 use crate::{
     RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
     RebornFacadeReadiness, RebornProductAuthServicePorts, RebornProductAuthServices,
     RebornReadiness, RebornReadinessState,
+};
+use crate::{
+    available_extensions::AvailableExtensionCatalog,
+    extension_installation_store::FilesystemExtensionInstallationStore,
+    extension_lifecycle::{RebornLocalExtensionManagementPort, restore_extension_lifecycle_state},
 };
 
 #[cfg(feature = "libsql")]
@@ -80,6 +90,8 @@ type LocalDevWorkspaceFilesystems = (
     Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     MountView,
 );
+
+const LOCAL_DEV_DEFAULT_SYSTEM_PROMPT_PATH: &str = "system/prompts/default-system.md";
 
 #[cfg(feature = "libsql")]
 pub(crate) type LocalDevTurnStateStore = FilesystemTurnStateStore<LocalDevRootFilesystem>;
@@ -98,9 +110,16 @@ type LocalDevRunStateStore = FilesystemRunStateStore<LocalDevRootFilesystem>;
 type LocalDevRunStateStore = InMemoryRunStateStore;
 
 #[cfg(feature = "libsql")]
-type LocalDevApprovalRequestStore = FilesystemApprovalRequestStore<LocalDevRootFilesystem>;
+pub(crate) type LocalDevApprovalRequestStore =
+    FilesystemApprovalRequestStore<LocalDevRootFilesystem>;
 #[cfg(not(feature = "libsql"))]
-type LocalDevApprovalRequestStore = InMemoryApprovalRequestStore;
+pub(crate) type LocalDevApprovalRequestStore = InMemoryApprovalRequestStore;
+
+#[cfg(feature = "libsql")]
+pub(crate) type LocalDevCapabilityLeaseStore =
+    FilesystemCapabilityLeaseStore<LocalDevRootFilesystem>;
+#[cfg(not(feature = "libsql"))]
+pub(crate) type LocalDevCapabilityLeaseStore = InMemoryCapabilityLeaseStore;
 
 #[cfg(feature = "libsql")]
 type LocalDevProcessServices = ProcessServices<
@@ -159,15 +178,25 @@ pub struct RebornServices {
 }
 
 pub(crate) struct RebornLocalRuntimeServices {
+    pub(crate) approval_requests: Arc<LocalDevApprovalRequestStore>,
+    pub(crate) capability_leases: Arc<LocalDevCapabilityLeaseStore>,
     pub(crate) turn_state: Arc<LocalDevTurnStateStore>,
     pub(crate) checkpoint_state_store: Arc<dyn CheckpointStateStore>,
     pub(crate) loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
+    pub(crate) skill_management: Arc<RebornLocalSkillManagementPort>,
+    // LocalSingleUser-only for now. Production and multi-tenant lifecycle
+    // wiring need scoped storage/registry ownership before this is reused
+    // outside local-dev composition. Tracked in #4091.
+    pub(crate) extension_management: Option<Arc<RebornLocalExtensionManagementPort>>,
+    pub(crate) skill_mounts: MountView,
     pub(crate) skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     pub(crate) workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     pub(crate) subagent_goal_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     pub(crate) workspace_mounts: MountView,
+    pub(crate) local_dev_storage_root: PathBuf,
+    pub(crate) default_system_prompt_path: PathBuf,
     pub(crate) event_log: Arc<dyn DurableEventLog>,
     pub(crate) audit_log: Arc<dyn DurableAuditLog>,
 }
@@ -175,12 +204,11 @@ pub(crate) struct RebornLocalRuntimeServices {
 struct RebornLocalDevStoreGraph {
     run_state: Arc<LocalDevRunStateStore>,
     approval_requests: Arc<LocalDevApprovalRequestStore>,
+    capability_leases: Arc<LocalDevCapabilityLeaseStore>,
     turn_state: Arc<LocalDevTurnStateStore>,
     local_runtime: Arc<RebornLocalRuntimeServices>,
     resource_governor: Arc<LocalDevResourceGovernor>,
     process_services: LocalDevProcessServices,
-    #[cfg(feature = "libsql")]
-    capability_leases: Arc<FilesystemCapabilityLeaseStore<LocalDevRootFilesystem>>,
 }
 
 impl std::fmt::Debug for RebornServices {
@@ -263,6 +291,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         runtime_policy,
         runtime_process_binding,
         product_auth_ports,
+        owner_id,
         ..
     } = input;
     let RebornStorageInput::LocalDev {
@@ -277,6 +306,11 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     };
     std::fs::create_dir_all(&root).map_err(|_| RebornBuildError::InvalidConfig {
         reason: "local-dev storage root could not be initialized".to_string(),
+    })?;
+    std::fs::create_dir_all(root.join("system/extensions")).map_err(|_| {
+        RebornBuildError::InvalidConfig {
+            reason: "local-dev system extensions root could not be initialized".to_string(),
+        }
     })?;
     let workspace_root = workspace_root.unwrap_or_else(|| root.join("workspace"));
     std::fs::create_dir_all(&workspace_root).map_err(|_| RebornBuildError::InvalidConfig {
@@ -308,20 +342,36 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         (false, None) => None,
     };
     validate_local_dev_workspace_skill_isolation(&root, &workspace_root)?;
+    let default_system_prompt_path = local_dev_default_system_prompt_path(&root);
+    seed_default_system_prompt(&root, &default_system_prompt_path).map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: error.to_string(),
+        }
+    })?;
     let filesystem =
         build_local_dev_root_filesystem(&root, &workspace_root, host_home_root.as_ref()).await?;
     let (skill_filesystem, workspace_filesystem, runtime_workspace_mounts) =
         build_workspace_filesystems(Arc::clone(&filesystem), host_home_root.as_ref())?;
-    let store_graph = build_local_dev_store_graph(
+    let http_body_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
         Arc::clone(&filesystem),
+        runtime_workspace_mounts.clone(),
+    ));
+    let owner_user_id = UserId::new(owner_id).map_err(|error| RebornBuildError::InvalidConfig {
+        reason: error.to_string(),
+    })?;
+    let mut store_graph = build_local_dev_store_graph(
+        Arc::clone(&filesystem),
+        owner_user_id,
         skill_filesystem,
         workspace_filesystem,
         runtime_workspace_mounts,
+        root.clone(),
+        default_system_prompt_path,
     )?;
 
     let mut services = HostRuntimeServices::new(
         Arc::new(builtin_extension_registry()?),
-        filesystem,
+        Arc::clone(&filesystem),
         Arc::clone(&store_graph.resource_governor),
         Arc::new(GrantAuthorizer::new()),
         store_graph.process_services.clone(),
@@ -330,20 +380,71 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     .with_first_party_capabilities(Arc::new(builtin_first_party_registry()?))
     .with_trust_policy(Arc::new(local_dev_first_party_trust_policy()?))
     .with_secret_store(Arc::new(ironclaw_secrets::InMemorySecretStore::new()))
-    .try_with_host_http_egress(ironclaw_network::PolicyNetworkHttpEgress::new(
-        ironclaw_network::ReqwestNetworkTransport::default(),
-    ))?
+    .try_with_host_http_egress_with_body_store(
+        ironclaw_network::PolicyNetworkHttpEgress::new(
+            ironclaw_network::ReqwestNetworkTransport::default(),
+        ),
+        http_body_filesystem,
+    )?
     .with_run_state(Arc::clone(&store_graph.run_state))
     .with_approval_requests(Arc::clone(&store_graph.approval_requests))
+    .with_capability_leases(Arc::clone(&store_graph.capability_leases))
     .with_turn_state_and_transition_port(Arc::clone(&store_graph.turn_state));
-    #[cfg(feature = "libsql")]
-    {
-        services = services.with_capability_leases(Arc::clone(&store_graph.capability_leases));
-    }
     if let Some(runtime_policy) = runtime_policy {
         services = services.with_runtime_policy(runtime_policy);
     }
     services = apply_runtime_process_binding(services, runtime_process_binding);
+    let mut available_extensions = AvailableExtensionCatalog::from_filesystem_root(
+        filesystem.as_ref(),
+        &VirtualPath::new("/system/extensions")?,
+    )
+    .await
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("available extension catalog could not be loaded: {error}"),
+    })?;
+    available_extensions.extend(
+        AvailableExtensionCatalog::from_first_party_assets().map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: format!("first-party extension catalog could not be loaded: {error}"),
+            }
+        })?,
+    );
+    let extension_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
+    let extension_installation_store: Arc<dyn ExtensionInstallationStore> = Arc::new(
+        FilesystemExtensionInstallationStore::load(extension_filesystem.clone())
+            .await
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("extension installation state could not be loaded: {error}"),
+            })?,
+    );
+    let extension_lifecycle_service = Arc::new(tokio::sync::Mutex::new(
+        ExtensionLifecycleService::new(services.shared_extension_registry().snapshot_owned()),
+    ));
+    let active_registry = services.shared_extension_registry();
+    restore_extension_lifecycle_state(
+        &available_extensions,
+        &extension_installation_store,
+        &extension_lifecycle_service,
+        &active_registry,
+    )
+    .await
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("extension lifecycle state could not be restored: {error}"),
+    })?;
+    let extension_management = Arc::new(RebornLocalExtensionManagementPort::new(
+        extension_filesystem,
+        available_extensions,
+        extension_installation_store,
+        extension_lifecycle_service,
+        active_registry,
+    ));
+    if let Some(local_runtime) = Arc::get_mut(&mut store_graph.local_runtime) {
+        local_runtime.extension_management = Some(extension_management);
+    } else {
+        return Err(RebornBuildError::InvalidConfig {
+            reason: "local-dev extension lifecycle facade could not be attached".to_string(),
+        });
+    }
 
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
         Arc::new(services.host_runtime_for_local_testing());
@@ -372,15 +473,21 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
 #[cfg(feature = "libsql")]
 fn build_local_dev_store_graph(
     filesystem: Arc<LocalDevRootFilesystem>,
+    owner_user_id: UserId,
     skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     workspace_mounts: MountView,
+    local_dev_storage_root: PathBuf,
+    default_system_prompt_path: PathBuf,
 ) -> Result<RebornLocalDevStoreGraph, RebornBuildError> {
     let scoped_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
     let event_log = local_dev_event_log(Arc::clone(&filesystem))?;
-    let audit_log = local_dev_audit_log(filesystem)?;
+    let audit_log = local_dev_audit_log(Arc::clone(&filesystem))?;
     let run_state = Arc::new(FilesystemRunStateStore::new(Arc::clone(&scoped_filesystem)));
     let approval_requests = Arc::new(FilesystemApprovalRequestStore::new(Arc::clone(
+        &scoped_filesystem,
+    )));
+    let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
         &scoped_filesystem,
     )));
     let turn_state = Arc::new(FilesystemTurnStateStore::new(Arc::clone(
@@ -393,15 +500,27 @@ fn build_local_dev_store_graph(
     let thread_service: Arc<dyn SessionThreadService> = Arc::new(
         FilesystemSessionThreadService::new(Arc::clone(&scoped_filesystem)),
     );
+    let skill_mounts =
+        skill_context_mount_view().map_err(|error| RebornBuildError::InvalidConfig {
+            reason: error.to_string(),
+        })?;
+    let skill_management = build_local_skill_management_port(owner_user_id, filesystem)?;
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
+        approval_requests: Arc::clone(&approval_requests),
+        capability_leases: Arc::clone(&capability_leases),
         turn_state: Arc::clone(&turn_state),
         checkpoint_state_store,
         loop_checkpoint_store,
         thread_service,
+        skill_management,
+        extension_management: None,
+        skill_mounts,
         skill_filesystem,
         workspace_filesystem,
         subagent_goal_filesystem: Arc::clone(&scoped_filesystem),
         workspace_mounts,
+        local_dev_storage_root,
+        default_system_prompt_path,
         event_log,
         audit_log,
     });
@@ -410,32 +529,35 @@ fn build_local_dev_store_graph(
             FilesystemResourceGovernorStore::new(Arc::clone(&scoped_filesystem)),
         ));
     let process_services = ProcessServices::filesystem(Arc::clone(&scoped_filesystem));
-    let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(scoped_filesystem));
 
     Ok(RebornLocalDevStoreGraph {
         run_state,
         approval_requests,
+        capability_leases,
         turn_state,
         local_runtime,
         resource_governor,
         process_services,
-        capability_leases,
     })
 }
 
 #[cfg(not(feature = "libsql"))]
 fn build_local_dev_store_graph(
     filesystem: Arc<LocalDevRootFilesystem>,
+    owner_user_id: UserId,
     skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     workspace_mounts: MountView,
+    local_dev_storage_root: PathBuf,
+    default_system_prompt_path: PathBuf,
 ) -> Result<RebornLocalDevStoreGraph, RebornBuildError> {
     #[cfg(feature = "postgres")]
     let subagent_goal_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
     let event_log = local_dev_event_log(Arc::clone(&filesystem))?;
-    let audit_log = local_dev_audit_log(filesystem)?;
+    let audit_log = local_dev_audit_log(Arc::clone(&filesystem))?;
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
     let turn_state = Arc::new(InMemoryTurnStateStore::default());
     let checkpoint_state_store: Arc<dyn CheckpointStateStore> =
         Arc::new(InMemoryCheckpointStateStore::default());
@@ -443,16 +565,28 @@ fn build_local_dev_store_graph(
         Arc::new(InMemoryLoopCheckpointStore::default());
     let thread_service: Arc<dyn SessionThreadService> =
         Arc::new(InMemorySessionThreadService::default());
+    let skill_mounts =
+        skill_context_mount_view().map_err(|error| RebornBuildError::InvalidConfig {
+            reason: error.to_string(),
+        })?;
+    let skill_management = build_local_skill_management_port(owner_user_id, filesystem)?;
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
+        approval_requests: Arc::clone(&approval_requests),
+        capability_leases: Arc::clone(&capability_leases),
         turn_state: Arc::clone(&turn_state),
         checkpoint_state_store,
         loop_checkpoint_store,
         thread_service,
+        skill_management,
+        extension_management: None,
+        skill_mounts,
         skill_filesystem,
         workspace_filesystem,
         #[cfg(feature = "postgres")]
         subagent_goal_filesystem,
         workspace_mounts,
+        local_dev_storage_root,
+        default_system_prompt_path,
         event_log,
         audit_log,
     });
@@ -463,6 +597,7 @@ fn build_local_dev_store_graph(
     Ok(RebornLocalDevStoreGraph {
         run_state,
         approval_requests,
+        capability_leases,
         turn_state,
         local_runtime,
         resource_governor,
@@ -528,7 +663,19 @@ async fn build_local_dev_root_filesystem(
             IndexPolicy::NotIndexed,
             local_dev_bytes_capabilities(),
         )?,
-        local,
+        Arc::clone(&local),
+    )?;
+    root.mount(
+        local_dev_mount_descriptor(
+            "/system/extensions",
+            "local-dev-system-extensions",
+            BackendKind::LocalFilesystem,
+            StorageClass::FileContent,
+            ContentKind::ExtensionPackage,
+            IndexPolicy::NotIndexed,
+            local_dev_bytes_capabilities(),
+        )?,
+        Arc::clone(&local),
     )?;
     Ok(Arc::new(root))
 }
@@ -559,6 +706,10 @@ fn local_dev_project_filesystem(
     filesystem.mount_local(
         VirtualPath::new("/projects/workspace")?,
         HostPath::from_path_buf(workspace_root.to_path_buf()),
+    )?;
+    filesystem.mount_local(
+        VirtualPath::new("/system/extensions")?,
+        HostPath::from_path_buf(root.join("system/extensions")),
     )?;
     if let Some(host_home_root) = host_home_root {
         filesystem.mount_local(
@@ -750,6 +901,7 @@ fn validate_local_dev_workspace_skill_isolation(
             storage_root.join("tenant-shared/skills"),
         ),
         ("/system/skills", storage_root.join("system/skills")),
+        ("/system/extensions", storage_root.join("system/extensions")),
     ] {
         if paths_overlap(workspace_root, &skill_root) {
             return Err(RebornBuildError::InvalidConfig {
@@ -760,6 +912,10 @@ fn validate_local_dev_workspace_skill_isolation(
         }
     }
     Ok(())
+}
+
+fn local_dev_default_system_prompt_path(storage_root: &Path) -> PathBuf {
+    storage_root.join(LOCAL_DEV_DEFAULT_SYSTEM_PROMPT_PATH)
 }
 
 fn paths_overlap(left: &Path, right: &Path) -> bool {
@@ -1048,9 +1204,12 @@ where
     .with_first_party_capabilities(Arc::new(builtin_first_party_registry()?))
     .with_capability_leases(stores.leases)
     .with_secret_store(stores.secret_store)
-    .try_with_host_http_egress(ironclaw_network::PolicyNetworkHttpEgress::new(
-        ironclaw_network::ReqwestNetworkTransport::default(),
-    ))?
+    .try_with_host_http_egress_with_body_store(
+        ironclaw_network::PolicyNetworkHttpEgress::new(
+            ironclaw_network::ReqwestNetworkTransport::default(),
+        ),
+        Arc::clone(&stores.scoped_filesystem),
+    )?
     .with_filesystem_resource_governor(Arc::clone(&stores.scoped_filesystem))
     .with_reborn_event_store_config(profile.to_event_store_profile(), stores.event_store)
     .await?
@@ -1156,8 +1315,8 @@ mod tests {
     use ironclaw_host_api::{
         CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
         ExecutionContext, ExtensionId, GrantConstraints, InvocationId, MountAlias, MountGrant,
-        NetworkPolicy, Principal, ResourceEstimate, ResourceScope, RuntimeKind, ScopedPath,
-        TrustClass, UserId, VirtualPath,
+        NetworkPolicy, NetworkTargetPattern, Principal, ResourceEstimate, ResourceScope,
+        RuntimeKind, ScopedPath, TrustClass, UserId, VirtualPath,
     };
     use ironclaw_host_runtime::{
         RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind,
@@ -1179,6 +1338,14 @@ mod tests {
         assert!(services.turn_coordinator.is_some());
         assert!(services.product_auth.is_some());
         assert!(services.local_runtime.is_some());
+        assert!(
+            services
+                .local_runtime
+                .as_ref()
+                .expect("local runtime")
+                .extension_management
+                .is_some()
+        );
         assert_eq!(services.readiness.state, RebornReadinessState::DevOnly);
     }
 
@@ -1514,7 +1681,7 @@ mod tests {
             constraints: GrantConstraints {
                 allowed_effects: allowed_effects(),
                 mounts,
-                network: NetworkPolicy::default(),
+                network: network_policy(),
                 secrets: Vec::new(),
                 resource_ceiling: None,
                 expires_at: None,
@@ -1553,7 +1720,20 @@ mod tests {
             EffectKind::DispatchCapability,
             EffectKind::ReadFilesystem,
             EffectKind::WriteFilesystem,
+            EffectKind::Network,
         ]
+    }
+
+    fn network_policy() -> NetworkPolicy {
+        NetworkPolicy {
+            allowed_targets: vec![NetworkTargetPattern {
+                scheme: None,
+                host_pattern: "*".to_string(),
+                port: None,
+            }],
+            deny_private_ip_ranges: true,
+            max_egress_bytes: None,
+        }
     }
 
     fn trust_decision() -> TrustDecision {

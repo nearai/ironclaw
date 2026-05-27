@@ -29,6 +29,33 @@ async fn authorized_subscription_without_cursor_emits_snapshot_then_ordered_upda
 }
 
 #[tokio::test]
+async fn subscription_without_cursor_uses_earliest_cursor_as_initial_rebase_baseline() {
+    let scope = projection_scope("thread-a");
+    let projection = Arc::new(InitialSnapshotRebaseProjectionService::new(scope.clone()));
+    let manager = EventStreamManager::new(
+        Arc::clone(&projection),
+        Arc::new(AllowAllProjectionAccessPolicy),
+        Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
+        Arc::new(InMemoryProjectionUpdateSource::new(8)),
+        Arc::new(NoExposureProjectionRedactionValidator),
+        Arc::new(InMemoryOutboundStateStore::default()),
+    );
+
+    let mut subscription = manager
+        .subscribe(subscribe_request(scope, None))
+        .await
+        .expect("initial rebase subscription");
+
+    match subscription.next().await.expect("rebased initial snapshot") {
+        ProjectionStreamItem::Snapshot(snapshot) => {
+            assert_eq!(snapshot.cursor().runtime, EventCursor::new(10));
+        }
+        other => panic!("expected rebased snapshot, got {other:?}"),
+    }
+    assert_eq!(projection.calls(), vec![None, Some(EventCursor::new(4))]);
+}
+
+#[tokio::test]
 async fn live_fanout_delivers_shared_projection_update_payload() {
     let scope = projection_scope("thread-a");
     let source = Arc::new(PointerUpdateSource::new(8));
@@ -99,6 +126,58 @@ async fn fetch_snapshot_returns_authorized_product_snapshot() {
         }
         other => panic!("expected thread snapshot, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn fetch_snapshot_uses_earliest_cursor_as_initial_rebase_baseline() {
+    let scope = projection_scope("thread-a");
+    let projection = Arc::new(InitialSnapshotRebaseProjectionService::new(scope.clone()));
+    let manager = EventStreamManager::new(
+        Arc::clone(&projection),
+        Arc::new(AllowAllProjectionAccessPolicy),
+        Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
+        Arc::new(InMemoryProjectionUpdateSource::new(8)),
+        Arc::new(NoExposureProjectionRedactionValidator),
+        Arc::new(InMemoryOutboundStateStore::default()),
+    );
+
+    let response = manager
+        .fetch_snapshot(fetch_request(scope))
+        .await
+        .expect("initial rebase falls forward to earliest snapshot");
+
+    assert_eq!(response.cursor.runtime, EventCursor::new(10));
+    assert_eq!(projection.calls(), vec![None, Some(EventCursor::new(4))]);
+}
+
+#[tokio::test]
+async fn fetch_snapshot_rejects_initial_rebase_cursor_scope_mismatch() {
+    let requested = projection_scope("thread-a");
+    let foreign = projection_scope("thread-b");
+    let projection = Arc::new(InitialSnapshotRebaseProjectionService::with_earliest_scope(
+        foreign,
+    ));
+    let manager = EventStreamManager::new(
+        Arc::clone(&projection),
+        Arc::new(AllowAllProjectionAccessPolicy),
+        Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
+        Arc::new(InMemoryProjectionUpdateSource::new(8)),
+        Arc::new(NoExposureProjectionRedactionValidator),
+        Arc::new(InMemoryOutboundStateStore::default()),
+    );
+
+    let error = manager
+        .fetch_snapshot(fetch_request(requested))
+        .await
+        .expect_err("foreign initial rebase cursor rejected");
+
+    assert_same_error_kind(
+        error,
+        ProjectionStreamError::InvalidRequest {
+            reason: "projection rebase cursor scope mismatch",
+        },
+    );
+    assert_eq!(projection.calls(), vec![None]);
 }
 
 #[tokio::test]

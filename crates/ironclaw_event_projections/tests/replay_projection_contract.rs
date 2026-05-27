@@ -6,8 +6,8 @@ use ironclaw_event_projections::{
     AuditProjectionCursor, AuditProjectionError, AuditProjectionRequest, AuditProjectionService,
     AuditProjectionStage, AuditStreamResume, CapabilityActivityStatus, EventProjectionService,
     EventStreamManager, MAX_PROJECTION_PAGE_LIMIT, ProjectionCursor, ProjectionError,
-    ProjectionRequest, ProjectionScope, ReplayAuditProjectionService, ReplayEventProjectionService,
-    RunProjectionStatus, RuntimeStreamResume, TimelineEntryKind,
+    ProjectionReplay, ProjectionRequest, ProjectionScope, ReplayAuditProjectionService,
+    ReplayEventProjectionService, RunProjectionStatus, RuntimeStreamResume, TimelineEntryKind,
 };
 use ironclaw_events::{
     DurableAuditLog, DurableEventLog, EventCursor, EventError, EventLogEntry, EventReplay,
@@ -1145,6 +1145,114 @@ async fn replay_projection_updates_capability_activity_only_for_touched_invocati
         CapabilityActivityStatus::Completed
     );
     assert_eq!(replay.capability_activities[0].output_bytes, Some(7));
+}
+
+#[tokio::test]
+async fn replay_projection_exposes_ordered_capability_activity_transitions() {
+    let log = Arc::new(InMemoryDurableEventLog::new());
+    let service = ReplayEventProjectionService::new(Arc::clone(&log));
+    let thread_id = ThreadId::new("thread-tool-activity-transitions").unwrap();
+    let run_scope = scope_for_thread(thread_id.clone());
+    let tool_invocation = InvocationId::new();
+    let tool_scope = scope_for_thread_with_invocation(thread_id, tool_invocation);
+    let capability = capability_id();
+    let provider = provider_id();
+
+    let first = log
+        .append(RuntimeEvent::model_started(
+            run_scope.clone(),
+            CapabilityId::new("loop.model").unwrap(),
+        ))
+        .await
+        .unwrap();
+    log.append(RuntimeEvent::dispatch_requested(
+        tool_scope.clone(),
+        capability.clone(),
+    ))
+    .await
+    .unwrap();
+    log.append(RuntimeEvent::runtime_selected(
+        tool_scope.clone(),
+        capability.clone(),
+        provider.clone(),
+        RuntimeKind::Script,
+    ))
+    .await
+    .unwrap();
+    log.append(RuntimeEvent::dispatch_succeeded(
+        tool_scope.clone(),
+        capability.clone(),
+        provider,
+        RuntimeKind::Script,
+        7,
+    ))
+    .await
+    .unwrap();
+
+    let replay = service
+        .updates(ProjectionRequest {
+            scope: ProjectionScope::from_resource_scope(&run_scope),
+            after: Some(ProjectionCursor::for_scope(
+                ProjectionScope::from_resource_scope(&run_scope),
+                first.cursor,
+            )),
+            limit: 16,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(replay.capability_activity_transitions.len(), 2);
+    assert_eq!(
+        replay
+            .capability_activity_transitions
+            .iter()
+            .map(|transition| transition.invocation_id)
+            .collect::<Vec<_>>(),
+        vec![tool_invocation, tool_invocation]
+    );
+    assert_eq!(
+        replay
+            .capability_activity_transitions
+            .iter()
+            .map(|transition| transition.status)
+            .collect::<Vec<_>>(),
+        vec![
+            CapabilityActivityStatus::Started,
+            CapabilityActivityStatus::Running
+        ]
+    );
+    assert_eq!(
+        replay.capability_activity_transitions[0].capability_id,
+        capability
+    );
+    assert_eq!(replay.capability_activities.len(), 1);
+    assert_eq!(
+        replay.capability_activities[0].status,
+        CapabilityActivityStatus::Completed
+    );
+}
+
+#[test]
+fn projection_replay_deserializes_without_capability_activity_transitions() {
+    let scope = ProjectionScope::from_resource_scope(&scope_for_thread(
+        ThreadId::new("thread-replay-without-transitions").unwrap(),
+    ));
+    let replay = ProjectionReplay {
+        updates: Vec::new(),
+        capability_activity_transitions: Vec::new(),
+        runs: Vec::new(),
+        capability_activities: Vec::new(),
+        next_cursor: ProjectionCursor::for_scope(scope, EventCursor::new(1)),
+        truncated: false,
+    };
+    let mut wire = serde_json::to_value(&replay).unwrap();
+    wire.as_object_mut()
+        .unwrap()
+        .remove("capability_activity_transitions");
+
+    let decoded: ProjectionReplay = serde_json::from_value(wire).unwrap();
+
+    assert!(decoded.capability_activity_transitions.is_empty());
 }
 
 #[tokio::test]

@@ -1,5 +1,13 @@
 use super::*;
 
+#[test]
+fn effective_runtime_payload_offset_resets_when_runtime_item_changes() {
+    let delivered =
+        effective_runtime_payload_offset(3, Some(EventCursor::new(7)), EventCursor::new(8));
+
+    assert_eq!(delivered, 0);
+}
+
 #[tokio::test]
 async fn webui_event_stream_rejects_malformed_projection_cursor() {
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();

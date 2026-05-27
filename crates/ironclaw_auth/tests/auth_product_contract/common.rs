@@ -3,18 +3,19 @@ pub use ironclaw_auth::{
     AuthChallenge, AuthContinuationRef, AuthErrorCode, AuthFlowKind, AuthFlowManager,
     AuthFlowStatus, AuthGateRef, AuthInteractionService, AuthProductError, AuthProductScope,
     AuthProviderClient, AuthProviderId, AuthSessionId, AuthSurface, AuthorizationCodeHash,
-    CredentialAccount, CredentialAccountChoiceRequest, CredentialAccountLabel,
-    CredentialAccountListRequest, CredentialAccountMutation, CredentialAccountProjection,
-    CredentialAccountSelectionRequest, CredentialAccountService, CredentialAccountStatus,
-    CredentialAccountUpdate, CredentialAccountUpdateBinding, CredentialOwnership,
-    CredentialRecoveryKind, CredentialRecoveryProjection, CredentialRecoveryReason,
-    CredentialRecoveryRequest, CredentialRefreshRequest, CredentialSetupService,
-    InMemoryAuthProductServices, LifecyclePackageRef, ManualTokenSetupRequest, NewAuthFlow,
-    NewCredentialAccount, OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthCallbackInput,
-    OAuthProviderCallbackRequest, OAuthProviderExchange, OAuthProviderRefreshRequest,
-    OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret, ProviderCallbackOutcome, ProviderScope,
-    SecretCleanupAction, SecretCleanupQuarantineReason, SecretCleanupRequest, SecretCleanupService,
-    SecretSubmitRequest, SecretSubmitResult, TurnRunRef,
+    CredentialAccount, CredentialAccountChoiceRequest, CredentialAccountId, CredentialAccountLabel,
+    CredentialAccountListRequest, CredentialAccountLookupRequest, CredentialAccountMutation,
+    CredentialAccountProjection, CredentialAccountSelectionRequest, CredentialAccountService,
+    CredentialAccountStatus, CredentialAccountUpdate, CredentialAccountUpdateBinding,
+    CredentialOwnership, CredentialRecoveryKind, CredentialRecoveryProjection,
+    CredentialRecoveryReason, CredentialRecoveryRequest, CredentialRefreshRequest,
+    CredentialSetupService, InMemoryAuthProductServices, LifecyclePackageRef,
+    ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount, OAuthAuthorizationCode,
+    OAuthAuthorizationUrl, OAuthCallbackInput, OAuthProviderCallbackRequest, OAuthProviderExchange,
+    OAuthProviderRefreshRequest, OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret,
+    ProviderCallbackOutcome, ProviderScope, SecretCleanupAction, SecretCleanupQuarantineReason,
+    SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest, SecretSubmitResult,
+    TurnRunRef,
 };
 pub use ironclaw_host_api::{ExtensionId, InvocationId, ResourceScope, SecretHandle, UserId};
 pub use secrecy::SecretString;
@@ -90,6 +91,15 @@ pub fn account_request(
         refresh_secret: None,
         scopes: Vec::new(),
     }
+}
+
+pub fn account_ids(accounts: &[CredentialAccountProjection]) -> Vec<CredentialAccountId> {
+    let mut ids = accounts
+        .iter()
+        .map(|account| account.id)
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids
 }
 
 pub fn update_binding(account: &CredentialAccount) -> CredentialAccountUpdateBinding {

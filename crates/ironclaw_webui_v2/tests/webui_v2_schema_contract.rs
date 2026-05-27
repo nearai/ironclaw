@@ -46,6 +46,7 @@ fn capability_activity() -> CapabilityActivityView {
 
 fn capability_display_preview() -> CapabilityDisplayPreviewView {
     CapabilityDisplayPreviewView {
+        timeline_message_id: Some("timeline-message-1".to_string()),
         invocation_id: InvocationId::new(),
         thread_id: Some(ThreadId::new("thread-alpha").expect("thread")),
         capability_id: CapabilityId::new("builtin.read_file").expect("capability"),
@@ -142,6 +143,19 @@ fn projection_state() -> ProductProjectionState {
         ],
     )
     .expect("projection state")
+}
+
+#[test]
+fn capability_display_preview_event_serializes_timeline_message_id() {
+    let frame = WebChatV2EventFrame {
+        cursor: cursor(),
+        event: WebChatV2Event::CapabilityDisplayPreview {
+            preview: capability_display_preview(),
+        },
+    };
+
+    let json = serde_json::to_value(&frame).expect("serialize frame");
+    assert_eq!(json["preview"]["timeline_message_id"], "timeline-message-1");
 }
 
 #[test]

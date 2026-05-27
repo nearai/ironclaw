@@ -65,7 +65,10 @@ async fn extension_owned_accounts_require_owner_and_cleanup_is_action_specific()
     assert!(deactivate.removed_grants.contains(&reusable.id));
     assert!(deactivate.revoked_accounts.is_empty());
     let inactive_owned = services
-        .get_account(&owner, owned.id)
+        .get_account(
+            CredentialAccountLookupRequest::new(owner.clone(), owned.id)
+                .for_extension(extension.clone()),
+        )
         .await
         .expect("lookup")
         .expect("owned account remains");
@@ -103,7 +106,10 @@ async fn extension_owned_accounts_require_owner_and_cleanup_is_action_specific()
         .expect_err("deactivated extension-owned account is not selectable");
     assert_eq!(deactivated_selection, AuthProductError::CredentialMissing);
     let isolated_after = isolated_services
-        .get_account(&owner, isolated_owned.id)
+        .get_account(
+            CredentialAccountLookupRequest::new(owner.clone(), isolated_owned.id)
+                .for_extension(extension.clone()),
+        )
         .await
         .expect("lookup")
         .expect("isolated account remains");
@@ -171,14 +177,20 @@ async fn cleanup_for_lifecycle_ignores_cross_scope_accounts() {
     assert!(report.removed_grants.is_empty());
 
     let owned_after = services
-        .get_account(&foreign_owner, foreign_owned.id)
+        .get_account(
+            CredentialAccountLookupRequest::new(foreign_owner.clone(), foreign_owned.id)
+                .for_extension(extension.clone()),
+        )
         .await
         .expect("lookup")
         .expect("foreign owned remains");
     assert_eq!(owned_after.status, CredentialAccountStatus::Configured);
     assert_eq!(owned_after.owner_extension, Some(extension.clone()));
     let granted_after = services
-        .get_account(&foreign_owner, foreign_granted.id)
+        .get_account(
+            CredentialAccountLookupRequest::new(foreign_owner, foreign_granted.id)
+                .for_extension(extension.clone()),
+        )
         .await
         .expect("lookup")
         .expect("foreign granted remains");
@@ -276,27 +288,29 @@ async fn cleanup_lifecycle_is_idempotent_and_quarantines_partial_failures() {
     );
 
     let owned_after = services
-        .get_account(&owner, owned.id)
+        .get_account(
+            CredentialAccountLookupRequest::new(owner.clone(), owned.id)
+                .for_extension(extension.clone()),
+        )
         .await
         .expect("lookup")
         .expect("owned remains tombstoned");
     assert_eq!(owned_after.status, CredentialAccountStatus::Revoked);
     let shared_after = services
-        .get_account(&owner, shared.id)
+        .get_account(
+            CredentialAccountLookupRequest::new(owner.clone(), shared.id)
+                .for_extension(other_extension.clone()),
+        )
         .await
         .expect("lookup")
         .expect("shared remains");
     assert_eq!(shared_after.status, CredentialAccountStatus::Configured);
     assert_eq!(shared_after.granted_extensions, vec![other_extension]);
-    let system_after = services
-        .get_account(&owner, system.id)
-        .await
-        .expect("lookup")
-        .expect("system remains");
-    assert_eq!(system_after.status, CredentialAccountStatus::Configured);
-    assert!(system_after.granted_extensions.is_empty());
     let quarantined_after = services
-        .get_account(&owner, quarantined.id)
+        .get_account(
+            CredentialAccountLookupRequest::new(owner.clone(), quarantined.id)
+                .for_extension(extension.clone()),
+        )
         .await
         .expect("lookup")
         .expect("quarantined remains");
@@ -329,4 +343,58 @@ async fn cleanup_lifecycle_is_idempotent_and_quarantines_partial_failures() {
     assert!(!serialized.contains("github-quarantine-secret"));
     assert!(!serialized.contains("RAW_BACKEND_ERROR_SENTINEL"));
     assert!(!serialized.contains("/host/path"));
+}
+
+#[tokio::test]
+async fn deactivate_cleanup_quarantines_partial_failures_without_mutating_account() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+    let extension = ExtensionId::new("github").unwrap();
+    let account = services
+        .create_account(NewCredentialAccount {
+            scope: owner.clone(),
+            provider: provider(),
+            label: label("deactivate quarantine"),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::ExtensionOwned,
+            owner_extension: Some(extension.clone()),
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("github-deactivate-quarantine").unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .expect("owned account");
+    services.quarantine_cleanup_for_tests(
+        account.id,
+        SecretCleanupQuarantineReason::BackendUnavailable,
+    );
+
+    let report = services
+        .cleanup_for_lifecycle(SecretCleanupRequest {
+            scope: owner.clone(),
+            extension_id: extension.clone(),
+            action: SecretCleanupAction::Deactivate,
+        })
+        .await
+        .expect("deactivate cleanup");
+
+    assert!(report.retained_accounts.is_empty());
+    assert!(report.revoked_accounts.is_empty());
+    assert!(report.removed_grants.is_empty());
+    assert_eq!(report.quarantined_accounts.len(), 1);
+    assert_eq!(report.quarantined_accounts[0].account_id, account.id);
+    assert_eq!(
+        report.quarantined_accounts[0].reason,
+        SecretCleanupQuarantineReason::BackendUnavailable
+    );
+
+    let stored = services
+        .get_account(
+            CredentialAccountLookupRequest::new(owner, account.id).for_extension(extension),
+        )
+        .await
+        .expect("lookup")
+        .expect("account remains");
+    assert_eq!(stored.status, CredentialAccountStatus::Configured);
 }

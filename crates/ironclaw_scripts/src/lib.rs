@@ -203,6 +203,7 @@ where
                 network_policy: request.network_policy,
                 credential_injections: request.credential_injections,
                 response_body_limit: request.response_body_limit,
+                save_body_to: None,
                 timeout_ms: request.timeout_ms,
             })
             .map_err(script_http_error)

@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
 use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
 
 use crate::auth::{ProtocolAuthEvidence, VerifiedAuthClaim};
 use crate::error::ProductAdapterError;
@@ -573,6 +574,7 @@ pub enum ProductRejectionKind {
     BindingRequired,
     AccessDenied,
     UnknownInstallation,
+    InvalidRequest,
     PolicyDenied,
 }
 
@@ -620,6 +622,22 @@ pub enum InboundRetryDisposition {
     ReplayPrior,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ProductCommandResultPayload(Value);
+
+impl Eq for ProductCommandResultPayload {}
+
+impl ProductCommandResultPayload {
+    pub fn new(value: Value) -> Self {
+        Self(value)
+    }
+
+    pub fn as_value(&self) -> &Value {
+        &self.0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProductInboundAck {
@@ -632,6 +650,10 @@ pub enum ProductInboundAck {
         active_run_id: TurnRunId,
     },
     Rejected(ProductRejection),
+    CommandResult {
+        command: String,
+        payload: ProductCommandResultPayload,
+    },
     Duplicate {
         prior: Box<ProductInboundAck>,
     },
@@ -644,6 +666,7 @@ impl ProductInboundAck {
             Self::Accepted { .. }
             | Self::DeferredBusy { .. }
             | Self::Duplicate { .. }
+            | Self::CommandResult { .. }
             | Self::NoOp => true,
             Self::Rejected(rejection) => {
                 rejection.disposition == ProductRejectionDisposition::Permanent
@@ -830,6 +853,15 @@ mod tests {
             .is_durable_outcome()
         );
         assert!(ProductInboundAck::NoOp.is_durable_outcome());
+        assert!(
+            ProductInboundAck::CommandResult {
+                command: "extension_install".to_string(),
+                payload: ProductCommandResultPayload::new(serde_json::json!({
+                    "phase": "installed",
+                })),
+            }
+            .is_durable_outcome()
+        );
         assert!(
             ProductInboundAck::Rejected(ProductRejection::permanent(
                 ProductRejectionKind::PolicyDenied,

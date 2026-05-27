@@ -1,10 +1,11 @@
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::Duration;
+use std::{future::Future, thread};
 
 use anyhow::Context;
 use ironclaw_reborn_composition::{
-    PollSettings, RebornCompositionProfile, RebornLocalRuntimeProfileOptions,
+    PollSettings, RebornBuildInput, RebornCompositionProfile, RebornLocalRuntimeProfileOptions,
     RebornRuntimeIdentity, RebornRuntimeInput, TurnRunnerSettings, build_reborn_runtime,
     local_runtime_build_input_with_options,
 };
@@ -23,6 +24,31 @@ pub(crate) fn init_tracing() {
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .try_init();
+}
+
+pub(crate) fn block_on_cli<F, T, E>(future: F) -> anyhow::Result<T>
+where
+    F: Future<Output = Result<T, E>> + Send + 'static,
+    T: Send + 'static,
+    E: Into<anyhow::Error> + Send + 'static,
+{
+    if tokio::runtime::Handle::try_current().is_ok() {
+        return thread::spawn(move || block_on_cli_future(future))
+            .join()
+            .map_err(|_| anyhow::anyhow!("CLI async task thread panicked"))?;
+    }
+    block_on_cli_future(future)
+}
+
+fn block_on_cli_future<F, T, E>(future: F) -> anyhow::Result<T>
+where
+    F: Future<Output = Result<T, E>>,
+    E: Into<anyhow::Error>,
+{
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(future).map_err(Into::into)
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -224,6 +250,55 @@ pub(crate) fn build_runtime_input_with_options(
     caller: RuntimeInputCaller,
     options: RuntimeInputOptions,
 ) -> anyhow::Result<RebornRuntimeInput> {
+    let runtime_services = build_services_input_with_options(config, caller, options)?;
+
+    #[allow(unused_mut)]
+    let mut runtime_input = RebornRuntimeInput::from_services(runtime_services.services_input)
+        .with_runner_settings(runner_settings(runtime_services.config_file.as_ref())?)
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(200),
+            max_total: Duration::from_secs(180),
+        })
+        .with_identity(runtime_identity(runtime_services.config_file.as_ref()));
+
+    #[cfg(feature = "root-llm-provider")]
+    {
+        match ironclaw_reborn_composition::resolve_reborn_runtime_llm(
+            config,
+            runtime_services.config_file.as_ref(),
+        )? {
+            Some(llm) => {
+                tracing::debug!(
+                    provider_id = %llm.provider_id(),
+                    model = %llm.model(),
+                    "resolved LLM selection for Reborn runtime"
+                );
+                runtime_input = runtime_input.with_resolved_llm(llm);
+            }
+            None => {
+                tracing::warn!(
+                    "no LLM selection configured; set `[llm.default]` in {} or configure \
+                     LLM_BACKEND / provider environment variables. Runs will fail until an \
+                     LLM is wired.",
+                    config.home().config_file_path().display()
+                );
+            }
+        }
+    }
+
+    Ok(runtime_input)
+}
+
+pub(crate) struct RuntimeServicesInput {
+    pub(crate) services_input: RebornBuildInput,
+    config_file: Option<ironclaw_reborn_config::RebornConfigFile>,
+}
+
+pub(crate) fn build_services_input_with_options(
+    config: &RebornBootConfig,
+    caller: RuntimeInputCaller,
+    options: RuntimeInputOptions,
+) -> anyhow::Result<RuntimeServicesInput> {
     // Read the operator's boot TOML if present. Missing file is OK
     // (operator may not have run `ironclaw-reborn config init` yet);
     // sparse fields are OK (each absent field falls back to the
@@ -232,11 +307,7 @@ pub(crate) fn build_runtime_input_with_options(
 
     reject_unsupported_runtime_sections(config_file.as_ref(), caller)?;
 
-    let owner_id = config_file
-        .as_ref()
-        .and_then(|file| file.identity.as_ref())
-        .and_then(|identity| identity.default_owner.as_deref())
-        .unwrap_or("reborn-cli");
+    let owner_id = default_owner_id(config_file.as_ref());
 
     let local_dev_root: PathBuf = config.home().path().join("local-dev");
 
@@ -264,39 +335,19 @@ pub(crate) fn build_runtime_input_with_options(
         services_input = services_input.with_local_dev_confirmed_host_home_root(host_home_root);
     }
 
-    #[allow(unused_mut)]
-    let mut runtime_input = RebornRuntimeInput::from_services(services_input)
-        .with_runner_settings(runner_settings(config_file.as_ref())?)
-        .with_poll_settings(PollSettings {
-            interval: Duration::from_millis(200),
-            max_total: Duration::from_secs(180),
-        })
-        .with_identity(runtime_identity(config_file.as_ref()));
+    Ok(RuntimeServicesInput {
+        services_input,
+        config_file,
+    })
+}
 
-    #[cfg(feature = "root-llm-provider")]
-    {
-        match ironclaw_reborn_composition::resolve_reborn_runtime_llm(config, config_file.as_ref())?
-        {
-            Some(llm) => {
-                tracing::debug!(
-                    provider_id = %llm.provider_id(),
-                    model = %llm.model(),
-                    "resolved LLM selection for Reborn runtime"
-                );
-                runtime_input = runtime_input.with_resolved_llm(llm);
-            }
-            None => {
-                tracing::warn!(
-                    "no LLM selection configured; set `[llm.default]` in {} or configure \
-                     LLM_BACKEND / provider environment variables. Runs will fail until an \
-                     LLM is wired.",
-                    config.home().config_file_path().display()
-                );
-            }
-        }
-    }
-
-    Ok(runtime_input)
+pub(crate) fn default_owner_id(
+    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+) -> &str {
+    config_file
+        .and_then(|file| file.identity.as_ref())
+        .and_then(|identity| identity.default_owner.as_deref())
+        .unwrap_or("reborn-cli")
 }
 
 fn confirmed_host_home_root(options: RuntimeInputOptions) -> anyhow::Result<PathBuf> {
@@ -316,7 +367,7 @@ fn composition_profile(profile: RebornProfile) -> RebornCompositionProfile {
     }
 }
 
-fn read_config_file(
+pub(crate) fn read_config_file(
     config: &RebornBootConfig,
 ) -> anyhow::Result<Option<ironclaw_reborn_config::RebornConfigFile>> {
     use ironclaw_reborn_config::RebornConfigFile;
@@ -356,7 +407,7 @@ fn runtime_identity(
     }
 }
 
-fn effective_profile(
+pub(crate) fn effective_profile(
     config: &RebornBootConfig,
     config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
 ) -> anyhow::Result<RebornProfile> {
@@ -451,9 +502,16 @@ mod tests {
     use ironclaw_reborn_config::RebornBootConfig;
 
     use super::{
-        RuntimeInputCaller, RuntimeInputOptions, build_runtime_input,
+        RuntimeInputCaller, RuntimeInputOptions, block_on_cli, build_runtime_input,
         build_runtime_input_with_options,
     };
+
+    #[tokio::test]
+    async fn block_on_cli_can_run_inside_existing_tokio_runtime() {
+        let value = block_on_cli(async { Ok::<_, anyhow::Error>(42) }).expect("block future");
+
+        assert_eq!(value, 42);
+    }
 
     #[test]
     fn build_runtime_input_maps_configured_cli_identity() {

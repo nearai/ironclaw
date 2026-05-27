@@ -50,6 +50,7 @@ mod capability_catalog;
 mod extension_contracts;
 mod first_party;
 mod first_party_tools;
+mod http_body;
 mod invocation_services;
 pub mod memory_context;
 mod obligations;
@@ -83,6 +84,7 @@ pub use first_party_tools::{
     SPAWN_SUBAGENT_CAPABILITY_ID, TIME_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
     builtin_first_party_handlers, builtin_first_party_package,
 };
+pub use http_body::{RuntimeHttpBodyStore, RuntimeHttpBodyStoreError};
 pub use invocation_services::{
     InvocationServices, InvocationServicesError, InvocationServicesResolutionRequest,
     InvocationServicesResolver, LocalInvocationServicesResolver,
@@ -935,6 +937,7 @@ pub struct HostHttpEgressService<N, S> {
     network_policy_store: Option<Arc<NetworkObligationPolicyStore>>,
     network_policy_source: NetworkPolicySource,
     unsafe_raw_diagnostics_allowed: bool,
+    body_store: Option<Arc<dyn RuntimeHttpBodyStore>>,
 }
 
 impl<N, S> HostHttpEgressService<N, S> {
@@ -952,6 +955,7 @@ impl<N, S> HostHttpEgressService<N, S> {
             network_policy_store: None,
             network_policy_source: NetworkPolicySource::StagedObligation,
             unsafe_raw_diagnostics_allowed: false,
+            body_store: None,
         }
     }
 
@@ -969,6 +973,7 @@ impl<N, S> HostHttpEgressService<N, S> {
             network_policy_store: None,
             network_policy_source: NetworkPolicySource::RequestPolicyFallback,
             unsafe_raw_diagnostics_allowed: false,
+            body_store: None,
         }
     }
 
@@ -1010,6 +1015,11 @@ impl<N, S> HostHttpEgressService<N, S> {
                 .secret_injections
                 .as_ref()
                 .is_some_and(|store| Arc::ptr_eq(store, secret_injections))
+    }
+
+    pub fn with_body_store(mut self, store: Arc<dyn RuntimeHttpBodyStore>) -> Self {
+        self.body_store = Some(store);
+        self
     }
 
     fn network_policy_for_request(
@@ -1094,10 +1104,34 @@ where
             self.discard_staged_policy_for_request(&request);
             return Err(error);
         }
+        let save_body_to = std::mem::take(&mut request.save_body_to);
+        let body_store = self.body_store.as_deref();
+        if let Some(target) = &save_body_to {
+            let Some(store) = body_store else {
+                self.discard_staged_policy_for_request(&request);
+                return Err(RuntimeHttpEgressError::Request {
+                    reason: "response_body_store_unavailable".to_string(),
+                    request_bytes: 0,
+                    response_bytes: 0,
+                });
+            };
+            if let Err(error) =
+                store.authorize_write(&request.scope, &request.capability_id, target)
+            {
+                self.discard_staged_policy_for_request(&request);
+                return Err(RuntimeHttpEgressError::Request {
+                    reason: format!("response_body_store_unauthorized: {}", error.reason),
+                    request_bytes: 0,
+                    response_bytes: 0,
+                });
+            }
+        }
         if let Err(error) = validate_runtime_request(&request) {
             self.discard_staged_policy_for_request(&request);
             return Err(error);
         }
+        let scope = request.scope.clone();
+        let capability_id = request.capability_id.clone();
 
         let mut redaction_values = Vec::new();
         let mut credential_materials = Vec::new();
@@ -1152,9 +1186,17 @@ where
             .map_err(|error| runtime_network_error(self.unsafe_raw_diagnostics_allowed, error))?;
         let credentials_injected = !redaction_values.is_empty();
         let (response, response_redacted) = sanitize_runtime_response(response, &redaction_values)?;
+        let (response, saved_body) = http_body::apply_body_disposition(
+            response,
+            save_body_to,
+            body_store,
+            &scope,
+            &capability_id,
+        )?;
         Ok(runtime_response(
             response,
             credentials_injected || response_redacted,
+            saved_body,
         ))
     }
 }
@@ -1602,11 +1644,13 @@ fn sanitize_runtime_response(
 fn runtime_response(
     response: NetworkHttpResponse,
     redaction_applied: bool,
+    saved_body: Option<ironclaw_host_api::RuntimeHttpSavedBody>,
 ) -> RuntimeHttpEgressResponse {
     RuntimeHttpEgressResponse {
         status: response.status,
         headers: response.headers,
         body: response.body,
+        saved_body,
         request_bytes: response.usage.request_bytes,
         response_bytes: response.usage.response_bytes,
         redaction_applied,

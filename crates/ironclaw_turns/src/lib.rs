@@ -12,6 +12,7 @@ mod coordinator;
 pub mod events;
 mod filesystem_store;
 mod ids;
+mod lifecycle;
 pub mod loop_exit;
 mod memory;
 mod request;
@@ -43,9 +44,10 @@ pub use coordinator::{
 };
 pub use events::{
     EventCursor, InMemoryTurnEventSink, MAX_TURN_EVENT_PROJECTION_LIMIT, TurnBlockedGateKind,
-    TurnBlockedGateMetadata, TurnEventKind, TurnEventPage, TurnEventProjectionCursor,
-    TurnEventProjectionError, TurnEventProjectionRequest, TurnEventProjectionService,
-    TurnEventProjectionSnapshot, TurnEventProjectionSource, TurnEventSink, TurnLifecycleEvent,
+    TurnBlockedGateMetadata, TurnCommittedEventObserver, TurnEventKind, TurnEventPage,
+    TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
+    TurnEventProjectionService, TurnEventProjectionSnapshot, TurnEventProjectionSource,
+    TurnEventSink, TurnLifecycleEvent,
 };
 pub use filesystem_store::FilesystemTurnStateStore;
 pub use ids::{
@@ -53,6 +55,10 @@ pub use ids::{
     LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef, LoopUsageSummaryRef,
     ReplyTargetBindingRef, RunProfileId, RunProfileRequest, RunProfileVersion, SourceBindingRef,
     TurnCheckpointId, TurnId, TurnLeaseToken, TurnRunId, TurnRunnerId,
+};
+pub use lifecycle::{
+    DefaultTurnLifecycleEventBus, LifecyclePublicationErrorPort, LifecyclePublishingTurnStateStore,
+    NoopLifecyclePublicationErrorPort, TurnLifecycleEventBus,
 };
 pub use loop_exit::{
     BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,

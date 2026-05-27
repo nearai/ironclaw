@@ -1071,6 +1071,8 @@ pub trait LoopPromptPort: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopModelResponse {
     pub chunks: Vec<ModelStreamChunk>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub safe_reasoning_deltas: Vec<String>,
     pub output: ParentLoopOutput,
     pub effective_model_profile_id: ModelProfileId,
 }

@@ -59,81 +59,15 @@ impl Default for RebornRuntimeIdentity {
     }
 }
 
-/// Configuration for the host-managed LLM model gateway wired into the
-/// composed Reborn runtime.
-///
-/// Only available when this crate is built with the `root-llm-provider`
-/// feature. Mirrors `ironclaw_llm::RegistryProviderConfig` but stays in
-/// composition-owned types so callers (the CLI) never name `ironclaw_llm`
-/// directly.
-#[cfg(feature = "root-llm-provider")]
-pub(crate) const DEFAULT_LLM_REQUEST_TIMEOUT_SECS: u64 = 120;
-
 pub const DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 pub const DEFAULT_TURN_RUNNER_POLL_INTERVAL: Duration = Duration::from_millis(200);
-
-#[cfg(feature = "root-llm-provider")]
-#[derive(Debug, Clone)]
-pub struct RebornLlmConfig {
-    /// Provider id (e.g. `"openai"`, `"anthropic"`, `"ollama"`).
-    pub provider_id: String,
-    /// Model id passed to the provider (e.g. `"gpt-4o-mini"`).
-    pub model: String,
-    /// Provider API base URL.
-    pub base_url: String,
-    /// API key, if the provider requires one. `None` for keyless providers
-    /// like Ollama.
-    pub api_key: Option<secrecy::SecretString>,
-    /// API protocol identifier — maps onto
-    /// `ironclaw_llm::ProviderProtocol`. Canonical accepted values:
-    /// `"open_ai_completions"`, `"anthropic"`, `"ollama"`, `"deep_seek"`,
-    /// `"gemini"`, `"open_router"`, `"github_copilot"`.
-    /// Legacy aliases `"openai"`, `"openai_completions"`, `"deepseek"`,
-    /// and `"openrouter"` are also accepted.
-    pub protocol: String,
-    /// Request timeout in seconds passed to the underlying HTTP client.
-    pub request_timeout_secs: u64,
-    /// Extra HTTP headers injected on every request.
-    pub extra_headers: Vec<(String, String)>,
-}
-
-#[cfg(feature = "root-llm-provider")]
-impl RebornLlmConfig {
-    /// Convenience constructor for the common OpenAI Chat Completions case.
-    pub fn openai_compat(
-        provider_id: impl Into<String>,
-        base_url: impl Into<String>,
-        model: impl Into<String>,
-        api_key: secrecy::SecretString,
-    ) -> Self {
-        Self {
-            provider_id: provider_id.into(),
-            model: model.into(),
-            base_url: base_url.into(),
-            api_key: Some(api_key),
-            protocol: "open_ai_completions".to_string(),
-            request_timeout_secs: DEFAULT_LLM_REQUEST_TIMEOUT_SECS,
-            extra_headers: Vec::new(),
-        }
-    }
-}
 
 #[cfg(feature = "root-llm-provider")]
 #[derive(Debug, Clone)]
 pub struct ResolvedRebornLlm {
     provider_id: String,
     model: String,
-    pub(crate) source: ResolvedRebornLlmSource,
-}
-
-#[cfg(feature = "root-llm-provider")]
-#[derive(Debug, Clone)]
-pub(crate) enum ResolvedRebornLlmSource {
-    Catalog(RebornLlmConfig),
-    RegistryProvider {
-        config: ironclaw_llm::RegistryProviderConfig,
-        request_timeout_secs: u64,
-    },
+    pub(crate) config: ironclaw_llm::LlmConfig,
 }
 
 #[cfg(feature = "root-llm-provider")]
@@ -146,25 +80,11 @@ impl ResolvedRebornLlm {
         &self.model
     }
 
-    pub fn from_catalog(config: RebornLlmConfig) -> Self {
+    pub fn from_llm_config(config: ironclaw_llm::LlmConfig) -> Self {
         Self {
-            provider_id: config.provider_id.clone(),
-            model: config.model.clone(),
-            source: ResolvedRebornLlmSource::Catalog(config),
-        }
-    }
-
-    pub(crate) fn from_registry_provider(
-        config: ironclaw_llm::RegistryProviderConfig,
-        request_timeout_secs: u64,
-    ) -> Self {
-        Self {
-            provider_id: config.provider_id.clone(),
-            model: config.model.clone(),
-            source: ResolvedRebornLlmSource::RegistryProvider {
-                config,
-                request_timeout_secs,
-            },
+            provider_id: config.active_provider_id(),
+            model: config.active_model_name(),
+            config,
         }
     }
 }
@@ -233,12 +153,6 @@ impl RebornRuntimeInput {
             #[cfg(test)]
             model_gateway_override: None,
         }
-    }
-
-    #[cfg(feature = "root-llm-provider")]
-    pub fn with_llm(mut self, llm: RebornLlmConfig) -> Self {
-        self.llm = Some(ResolvedRebornLlm::from_catalog(llm));
-        self
     }
 
     #[cfg(feature = "root-llm-provider")]

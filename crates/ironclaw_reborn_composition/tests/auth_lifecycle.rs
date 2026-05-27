@@ -3,9 +3,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_auth::{
     AuthContinuationEvent, AuthProductError, AuthProductScope, AuthProviderId, AuthSessionId,
-    AuthSurface, CredentialAccountService, CredentialAccountStatus, CredentialOwnership,
-    CredentialRefreshRequest, InMemoryAuthProductServices, NewCredentialAccount, ProviderScope,
-    SecretCleanupAction, SecretCleanupQuarantineReason, SecretCleanupRequest,
+    AuthSurface, CredentialAccountLookupRequest, CredentialAccountService, CredentialAccountStatus,
+    CredentialOwnership, CredentialRefreshRequest, InMemoryAuthProductServices,
+    NewCredentialAccount, ProviderScope, SecretCleanupAction, SecretCleanupQuarantineReason,
+    SecretCleanupRequest,
 };
 use ironclaw_host_api::{ExtensionId, InvocationId, ResourceScope, SecretHandle, UserId};
 use ironclaw_reborn_composition::{RebornAuthContinuationDispatcher, RebornProductAuthServices};
@@ -79,7 +80,10 @@ async fn refresh_credential_account_uses_product_auth_facade_and_redacts_respons
     assert_eq!(report.account.id, account.id);
     assert_eq!(report.account.status, CredentialAccountStatus::Configured);
     let stored = auth
-        .get_account(&owner, account.id)
+        .get_account(CredentialAccountLookupRequest::new(
+            owner.clone(),
+            account.id,
+        ))
         .await
         .unwrap()
         .expect("refreshed account");
@@ -170,7 +174,7 @@ async fn cleanup_credentials_for_lifecycle_uses_facade_and_quarantine_report() {
     let report = services
         .cleanup_credentials_for_lifecycle(SecretCleanupRequest {
             scope: owner.clone(),
-            extension_id: extension,
+            extension_id: extension.clone(),
             action: SecretCleanupAction::Uninstall,
         })
         .await
@@ -184,13 +188,19 @@ async fn cleanup_credentials_for_lifecycle_uses_facade_and_quarantine_report() {
         SecretCleanupQuarantineReason::TombstoneFailed
     );
     let owned_after = auth
-        .get_account(&owner, owned.id)
+        .get_account(
+            CredentialAccountLookupRequest::new(owner.clone(), owned.id)
+                .for_extension(extension.clone()),
+        )
         .await
         .unwrap()
         .expect("owned account");
     assert_eq!(owned_after.status, CredentialAccountStatus::Revoked);
     let quarantined_after = auth
-        .get_account(&owner, quarantined.id)
+        .get_account(
+            CredentialAccountLookupRequest::new(owner.clone(), quarantined.id)
+                .for_extension(extension),
+        )
         .await
         .unwrap()
         .expect("quarantined account");

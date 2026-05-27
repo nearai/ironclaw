@@ -686,6 +686,7 @@ mod advanced {
                 fallback_source: None,
                 auth_hint: AuthHint::Dcr,
                 version: None,
+                hidden: false,
             })
             .await;
 

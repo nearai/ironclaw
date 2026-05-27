@@ -23,6 +23,7 @@ use ironclaw_turns::{
 };
 
 mod cursor_validation;
+mod display_preview;
 mod runtime_stream;
 mod turn_stream;
 
@@ -76,6 +77,7 @@ impl TurnEventProjectionSource for FakeTurnEventSource {
     async fn read_turn_events_after(
         &self,
         scope: &TurnScope,
+        owner_user_id: Option<&UserId>,
         after: Option<TurnEventCursor>,
         limit: usize,
     ) -> Result<TurnEventPage, TurnError> {
@@ -83,7 +85,11 @@ impl TurnEventProjectionSource for FakeTurnEventSource {
         let mut events = self
             .events
             .iter()
-            .filter(|event| &event.scope == scope && event.cursor > after)
+            .filter(|event| {
+                &event.scope == scope
+                    && event.cursor > after
+                    && owner_user_id.is_none_or(|owner| event.owner_user_id.as_ref() == Some(owner))
+            })
             .cloned()
             .collect::<Vec<_>>();
         events.sort_by_key(|event| event.cursor);
@@ -97,6 +103,28 @@ impl TurnEventProjectionSource for FakeTurnEventSource {
             next_cursor,
             truncated,
             rebase_required: None,
+        })
+    }
+}
+
+struct RebaseTurnEventSource {
+    cursor: TurnEventCursor,
+}
+
+#[async_trait]
+impl TurnEventProjectionSource for RebaseTurnEventSource {
+    async fn read_turn_events_after(
+        &self,
+        _scope: &TurnScope,
+        _owner_user_id: Option<&UserId>,
+        _after: Option<TurnEventCursor>,
+        _limit: usize,
+    ) -> Result<TurnEventPage, TurnError> {
+        Ok(TurnEventPage {
+            entries: Vec::new(),
+            next_cursor: self.cursor,
+            truncated: false,
+            rebase_required: Some(self.cursor),
         })
     }
 }

@@ -323,6 +323,7 @@ struct SpawnContext {
     child_scope: ThreadScope,
     child_run_id: TurnRunId,
     tree_root: TurnRunId,
+    gate_override: Option<GateRef>,
 }
 
 #[derive(Default)]
@@ -432,10 +433,11 @@ impl SubagentSpawnCapabilityPort {
         }
     }
 
-    async fn handle_spawn(
+    async fn handle_spawn_with_gate(
         &self,
         invocation: &CapabilityInvocation,
         args: SpawnSubagentArgs,
+        gate_override: Option<GateRef>,
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
         let Some(spawn_slot) = self.reserve_spawn_slot() else {
             return Ok(spawn_rejected("fanout_cap_exceeded"));
@@ -505,6 +507,7 @@ impl SubagentSpawnCapabilityPort {
             child_scope,
             child_run_id,
             tree_root,
+            gate_override,
         };
 
         let result = self
@@ -589,6 +592,7 @@ impl SubagentSpawnCapabilityPort {
             child_scope,
             child_run_id,
             tree_root,
+            gate_override,
         } = ctx;
         let child_thread_id =
             ThreadId::new(format!("subagent-{}", child_run_id.as_uuid().simple()))
@@ -597,11 +601,14 @@ impl SubagentSpawnCapabilityPort {
         // The gate ref is also returned as a `LoopGateRef`; keep the opaque
         // suffix colon-free so it satisfies the model-visible loop ref
         // contract (`gate:<ascii-id>` with only alnum/underscore/dash/dot).
-        let gate_ref = GateRef::new(match mode {
-            SpawnSubagentMode::Blocking => format!("gate:subagent.{child_run_id}"),
-            SpawnSubagentMode::Background => format!("gate:subagent-bg.{child_run_id}"),
-        })
-        .map_err(invalid_static_ref)?;
+        let gate_ref = match gate_override {
+            Some(gate_ref) => gate_ref,
+            None => GateRef::new(match mode {
+                SpawnSubagentMode::Blocking => format!("gate:subagent-{child_run_id}"),
+                SpawnSubagentMode::Background => format!("gate:subagent-bg-{child_run_id}"),
+            })
+            .map_err(invalid_static_ref)?,
+        };
         let payload = spawn_result_payload(
             child_run_id,
             &child_thread_id,
@@ -853,7 +860,7 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
                 .spawn_input_codec
                 .decode(&self.run_context, &request.input_ref)
                 .await?;
-            return self.handle_spawn(&request, args).await;
+            return self.handle_spawn_with_gate(&request, args, None).await;
         }
         self.inner.invoke_capability(request).await
     }
@@ -863,6 +870,34 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
         request: CapabilityBatchInvocation,
     ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
         let mut outcomes = Vec::with_capacity(request.invocations.len());
+        // Pre-decode every spawn invocation so we know how many are Blocking
+        // before allocating the shared batch gate. Only batches with at least
+        // two Blocking spawns benefit from gate coalescing; otherwise the gate
+        // would be created and never registered, wasting a TurnRunId.
+        let mut spawn_args: HashMap<usize, SpawnSubagentArgs> = HashMap::new();
+        let mut blocking_count = 0_usize;
+        for (idx, invocation) in request.invocations.iter().enumerate() {
+            if !self.is_spawn(&invocation.capability_id) {
+                continue;
+            }
+            let args = self
+                .deps
+                .spawn_input_codec
+                .decode(&self.run_context, &invocation.input_ref)
+                .await?;
+            if args.spawn_mode() == SpawnSubagentMode::Blocking {
+                blocking_count += 1;
+            }
+            spawn_args.insert(idx, args);
+        }
+        let batch_blocking_gate = if blocking_count > 1 {
+            Some(
+                GateRef::new(format!("gate:subagent-batch-{}", TurnRunId::new()))
+                    .map_err(invalid_static_ref)?,
+            )
+        } else {
+            None
+        };
         let mut index = 0_usize;
         while index < request.invocations.len() {
             let invocation = &request.invocations[index];
@@ -870,16 +905,28 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
                 let outcome = if let Some(outcome) = self.authorize_spawn(invocation).await? {
                     outcome
                 } else {
-                    let args = self
-                        .deps
-                        .spawn_input_codec
-                        .decode(&self.run_context, &invocation.input_ref)
-                        .await?;
-                    self.handle_spawn(invocation, args).await?
+                    let args = spawn_args.remove(&index).ok_or_else(|| {
+                        AgentLoopHostError::new(
+                            AgentLoopHostErrorKind::Invalid,
+                            "subagent spawn args missing from pre-decode pass",
+                        )
+                    })?;
+                    let gate_override = (args.spawn_mode() == SpawnSubagentMode::Blocking)
+                        .then(|| batch_blocking_gate.clone())
+                        .flatten();
+                    self.handle_spawn_with_gate(invocation, args, gate_override)
+                        .await?
                 };
+                let batch_await_dependent = matches!(
+                    &outcome,
+                    CapabilityOutcome::AwaitDependentRun { gate_ref, .. }
+                        if batch_blocking_gate
+                            .as_ref()
+                            .is_some_and(|batch_gate| batch_gate == gate_ref)
+                );
                 let suspended = outcome.is_suspension();
                 outcomes.push(outcome);
-                if suspended && request.stop_on_first_suspension {
+                if suspended && request.stop_on_first_suspension && !batch_await_dependent {
                     return Ok(CapabilityBatchOutcome {
                         outcomes,
                         stopped_on_suspension: true,

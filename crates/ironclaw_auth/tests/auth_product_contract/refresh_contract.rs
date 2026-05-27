@@ -41,7 +41,10 @@ async fn credential_refresh_updates_account_through_provider_boundary() {
     );
 
     let refreshed = services
-        .get_account(&owner, account.id)
+        .get_account(CredentialAccountLookupRequest::new(
+            owner.clone(),
+            account.id,
+        ))
         .await
         .expect("lookup")
         .expect("refreshed account");
@@ -104,7 +107,10 @@ async fn credential_refresh_failure_becomes_recoverable_status() {
     assert_eq!(report.recovery.choices()[0].id, account.id);
 
     let failed = services
-        .get_account(&owner, account.id)
+        .get_account(CredentialAccountLookupRequest::new(
+            owner.clone(),
+            account.id,
+        ))
         .await
         .expect("lookup")
         .expect("failed account");
@@ -155,7 +161,10 @@ async fn stale_refresh_success_does_not_overwrite_concurrent_refresh() {
 
     assert_eq!(error, AuthProductError::RefreshFailed);
     let stored = services
-        .get_account(&owner, account.id)
+        .get_account(CredentialAccountLookupRequest::new(
+            owner.clone(),
+            account.id,
+        ))
         .await
         .expect("lookup")
         .expect("account");
@@ -205,7 +214,10 @@ async fn stale_refresh_failure_does_not_mark_concurrent_refresh_failed() {
     assert_eq!(report.account.status, CredentialAccountStatus::Configured);
     assert_eq!(report.recovery.kind(), CredentialRecoveryKind::Configured);
     let stored = services
-        .get_account(&owner, account.id)
+        .get_account(CredentialAccountLookupRequest::new(
+            owner.clone(),
+            account.id,
+        ))
         .await
         .expect("lookup")
         .expect("account");
@@ -258,11 +270,78 @@ async fn credential_refresh_without_refresh_secret_becomes_recoverable_status() 
     );
 
     let failed = services
-        .get_account(&owner, account.id)
+        .get_account(CredentialAccountLookupRequest::new(
+            owner.clone(),
+            account.id,
+        ))
         .await
         .expect("lookup")
         .expect("failed account");
     assert_eq!(failed.status, CredentialAccountStatus::RefreshFailed);
+}
+
+#[tokio::test]
+async fn credential_refresh_rejects_terminal_statuses_even_with_refresh_secret() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+
+    for (status, label_value, secret_suffix) in [
+        (
+            CredentialAccountStatus::Revoked,
+            "terminal revoked",
+            "revoked",
+        ),
+        (
+            CredentialAccountStatus::Inactive,
+            "terminal inactive",
+            "inactive",
+        ),
+        (
+            CredentialAccountStatus::PendingSetup,
+            "terminal pending",
+            "pending",
+        ),
+    ] {
+        let account = services
+            .create_account(NewCredentialAccount {
+                scope: owner.clone(),
+                provider: provider(),
+                label: label(label_value),
+                status,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(
+                    SecretHandle::new(format!("github-terminal-access-{secret_suffix}")).unwrap(),
+                ),
+                refresh_secret: Some(
+                    SecretHandle::new(format!("github-terminal-refresh-{secret_suffix}")).unwrap(),
+                ),
+                scopes: provider_scopes(&["repo"]),
+            })
+            .await
+            .expect("terminal account");
+
+        let error = services
+            .refresh_account(CredentialRefreshRequest::new(
+                owner.clone(),
+                provider(),
+                account.id,
+            ))
+            .await
+            .expect_err("terminal account refresh is rejected");
+        assert_eq!(error, AuthProductError::CredentialMissing);
+
+        let stored = services
+            .get_account(CredentialAccountLookupRequest::new(
+                owner.clone(),
+                account.id,
+            ))
+            .await
+            .expect("lookup")
+            .expect("terminal account remains");
+        assert_eq!(stored.status, status);
+    }
 }
 
 #[tokio::test]

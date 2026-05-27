@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{cmp::Ordering, collections::HashMap};
 
 use ironclaw_events::{EventLogEntry, RuntimeEvent, RuntimeEventKind, sanitize_error_kind};
 use ironclaw_host_api::InvocationId;
@@ -8,7 +8,6 @@ use crate::{
     RunStatusProjection,
 };
 
-#[derive(Default)]
 pub(crate) struct RuntimeProjectionState {
     runs: HashMap<InvocationId, RunStatusProjection>,
     capability_activities: HashMap<InvocationId, CapabilityActivityProjection>,
@@ -16,10 +15,19 @@ pub(crate) struct RuntimeProjectionState {
 }
 
 impl RuntimeProjectionState {
+    pub(crate) fn without_capability_activity_output_limit() -> Self {
+        Self {
+            runs: HashMap::new(),
+            capability_activities: HashMap::new(),
+            capability_activity_output_limit: None,
+        }
+    }
+
     pub(crate) fn with_capability_activity_output_limit(limit: usize) -> Self {
         Self {
+            runs: HashMap::new(),
+            capability_activities: HashMap::new(),
             capability_activity_output_limit: Some(limit),
-            ..Self::default()
         }
     }
 
@@ -31,12 +39,14 @@ impl RuntimeProjectionState {
     pub(crate) fn into_parts(
         self,
     ) -> (Vec<RunStatusProjection>, Vec<CapabilityActivityProjection>) {
+        let mut runs = self.runs.into_values().collect::<Vec<_>>();
         let mut capability_activities = self.capability_activities.into_values().collect();
+        sort_runs_for_projection(&mut runs);
         enforce_capability_activity_output_limit(
             &mut capability_activities,
             self.capability_activity_output_limit,
         );
-        (self.runs.into_values().collect(), capability_activities)
+        (runs, capability_activities)
     }
 }
 
@@ -47,41 +57,101 @@ fn enforce_capability_activity_output_limit(
     let Some(limit) = limit else {
         return;
     };
-    if activities.len() <= limit {
-        return;
+    if activities.len() > limit {
+        let split_index = limit.saturating_sub(1);
+        activities
+            .select_nth_unstable_by(split_index, compare_capability_activities_for_projection);
+        activities.truncate(limit);
     }
     sort_capability_activities_for_projection(activities);
-    activities.truncate(limit);
 }
 
-pub(crate) fn sort_runs_for_projection(runs: &mut [RunStatusProjection]) {
-    runs.sort_by(|left, right| {
-        right
-            .updated_at
-            .cmp(&left.updated_at)
-            .then_with(|| right.last_cursor.cmp(&left.last_cursor))
-            .then_with(|| {
-                left.invocation_id
-                    .as_uuid()
-                    .cmp(&right.invocation_id.as_uuid())
-            })
-    });
+fn sort_runs_for_projection(runs: &mut [RunStatusProjection]) {
+    runs.sort_by(compare_runs_for_projection);
 }
 
-pub(crate) fn sort_capability_activities_for_projection(
-    activities: &mut [CapabilityActivityProjection],
-) {
-    activities.sort_by(|left, right| {
-        right
-            .updated_at
-            .cmp(&left.updated_at)
-            .then_with(|| right.last_cursor.cmp(&left.last_cursor))
-            .then_with(|| {
-                left.invocation_id
-                    .as_uuid()
-                    .cmp(&right.invocation_id.as_uuid())
-            })
-    });
+fn sort_capability_activities_for_projection(activities: &mut [CapabilityActivityProjection]) {
+    activities.sort_by(compare_capability_activities_for_projection);
+}
+
+fn compare_runs_for_projection(
+    left: &RunStatusProjection,
+    right: &RunStatusProjection,
+) -> Ordering {
+    compare_projection_order(
+        &left.updated_at,
+        &right.updated_at,
+        left.last_cursor,
+        right.last_cursor,
+        &left.invocation_id,
+        &right.invocation_id,
+    )
+}
+
+fn compare_capability_activities_for_projection(
+    left: &CapabilityActivityProjection,
+    right: &CapabilityActivityProjection,
+) -> Ordering {
+    compare_projection_order(
+        &left.updated_at,
+        &right.updated_at,
+        left.last_cursor,
+        right.last_cursor,
+        &left.invocation_id,
+        &right.invocation_id,
+    )
+}
+
+fn compare_projection_order(
+    left_updated_at: &ironclaw_host_api::Timestamp,
+    right_updated_at: &ironclaw_host_api::Timestamp,
+    left_cursor: ironclaw_events::EventCursor,
+    right_cursor: ironclaw_events::EventCursor,
+    left_invocation_id: &InvocationId,
+    right_invocation_id: &InvocationId,
+) -> Ordering {
+    right_updated_at
+        .cmp(left_updated_at)
+        .then_with(|| right_cursor.cmp(&left_cursor))
+        .then_with(|| {
+            left_invocation_id
+                .as_uuid()
+                .cmp(&right_invocation_id.as_uuid())
+        })
+}
+
+fn preserve_status_on_dispatch_success<S>(
+    has_active_process: bool,
+    current_status: Option<S>,
+    running_status: S,
+    terminal_statuses: &[S],
+) -> Option<S>
+where
+    S: Copy + PartialEq,
+{
+    if !has_active_process {
+        return None;
+    }
+    if current_status == Some(running_status) {
+        return current_status;
+    }
+    if current_status.is_some_and(|status| terminal_statuses.contains(&status)) {
+        return current_status;
+    }
+    None
+}
+
+pub(crate) fn capability_activity_transition_for_entry(
+    entry: &EventLogEntry<RuntimeEvent>,
+) -> Option<CapabilityActivityProjection> {
+    let status = capability_activity_status_for_event(entry.record.kind, None, false)?;
+    if !matches!(
+        status,
+        CapabilityActivityStatus::Started | CapabilityActivityStatus::Running
+    ) {
+        return None;
+    }
+    Some(capability_activity_projection_for_entry(entry, status))
 }
 
 fn apply_run_event(
@@ -169,20 +239,7 @@ fn apply_capability_activity_event(
     let sanitized_error_kind = event.error_kind.clone().map(sanitize_error_kind);
     let activity = activities
         .entry(event.scope.invocation_id)
-        .or_insert_with(|| CapabilityActivityProjection {
-            invocation_id: event.scope.invocation_id,
-            run_id: event.parent_invocation_id,
-            capability_id: event.capability_id.clone(),
-            thread_id: event.scope.thread_id.clone(),
-            status,
-            provider: event.provider.clone(),
-            runtime: event.runtime,
-            process_id: event.process_id,
-            output_bytes: event.output_bytes,
-            error_kind: sanitized_error_kind.clone(),
-            last_cursor: entry.cursor,
-            updated_at: event.timestamp,
-        });
+        .or_insert_with(|| capability_activity_projection_for_entry(entry, status));
 
     activity.status = status;
     if event.parent_invocation_id.is_some() {
@@ -216,31 +273,52 @@ fn apply_capability_activity_event(
     activity.updated_at = event.timestamp;
 }
 
+fn capability_activity_projection_for_entry(
+    entry: &EventLogEntry<RuntimeEvent>,
+    status: CapabilityActivityStatus,
+) -> CapabilityActivityProjection {
+    let event = &entry.record;
+    CapabilityActivityProjection {
+        invocation_id: event.scope.invocation_id,
+        run_id: event.parent_invocation_id,
+        capability_id: event.capability_id.clone(),
+        thread_id: event.scope.thread_id.clone(),
+        status,
+        provider: event.provider.clone(),
+        runtime: event.runtime,
+        process_id: event.process_id,
+        output_bytes: event.output_bytes,
+        error_kind: event.error_kind.clone().map(sanitize_error_kind),
+        last_cursor: entry.cursor,
+        updated_at: event.timestamp,
+    }
+}
+
 fn capability_activity_status_for_event(
     kind: RuntimeEventKind,
     current_status: Option<CapabilityActivityStatus>,
     has_active_process: bool,
 ) -> Option<CapabilityActivityStatus> {
+    if matches!(
+        kind,
+        RuntimeEventKind::DispatchSucceeded | RuntimeEventKind::CapabilityActivitySucceeded
+    ) && let Some(status) = preserve_status_on_dispatch_success(
+        has_active_process,
+        current_status,
+        CapabilityActivityStatus::Running,
+        &[
+            CapabilityActivityStatus::Failed,
+            CapabilityActivityStatus::Killed,
+        ],
+    ) {
+        return Some(status);
+    }
     match kind {
         RuntimeEventKind::DispatchRequested | RuntimeEventKind::CapabilityActivityRequested => {
             Some(CapabilityActivityStatus::Started)
         }
         RuntimeEventKind::RuntimeSelected | RuntimeEventKind::ProcessStarted => {
             Some(CapabilityActivityStatus::Running)
-        }
-        RuntimeEventKind::DispatchSucceeded | RuntimeEventKind::CapabilityActivitySucceeded
-            if has_active_process && current_status == Some(CapabilityActivityStatus::Running) =>
-        {
-            Some(CapabilityActivityStatus::Running)
-        }
-        RuntimeEventKind::DispatchSucceeded | RuntimeEventKind::CapabilityActivitySucceeded
-            if has_active_process
-                && matches!(
-                    current_status,
-                    Some(CapabilityActivityStatus::Failed) | Some(CapabilityActivityStatus::Killed)
-                ) =>
-        {
-            current_status
         }
         RuntimeEventKind::DispatchSucceeded
         | RuntimeEventKind::CapabilityActivitySucceeded
@@ -267,6 +345,16 @@ fn run_status_for_event(
     current_status: Option<RunProjectionStatus>,
     has_active_process: bool,
 ) -> RunProjectionStatus {
+    if matches!(kind, RuntimeEventKind::DispatchSucceeded)
+        && let Some(status) = preserve_status_on_dispatch_success(
+            has_active_process,
+            current_status,
+            RunProjectionStatus::Running,
+            &[RunProjectionStatus::Failed, RunProjectionStatus::Killed],
+        )
+    {
+        return status;
+    }
     match kind {
         RuntimeEventKind::DispatchRequested
         | RuntimeEventKind::RuntimeSelected
@@ -274,20 +362,6 @@ fn run_status_for_event(
         | RuntimeEventKind::ModelCompleted
         | RuntimeEventKind::ModelFailed
         | RuntimeEventKind::ProcessStarted => RunProjectionStatus::Running,
-        RuntimeEventKind::DispatchSucceeded
-            if has_active_process && current_status == Some(RunProjectionStatus::Running) =>
-        {
-            RunProjectionStatus::Running
-        }
-        RuntimeEventKind::DispatchSucceeded
-            if has_active_process
-                && matches!(
-                    current_status,
-                    Some(RunProjectionStatus::Failed) | Some(RunProjectionStatus::Killed)
-                ) =>
-        {
-            current_status.unwrap_or(RunProjectionStatus::Failed)
-        }
         RuntimeEventKind::DispatchSucceeded
         | RuntimeEventKind::AssistantReplyFinalized
         | RuntimeEventKind::LoopCompleted
