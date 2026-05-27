@@ -206,6 +206,14 @@ impl PredicateEvaluator {
                                 return restrictive_action(on_exceeded);
                             }
                         };
+                        // `max` is the inclusive ceiling on invocations within
+                        // the window: `record_invocation` returns the count
+                        // *including* this invocation, so `count > max` denies
+                        // only the first invocation that would push past the
+                        // cap. With `max = 2` the 1st and 2nd invocations are
+                        // allowed (count 1, 2) and the 3rd is denied (count 3).
+                        // This inclusive-allow / deny-on-overflow semantics is
+                        // pinned by the InvocationCount cap test.
                         if count > *max {
                             restrictive_action(on_exceeded)
                         } else {

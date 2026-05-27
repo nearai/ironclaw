@@ -1148,6 +1148,103 @@ type = "always"
 }
 
 #[test]
+fn manifest_rejects_non_table_hook_entry() {
+    // A `[[hooks]]` array element that is not a TOML table (e.g. a bare
+    // string) must be rejected before any field projection.
+    let manifest = r#"schema_version = "reborn.extension_manifest.v2"
+id = "hookext"
+name = "hookext"
+version = "0.1.0"
+description = "hookext extension"
+trust = "untrusted"
+hooks = ["not-a-table"]
+
+[runtime]
+kind = "wasm"
+module = "wasm/tool.wasm"
+
+[[capabilities]]
+id = "hookext.run"
+description = "Run hookext"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/hookext/run.input.v1.json"
+output_schema_ref = "schemas/hookext/run.output.v1.json"
+prompt_doc_ref = "prompts/hookext/run.md"
+"#;
+    let err = ExtensionManifest::parse(
+        manifest,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .expect_err("non-table hook entry must be rejected");
+    assert!(
+        err.to_string().contains("must be a TOML table"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn manifest_rejects_whitespace_only_hook_id() {
+    let hooks = r#"
+[[hooks]]
+id = "   "
+kind = "before_capability"
+[hooks.body]
+mode = "predicate"
+[hooks.body.spec]
+type = "deny_capability"
+reason = "x"
+[hooks.body.spec.when]
+type = "always"
+"#;
+    let err = ExtensionManifest::parse(
+        &manifest_with_hooks(hooks),
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .expect_err("whitespace-only hook id must be rejected");
+    assert!(
+        err.to_string().contains("`id` must not be empty"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn manifest_rejects_oversized_hook_entry() {
+    // A single hook entry whose serialized body exceeds the per-entry size
+    // bound must be rejected with `HookEntryTooLarge`. Pad the reason string
+    // past MAX_HOOK_ENTRY_BYTES so the canonical re-serialization trips the
+    // size guard.
+    let padding = "x".repeat(MAX_HOOK_ENTRY_BYTES + 1);
+    let hooks = format!(
+        r#"
+[[hooks]]
+id = "too-big"
+kind = "before_capability"
+[hooks.body]
+mode = "predicate"
+[hooks.body.spec]
+type = "deny_capability"
+reason = "{padding}"
+[hooks.body.spec.when]
+type = "always"
+"#
+    );
+    let err = ExtensionManifest::parse(
+        &manifest_with_hooks(&hooks),
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .expect_err("oversized hook entry must be rejected");
+    assert!(
+        err.to_string().contains("exceeding the per-entry maximum"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn manifest_rejects_duplicate_hook_ids() {
     let hooks = r#"
 [[hooks]]
