@@ -70,7 +70,9 @@ use crate::RebornProductAuthServicePorts;
 use crate::default_system_prompt::seed_default_system_prompt;
 use crate::input::{RebornRuntimeProcessBinding, RebornStorageInput};
 use crate::lifecycle::{RebornLocalSkillManagementPort, build_local_skill_management_port};
-use crate::local_dev_mounts::{skill_context_mount_view, workspace_mount_view};
+use crate::local_dev_mounts::{
+    ambient_workspace_mount_view, skill_context_mount_view, workspace_mount_view,
+};
 use crate::{
     RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
     RebornFacadeReadiness, RebornProductAuthServices, RebornReadiness, RebornReadinessState,
@@ -363,7 +365,11 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     let filesystem =
         build_local_dev_root_filesystem(&root, &workspace_root, host_home_root.as_ref()).await?;
     let (skill_filesystem, workspace_filesystem, runtime_workspace_mounts) =
-        build_workspace_filesystems(Arc::clone(&filesystem), host_home_root.as_ref())?;
+        build_workspace_filesystems(
+            Arc::clone(&filesystem),
+            &workspace_root,
+            host_home_root.as_ref(),
+        )?;
     let http_body_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
         Arc::clone(&filesystem),
         runtime_workspace_mounts.clone(),
@@ -862,10 +868,13 @@ impl LocalDevHostHomeRoot {
 /// Build the two ScopedFilesystem views used by local-dev: a read-only workspace view
 /// for skill context, and a read-write workspace view for runtime operations.
 ///
-/// When `host_home_root` is present, the runtime view also grants raw host-home aliases
-/// so `/Users/alice`-style paths resolve through the `/host` mount.
+/// When `host_home_root` is present, the runtime view is the local-dev-yolo
+/// ambient coding-tool view: it grants raw workspace and host-home aliases so
+/// real local paths resolve through the same virtual roots as `/workspace` and
+/// `/host`.
 fn build_workspace_filesystems(
     filesystem: Arc<LocalDevRootFilesystem>,
+    workspace_root: &Path,
     host_home_root: Option<&LocalDevHostHomeRoot>,
 ) -> Result<LocalDevWorkspaceFilesystems, RebornBuildError> {
     let read_only_workspace_mounts = workspace_mount_view(MountPermissions::read_only(), &[])
@@ -875,12 +884,19 @@ fn build_workspace_filesystems(
     let host_home_aliases = host_home_root
         .map(|root| root.aliases())
         .unwrap_or_default();
-    let runtime_workspace_mounts =
-        workspace_mount_view(MountPermissions::read_write(), &host_home_aliases).map_err(
-            |error| RebornBuildError::InvalidConfig {
-                reason: error.to_string(),
-            },
-        )?;
+    let workspace_aliases = if host_home_root.is_some() {
+        vec![workspace_root]
+    } else {
+        Vec::new()
+    };
+    let runtime_workspace_mounts = ambient_workspace_mount_view(
+        MountPermissions::read_write(),
+        &workspace_aliases,
+        &host_home_aliases,
+    )
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: error.to_string(),
+    })?;
     let skill_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
         Arc::clone(&filesystem),
         skill_context_mount_view().map_err(|error| RebornBuildError::InvalidConfig {

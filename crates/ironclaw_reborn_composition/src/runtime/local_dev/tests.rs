@@ -480,9 +480,18 @@ mod tests {
     async fn local_yolo_capability_port_reads_confirmed_host_mount() {
         let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only setup in #[cfg(test)] module.
         let storage_root = dir.path().join("local-dev");
+        let workspace_root = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace_root).expect("workspace root"); // safety: test-only setup in #[cfg(test)] module.
+        std::fs::write(workspace_root.join("note.txt"), "safe workspace file\n")
+            .expect("workspace file"); // safety: test-only setup in #[cfg(test)] module.
         let host_home = dir.path().join("home");
         std::fs::create_dir_all(&host_home).expect("host home"); // safety: test-only setup in #[cfg(test)] module.
         std::fs::write(host_home.join("safe.txt"), "safe host file\n").expect("host file"); // safety: test-only setup in #[cfg(test)] module.
+        let raw_workspace = workspace_root
+            .canonicalize()
+            .expect("canonical workspace root")
+            .to_string_lossy()
+            .into_owned();
         let raw_host_home = host_home
             .canonicalize()
             .expect("canonical host home")
@@ -498,6 +507,7 @@ mod tests {
             .with_runtime_policy(
                 crate::local_dev_yolo_runtime_policy(true).expect("local-yolo policy resolves"), // safety: test-only helper in #[cfg(test)] module.
             )
+            .with_local_dev_workspace_root(workspace_root.clone())
             .with_local_dev_confirmed_host_home_root(host_home.clone()),
         )
         .await
@@ -635,7 +645,7 @@ mod tests {
 
         let outcome = port
             .invoke_capability(CapabilityInvocation {
-                surface_version: surface.version,
+                surface_version: surface.version.clone(),
                 capability_id: CapabilityId::new(READ_FILE_CAPABILITY_ID)
                     .expect("read_file capability id"), // safety: built-in capability id is a valid literal.
                 input_ref,
@@ -652,6 +662,37 @@ mod tests {
         assert_eq!(
             output["content"],
             serde_json::json!("     1│ safe host file")
+        );
+
+        let input_ref = capability_io
+            .register_provider_tool_call_input(
+                &run_context,
+                &provider_tool_call(
+                    serde_json::json!({"path": format!("{raw_workspace}/note.txt")}),
+                ),
+            )
+            .await
+            .expect("input ref"); // safety: test-only assertion in #[cfg(test)] module.
+
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: surface.version,
+                capability_id: CapabilityId::new(READ_FILE_CAPABILITY_ID)
+                    .expect("read_file capability id"), // safety: built-in capability id is a valid literal.
+                input_ref,
+            })
+            .await
+            .expect("raw workspace read_file invocation"); // safety: test-only assertion in #[cfg(test)] module.
+        let CapabilityOutcome::Completed(completed) = outcome else {
+            panic!("expected completed read_file invocation");
+        };
+        let output = capability_io
+            .result_output(completed.result_ref.as_str())
+            .expect("result output lookup") // safety: test-only assertion in #[cfg(test)] module.
+            .expect("result output"); // safety: test-only assertion in #[cfg(test)] module.
+        assert_eq!(
+            output["content"],
+            serde_json::json!("     1│ safe workspace file")
         );
     }
 
