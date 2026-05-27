@@ -10,10 +10,12 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{
+    CasExpectation, Entry, InMemoryBackend, RootFilesystem, ScopedFilesystem,
+};
 use ironclaw_host_api::{
     AgentId, CapabilityId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
-    ProjectId, TenantId, ThreadId, UserId, VirtualPath,
+    ProjectId, ScopedPath, TenantId, ThreadId, UserId, VirtualPath,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AppendAssistantDraftRequest,
@@ -73,7 +75,7 @@ async fn filesystem_store_rejects_wrong_scope_history_reads() {
 async fn filesystem_store_range_read_returns_only_requested_sequences() {
     let backend = Arc::new(InMemoryBackend::new());
     let scoped = scoped_threads_fs_at(backend, "tenant-range", "alice");
-    let service = FilesystemSessionThreadService::new(scoped);
+    let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
     let scope = scope("fs-range");
     let thread = service
         .ensure_thread(EnsureThreadRequest {
@@ -100,6 +102,44 @@ async fn filesystem_store_range_read_returns_only_requested_sequences() {
             .await
             .unwrap();
     }
+
+    let index_entries = scoped
+        .list_dir(
+            &scope.to_resource_scope(),
+            &ScopedPath::new(
+                "/threads/agents/agent-fs-range/projects/project-fs-range/owners/user-fs-range/threads/thread-fs-range/messages_by_sequence",
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut index_entry_names = index_entries
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect::<Vec<_>>();
+    index_entry_names.sort_unstable();
+    assert_eq!(
+        index_entry_names,
+        vec![
+            "00000000000000000001.json",
+            "00000000000000000002.json",
+            "00000000000000000003.json",
+            "00000000000000000004.json",
+        ]
+    );
+
+    scoped
+        .put(
+            &scope.to_resource_scope(),
+            &ScopedPath::new(
+                "/threads/agents/agent-fs-range/projects/project-fs-range/owners/user-fs-range/threads/thread-fs-range/messages/malformed-out-of-range.json",
+            )
+            .unwrap(),
+            Entry::bytes(b"{not-json".to_vec()),
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
 
     let range = service
         .list_thread_messages_range(ThreadMessageRangeRequest {
