@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use ironclaw_host_api::sha256_digest_token;
 use ironclaw_llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider,
-    ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
+    Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
 };
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
@@ -1041,10 +1041,15 @@ fn convert_messages(
             HostManagedModelMessageRole::ToolResult => {
                 let replay = tool_result_replay_message(message)?;
                 let Some(provider_call) = replay.provider_call else {
-                    converted.push(ChatMessage::system(replay.safe_summary));
+                    converted.push(ChatMessage::user(tool_summary_message(replay.safe_summary)));
                     index += 1;
                     continue;
                 };
+                if !provider_replay_matches_identity(&provider_call, replay_identity) {
+                    converted.push(ChatMessage::user(tool_summary_message(replay.safe_summary)));
+                    index += 1;
+                    continue;
+                }
                 validate_provider_replay_identity(&provider_call, replay_identity)?;
                 let provider_turn_id = provider_call.provider_turn_id.clone();
                 let mut provider_results = vec![(provider_call, replay.safe_summary)];
@@ -1059,6 +1064,11 @@ fn convert_messages(
                         index += 1;
                         continue;
                     };
+                    if !provider_replay_matches_identity(&next_provider_call, replay_identity) {
+                        plain_tool_summaries.push(next.safe_summary);
+                        index += 1;
+                        continue;
+                    }
                     validate_provider_replay_identity(&next_provider_call, replay_identity)?;
                     if next_provider_call.provider_turn_id != provider_turn_id {
                         break;
@@ -1067,13 +1077,50 @@ fn convert_messages(
                     index += 1;
                 }
                 converted.extend(provider_tool_roundtrip_messages(provider_results));
-                converted.extend(plain_tool_summaries.into_iter().map(ChatMessage::system));
+                converted.extend(
+                    plain_tool_summaries
+                        .into_iter()
+                        .map(tool_summary_message)
+                        .map(ChatMessage::user),
+                );
                 continue;
             }
         }
         index += 1;
     }
-    Ok(converted)
+    Ok(coalesce_system_messages_at_start(converted))
+}
+
+fn coalesce_system_messages_at_start(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    let mut system_content = Vec::new();
+    let mut transcript = Vec::with_capacity(messages.len());
+    for message in messages {
+        if message.role == Role::System {
+            system_content.push(message.content);
+        } else {
+            transcript.push(message);
+        }
+    }
+    if system_content.is_empty() {
+        return transcript;
+    }
+
+    let mut normalized = Vec::with_capacity(transcript.len() + 1);
+    normalized.push(ChatMessage::system(system_content.join("\n\n")));
+    normalized.extend(transcript);
+    normalized
+}
+
+fn tool_summary_message(summary: String) -> String {
+    format!("[Tool result summary]: {summary}")
+}
+
+fn provider_replay_matches_identity(
+    provider_call: &ProviderToolCallReferenceEnvelope,
+    expected: &ProviderReplayIdentity,
+) -> bool {
+    provider_call.provider_id == expected.provider_id
+        && provider_call.provider_model_id == expected.provider_model_id
 }
 
 fn validate_provider_replay_identity(
