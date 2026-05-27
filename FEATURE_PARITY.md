@@ -310,7 +310,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | Post-compaction context injection | ✅ | ❌ | Workspace context as system event |
 | Compaction start/end notices | ✅ | ❌ | Opt-in lifecycle notices during compaction |
 | Custom system prompts | ✅ | ✅ | Template variables, safety guardrails |
-| Skills (modular capabilities) | ✅ | ✅ | Prompt-based skills with trust gating, attenuation, activation criteria, catalog, selector |
+| Skills (modular capabilities) | ✅ | ✅ | Prompt-based skills with trust gating, attenuation, activation criteria, catalog, selector; Reborn local-dev now uses catalog/list-first model-selected activation before loading full skill context |
 | Skill Workshop plugin | ✅ | ❌ | Captures reusable workflow corrections as pending or auto-applied workspace skills, threshold-based reviewer |
 | Grouped skill directories | ✅ | ✅ | `skills/<group>/<skill>/SKILL.md` discovery |
 | Skill installer metadata | ✅ | ❌ | One-click install recipes (npm/pip), API key entry, source metadata |

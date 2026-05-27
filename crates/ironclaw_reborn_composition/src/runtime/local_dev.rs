@@ -49,13 +49,20 @@ use crate::local_dev_mounts::skill_management_mount_view;
 use crate::{
     RebornServices,
     projection::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore},
+    runtime::LocalDevSelectableSkillContextSource,
 };
 
 mod extension_surface;
+mod skill_activation;
 mod surface_disclosure;
+mod synthetic_capability;
 
 use extension_surface::{LocalDevExtensionSurface, LocalDevExtensionSurfaceSource};
+#[cfg(test)]
+pub(crate) use skill_activation::SKILL_ACTIVATE_CAPABILITY_ID;
+use skill_activation::skill_activation_capability;
 use surface_disclosure::wrap_local_dev_surface_disclosure;
+use synthetic_capability::wrap_local_dev_synthetic_capabilities;
 
 pub(super) struct LocalDevCapabilityWiring {
     pub(super) capability_factory: Arc<dyn LoopCapabilityPortFactory>,
@@ -72,6 +79,7 @@ pub(super) fn capability_wiring(
     user_id: UserId,
     model_gateway: Arc<dyn HostManagedModelGateway>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
+    skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
 ) -> Option<LocalDevCapabilityWiring> {
     let runtime = services.host_runtime.clone()?;
     let local_runtime = services.local_runtime.as_ref()?;
@@ -95,6 +103,7 @@ pub(super) fn capability_wiring(
             Arc::clone(&capability_input_resolver),
             Arc::clone(&capability_result_writer),
             milestone_sink,
+            skill_activation_source,
         ));
     let model_gateway: Arc<dyn HostManagedModelGateway> = Arc::new(
         LocalDevResultHydratingModelGateway::new(model_gateway, capability_io),
@@ -118,6 +127,7 @@ struct LocalDevLoopCapabilityPortFactory {
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
+    skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
 }
 
 impl LocalDevLoopCapabilityPortFactory {
@@ -129,6 +139,7 @@ impl LocalDevLoopCapabilityPortFactory {
         input_resolver: Arc<dyn LoopCapabilityInputResolver>,
         result_writer: Arc<dyn LoopCapabilityResultWriter>,
         milestone_sink: Arc<dyn LoopHostMilestoneSink>,
+        skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
     ) -> Self {
         Self {
             runtime,
@@ -138,6 +149,7 @@ impl LocalDevLoopCapabilityPortFactory {
             input_resolver,
             result_writer,
             milestone_sink,
+            skill_activation_source,
         }
     }
 }
@@ -178,6 +190,21 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
             );
         }
         let port = factory.for_run_context(run_context.clone());
+        let synthetic_capabilities = match &self.skill_activation_source {
+            Some(skill_activation_source) => {
+                vec![skill_activation_capability(Arc::clone(
+                    skill_activation_source,
+                ))?]
+            }
+            None => Vec::new(),
+        };
+        let port = wrap_local_dev_synthetic_capabilities(
+            port,
+            synthetic_capabilities,
+            run_context.clone(),
+            Arc::clone(&self.input_resolver),
+            Arc::clone(&self.result_writer),
+        )?;
         Ok(wrap_local_dev_surface_disclosure(port, &disclosure_mounts))
     }
 }
@@ -763,7 +790,7 @@ fn local_dev_builtin_grants(
     skill_mounts: &MountView,
 ) -> Result<CapabilitySet, AgentLoopHostError> {
     let mut grants = Vec::new();
-    for capability_id in local_dev_builtin_capability_ids() {
+    for capability_id in local_dev_runtime_capability_ids() {
         grants.push(CapabilityGrant {
             id: CapabilityGrantId::new(),
             capability: CapabilityId::new(capability_id).map_err(host_api_agent_loop_error)?,
@@ -810,7 +837,7 @@ fn local_dev_capability_kind(capability_id: &str) -> LocalDevCapabilityKind {
 }
 
 fn local_dev_skill_management_capability_ids() -> impl Iterator<Item = &'static str> {
-    local_dev_builtin_capability_ids()
+    local_dev_runtime_capability_ids()
         .into_iter()
         .filter(|capability_id| {
             matches!(
@@ -898,7 +925,17 @@ pub(super) fn local_dev_grant_constraints(
     }
 }
 
-fn local_dev_builtin_capability_ids() -> [&'static str; 18] {
+#[cfg(test)]
+fn local_dev_builtin_capability_ids() -> [&'static str; 19] {
+    let mut ids = [""; 19];
+    let runtime = local_dev_runtime_capability_ids();
+    let synthetic = local_dev_synthetic_capability_ids();
+    ids[..runtime.len()].copy_from_slice(&runtime);
+    ids[runtime.len()..].copy_from_slice(&synthetic);
+    ids
+}
+
+fn local_dev_runtime_capability_ids() -> [&'static str; 18] {
     [
         ECHO_CAPABILITY_ID,
         TIME_CAPABILITY_ID,
@@ -919,6 +956,11 @@ fn local_dev_builtin_capability_ids() -> [&'static str; 18] {
         SKILL_INSTALL_CAPABILITY_ID,
         SKILL_REMOVE_CAPABILITY_ID,
     ]
+}
+
+#[cfg(test)]
+fn local_dev_synthetic_capability_ids() -> [&'static str; 1] {
+    [SKILL_ACTIVATE_CAPABILITY_ID]
 }
 
 fn local_dev_network_allowed_effects() -> Vec<EffectKind> {

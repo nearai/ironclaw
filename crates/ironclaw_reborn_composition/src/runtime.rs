@@ -95,6 +95,9 @@ mod default_system_prompt_tests;
 mod local_dev;
 mod skills;
 
+#[cfg(test)]
+pub(crate) use local_dev::SKILL_ACTIVATE_CAPABILITY_ID;
+
 pub use skills::{
     RebornSkillActivation, RebornSkillActivationMode, RebornSkillAsset, RebornSkillBundle,
     RebornSkillExecutionPlan, RebornSkillExecutionResult, RebornSkillSourceKind,
@@ -1000,6 +1003,7 @@ pub async fn build_reborn_runtime(
         actor_user_id.clone(),
         model_gateway,
         milestone_sink.clone(),
+        skill_activation_source.clone(),
     )
     .ok_or(RebornRuntimeError::HostRuntimeUnavailable)?;
     let capability_factory = local_dev_capabilities.capability_factory;
@@ -1227,6 +1231,8 @@ fn local_dev_filesystem_skill_context_source(
         reason: format!("first-party skills extension source: {reason}"),
     })?;
     let selector_config = SkillActivationSelectorConfig {
+        selection_mode:
+            ironclaw_first_party_extension_ports::SkillActivationSelectionMode::ExplicitOnly,
         regex_activation_enabled: regex_skill_activation_enabled,
         ..SkillActivationSelectorConfig::default()
     };
@@ -3412,7 +3418,7 @@ mod tests {
                 WebUiSendMessageRequest {
                     client_action_id: Some("send-webui-skill-message".to_string()),
                     thread_id: Some(created.thread.thread_id.to_string()),
-                    content: Some("please use webui-helper".to_string()),
+                    content: Some("$webui-helper please help".to_string()),
                 },
             )
             .await

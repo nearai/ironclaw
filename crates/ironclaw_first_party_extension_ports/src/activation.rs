@@ -26,6 +26,7 @@ pub const DEFAULT_MAX_SKILL_CONTEXT_TOKENS: usize = 4000;
 
 const MAX_CONCURRENT_SKILL_ACTIVATION_LOADS: usize = 16;
 const MAX_ACTIVATION_CACHE_ENTRIES: usize = 1024;
+const MAX_ACTIVE_PLAN_ENTRIES: usize = 1024;
 
 /// Typed request produced by first-party skill activation selection.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +57,7 @@ impl SkillActivationRequest {
 pub enum SkillActivationMode {
     ExplicitMention,
     ActivationCriteria,
+    ModelSelected,
 }
 
 /// Selector limits for conversation-driven first-party skill activation.
@@ -63,7 +65,15 @@ pub enum SkillActivationMode {
 pub struct SkillActivationSelectorConfig {
     pub max_active_skills: usize,
     pub max_context_tokens: usize,
+    pub selection_mode: SkillActivationSelectionMode,
     pub regex_activation_enabled: bool,
+}
+
+/// How recorded user messages are allowed to activate skills.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillActivationSelectionMode {
+    ExplicitAndCriteria,
+    ExplicitOnly,
 }
 
 impl Default for SkillActivationSelectorConfig {
@@ -71,6 +81,7 @@ impl Default for SkillActivationSelectorConfig {
         Self {
             max_active_skills: DEFAULT_MAX_ACTIVE_SKILLS,
             max_context_tokens: DEFAULT_MAX_SKILL_CONTEXT_TOKENS,
+            selection_mode: SkillActivationSelectionMode::ExplicitAndCriteria,
             regex_activation_enabled: true,
         }
     }
@@ -173,6 +184,7 @@ where
     setup_marker_source: Option<Arc<dyn SetupMarkerSource>>,
     messages_by_run: Mutex<HashMap<SkillActivationMessageKey, SkillActivationMessage>>,
     activation_cache: Mutex<HashMap<ActivationCandidateCacheKey, CachedActivationCandidate>>,
+    active_plans_by_run: Mutex<HashMap<(TurnScope, TurnRunId), SkillActivationPlan>>,
     plans_by_run: Mutex<HashMap<(TurnScope, TurnRunId), CapturedSkillActivationPlan>>,
 }
 
@@ -197,6 +209,7 @@ where
             setup_marker_source: None,
             messages_by_run: Mutex::new(HashMap::new()),
             activation_cache: Mutex::new(HashMap::new()),
+            active_plans_by_run: Mutex::new(HashMap::new()),
             plans_by_run: Mutex::new(HashMap::new()),
         }
     }
@@ -271,6 +284,23 @@ where
         self.resolve_activation_plan(run_context, message).await
     }
 
+    pub async fn activate_skills_for_run(
+        &self,
+        run_context: &LoopRunContext,
+        skill_names: &[String],
+    ) -> Result<SkillActivationPlan, SkillActivationSelectionError> {
+        let candidate_set = self.load_activation_candidate_set(run_context).await?;
+        let selection = select_named_skill_activations(
+            skill_names,
+            &candidate_set.candidates,
+            &self.config,
+            &candidate_set.satisfied_setup_markers,
+        )?;
+        let plan =
+            self.merge_active_plan(run_context, activation_plan_for_candidates(selection))?;
+        Ok(plan)
+    }
+
     pub fn clear_accepted_message(
         &self,
         scope: &TurnScope,
@@ -310,6 +340,7 @@ where
         let (plan, candidates) = self
             .resolve_activation_plan_with_candidates(run_context, message)
             .await?;
+        self.store_active_plan(run_context, plan.clone())?;
         if capture_plan {
             self.plans_by_run
                 .lock()
@@ -325,14 +356,18 @@ where
         if plan.selection.activations.is_empty() {
             return Ok(Vec::new());
         }
+        Ok(context_candidates_for_plan(&plan, candidates))
+    }
 
-        let mut selected = Vec::new();
-        for candidate in candidates {
-            if plan.activated_bundles.contains(candidate.descriptor.id()) {
-                selected.push(candidate.into_context_candidate());
-            }
-        }
-        Ok(selected)
+    async fn active_plan_candidates(
+        &self,
+        run_context: &LoopRunContext,
+    ) -> Result<Vec<HostSkillContextCandidate>, SkillActivationSelectionError> {
+        let Some(plan) = self.active_plan(run_context)? else {
+            return Ok(Vec::new());
+        };
+        let candidate_set = self.load_activation_candidate_set(run_context).await?;
+        Ok(context_candidates_for_plan(&plan, candidate_set.candidates))
     }
 
     async fn resolve_activation_plan(
@@ -362,6 +397,21 @@ where
             ));
         }
 
+        let candidate_set = self.load_activation_candidate_set(run_context).await?;
+        let selection = select_skill_activations(
+            message,
+            &candidate_set.candidates,
+            &self.config,
+            &candidate_set.satisfied_setup_markers,
+        )?;
+        let plan = activation_plan_for_candidates(selection);
+        Ok((plan, candidate_set.candidates))
+    }
+
+    async fn load_activation_candidate_set(
+        &self,
+        run_context: &LoopRunContext,
+    ) -> Result<ActivationCandidateSet, SkillActivationSelectionError> {
         let mut descriptors = self
             .bundle_source
             .list_skill_bundles(run_context)
@@ -376,10 +426,10 @@ where
         let satisfied_setup_markers = self
             .satisfied_setup_markers(run_context, &candidates)
             .await?;
-        let selection =
-            select_skill_activations(message, &candidates, &self.config, &satisfied_setup_markers)?;
-        let plan = activation_plan_for_candidates(selection);
-        Ok((plan, candidates))
+        Ok(ActivationCandidateSet {
+            candidates,
+            satisfied_setup_markers,
+        })
     }
 
     async fn satisfied_setup_markers(
@@ -487,6 +537,69 @@ where
             skill_md,
         })
     }
+
+    fn active_plan(
+        &self,
+        run_context: &LoopRunContext,
+    ) -> Result<Option<SkillActivationPlan>, SkillActivationSelectionError> {
+        Ok(self
+            .active_plans_by_run
+            .lock()
+            .map_err(|_| SkillActivationSelectionError::Internal)?
+            .get(&(run_context.scope.clone(), run_context.run_id))
+            .cloned())
+    }
+
+    fn store_active_plan(
+        &self,
+        run_context: &LoopRunContext,
+        plan: SkillActivationPlan,
+    ) -> Result<(), SkillActivationSelectionError> {
+        if plan.selection.activations.is_empty() {
+            return Ok(());
+        }
+        let mut active = self
+            .active_plans_by_run
+            .lock()
+            .map_err(|_| SkillActivationSelectionError::Internal)?;
+        if active.len() >= MAX_ACTIVE_PLAN_ENTRIES {
+            active.clear();
+        }
+        active.insert((run_context.scope.clone(), run_context.run_id), plan);
+        Ok(())
+    }
+
+    fn merge_active_plan(
+        &self,
+        run_context: &LoopRunContext,
+        next: SkillActivationPlan,
+    ) -> Result<SkillActivationPlan, SkillActivationSelectionError> {
+        let Some(existing) = self.active_plan(run_context)? else {
+            self.store_active_plan(run_context, next.clone())?;
+            return Ok(next);
+        };
+        let mut selection = existing.selection.clone();
+        let mut activated_bundles = existing.activated_bundles().to_vec();
+        let mut selected = existing
+            .selection
+            .activations
+            .iter()
+            .filter_map(|activation| activation.bundle_id.clone())
+            .collect::<HashSet<_>>();
+
+        for activation in next.selection.activations {
+            if let Some(bundle_id) = activation.bundle_id.clone() {
+                if selected.insert(bundle_id.clone()) {
+                    activated_bundles.push(bundle_id);
+                    selection.activations.push(activation);
+                }
+            }
+        }
+        selection.feedback.extend(next.selection.feedback);
+        let merged = SkillActivationPlan::new(selection, activated_bundles);
+        self.store_active_plan(run_context, merged.clone())?;
+        Ok(merged)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -526,7 +639,10 @@ where
             .take_message_for_run(&run_context.scope, accepted_message_ref)
             .map_err(SkillActivationSelectionError::into_context_error)?
         else {
-            return Ok(Vec::new());
+            return self
+                .active_plan_candidates(run_context)
+                .await
+                .map_err(SkillActivationSelectionError::into_context_error);
         };
         self.selected_candidates(run_context, &message.text, message.capture_plan)
             .await
@@ -538,6 +654,11 @@ struct ActivationCandidate {
     descriptor: SkillBundleDescriptor,
     loaded: LoadedSkill,
     skill_md: String,
+}
+
+struct ActivationCandidateSet {
+    candidates: Vec<ActivationCandidate>,
+    satisfied_setup_markers: HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -591,6 +712,26 @@ fn activation_plan_for_candidates(selection: SkillActivationSelection) -> SkillA
         .collect();
 
     SkillActivationPlan::new(selection, activated_bundles)
+}
+
+fn context_candidates_for_plan(
+    plan: &SkillActivationPlan,
+    candidates: Vec<ActivationCandidate>,
+) -> Vec<HostSkillContextCandidate> {
+    if plan.selection.activations.is_empty() {
+        return Vec::new();
+    }
+
+    let active_bundles = plan
+        .activated_bundles()
+        .iter()
+        .cloned()
+        .collect::<HashSet<_>>();
+    candidates
+        .into_iter()
+        .filter(|candidate| active_bundles.contains(candidate.descriptor.id()))
+        .map(ActivationCandidate::into_context_candidate)
+        .collect()
 }
 
 fn loaded_skill_from_candidate(
@@ -666,28 +807,30 @@ fn select_skill_activations(
         }
     }
 
-    let outcome = prefilter_skills_with_options(
-        &rewritten_message,
-        &loaded_skills,
-        remaining_slots,
-        remaining_tokens,
-        satisfied_setup_markers,
-        SkillSelectionOptions::regex_activation_enabled(config.regex_activation_enabled),
-    );
-    feedback.extend(outcome.notes);
-
-    for skill in outcome.selected {
-        let candidate = candidate_for_loaded_skill(skill, &active_candidates)?;
-        let key = (
-            candidate.descriptor.id().source_kind(),
-            candidate.loaded.manifest.name.clone(),
+    if config.selection_mode == SkillActivationSelectionMode::ExplicitAndCriteria {
+        let outcome = prefilter_skills_with_options(
+            &rewritten_message,
+            &loaded_skills,
+            remaining_slots,
+            remaining_tokens,
+            satisfied_setup_markers,
+            SkillSelectionOptions::regex_activation_enabled(config.regex_activation_enabled),
         );
-        if selected_keys.insert(key) {
-            activations.push(SkillActivationRequest::resolved(
+        feedback.extend(outcome.notes);
+
+        for skill in outcome.selected {
+            let candidate = candidate_for_loaded_skill(skill, &active_candidates)?;
+            let key = (
+                candidate.descriptor.id().source_kind(),
                 candidate.loaded.manifest.name.clone(),
-                candidate.descriptor.id().clone(),
-                SkillActivationMode::ActivationCriteria,
-            ));
+            );
+            if selected_keys.insert(key) {
+                activations.push(SkillActivationRequest::resolved(
+                    candidate.loaded.manifest.name.clone(),
+                    candidate.descriptor.id().clone(),
+                    SkillActivationMode::ActivationCriteria,
+                ));
+            }
         }
     }
 
@@ -696,6 +839,61 @@ fn select_skill_activations(
     Ok(SkillActivationSelection {
         activations,
         rewritten_message,
+        feedback,
+    })
+}
+
+fn select_named_skill_activations(
+    skill_names: &[String],
+    candidates: &[ActivationCandidate],
+    config: &SkillActivationSelectorConfig,
+    satisfied_setup_markers: &HashSet<String>,
+) -> Result<SkillActivationSelection, SkillActivationSelectionError> {
+    let active_candidates =
+        candidates_with_unsatisfied_setup_markers(candidates, satisfied_setup_markers);
+    let mut activations = Vec::new();
+    let mut selected_keys = HashSet::new();
+    let mut feedback = Vec::new();
+    let mut remaining_slots = config.max_active_skills;
+    let mut remaining_tokens = config.max_context_tokens;
+
+    validate_explicit_mentions_are_unambiguous(skill_names, &active_candidates)?;
+    for name in skill_names {
+        let Some(candidate) = active_candidates
+            .iter()
+            .find(|candidate| candidate.loaded.manifest.name.eq_ignore_ascii_case(name))
+            .copied()
+        else {
+            feedback.push(format!("{name}: requested skill is not available"));
+            continue;
+        };
+        let key = (
+            candidate.descriptor.id().source_kind(),
+            candidate.loaded.manifest.name.clone(),
+        );
+        if selected_keys.insert(key) {
+            reserve_skill_budget(
+                &candidate.loaded,
+                &mut remaining_slots,
+                &mut remaining_tokens,
+            )?;
+            activations.push(SkillActivationRequest::resolved(
+                candidate.loaded.manifest.name.clone(),
+                candidate.descriptor.id().clone(),
+                SkillActivationMode::ModelSelected,
+            ));
+            feedback.push(format!(
+                "{}: activated after model selection",
+                candidate.loaded.manifest.name
+            ));
+        }
+    }
+
+    validate_selected_names_are_unambiguous(&activations)?;
+
+    Ok(SkillActivationSelection {
+        activations,
+        rewritten_message: String::new(),
         feedback,
     })
 }
@@ -1321,6 +1519,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn selector_can_disable_activation_criteria_but_keep_explicit_mentions() {
+        let source = Arc::new(StaticSkillBundleSource::new(vec![(
+            SkillSourceKind::User,
+            "code-review",
+            &skill_md(
+                "code-review",
+                "Review code",
+                &["review"],
+                "CODE_REVIEW_SENTINEL",
+            ),
+        )]));
+        let selectable = SelectableSkillContextSource::new(
+            source,
+            SkillActivationSelectorConfig {
+                selection_mode: SkillActivationSelectionMode::ExplicitOnly,
+                ..SkillActivationSelectorConfig::default()
+            },
+        );
+        let context = run_context().await;
+        selectable
+            .record_user_message(
+                context.scope.clone(),
+                accepted_message_ref(&context),
+                "please review this PR",
+            )
+            .expect("record natural-language message");
+        assert!(
+            selectable
+                .load_skill_context_candidates(&context)
+                .await
+                .expect("natural-language selection succeeds")
+                .is_empty(),
+            "keyword/tag/pattern criteria should not inject full skill bodies when disabled"
+        );
+
+        selectable
+            .record_user_message(
+                context.scope.clone(),
+                accepted_message_ref(&context),
+                "$code-review this PR",
+            )
+            .expect("record explicit message");
+        let selected = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("explicit selection succeeds");
+
+        assert_eq!(selected.len(), 1);
+        assert!(
+            selected[0]
+                .skill_md
+                .as_ref()
+                .expect("skill context")
+                .contains("CODE_REVIEW_SENTINEL")
+        );
+    }
+
+    #[tokio::test]
+    async fn model_selected_skill_persists_for_later_prompt_builds() {
+        let source = Arc::new(StaticSkillBundleSource::new(vec![(
+            SkillSourceKind::User,
+            "code-review",
+            &skill_md(
+                "code-review",
+                "Review code",
+                &["review"],
+                "CODE_REVIEW_SENTINEL",
+            ),
+        )]));
+        let selectable = SelectableSkillContextSource::new(
+            source,
+            SkillActivationSelectorConfig {
+                selection_mode: SkillActivationSelectionMode::ExplicitOnly,
+                ..SkillActivationSelectorConfig::default()
+            },
+        );
+        let context = run_context().await;
+
+        selectable
+            .activate_skills_for_run(&context, &["code-review".to_string()])
+            .await
+            .expect("model-selected skill activates");
+        let selected = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("active plan context loads");
+        let selected_again = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("active plan context reloads");
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected_again.len(), 1);
+        assert!(
+            selected_again[0]
+                .skill_md
+                .as_ref()
+                .expect("skill context")
+                .contains("CODE_REVIEW_SENTINEL")
+        );
+    }
+
+    #[tokio::test]
     async fn selector_suppresses_explicit_skill_when_setup_marker_is_satisfied() {
         let source = Arc::new(StaticSkillBundleSource::new(vec![(
             SkillSourceKind::User,
@@ -1400,11 +1701,15 @@ mod tests {
             .expect("first selection succeeds");
         assert_eq!(first_selected.len(), 1);
 
-        let first_selected_after_clear = selectable
+        let first_selected_after_message_consumed = selectable
             .load_skill_context_candidates(&first_context)
             .await
             .expect("first selection after clear succeeds");
-        assert!(first_selected_after_clear.is_empty());
+        assert_eq!(
+            first_selected_after_message_consumed.len(),
+            1,
+            "activated skill context persists across later prompt builds in the same run"
+        );
 
         let second_selected = selectable
             .load_skill_context_candidates(&second_context)
