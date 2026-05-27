@@ -198,6 +198,45 @@ where
         Ok(Some((record, versioned.version)))
     }
 
+    async fn replay_inbound_idempotency_record(
+        &self,
+        request: &AcceptInboundMessageRequest,
+        body: &[u8],
+    ) -> Result<AcceptedInboundMessage, SessionThreadError> {
+        let record = deserialize::<InboundIdempotencyRecord>(body)?;
+        if record.thread_id != request.thread_id {
+            return Err(SessionThreadError::IdempotentReplayThreadMismatch {
+                stored_thread_id: record.thread_id,
+                requested_thread_id: request.thread_id.clone(),
+            });
+        }
+        let (_, _) = self
+            .read_thread_versioned(&request.scope, &record.thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: record.thread_id.clone(),
+            })?;
+        let existing = self
+            .read_message_versioned(&request.scope, &record.thread_id, record.message_id)
+            .await?
+            .map(|(message, _)| message)
+            .ok_or(SessionThreadError::UnknownMessage {
+                message_id: record.message_id,
+            })?;
+        if existing.actor_id.as_deref() != Some(request.actor_id.as_str()) {
+            return Err(SessionThreadError::IdempotentReplayActorMismatch {
+                stored_actor_id: existing.actor_id.clone().unwrap_or_default(),
+                requested_actor_id: request.actor_id.clone(),
+            });
+        }
+        Ok(AcceptedInboundMessage {
+            thread_id: existing.thread_id,
+            message_id: record.message_id,
+            sequence: existing.sequence,
+            idempotent_replay: true,
+        })
+    }
+
     async fn list_thread_messages(
         &self,
         scope: &ThreadScope,
@@ -486,45 +525,71 @@ where
                 .get(&request.scope.to_resource_scope(), &path)
                 .await?
             {
-                let record = deserialize::<InboundIdempotencyRecord>(&versioned.entry.body)?;
-                if record.thread_id != request.thread_id {
-                    return Err(SessionThreadError::IdempotentReplayThreadMismatch {
-                        stored_thread_id: record.thread_id,
-                        requested_thread_id: request.thread_id,
-                    });
-                }
-                let (_, _) = self
-                    .read_thread_versioned(&request.scope, &record.thread_id)
-                    .await?
-                    .ok_or_else(|| SessionThreadError::UnknownThread {
-                        thread_id: record.thread_id.clone(),
-                    })?;
-                let existing = self
-                    .read_message_versioned(&request.scope, &record.thread_id, record.message_id)
-                    .await?
-                    .map(|(message, _)| message)
-                    .ok_or(SessionThreadError::UnknownMessage {
-                        message_id: record.message_id,
-                    })?;
-                if existing.actor_id.as_deref() != Some(request.actor_id.as_str()) {
-                    return Err(SessionThreadError::IdempotentReplayActorMismatch {
-                        stored_actor_id: existing.actor_id.clone().unwrap_or_default(),
-                        requested_actor_id: request.actor_id,
-                    });
-                }
-                return Ok(AcceptedInboundMessage {
-                    thread_id: existing.thread_id,
-                    message_id: record.message_id,
-                    sequence: existing.sequence,
-                    idempotent_replay: true,
-                });
+                return self
+                    .replay_inbound_idempotency_record(&request, &versioned.entry.body)
+                    .await;
             }
         }
 
-        let sequence = self
-            .reserve_sequence(&request.scope, &request.thread_id)
-            .await?;
         let message_id = ThreadMessageId::new();
+        let idempotency_key = InboundIdempotencyKey::from_request(&request);
+        let idempotency_reservation = if let Some(idempotency_key) = idempotency_key.as_ref() {
+            let idem_record = InboundIdempotencyRecord {
+                scope: idempotency_key.scope.clone(),
+                source_binding_id: idempotency_key.source_binding_id.clone(),
+                external_event_id: idempotency_key.external_event_id.clone(),
+                thread_id: request.thread_id.clone(),
+                message_id,
+            };
+            let record_key = idempotency_record_key(idempotency_key)?;
+            let path = idempotency_record_path(&record_key)?;
+            let entry = Self::idempotency_entry(&idem_record)?;
+            match put_with_cas(
+                self.filesystem.as_ref(),
+                &request.scope.to_resource_scope(),
+                &path,
+                entry,
+                CasExpectation::Absent,
+            )
+            .await
+            {
+                Ok(()) => Some(path),
+                Err(PutError::VersionMismatch) => {
+                    let versioned = self
+                        .filesystem
+                        .get(&request.scope.to_resource_scope(), &path)
+                        .await?
+                        .ok_or_else(|| {
+                            SessionThreadError::Backend(format!(
+                                "filesystem CAS Absent rejected inbound idempotency at {} but record is missing",
+                                path.as_str()
+                            ))
+                        })?;
+                    return self
+                        .replay_inbound_idempotency_record(&request, &versioned.entry.body)
+                        .await;
+                }
+                Err(PutError::Other(error)) => return Err(error),
+            }
+        } else {
+            None
+        };
+
+        let sequence = match self
+            .reserve_sequence(&request.scope, &request.thread_id)
+            .await
+        {
+            Ok(sequence) => sequence,
+            Err(error) => {
+                if let Some(path) = idempotency_reservation.as_ref() {
+                    let _ = self
+                        .filesystem
+                        .delete(&request.scope.to_resource_scope(), path)
+                        .await;
+                }
+                return Err(error);
+            }
+        };
         let message = ThreadMessageRecord {
             message_id,
             thread_id: request.thread_id.clone(),
@@ -554,37 +619,26 @@ where
         {
             Ok(()) => {}
             Err(PutError::VersionMismatch) => {
+                if let Some(path) = idempotency_reservation.as_ref() {
+                    let _ = self
+                        .filesystem
+                        .delete(&request.scope.to_resource_scope(), path)
+                        .await;
+                }
                 return Err(SessionThreadError::Backend(format!(
                     "filesystem CAS Absent rejected new message at {}",
                     message_path.as_str()
                 )));
             }
-            Err(PutError::Other(error)) => return Err(error),
-        }
-
-        if let Some(idempotency_key) = InboundIdempotencyKey::from_request(&request) {
-            let idem_record = InboundIdempotencyRecord {
-                scope: idempotency_key.scope.clone(),
-                source_binding_id: idempotency_key.source_binding_id.clone(),
-                external_event_id: idempotency_key.external_event_id.clone(),
-                thread_id: request.thread_id.clone(),
-                message_id,
-            };
-            let record_key = idempotency_record_key(&idempotency_key)?;
-            let path = idempotency_record_path(&record_key)?;
-            let entry = Self::idempotency_entry(&idem_record)?;
-            // `Any` here: the SHA-256 key already encodes the full tuple,
-            // so a duplicate write simply overwrites with the same
-            // (binding, event, thread, message) — equivalent to the
-            // legacy in-memory HashMap upsert.
-            self.filesystem
-                .put(
-                    &request.scope.to_resource_scope(),
-                    &path,
-                    entry,
-                    CasExpectation::Any,
-                )
-                .await?;
+            Err(PutError::Other(error)) => {
+                if let Some(path) = idempotency_reservation.as_ref() {
+                    let _ = self
+                        .filesystem
+                        .delete(&request.scope.to_resource_scope(), path)
+                        .await;
+                }
+                return Err(error);
+            }
         }
 
         Ok(AcceptedInboundMessage {
