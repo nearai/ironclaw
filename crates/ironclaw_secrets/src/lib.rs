@@ -20,8 +20,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 pub use crypto::{
-    SecretsCrypto, credential_account_aad, credential_session_aad, filesystem_secret_aad,
-    secret_record_aad,
+    SecretsCrypto, chain_key_aad, credential_account_aad, credential_session_aad,
+    filesystem_secret_aad, secret_record_aad,
 };
 use ironclaw_host_api::{
     AgentId, CapabilityId, ExtensionId, InvocationId, MissionId, NetworkMethod, ProjectId,
