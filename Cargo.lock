@@ -4923,6 +4923,7 @@ dependencies = [
 name = "ironclaw_reborn_config"
 version = "0.1.0"
 dependencies = [
+ "fs4",
  "serde",
  "tempfile",
  "thiserror 2.0.18",

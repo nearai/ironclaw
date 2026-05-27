@@ -282,6 +282,39 @@ pub struct DefaultLlmSlotUpdate {
     pub base_url: LlmSlotFieldUpdate,
 }
 
+/// Held exclusive lock plus editable config document for one config update.
+pub struct DefaultLlmSlotUpdateSession {
+    path: PathBuf,
+    doc: toml_edit::DocumentMut,
+    _lock_file: fs::File,
+}
+
+impl DefaultLlmSlotUpdateSession {
+    pub fn default_llm_slot(
+        &self,
+    ) -> Result<Option<LlmSlotSelection>, RebornConfigFileUpdateError> {
+        let text = self.doc.to_string();
+        let config = RebornConfigFile::parse_text(&text, &self.path).map_err(|source| {
+            RebornConfigFileUpdateError::Validate {
+                path: self.path.clone(),
+                source: Box::new(source),
+            }
+        })?;
+        Ok(config.default_llm_slot().cloned())
+    }
+
+    pub fn apply(
+        mut self,
+        update: &DefaultLlmSlotUpdate,
+    ) -> Result<(), RebornConfigFileUpdateError> {
+        apply_llm_slot_field(&mut self.doc, "provider_id", &update.provider_id);
+        apply_llm_slot_field(&mut self.doc, "model", &update.model);
+        apply_llm_slot_field(&mut self.doc, "api_key_env", &update.api_key_env);
+        apply_llm_slot_field(&mut self.doc, "base_url", &update.base_url);
+        write_edit_document(&self.path, &self.doc)
+    }
+}
+
 // ─── Errors ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Error)]
@@ -323,6 +356,11 @@ pub enum RebornConfigFileError {
 
 #[derive(Debug, Error)]
 pub enum RebornConfigFileUpdateError {
+    #[error("lock Reborn config `{}`: {source}", path.display())]
+    Lock {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     #[error("read Reborn config `{}`: {source}", path.display())]
     Read {
         path: PathBuf,
@@ -336,7 +374,7 @@ pub enum RebornConfigFileUpdateError {
     #[error("validate Reborn config `{}`: {source}", path.display())]
     Validate {
         path: PathBuf,
-        source: RebornConfigFileError,
+        source: Box<RebornConfigFileError>,
     },
     #[error("write Reborn config `{}`: {source}", path.display())]
     Write {
@@ -559,16 +597,60 @@ pub fn update_default_llm_slot(
     path: &Path,
     update: &DefaultLlmSlotUpdate,
 ) -> Result<(), RebornConfigFileUpdateError> {
-    let mut doc = load_edit_document(path)?;
-    apply_llm_slot_field(&mut doc, "provider_id", &update.provider_id);
-    apply_llm_slot_field(&mut doc, "model", &update.model);
-    apply_llm_slot_field(&mut doc, "api_key_env", &update.api_key_env);
-    apply_llm_slot_field(&mut doc, "base_url", &update.base_url);
-    write_edit_document(path, &doc)
+    begin_default_llm_slot_update(path)?.apply(update)
 }
 
 fn llm_slot_field_label(slot: &str, field: &str) -> Cow<'static, str> {
     Cow::Owned(format!("llm.{slot}.{field}"))
+}
+
+pub fn begin_default_llm_slot_update(
+    path: &Path,
+) -> Result<DefaultLlmSlotUpdateSession, RebornConfigFileUpdateError> {
+    let lock_file = acquire_update_lock(path)?;
+    let doc = load_edit_document(path)?;
+    Ok(DefaultLlmSlotUpdateSession {
+        path: path.to_path_buf(),
+        doc,
+        _lock_file: lock_file,
+    })
+}
+
+fn acquire_update_lock(path: &Path) -> Result<fs::File, RebornConfigFileUpdateError> {
+    use fs4::FileExt as _;
+
+    let lock_path = config_update_lock_path(path);
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent).map_err(|source| RebornConfigFileUpdateError::Lock {
+            path: lock_path.clone(),
+            source,
+        })?;
+    }
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|source| RebornConfigFileUpdateError::Lock {
+            path: lock_path.clone(),
+            source,
+        })?;
+    file.lock_exclusive()
+        .map_err(|source| RebornConfigFileUpdateError::Lock {
+            path: lock_path,
+            source,
+        })?;
+    Ok(file)
+}
+
+fn config_update_lock_path(path: &Path) -> PathBuf {
+    let Some(file_name) = path.file_name() else {
+        return path.with_extension("lock");
+    };
+    let mut lock_name = file_name.to_os_string();
+    lock_name.push(".lock");
+    path.with_file_name(lock_name)
 }
 
 fn load_edit_document(path: &Path) -> Result<toml_edit::DocumentMut, RebornConfigFileUpdateError> {
@@ -629,7 +711,7 @@ fn write_edit_document(
     RebornConfigFile::parse_text(&text, path).map_err(|source| {
         RebornConfigFileUpdateError::Validate {
             path: path.to_path_buf(),
-            source,
+            source: Box::new(source),
         }
     })?;
 
@@ -843,6 +925,54 @@ provider_id = "anthropic"
         RebornConfigFile::load(&path)
             .expect("valid config")
             .expect("config present");
+    }
+
+    #[test]
+    fn default_llm_update_rejects_malformed_existing_toml() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        fs::write(&path, "[llm.default\nprovider_id = \"openai\"").expect("write config");
+
+        let err = update_default_llm_slot(
+            &path,
+            &DefaultLlmSlotUpdate {
+                model: LlmSlotFieldUpdate::Set("gpt-5-mini".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect_err("malformed existing TOML should reject");
+
+        assert!(matches!(err, RebornConfigFileUpdateError::Parse { .. }));
+    }
+
+    #[test]
+    fn default_llm_update_rejects_inline_secret_value_without_writing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        fs::write(
+            &path,
+            r#"
+[llm.default]
+provider_id = "openai"
+model = "gpt-5-mini"
+"#,
+        )
+        .expect("write config");
+        let before = fs::read_to_string(&path).expect("read config");
+
+        let err = update_default_llm_slot(
+            &path,
+            &DefaultLlmSlotUpdate {
+                api_key_env: LlmSlotFieldUpdate::Set(
+                    "sk-proj-1234567890abcdef1234567890".to_string(),
+                ),
+                ..Default::default()
+            },
+        )
+        .expect_err("inline secret should reject");
+
+        assert!(matches!(err, RebornConfigFileUpdateError::Validate { .. }));
+        assert_eq!(fs::read_to_string(&path).expect("read config"), before);
     }
 
     #[test]

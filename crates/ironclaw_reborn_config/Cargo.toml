@@ -16,6 +16,7 @@ publish = false
 dist = false
 
 [dependencies]
+fs4 = "0.6"
 serde = { version = "1", features = ["derive"] }
 tempfile = "3"
 thiserror = "2"

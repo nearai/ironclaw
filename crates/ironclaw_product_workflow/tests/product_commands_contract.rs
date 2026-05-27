@@ -45,6 +45,31 @@ fn model_command_maps_provider_selection_without_cli_shelling_contract() {
 }
 
 #[test]
+fn model_provider_command_rejects_missing_provider() {
+    let payload =
+        InboundCommandPayload::new("model", "set-provider", ProductTriggerReason::BotCommand)
+            .expect("valid command");
+
+    let rejection = ProductCommand::from_payload(&payload).expect_err("missing provider");
+
+    assert_eq!(rejection.kind, ProductRejectionKind::InvalidRequest);
+}
+
+#[test]
+fn model_provider_command_rejects_unsupported_option() {
+    let payload = InboundCommandPayload::new(
+        "model",
+        "set-provider openai --foo bar",
+        ProductTriggerReason::BotCommand,
+    )
+    .expect("valid command");
+
+    let rejection = ProductCommand::from_payload(&payload).expect_err("unsupported option");
+
+    assert_eq!(rejection.kind, ProductRejectionKind::InvalidRequest);
+}
+
+#[test]
 fn command_payload_maps_all_declared_commands_and_unknown_fallback() {
     let cases = [
         (

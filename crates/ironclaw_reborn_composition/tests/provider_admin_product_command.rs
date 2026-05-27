@@ -5,9 +5,9 @@ use std::sync::Arc;
 use chrono::Utc;
 use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
-    ExternalEventId, InboundCommandPayload, ProductAdapterId, ProductInboundAck,
-    ProductInboundEnvelope, ProductInboundPayload, ProductTriggerReason, ProductWorkflow,
-    ProtocolAuthEvidence, TrustedInboundContext,
+    ExternalEventId, InboundCommandPayload, ProductAdapterError, ProductAdapterId,
+    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductTriggerReason,
+    ProductWorkflow, ProductWorkflowRejectionKind, ProtocolAuthEvidence, TrustedInboundContext,
 };
 use ironclaw_product_workflow::{
     DefaultProductWorkflow, FakeConversationBindingService, FakeIdempotencyLedger,
@@ -93,6 +93,8 @@ async fn model_provider_command_executes_through_reborn_provider_admin_service()
     assert_eq!(command, "model");
     assert_eq!(payload.as_value()["provider_id"], "openai");
     assert_eq!(payload.as_value()["model"], "gpt-5-mini");
+    assert!(payload.as_value().get("config_file").is_none());
+    assert!(payload.as_value().get("api_key_env").is_none());
     assert_eq!(inbound.accepted_count(), 0);
     let config = std::fs::read_to_string(reborn_home.join("config.toml")).expect("read config");
     assert!(
@@ -103,4 +105,41 @@ async fn model_provider_command_executes_through_reborn_provider_admin_service()
         config.contains("model = \"gpt-5-mini\""),
         "config: {config}"
     );
+}
+
+#[tokio::test]
+async fn model_provider_command_rejects_unknown_provider_as_invalid_binding() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = RebornHome::resolve_from_env_parts(Some(reborn_home.into_os_string()), None, None)
+        .expect("valid reborn home");
+    let admin = RebornProviderAdmin::new(RebornBootConfig::new(home, RebornProfile::LocalDev));
+    let command_service = Arc::new(RebornProviderAdminProductCommandService::new(admin));
+    let inbound = Arc::new(FakeInboundTurnService::new());
+    let ledger = Arc::new(FakeIdempotencyLedger::new());
+    let binding = Arc::new(FakeConversationBindingService::new());
+    let workflow = DefaultProductWorkflow::new(inbound.clone(), ledger, binding)
+        .with_product_command_admission_service(Arc::new(AllowingCommandAdmissionService))
+        .with_product_command_service(command_service);
+    let envelope = sample_command_envelope(
+        "command-model-provider-unknown",
+        "model",
+        "set-provider missing-provider",
+    );
+
+    let err = workflow
+        .accept_inbound(envelope)
+        .await
+        .expect_err("unknown provider should reject");
+
+    assert!(matches!(
+        err,
+        ProductAdapterError::WorkflowRejected {
+            kind: ProductWorkflowRejectionKind::InvalidRequest,
+            status_code: 400,
+            retryable: false,
+            ..
+        }
+    ));
+    assert_eq!(inbound.accepted_count(), 0);
 }

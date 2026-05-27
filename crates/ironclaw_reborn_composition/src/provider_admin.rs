@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use ironclaw_reborn_config::{
     DefaultLlmSlotUpdate, LlmSlotFieldUpdate, LlmSlotSelection, RebornBootConfig, RebornConfigFile,
-    update_default_llm_slot,
+    begin_default_llm_slot_update, update_default_llm_slot,
 };
 use serde::Serialize;
 use thiserror::Error;
@@ -105,21 +105,23 @@ impl RebornProviderAdmin {
 
         let home = self.boot.home();
         let config_path = home.config_file_path();
-        let config = RebornConfigFile::load(&config_path).map_err(|source| {
-            RebornProviderAdminError::LoadConfig {
+        let session = begin_default_llm_slot_update(&config_path).map_err(|source| {
+            RebornProviderAdminError::UpdateConfig {
                 path: config_path.clone(),
                 source,
             }
         })?;
-        let provider_id = config
+        let provider_id = session
+            .default_llm_slot()
+            .map_err(|source| RebornProviderAdminError::UpdateConfig {
+                path: config_path.clone(),
+                source,
+            })?
             .as_ref()
-            .and_then(RebornConfigFile::default_llm_slot)
             .and_then(|selection| selection.provider_id.as_deref())
             .ok_or_else(|| RebornProviderAdminError::InvalidRequest {
-                reason: format!(
-                    "no default Reborn provider is configured in {}; set a provider first",
-                    config_path.display()
-                ),
+                reason: "no default Reborn provider is configured; set a provider first"
+                    .to_string(),
             })?
             .to_string();
 
@@ -128,18 +130,16 @@ impl RebornProviderAdmin {
             .find(&provider_id)
             .map(|def| def.id.clone())
             .unwrap_or_else(|| provider_id.to_string());
-        update_default_llm_slot(
-            &config_path,
-            &DefaultLlmSlotUpdate {
+        session
+            .apply(&DefaultLlmSlotUpdate {
                 provider_id: LlmSlotFieldUpdate::Set(canonical_id.clone()),
                 model: LlmSlotFieldUpdate::Set(model.to_string()),
                 ..Default::default()
-            },
-        )
-        .map_err(|source| RebornProviderAdminError::UpdateConfig {
-            path: config_path.clone(),
-            source,
-        })?;
+            })
+            .map_err(|source| RebornProviderAdminError::UpdateConfig {
+                path: config_path.clone(),
+                source,
+            })?;
 
         Ok(RebornProviderWriteOutcome {
             provider_id: canonical_id,
@@ -308,15 +308,6 @@ pub enum RebornProviderAdminError {
         path: PathBuf,
         source: ironclaw_reborn_config::RebornConfigFileUpdateError,
     },
-}
-
-impl RebornProviderAdminError {
-    pub(crate) fn is_invalid_request(&self) -> bool {
-        matches!(
-            self,
-            Self::UnknownProvider { .. } | Self::InvalidRequest { .. }
-        )
-    }
 }
 
 #[derive(Debug, Clone)]

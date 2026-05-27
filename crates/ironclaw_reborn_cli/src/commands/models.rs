@@ -1,5 +1,6 @@
 use clap::{Args, Subcommand};
 
+#[cfg(feature = "root-llm-provider")]
 use crate::context::RebornCliContext;
 
 #[derive(Debug, Args)]
@@ -55,19 +56,20 @@ struct ModelsSetProviderCommand {
 }
 
 impl ModelsCommand {
-    pub(crate) fn execute(self, context: RebornCliContext) -> anyhow::Result<()> {
+    pub(crate) fn execute(self) -> anyhow::Result<()> {
         match self.command {
-            ModelsSubcommand::List(command) => command.execute(context),
-            ModelsSubcommand::Status(command) => command.execute(context),
-            ModelsSubcommand::Set(command) => command.execute(context),
-            ModelsSubcommand::SetProvider(command) => command.execute(context),
+            ModelsSubcommand::List(command) => command.execute(),
+            ModelsSubcommand::Status(command) => command.execute(),
+            ModelsSubcommand::Set(command) => command.execute(),
+            ModelsSubcommand::SetProvider(command) => command.execute(),
         }
     }
 }
 
 #[cfg(feature = "root-llm-provider")]
 impl ModelsListCommand {
-    fn execute(self, context: RebornCliContext) -> anyhow::Result<()> {
+    fn execute(self) -> anyhow::Result<()> {
+        let context = RebornCliContext::resolve_from_env()?;
         let admin =
             ironclaw_reborn_composition::RebornProviderAdmin::new(context.boot_config().clone());
         let list = admin.list(
@@ -89,7 +91,7 @@ impl ModelsListCommand {
 
 #[cfg(not(feature = "root-llm-provider"))]
 impl ModelsListCommand {
-    fn execute(self, _context: RebornCliContext) -> anyhow::Result<()> {
+    fn execute(self) -> anyhow::Result<()> {
         let slots = ironclaw_reborn_composition::reborn_model_slot_names();
 
         if self.json {
@@ -120,7 +122,8 @@ impl ModelsListCommand {
 
 #[cfg(feature = "root-llm-provider")]
 impl ModelsStatusCommand {
-    fn execute(self, context: RebornCliContext) -> anyhow::Result<()> {
+    fn execute(self) -> anyhow::Result<()> {
+        let context = RebornCliContext::resolve_from_env()?;
         let admin =
             ironclaw_reborn_composition::RebornProviderAdmin::new(context.boot_config().clone());
         let status = admin.status()?;
@@ -136,7 +139,8 @@ impl ModelsStatusCommand {
 
 #[cfg(feature = "root-llm-provider")]
 impl ModelsSetCommand {
-    fn execute(self, context: RebornCliContext) -> anyhow::Result<()> {
+    fn execute(self) -> anyhow::Result<()> {
+        let context = RebornCliContext::resolve_from_env()?;
         let admin =
             ironclaw_reborn_composition::RebornProviderAdmin::new(context.boot_config().clone());
         let outcome = admin.set_model(&self.model)?;
@@ -147,7 +151,7 @@ impl ModelsSetCommand {
 
 #[cfg(not(feature = "root-llm-provider"))]
 impl ModelsSetCommand {
-    fn execute(self, _context: RebornCliContext) -> anyhow::Result<()> {
+    fn execute(self) -> anyhow::Result<()> {
         anyhow::bail!(
             "`models set {}` requires the root-llm-provider feature; v1_state: not-used",
             self.model
@@ -157,7 +161,8 @@ impl ModelsSetCommand {
 
 #[cfg(feature = "root-llm-provider")]
 impl ModelsSetProviderCommand {
-    fn execute(self, context: RebornCliContext) -> anyhow::Result<()> {
+    fn execute(self) -> anyhow::Result<()> {
+        let context = RebornCliContext::resolve_from_env()?;
         let admin =
             ironclaw_reborn_composition::RebornProviderAdmin::new(context.boot_config().clone());
         let outcome = admin.set_provider(&self.provider, self.model.as_deref())?;
@@ -168,7 +173,7 @@ impl ModelsSetProviderCommand {
 
 #[cfg(not(feature = "root-llm-provider"))]
 impl ModelsSetProviderCommand {
-    fn execute(self, _context: RebornCliContext) -> anyhow::Result<()> {
+    fn execute(self) -> anyhow::Result<()> {
         anyhow::bail!(
             "`models set-provider {}` requires the root-llm-provider feature; v1_state: not-used",
             self.provider
@@ -178,7 +183,7 @@ impl ModelsSetProviderCommand {
 
 #[cfg(not(feature = "root-llm-provider"))]
 impl ModelsStatusCommand {
-    fn execute(self, _context: RebornCliContext) -> anyhow::Result<()> {
+    fn execute(self) -> anyhow::Result<()> {
         let slots = ironclaw_reborn_composition::reborn_model_slot_names();
 
         if self.json {
