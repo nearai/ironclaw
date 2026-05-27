@@ -13,6 +13,10 @@ use secrecy::SecretString;
 
 use crate::{RebornCompositionProfile, RebornProductAuthServicePorts};
 
+/// Composition-time Google OAuth client metadata.
+///
+/// `RebornBuildInput` owns this seam for product/bootstrap-provided values
+/// until a settings-backed source exists.
 #[derive(Clone)]
 pub struct OAuthClientConfig {
     pub client_id: OAuthClientId,
@@ -348,6 +352,10 @@ impl RebornBuildInput {
         self
     }
 
+    /// Record product/bootstrap-provided Google OAuth metadata on the build input.
+    ///
+    /// `RebornBuildInput` owns this composition seam until a settings-backed
+    /// source exists.
     pub fn with_google_oauth_backend(mut self, config: OAuthClientConfig) -> Self {
         self.google_oauth_config = Some(config);
         self

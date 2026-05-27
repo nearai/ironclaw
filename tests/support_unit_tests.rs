@@ -605,7 +605,11 @@ mod reborn_support_tests {
             .stream_model(model_request(Vec::new()))
             .await
             .expect_err("empty trace should fail");
-        assert!(error.safe_summary.contains("exhausted"));
+        assert!(
+            error.safe_summary.contains("no matching step"),
+            "unexpected error summary: {}",
+            error.safe_summary
+        );
     }
 
     #[tokio::test]

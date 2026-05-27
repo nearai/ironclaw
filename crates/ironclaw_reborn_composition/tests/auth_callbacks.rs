@@ -105,11 +105,19 @@ impl AuthProviderClient for CountingProviderClient {
 #[derive(Default)]
 struct SuccessfulCountingProviderClient {
     calls: AtomicUsize,
+    last_context: Mutex<Option<OAuthProviderExchangeContext>>,
 }
 
 impl SuccessfulCountingProviderClient {
     fn calls(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
+    }
+
+    fn last_context(&self) -> Option<OAuthProviderExchangeContext> {
+        self.last_context
+            .lock()
+            .expect("provider context lock poisoned")
+            .clone()
     }
 }
 
@@ -117,10 +125,14 @@ impl SuccessfulCountingProviderClient {
 impl AuthProviderClient for SuccessfulCountingProviderClient {
     async fn exchange_callback(
         &self,
-        _context: OAuthProviderExchangeContext,
+        context: OAuthProviderExchangeContext,
         request: OAuthProviderCallbackRequest,
     ) -> Result<OAuthProviderExchange, AuthProductError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        *self
+            .last_context
+            .lock()
+            .expect("provider context lock poisoned") = Some(context);
         Ok(OAuthProviderExchange {
             provider: request.provider,
             account_label: request.account_label,
@@ -260,7 +272,8 @@ fn authorized_request(scope: AuthProductScope, flow_id: AuthFlowId) -> RebornOAu
 #[tokio::test]
 async fn oauth_callback_handler_completes_flow_and_dispatches_typed_continuation() {
     let dispatcher = Arc::new(RecordingContinuationDispatcher::default());
-    let services = auth_services(dispatcher.clone());
+    let provider_client = Arc::new(SuccessfulCountingProviderClient::default());
+    let services = auth_services(dispatcher.clone()).with_provider_client(provider_client.clone());
     let owner = scope("alice");
     let flow_id = create_flow(&services, owner.clone()).await;
     let request = authorized_request(owner.clone(), flow_id);
@@ -275,6 +288,13 @@ async fn oauth_callback_handler_completes_flow_and_dispatches_typed_continuation
 
     assert_eq!(response.flow_id, flow_id);
     assert!(response.credential_account_id.is_some());
+    assert_eq!(
+        provider_client.last_context(),
+        Some(OAuthProviderExchangeContext {
+            scope: owner.clone(),
+            flow_id,
+        })
+    );
     assert_eq!(
         response.continuation,
         AuthContinuationRef::LifecycleActivation {

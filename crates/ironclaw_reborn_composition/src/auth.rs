@@ -995,13 +995,6 @@ mod tests {
             unreachable!("constructor tests do not call credential-account methods")
         }
 
-        async fn select_unique_configured_account_record(
-            &self,
-            _request: CredentialAccountSelectionRequest,
-        ) -> Result<CredentialAccount, AuthProductError> {
-            unreachable!("constructor tests do not call credential-account methods")
-        }
-
         async fn project_credential_recovery(
             &self,
             _request: CredentialRecoveryRequest,

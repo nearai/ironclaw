@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use ironclaw_auth::{
     AuthProductError, AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountId,
-    CredentialAccountSelectionRequest, CredentialAccountService, CredentialAccountStatus,
-    CredentialRecoveryProjection, GOOGLE_PROVIDER_ID, ProviderScope,
+    CredentialAccountLookupRequest, CredentialAccountSelectionRequest, CredentialAccountService,
+    CredentialAccountStatus, CredentialRecoveryProjection, GOOGLE_PROVIDER_ID, ProviderScope,
 };
 use ironclaw_host_api::{ExtensionId, ResourceScope, SecretHandle};
 use thiserror::Error;
@@ -48,16 +48,37 @@ impl GoogleCredentialResolver {
     ) -> Result<GoogleCredential, GoogleCredentialError> {
         let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
         let provider = google_provider_id()?;
-        let account = self
+        let selected_account = self
             .accounts
-            .select_unique_configured_account_record(
+            .select_unique_configured_account(
                 CredentialAccountSelectionRequest::new(auth_scope.clone(), provider.clone())
                     .for_extension(requester_extension.clone()),
             )
             .await;
-        let account = match account {
+        let selected_account = match selected_account {
             Ok(account) => account,
             Err(
+                AuthProductError::CredentialMissing
+                | AuthProductError::CrossScopeDenied
+                | AuthProductError::AccountSelectionRequired,
+            ) => {
+                return self
+                    .recovery_required(scope, requester_extension, provider)
+                    .await;
+            }
+            Err(error) => return Err(GoogleCredentialError::Auth(error)),
+        };
+        let account = match self
+            .accounts
+            .get_account(
+                CredentialAccountLookupRequest::new(auth_scope, selected_account.id)
+                    .for_extension(requester_extension.clone()),
+            )
+            .await
+        {
+            Ok(Some(account)) => account,
+            Ok(None)
+            | Err(
                 AuthProductError::CredentialMissing
                 | AuthProductError::CrossScopeDenied
                 | AuthProductError::AccountSelectionRequired,
@@ -441,13 +462,6 @@ mod tests {
             Ok(self.account.projection())
         }
 
-        async fn select_unique_configured_account_record(
-            &self,
-            _request: CredentialAccountSelectionRequest,
-        ) -> Result<CredentialAccount, AuthProductError> {
-            Ok(self.account.clone())
-        }
-
         async fn project_credential_recovery(
             &self,
             _request: CredentialRecoveryRequest,
@@ -510,13 +524,6 @@ mod tests {
             _request: CredentialAccountSelectionRequest,
         ) -> Result<CredentialAccountProjection, AuthProductError> {
             Ok(self.selected.clone())
-        }
-
-        async fn select_unique_configured_account_record(
-            &self,
-            _request: CredentialAccountSelectionRequest,
-        ) -> Result<CredentialAccount, AuthProductError> {
-            Err(AuthProductError::CredentialMissing)
         }
 
         async fn project_credential_recovery(

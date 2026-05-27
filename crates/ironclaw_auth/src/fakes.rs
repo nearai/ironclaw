@@ -471,15 +471,6 @@ impl CredentialAccountService for InMemoryAuthProductServices {
         &self,
         request: CredentialAccountSelectionRequest,
     ) -> Result<CredentialAccountProjection, AuthProductError> {
-        self.select_unique_configured_account_record(request)
-            .await
-            .map(|account| account.projection())
-    }
-
-    async fn select_unique_configured_account_record(
-        &self,
-        request: CredentialAccountSelectionRequest,
-    ) -> Result<CredentialAccount, AuthProductError> {
         let state = self.lock_state();
         let configured = state
             .accounts
@@ -502,7 +493,7 @@ impl CredentialAccountService for InMemoryAuthProductServices {
             .collect::<Vec<_>>();
         match selectable.as_slice() {
             [] => Err(AuthProductError::CrossScopeDenied),
-            [account] => Ok((*account).clone()),
+            [account] => Ok(account.projection()),
             _ => Err(AuthProductError::AccountSelectionRequired),
         }
     }

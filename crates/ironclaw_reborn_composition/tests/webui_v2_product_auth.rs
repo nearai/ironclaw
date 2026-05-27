@@ -643,6 +643,20 @@ async fn product_auth_callback_malformed_fields_are_sanitized() {
             "malformed-field-state",
             "&provider=github&account_label=work&code=bad-scopes-code&scopes=repo,,gist",
         ),
+        callback_uri(
+            &started.flow_id,
+            &started.invocation_id,
+            USER,
+            "malformed-field-state",
+            "&provider=github&account_label=work&code=missing-scopes-code",
+        ),
+        callback_uri(
+            &started.flow_id,
+            &started.invocation_id,
+            USER,
+            "malformed-field-state",
+            "&provider=github&account_label=work&code=empty-scopes-code&scopes=",
+        ),
     ];
 
     for uri in malformed_uris {

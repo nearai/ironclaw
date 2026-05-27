@@ -29,7 +29,7 @@ use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
 use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
 use ironclaw_host_api::runtime_policy::FilesystemBackendKind;
 use ironclaw_host_api::{
-    EffectKind, HostPath, MountPermissions, MountView, PackageId, UserId, VirtualPath,
+    EffectKind, ExtensionId, HostPath, MountPermissions, MountView, PackageId, UserId, VirtualPath,
 };
 #[cfg(feature = "libsql")]
 use ironclaw_host_api::{MountAlias, MountGrant};
@@ -42,6 +42,7 @@ use ironclaw_loop_support::FilesystemCheckpointStateStore;
 use ironclaw_processes::ProcessServices;
 use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
 use ironclaw_resources::InMemoryResourceGovernor;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_resources::ResourceGovernor;
 #[cfg(feature = "libsql")]
 use ironclaw_resources::{FilesystemResourceGovernorStore, PersistentResourceGovernor};
@@ -68,11 +69,12 @@ use ironclaw_turns::{
     InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore, InMemoryTurnStateStore,
 };
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use crate::RebornProductAuthServicePorts;
 use crate::default_system_prompt::seed_default_system_prompt;
 use crate::google_oauth::google_provider_client;
-use crate::input::{OAuthClientConfig, RebornRuntimeProcessBinding, RebornStorageInput};
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use crate::input::OAuthClientConfig;
+use crate::input::{RebornRuntimeProcessBinding, RebornStorageInput};
 use crate::lifecycle::{RebornLocalSkillManagementPort, build_local_skill_management_port};
 use crate::local_dev_mounts::{skill_context_mount_view, workspace_mount_view};
 use crate::{
@@ -275,7 +277,6 @@ fn auth_continuation_dispatcher(
     Arc::new(ProductAuthTurnGateResumeDispatcher::new(turn_coordinator))
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn compose_product_auth_services(
     ports: RebornProductAuthServicePorts,
     turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,

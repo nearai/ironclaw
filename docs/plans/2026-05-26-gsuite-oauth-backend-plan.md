@@ -27,6 +27,7 @@
 ### Reborn Composition And Product Auth
 
 - Compose the real Google provider client into `RebornProductAuthServices` instead of relying on `InMemoryAuthProductServices` for provider exchange outside tests.
+- Keep Google OAuth client metadata on `RebornBuildInput` as the product/bootstrap composition seam until a settings-backed source exists.
 - Add a service-level API/helper to start Google auth for required scopes and a continuation.
 - Preserve callback authority:
   - callback route/caller must call `RebornProductAuthServices::handle_oauth_callback -> AuthFlowManager`
