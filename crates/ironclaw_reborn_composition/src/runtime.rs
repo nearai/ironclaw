@@ -1261,9 +1261,7 @@ async fn build_llm_gateway(
     use ironclaw_turns::run_profile::ModelProfileId;
 
     let model = llm.model().to_string();
-    let session = Arc::new(ironclaw_llm::SessionManager::new(
-        llm.config.session.clone(),
-    ));
+    let session = ironclaw_llm::create_session_manager(llm.config.session.clone()).await;
     let provider = ironclaw_llm::build_static_provider_chain(&llm.config, session)
         .await
         .map_err(|error| RebornRuntimeError::LlmProvider(error.to_string()))?;
@@ -1620,6 +1618,120 @@ mod tests {
         HostManagedModelError::safe(HostManagedModelErrorKind::Unavailable, safe_summary)
     }
 
+    #[cfg(feature = "root-llm-provider")]
+    struct RuntimeEnvGuard {
+        name: &'static str,
+        previous: Option<String>,
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    impl RuntimeEnvGuard {
+        fn set(name: &'static str, value: &str) -> Self {
+            let previous = ironclaw_common::env_helpers::env_or_override(name);
+            ironclaw_common::env_helpers::set_runtime_env(name, value);
+            Self { name, previous }
+        }
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    impl Drop for RuntimeEnvGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => ironclaw_common::env_helpers::set_runtime_env(self.name, value),
+                None => ironclaw_common::env_helpers::remove_runtime_env(self.name),
+            }
+        }
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    async fn start_nearai_auth_capture_server() -> (String, tokio::sync::oneshot::Receiver<String>)
+    {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpSocket;
+
+        let socket = TcpSocket::new_v4().expect("test server socket");
+        socket
+            .bind("127.0.0.1:0".parse().expect("test server address"))
+            .expect("test server binds");
+        let listener = socket.listen(1024).expect("test server listens");
+        let base_url = format!("http://{}", listener.local_addr().expect("local addr"));
+        let (auth_tx, auth_rx) = tokio::sync::oneshot::channel();
+
+        tokio::spawn(async move {
+            let mut auth_tx = Some(auth_tx);
+            loop {
+                let (mut stream, _) = listener.accept().await.expect("accept test request");
+                let mut buffer = Vec::new();
+                loop {
+                    let mut chunk = [0_u8; 1024];
+                    let read = stream.read(&mut chunk).await.expect("read test request");
+                    if read == 0 {
+                        break;
+                    }
+                    buffer.extend_from_slice(&chunk[..read]);
+                    if buffer.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+
+                let request = String::from_utf8_lossy(&buffer);
+                let request_line = request.lines().next().unwrap_or_default();
+                let auth_header = request
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                    .map(|(_, value)| value.trim())
+                    .unwrap_or_default()
+                    .to_string();
+                let is_chat_completion = request_line.contains("/v1/chat/completions");
+                let body = if is_chat_completion {
+                    r#"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#
+                } else {
+                    r#"{"data":[]}"#
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write test response");
+
+                if is_chat_completion {
+                    if let Some(auth_tx) = auth_tx.take() {
+                        let _ = auth_tx.send(auth_header);
+                    }
+                    break;
+                }
+            }
+        });
+
+        (base_url, auth_rx)
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    fn nearai_gateway_test_request() -> HostManagedModelRequest {
+        HostManagedModelRequest {
+            model_profile_id: ironclaw_turns::run_profile::ModelProfileId::new("interactive_model")
+                .expect("model profile id"),
+            messages: vec![ironclaw_loop_support::HostManagedModelMessage {
+                role: HostManagedModelMessageRole::User,
+                content: "hello model".to_string(),
+                content_ref: ironclaw_turns::LoopMessageRef::new(
+                    "msg:22222222-2222-2222-2222-222222222222",
+                )
+                .expect("message ref"),
+                tool_result_provider_call: None,
+            }],
+            surface_version: None,
+            resolved_model_route: None,
+            run_id: TurnRunId::new(),
+            turn_id: TurnId::new(),
+        }
+    }
+
     fn skill_md(name: &str, description: &str, prompt: &str) -> String {
         format!(
             "---\nname: {name}\ndescription: {description}\nactivation:\n  keywords: [\"{name}\"]\n---\n\n{prompt}"
@@ -1642,6 +1754,65 @@ mod tests {
             .lock()
             .expect("recording gateway requests lock poisoned")
             .len()
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    #[tokio::test]
+    async fn root_llm_gateway_bootstraps_nearai_session_token_from_env() {
+        let _token_guard = RuntimeEnvGuard::set("NEARAI_SESSION_TOKEN", "sess_reborn_env_token");
+        let session_dir = tempfile::tempdir().expect("session tempdir");
+        let (base_url, auth_rx) = start_nearai_auth_capture_server().await;
+
+        let config = ironclaw_llm::LlmConfig {
+            backend: "nearai".to_string(),
+            session: ironclaw_llm::SessionConfig {
+                auth_base_url: base_url.clone(),
+                session_path: session_dir.path().join("session.json"),
+            },
+            nearai: ironclaw_llm::NearAiConfig {
+                model: "test-model".to_string(),
+                cheap_model: None,
+                base_url,
+                api_key: None,
+                fallback_model: None,
+                max_retries: 0,
+                circuit_breaker_threshold: None,
+                circuit_breaker_recovery_secs: 30,
+                response_cache_enabled: false,
+                response_cache_ttl_secs: 3600,
+                response_cache_max_entries: 1000,
+                failover_cooldown_secs: 300,
+                failover_cooldown_threshold: 3,
+                smart_routing_cascade: false,
+            },
+            provider: None,
+            bedrock: None,
+            gemini_oauth: None,
+            openai_codex: None,
+            request_timeout_secs: 5,
+            cheap_model: None,
+            smart_routing_cascade: false,
+            max_retries: 0,
+            circuit_breaker_threshold: None,
+            circuit_breaker_recovery_secs: 30,
+            response_cache_enabled: false,
+            response_cache_ttl_secs: 3600,
+            response_cache_max_entries: 1000,
+        };
+        let llm = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config);
+
+        let gateway = super::build_llm_gateway(llm).await.expect("gateway builds");
+        let response = gateway
+            .stream_model(nearai_gateway_test_request())
+            .await
+            .expect("gateway calls NEAR AI provider");
+
+        assert_eq!(response.safe_text_deltas, vec!["ok".to_string()]);
+        let auth_header = tokio::time::timeout(Duration::from_secs(2), auth_rx)
+            .await
+            .expect("chat request should be captured")
+            .expect("auth header should be sent by capture server");
+        assert_eq!(auth_header, "Bearer sess_reborn_env_token");
     }
 
     #[tokio::test]
