@@ -391,10 +391,10 @@ mod reborn_support_tests {
         InboundTurnService, ProductActionId, ProductConversationRouteKind, ProductWorkflowError,
         ResolveBindingRequest, SourceBindingKey,
     };
-    use ironclaw_threads::ProviderToolCallReferenceEnvelope;
     use ironclaw_threads::{
         AcceptInboundMessageRequest, AppendAssistantDraftRequest, EnsureThreadRequest,
-        MessageContent, SessionThreadService, ThreadScope, ToolResultSafeSummary,
+        MessageContent, ProviderToolCallReferenceEnvelope, SessionThreadService, ThreadScope,
+        ToolResultSafeSummary,
     };
     use ironclaw_turns::{
         CancelRunRequest, CancelRunResponse, GetRunStateRequest, LoopMessageRef,
