@@ -46,7 +46,8 @@
 /// Idempotent schema applied by `run_migrations()`. Sourced directly from
 /// `migrations/V1__predicate_state.sql` via `include_str!` so the file
 /// is the only copy — no embedded duplicate can drift out of sync.
-pub const POSTGRES_PREDICATE_SCHEMA: &str = include_str!("../migrations/V1__predicate_state.sql");
+pub(crate) const POSTGRES_PREDICATE_SCHEMA: &str =
+    include_str!("../migrations/V1__predicate_state.sql");
 
 /// Table holding invocation-count samples (one row per recorded invocation
 /// event; the in-window `COUNT(*)` is the invocation count).

@@ -35,7 +35,9 @@ pub use backend::LibSqlPredicateStateBackend;
 #[doc(hidden)]
 pub mod test_support {
     /// `scope_hash` (tenant digest) bytes — see `crate::hashing::tenant_scope_hash`.
-    pub fn tenant_scope_hash_bytes(tenant_id: &str) -> Vec<u8> {
+    /// Named to match the Postgres sibling's `scope_hash_bytes` accessor so the
+    /// parity tests reference the same symbol across both backends.
+    pub fn scope_hash_bytes(tenant_id: &str) -> Vec<u8> {
         crate::hashing::tenant_scope_hash(tenant_id)
     }
 }

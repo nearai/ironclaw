@@ -707,7 +707,7 @@ async fn no_global_key_cap_only_per_tenant() {
 /// tenant grain is now the `scope_hash` digest (the raw `tenant_id` column is
 /// gone), so resolve the digest via the crate's test_support and filter on it.
 async fn count_distinct_keys(db: &Arc<libsql::Database>, table: &str, tenant: &str) -> usize {
-    let scope = ironclaw_hooks_libsql::test_support::tenant_scope_hash_bytes(tenant);
+    let scope = ironclaw_hooks_libsql::test_support::scope_hash_bytes(tenant);
     let conn = db.connect().expect("connect");
     let mut rows = conn
         .query(

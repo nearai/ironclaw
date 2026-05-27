@@ -30,8 +30,6 @@ mod schema;
 
 #[cfg(feature = "postgres")]
 pub use backend::PostgresPredicateStateBackend;
-#[cfg(feature = "postgres")]
-pub use schema::POSTGRES_PREDICATE_SCHEMA;
 
 /// Test-only accessors for the crate-internal bucket hashing, used by the
 /// adversarial integration tests to compute the `key_hash` / `scope_hash`

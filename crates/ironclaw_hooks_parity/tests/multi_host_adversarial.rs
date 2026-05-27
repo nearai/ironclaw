@@ -138,7 +138,7 @@ mod libsql_cluster {
         /// in the canonical typed schema), so resolve the digest and filter on
         /// it, counting the distinct `key_hash` buckets under it.
         pub async fn distinct_invocation_scopes(&self, tenant: &str) -> usize {
-            let scope = ironclaw_hooks_libsql::test_support::tenant_scope_hash_bytes(tenant);
+            let scope = ironclaw_hooks_libsql::test_support::scope_hash_bytes(tenant);
             let conn = self.db.connect().expect("connect");
             let mut rows = conn
                 .query(
