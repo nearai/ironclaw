@@ -53,7 +53,8 @@ pub fn build_webui_services(
         runtime.webui_thread_service(),
         runtime.webui_turn_coordinator(),
     )
-    .with_approval_interactions(runtime.webui_approval_interaction_service());
+    .with_approval_interactions(runtime.webui_approval_interaction_service())
+    .with_auth_interactions(runtime.webui_auth_interaction_service());
     if let Some(skill_activation_source) = runtime.webui_skill_activation_source() {
         let activation_recorder = Arc::clone(&skill_activation_source);
         let activation_clearer = skill_activation_source;

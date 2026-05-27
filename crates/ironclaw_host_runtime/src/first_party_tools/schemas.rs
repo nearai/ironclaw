@@ -188,6 +188,24 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["path", "old_string", "new_string"],
             "additionalProperties": false
         }),
+        "schemas/builtin/extension_search.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "Search query for locally available Reborn extensions" }
+            },
+            "required": ["query"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/extension_install.input.v1.json"
+        | "schemas/builtin/extension_activate.input.v1.json"
+        | "schemas/builtin/extension_remove.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "extension_id": { "type": "string", "description": "Extension id from extension_search results" }
+            },
+            "required": ["extension_id"],
+            "additionalProperties": false
+        }),
         "schemas/builtin/skill_list.input.v1.json" => json!({
             "type": "object",
             "properties": {},

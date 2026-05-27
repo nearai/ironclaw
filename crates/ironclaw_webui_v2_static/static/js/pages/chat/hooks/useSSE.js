@@ -13,6 +13,8 @@ const V2_EVENT_NAMES = [
   "accepted",
   "running",
   "capability_progress",
+  "capability_activity",
+  "capability_display_preview",
   "gate",
   "auth_required",
   "final_reply",

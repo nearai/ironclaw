@@ -5,6 +5,11 @@ mod tests {
     use super::super::*;
 
     use ironclaw_host_api::{AgentId, MountPermissions, ProjectId, TenantId, ThreadId};
+    use ironclaw_host_runtime::SPAWN_SUBAGENT_CAPABILITY_ID;
+    use ironclaw_product_workflow::{
+        LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext,
+        LifecycleProductFacade, LifecycleProductSurfaceContext,
+    };
     use ironclaw_threads::{
         EnsureThreadRequest, InMemorySessionThreadService, MessageKind, ThreadHistoryRequest,
     };
@@ -46,6 +51,56 @@ mod tests {
             reasoning: None,
             signature: None,
         }
+    }
+
+    fn lifecycle_context(label: &str) -> LifecycleProductContext {
+        LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
+            tenant_id: TenantId::new(format!("tenant-{label}")).expect("tenant id"),
+            user_id: UserId::new(format!("user-{label}")).expect("user id"),
+            agent_id: None,
+            project_id: None,
+        })
+    }
+
+    #[derive(Debug, Default)]
+    struct UnavailableModelGateway;
+
+    #[async_trait::async_trait]
+    impl HostManagedModelGateway for UnavailableModelGateway {
+        async fn stream_model(
+            &self,
+            _request: HostManagedModelRequest,
+        ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+            Err(HostManagedModelError::safe(
+                HostManagedModelErrorKind::Unavailable,
+                "test gateway is not wired",
+            ))
+        }
+    }
+
+    async fn assert_github_capabilities_visible(
+        wiring: &LocalDevCapabilityWiring,
+        run_context: &LoopRunContext,
+    ) {
+        let port = wiring
+            .capability_factory
+            .create_capability_port(run_context)
+            .await
+            .expect("capability port");
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible surface");
+        let capability_ids = surface
+            .descriptors
+            .iter()
+            .map(|descriptor| descriptor.capability_id.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(capability_ids.contains(&"github.search_issues"));
+        assert!(capability_ids.contains(&"github.get_issue"));
+        assert!(capability_ids.contains(&"github.comment_issue"));
+        assert!(!capability_ids.contains(&SPAWN_SUBAGENT_CAPABILITY_ID));
     }
 
     #[tokio::test]
@@ -342,6 +397,31 @@ mod tests {
             local_dev_shell_network_policy()
         );
 
+        let extension_search_grant = grant_for(EXTENSION_SEARCH_CAPABILITY_ID);
+        assert_eq!(
+            extension_search_grant.constraints.allowed_effects,
+            vec![EffectKind::DispatchCapability, EffectKind::ReadFilesystem]
+        );
+        assert!(extension_search_grant.constraints.mounts.mounts.is_empty());
+        assert_eq!(
+            extension_search_grant.constraints.network,
+            NetworkPolicy::default()
+        );
+
+        for capability_id in [
+            EXTENSION_INSTALL_CAPABILITY_ID,
+            EXTENSION_ACTIVATE_CAPABILITY_ID,
+            EXTENSION_REMOVE_CAPABILITY_ID,
+        ] {
+            let grant = grant_for(capability_id);
+            assert_eq!(
+                grant.constraints.allowed_effects,
+                local_dev_allowed_effects()
+            );
+            assert!(grant.constraints.mounts.mounts.is_empty());
+            assert_eq!(grant.constraints.network, NetworkPolicy::default());
+        }
+
         let read_file_grant = grant_for(READ_FILE_CAPABILITY_ID);
         assert_eq!(
             read_file_grant.constraints.allowed_effects,
@@ -400,6 +480,7 @@ mod tests {
             runtime,
             UserId::new("local-yolo-host-user").expect("user id"), // safety: literal test id is valid.
             workspace_mounts,
+            LocalDevExtensionSurfaceSource::default(),
             input_resolver,
             result_writer,
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
@@ -441,6 +522,139 @@ mod tests {
             output["content"],
             serde_json::json!("     1│ safe host file")
         );
+    }
+
+    #[tokio::test]
+    async fn local_dev_capability_port_restores_activated_github_extension_surface() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        let owner_id = "local-dev-github-surface-owner";
+        {
+            let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+                owner_id,
+                storage_root.clone(),
+            ))
+            .await
+            .expect("local-dev services build");
+            let local_runtime = services
+                .local_runtime
+                .as_ref()
+                .expect("local runtime substrate");
+            let extension_management = local_runtime
+                .extension_management
+                .as_ref()
+                .expect("extension management")
+                .clone();
+            let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
+                local_runtime.skill_management.clone(),
+            )
+            .with_extension_management(extension_management);
+            let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
+                .expect("valid github ref");
+            facade
+                .execute(
+                    lifecycle_context("github-install"),
+                    LifecycleProductAction::ExtensionInstall {
+                        package_ref: package_ref.clone(),
+                    },
+                )
+                .await
+                .expect("install github extension");
+            facade
+                .execute(
+                    lifecycle_context("github-activate"),
+                    LifecycleProductAction::ExtensionActivate { package_ref },
+                )
+                .await
+                .expect("activate github extension");
+        }
+
+        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+            owner_id,
+            storage_root,
+        ))
+        .await
+        .expect("local-dev services rebuild");
+        let run_context = run_context("github-surface").await;
+        let thread_scope = ThreadScope {
+            tenant_id: run_context.scope.tenant_id.clone(),
+            agent_id: run_context.scope.agent_id.clone().expect("agent id"),
+            project_id: run_context.scope.project_id.clone(),
+            owner_user_id: None,
+            mission_id: None,
+        };
+        let wiring = capability_wiring(
+            &services,
+            Arc::new(InMemorySessionThreadService::default()),
+            thread_scope,
+            UserId::new("local-dev-github-user").expect("user id"),
+            Arc::new(UnavailableModelGateway),
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        )
+        .expect("local-dev capability wiring");
+        assert_github_capabilities_visible(&wiring, &run_context).await;
+    }
+
+    #[tokio::test]
+    async fn local_dev_capability_port_snapshots_extensions_when_port_is_created() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+            "local-dev-live-github-surface-owner",
+            storage_root,
+        ))
+        .await
+        .expect("local-dev services build");
+        let run_context = run_context("github-live-surface").await;
+        let thread_scope = ThreadScope {
+            tenant_id: run_context.scope.tenant_id.clone(),
+            agent_id: run_context.scope.agent_id.clone().expect("agent id"),
+            project_id: run_context.scope.project_id.clone(),
+            owner_user_id: None,
+            mission_id: None,
+        };
+        let wiring = capability_wiring(
+            &services,
+            Arc::new(InMemorySessionThreadService::default()),
+            thread_scope,
+            UserId::new("local-dev-live-github-user").expect("user id"),
+            Arc::new(UnavailableModelGateway),
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        )
+        .expect("local-dev capability wiring");
+        let local_runtime = services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime substrate");
+        let extension_management = local_runtime
+            .extension_management
+            .as_ref()
+            .expect("extension management")
+            .clone();
+        let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
+            local_runtime.skill_management.clone(),
+        )
+        .with_extension_management(extension_management);
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
+            .expect("valid github ref");
+        facade
+            .execute(
+                lifecycle_context("github-live-install"),
+                LifecycleProductAction::ExtensionInstall {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("install github extension");
+        facade
+            .execute(
+                lifecycle_context("github-live-activate"),
+                LifecycleProductAction::ExtensionActivate { package_ref },
+            )
+            .await
+            .expect("activate github extension");
+
+        assert_github_capabilities_visible(&wiring, &run_context).await;
     }
 
     #[test]

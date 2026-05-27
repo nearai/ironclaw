@@ -28,7 +28,7 @@ use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
 use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
 use ironclaw_host_api::runtime_policy::FilesystemBackendKind;
 use ironclaw_host_api::{
-    EffectKind, HostPath, MountPermissions, MountView, PackageId, UserId, VirtualPath,
+    EffectKind, ExtensionId, HostPath, MountPermissions, MountView, PackageId, UserId, VirtualPath,
 };
 #[cfg(feature = "libsql")]
 use ironclaw_host_api::{MountAlias, MountGrant};
@@ -79,7 +79,13 @@ use crate::{
         AvailableExtensionCatalog, gmail_manifest_digest, google_calendar_manifest_digest,
     },
     extension_installation_store::FilesystemExtensionInstallationStore,
-    extension_lifecycle::{RebornLocalExtensionManagementPort, restore_extension_lifecycle_state},
+    extension_lifecycle::{
+        ActiveExtensionPublisher, RebornLocalExtensionManagementPort,
+        restore_extension_lifecycle_state,
+    },
+    extension_lifecycle_capabilities::{
+        extend_builtin_first_party_package, insert_handlers as insert_extension_lifecycle_handlers,
+    },
     gsuite::register_bundled_gsuite_first_party_handlers,
 };
 
@@ -351,6 +357,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
             reason: error.to_string(),
         }
     })?;
+    crate::bundled_skills::ensure_bundled_reborn_skills_installed(&root).await?;
     let filesystem =
         build_local_dev_root_filesystem(&root, &workspace_root, host_home_root.as_ref()).await?;
     let (skill_filesystem, workspace_filesystem, runtime_workspace_mounts) =
@@ -390,16 +397,17 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         reason: format!("GSuite first-party handlers are invalid: {error}"),
     })?;
 
+    let local_dev_trust_policy = Arc::new(local_dev_first_party_trust_policy()?);
+    let local_dev_trust_invalidation_bus = Arc::new(ironclaw_trust::InvalidationBus::new());
     let mut services = HostRuntimeServices::new(
-        Arc::new(builtin_extension_registry()?),
+        Arc::new(local_dev_builtin_extension_registry()?),
         Arc::clone(&filesystem),
         Arc::clone(&store_graph.resource_governor),
         Arc::new(GrantAuthorizer::new()),
         store_graph.process_services.clone(),
         CapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
-    .with_first_party_capabilities(Arc::new(first_party_registry))
-    .with_trust_policy(Arc::new(local_dev_first_party_trust_policy()?))
+    .with_trust_policy(Arc::clone(&local_dev_trust_policy))
     .with_secret_store(Arc::new(ironclaw_secrets::InMemorySecretStore::new()))
     .try_with_host_http_egress_with_body_store(
         ironclaw_network::PolicyNetworkHttpEgress::new(
@@ -442,11 +450,16 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         ExtensionLifecycleService::new(services.shared_extension_registry().snapshot_owned()),
     ));
     let active_registry = services.shared_extension_registry();
+    let active_extensions = ActiveExtensionPublisher::new(
+        active_registry,
+        local_dev_trust_policy,
+        local_dev_trust_invalidation_bus,
+    );
     restore_extension_lifecycle_state(
         &available_extensions,
         &extension_installation_store,
         &extension_lifecycle_service,
-        &active_registry,
+        &active_extensions,
     )
     .await
     .map_err(|error| RebornBuildError::InvalidConfig {
@@ -457,8 +470,16 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         available_extensions,
         extension_installation_store,
         extension_lifecycle_service,
-        active_registry,
+        active_extensions,
     ));
+    insert_extension_lifecycle_handlers(
+        &mut first_party_registry,
+        Arc::clone(&extension_management),
+    )
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("local-dev extension lifecycle handlers are invalid: {error}"),
+    })?;
+    services = services.with_first_party_capabilities(Arc::new(first_party_registry));
     if let Some(local_runtime) = Arc::get_mut(&mut store_graph.local_runtime) {
         local_runtime.extension_management = Some(extension_management);
     } else {
@@ -953,6 +974,30 @@ fn builtin_first_party_registry() -> Result<FirstPartyCapabilityRegistry, Reborn
     builtin_first_party_handlers().map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("built-in first-party handlers are invalid: {error}"),
     })
+}
+
+fn local_dev_builtin_extension_registry() -> Result<ExtensionRegistry, RebornBuildError> {
+    let mut registry = builtin_extension_registry()?;
+    let builtin_id =
+        ExtensionId::new("builtin").map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("built-in first-party package id is invalid: {error}"),
+        })?;
+    let package = registry
+        .remove(&builtin_id)
+        .ok_or_else(|| RebornBuildError::InvalidConfig {
+            reason: "built-in first-party package is missing".to_string(),
+        })?;
+    let package = extend_builtin_first_party_package(package).map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("local-dev extension lifecycle package is invalid: {error}"),
+        }
+    })?;
+    registry
+        .insert(package)
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("local-dev built-in first-party registry is invalid: {error}"),
+        })?;
+    Ok(registry)
 }
 
 fn local_dev_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuildError> {
@@ -1477,6 +1522,7 @@ mod tests {
             panic!("expected fail-closed handler outcome, got {outcome:?}");
         };
         assert_eq!(failure.capability_id.as_str(), "gmail.send_message");
+        assert_ne!(failure.kind, RuntimeFailureKind::Authorization);
         assert_ne!(failure.kind, RuntimeFailureKind::MissingRuntime);
 
         let calendar_context = gsuite_context("google-calendar.create_event");
@@ -1504,6 +1550,7 @@ mod tests {
             failure.capability_id.as_str(),
             "google-calendar.create_event"
         );
+        assert_ne!(failure.kind, RuntimeFailureKind::Authorization);
         assert_ne!(failure.kind, RuntimeFailureKind::MissingRuntime);
     }
 
@@ -1824,7 +1871,7 @@ mod tests {
                         allowed_effects: gsuite_allowed_effects(),
                         mounts: MountView::new(Vec::new()).expect("valid empty mount view"),
                         network: NetworkPolicy::default(),
-                        secrets: Vec::new(),
+                        secrets: vec![SecretHandle::new("missing-google-access-token").unwrap()],
                         resource_ceiling: None,
                         expires_at: None,
                         max_invocations: None,

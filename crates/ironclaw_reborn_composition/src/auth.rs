@@ -41,6 +41,10 @@ impl RebornAuthContinuationDispatcher for NoopAuthContinuationDispatcher {
     }
 }
 
+pub(crate) trait RebornAuthFlowRecordSource: Send + Sync {
+    fn flow_records_snapshot(&self) -> Vec<AuthFlowRecord>;
+}
+
 #[async_trait]
 impl RebornAuthContinuationDispatcher for ProductAuthTurnGateResumeDispatcher {
     async fn dispatch_auth_continuation(
@@ -338,6 +342,7 @@ pub struct RebornProductAuthServices {
     provider_client: Arc<dyn AuthProviderClient>,
     cleanup_service: Arc<dyn SecretCleanupService>,
     continuation_dispatcher: Arc<dyn RebornAuthContinuationDispatcher>,
+    flow_record_source: Option<Arc<dyn RebornAuthFlowRecordSource>>,
 }
 
 impl std::fmt::Debug for RebornProductAuthServices {
@@ -360,6 +365,7 @@ impl std::fmt::Debug for RebornProductAuthServices {
                 "continuation_dispatcher",
                 &"Arc<dyn RebornAuthContinuationDispatcher>",
             )
+            .field("flow_record_source", &self.flow_record_source.is_some())
             .finish()
     }
 }
@@ -382,6 +388,7 @@ impl RebornProductAuthServices {
             provider_client,
             cleanup_service,
             continuation_dispatcher,
+            flow_record_source: None,
         }
     }
 
@@ -440,6 +447,10 @@ impl RebornProductAuthServices {
         self.flow_manager.clone()
     }
 
+    pub(crate) fn flow_record_source(&self) -> Option<Arc<dyn RebornAuthFlowRecordSource>> {
+        self.flow_record_source.clone()
+    }
+
     pub fn interaction_service(&self) -> Arc<dyn AuthInteractionService> {
         self.interaction_service.clone()
     }
@@ -470,6 +481,14 @@ impl RebornProductAuthServices {
         dispatcher: Arc<dyn RebornAuthContinuationDispatcher>,
     ) -> Self {
         self.continuation_dispatcher = dispatcher;
+        self
+    }
+
+    pub(crate) fn with_flow_record_source(
+        mut self,
+        source: Arc<dyn RebornAuthFlowRecordSource>,
+    ) -> Self {
+        self.flow_record_source = Some(source);
         self
     }
 
@@ -719,8 +738,26 @@ impl RebornProductAuthServices {
     pub(crate) fn local_dev_in_memory(
         continuation_dispatcher: Arc<dyn RebornAuthContinuationDispatcher>,
     ) -> Self {
-        RebornProductAuthServicePorts::from_shared(Arc::new(InMemoryAuthProductServices::new()))
+        let services = Arc::new(InMemoryAuthProductServices::new());
+        RebornProductAuthServicePorts::from_shared(services.clone())
             .into_services(continuation_dispatcher)
+            .with_flow_record_source(Arc::new(InMemoryAuthFlowRecordSource::new(services)))
+    }
+}
+
+struct InMemoryAuthFlowRecordSource {
+    services: Arc<InMemoryAuthProductServices>,
+}
+
+impl InMemoryAuthFlowRecordSource {
+    fn new(services: Arc<InMemoryAuthProductServices>) -> Self {
+        Self { services }
+    }
+}
+
+impl RebornAuthFlowRecordSource for InMemoryAuthFlowRecordSource {
+    fn flow_records_snapshot(&self) -> Vec<AuthFlowRecord> {
+        self.services.flow_records_snapshot()
     }
 }
 
@@ -846,6 +883,14 @@ mod tests {
             &self,
             _scope: &AuthProductScope,
             _input: OAuthCallbackInput,
+        ) -> Result<AuthFlowRecord, AuthProductError> {
+            unreachable!("constructor tests do not call auth-flow methods")
+        }
+
+        async fn complete_credential_selection(
+            &self,
+            _scope: &AuthProductScope,
+            _input: ironclaw_auth::CredentialSelectionInput,
         ) -> Result<AuthFlowRecord, AuthProductError> {
             unreachable!("constructor tests do not call auth-flow methods")
         }

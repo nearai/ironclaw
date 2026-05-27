@@ -78,11 +78,23 @@ continuation dispatch. Setup-only, lifecycle-activation, and product-action
 continuations remain explicit non-turn cases for their owning handlers and must
 not be performed inline by the OAuth callback route.
 
-The blocked-run interaction loop is separate: #3094 owns listing/rendering
-approval/auth gates from blocked run-state and routing user decisions back into
-the trusted resume path. That issue should consume the auth-flow boundary here
-for auth gates; it must not create a second credential-account or OAuth-flow
-model.
+`ironclaw_product_workflow::AuthInteractionService` owns the product/WebUI
+blocked-auth interaction loop from #3094. It reads auth-required gates from
+scoped blocked run-state plus auth-flow records, returns redacted
+adapter/UI-safe DTOs, and routes credential/callback/cancel decisions back
+through `AuthFlowManager` and `TurnCoordinator` with the `BlockedAuthGate`
+precondition. It consumes the auth-flow boundary here for auth gates; it must
+not create a second credential-account or OAuth-flow model.
+Only non-terminal auth-flow states are listed as pending interactions. Terminal
+states such as `failed`, `completed`, `expired`, and `canceled` must not be
+rendered as actionable auth gates.
+
+Legacy web/CLI/channel auth UX may remain behavior-compatible during
+migration, but Reborn paths should enter through `ProductWorkflow` or the
+WebUI-facing `RebornServicesApi` facade. They must not call V1 pending maps,
+V1 OAuth routes, extension-manager authority, or route-local credential state.
+Dedicated HTTP route mounting for manual-token and OAuth callback transports
+remains a host-composition concern around `RebornProductAuthServices`.
 
 ---
 
