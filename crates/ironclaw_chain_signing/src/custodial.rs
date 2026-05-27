@@ -195,7 +195,12 @@ where
         // of the same grant fails (one-shot), so a replayed approval cannot
         // produce a second signature.
         let grant_key = GrantKey::from_context(&req.context, req.approved_tx_hash);
-        self.grants.claim(&grant_key).await?; // GrantError -> ChainSigningError
+        // Expiry is enforced inside the store against the runtime clock the
+        // caller passes in (the store never reads the wall clock itself). An
+        // expired grant fails closed here without burning the one-shot.
+        self.grants
+            .claim(&grant_key, ironclaw_attestation::now_unix_millis())
+            .await?; // GrantError -> ChainSigningError
 
         // --- Enforcement point #2: sign-time approved-tx-hash re-check. ---
         // Recompute the binding hash FROM THE PERSISTED decoded tx and compare

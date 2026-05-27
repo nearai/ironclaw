@@ -178,7 +178,10 @@ impl SigningProvider for InjectedSigningProvider {
         // 3. One-shot grant (threat #1): claim the sealed grant atomically. A
         //    replay of an already-claimed grant fails closed here.
         let key = GrantKey::from_context(context, *approved_tx_hash);
-        self.grants.claim(&key).await.map_err(map_grant_error)?;
+        self.grants
+            .claim(&key, ironclaw_attestation::now_unix_millis())
+            .await
+            .map_err(map_grant_error)?;
 
         Ok(VerifiedProof::new(
             ProviderId::Injected,
@@ -191,11 +194,13 @@ impl SigningProvider for InjectedSigningProvider {
 /// Map a [`GrantError`] onto the provider error taxonomy, fail-closed.
 fn map_grant_error(err: GrantError) -> SigningProviderError {
     match err {
-        // Replay / missing / lost-CAS all collapse to a single fail-closed
-        // grant-claim failure; the distinction is not safe to leak to a caller.
-        GrantError::AlreadyClaimed | GrantError::NotFound | GrantError::AlreadySealed => {
-            SigningProviderError::GrantClaimFailed
-        }
+        // Replay / missing / lost-CAS / expired all collapse to a single
+        // fail-closed grant-claim failure; the distinction is not safe to leak
+        // to a caller.
+        GrantError::AlreadyClaimed
+        | GrantError::NotFound
+        | GrantError::AlreadySealed
+        | GrantError::Expired { .. } => SigningProviderError::GrantClaimFailed,
         GrantError::Backend { reason } => SigningProviderError::Provider { reason },
     }
 }

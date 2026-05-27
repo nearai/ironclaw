@@ -378,10 +378,16 @@ where
     where
         S: CustodialSignerLike,
     {
+        // The continuation is identified by `gate_ref` alone (the resolved-gate
+        // ref carried through the turn); the tenant is not on this path. Read via
+        // the gate_ref-keyed sync index — the same authoritative binding the
+        // resume port verified. The tenant axis on the binding store guards the
+        // WRITE (a binding can never be filed under a foreign tenant) and the
+        // async tenant-qualified reads on the ingress paths; here we trust the
+        // binding's own persisted `context.tenant`, exactly as before.
         let binding = self
             .bindings
-            .get(gate_ref)
-            .await
+            .get_sync(gate_ref)
             .ok_or(ContinuationError::MissingBinding)?;
 
         match binding.provider_id {

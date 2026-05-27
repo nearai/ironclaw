@@ -16,7 +16,7 @@ use alloy_primitives::{Address, Bytes, TxKind, U256};
 use chrono::{TimeZone, Utc};
 use ironclaw_attestation::{DecodedTransaction, RenderingSchemaVersion};
 use ironclaw_attested_runtime::{
-    AttestedGateBinding, AttestedGateBindingStore, InMemoryAttestedGateBindingStore,
+    AttestedGateBinding, AttestedGateBindingStore, BindingKey, InMemoryAttestedGateBindingStore,
     InMemoryResumeGuard, ResumeGuard, RuntimeAttestedResumePort, SyncBindingRead,
     approved_tx_hash_ref_hex,
 };
@@ -165,7 +165,7 @@ async fn real_port_resolves_attested_gate_and_never_requeues_loop() {
     // PR11 ingress would persist the authoritative binding when raising the gate.
     bindings
         .put(
-            SigningGateRef::new(GATE),
+            BindingKey::new(signing_ctx().tenant, SigningGateRef::new(GATE)),
             AttestedGateBinding {
                 provider_id: ProviderId::Injected,
                 context: signing_ctx(),

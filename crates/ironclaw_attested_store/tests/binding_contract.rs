@@ -10,7 +10,9 @@ use std::sync::Arc;
 use alloy_consensus::TxEip1559;
 use alloy_primitives::{Address, Bytes, TxKind, U256};
 use ironclaw_attestation::{DecodedTransaction, RenderingSchemaVersion};
-use ironclaw_attested_runtime::{AttestedGateBinding, AttestedGateBindingStore, SyncBindingRead};
+use ironclaw_attested_runtime::{
+    AttestedGateBinding, AttestedGateBindingStore, BindingKey, SyncBindingRead,
+};
 use ironclaw_attested_store::LibSqlAttestedGateBindingStore;
 use ironclaw_chain_signing::{ChainKeyId, evm};
 use ironclaw_host_api::{ResourceScope, TenantId, UserId};
@@ -71,6 +73,22 @@ fn sample_binding() -> AttestedGateBinding {
     }
 }
 
+/// The tenant-qualified key for the sample binding (tenant1 + the fixed gate).
+fn sample_key() -> BindingKey {
+    BindingKey::new(SigningTenantId::new("tenant1"), GateRef::new(GATE))
+}
+
+/// A binding for a specific tenant sharing the SAME `gate_ref`. Both the
+/// `context.tenant` and the custodial `scope.tenant_id` carry `tenant` so the
+/// binding is self-consistent (validate_binding_key requires the key tenant to
+/// equal the binding's own context tenant).
+fn sample_binding_for_tenant(tenant: &str) -> AttestedGateBinding {
+    let mut binding = sample_binding();
+    binding.context.tenant = SigningTenantId::new(tenant);
+    binding.scope.tenant_id = TenantId::new(tenant).unwrap();
+    binding
+}
+
 async fn build(path: &std::path::Path) -> LibSqlAttestedGateBindingStore {
     let db = Arc::new(
         libsql::Builder::new_local(path)
@@ -89,17 +107,18 @@ async fn put_then_async_and_sync_read_agree() {
     let path = dir.path().join("bindings.db");
     let store = build(&path).await;
     let gate = GateRef::new(GATE);
+    let key = sample_key();
 
-    assert!(store.get(&gate).await.is_none());
+    assert!(store.get(&key).await.is_none());
     assert!(store.get_sync(&gate).is_none());
 
     let binding = sample_binding();
     store
-        .put(gate.clone(), binding.clone())
+        .put(key.clone(), binding.clone())
         .await
         .expect("first put succeeds");
 
-    let via_async = store.get(&gate).await.expect("async read");
+    let via_async = store.get(&key).await.expect("async read");
     let via_sync = store.get_sync(&gate).expect("sync read");
     assert_eq!(via_async.approved_tx_hash, binding.approved_tx_hash);
     assert_eq!(via_sync.approved_tx_hash, binding.approved_tx_hash);
@@ -115,10 +134,11 @@ async fn binding_is_immutable_after_first_put() {
     let path = dir.path().join("bindings.db");
     let store = build(&path).await;
     let gate = GateRef::new(GATE);
+    let key = sample_key();
 
     let original = sample_binding();
     store
-        .put(gate.clone(), original.clone())
+        .put(key.clone(), original.clone())
         .await
         .expect("first put succeeds");
     let original_hash = original.approved_tx_hash;
@@ -150,15 +170,15 @@ async fn binding_is_immutable_after_first_put() {
         "test setup: tampered binding must differ"
     );
 
-    let rejected = store.put(gate.clone(), tampered).await;
+    let rejected = store.put(key.clone(), tampered).await;
     assert_eq!(
         rejected,
         Err(ironclaw_attested_runtime::BindingError::AlreadyExists),
-        "a second put for the same gate_ref must be rejected (immutable binding)"
+        "a second put for the same (tenant, gate_ref) must be rejected (immutable binding)"
     );
 
     // The overwrite was rejected: original binding still stands on both paths.
-    let via_async = store.get(&gate).await.expect("async read");
+    let via_async = store.get(&key).await.expect("async read");
     let via_sync = store.get_sync(&gate).expect("sync read");
     assert_eq!(via_async.approved_tx_hash, original_hash);
     assert_eq!(via_sync.approved_tx_hash, original_hash);
@@ -185,7 +205,7 @@ async fn binding_survives_store_reopen() {
     {
         let store = build(&path).await;
         store
-            .put(gate.clone(), binding.clone())
+            .put(sample_key(), binding.clone())
             .await
             .expect("first put succeeds");
     }
@@ -198,5 +218,46 @@ async fn binding_survives_store_reopen() {
     assert_eq!(
         rehydrated.context.gate_ref.as_str(),
         binding.context.gate_ref.as_str()
+    );
+}
+
+#[tokio::test]
+async fn two_tenants_same_gate_ref_are_isolated() {
+    // Mirrors the ledger's `two_gates_are_isolated`/tenant-isolation pinning: two
+    // tenants that happen to share a `gate_ref` get fully independent bindings.
+    // A backend that keyed by `gate_ref` alone would collide them — the first
+    // put would win and the second tenant would either be rejected as a
+    // duplicate or, worse, read back the first tenant's binding.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("bindings.db");
+    let store = build(&path).await;
+    let gate = GateRef::new(GATE);
+
+    let key_a = BindingKey::new(SigningTenantId::new("tenant-a"), gate.clone());
+    let key_b = BindingKey::new(SigningTenantId::new("tenant-b"), gate.clone());
+    let binding_a = sample_binding_for_tenant("tenant-a");
+    let binding_b = sample_binding_for_tenant("tenant-b");
+
+    // Both tenants can persist a binding under the same gate_ref.
+    store
+        .put(key_a.clone(), binding_a.clone())
+        .await
+        .expect("tenant-a put succeeds");
+    store
+        .put(key_b.clone(), binding_b.clone())
+        .await
+        .expect("tenant-b put under the same gate_ref must NOT collide");
+
+    // Each tenant reads back ITS OWN binding via the tenant-qualified async read.
+    let read_a = store.get(&key_a).await.expect("tenant-a async read");
+    let read_b = store.get(&key_b).await.expect("tenant-b async read");
+    assert_eq!(read_a.context.tenant.as_str(), "tenant-a");
+    assert_eq!(read_b.context.tenant.as_str(), "tenant-b");
+
+    // A tenant-qualified read for a tenant that never wrote returns nothing.
+    let key_c = BindingKey::new(SigningTenantId::new("tenant-c"), gate);
+    assert!(
+        store.get(&key_c).await.is_none(),
+        "a tenant with no binding must not read another tenant's"
     );
 }

@@ -202,10 +202,10 @@ async fn second_signing_of_same_grant_is_refused_one_shot() {
     f.signer.sign_evm(&f.req).await.expect("first sign");
     let err = f
         .grants
-        .claim(&GrantKey::from_context(
-            &f.req.context,
-            f.req.approved_tx_hash,
-        ))
+        .claim(
+            &GrantKey::from_context(&f.req.context, f.req.approved_tx_hash),
+            ironclaw_attestation::now_unix_millis(),
+        )
         .await
         .unwrap_err();
     assert_eq!(err, ironclaw_attestation::GrantError::AlreadyClaimed);

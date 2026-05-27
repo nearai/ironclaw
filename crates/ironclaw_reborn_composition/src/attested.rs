@@ -32,7 +32,7 @@ use ironclaw_attestation::{
 };
 use ironclaw_attested_runtime::{
     AttestedGateBinding, AttestedGateBindingStore, AttestedSignerContinuationDriver, BindingError,
-    BroadcastOutcome, Broadcaster, ContinuationError, InMemoryAttestedGateBindingStore,
+    BindingKey, BroadcastOutcome, Broadcaster, ContinuationError, InMemoryAttestedGateBindingStore,
     ProviderRegistry,
 };
 use ironclaw_chain_signing::{CustodialSigner, DenyFirstCustodyPolicy, SecretsKeyStore, ShipGate};
@@ -244,7 +244,12 @@ where
         // persisting. An existing binding for this gate fails closed with
         // `AlreadyExists` — treat it as a duplicate, consistent with the grant
         // CAS above; any other validation/backend error fails closed too.
-        match self.bindings.put(gate_ref, binding).await {
+        // Key the binding by its tenant-qualified identity. The tenant comes from
+        // the authoritative binding context (validated by the store's
+        // `validate_binding_key` to equal the binding's own `context.tenant`),
+        // never from a caller-supplied value.
+        let binding_key = BindingKey::new(binding.context.tenant.clone(), gate_ref);
+        match self.bindings.put(binding_key, binding).await {
             Ok(()) => Ok(()),
             Err(BindingError::AlreadyExists) => Err(RegisterAttestedGateError::DuplicateBinding),
             Err(other) => Err(RegisterAttestedGateError::BindingStore(other)),
@@ -429,7 +434,7 @@ mod tests {
         composition
             .bindings()
             .put(
-                GateRef::new(GATE),
+                BindingKey::new(ctx.tenant.clone(), GateRef::new(GATE)),
                 AttestedGateBinding {
                     provider_id: ProviderId::Custodial,
                     context: ctx.clone(),

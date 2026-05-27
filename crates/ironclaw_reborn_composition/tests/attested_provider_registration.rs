@@ -21,7 +21,7 @@ use alloy_consensus::TxEip1559;
 
 use ironclaw_attestation::{DecodedTransaction, RenderingSchemaVersion};
 use ironclaw_attested_runtime::{
-    AttestedGateBinding, ContinuationError, CustodialMainnetShipGate,
+    AttestedGateBinding, BindingKey, ContinuationError, CustodialMainnetShipGate,
     InMemoryAttestedGateBindingStore,
 };
 use ironclaw_chain_signing::{ChainKeyId, SecretsKeyStore};
@@ -340,7 +340,14 @@ async fn register_attested_gate_seals_grant_and_persists_binding() {
 
     // Binding half: the authoritative binding is readable back.
     assert!(
-        composition.bindings().get(&gate_ref).await.is_some(),
+        composition
+            .bindings()
+            .get(&BindingKey::new(
+                SigningTenantId::new(TENANT),
+                gate_ref.clone()
+            ))
+            .await
+            .is_some(),
         "binding must be persisted on raise"
     );
 

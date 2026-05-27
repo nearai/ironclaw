@@ -55,6 +55,10 @@ mod libsql_backend {
         contract::claim_unsealed_is_not_found(fresh().await).await;
     }
     #[tokio::test]
+    async fn claim_expired_grant_is_rejected() {
+        contract::claim_expired_grant_is_rejected(fresh().await).await;
+    }
+    #[tokio::test]
     async fn claim_mismatched_component_is_not_found() {
         contract::claim_mismatched_component_is_not_found(fresh().await).await;
     }
@@ -133,6 +137,7 @@ mod postgres_backend {
     pg_case!(seal_then_claim_succeeds);
     pg_case!(second_claim_is_already_claimed);
     pg_case!(claim_unsealed_is_not_found);
+    pg_case!(claim_expired_grant_is_rejected);
     pg_case!(claim_mismatched_component_is_not_found);
     pg_case!(double_seal_is_already_sealed);
     pg_case!(

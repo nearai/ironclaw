@@ -273,7 +273,10 @@ impl SigningProvider for WalletConnectSigningProvider {
         // 5. One-shot grant (T20): claim the sealed grant atomically. A replay of
         //    an already-claimed grant fails closed here.
         let key = GrantKey::from_context(context, *approved_tx_hash);
-        self.grants.claim(&key).await.map_err(map_grant_error)?;
+        self.grants
+            .claim(&key, ironclaw_attestation::now_unix_millis())
+            .await
+            .map_err(map_grant_error)?;
 
         // Consume the binding only now that every check (incl. the durable grant
         // CAS) has passed — a malformed earlier response never burned it.
@@ -293,9 +296,10 @@ impl SigningProvider for WalletConnectSigningProvider {
 /// Map a [`GrantError`] onto the provider error taxonomy, fail-closed.
 fn map_grant_error(err: GrantError) -> SigningProviderError {
     match err {
-        GrantError::AlreadyClaimed | GrantError::NotFound | GrantError::AlreadySealed => {
-            SigningProviderError::GrantClaimFailed
-        }
+        GrantError::AlreadyClaimed
+        | GrantError::NotFound
+        | GrantError::AlreadySealed
+        | GrantError::Expired { .. } => SigningProviderError::GrantClaimFailed,
         GrantError::Backend { reason } => SigningProviderError::Provider { reason },
     }
 }
