@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 mod auth;
 mod available_extensions;
+mod bundled_skills;
 mod default_system_prompt;
 mod error;
 mod extension_installation_store;

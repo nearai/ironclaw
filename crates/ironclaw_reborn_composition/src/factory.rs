@@ -351,6 +351,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
             reason: error.to_string(),
         }
     })?;
+    crate::bundled_skills::ensure_bundled_reborn_skills_installed(&root)?;
     let filesystem =
         build_local_dev_root_filesystem(&root, &workspace_root, host_home_root.as_ref()).await?;
     let (skill_filesystem, workspace_filesystem, runtime_workspace_mounts) =

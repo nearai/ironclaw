@@ -2531,20 +2531,20 @@ mod tests {
     async fn local_dev_runtime_suppresses_explicit_setup_skill_when_workspace_marker_exists() {
         let root = tempfile::tempdir().expect("tempdir");
         let storage_root = root.path().join("local-dev");
-        std::fs::create_dir_all(storage_root.join("skills/setup-helper")).expect("user skill dir");
+        std::fs::create_dir_all(storage_root.join("skills/marker-helper")).expect("user skill dir");
         std::fs::create_dir_all(storage_root.join("workspace/markers")).expect("marker dir");
         std::fs::write(
-            storage_root.join("skills/setup-helper/SKILL.md"),
+            storage_root.join("skills/marker-helper/SKILL.md"),
             skill_md_with_setup_marker(
-                "setup-helper",
-                "setup helper description",
-                "markers/setup-helper.done",
-                "SETUP_HELPER_PROMPT_SENTINEL",
+                "marker-helper",
+                "marker helper description",
+                "markers/marker-helper.done",
+                "MARKER_HELPER_PROMPT_SENTINEL",
             ),
         )
-        .expect("write setup helper skill");
+        .expect("write marker helper skill");
         std::fs::write(
-            storage_root.join("workspace/markers/setup-helper.done"),
+            storage_root.join("workspace/markers/marker-helper.done"),
             "done",
         )
         .expect("write setup marker");
@@ -2573,7 +2573,7 @@ mod tests {
         let conversation = runtime.new_conversation().await.expect("conversation");
         let result = tokio::time::timeout(
             Duration::from_secs(3),
-            runtime.execute_skill_message(&conversation, "$setup-helper"),
+            runtime.execute_skill_message(&conversation, "$marker-helper"),
         )
         .await
         .expect("skill execution should finish")
@@ -2606,17 +2606,17 @@ mod tests {
     async fn local_dev_runtime_activates_setup_skill_when_workspace_marker_is_absent() {
         let root = tempfile::tempdir().expect("tempdir");
         let storage_root = root.path().join("local-dev");
-        std::fs::create_dir_all(storage_root.join("skills/setup-helper")).expect("user skill dir");
+        std::fs::create_dir_all(storage_root.join("skills/marker-helper")).expect("user skill dir");
         std::fs::write(
-            storage_root.join("skills/setup-helper/SKILL.md"),
+            storage_root.join("skills/marker-helper/SKILL.md"),
             skill_md_with_setup_marker(
-                "setup-helper",
-                "setup helper description",
-                "markers/setup-helper.done",
-                "SETUP_HELPER_PROMPT_SENTINEL",
+                "marker-helper",
+                "marker helper description",
+                "markers/marker-helper.done",
+                "MARKER_HELPER_PROMPT_SENTINEL",
             ),
         )
-        .expect("write setup helper skill");
+        .expect("write marker helper skill");
         let requests = Arc::new(StdMutex::new(Vec::new()));
         let gateway = Arc::new(RecordingGateway {
             reply: "setup marker absent ok".to_string(),
@@ -2642,7 +2642,7 @@ mod tests {
         let conversation = runtime.new_conversation().await.expect("conversation");
         let result = tokio::time::timeout(
             Duration::from_secs(3),
-            runtime.execute_skill_message(&conversation, "$setup-helper"),
+            runtime.execute_skill_message(&conversation, "$marker-helper"),
         )
         .await
         .expect("skill execution should finish")
@@ -2650,7 +2650,7 @@ mod tests {
 
         assert_eq!(result.reply.status, TurnStatus::Completed);
         assert_eq!(result.plan.activations().len(), 1);
-        assert_eq!(result.plan.activations()[0].name, "setup-helper");
+        assert_eq!(result.plan.activations()[0].name, "marker-helper");
         let skill_context = {
             let requests = requests
                 .lock()
@@ -2669,8 +2669,8 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        assert!(skill_context.contains("setup helper description"));
-        assert!(skill_context.contains("SETUP_HELPER_PROMPT_SENTINEL"));
+        assert!(skill_context.contains("marker helper description"));
+        assert!(skill_context.contains("MARKER_HELPER_PROMPT_SENTINEL"));
 
         runtime.shutdown().await.expect("runtime shutdown");
     }
@@ -2753,7 +2753,7 @@ mod tests {
         let conversation = runtime.new_conversation().await.expect("conversation");
         let reply = tokio::time::timeout(
             Duration::from_secs(3),
-            runtime.send_user_message(&conversation, "review this"),
+            runtime.send_user_message(&conversation, "hello with no matching skill"),
         )
         .await
         .expect("runtime send should finish")

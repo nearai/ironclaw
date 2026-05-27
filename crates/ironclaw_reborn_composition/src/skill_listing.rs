@@ -2,6 +2,7 @@ use ironclaw_skills::{SkillManagementError, SkillManagementErrorKind};
 
 use crate::{
     RebornBuildError,
+    bundled_skills::bundled_reborn_skill_summaries,
     lifecycle::{RebornLocalSkillManagementError, build_existing_local_dev_skill_management_port},
 };
 
@@ -9,15 +10,25 @@ pub async fn list_reborn_local_skills(
     owner_id: impl Into<String>,
     local_dev_storage_root: impl Into<std::path::PathBuf>,
 ) -> Result<Vec<ironclaw_skills::SkillSummary>, RebornSkillListError> {
-    let Some(skill_management) =
-        build_existing_local_dev_skill_management_port(owner_id, local_dev_storage_root)?
-    else {
-        return Ok(Vec::new());
-    };
-    skill_management
-        .list()
-        .await
-        .map_err(map_local_skill_management_error)
+    let mut skills =
+        match build_existing_local_dev_skill_management_port(owner_id, local_dev_storage_root)? {
+            Some(skill_management) => skill_management
+                .list()
+                .await
+                .map_err(map_local_skill_management_error)?,
+            None => Vec::new(),
+        };
+    let existing_names = skills
+        .iter()
+        .map(|skill| skill.name.clone())
+        .collect::<std::collections::HashSet<_>>();
+    skills.extend(
+        bundled_reborn_skill_summaries()?
+            .into_iter()
+            .filter(|skill| !existing_names.contains(&skill.name)),
+    );
+    skills.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(skills)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -78,17 +89,23 @@ mod tests {
             .await
             .expect("list skills");
 
-        assert_eq!(result.len(), 55);
         assert!(result.iter().any(|skill| skill.name == "list-skill-54"));
         assert!(
             result
                 .iter()
+                .any(|skill| skill.name == "code-review"
+                    && skill.source == ManagedSkillSource::System)
+        );
+        assert!(
+            result
+                .iter()
+                .filter(|skill| skill.name.starts_with("list-skill-"))
                 .all(|skill| skill.source == ManagedSkillSource::User)
         );
     }
 
     #[tokio::test]
-    async fn local_skill_list_missing_storage_is_empty_without_creating_state() {
+    async fn local_skill_list_missing_storage_reports_bundled_without_creating_state() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("missing-local-dev");
 
@@ -96,7 +113,12 @@ mod tests {
             .await
             .expect("list skills");
 
-        assert!(result.is_empty());
+        assert!(
+            result
+                .iter()
+                .any(|skill| skill.name == "code-review"
+                    && skill.source == ManagedSkillSource::System)
+        );
         assert!(!storage_root.exists());
     }
 
