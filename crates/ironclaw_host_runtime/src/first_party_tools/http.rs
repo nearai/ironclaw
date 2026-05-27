@@ -1,10 +1,10 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
 use ironclaw_host_api::{
-    EffectKind, NetworkMethod, NetworkPolicy, PermissionMode, ResourceCeiling, ResourceEstimate,
-    ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind, RuntimeHttpEgressError,
-    RuntimeHttpEgressReasonCode, RuntimeHttpEgressRequest, RuntimeKind, SandboxQuota,
-    valid_http_field_name,
+    EffectKind, MountView, NetworkMethod, NetworkPolicy, PermissionMode, ResourceCeiling,
+    ResourceEstimate, ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind,
+    RuntimeHttpEgressError, RuntimeHttpEgressReasonCode, RuntimeHttpEgressRequest,
+    RuntimeHttpSaveTarget, RuntimeKind, SandboxQuota, ScopedPath, valid_http_field_name,
 };
 use serde_json::{Map, Value, json};
 
@@ -124,6 +124,14 @@ pub(super) async fn dispatch(
             error,
         )
     })?;
+    let save_body_to = save_body_to(&request.input, request.mounts.as_ref()).map_err(|error| {
+        log_raw_http_input_error_for_local_diagnostics(
+            unsafe_raw_diagnostics_allowed,
+            &request.input,
+            "save_to",
+            error,
+        )
+    })?;
     let http_request = RuntimeHttpEgressRequest {
         runtime: RuntimeKind::FirstParty,
         scope: request.scope.clone(),
@@ -137,6 +145,7 @@ pub(super) async fn dispatch(
         // Always send a bounded limit, even when caller omits the field, so the
         // host transport stays fail-closed instead of inheriting an unbounded cap.
         response_body_limit: Some(response_body_limit),
+        save_body_to,
         timeout_ms: Some(timeout_ms),
     };
     let response = tokio::task::spawn_blocking(move || egress.execute(http_request))
@@ -151,17 +160,27 @@ pub(super) async fn dispatch(
     let mut output = Map::new();
     output.insert("status".to_string(), json!(response.status));
     output.insert("headers".to_string(), response_headers(response.headers));
-    // Response bodies must be valid UTF-8 to appear as body_text. Any invalid
-    // byte returns the full response as body_base64 to avoid lossy surprises.
-    match String::from_utf8(response.body) {
-        Ok(body_text) => {
-            output.insert("body_text".to_string(), Value::String(body_text));
-        }
-        Err(error) => {
-            output.insert(
-                "body_base64".to_string(),
-                Value::String(BASE64_STANDARD.encode(error.into_bytes())),
-            );
+    if let Some(saved_body) = response.saved_body {
+        output.insert(
+            "saved_body".to_string(),
+            json!({
+                "path": saved_body.path.as_str(),
+                "bytes_written": saved_body.bytes_written,
+            }),
+        );
+    } else {
+        // Response bodies must be valid UTF-8 to appear as body_text. Any invalid
+        // byte returns the full response as body_base64 to avoid lossy surprises.
+        match String::from_utf8(response.body) {
+            Ok(body_text) => {
+                output.insert("body_text".to_string(), Value::String(body_text));
+            }
+            Err(error) => {
+                output.insert(
+                    "body_base64".to_string(),
+                    Value::String(BASE64_STANDARD.encode(error.into_bytes())),
+                );
+            }
         }
     }
     output.insert("request_bytes".to_string(), json!(response.request_bytes));
@@ -307,6 +326,28 @@ fn timeout_ms(input: &Value) -> Result<u32, FirstPartyCapabilityError> {
     )?;
     let value = value.min(u64::from(MAX_HTTP_TIMEOUT_MS));
     u32::try_from(value).map_err(|_| input_error())
+}
+
+fn save_body_to(
+    input: &Value,
+    mounts: Option<&MountView>,
+) -> Result<Option<RuntimeHttpSaveTarget>, FirstPartyCapabilityError> {
+    let Some(value) = input.get("save_to") else {
+        return Ok(None);
+    };
+    let path = value.as_str().ok_or_else(input_error)?;
+    if path.trim().is_empty() {
+        return Ok(None);
+    }
+    let path = match mounts {
+        Some(mounts) => mounts.scoped_path(path.to_string()),
+        None => ScopedPath::new(path.to_string()),
+    }
+    .map_err(|_| input_error())?;
+    Ok(Some(RuntimeHttpSaveTarget {
+        path,
+        mount_view: mounts.cloned(),
+    }))
 }
 
 fn ranged_u64(

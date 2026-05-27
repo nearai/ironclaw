@@ -81,6 +81,61 @@ async fn gateway_calls_llm_provider_for_allowed_model_profile() {
 }
 
 #[tokio::test]
+async fn gateway_coalesces_late_system_messages_before_provider_call() {
+    let provider = Arc::new(RecordingLlmProvider::reply("assistant response"));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let mut request = model_request(interactive_model());
+    request.messages.push(HostManagedModelMessage {
+        role: HostManagedModelMessageRole::System,
+        content: "host summary after user".to_string(),
+        content_ref: LoopMessageRef::new("msg:33333333-3333-3333-3333-333333333333").unwrap(),
+        tool_result_provider_call: None,
+    });
+
+    gateway.stream_model(request).await.unwrap();
+
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].messages.len(), 2);
+    assert_eq!(requests[0].messages[0].role, Role::System);
+    assert_eq!(
+        requests[0].messages[0].content,
+        "system instructions\n\nhost summary after user"
+    );
+    assert_eq!(requests[0].messages[1].role, Role::User);
+    assert_eq!(requests[0].messages[1].content, "hello model");
+}
+
+#[tokio::test]
+async fn gateway_preserves_text_only_provider_reasoning() {
+    let provider = Arc::new(RecordingLlmProvider::reply_with_reasoning(
+        "assistant response",
+        "text-only reasoning",
+    ));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+
+    let response = gateway
+        .stream_model(model_request(interactive_model()))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.safe_reasoning_deltas,
+        vec!["text-only reasoning".to_string()]
+    );
+}
+
+#[tokio::test]
 async fn gateway_with_empty_tool_definitions_uses_plain_complete() {
     let provider = Arc::new(ToolAwareProvider::plain_reply("assistant response"));
     let gateway = LlmProviderModelGateway::with_provider_identity(
@@ -126,6 +181,10 @@ async fn gateway_with_tool_surface_calls_complete_with_tools_and_returns_capabil
         .await
         .unwrap();
 
+    assert_eq!(
+        response.safe_reasoning_deltas,
+        vec!["response reasoning".to_string()]
+    );
     assert!(provider.complete_requests.lock().unwrap().is_empty());
     let tool_requests = provider.tool_requests.lock().unwrap();
     assert_eq!(tool_requests.len(), 1);
@@ -640,12 +699,15 @@ async fn gateway_keeps_same_turn_provider_roundtrip_when_plain_tool_result_is_in
         requests[0].messages[2].tool_call_id.as_deref(),
         Some("call_2")
     );
-    assert_eq!(requests[0].messages[3].role, Role::System);
-    assert_eq!(requests[0].messages[3].content, "plain tool completed");
+    assert_eq!(requests[0].messages[3].role, Role::User);
+    assert_eq!(
+        requests[0].messages[3].content,
+        "[Tool result summary]: plain tool completed"
+    );
 }
 
 #[tokio::test]
-async fn gateway_rejects_provider_tool_replay_from_different_provider_route() {
+async fn gateway_degrades_provider_tool_replay_from_different_provider_route_to_summary() {
     let provider = Arc::new(ToolAwareProvider::plain_reply("assistant response"));
     let gateway = LlmProviderModelGateway::with_provider_identity(
         STATIC_PROVIDER_ID,
@@ -678,10 +740,20 @@ async fn gateway_rejects_provider_tool_replay_from_different_provider_route() {
         tool_result_provider_call: Some(provider_call),
     }];
 
-    let error = gateway.stream_model(request).await.unwrap_err();
+    let response = gateway.stream_model(request).await.unwrap();
 
-    assert_eq!(error.kind, HostManagedModelErrorKind::PolicyDenied);
-    assert!(provider.complete_requests.lock().unwrap().is_empty());
+    assert_eq!(
+        response.safe_text_deltas,
+        vec!["assistant response".to_string()]
+    );
+    let requests = provider.complete_requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].messages.len(), 1);
+    assert_eq!(requests[0].messages[0].role, Role::User);
+    assert_eq!(
+        requests[0].messages[0].content,
+        "[Tool result summary]: tool completed"
+    );
     assert!(provider.tool_requests.lock().unwrap().is_empty());
 }
 
@@ -1661,6 +1733,7 @@ impl LlmProvider for IgnoresModelOverrideProvider {
             input_tokens: 1,
             output_tokens: 1,
             finish_reason: FinishReason::Stop,
+            reasoning: None,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
         })
@@ -1709,6 +1782,20 @@ impl RecordingLlmProvider {
         Self::reply_for_model("recording-model", content)
     }
 
+    fn reply_with_reasoning(content: &str, reasoning: &str) -> Self {
+        let provider = Self::reply(content);
+        provider
+            .response
+            .lock()
+            .unwrap()
+            .as_mut()
+            .expect("response configured")
+            .as_mut()
+            .expect("successful response configured")
+            .reasoning = Some(reasoning.to_string());
+        provider
+    }
+
     fn reply_for_model(model_name: &str, content: &str) -> Self {
         Self::reply_for_model_with_finish_reason(model_name, content, FinishReason::Stop)
     }
@@ -1730,6 +1817,7 @@ impl RecordingLlmProvider {
                 input_tokens: 1,
                 output_tokens: 1,
                 finish_reason,
+                reasoning: None,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             }))),
@@ -1762,6 +1850,7 @@ impl ToolAwareProvider {
                 input_tokens: 1,
                 output_tokens: 1,
                 finish_reason: FinishReason::Stop,
+                reasoning: None,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             })),

@@ -21,7 +21,14 @@
 use std::sync::Arc;
 
 mod auth;
+mod available_extensions;
+mod bundled_skills;
+mod default_system_prompt;
 mod error;
+mod extension_installation_store;
+mod extension_lifecycle;
+mod extension_lifecycle_capabilities;
+mod extension_lifecycle_command;
 mod factory;
 mod gsuite;
 mod input;
@@ -30,6 +37,8 @@ mod lifecycle;
 mod llm_catalog;
 mod local_dev_mounts;
 mod local_runtime_profile;
+#[cfg(feature = "webui-v2-beta")]
+mod product_auth_serve;
 mod product_live_adapters;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 mod production_runtime_policy;
@@ -38,6 +47,7 @@ mod projection;
 mod readiness;
 mod runtime;
 mod runtime_input;
+mod skill_listing;
 mod webui;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_body_limit;
@@ -58,9 +68,21 @@ pub use auth::{
     RebornProductAuthServices,
 };
 pub use error::RebornBuildError;
+pub use extension_lifecycle_command::{
+    RebornExtensionLifecycleCommand, RebornExtensionLifecycleCommandError,
+    execute_reborn_extension_lifecycle_command, render_reborn_extension_lifecycle_response,
+};
 pub use factory::{RebornServices, build_reborn_services};
 pub use gsuite::{bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers};
 pub use input::{RebornBuildInput, RebornRuntimeProcessBinding};
+pub use ironclaw_product_workflow::{
+    LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePhase, LifecycleProductPayload,
+    LifecycleProductResponse,
+};
+pub use ironclaw_skills::{
+    ManagedSkillSource as RebornSkillSource, SkillSummary as RebornSkillSummary,
+    skill_summary_json as reborn_skill_summary_json,
+};
 #[cfg(feature = "root-llm-provider")]
 pub use llm_catalog::{
     RebornLlmCatalogError, resolve_against_registry, resolve_llm_selection_against_catalog,
@@ -86,12 +108,13 @@ pub use runtime::{
     RebornSkillActivationMode, RebornSkillAsset, RebornSkillBundle, RebornSkillExecutionPlan,
     RebornSkillExecutionResult, RebornSkillSourceKind, build_reborn_runtime,
 };
+#[cfg(feature = "root-llm-provider")]
+pub use runtime_input::ResolvedRebornLlm;
 pub use runtime_input::{
     DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL, DEFAULT_TURN_RUNNER_POLL_INTERVAL, PollSettings,
     RebornRuntimeIdentity, RebornRuntimeInput, TurnRunnerSettings,
 };
-#[cfg(feature = "root-llm-provider")]
-pub use runtime_input::{RebornLlmConfig, ResolvedRebornLlm};
+pub use skill_listing::{RebornSkillListError, list_reborn_local_skills};
 pub use webui::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]
 pub use webui_rate_limit::RateLimitConfigError;
@@ -275,6 +298,7 @@ const PER_USER_ALIASES: &[&str] = &[
     "/resources",
     "/engine",
     "/skills",
+    "/workspace",
 ];
 
 /// Per-invocation [`MountView`] used as the production resolver.
@@ -479,9 +503,10 @@ where
     // `Missing(SecretStore)` wiring report if the host-runtime builder API
     // regresses; treat that as infallible here.
     let services = services
-        .try_with_host_http_egress(PolicyNetworkHttpEgress::new(
-            ReqwestNetworkTransport::default(),
-        ))
+        .try_with_host_http_egress_with_body_store(
+            PolicyNetworkHttpEgress::new(ReqwestNetworkTransport::default()),
+            Arc::clone(&scoped_filesystem),
+        )
         .expect("secret_store wired above guarantees host HTTP egress is buildable"); // safety: see comment above
 
     Ok(services)
@@ -548,9 +573,10 @@ where
     // `Missing(SecretStore)` wiring report if the host-runtime builder API
     // regresses; treat that as infallible here.
     let services = services
-        .try_with_host_http_egress(PolicyNetworkHttpEgress::new(
-            ReqwestNetworkTransport::default(),
-        ))
+        .try_with_host_http_egress_with_body_store(
+            PolicyNetworkHttpEgress::new(ReqwestNetworkTransport::default()),
+            Arc::clone(&scoped_filesystem),
+        )
         .expect("secret_store wired above guarantees host HTTP egress is buildable"); // safety: see comment above
 
     Ok(services)

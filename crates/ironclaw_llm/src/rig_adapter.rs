@@ -676,6 +676,7 @@ where
             input_tokens: saturate_u32(response.usage.input_tokens),
             output_tokens: saturate_u32(response.usage.output_tokens),
             finish_reason: finish,
+            reasoning: None,
             cache_read_input_tokens: saturate_u32(response.usage.cached_input_tokens),
             cache_creation_input_tokens: extract_cache_creation(&response.raw_response),
         };

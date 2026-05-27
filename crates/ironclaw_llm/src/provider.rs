@@ -254,6 +254,9 @@ pub struct CompletionResponse {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub finish_reason: FinishReason,
+    /// Provider-emitted reasoning content, when the text-completion API returns
+    /// a separate reasoning artifact.
+    pub reasoning: Option<String>,
     /// Tokens read from the provider's server-side prompt cache (Anthropic).
     /// Zero when caching is not supported or on a cache miss.
     pub cache_read_input_tokens: u32,

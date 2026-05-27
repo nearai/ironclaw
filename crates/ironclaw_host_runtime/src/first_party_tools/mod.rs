@@ -43,8 +43,7 @@ pub use http::HTTP_CAPABILITY_ID;
 pub use json::JSON_CAPABILITY_ID;
 pub use shell::SHELL_CAPABILITY_ID;
 pub use skill_management::{
-    SKILL_INSTALL_CAPABILITY_ID, SKILL_INSTALL_URL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
-    SKILL_REMOVE_CAPABILITY_ID,
+    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
 };
 pub use spawn_subagent::SPAWN_SUBAGENT_CAPABILITY_ID;
 pub use time::TIME_CAPABILITY_ID;
@@ -228,9 +227,10 @@ pub struct BuiltinFirstPartyTools {
 impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
     async fn dispatch(
         &self,
-        request: FirstPartyCapabilityRequest,
+        mut request: FirstPartyCapabilityRequest,
     ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
         bounded_input_size(request.capability_id.as_str(), &request.input)?;
+        normalize_optional_null_sentinels(&mut request);
         let start = Instant::now();
         let mut network_egress_bytes = 0;
         let output = match request.capability_id.as_str() {
@@ -340,6 +340,49 @@ fn bounded_output_bytes(
         ));
     }
     Ok(bytes)
+}
+
+/// Treat the literal string `"null"` as absent for declared optional fields.
+///
+/// Weaker models (notably quantized local models) routinely populate every
+/// optional parameter with the string `"null"` instead of omitting it. Without
+/// this normalization an optional `"null"` reaches a typed parser (e.g. an IANA
+/// timezone) and aborts an otherwise valid call with `InputEncode`. Required
+/// fields are left untouched so a legitimate `"null"` payload is preserved, and
+/// only declared optional properties are normalized.
+fn normalize_optional_null_sentinels(request: &mut FirstPartyCapabilityRequest) {
+    let schema_name = request
+        .capability_id
+        .as_str()
+        .strip_prefix("builtin.")
+        .unwrap_or(request.capability_id.as_str())
+        .replace('.', "-");
+    let Some(schema) =
+        resolve_builtin_input_schema_ref(&format!("schemas/builtin/{schema_name}.input.v1.json"))
+    else {
+        return;
+    };
+    let required: std::collections::HashSet<&str> = schema
+        .get("required")
+        .and_then(|value| value.as_array())
+        .map(|values| values.iter().filter_map(|value| value.as_str()).collect())
+        .unwrap_or_default();
+    let declared: std::collections::HashSet<&str> = schema
+        .get("properties")
+        .and_then(|value| value.as_object())
+        .map(|properties| properties.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    let Some(object) = request.input.as_object_mut() else {
+        return;
+    };
+    for (key, value) in object.iter_mut() {
+        if declared.contains(key.as_str())
+            && !required.contains(key.as_str())
+            && value.as_str() == Some("null")
+        {
+            *value = serde_json::Value::Null;
+        }
+    }
 }
 
 fn resource_profile() -> Option<ResourceProfile> {

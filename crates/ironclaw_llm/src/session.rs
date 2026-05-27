@@ -522,9 +522,7 @@ pub async fn create_session_manager(config: SessionConfig) -> Arc<SessionManager
     // NEARAI_SESSION_TOKEN env var always takes precedence over file-based
     // tokens. Hosting providers set this env var and expect it to be used
     // directly — no file persistence needed.
-    if let Ok(token) = std::env::var("NEARAI_SESSION_TOKEN")
-        && !token.is_empty()
-    {
+    if let Some(token) = ironclaw_common::env_helpers::env_or_override("NEARAI_SESSION_TOKEN") {
         tracing::info!("Using session token from NEARAI_SESSION_TOKEN env var");
         manager.set_token(SecretString::from(token)).await;
     }

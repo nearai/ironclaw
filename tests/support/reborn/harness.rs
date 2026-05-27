@@ -1910,6 +1910,7 @@ impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
             status: 200,
             headers: vec![("content-type".to_string(), "application/json".to_string())],
             body: self.body.clone(),
+            saved_body: None,
             request_bytes: request.body.len() as u64,
             response_bytes: self.body.len() as u64,
             redaction_applied: false,
@@ -2446,6 +2447,7 @@ where
 pub fn trace_tool_call_response() -> ironclaw_loop_support::HostManagedModelResponse {
     ironclaw_loop_support::HostManagedModelResponse {
         safe_text_deltas: Vec::new(),
+        safe_reasoning_deltas: Vec::new(),
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
             surface_version: CapabilitySurfaceVersion::new(TEST_CAPABILITY_SURFACE_VERSION)
                 .expect("valid surface version"),

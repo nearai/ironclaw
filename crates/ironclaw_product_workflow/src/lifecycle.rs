@@ -286,6 +286,20 @@ impl LifecycleProductAction {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LifecycleProductPayload {
+    ExtensionSearch {
+        extensions: Vec<LifecycleExtensionSummary>,
+        count: usize,
+    },
+    ExtensionInstall {
+        installed: bool,
+        visible_capability_ids: Vec<String>,
+    },
+    ExtensionActivate {
+        activated: bool,
+    },
+    ExtensionRemove {
+        removed: bool,
+    },
     SkillSearch {
         skills: Vec<LifecycleSkillSummary>,
         count: usize,
@@ -300,6 +314,22 @@ pub enum LifecycleProductPayload {
         removed: bool,
         name: LifecyclePackageId,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LifecycleExtensionSummary {
+    pub package_ref: LifecyclePackageRef,
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    pub source: LifecycleExtensionSource,
+    pub visible_read_only_capability_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecycleExtensionSource {
+    HostBundled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

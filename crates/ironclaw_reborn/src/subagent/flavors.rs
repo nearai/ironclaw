@@ -273,6 +273,7 @@ mod tests {
         );
         assert_eq!(parse_flavor_id("coder"), Some(SubagentFlavorId::Coder));
         assert_eq!(parse_flavor_id("nope"), None);
+        assert_eq!(parse_flavor_id("unknown"), None);
     }
 
     #[test]

@@ -3,21 +3,26 @@
 //!
 //! `ironclaw_webui_v2::webui_v2_routes()` returns an
 //! [`IngressRouteDescriptor`] per route, each carrying a
-//! [`RateLimitPolicy`] (mutation 60/60, read 120/60, stream 12/60 in
+//! [`RateLimitPolicy`] (mutation 60/60, read 120/60, stream 30/60 in
 //! the current beta). The v2 crate's CLAUDE.md explicitly designates
 //! enforcement of these policies as a host-composition responsibility;
 //! this module is that enforcement.
 //!
 //! Design choices:
 //!
-//! - **Sliding window per `(route, caller)`** — a single 30s burst from
-//!   one user does not exhaust other users on the same route.
-//! - **`PerCaller` scope only.** All v2 descriptors today declare
-//!   `PerCaller`; other scopes (`PerTenant`, `PerIp`, `PerRoute`,
-//!   `Global`) are explicit `Err` at composition time so a future
-//!   policy change cannot silently degrade enforcement.
+//! - **Sliding window per descriptor-declared bucket** — authenticated
+//!   routes use `(route, caller)`, while public callback-style routes
+//!   use route/global/IP buckets that do not need caller identity.
+//! - **Supported scopes:** `PerCaller` for authenticated routes and
+//!   `PerRoute` / `PerIp` / `Global` for public callback-style routes
+//!   that have no authenticated caller extension yet. `PerIp` uses the
+//!   transport peer address injected by the host-owned ingress
+//!   (`ConnectInfo<SocketAddr>`); it never trusts `X-Forwarded-For` or
+//!   `X-Real-IP` headers. `PerTenant` remains an explicit `Err` at
+//!   composition time so a future policy change cannot silently degrade
+//!   enforcement.
 //! - **Sharded LRU eviction** — counters live in 16 independent
-//!   `Mutex<LruCache>` shards picked by a hash of the caller identity.
+//!   `Mutex<LruCache>` shards picked by a hash of the resolved bucket key.
 //!   Each shard is capped at 512 entries (16 × 512 = 8192-entry total
 //!   budget). Concurrent requests for different callers very rarely
 //!   contend on the same shard's mutex; a single caller's bursts
@@ -29,11 +34,12 @@
 //!   the type allows it) records no counters and never returns 429.
 
 use std::hash::{Hash, Hasher};
+use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use axum::extract::{Request, State};
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -72,7 +78,7 @@ const RATE_LIMIT_PER_SHARD_CAPACITY: NonZeroUsize = match NonZeroUsize::new(512)
 pub enum RateLimitConfigError {
     #[error(
         "rate-limit scope {scope:?} on route `{route_id}` is not supported by the WebUI gateway \
-         composition; only PerCaller is enforced today"
+         composition; supported scopes are PerCaller, PerRoute, PerIp, and Global"
     )]
     UnsupportedScope {
         route_id: String,
@@ -95,13 +101,17 @@ struct RouteLimit {
 
 #[derive(Debug, Clone, Copy)]
 enum ResolvedPolicy {
-    Limited { max_requests: u32, window: Duration },
+    Limited {
+        scope: RateLimitScope,
+        max_requests: u32,
+        window: Duration,
+    },
     Disabled,
 }
 
 /// Shared state for [`enforce_rate_limit`]. Cheap to clone — the
 /// inner counter maps are sharded across [`SHARD_COUNT`] independent
-/// `Mutex<LruCache<…>>`s, picked by a hash of the caller identity, so
+/// `Mutex<LruCache<…>>`s, picked by a hash of the resolved bucket key, so
 /// concurrent rate-limit checks for different callers don't contend
 /// on the same mutex. Each shard's lock is held only for the window
 /// update + counter decrement — microseconds in the warm path.
@@ -123,10 +133,10 @@ impl std::fmt::Debug for RateLimitState {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct CounterKey {
     route_idx: usize,
-    /// Caller identity formatted as `tenant\x1fuser`. The unit-separator
-    /// byte is illegal inside `TenantId` / `UserId` (the grammar is
-    /// `[a-z0-9._-]+`), so it cannot collide with a real id value.
-    caller_key: String,
+    /// Stable limiter bucket. For authenticated routes this is the
+    /// caller identity formatted as `tenant\x1fuser`; for public callback
+    /// routes it is route/global/IP-scoped and contains no user material.
+    bucket_key: String,
 }
 
 #[derive(Debug)]
@@ -135,6 +145,11 @@ struct Window {
     remaining: u32,
     /// Epoch second at which the current window started.
     window_start: u64,
+}
+
+#[derive(Debug)]
+enum CounterKeyError {
+    Misconfigured,
 }
 
 /// Resolve the v2 descriptor set into a fixed lookup table consumed by
@@ -167,14 +182,14 @@ pub(crate) fn build_rate_limit_state(
     })
 }
 
-/// Pick the shard for a given caller. Uses `DefaultHasher` for
+/// Pick the shard for a given limiter bucket. Uses `DefaultHasher` for
 /// uniform-enough distribution across 16 buckets; we don't need
-/// adversarial-resistance because the caller identity is already host-
-/// authenticated and trusted to not be attacker-controlled in a way
-/// that could collide on a specific shard.
-fn shard_index(caller_key: &str) -> usize {
+/// adversarial resistance because per-caller buckets come from
+/// host-authenticated caller identity and public route/global buckets
+/// are fixed by descriptor metadata.
+fn shard_index(bucket_key: &str) -> usize {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    caller_key.hash(&mut hasher);
+    bucket_key.hash(&mut hasher);
     (hasher.finish() as usize) % SHARD_COUNT
 }
 
@@ -189,7 +204,11 @@ fn resolve_policy(
             max_requests,
             window_seconds,
         } => match scope {
-            RateLimitScope::PerCaller => Ok(ResolvedPolicy::Limited {
+            RateLimitScope::PerCaller
+            | RateLimitScope::PerRoute
+            | RateLimitScope::PerIp
+            | RateLimitScope::Global => Ok(ResolvedPolicy::Limited {
+                scope: *scope,
                 max_requests: max_requests.get(),
                 window: Duration::from_secs(u64::from(window_seconds.get())),
             }),
@@ -199,6 +218,65 @@ fn resolve_policy(
             }),
         },
     }
+}
+
+fn request_counter_key(
+    route_idx: usize,
+    route: &RouteLimit,
+    request: &Request,
+) -> Result<CounterKey, CounterKeyError> {
+    let ResolvedPolicy::Limited { scope, .. } = route.policy else {
+        return Err(CounterKeyError::Misconfigured);
+    };
+
+    let bucket_key = match scope {
+        RateLimitScope::PerCaller => {
+            let Some(caller) = request.extensions().get::<WebUiAuthenticatedCaller>() else {
+                tracing::debug!(
+                    target = "ironclaw::reborn::webui_rate_limit",
+                    route_id = %route.route_id,
+                    "per-caller rate-limit reached without an authenticated caller — \
+                     auth middleware must run first",
+                );
+                return Err(CounterKeyError::Misconfigured);
+            };
+            caller_key(caller)
+        }
+        RateLimitScope::PerRoute => format!("route\x1f{}", route.route_id),
+        RateLimitScope::PerIp => {
+            let Some(connect_info) = request.extensions().get::<ConnectInfo<SocketAddr>>() else {
+                tracing::debug!(
+                    target = "ironclaw::reborn::webui_rate_limit",
+                    route_id = %route.route_id,
+                    "per-ip rate-limit reached without host-provided ConnectInfo — \
+                     host ingress must inject transport peer addresses",
+                );
+                return Err(CounterKeyError::Misconfigured);
+            };
+            format!("peer_ip\x1f{}", connect_info.0.ip())
+        }
+        RateLimitScope::Global => "global".to_string(),
+        RateLimitScope::PerTenant => {
+            tracing::debug!(
+                target = "ironclaw::reborn::webui_rate_limit",
+                route_id = %route.route_id,
+                scope = ?scope,
+                "unsupported rate-limit scope reached runtime after composition",
+            );
+            return Err(CounterKeyError::Misconfigured);
+        }
+    };
+
+    let route_idx = if scope == RateLimitScope::Global {
+        usize::MAX
+    } else {
+        route_idx
+    };
+
+    Ok(CounterKey {
+        route_idx,
+        bucket_key,
+    })
 }
 
 /// Build the `(method, path)` → route index lookup for one request.
@@ -233,10 +311,11 @@ fn now_epoch_secs() -> u64 {
 }
 
 /// Axum middleware that enforces the per-route rate limits resolved by
-/// [`build_rate_limit_state`]. Runs after the bearer-auth middleware so
-/// the [`WebUiAuthenticatedCaller`] extension is available. Returns 429
-/// when the caller has exhausted the route's window; otherwise passes
-/// through.
+/// [`build_rate_limit_state`]. Authenticated routes run this after the
+/// bearer-auth middleware so the [`WebUiAuthenticatedCaller`] extension
+/// is available; public callback routes use route/global buckets that do
+/// not require a caller extension. Returns 429 when the bucket has
+/// exhausted the route's window; otherwise passes through.
 pub(crate) async fn enforce_rate_limit(
     State(state): State<RateLimitState>,
     request: Request,
@@ -255,22 +334,13 @@ pub(crate) async fn enforce_rate_limit(
         ResolvedPolicy::Limited {
             max_requests,
             window,
+            ..
         } => (max_requests, window),
     };
 
-    let caller = match request.extensions().get::<WebUiAuthenticatedCaller>() {
-        Some(caller) => caller,
-        None => {
-            // No authenticated caller in extensions means the auth
-            // middleware did not run (composition bug). Fail closed
-            // with a 500 — under no circumstances should we silently
-            // skip enforcement when the gate above us is missing.
-            tracing::debug!(
-                target = "ironclaw::reborn::webui_rate_limit",
-                route_id = %route.route_id,
-                "rate-limit middleware reached without an authenticated caller — \
-                 auth middleware must run first",
-            );
+    let key = match request_counter_key(route_idx, route, &request) {
+        Ok(key) => key,
+        Err(CounterKeyError::Misconfigured) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Rate-limit middleware misconfigured",
@@ -279,15 +349,10 @@ pub(crate) async fn enforce_rate_limit(
         }
     };
 
-    let key = CounterKey {
-        route_idx,
-        caller_key: caller_key(caller),
-    };
-
     let now = now_epoch_secs();
     let window_seconds = window.as_secs().max(1);
 
-    let shard = &state.shards[shard_index(&key.caller_key)];
+    let shard = &state.shards[shard_index(&key.bucket_key)];
     let allowed = {
         let mut guard = match shard.lock() {
             Ok(guard) => guard,
@@ -350,6 +415,7 @@ mod tests {
             method: Method::POST,
             segments: parse_pattern("/api/test"),
             policy: ResolvedPolicy::Limited {
+                scope: RateLimitScope::PerCaller,
                 max_requests: max,
                 window: Duration::from_secs(u64::from(window_secs)),
             },
@@ -363,12 +429,25 @@ mod tests {
         }
     }
 
+    fn limited_route_with_scope(scope: RateLimitScope) -> RouteLimit {
+        RouteLimit {
+            route_id: "test.route".into(),
+            method: Method::GET,
+            segments: parse_pattern("/api/test"),
+            policy: ResolvedPolicy::Limited {
+                scope,
+                max_requests: 2,
+                window: Duration::from_secs(60),
+            },
+        }
+    }
+
     fn consume(state: &RateLimitState, caller: &WebUiAuthenticatedCaller) -> bool {
         let key = CounterKey {
             route_idx: 0,
-            caller_key: caller_key(caller),
+            bucket_key: caller_key(caller),
         };
-        let mut guard = state.shards[shard_index(&key.caller_key)]
+        let mut guard = state.shards[shard_index(&key.bucket_key)]
             .lock()
             .expect("lock");
         let route = &state.routes[0];
@@ -376,6 +455,7 @@ mod tests {
             ResolvedPolicy::Limited {
                 max_requests,
                 window,
+                ..
             } => (max_requests, window),
             ResolvedPolicy::Disabled => return true,
         };
@@ -438,10 +518,10 @@ mod tests {
     fn unsupported_scope_is_rejected_at_composition() {
         // Regression guard for the fail-closed branch in
         // `resolve_policy`: a descriptor whose rate-limit scope is not
-        // `PerCaller` must abort composition rather than silently
-        // degrade to no enforcement. Without this test, a future v2
-        // descriptor flipping `send_message` to e.g. `PerTenant` would
-        // skip the limiter entirely.
+        // implemented by this gateway must abort composition rather
+        // than silently degrade to no enforcement. Without this test, a
+        // future v2 descriptor flipping `send_message` to e.g.
+        // `PerTenant` would skip the limiter entirely.
         use ironclaw_host_api::NetworkMethod;
         use ironclaw_host_api::ingress::{
             AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthPolicy,
@@ -488,5 +568,38 @@ mod tests {
                 assert!(matches!(scope, RateLimitScope::PerTenant));
             }
         }
+    }
+
+    #[test]
+    fn per_ip_uses_host_peer_address_not_forwarded_headers() {
+        let route = limited_route_with_scope(RateLimitScope::PerIp);
+        let mut request = Request::builder()
+            .method(Method::GET)
+            .uri("/api/test")
+            .header("x-forwarded-for", "198.51.100.10")
+            .header("x-real-ip", "198.51.100.11")
+            .body(axum::body::Body::empty())
+            .expect("request");
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([203, 0, 113, 10], 443))));
+
+        let key = request_counter_key(0, &route, &request).expect("counter key");
+        assert_eq!(key.bucket_key, "peer_ip\x1f203.0.113.10");
+    }
+
+    #[test]
+    fn per_ip_without_host_peer_address_fails_closed() {
+        let route = limited_route_with_scope(RateLimitScope::PerIp);
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/api/test")
+            .body(axum::body::Body::empty())
+            .expect("request");
+
+        assert!(matches!(
+            request_counter_key(0, &route, &request),
+            Err(CounterKeyError::Misconfigured)
+        ));
     }
 }

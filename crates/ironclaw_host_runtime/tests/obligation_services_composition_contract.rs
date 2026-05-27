@@ -248,6 +248,7 @@ impl CapabilityDispatcher for ObligationAwareDispatcher {
                     required: true,
                 }],
                 response_body_limit: None,
+                save_body_to: None,
                 timeout_ms: None,
             })
             .map_err(|_| DispatchError::Wasm {

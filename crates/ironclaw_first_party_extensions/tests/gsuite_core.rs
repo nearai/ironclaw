@@ -15,9 +15,9 @@ use ironclaw_first_party_extensions::{
     CALENDAR_UPDATE_EVENT_CAPABILITY_ID, GMAIL_CREATE_DRAFT_CAPABILITY_ID,
     GMAIL_GET_MESSAGE_CAPABILITY_ID, GMAIL_LIST_MESSAGES_CAPABILITY_ID,
     GMAIL_REPLY_TO_MESSAGE_CAPABILITY_ID, GMAIL_SEND_MESSAGE_CAPABILITY_ID,
-    GMAIL_TRASH_MESSAGE_CAPABILITY_ID, GSUITE_OUTPUT_BYTES_LIMIT, GSUITE_RESPONSE_BODY_LIMIT,
-    GsuiteDispatchRequest, GsuiteExecutor, google_provider_id, gsuite_package_specs,
-    gsuite_resource_profile,
+    GMAIL_TRASH_MESSAGE_CAPABILITY_ID, GSUITE_OUTPUT_BYTES_LIMIT, GSUITE_REQUEST_BODY_LIMIT,
+    GSUITE_RESPONSE_BODY_LIMIT, GsuiteDispatchRequest, GsuiteExecutor, google_provider_id,
+    gsuite_package_specs, gsuite_resource_profile,
 };
 use ironclaw_host_api::{
     NetworkMethod, NetworkScheme, RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED,
@@ -83,10 +83,75 @@ async fn calendar_handler_integration_tests() {
     assert!(requests[0].url.contains("/calendars/primary/events"));
     assert_eq!(requests[1].method, NetworkMethod::Post);
     assert!(requests[1].url.contains("/calendars/primary/events"));
+    assert!(!requests[1].url.contains("timeMin"));
+    assert!(!requests[1].url.contains("pageToken"));
+    assert!(!requests[1].url.contains("maxResults"));
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&requests[1].body).unwrap()["summary"],
         "Review"
     );
+}
+
+#[tokio::test]
+async fn calendar_create_event_does_not_forward_list_query_fields() {
+    let scope = scope();
+    let auth = auth_with_google_account(
+        &scope,
+        vec![provider_scope(ironclaw_auth::GOOGLE_CALENDAR_EVENTS_SCOPE)],
+    )
+    .await;
+    let egress = Arc::new(RecordingEgress::permissive_success());
+
+    dispatch_ok(
+        auth,
+        scope,
+        CALENDAR_CREATE_EVENT_CAPABILITY_ID,
+        json!({
+            "calendar_id": "primary",
+            "time_min": "2026-05-21T00:00:00Z",
+            "time_max": "2026-05-22T00:00:00Z",
+            "page_token": "next",
+            "max_results": 2500,
+            "event": { "summary": "Review" }
+        }),
+        egress.clone(),
+    )
+    .await;
+
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].url,
+        "https://www.googleapis.com/calendar/v3/calendars/primary/events"
+    );
+}
+
+#[tokio::test]
+async fn gsuite_handler_rejects_oversized_request_body_before_egress() {
+    let scope = scope();
+    let auth = auth_with_google_account(
+        &scope,
+        vec![provider_scope(ironclaw_auth::GOOGLE_CALENDAR_EVENTS_SCOPE)],
+    )
+    .await;
+    let egress = Arc::new(RecordingEgress::permissive_success());
+
+    let error = dispatch_error(
+        auth,
+        scope,
+        CALENDAR_CREATE_EVENT_CAPABILITY_ID,
+        json!({
+            "event": {
+                "summary": "Review",
+                "description": "x".repeat(GSUITE_REQUEST_BODY_LIMIT + 1)
+            }
+        }),
+        egress.clone(),
+    )
+    .await;
+
+    assert_eq!(error.kind(), RuntimeDispatchErrorKind::InputEncode);
+    assert!(egress.requests().is_empty());
 }
 
 #[tokio::test]

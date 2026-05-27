@@ -384,11 +384,8 @@ pub struct CredentialSession {
 /// stores already use the equivalent `pub(crate)` pattern inline; the
 /// filesystem backend lives in a sibling module and uses this explicit helper
 /// to avoid duplicating that constructor for every backend.
+// arch-exempt: too_many_args, needs CredentialSession reconstruction context, plan #4088
 #[allow(clippy::too_many_arguments)]
-// arch-exempt: too_many_args, all fields are required to reconstruct a
-// CredentialSession; the alternative is to add another helper struct that
-// duplicates the existing struct shape, which is exactly the kind of
-// parallel surface the architecture rule warns against.
 pub(crate) fn __internal_session_for_filesystem_store(
     scope: ResourceScope,
     invocation_id: InvocationId,

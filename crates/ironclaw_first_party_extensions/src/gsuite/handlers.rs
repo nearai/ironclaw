@@ -1,4 +1,9 @@
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap,
+    io::{self, Write},
+    sync::Arc,
+    time::Instant,
+};
 
 use ironclaw_auth::{CredentialAccountService, ProviderScope};
 use ironclaw_host_api::{
@@ -12,8 +17,8 @@ use serde_json::{Value, json};
 use crate::gsuite::{
     credential::{GoogleCredentialError, GoogleCredentialResolver},
     manifest::{
-        GSUITE_RESPONSE_BODY_LIMIT, GSUITE_TIMEOUT_MS, GsuiteCapabilityOperation,
-        GsuiteCapabilitySpec, find_gsuite_capability,
+        GSUITE_REQUEST_BODY_LIMIT, GSUITE_RESPONSE_BODY_LIMIT, GSUITE_TIMEOUT_MS,
+        GsuiteCapabilityOperation, GsuiteCapabilitySpec, find_gsuite_capability,
     },
     network::google_api_network_policy,
 };
@@ -410,7 +415,15 @@ fn calendar_find_free_slots_request(
 fn calendar_create_event_request(
     input: &Value,
 ) -> Result<(NetworkMethod, String, Vec<u8>), GsuiteDispatchError> {
-    let query = CalendarEventsQuery::parse(input)?;
+    let query = CalendarEventsQuery {
+        calendar_id: optional_str(input, "calendar_id")?
+            .unwrap_or("primary")
+            .to_string(),
+        time_min: None,
+        time_max: None,
+        page_token: None,
+        max_results: None,
+    };
     Ok((
         NetworkMethod::Post,
         calendar_events_url(&query, None),
@@ -542,6 +555,7 @@ fn runtime_request(
             required: true,
         }],
         response_body_limit: Some(GSUITE_RESPONSE_BODY_LIMIT),
+        save_body_to: None,
         timeout_ms: Some(GSUITE_TIMEOUT_MS),
     }
 }
@@ -685,7 +699,44 @@ fn required_array<'a>(input: &'a Value, key: &str) -> Result<&'a Value, GsuiteDi
 }
 
 fn json_body(value: &Value) -> Result<Vec<u8>, GsuiteDispatchError> {
-    serde_json::to_vec(value).map_err(|_| input_error())
+    let mut writer = BoundedJsonBody::new(GSUITE_REQUEST_BODY_LIMIT);
+    serde_json::to_writer(&mut writer, value).map_err(|_| input_error())?;
+    Ok(writer.into_inner())
+}
+
+struct BoundedJsonBody {
+    bytes: Vec<u8>,
+    limit: usize,
+}
+
+impl BoundedJsonBody {
+    fn new(limit: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            limit,
+        }
+    }
+
+    fn into_inner(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+impl Write for BoundedJsonBody {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.bytes.len().saturating_add(buf.len()) > self.limit {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "JSON request body exceeds GSuite request body limit",
+            ));
+        }
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 fn merge_attendees(mut existing: Vec<Value>, additions: Vec<Value>) -> Vec<Value> {
@@ -755,7 +806,7 @@ fn encode_percent(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::HostApiError;
+    use ironclaw_host_api::{HostApiError, RuntimeHttpEgressResponse};
 
     use super::*;
 
@@ -922,5 +973,56 @@ mod tests {
         assert!(gmail_messages.contains("q=is%3Aunread%20from%3Aada"));
         assert!(gmail_messages.contains("labelIds=INBOX"));
         assert!(gmail_messages.contains("labelIds=Team%20Label"));
+    }
+
+    #[test]
+    fn merge_attendees_deduplicates_email_case_insensitively() {
+        let merged = merge_attendees(
+            vec![
+                serde_json::json!({"email": "Alice@Example.com", "name": "old"}),
+                serde_json::json!({"email": "bob@example.com"}),
+            ],
+            vec![
+                serde_json::json!({"email": "alice@example.com", "name": "new"}),
+                serde_json::json!({"email": "carol@example.com"}),
+            ],
+        );
+
+        assert_eq!(merged.len(), 3);
+        assert_eq!(merged[0]["name"], "new");
+        assert_eq!(merged[2]["email"], "carol@example.com");
+    }
+
+    #[test]
+    fn response_etag_reads_case_insensitive_header_body_fallback_and_absent_case() {
+        let response = RuntimeHttpEgressResponse {
+            status: 200,
+            headers: vec![("ETag".to_string(), "header-etag".to_string())],
+            body: Vec::new(),
+            saved_body: None,
+            request_bytes: 0,
+            response_bytes: 0,
+            redaction_applied: false,
+        };
+        assert_eq!(
+            response_etag(&response, &serde_json::json!({"etag": "body-etag"})),
+            Some("header-etag".to_string())
+        );
+
+        let response_without_header = RuntimeHttpEgressResponse {
+            headers: Vec::new(),
+            ..response
+        };
+        assert_eq!(
+            response_etag(
+                &response_without_header,
+                &serde_json::json!({"etag": "body-etag"})
+            ),
+            Some("body-etag".to_string())
+        );
+        assert_eq!(
+            response_etag(&response_without_header, &serde_json::json!({})),
+            None
+        );
     }
 }

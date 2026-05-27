@@ -5,6 +5,14 @@ mod tests {
     use super::super::*;
 
     use ironclaw_host_api::{AgentId, MountPermissions, ProjectId, TenantId, ThreadId};
+    use ironclaw_host_runtime::SPAWN_SUBAGENT_CAPABILITY_ID;
+    use ironclaw_product_workflow::{
+        LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext,
+        LifecycleProductFacade, LifecycleProductSurfaceContext,
+    };
+    use ironclaw_threads::{
+        EnsureThreadRequest, InMemorySessionThreadService, MessageKind, ThreadHistoryRequest,
+    };
     use ironclaw_turns::{
         RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
         run_profile::{
@@ -43,6 +51,178 @@ mod tests {
             reasoning: None,
             signature: None,
         }
+    }
+
+    fn lifecycle_context(label: &str) -> LifecycleProductContext {
+        LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
+            tenant_id: TenantId::new(format!("tenant-{label}")).expect("tenant id"),
+            user_id: UserId::new(format!("user-{label}")).expect("user id"),
+            agent_id: None,
+            project_id: None,
+        })
+    }
+
+    #[derive(Debug, Default)]
+    struct UnavailableModelGateway;
+
+    #[async_trait::async_trait]
+    impl HostManagedModelGateway for UnavailableModelGateway {
+        async fn stream_model(
+            &self,
+            _request: HostManagedModelRequest,
+        ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+            Err(HostManagedModelError::safe(
+                HostManagedModelErrorKind::Unavailable,
+                "test gateway is not wired",
+            ))
+        }
+    }
+
+    async fn assert_github_capabilities_visible(
+        wiring: &LocalDevCapabilityWiring,
+        run_context: &LoopRunContext,
+    ) {
+        let port = wiring
+            .capability_factory
+            .create_capability_port(run_context)
+            .await
+            .expect("capability port");
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible surface");
+        let capability_ids = surface
+            .descriptors
+            .iter()
+            .map(|descriptor| descriptor.capability_id.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(capability_ids.contains(&"github.search_issues"));
+        assert!(capability_ids.contains(&"github.get_issue"));
+        assert!(capability_ids.contains(&"github.comment_issue"));
+        assert!(!capability_ids.contains(&SPAWN_SUBAGENT_CAPABILITY_ID));
+    }
+
+    #[tokio::test]
+    async fn capability_io_writes_durable_preview_message_and_live_upsert_id() {
+        let run_context = run_context("durable-preview").await;
+        let thread_scope = ThreadScope {
+            tenant_id: run_context.scope.tenant_id.clone(),
+            agent_id: run_context.scope.agent_id.clone().expect("agent id"),
+            project_id: run_context.scope.project_id.clone(),
+            owner_user_id: None,
+            mission_id: None,
+        };
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        thread_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: thread_scope.clone(),
+                thread_id: Some(run_context.thread_id.clone()),
+                created_by_actor_id: "actor-a".to_string(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .expect("thread exists");
+        let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
+        let capability_io = LocalDevCapabilityIo::new_with_durable_previews(
+            Arc::clone(&display_previews),
+            thread_service.clone(),
+            thread_scope.clone(),
+        );
+        let input_ref = capability_io
+            .register_provider_tool_call_input(
+                &run_context,
+                &provider_tool_call(serde_json::json!({"message": "hello"})),
+            )
+            .await
+            .expect("input stages");
+        let invocation_id = InvocationId::new();
+
+        let result_ref = capability_io
+            .write_capability_result(
+                &run_context,
+                &input_ref,
+                invocation_id,
+                &CapabilityId::new("builtin.echo").expect("capability id"),
+                serde_json::json!({"content": "hello"}),
+            )
+            .await
+            .expect("result stages");
+
+        let history = thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: thread_scope,
+                thread_id: run_context.thread_id.clone(),
+            })
+            .await
+            .expect("history loads");
+        let preview_message = history
+            .messages
+            .iter()
+            .find(|message| message.kind == MessageKind::CapabilityDisplayPreview)
+            .expect("durable preview message");
+        let run_id = run_context.run_id.to_string();
+        assert_eq!(
+            preview_message.turn_run_id.as_deref(),
+            Some(run_id.as_str())
+        );
+        assert_eq!(
+            preview_message.tool_result_ref.as_deref(),
+            Some(result_ref.as_str())
+        );
+        assert!(preview_message.tool_result_provider_call.is_none());
+        let preview_record = display_previews
+            .record_for_invocation(invocation_id)
+            .expect("live preview record");
+        assert_eq!(
+            preview_record.timeline_message_id,
+            Some(preview_message.message_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn capability_io_fails_result_when_durable_preview_append_fails() {
+        let run_context = run_context("durable-preview-failure").await;
+        let thread_scope = ThreadScope {
+            tenant_id: run_context.scope.tenant_id.clone(),
+            agent_id: run_context.scope.agent_id.clone().expect("agent id"),
+            project_id: run_context.scope.project_id.clone(),
+            owner_user_id: None,
+            mission_id: None,
+        };
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
+        let capability_io = LocalDevCapabilityIo::new_with_durable_previews(
+            Arc::clone(&display_previews),
+            thread_service,
+            thread_scope,
+        );
+        let input_ref = capability_io
+            .register_provider_tool_call_input(
+                &run_context,
+                &provider_tool_call(serde_json::json!({"message": "hello"})),
+            )
+            .await
+            .expect("input stages");
+        let invocation_id = InvocationId::new();
+
+        let error = capability_io
+            .write_capability_result(
+                &run_context,
+                &input_ref,
+                invocation_id,
+                &CapabilityId::new("builtin.echo").expect("capability id"),
+                serde_json::json!({"content": "hello"}),
+            )
+            .await
+            .expect_err("missing thread rejects durable preview append");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::Internal);
+        let preview_record = display_previews
+            .record_for_invocation(invocation_id)
+            .expect("live preview record was staged before durable append");
+        assert!(preview_record.timeline_message_id.is_none());
     }
 
     #[tokio::test]
@@ -217,6 +397,31 @@ mod tests {
             local_dev_shell_network_policy()
         );
 
+        let extension_search_grant = grant_for(EXTENSION_SEARCH_CAPABILITY_ID);
+        assert_eq!(
+            extension_search_grant.constraints.allowed_effects,
+            vec![EffectKind::DispatchCapability, EffectKind::ReadFilesystem]
+        );
+        assert!(extension_search_grant.constraints.mounts.mounts.is_empty());
+        assert_eq!(
+            extension_search_grant.constraints.network,
+            NetworkPolicy::default()
+        );
+
+        for capability_id in [
+            EXTENSION_INSTALL_CAPABILITY_ID,
+            EXTENSION_ACTIVATE_CAPABILITY_ID,
+            EXTENSION_REMOVE_CAPABILITY_ID,
+        ] {
+            let grant = grant_for(capability_id);
+            assert_eq!(
+                grant.constraints.allowed_effects,
+                local_dev_allowed_effects()
+            );
+            assert!(grant.constraints.mounts.mounts.is_empty());
+            assert_eq!(grant.constraints.network, NetworkPolicy::default());
+        }
+
         let read_file_grant = grant_for(READ_FILE_CAPABILITY_ID);
         assert_eq!(
             read_file_grant.constraints.allowed_effects,
@@ -229,10 +434,14 @@ mod tests {
         );
 
         let skill_install_grant = grant_for(SKILL_INSTALL_CAPABILITY_ID);
+        assert_eq!(
+            skill_install_grant.constraints.allowed_effects,
+            local_dev_skill_install_allowed_effects()
+        );
         assert_eq!(skill_install_grant.constraints.mounts, skill_mounts);
         assert_eq!(
             skill_install_grant.constraints.network,
-            NetworkPolicy::default()
+            local_dev_shell_network_policy()
         );
     }
 
@@ -243,6 +452,11 @@ mod tests {
         let host_home = dir.path().join("home");
         std::fs::create_dir_all(&host_home).expect("host home"); // safety: test-only setup in #[cfg(test)] module.
         std::fs::write(host_home.join("safe.txt"), "safe host file\n").expect("host file"); // safety: test-only setup in #[cfg(test)] module.
+        let raw_host_home = host_home
+            .canonicalize()
+            .expect("canonical host home")
+            .to_string_lossy()
+            .into_owned();
 
         let services = crate::build_reborn_services(
             crate::RebornBuildInput::local_dev_with_profile(
@@ -253,7 +467,7 @@ mod tests {
             .with_runtime_policy(
                 crate::local_dev_yolo_runtime_policy(true).expect("local-yolo policy resolves"), // safety: test-only helper in #[cfg(test)] module.
             )
-            .with_local_dev_confirmed_host_home_root(host_home),
+            .with_local_dev_confirmed_host_home_root(host_home.clone()),
         )
         .await
         .expect("local-dev-yolo services build"); // safety: test-only assertion in #[cfg(test)] module.
@@ -271,6 +485,7 @@ mod tests {
             runtime,
             UserId::new("local-yolo-host-user").expect("user id"), // safety: literal test id is valid.
             workspace_mounts,
+            LocalDevExtensionSurfaceSource::default(),
             input_resolver,
             result_writer,
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
@@ -284,6 +499,101 @@ mod tests {
             .visible_capabilities(VisibleCapabilityRequest {})
             .await
             .expect("visible surface"); // safety: test-only assertion in #[cfg(test)] module.
+        for capability_id in [
+            READ_FILE_CAPABILITY_ID,
+            WRITE_FILE_CAPABILITY_ID,
+            LIST_DIR_CAPABILITY_ID,
+            GLOB_CAPABILITY_ID,
+            GREP_CAPABILITY_ID,
+            APPLY_PATCH_CAPABILITY_ID,
+        ] {
+            let descriptor = surface
+                .descriptors
+                .iter()
+                .find(|descriptor| descriptor.capability_id.as_str() == capability_id)
+                .unwrap_or_else(|| panic!("{capability_id} descriptor visible"));
+            assert!(
+                descriptor.safe_description.contains("/host"),
+                "{capability_id} description should disclose confirmed host mount: {}",
+                descriptor.safe_description
+            );
+            assert!(
+                !descriptor.safe_description.contains(&raw_host_home),
+                "model-visible description must not disclose raw host home path"
+            );
+            let path_description =
+                descriptor.parameters_schema["properties"]["path"]["description"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{capability_id} path description"));
+            assert!(
+                path_description.contains("/host"),
+                "{capability_id} path schema should disclose confirmed host mount: {path_description}"
+            );
+            assert!(
+                !path_description.contains(&raw_host_home),
+                "model-visible schema must not disclose raw host home path"
+            );
+        }
+        let shell_descriptor = surface
+            .descriptors
+            .iter()
+            .find(|descriptor| descriptor.capability_id.as_str() == SHELL_CAPABILITY_ID)
+            .expect("shell descriptor visible");
+        assert!(
+            !shell_descriptor.safe_description.contains("/host"),
+            "shell does not receive scoped filesystem disclosure"
+        );
+        assert!(
+            shell_descriptor.safe_description.contains("local host")
+                && shell_descriptor
+                    .safe_description
+                    .contains("shell process and network access"),
+            "shell should disclose local-dev host shell authority: {}",
+            shell_descriptor.safe_description
+        );
+        let tool_definitions = port.tool_definitions().expect("tool definitions");
+        for capability_id in [
+            READ_FILE_CAPABILITY_ID,
+            WRITE_FILE_CAPABILITY_ID,
+            LIST_DIR_CAPABILITY_ID,
+            GLOB_CAPABILITY_ID,
+            GREP_CAPABILITY_ID,
+            APPLY_PATCH_CAPABILITY_ID,
+        ] {
+            let tool = tool_definitions
+                .iter()
+                .find(|definition| definition.capability_id.as_str() == capability_id)
+                .unwrap_or_else(|| panic!("{capability_id} tool definition visible"));
+            assert!(
+                tool.description.contains("/host"),
+                "{capability_id} provider tool description should disclose confirmed host mount: {}",
+                tool.description
+            );
+            let tool_path_description = tool.parameters["properties"]["path"]["description"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{capability_id} tool path description"));
+            assert!(
+                tool_path_description.contains("/host"),
+                "{capability_id} provider tool path schema should disclose confirmed host mount: {tool_path_description}"
+            );
+            assert!(
+                !tool.description.contains(&raw_host_home)
+                    && !tool_path_description.contains(&raw_host_home),
+                "provider-visible tool surface must not disclose raw host home path"
+            );
+        }
+        let shell_tool = tool_definitions
+            .iter()
+            .find(|definition| definition.capability_id.as_str() == SHELL_CAPABILITY_ID)
+            .expect("shell tool definition visible");
+        assert!(
+            shell_tool.description.contains("local host")
+                && shell_tool
+                    .description
+                    .contains("shell process and network access"),
+            "provider tool shell description should disclose local-dev host shell authority: {}",
+            shell_tool.description
+        );
         let input_ref = capability_io
             .register_provider_tool_call_input(
                 &run_context,
@@ -312,6 +622,228 @@ mod tests {
             output["content"],
             serde_json::json!("     1│ safe host file")
         );
+    }
+
+    #[tokio::test]
+    async fn local_dev_capability_port_omits_host_disclosure_without_confirmed_host_mount() {
+        let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only setup in #[cfg(test)] module.
+        let storage_root = dir.path().join("local-dev");
+        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+            "local-dev-no-host-owner",
+            storage_root,
+        ))
+        .await
+        .expect("local-dev services build"); // safety: test-only assertion in #[cfg(test)] module.
+        let runtime = services.host_runtime.clone().expect("host runtime"); // safety: test-only assertion in #[cfg(test)] module.
+        let workspace_mounts = services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime substrate") // safety: test-only assertion in #[cfg(test)] module.
+            .workspace_mounts
+            .clone();
+        let capability_io = Arc::new(LocalDevCapabilityIo::default());
+        let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
+        let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
+        let factory = LocalDevLoopCapabilityPortFactory::new(
+            runtime,
+            UserId::new("local-dev-no-host-user").expect("user id"), // safety: literal test id is valid.
+            workspace_mounts,
+            LocalDevExtensionSurfaceSource::default(),
+            input_resolver,
+            result_writer,
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        );
+        let run_context = run_context("no-host-disclosure").await;
+        let port = factory
+            .create_capability_port(&run_context)
+            .await
+            .expect("capability port"); // safety: test-only assertion in #[cfg(test)] module.
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible surface"); // safety: test-only assertion in #[cfg(test)] module.
+        let read_descriptor = surface
+            .descriptors
+            .iter()
+            .find(|descriptor| descriptor.capability_id.as_str() == READ_FILE_CAPABILITY_ID)
+            .expect("read_file descriptor visible");
+        assert!(
+            !read_descriptor.safe_description.contains("/host")
+                && !read_descriptor
+                    .safe_description
+                    .contains("Available scoped roots"),
+            "normal local-dev read_file description must not disclose host roots: {}",
+            read_descriptor.safe_description
+        );
+        let shell_descriptor = surface
+            .descriptors
+            .iter()
+            .find(|descriptor| descriptor.capability_id.as_str() == SHELL_CAPABILITY_ID)
+            .expect("shell descriptor visible");
+        assert!(
+            !shell_descriptor
+                .safe_description
+                .contains("shell process and network access"),
+            "normal local-dev shell description should not receive yolo disclosure: {}",
+            shell_descriptor.safe_description
+        );
+        let tool_definitions = port.tool_definitions().expect("tool definitions");
+        let read_file_tool = tool_definitions
+            .iter()
+            .find(|definition| definition.capability_id.as_str() == READ_FILE_CAPABILITY_ID)
+            .expect("read_file tool definition visible");
+        assert!(
+            !read_file_tool.description.contains("/host")
+                && !read_file_tool
+                    .description
+                    .contains("Available scoped roots"),
+            "normal local-dev provider tool description must not disclose host roots: {}",
+            read_file_tool.description
+        );
+        let shell_tool = tool_definitions
+            .iter()
+            .find(|definition| definition.capability_id.as_str() == SHELL_CAPABILITY_ID)
+            .expect("shell tool definition visible");
+        assert!(
+            !shell_tool
+                .description
+                .contains("shell process and network access"),
+            "normal local-dev shell provider tool should not receive yolo disclosure: {}",
+            shell_tool.description
+        );
+    }
+
+    #[tokio::test]
+    async fn local_dev_capability_port_restores_activated_github_extension_surface() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        let owner_id = "local-dev-github-surface-owner";
+        {
+            let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+                owner_id,
+                storage_root.clone(),
+            ))
+            .await
+            .expect("local-dev services build");
+            let local_runtime = services
+                .local_runtime
+                .as_ref()
+                .expect("local runtime substrate");
+            let extension_management = local_runtime
+                .extension_management
+                .as_ref()
+                .expect("extension management")
+                .clone();
+            let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
+                local_runtime.skill_management.clone(),
+            )
+            .with_extension_management(extension_management);
+            let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
+                .expect("valid github ref");
+            facade
+                .execute(
+                    lifecycle_context("github-install"),
+                    LifecycleProductAction::ExtensionInstall {
+                        package_ref: package_ref.clone(),
+                    },
+                )
+                .await
+                .expect("install github extension");
+            facade
+                .execute(
+                    lifecycle_context("github-activate"),
+                    LifecycleProductAction::ExtensionActivate { package_ref },
+                )
+                .await
+                .expect("activate github extension");
+        }
+
+        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+            owner_id,
+            storage_root,
+        ))
+        .await
+        .expect("local-dev services rebuild");
+        let run_context = run_context("github-surface").await;
+        let thread_scope = ThreadScope {
+            tenant_id: run_context.scope.tenant_id.clone(),
+            agent_id: run_context.scope.agent_id.clone().expect("agent id"),
+            project_id: run_context.scope.project_id.clone(),
+            owner_user_id: None,
+            mission_id: None,
+        };
+        let wiring = capability_wiring(
+            &services,
+            Arc::new(InMemorySessionThreadService::default()),
+            thread_scope,
+            UserId::new("local-dev-github-user").expect("user id"),
+            Arc::new(UnavailableModelGateway),
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        )
+        .expect("local-dev capability wiring");
+        assert_github_capabilities_visible(&wiring, &run_context).await;
+    }
+
+    #[tokio::test]
+    async fn local_dev_capability_port_snapshots_extensions_when_port_is_created() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+            "local-dev-live-github-surface-owner",
+            storage_root,
+        ))
+        .await
+        .expect("local-dev services build");
+        let run_context = run_context("github-live-surface").await;
+        let thread_scope = ThreadScope {
+            tenant_id: run_context.scope.tenant_id.clone(),
+            agent_id: run_context.scope.agent_id.clone().expect("agent id"),
+            project_id: run_context.scope.project_id.clone(),
+            owner_user_id: None,
+            mission_id: None,
+        };
+        let wiring = capability_wiring(
+            &services,
+            Arc::new(InMemorySessionThreadService::default()),
+            thread_scope,
+            UserId::new("local-dev-live-github-user").expect("user id"),
+            Arc::new(UnavailableModelGateway),
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        )
+        .expect("local-dev capability wiring");
+        let local_runtime = services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime substrate");
+        let extension_management = local_runtime
+            .extension_management
+            .as_ref()
+            .expect("extension management")
+            .clone();
+        let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
+            local_runtime.skill_management.clone(),
+        )
+        .with_extension_management(extension_management);
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
+            .expect("valid github ref");
+        facade
+            .execute(
+                lifecycle_context("github-live-install"),
+                LifecycleProductAction::ExtensionInstall {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("install github extension");
+        facade
+            .execute(
+                lifecycle_context("github-live-activate"),
+                LifecycleProductAction::ExtensionActivate { package_ref },
+            )
+            .await
+            .expect("activate github extension");
+
+        assert_github_capabilities_visible(&wiring, &run_context).await;
     }
 
     #[test]
