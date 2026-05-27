@@ -294,8 +294,8 @@ fn callback_policy() -> IngressPolicy {
 struct OAuthStartRequest {
     provider: String,
     authorization_url: String,
-    opaque_state: String,
-    pkce_verifier: String,
+    opaque_state: UnvalidatedRawCallbackValue,
+    pkce_verifier: UnvalidatedRawSecretValue,
     expires_at: Timestamp,
     #[serde(default)]
     session_id: Option<String>,
@@ -442,9 +442,13 @@ async fn oauth_start_handler(
         ProductAuthRouteFailure::new(StatusCode::BAD_REQUEST, AuthErrorCode::InvalidRequest)
     })?;
     let authorization_endpoint = authorization_endpoint_url(&request.authorization_url)?;
-    let opaque_state = RawCallbackValue::new(request.opaque_state)
+    let opaque_state = request
+        .opaque_state
+        .into_validated()
         .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
-    let pkce_verifier_value = RawSecretValue::new(request.pkce_verifier)
+    let pkce_verifier_value = request
+        .pkce_verifier
+        .into_validated()
         .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
     let opaque_state_hash = opaque_state_hash(opaque_state.as_str())?;
     let pkce_verifier_hash = pkce_verifier_hash(pkce_verifier_value.expose_secret())?;
@@ -866,6 +870,43 @@ fn parse_provider_scopes(raw: Option<&str>) -> Result<Vec<ProviderScope>, Produc
                 .map_err(|_| ProductAuthRouteFailure::malformed_callback())
         })
         .collect()
+}
+
+#[derive(Clone)]
+struct UnvalidatedRawCallbackValue(String);
+
+impl UnvalidatedRawCallbackValue {
+    fn into_validated(self) -> Result<RawCallbackValue, &'static str> {
+        RawCallbackValue::new(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for UnvalidatedRawCallbackValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        String::deserialize(deserializer).map(Self)
+    }
+}
+
+#[derive(Clone)]
+struct UnvalidatedRawSecretValue(SecretString);
+
+impl UnvalidatedRawSecretValue {
+    fn into_validated(self) -> Result<RawSecretValue, &'static str> {
+        RawSecretValue::new(self.0.expose_secret().to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for UnvalidatedRawSecretValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(Self(SecretString::from(value)))
+    }
 }
 
 #[derive(Clone)]
