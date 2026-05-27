@@ -449,10 +449,15 @@ impl HostRuntime for DefaultHostRuntime {
                     idempotency_key = idempotency_key.as_deref().unwrap_or(""),
                     "capability resume failed"
                 );
-                Ok(RuntimeCapabilityOutcome::Failed(failure_from(
-                    error,
-                    capability_id,
-                )))
+                match error {
+                    CapabilityInvocationError::AuthorizationRequiresAuth { capability } => {
+                        Ok(auth_required_outcome(capability))
+                    }
+                    other => Ok(RuntimeCapabilityOutcome::Failed(failure_from(
+                        other,
+                        capability_id,
+                    ))),
+                }
             }
         }
     }
@@ -812,12 +817,7 @@ impl DefaultHostRuntime {
                 }
             }
             CapabilityInvocationError::AuthorizationRequiresAuth { capability } => {
-                Ok(RuntimeCapabilityOutcome::AuthRequired(RuntimeAuthGate {
-                    gate_id: RuntimeGateId::new(),
-                    capability_id: capability,
-                    reason: RuntimeBlockedReason::AuthRequired,
-                    required_secrets: Vec::new(),
-                }))
+                Ok(auth_required_outcome(capability))
             }
             other => Ok(RuntimeCapabilityOutcome::Failed(failure_from(
                 other,
@@ -1087,6 +1087,15 @@ fn completed_outcome_from(
         output: result.dispatch.output,
         usage: result.dispatch.usage,
     }
+}
+
+fn auth_required_outcome(capability_id: CapabilityId) -> RuntimeCapabilityOutcome {
+    RuntimeCapabilityOutcome::AuthRequired(RuntimeAuthGate {
+        gate_id: RuntimeGateId::new(),
+        capability_id,
+        reason: RuntimeBlockedReason::AuthRequired,
+        required_secrets: Vec::new(),
+    })
 }
 
 fn failure_from(

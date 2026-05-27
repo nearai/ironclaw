@@ -22,9 +22,9 @@ use crate::obligations::post_dispatch_obligations;
 use crate::{
     CapabilityInvocationError, CapabilityInvocationRequest, CapabilityInvocationResult,
     CapabilityObligationAbortRequest, CapabilityObligationCompletionRequest,
-    CapabilityObligationError, CapabilityObligationHandler, CapabilityObligationOutcome,
-    CapabilityObligationPhase, CapabilityObligationRequest, CapabilityResumeRequest,
-    CapabilitySpawnRequest, CapabilitySpawnResult,
+    CapabilityObligationError, CapabilityObligationFailureKind, CapabilityObligationHandler,
+    CapabilityObligationOutcome, CapabilityObligationPhase, CapabilityObligationRequest,
+    CapabilityResumeRequest, CapabilitySpawnRequest, CapabilitySpawnResult,
 };
 
 pub struct CapabilityHost<'a, D>
@@ -1555,7 +1555,7 @@ where
                 obligations: obligations.as_slice(),
             })
             .await
-            .map_err(|error| obligation_error_to_invocation(capability_id, error))
+            .map_err(|error| prepare_obligation_error_to_invocation(capability_id, error))
     }
 
     async fn complete_dispatch_obligations(
@@ -1590,7 +1590,7 @@ where
                 dispatch,
             })
             .await
-            .map_err(|error| obligation_error_to_invocation(capability_id, error))
+            .map_err(|error| completion_obligation_error_to_invocation(capability_id, error))
     }
 
     async fn abort_obligations(
@@ -1628,7 +1628,7 @@ where
     }
 }
 
-fn obligation_error_to_invocation(
+fn prepare_obligation_error_to_invocation(
     capability_id: &ironclaw_host_api::CapabilityId,
     error: CapabilityObligationError,
 ) -> CapabilityInvocationError {
@@ -1648,6 +1648,19 @@ fn obligation_error_to_invocation(
             capability: capability_id.clone(),
             kind,
         },
+    }
+}
+
+fn completion_obligation_error_to_invocation(
+    capability_id: &ironclaw_host_api::CapabilityId,
+    error: CapabilityObligationError,
+) -> CapabilityInvocationError {
+    match error {
+        CapabilityObligationError::AuthRequired => CapabilityInvocationError::ObligationFailed {
+            capability: capability_id.clone(),
+            kind: CapabilityObligationFailureKind::Secret,
+        },
+        other => prepare_obligation_error_to_invocation(capability_id, other),
     }
 }
 
