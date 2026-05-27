@@ -77,7 +77,6 @@ pub struct RebornOAuthCallbackRequest {
 /// product-auth semantics stay here with the auth service boundary.
 #[allow(dead_code, reason = "used by upcoming Reborn OAuth setup route wiring")]
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code, reason = "used by upcoming Reborn OAuth setup route wiring")]
 pub(crate) struct RebornOAuthStartFlowRequest {
     pub(crate) scope: AuthProductScope,
     pub(crate) provider: AuthProviderId,
