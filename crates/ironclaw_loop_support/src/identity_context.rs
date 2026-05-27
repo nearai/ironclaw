@@ -509,10 +509,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(
-            serde_json::to_vec(&first).unwrap(),
-            serde_json::to_vec(&second).unwrap()
-        );
+        assert_eq!(first, second);
         assert_eq!(source.calls.load(Ordering::SeqCst), 2);
     }
 

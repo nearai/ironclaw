@@ -262,7 +262,7 @@ impl InstructionBundleBuilder {
             if snippet.snippet_ref.starts_with("skill:") {
                 let content_ref = skill_snippet_model_message_ref(
                     &snippet.snippet_ref,
-                    &snippet.model_content,
+                    &snippet.safe_summary,
                     skill_ordinal,
                 )?;
                 let Some(metadata) = snippet.metadata.as_ref() else {
@@ -769,30 +769,28 @@ fn validate_model_safe_text(
     value: String,
     label: &'static str,
 ) -> Result<String, AgentLoopHostError> {
-    if value.is_empty() || value.len() > MODEL_SAFE_SUMMARY_MAX_BYTES {
-        return Err(AgentLoopHostError::new(
-            AgentLoopHostErrorKind::PolicyDenied,
-            format!("{label} is not model-safe"),
-        ));
-    }
-    if value
-        .chars()
-        .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t'))
-    {
-        return Err(AgentLoopHostError::new(
-            AgentLoopHostErrorKind::PolicyDenied,
-            format!("{label} contains control characters"),
-        ));
-    }
-    reject_sensitive_text(&value, label)?;
-    Ok(value)
+    validate_model_text_with_limit(value, label, MODEL_SAFE_SUMMARY_MAX_BYTES, true)
 }
 
 fn validate_model_visible_content(
     value: String,
     label: &'static str,
 ) -> Result<String, AgentLoopHostError> {
-    if value.is_empty() || value.len() > LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES {
+    validate_model_text_with_limit(
+        value,
+        label,
+        LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES,
+        false,
+    )
+}
+
+fn validate_model_text_with_limit(
+    value: String,
+    label: &'static str,
+    max_bytes: usize,
+    reject_sensitive: bool,
+) -> Result<String, AgentLoopHostError> {
+    if value.is_empty() || value.len() > max_bytes {
         return Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::PolicyDenied,
             format!("{label} is not model-safe"),
@@ -806,6 +804,9 @@ fn validate_model_visible_content(
             AgentLoopHostErrorKind::PolicyDenied,
             format!("{label} contains control characters"),
         ));
+    }
+    if reject_sensitive {
+        reject_sensitive_text(&value, label)?;
     }
     Ok(value)
 }

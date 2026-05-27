@@ -36,7 +36,7 @@ use ironclaw_turns::{
     LoopResultRef,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, LoopCapabilityPort,
-        LoopHostMilestoneSink, LoopRunContext, ProviderToolCall,
+        LoopHostMilestoneSink, LoopRunContext, ProviderToolCall, sanitize_model_visible_text,
     },
 };
 
@@ -598,7 +598,7 @@ fn hydrate_tool_result_messages(
 fn model_visible_tool_result_content(
     output: &serde_json::Value,
 ) -> Result<String, HostManagedModelError> {
-    let content = serde_json::to_string_pretty(output).map_err(|error| {
+    let serialized = serde_json::to_string_pretty(output).map_err(|error| {
         ironclaw_loop_support::raw_host_managed_model_error(
             "local_dev_model_replay",
             "encode_tool_result_content",
@@ -607,23 +607,43 @@ fn model_visible_tool_result_content(
             error,
         )
     })?;
+    let content = sanitize_model_visible_tool_result(serialized);
     Ok(truncate_model_visible_tool_result(content))
 }
 
-fn truncate_model_visible_tool_result(content: String) -> String {
+fn sanitize_model_visible_tool_result(content: String) -> String {
+    let content = sanitize_model_visible_text(content);
+    content
+        .chars()
+        .map(|character| {
+            if character.is_control()
+                || matches!(
+                    character,
+                    '{' | '}' | '[' | ']' | '`' | '<' | '>' | '/' | '\\'
+                )
+            {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
+fn truncate_model_visible_tool_result(mut content: String) -> String {
     if content.len() <= LOCAL_DEV_MODEL_VISIBLE_TOOL_RESULT_MAX_BYTES {
         return content;
     }
+    let original_len = content.len();
     let mut cut = LOCAL_DEV_MODEL_VISIBLE_TOOL_RESULT_MAX_BYTES;
     while cut > 0 && !content.is_char_boundary(cut) {
         cut -= 1;
     }
-    format!(
-        "{}\n\n[... truncated: showing {}/{} bytes. Use a follow-up tool call to inspect the full result.]",
-        &content[..cut],
-        cut,
-        content.len()
-    )
+    content.truncate(cut);
+    content.push_str(&format!(
+        "\n\n[... truncated: showing {cut}/{original_len} bytes. Use a follow-up tool call to inspect the full result.]"
+    ));
+    content
 }
 
 fn model_capability_io_error(error: AgentLoopHostError) -> HostManagedModelError {

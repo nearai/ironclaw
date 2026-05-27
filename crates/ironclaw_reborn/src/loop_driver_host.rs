@@ -131,14 +131,14 @@ impl HookPromptMaterializationSink for InstructionStoreBackedHookSink {
         &self,
         role: &str,
         content_ref: &ironclaw_turns::LoopMessageRef,
-        model_content: String,
+        safe_content: String,
     ) -> Result<(), AgentLoopHostError> {
         self.store.put_materialized_messages(
             &self.run_context,
             vec![InstructionBundleMaterializedMessage {
                 role: role.to_string(),
                 content_ref: content_ref.clone(),
-                model_content,
+                model_content: safe_content,
             }],
         )
     }

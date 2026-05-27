@@ -22,20 +22,20 @@ use ironclaw_turns::{
         FinalizeAssistantMessage, HostManagedLoopModelPort, HostManagedLoopPromptPort,
         InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
         InstructionBundleBuilder, InstructionBundleFingerprint, InstructionBundleRequest,
-        InstructionMaterializationStore, InstructionSafetyContext, LoopCancellationPort,
-        LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort,
-        LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextBundle, LoopContextMessage,
-        LoopContextPort, LoopContextRequest, LoopContextSnippet, LoopContextSnippetMetadata,
-        LoopDriverId, LoopDriverNoteKind, LoopGateKind, LoopHostMilestone,
-        LoopHostMilestoneEmitter, LoopHostMilestoneKind, LoopHostMilestoneSink, LoopInputAckToken,
-        LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopInputPort,
-        LoopModelBudgetAccountant, LoopModelCapabilityView, LoopModelGateway,
-        LoopModelGatewayError, LoopModelGatewayRequest, LoopModelMessage, LoopModelPolicyGuard,
-        LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort,
-        LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptBundleRequest,
-        LoopPromptPort, LoopRunContext, LoopRunInfoPort, LoopTranscriptPort, ModelCallOutcome,
-        ParentLoopOutput, PromptMode, PromptSkillContextMetadata, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        InstructionMaterializationStore, InstructionSafetyContext,
+        LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES, LoopCancellationPort, LoopCancellationSignal,
+        LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest,
+        LoopCheckpointStateRef, LoopContextBundle, LoopContextMessage, LoopContextPort,
+        LoopContextRequest, LoopContextSnippet, LoopContextSnippetMetadata, LoopDriverId,
+        LoopDriverNoteKind, LoopGateKind, LoopHostMilestone, LoopHostMilestoneEmitter,
+        LoopHostMilestoneKind, LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch,
+        LoopInputCursor, LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant,
+        LoopModelCapabilityView, LoopModelGateway, LoopModelGatewayError, LoopModelGatewayRequest,
+        LoopModelMessage, LoopModelPolicyGuard, LoopModelPort, LoopModelRequest, LoopModelResponse,
+        LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority,
+        LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
+        LoopRunInfoPort, LoopTranscriptPort, ModelCallOutcome, ParentLoopOutput, PromptMode,
+        PromptSkillContextMetadata, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
     runner::{ClaimRunRequest, TurnRunTransitionPort},
 };
@@ -640,6 +640,70 @@ async fn instruction_bundle_materializes_oversized_snippet_content_separate_from
                 .as_str()
                 .starts_with("msg:snippet.skill.github.")
     }));
+}
+
+#[tokio::test]
+async fn instruction_bundle_rejects_empty_model_content() {
+    let context = claimed_run_context().await;
+    let error = InstructionBundleBuilder::new(context)
+        .build(InstructionBundleRequest {
+            context_bundle: LoopContextBundle {
+                identity_messages: Vec::new(),
+                messages: Vec::new(),
+                instruction_snippets: vec![LoopContextSnippet {
+                    snippet_ref: "skill:empty".to_string(),
+                    model_content: String::new(),
+                    safe_summary: "empty skill".to_string(),
+                    metadata: Some(LoopContextSnippetMetadata {
+                        source_name: "empty".to_string(),
+                        trust_level: "trusted".to_string(),
+                    }),
+                }],
+                memory_snippets: Vec::new(),
+            },
+            visible_surface: None,
+            safety_context: None,
+            inline_messages: Vec::new(),
+        })
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+    assert_eq!(
+        error.safe_summary,
+        "context snippet content is not model-safe"
+    );
+}
+
+#[tokio::test]
+async fn instruction_bundle_rejects_oversized_model_content() {
+    let context = claimed_run_context().await;
+    let error = InstructionBundleBuilder::new(context)
+        .build(InstructionBundleRequest {
+            context_bundle: LoopContextBundle {
+                identity_messages: Vec::new(),
+                messages: Vec::new(),
+                instruction_snippets: vec![LoopContextSnippet {
+                    snippet_ref: "skill:oversized".to_string(),
+                    model_content: "x".repeat(LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES + 1),
+                    safe_summary: "oversized skill".to_string(),
+                    metadata: Some(LoopContextSnippetMetadata {
+                        source_name: "oversized".to_string(),
+                        trust_level: "trusted".to_string(),
+                    }),
+                }],
+                memory_snippets: Vec::new(),
+            },
+            visible_surface: None,
+            safety_context: None,
+            inline_messages: Vec::new(),
+        })
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+    assert_eq!(
+        error.safe_summary,
+        "context snippet content is not model-safe"
+    );
 }
 
 #[tokio::test]

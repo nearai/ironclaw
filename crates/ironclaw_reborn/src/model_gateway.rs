@@ -35,7 +35,7 @@ use ironclaw_turns::{
         PromptMode, ProviderToolCall, ProviderToolDefinition,
     },
 };
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::model_routes::{
     ModelRoute, ModelRouteError, ModelRouteErrorKind, ModelRouteProviderKey, ModelRouteResolver,
@@ -1107,9 +1107,9 @@ fn tool_result_replay_message(
 ) -> Result<ToolResultReplayMessage, HostManagedModelError> {
     let model_content = match message.tool_result_content.as_ref() {
         Some(HostManagedToolResultContent::Reference { envelope }) => {
-            debug!(
+            warn!(
                 result_ref = %envelope.result_ref,
-                "tool result content unavailable; replaying safe summary fallback"
+                "tool result resolved content unavailable; replaying safe summary fallback"
             );
             envelope.safe_summary.as_str().to_string()
         }

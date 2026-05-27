@@ -1344,7 +1344,7 @@ where
         for (ordinal, snippet) in snippets.into_iter().enumerate() {
             let content_ref = skill_context::snippet_model_message_ref(
                 &snippet.snippet_ref,
-                &snippet.model_content,
+                &snippet.safe_summary,
                 ordinal,
             )?;
             messages.insert(
@@ -1404,12 +1404,11 @@ pub struct HostManagedModelMessage {
     pub content_ref: LoopMessageRef,
     #[serde(default, skip_serializing)]
     pub tool_result_provider_call: Option<ProviderToolCallReferenceEnvelope>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip)]
     pub tool_result_content: Option<HostManagedToolResultContent>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostManagedToolResultContent {
     Reference {
         envelope: ToolResultReferenceEnvelope,

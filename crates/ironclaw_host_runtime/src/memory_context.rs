@@ -221,11 +221,11 @@ fn collect_snippets_with_total_budget(
 /// — the snippet is silently dropped rather than failing the entire load.
 fn map_search_result_to_snippet(result: MemorySearchResult) -> Option<LoopContextSnippet> {
     let snippet_ref = snippet_ref_for_path(&result.path);
-    let safe_summary = sanitize_snippet_text(&result.snippet)?;
+    let model_content = sanitize_snippet_text(&result.snippet)?;
     Some(LoopContextSnippet {
         snippet_ref,
-        model_content: safe_summary.clone(),
-        safe_summary,
+        safe_summary: model_content.clone(),
+        model_content,
         metadata: None,
     })
 }

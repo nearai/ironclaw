@@ -130,6 +130,9 @@ impl SkillTrustLevel {
 // ---------------------------------------------------------------------------
 
 const EMPTY_SNAPSHOT_VERSION: &str = "empty";
+// Trusted skill prompts can be materially larger than their safe descriptions.
+// Use the shared loop-context model-content limits here so prompt construction
+// has one bounded policy for host-approved model-visible snippet content.
 const DEFAULT_MAX_SKILL_SNIPPET_BYTES: usize = LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES;
 const DEFAULT_MAX_SKILL_CONTEXT_BYTES: usize = LOOP_CONTEXT_TOTAL_MODEL_CONTENT_MAX_BYTES;
 
@@ -409,12 +412,12 @@ impl SkillContextSource for NoopSkillContextSource {
 /// so source/ordering drift fails closed instead of producing mismatched refs.
 pub fn skill_snippet_model_message_ref(
     snippet_ref: &str,
-    model_content: &str,
+    safe_summary: &str,
     ordinal: usize,
 ) -> Result<LoopMessageRef, AgentLoopHostError> {
     let slug = sanitize_ref_suffix(snippet_ref);
     let ordinal = ordinal.to_string();
-    let hash = stable_skill_snippet_display_hash([snippet_ref, model_content, &ordinal]);
+    let hash = stable_skill_snippet_display_hash([snippet_ref, safe_summary, &ordinal]);
     LoopMessageRef::new(format!("msg:snippet.{slug}.{ordinal}.{hash:016x}")).map_err(|_| {
         AgentLoopHostError::new(
             AgentLoopHostErrorKind::Internal,
