@@ -27,18 +27,21 @@ use ironclaw_turns::{
 use uuid::Uuid;
 
 use crate::{
-    ApprovalInteractionDecision, ApprovalInteractionService, LifecycleProductFacade,
+    ApprovalInteractionDecision, ApprovalInteractionService, AuthInteractionDecision,
+    AuthInteractionService, LifecycleProductFacade, ProductWorkflowError,
     ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
     UnsupportedLifecycleProductFacade, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
     WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundCommand, WebUiInboundValidationCode,
     WebUiInboundValidationError, WebUiListThreadsRequest, WebUiResolveGateRequest,
     WebUiSendMessageRequest, WebUiSetupExtensionRequest,
     approval_interaction::RejectingApprovalInteractionService,
+    auth_interaction::RejectingAuthInteractionService,
     binding_ref::{
         DEFAULT_BINDING_REF_RAW_MAX_BYTES, bounded_reply_target_binding_ref,
         bounded_source_binding_ref,
     },
-    is_approval_gate_ref,
+    is_approval_gate_ref, is_auth_gate_ref,
 };
 
 mod error;
@@ -146,6 +149,7 @@ pub struct RebornServices {
     event_stream: Option<Arc<dyn ProjectionStream>>,
     lifecycle_facade: Arc<dyn LifecycleProductFacade>,
     approval_interactions: Arc<dyn ApprovalInteractionService>,
+    auth_interactions: Arc<dyn AuthInteractionService>,
     skill_activation_recorder: Option<Arc<SkillActivationRecorder>>,
     skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
 }
@@ -163,6 +167,7 @@ impl RebornServices {
                 "reborn_lifecycle_facade_unwired",
             )),
             approval_interactions: Arc::new(RejectingApprovalInteractionService),
+            auth_interactions: Arc::new(RejectingAuthInteractionService),
             skill_activation_recorder: None,
             skill_activation_clearer: None,
         }
@@ -186,6 +191,14 @@ impl RebornServices {
         approval_interactions: Arc<dyn ApprovalInteractionService>,
     ) -> Self {
         self.approval_interactions = approval_interactions;
+        self
+    }
+
+    pub fn with_auth_interactions(
+        mut self,
+        auth_interactions: Arc<dyn AuthInteractionService>,
+    ) -> Self {
+        self.auth_interactions = auth_interactions;
         self
     }
 
@@ -625,6 +638,46 @@ impl RebornServicesApi for RebornServices {
                     Ok(RebornResolveGateResponse::Resumed(response.into()))
                 }
                 ResolveApprovalInteractionResponse::Denied(response) => {
+                    Ok(RebornResolveGateResponse::Cancelled(response.into()))
+                }
+            };
+        }
+        let is_credential_resolution =
+            matches!(&resolution, WebUiGateResolution::CredentialProvided { .. });
+        if is_credential_resolution || is_auth_gate_ref(&gate_ref) {
+            let decision = match resolution {
+                WebUiGateResolution::CredentialProvided { credential_ref } => {
+                    AuthInteractionDecision::CredentialProvided { credential_ref }
+                }
+                WebUiGateResolution::Denied | WebUiGateResolution::Cancelled => {
+                    AuthInteractionDecision::Deny
+                }
+                WebUiGateResolution::Approved { .. } => {
+                    return Err(RebornServicesError::from_status_kind(
+                        RebornServicesErrorCode::Unavailable,
+                        RebornServicesErrorKind::BlockedAuthentication,
+                        503,
+                        false,
+                    ));
+                }
+            };
+            let response = self
+                .auth_interactions
+                .resolve(ResolveAuthInteractionRequest {
+                    scope,
+                    actor,
+                    run_id_hint: Some(run_id),
+                    gate_ref,
+                    decision,
+                    idempotency_key: client_action_id,
+                })
+                .await
+                .map_err(map_auth_interaction_error)?;
+            return match response {
+                ResolveAuthInteractionResponse::Resumed(response) => {
+                    Ok(RebornResolveGateResponse::Resumed(response.into()))
+                }
+                ResolveAuthInteractionResponse::Canceled(response) => {
                     Ok(RebornResolveGateResponse::Cancelled(response.into()))
                 }
             };
@@ -1391,6 +1444,20 @@ fn map_adapter_error(error: ProductAdapterError) -> RebornServicesError {
         ProductAdapterError::Internal { .. } => {
             RebornServicesError::from_status(RebornServicesErrorCode::Internal, 500, false)
         }
+    }
+}
+
+fn map_auth_interaction_error(error: ProductWorkflowError) -> RebornServicesError {
+    match error {
+        ProductWorkflowError::AuthInteractionRejected { kind } => {
+            RebornServicesError::from_status_kind(
+                code_for_status(kind.status_code()),
+                RebornServicesErrorKind::BlockedAuthentication,
+                kind.status_code(),
+                kind.retryable(),
+            )
+        }
+        error => map_adapter_error(error.into()),
     }
 }
 

@@ -50,6 +50,17 @@ impl InMemoryAuthProductServices {
         self.lock_state().continuations.clone()
     }
 
+    pub fn flow_records_snapshot(&self) -> Vec<AuthFlowRecord> {
+        let mut flows = self
+            .lock_state()
+            .flows
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        flows.sort_by_key(|flow| flow.id.as_uuid());
+        flows
+    }
+
     fn lock_state(&self) -> MutexGuard<'_, AuthState> {
         self.state
             .lock()

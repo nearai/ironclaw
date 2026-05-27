@@ -22,6 +22,10 @@ use crate::approval_interaction::{
     ApprovalInteractionDecision, ApprovalInteractionRejectionKind, ApprovalInteractionService,
     RejectingApprovalInteractionService, ResolveApprovalInteractionRequest,
 };
+use crate::auth_interaction::{
+    AuthInteractionDecision, AuthInteractionRejectionKind, AuthInteractionService,
+    RejectingAuthInteractionService, ResolveAuthInteractionRequest,
+};
 use crate::binding::{
     ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
     ResolvedBinding,
@@ -50,6 +54,7 @@ pub struct DefaultProductWorkflow {
     command_admission_service: Arc<dyn ProductCommandAdmissionService>,
     command_service: Arc<dyn ProductCommandService>,
     approval_interaction_service: Arc<dyn ApprovalInteractionService>,
+    auth_interaction_service: Arc<dyn AuthInteractionService>,
 }
 
 impl DefaultProductWorkflow {
@@ -66,6 +71,7 @@ impl DefaultProductWorkflow {
             command_admission_service: Arc::new(RejectingProductCommandAdmissionService),
             command_service: Arc::new(RejectingProductCommandService),
             approval_interaction_service: Arc::new(RejectingApprovalInteractionService),
+            auth_interaction_service: Arc::new(RejectingAuthInteractionService),
         }
     }
 
@@ -98,6 +104,14 @@ impl DefaultProductWorkflow {
         approval_interaction_service: Arc<dyn ApprovalInteractionService>,
     ) -> Self {
         self.approval_interaction_service = approval_interaction_service;
+        self
+    }
+
+    pub fn with_auth_interaction_service(
+        mut self,
+        auth_interaction_service: Arc<dyn AuthInteractionService>,
+    ) -> Self {
+        self.auth_interaction_service = auth_interaction_service;
         self
     }
 }
@@ -155,6 +169,7 @@ impl ProductWorkflow for DefaultProductWorkflow {
                         command_admission_service: &*self.command_admission_service,
                         command_service: &*self.command_service,
                         approval_interaction_service: &*self.approval_interaction_service,
+                        auth_interaction_service: &*self.auth_interaction_service,
                     },
                 )
                 .await;
@@ -254,6 +269,7 @@ struct DispatchPorts<'a> {
     command_admission_service: &'a dyn ProductCommandAdmissionService,
     command_service: &'a dyn ProductCommandService,
     approval_interaction_service: &'a dyn ApprovalInteractionService,
+    auth_interaction_service: &'a dyn AuthInteractionService,
 }
 
 fn resolve_binding_request(envelope: &ProductInboundEnvelope) -> ResolveBindingRequest {
@@ -379,10 +395,15 @@ async fn dispatch_payload(
             )
             .await
         }
-        ProductInboundPayload::AuthResolution(_) => {
-            Err(ProductWorkflowError::UnsupportedActionKind {
-                kind: "auth_resolution".into(),
-            })
+        ProductInboundPayload::AuthResolution(payload) => {
+            dispatch_auth_resolution(
+                envelope,
+                payload,
+                action_fingerprint,
+                ports.binding_service,
+                ports.auth_interaction_service,
+            )
+            .await
         }
         ProductInboundPayload::SubscriptionRequest(_) => {
             Err(ProductWorkflowError::UnsupportedActionKind {
@@ -444,6 +465,53 @@ async fn dispatch_approval_resolution(
     })
 }
 
+async fn dispatch_auth_resolution(
+    envelope: &ProductInboundEnvelope,
+    payload: &ironclaw_product_adapters::AuthResolutionPayload,
+    action_fingerprint: ActionFingerprintKey,
+    binding_service: &dyn ConversationBindingService,
+    auth_interaction_service: &dyn AuthInteractionService,
+) -> Result<DispatchedAction, ProductWorkflowError> {
+    let decision = match &payload.result {
+        ironclaw_product_adapters::AuthResolutionResult::CredentialProvided { credential_ref } => {
+            AuthInteractionDecision::CredentialProvided {
+                credential_ref: credential_ref.clone(),
+            }
+        }
+        ironclaw_product_adapters::AuthResolutionResult::CallbackCompleted { callback_ref } => {
+            AuthInteractionDecision::CallbackCompleted {
+                callback_ref: callback_ref.clone(),
+            }
+        }
+        ironclaw_product_adapters::AuthResolutionResult::Denied => AuthInteractionDecision::Deny,
+    };
+    let binding = binding_service
+        .lookup_binding(resolve_binding_request(envelope))
+        .await?;
+    let scope = turn_scope_from_binding(&binding);
+    let actor = TurnActor::new(binding.user_id.clone());
+    let gate_ref = GateRef::new(payload.auth_request_ref.clone()).map_err(|_| {
+        ProductWorkflowError::AuthInteractionRejected {
+            kind: AuthInteractionRejectionKind::InvalidGateRef,
+        }
+    })?;
+    let idempotency_key = auth_resolution_idempotency_key(&action_fingerprint)?;
+    auth_interaction_service
+        .resolve(ResolveAuthInteractionRequest {
+            scope,
+            actor,
+            run_id_hint: None,
+            gate_ref,
+            decision,
+            idempotency_key,
+        })
+        .await?;
+    Ok(DispatchedAction {
+        ack: ProductInboundAck::NoOp,
+        dispatch_kind: ActionDispatchKind::try_from_payload(envelope.payload())?,
+    })
+}
+
 fn approval_resolution_idempotency_key(
     fingerprint: &ActionFingerprintKey,
 ) -> Result<IdempotencyKey, ProductWorkflowError> {
@@ -461,6 +529,25 @@ fn approval_resolution_idempotency_key(
             kind: ApprovalInteractionRejectionKind::InvalidBindingRef,
         },
     )
+}
+
+fn auth_resolution_idempotency_key(
+    fingerprint: &ActionFingerprintKey,
+) -> Result<IdempotencyKey, ProductWorkflowError> {
+    let raw = format!(
+        "{}{}{}{}{}{}",
+        binding_ref_segment("adapter", fingerprint.adapter_id.as_str()),
+        binding_ref_segment("installation", fingerprint.installation_id.as_str()),
+        binding_ref_segment("actor_kind", fingerprint.external_actor_ref.kind()),
+        binding_ref_segment("actor_id", fingerprint.external_actor_ref.id()),
+        binding_ref_segment("source", fingerprint.source_binding_key.as_str()),
+        binding_ref_segment("event", fingerprint.external_event_id.as_str())
+    );
+    bounded_idempotency_key("product-auth", &raw, DEFAULT_BINDING_REF_RAW_MAX_BYTES).map_err(|_| {
+        ProductWorkflowError::AuthInteractionRejected {
+            kind: AuthInteractionRejectionKind::InvalidBindingRef,
+        }
+    })
 }
 
 fn turn_scope_from_binding(binding: &ResolvedBinding) -> TurnScope {
@@ -578,6 +665,12 @@ fn terminal_ack_for_error(error: &ProductWorkflowError) -> Option<ProductInbound
                 kind.sanitized_reason(),
             )))
         }
+        ProductWorkflowError::AuthInteractionRejected { kind } if !kind.retryable() => {
+            Some(ProductInboundAck::Rejected(ProductRejection::permanent(
+                rejection_kind_for_auth_interaction(*kind),
+                kind.sanitized_reason(),
+            )))
+        }
         ProductWorkflowError::TurnSubmissionFailed { error } if !turn_error_is_retryable(error) => {
             Some(ProductInboundAck::Rejected(ProductRejection::permanent(
                 rejection_kind_for_turn_error(error),
@@ -597,12 +690,27 @@ fn terminal_ack_for_error(error: &ProductWorkflowError) -> Option<ProductInbound
         | ProductWorkflowError::TurnResumeRejected { .. }
         | ProductWorkflowError::AuthContinuationRejected { .. }
         | ProductWorkflowError::ApprovalInteractionRejected { .. }
+        | ProductWorkflowError::AuthInteractionRejected { .. }
         | ProductWorkflowError::TurnResumeDenied { .. }
         | ProductWorkflowError::Transient { .. }
         | ProductWorkflowError::BeforeInboundPolicyFailed {
             permanent: false, ..
         }
         | ProductWorkflowError::DuplicateAction { .. } => None,
+    }
+}
+
+fn rejection_kind_for_auth_interaction(kind: AuthInteractionRejectionKind) -> ProductRejectionKind {
+    match kind {
+        AuthInteractionRejectionKind::MissingAuth => ProductRejectionKind::BindingRequired,
+        AuthInteractionRejectionKind::CrossScopeDenied => ProductRejectionKind::AccessDenied,
+        AuthInteractionRejectionKind::StaleAuth
+        | AuthInteractionRejectionKind::InvalidGateRef
+        | AuthInteractionRejectionKind::InvalidCredentialRef
+        | AuthInteractionRejectionKind::InvalidCallbackRef
+        | AuthInteractionRejectionKind::UnsupportedResult
+        | AuthInteractionRejectionKind::FlowUnavailable
+        | AuthInteractionRejectionKind::InvalidBindingRef => ProductRejectionKind::PolicyDenied,
     }
 }
 

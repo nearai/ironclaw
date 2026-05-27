@@ -48,7 +48,8 @@ use ironclaw_loop_support::{
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
     ApprovalBlockedTurnRun, ApprovalInteractionScope, ApprovalInteractionService,
-    ApprovalResolverPort, ApprovalTurnRunLocator, DefaultApprovalInteractionService,
+    ApprovalResolverPort, ApprovalTurnRunLocator, AuthInteractionService,
+    DefaultApprovalInteractionService, DefaultAuthInteractionService,
     RunStateApprovalInteractionReadModel,
 };
 use ironclaw_reborn::loop_exit_applier::ThreadCheckpointLoopExitEvidencePort;
@@ -87,6 +88,7 @@ use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInp
 use crate::{RebornBuildError, RebornCompositionProfile, RebornServices, build_reborn_services};
 
 mod approval;
+mod auth_interaction;
 #[cfg(test)]
 #[path = "runtime/tests/default_system_prompt.rs"]
 mod default_system_prompt_tests;
@@ -192,6 +194,7 @@ pub struct RebornRuntime {
     reply_target_binding_ref: ReplyTargetBindingRef,
     projection_services: RebornProjectionServices,
     approval_interaction_service: Arc<dyn ApprovalInteractionService>,
+    auth_interaction_service: Arc<dyn AuthInteractionService>,
     #[cfg(test)]
     approval_audit_sink: Arc<InMemoryAuditSink>,
     webui_event_log: Arc<dyn DurableEventLog>,
@@ -367,6 +370,10 @@ impl RebornRuntime {
 
     pub(crate) fn webui_approval_interaction_service(&self) -> Arc<dyn ApprovalInteractionService> {
         self.approval_interaction_service.clone()
+    }
+
+    pub(crate) fn webui_auth_interaction_service(&self) -> Arc<dyn AuthInteractionService> {
+        self.auth_interaction_service.clone()
     }
 
     #[cfg(test)]
@@ -1081,6 +1088,23 @@ pub async fn build_reborn_runtime(
             approval_resolver,
             Arc::clone(&planned_turn_coordinator),
         ));
+    let auth_interaction_service: Arc<dyn AuthInteractionService> =
+        if let Some(product_auth) = services.product_auth.as_ref() {
+            if let Some(flow_records) = product_auth.flow_record_source() {
+                Arc::new(DefaultAuthInteractionService::new(
+                    Arc::new(auth_interaction::LocalDevAuthInteractionReadModel::new(
+                        Arc::clone(&turn_state_store),
+                        flow_records,
+                    )),
+                    product_auth.flow_manager(),
+                    Arc::clone(&planned_turn_coordinator),
+                ))
+            } else {
+                Arc::new(auth_interaction::UnavailableAuthInteractionService)
+            }
+        } else {
+            Arc::new(auth_interaction::UnavailableAuthInteractionService)
+        };
     let turn_event_source: Arc<dyn TurnEventProjectionSource> = turn_state_store.clone();
     let projection_services = projection_services
         .with_turn_events(turn_event_source, Arc::clone(&planned_turn_coordinator))
@@ -1109,6 +1133,7 @@ pub async fn build_reborn_runtime(
         reply_target_binding_ref: validated_identity.reply_target_binding_ref,
         projection_services,
         approval_interaction_service,
+        auth_interaction_service,
         #[cfg(test)]
         approval_audit_sink,
         webui_event_log: event_log,
@@ -3072,6 +3097,72 @@ mod tests {
 
         assert_eq!(err.code, RebornServicesErrorCode::NotFound);
         assert_eq!(err.kind, RebornServicesErrorKind::NotFound);
+        assert_eq!(err.status_code, 404);
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn local_dev_webui_bundle_routes_auth_gates_into_interaction_service() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "unused".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-webui-auth-owner", root.path().join("local-dev"))
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-webui-auth-tenant".to_string(),
+            agent_id: "runtime-webui-auth-agent".to_string(),
+            source_binding_id: "runtime-webui-auth-source".to_string(),
+            reply_target_binding_id: "runtime-webui-auth-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+        let caller = WebUiAuthenticatedCaller::new(
+            TenantId::new("runtime-webui-auth-tenant").unwrap(),
+            UserId::new("runtime-webui-auth-owner").unwrap(),
+            Some(AgentId::new("runtime-webui-auth-agent").unwrap()),
+            None,
+        );
+        let created = bundle
+            .api
+            .create_thread(
+                caller.clone(),
+                WebUiCreateThreadRequest {
+                    client_action_id: Some("create-webui-auth-thread".to_string()),
+                    requested_thread_id: None,
+                },
+            )
+            .await
+            .expect("create thread");
+
+        let err = bundle
+            .api
+            .resolve_gate(
+                caller,
+                WebUiResolveGateRequest {
+                    client_action_id: Some("resolve-webui-auth-gate".to_string()),
+                    thread_id: Some(created.thread.thread_id.to_string()),
+                    run_id: Some(TurnRunId::new().to_string()),
+                    gate_ref: Some("gate:hook-auth-missing".to_string()),
+                    resolution: Some("denied".to_string()),
+                    always: None,
+                    credential_ref: None,
+                },
+            )
+            .await
+            .expect_err("missing auth gate should reach auth interaction service");
+
+        assert_eq!(err.code, RebornServicesErrorCode::NotFound);
+        assert_eq!(err.kind, RebornServicesErrorKind::BlockedAuthentication);
         assert_eq!(err.status_code, 404);
         runtime.shutdown().await.expect("runtime shutdown");
     }

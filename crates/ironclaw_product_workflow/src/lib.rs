@@ -27,6 +27,7 @@
 mod action;
 mod approval_interaction;
 mod auth_continuation;
+mod auth_interaction;
 mod binding;
 mod binding_ref;
 mod command_dispatch;
@@ -61,6 +62,13 @@ pub use approval_interaction::{
 /// Concrete turn-gate resume dispatcher used by the Reborn composition crate to
 /// bridge product-auth continuations into the workflow-owned turn boundary.
 pub use auth_continuation::ProductAuthTurnGateResumeDispatcher;
+pub use auth_interaction::{
+    AuthGateRecord, AuthInteractionChallengeView, AuthInteractionDecision,
+    AuthInteractionReadModel, AuthInteractionRejectionKind, AuthInteractionScope,
+    AuthInteractionService, DefaultAuthInteractionService, ListPendingAuthInteractionsRequest,
+    ListPendingAuthInteractionsResponse, PendingAuthInteractionView, ResolveAuthInteractionRequest,
+    ResolveAuthInteractionResponse, is_auth_gate_ref,
+};
 pub use binding::{
     ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
     ResolvedBinding,
