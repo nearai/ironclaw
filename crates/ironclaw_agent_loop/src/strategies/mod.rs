@@ -1,8 +1,9 @@
 //! Strategy trait contracts for the Reborn agent loop.
 //!
-//! Each strategy receives `&LoopExecutionState` and returns an outcome enum
-//! that carries the new value of its own slot. The executor swaps the slot
-//! into the next whole state.
+//! Most strategies receive `&LoopExecutionState` and return an outcome enum
+//! that carries the new value of their own slot. Stop handling is split into
+//! completed-turn observation, which updates `stop_state`, and terminal
+//! decision, which is state-read-only.
 //!
 //! Checkpoint/observability wire enums are `#[non_exhaustive]`; later
 //! changes should extend them without forcing consumers to assume the current
@@ -66,12 +67,10 @@ mod tests {
     };
 
     use super::*;
-    use crate::state::{
-        GateStrategyState, LoopExecutionState, RecoveryStrategyState, StopStrategyState,
-    };
+    use crate::state::{GateStrategyState, LoopExecutionState, RecoveryStrategyState};
 
     #[test]
-    fn strategy_outcomes_compose_through_loop_state_slots() {
+    fn strategy_outcomes_compose_through_owned_loop_state_slots() {
         let state = LoopExecutionState::initial_for_run(&test_run_context());
 
         let gate_outcome = GateOutcome::Block {
@@ -86,11 +85,6 @@ mod tests {
             alter: Some(RetryAlteration::ShrinkContext { drop_messages: 1 }),
         };
         let stop_outcome = StopOutcome::Stop {
-            stop: StopStrategyState {
-                turns_completed: 1,
-                terminate_hints_in_last_batch: 1,
-                last_batch_total: 1,
-            },
             kind: StopKind::NoProgressDetected,
         };
 
@@ -101,9 +95,8 @@ mod tests {
         if let RecoveryOutcome::Retry { recovery, .. } = recovery_outcome {
             next_state.recovery_state = recovery;
         }
-        if let StopOutcome::Stop { stop, kind } = stop_outcome {
+        if let StopOutcome::Stop { kind } = stop_outcome {
             assert_eq!(kind, StopKind::NoProgressDetected);
-            next_state.stop_state = stop;
         }
 
         let value = serde_json::to_value(&next_state).expect("serialize loop state");
@@ -111,7 +104,7 @@ mod tests {
             value["recovery_state"]["attempts_by_class"]["model_transient"],
             2
         );
-        assert_eq!(value["stop_state"]["turns_completed"], 1);
+        assert_eq!(value["stop_state"]["turns_completed"], 0);
         assert_eq!(value["gate_state"], serde_json::json!({}));
 
         let restored: LoopExecutionState =
@@ -123,14 +116,7 @@ mod tests {
                 2,
             )
         );
-        assert_eq!(
-            restored.stop_state,
-            StopStrategyState {
-                turns_completed: 1,
-                terminate_hints_in_last_batch: 1,
-                last_batch_total: 1,
-            }
-        );
+        assert_eq!(restored.stop_state, Default::default());
         assert_eq!(restored.gate_state, GateStrategyState::default());
     }
 

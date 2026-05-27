@@ -1,5 +1,10 @@
 import { React } from "../../../lib/html.js";
 import { gateFromEvent } from "./gates.js";
+import {
+  isTerminalToolStatus,
+  toolCardFromActivity,
+  toolCardFromPreview,
+} from "./history-messages.js";
 
 // Handler factory for v2 `WebChatV2EventFrame` events.
 //
@@ -71,6 +76,31 @@ export function useChatEvents({
             );
           }
           setIsProcessing(true);
+          return;
+        }
+
+        case "capability_activity": {
+          // Lifecycle metadata for a capability invocation. Used to
+          // render a "running" placeholder card before the richer
+          // `capability_display_preview` frame arrives at terminal
+          // time. Keyed by invocation_id so the preview frame can
+          // upgrade the same bubble in place.
+          const activity = frame.activity;
+          if (!activity || !activity.invocation_id) return;
+          const card = toolCardFromActivity(activity);
+          upsertToolFromActivity(setMessages, activity.invocation_id, card);
+          return;
+        }
+
+        case "capability_display_preview": {
+          // Final sanitized display artifact for a capability
+          // invocation (carries title, input/output summaries, and
+          // truncated preview). Replaces any prior activity-derived
+          // card for the same invocation_id.
+          const preview = frame.preview;
+          if (!preview || !preview.invocation_id) return;
+          const card = toolCardFromPreview(preview);
+          upsertToolFromPreview(setMessages, preview.invocation_id, card);
           return;
         }
 
@@ -281,4 +311,44 @@ function applyProjectionItems({
   if (latestRunIdRef && activeRunId) {
     latestRunIdRef.current = activeRunId;
   }
+}
+
+function upsertToolFromPreview(setMessages, invocationId, card) {
+  const id = `tool-${invocationId}`;
+  const message = { id, role: "tool_activity", ...card };
+  setMessages((prev) => {
+    const existing = prev.findIndex((m) => m.id === id);
+    if (existing >= 0) {
+      const copy = [...prev];
+      copy[existing] = message;
+      return copy;
+    }
+    return [...prev, message];
+  });
+}
+
+function upsertToolFromActivity(setMessages, invocationId, card) {
+  const id = `tool-${invocationId}`;
+  setMessages((prev) => {
+    const existing = prev.findIndex((m) => m.id === id);
+    if (existing >= 0) {
+      const current = prev[existing];
+      // A late lifecycle frame can carry `running` after the preview
+      // already set `success` / `error`. Don't downgrade terminal
+      // state — but do let the next terminal state through.
+      const nextStatus =
+        isTerminalToolStatus(current.toolStatus) && card.toolStatus === "running"
+          ? current.toolStatus
+          : card.toolStatus;
+      const copy = [...prev];
+      copy[existing] = {
+        ...current,
+        toolStatus: nextStatus,
+        toolError: card.toolError || current.toolError,
+        updatedAt: card.updatedAt || current.updatedAt,
+      };
+      return copy;
+    }
+    return [...prev, { id, role: "tool_activity", ...card }];
+  });
 }

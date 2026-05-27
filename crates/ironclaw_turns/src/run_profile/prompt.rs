@@ -373,7 +373,7 @@ mod tests {
             .unwrap()
             .expect("inline message should materialize");
         assert_eq!(materialized.role, "user");
-        assert_eq!(materialized.safe_content, "safe inline nudge");
+        assert_eq!(materialized.model_content, "safe inline nudge");
     }
 
     /// A context port that returns configurable identity and body messages.
@@ -461,7 +461,7 @@ mod tests {
             .get_materialized_message(&context, &msg.content_ref)
             .unwrap()
             .expect("summary-only identity message should be materialized");
-        assert_eq!(materialized.safe_content, summary_text);
+        assert_eq!(materialized.model_content, summary_text);
     }
 
     /// A summary-only entry in the main messages list (not just identity_messages)
@@ -512,7 +512,7 @@ mod tests {
             .get_materialized_message(&context, &bundle.messages[0].content_ref)
             .unwrap()
             .expect("summary-only body message should be materialized");
-        assert_eq!(materialized.safe_content, "What is the capital of France?");
+        assert_eq!(materialized.model_content, "What is the capital of France?");
     }
 
     #[tokio::test]

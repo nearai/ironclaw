@@ -120,6 +120,78 @@ async fn progress_port_failure_does_not_abort_reply_only_run() {
 }
 
 #[tokio::test]
+async fn reply_only_drains_follow_up_before_stop_strategy_completes() {
+    let host = MockHost::new(vec![reply_response(), reply_response()]);
+    let run_context = host.run_context().clone();
+    let host = host.with_input_batches(vec![
+        LoopInputBatch {
+            inputs: Vec::new(),
+            input_acks: Vec::new(),
+            next_cursor: input_cursor(&run_context, "input-cursor:no-input"),
+        },
+        LoopInputBatch {
+            inputs: vec![LoopInput::FollowUp {
+                message_ref: message_ref("msg:follow-up"),
+            }],
+            input_acks: vec![input_ack(
+                &run_context,
+                "input-cursor:after-follow-up",
+                "input-ack:after-follow-up",
+            )],
+            next_cursor: input_cursor(&run_context, "input-cursor:after-follow-up"),
+        },
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert_eq!(host.model_requests().len(), 2);
+    assert_eq!(
+        host.acked_input_tokens(),
+        vec![LoopInputAckToken::new("input-ack:after-follow-up").expect("valid")]
+    );
+    assert_eq!(
+        host.checkpoint_kinds(),
+        vec![
+            LoopCheckpointKind::BeforeModel,
+            LoopCheckpointKind::BeforeModel,
+            LoopCheckpointKind::Final,
+        ]
+    );
+    assert_eq!(final_staged_state(&host).stop_state.turns_completed, 2);
+}
+
+#[tokio::test]
+async fn reply_only_uses_configured_stop_strategy_decision() {
+    let host = MockHost::new(vec![reply_response(), reply_response()]);
+    let family = family_with_stop_after_observed_turns(2);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&family, &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert_eq!(host.model_requests().len(), 2);
+    assert_eq!(
+        host.checkpoint_kinds(),
+        vec![
+            LoopCheckpointKind::BeforeModel,
+            LoopCheckpointKind::BeforeModel,
+            LoopCheckpointKind::Final,
+        ]
+    );
+    assert_eq!(final_staged_state(&host).stop_state.turns_completed, 2);
+}
+
+#[tokio::test]
 async fn budget_stage_exits_at_iteration_limit() {
     let host = MockHost::new(Vec::new());
     let family = family_with_compaction_strategy(DefaultCompactionStrategy {

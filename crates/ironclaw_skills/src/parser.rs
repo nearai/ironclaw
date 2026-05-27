@@ -54,6 +54,12 @@ pub fn parse_skill_md(content: &str) -> Result<ParsedSkill, SkillParseError> {
     parse_skill_md_impl(content, true)
 }
 
+pub(crate) fn starts_with_frontmatter_delimiter(content: &str) -> bool {
+    let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
+    let stripped = normalized.strip_prefix('\u{feff}').unwrap_or(&normalized);
+    stripped.trim_start_matches(['\n', '\r']).starts_with("---")
+}
+
 /// Parse a SKILL.md file for install recovery without validating the `name` field.
 ///
 /// Used by install paths that need to recover from invalid published names by

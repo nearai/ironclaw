@@ -20,12 +20,16 @@ use ironclaw_authorization::{CapabilityLeaseStore, TrustAwareCapabilityDispatchA
 use ironclaw_capabilities::{
     CapabilityHost, CapabilityInvocationError, CapabilityInvocationRequest,
     CapabilityInvocationResult, CapabilityObligationHandler, CapabilityResumeRequest,
+    CapabilitySpawnRequest, CapabilitySpawnResult,
 };
 use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_host_api::{
     ApprovalRequestId, CapabilityDispatcher, CapabilityId, DispatchFailureKind, InvocationId,
     PackageSource, ResourceScope, RuntimeDispatchErrorKind, RuntimeKind,
     runtime_policy::EffectiveRuntimePolicy,
+};
+use ironclaw_process_sandbox::{
+    PROCESS_SANDBOX_CAPABILITY_ID, SandboxProcessPlan, ValidatedSandboxProcessPlan,
 };
 use ironclaw_processes::{
     ProcessCancellationRegistry, ProcessError, ProcessHost, ProcessManager, ProcessResultStore,
@@ -39,12 +43,12 @@ use ironclaw_trust::{HostTrustPolicy, TrustDecision, TrustError, TrustPolicy, Tr
 use crate::{
     BuiltinObligationHandler, BuiltinObligationServices, CancelRuntimeWorkOutcome,
     CancelRuntimeWorkRequest, CapabilitySurfaceVersion, HostRuntime, HostRuntimeError,
-    HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalGate, RuntimeBackendHealth,
-    RuntimeBlockedReason, RuntimeCapabilityCompleted, RuntimeCapabilityFailure,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
-    RuntimeFailureKind, RuntimeStatusRequest, RuntimeWorkId, RuntimeWorkSummary,
-    VisibleCapabilityRequest, VisibleCapabilitySurface, plan_capability,
-    surface::CapabilityCatalog,
+    HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalGate, RuntimeAuthGate,
+    RuntimeBackendHealth, RuntimeBlockedReason, RuntimeCapabilityCompleted,
+    RuntimeCapabilityFailure, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
+    RuntimeCapabilityResumeRequest, RuntimeFailureKind, RuntimeGateId, RuntimeStatusRequest,
+    RuntimeWorkId, RuntimeWorkSummary, VisibleCapabilityRequest, VisibleCapabilitySurface,
+    plan_capability, surface::CapabilityCatalog,
 };
 
 /// Default production wiring for [`HostRuntime`].
@@ -365,6 +369,79 @@ impl HostRuntime for DefaultHostRuntime {
         }
     }
 
+    async fn spawn_capability(
+        &self,
+        request: RuntimeCapabilityRequest,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        let RuntimeCapabilityRequest {
+            mut context,
+            capability_id,
+            estimate,
+            input,
+            idempotency_key,
+            trust_decision: _caller_trust_decision,
+        } = request;
+        let input = host_runtime_spawn_input_for_capability(&capability_id, input)?;
+        let scope = context.resource_scope.clone();
+        let invocation_id = context.invocation_id;
+        let idempotency_key = idempotency_key.map(|key| key.as_str().to_string());
+        if let Some(key) = idempotency_key.as_deref() {
+            tracing::debug!(
+                capability_id = %capability_id,
+                idempotency_key = %key,
+                "capability spawn accepted advisory idempotency key (not yet enforced)"
+            );
+        }
+
+        if let Err(error) = self.enforce_runtime_policy(&capability_id) {
+            tracing::debug!(
+                capability_id = %capability_id,
+                runtime_policy_error_kind = error.kind(),
+                "capability runtime policy rejected spawn before process start"
+            );
+            return Ok(runtime_policy_failure(capability_id, error));
+        }
+
+        let trust_decision = match self.evaluate_invocation_trust(&capability_id) {
+            Ok(host_decision) => host_decision,
+            Err(error) => {
+                tracing::debug!(
+                    capability_id = %capability_id,
+                    trust_error_kind = error.kind(),
+                    "capability trust evaluation failed before spawn"
+                );
+                return Ok(trust_evaluation_failure(capability_id, error));
+            }
+        };
+        context.trust = trust_decision.effective_trust.class();
+
+        let registry = self.registry.snapshot();
+        let host = self.capability_host(&registry);
+        let spawn = CapabilitySpawnRequest {
+            context,
+            capability_id: capability_id.clone(),
+            estimate,
+            input,
+            trust_decision,
+        };
+
+        match host.spawn_json(spawn).await {
+            Ok(result) => Ok(RuntimeCapabilityOutcome::SpawnedProcess(
+                spawned_process_outcome_from(result, capability_id),
+            )),
+            Err(error) => {
+                tracing::debug!(
+                    capability_id = %capability_id,
+                    error_kind = failure_kind_from(&error).as_str(),
+                    idempotency_key = idempotency_key.as_deref().unwrap_or(""),
+                    "capability spawn failed"
+                );
+                self.translate_invocation_error(error, capability_id, scope, invocation_id)
+                    .await
+            }
+        }
+    }
+
     async fn resume_capability(
         &self,
         request: RuntimeCapabilityResumeRequest,
@@ -448,6 +525,101 @@ impl HostRuntime for DefaultHostRuntime {
                     error_kind = failure_kind_from(&error).as_str(),
                     idempotency_key = idempotency_key.as_deref().unwrap_or(""),
                     "capability resume failed"
+                );
+                match error {
+                    CapabilityInvocationError::AuthorizationRequiresAuth { capability } => {
+                        Ok(auth_required_outcome(capability))
+                    }
+                    other => Ok(RuntimeCapabilityOutcome::Failed(failure_from(
+                        other,
+                        capability_id,
+                    ))),
+                }
+            }
+        }
+    }
+
+    async fn resume_spawn_capability(
+        &self,
+        request: RuntimeCapabilityResumeRequest,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        let RuntimeCapabilityResumeRequest {
+            mut context,
+            approval_request_id,
+            capability_id,
+            estimate,
+            input,
+            idempotency_key,
+            trust_decision: _caller_trust_decision,
+        } = request;
+        let input = host_runtime_spawn_input_for_capability(&capability_id, input)?;
+        let idempotency_key = idempotency_key.map(|key| key.as_str().to_string());
+        if let Some(key) = idempotency_key.as_deref() {
+            tracing::debug!(
+                capability_id = %capability_id,
+                approval_request_id = %approval_request_id,
+                idempotency_key = %key,
+                "capability spawn resume accepted advisory idempotency key (not yet enforced)"
+            );
+        }
+
+        if let Err(error) = self.enforce_runtime_policy(&capability_id) {
+            tracing::debug!(
+                capability_id = %capability_id,
+                runtime_policy_error_kind = error.kind(),
+                "capability runtime policy rejected spawn resume before process start"
+            );
+            self.fail_matching_blocked_resume_on_preflight_error(
+                &context,
+                &capability_id,
+                approval_request_id,
+                error.kind(),
+            )
+            .await;
+            return Ok(runtime_policy_failure(capability_id, error));
+        }
+
+        let trust_decision = match self.evaluate_invocation_trust(&capability_id) {
+            Ok(host_decision) => host_decision,
+            Err(error) => {
+                tracing::debug!(
+                    capability_id = %capability_id,
+                    trust_error_kind = error.kind(),
+                    "capability trust evaluation failed before spawn resume"
+                );
+                self.fail_matching_blocked_resume_on_preflight_error(
+                    &context,
+                    &capability_id,
+                    approval_request_id,
+                    error.kind(),
+                )
+                .await;
+                return Ok(trust_evaluation_failure(capability_id, error));
+            }
+        };
+        context.trust = trust_decision.effective_trust.class();
+
+        let registry = self.registry.snapshot();
+        let host = self.capability_host(&registry);
+        let resume = CapabilityResumeRequest {
+            context,
+            approval_request_id,
+            capability_id: capability_id.clone(),
+            estimate,
+            input,
+            trust_decision,
+        };
+
+        match host.resume_spawn_json(resume).await {
+            Ok(result) => Ok(RuntimeCapabilityOutcome::SpawnedProcess(
+                spawned_process_outcome_from(result, capability_id),
+            )),
+            Err(error) => {
+                tracing::debug!(
+                    capability_id = %capability_id,
+                    error_kind = failure_kind_from(&error).as_str(),
+                    idempotency_key = idempotency_key.as_deref().unwrap_or(""),
+                    "capability spawn resume failed"
                 );
                 Ok(RuntimeCapabilityOutcome::Failed(failure_from(
                     error,
@@ -811,6 +983,9 @@ impl DefaultHostRuntime {
                     }
                 }
             }
+            CapabilityInvocationError::AuthorizationRequiresAuth { capability } => {
+                Ok(auth_required_outcome(capability))
+            }
             other => Ok(RuntimeCapabilityOutcome::Failed(failure_from(
                 other,
                 capability_id,
@@ -903,7 +1078,11 @@ fn trust_policy_input_for_local_manifest(
     package: &ExtensionPackage,
 ) -> Result<ironclaw_trust::TrustPolicyInput, TrustEvaluationError> {
     package
-        .trust_policy_input(local_manifest_source(package), None, None)
+        .trust_policy_input(
+            local_manifest_source(package),
+            package.manifest_digest(),
+            None,
+        )
         .map_err(|_| TrustEvaluationError::TrustInput)
 }
 
@@ -1077,6 +1256,47 @@ fn completed_outcome_from(
     }
 }
 
+fn auth_required_outcome(capability_id: CapabilityId) -> RuntimeCapabilityOutcome {
+    RuntimeCapabilityOutcome::AuthRequired(RuntimeAuthGate {
+        gate_id: RuntimeGateId::new(),
+        capability_id,
+        reason: RuntimeBlockedReason::AuthRequired,
+        required_secrets: Vec::new(),
+    })
+}
+
+fn spawned_process_outcome_from(
+    result: CapabilitySpawnResult,
+    capability_id: CapabilityId,
+) -> crate::RuntimeProcessHandle {
+    crate::RuntimeProcessHandle {
+        process_id: result.process.process_id,
+        capability_id,
+    }
+}
+
+fn host_runtime_spawn_input_for_capability(
+    capability_id: &CapabilityId,
+    input: serde_json::Value,
+) -> Result<serde_json::Value, HostRuntimeError> {
+    if capability_id.as_str() != PROCESS_SANDBOX_CAPABILITY_ID {
+        return Ok(input);
+    }
+    let plan = serde_json::from_value::<SandboxProcessPlan>(input).map_err(|_| {
+        HostRuntimeError::invalid_request(
+            "process sandbox capability input must be a SandboxProcessPlan",
+        )
+    })?;
+    let plan = ValidatedSandboxProcessPlan::new(plan).map_err(|_| {
+        HostRuntimeError::invalid_request(
+            "process sandbox capability input failed SandboxProcessPlan validation",
+        )
+    })?;
+    serde_json::to_value(plan.into_plan()).map_err(|_| {
+        HostRuntimeError::invalid_request("validated process sandbox plan could not be serialized")
+    })
+}
+
 fn failure_from(
     error: CapabilityInvocationError,
     capability_id: CapabilityId,
@@ -1101,6 +1321,7 @@ fn sanitized_failure_message(error: &CapabilityInvocationError) -> Option<String
         | AuthorizationDenied { .. }
         | UnsupportedObligations { .. }
         | ObligationFailed { .. }
+        | AuthorizationRequiresAuth { .. }
         | AuthorizationRequiresApproval { .. }
         | ApprovalRequestMismatch { .. }
         | ApprovalFingerprintMismatch { .. }
@@ -1122,6 +1343,9 @@ fn sanitized_failure_message(error: &CapabilityInvocationError) -> Option<String
 pub(crate) fn failure_kind_from(error: &CapabilityInvocationError) -> RuntimeFailureKind {
     match error {
         CapabilityInvocationError::UnknownCapability { .. } => RuntimeFailureKind::MissingRuntime,
+        CapabilityInvocationError::AuthorizationRequiresAuth { .. } => {
+            RuntimeFailureKind::Authorization
+        }
         CapabilityInvocationError::AuthorizationDenied { .. }
         | CapabilityInvocationError::UnsupportedObligations { .. }
         | CapabilityInvocationError::AuthorizationRequiresApproval { .. }
@@ -1236,9 +1460,11 @@ mod tests {
 
     use super::*;
     use ironclaw_capabilities::CapabilityInvocationError;
+    use ironclaw_extensions::{ExtensionManifest, ManifestSource};
     use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
     use ironclaw_host_api::{
-        CapabilityId, DispatchFailureKind, RuntimeDispatchErrorKind, VirtualPath,
+        CapabilityId, DispatchFailureKind, HostPortCatalog, PackageSource,
+        RuntimeDispatchErrorKind, VirtualPath, sha256_digest_token,
     };
 
     fn cap() -> CapabilityId {
@@ -1247,6 +1473,58 @@ mod tests {
 
     fn dispatch(kind: DispatchFailureKind) -> CapabilityInvocationError {
         CapabilityInvocationError::Dispatch { kind }
+    }
+
+    #[test]
+    fn local_manifest_trust_input_includes_manifest_digest() {
+        const MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "test"
+name = "Test"
+version = "0.1.0"
+description = "test extension"
+trust = "third_party"
+
+[runtime]
+kind = "script"
+runner = "sandboxed_process"
+command = "echo"
+
+[[capabilities]]
+id = "test.cap"
+description = "Test capability"
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/test.input.json"
+output_schema_ref = "schemas/test.output.json"
+"#;
+        let manifest = ExtensionManifest::parse(
+            MANIFEST,
+            ManifestSource::HostBundled,
+            &HostPortCatalog::empty(),
+        )
+        .unwrap();
+        let package = ExtensionPackage::from_manifest_toml(
+            manifest,
+            VirtualPath::new("/system/extensions/test").unwrap(),
+            MANIFEST,
+        )
+        .unwrap();
+
+        let input = trust_policy_input_for_local_manifest(&package).unwrap();
+
+        assert_eq!(
+            input.identity.source,
+            PackageSource::LocalManifest {
+                path: "/system/extensions/test/manifest.toml".to_string()
+            }
+        );
+        let expected_digest = sha256_digest_token(MANIFEST.as_bytes());
+        assert_eq!(
+            input.identity.digest.as_deref(),
+            Some(expected_digest.as_str())
+        );
     }
 
     #[test]
@@ -1387,6 +1665,21 @@ mod tests {
             failure_kind_from(&error),
             RuntimeFailureKind::MissingRuntime
         );
+    }
+
+    #[test]
+    fn host_runtime_spawn_input_for_capability_passthrough_for_non_sandbox() {
+        let input = serde_json::json!({
+            "run": {
+                "command": "",
+            },
+            "other": ["unchanged"],
+        });
+
+        let output = host_runtime_spawn_input_for_capability(&cap(), input.clone())
+            .expect("non-sandbox capability input should pass through");
+
+        assert_eq!(output, input);
     }
 
     #[test]

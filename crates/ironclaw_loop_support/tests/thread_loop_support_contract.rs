@@ -12,12 +12,12 @@ use ironclaw_loop_support::{
     EmptyLoopCapabilityPort, HostIdentityContextBuildError, HostIdentityContextCandidate,
     HostIdentityContextSource, HostIdentityMessageContent, HostManagedModelError,
     HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessageRole,
-    HostManagedModelRequest, HostManagedModelResponse, HostSkillContextBuildError,
-    HostSkillContextCandidate, HostSkillContextSource, IdentityApplicability, IdentityBudget,
-    IdentityFileName, SkillBundleContextSource, SkillBundleDescriptor, SkillBundleId,
-    SkillBundleSource, SkillBundleSourceError, SkillFilePath, SkillSourceKind,
-    ThreadBackedLoopContextPort, ThreadBackedLoopModelPort, ThreadBackedLoopTranscriptPort,
-    build_skill_run_snapshot, identity_message_ref,
+    HostManagedModelRequest, HostManagedModelResponse, HostManagedToolResultContent,
+    HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
+    IdentityApplicability, IdentityBudget, IdentityFileName, SkillBundleContextSource,
+    SkillBundleDescriptor, SkillBundleId, SkillBundleSource, SkillBundleSourceError, SkillFilePath,
+    SkillSourceKind, ThreadBackedLoopContextPort, ThreadBackedLoopModelPort,
+    ThreadBackedLoopTranscriptPort, build_skill_run_snapshot, identity_message_ref,
 };
 use ironclaw_skills::SkillTrust;
 use ironclaw_threads::{
@@ -1039,9 +1039,14 @@ async fn thread_context_port_filters_skill_visibility_and_installed_prompt_conte
             .safe_summary
             .contains("installed prompt secret")
     );
-    let serialized = serde_json::to_string(&bundle).unwrap();
-    assert!(!serialized.contains("hidden"));
-    assert!(!serialized.contains("denied"));
+    for snippet in &bundle.instruction_snippets {
+        assert!(!snippet.snippet_ref.contains("hidden"));
+        assert!(!snippet.safe_summary.contains("hidden"));
+        assert!(!snippet.model_content.contains("hidden"));
+        assert!(!snippet.snippet_ref.contains("denied"));
+        assert!(!snippet.safe_summary.contains("denied"));
+        assert!(!snippet.model_content.contains("denied"));
+    }
 }
 
 #[test]
@@ -1219,7 +1224,7 @@ async fn prompt_and_model_ports_send_selected_skill_context_to_gateway() {
     assert_eq!(prompt_bundle.messages[0].role, "system");
     assert_eq!(
         prompt_bundle.messages[0].content_ref,
-        LoopMessageRef::new("msg:snippet.skill.alpha.0.5241b0c7358325ab").unwrap()
+        LoopMessageRef::new("msg:snippet.skill.alpha.0.48cf250f887a9389").unwrap()
     );
 
     let gateway = Arc::new(RecordingGateway::reply("model says hi"));
@@ -1379,11 +1384,13 @@ async fn prompt_and_model_ports_resolve_instruction_memory_and_identity_refs() {
             }],
             instruction_snippets: vec![LoopContextSnippet {
                 snippet_ref: "instruction:project".to_string(),
+                model_content: "project instruction summary".to_string(),
                 safe_summary: "project instruction summary".to_string(),
                 metadata: None,
             }],
             memory_snippets: vec![LoopContextSnippet {
                 snippet_ref: "memory:project-summary".to_string(),
+                model_content: "project memory summary".to_string(),
                 safe_summary: "project memory summary".to_string(),
                 metadata: None,
             }],
@@ -2546,13 +2553,19 @@ async fn prompt_port_builds_bundle_with_tool_result_reference_context() {
 async fn model_port_round_trips_tool_result_reference_context_as_typed_model_input() {
     let fixture = ThreadFixture::new().await;
     let tool_result_ref = LoopMessageRef::new("msg:11111111-1111-1111-1111-111111111111").unwrap();
+    let envelope = ToolResultReferenceEnvelope {
+        version: 1,
+        result_ref: "result:round-trip".to_string(),
+        safe_summary: ToolResultSafeSummary::new("tool result content").unwrap(),
+    };
+    let envelope_content = serde_json::to_string(&envelope).unwrap();
     let thread_service = Arc::new(StaticContextThreadService::new(ContextMessage {
         message_id: Some(ThreadMessageId::parse("11111111-1111-1111-1111-111111111111").unwrap()),
         summary_id: None,
         sequence: 1,
         kind: MessageKind::ToolResultReference,
         tool_result_provider_call: None,
-        content: "tool result content".to_string(),
+        content: envelope_content.clone(),
     }));
     let context_port = ThreadBackedLoopContextPort::new(
         thread_service.clone(),
@@ -2606,7 +2619,51 @@ async fn model_port_round_trips_tool_result_reference_context_as_typed_model_inp
         calls[0].messages[0].role,
         HostManagedModelMessageRole::ToolResult
     );
-    assert_eq!(calls[0].messages[0].content, "tool result content");
+    assert_eq!(calls[0].messages[0].content, envelope_content);
+    assert_eq!(
+        calls[0].messages[0].tool_result_content,
+        Some(HostManagedToolResultContent::Reference { envelope })
+    );
+}
+
+#[tokio::test]
+async fn model_port_rejects_malformed_tool_result_reference_content() {
+    let fixture = ThreadFixture::new().await;
+    let tool_result_ref = LoopMessageRef::new("msg:22222222-2222-2222-2222-222222222222").unwrap();
+    let thread_service = Arc::new(StaticContextThreadService::new(ContextMessage {
+        message_id: Some(ThreadMessageId::parse("22222222-2222-2222-2222-222222222222").unwrap()),
+        summary_id: None,
+        sequence: 1,
+        kind: MessageKind::ToolResultReference,
+        tool_result_provider_call: None,
+        content: "not a tool-result reference envelope".to_string(),
+    }));
+    let gateway = Arc::new(RecordingGateway::reply("model says hi"));
+    let model_port = ThreadBackedLoopModelPort::new(
+        thread_service,
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway.clone(),
+        16,
+    );
+    let messages = vec![LoopModelMessage {
+        role: "tool_result_reference".to_string(),
+        content_ref: tool_result_ref,
+    }];
+    issue_prompt_grant(&fixture.run_context, &messages);
+
+    let error = model_port
+        .stream_model(LoopModelRequest {
+            messages,
+            surface_version: None,
+            model_preference: None,
+            capability_view: None,
+        })
+        .await
+        .expect_err("malformed tool result reference content should fail");
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    assert!(gateway.calls.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

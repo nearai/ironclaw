@@ -4566,6 +4566,7 @@ dependencies = [
  "ironclaw_host_api",
  "ironclaw_host_runtime",
  "ironclaw_memory",
+ "ironclaw_process_sandbox",
  "ironclaw_resources",
  "ironclaw_safety",
  "ironclaw_skills",
@@ -4915,6 +4916,7 @@ dependencies = [
  "tower 0.5.3",
  "tower-http 0.6.11",
  "tracing",
+ "url",
  "uuid",
 ]
 

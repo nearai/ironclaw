@@ -37,6 +37,8 @@ pub enum CapabilityInvocationError {
     },
     #[error("capability {capability} invocation requires approval")]
     AuthorizationRequiresApproval { capability: CapabilityId },
+    #[error("capability {capability} invocation requires authentication")]
+    AuthorizationRequiresAuth { capability: CapabilityId },
     #[error("capability {capability} invocation fingerprint failed: {source}")]
     InvocationFingerprint {
         capability: CapabilityId,

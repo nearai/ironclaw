@@ -371,6 +371,7 @@ mod reborn_support_tests {
     use ironclaw_loop_support::{
         HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessage,
         HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
+        HostManagedToolResultContent,
     };
     use ironclaw_network::{
         NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse,
@@ -2114,6 +2115,7 @@ mod reborn_support_tests {
                 reasoning: None,
                 signature: None,
             }),
+            tool_result_content: Some(HostManagedToolResultContent::Resolved),
         }
     }
 

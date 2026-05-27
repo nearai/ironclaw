@@ -12,11 +12,13 @@ use sha2::{Digest, Sha256};
 use crate::LoopMessageRef;
 
 use super::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityDescriptorView, LoopContextBundle,
-    LoopContextMessage, LoopContextSnippet, LoopInlineMessage, LoopInlineMessageRole,
-    LoopModelMessage, LoopRunContext, PromptSkillContextMetadata, VisibleCapabilitySurface,
-    skill_snippet_model_message_ref,
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityDescriptorView,
+    LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES, LoopContextBundle, LoopContextMessage,
+    LoopContextSnippet, LoopInlineMessage, LoopInlineMessageRole, LoopModelMessage, LoopRunContext,
+    PromptSkillContextMetadata, VisibleCapabilitySurface, skill_snippet_model_message_ref,
 };
+
+const MODEL_SAFE_SUMMARY_MAX_BYTES: usize = 4096;
 
 /// Stable fingerprint for an instruction bundle rebuild.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -88,14 +90,11 @@ impl InstructionSafetyContext {
 }
 
 /// Inputs for a deterministic instruction bundle build.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstructionBundleRequest {
     pub context_bundle: LoopContextBundle,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible_surface: Option<VisibleCapabilitySurface>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub safety_context: Option<InstructionSafetyContext>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inline_messages: Vec<LoopInlineMessage>,
 }
 
@@ -104,7 +103,7 @@ pub struct InstructionBundleRequest {
 pub struct InstructionBundleMaterializedMessage {
     pub role: String,
     pub content_ref: LoopMessageRef,
-    pub safe_content: String,
+    pub model_content: String,
 }
 
 /// Scoped store for host-owned prompt refs that are not durable transcript refs.
@@ -277,6 +276,7 @@ impl InstructionBundleBuilder {
                     &mut materialized_messages,
                     &mut fingerprint,
                     "skill",
+                    skill_ordinal,
                     content_ref,
                     &snippet,
                 )?;
@@ -288,17 +288,15 @@ impl InstructionBundleBuilder {
                 skill_ordinal += 1;
             } else {
                 requires_materialization_store = true;
-                let content_ref = snippet_message_ref(
-                    "instruction",
-                    &snippet,
-                    messages.len(),
-                    &mut synthetic_refs,
-                )?;
+                let ordinal = messages.len();
+                let content_ref =
+                    snippet_message_ref("instruction", &snippet, ordinal, &mut synthetic_refs)?;
                 push_snippet_message(
                     &mut messages,
                     &mut materialized_messages,
                     &mut fingerprint,
                     "instruction",
+                    ordinal,
                     content_ref,
                     &snippet,
                 )?;
@@ -318,6 +316,7 @@ impl InstructionBundleBuilder {
                 &mut materialized_messages,
                 &mut fingerprint,
                 "memory",
+                ordinal,
                 content_ref,
                 &snippet,
             )?;
@@ -430,7 +429,7 @@ fn push_context_message(
         materialized_messages.push(InstructionBundleMaterializedMessage {
             role: message.role.clone(),
             content_ref: content_ref.clone(),
-            safe_content: safe_summary,
+            model_content: safe_summary,
         });
     }
     messages.push(LoopModelMessage {
@@ -445,20 +444,36 @@ fn push_snippet_message(
     materialized_messages: &mut Vec<InstructionBundleMaterializedMessage>,
     fingerprint: &mut Sha256,
     section: &'static str,
+    ordinal: usize,
     content_ref: LoopMessageRef,
     snippet: &LoopContextSnippet,
 ) -> Result<(), AgentLoopHostError> {
     validate_context_ref(snippet.snippet_ref.clone(), "context snippet ref")?;
     let safe_summary =
-        validate_model_safe_text(snippet.safe_summary.clone(), "context snippet summary")?;
+        validate_model_safe_text(snippet.safe_summary.clone(), "context snippet summary")
+            .inspect_err(|error| {
+                tracing::debug!(
+                    section,
+                    ordinal,
+                    snippet_ref = %snippet.snippet_ref,
+                    content_ref = %content_ref.as_str(),
+                    safe_summary_bytes = snippet.safe_summary.len(),
+                    error_kind = ?error.kind,
+                    error_safe_summary = %error.safe_summary,
+                    "instruction bundle rejected context snippet safe summary"
+                );
+            })?;
+    let model_content =
+        validate_model_visible_content(snippet.model_content.clone(), "context snippet content")?;
     feed_field(fingerprint, b"section", section.as_bytes());
     feed_field(fingerprint, b"ref", content_ref.as_str().as_bytes());
     feed_field(fingerprint, b"source", snippet.snippet_ref.as_bytes());
-    feed_field(fingerprint, b"summary", snippet.safe_summary.as_bytes());
+    feed_field(fingerprint, b"summary", safe_summary.as_bytes());
+    feed_field(fingerprint, b"content", model_content.as_bytes());
     materialized_messages.push(InstructionBundleMaterializedMessage {
         role: "system".to_string(),
         content_ref: content_ref.clone(),
-        safe_content: safe_summary,
+        model_content,
     });
     messages.push(LoopModelMessage {
         role: "system".to_string(),
@@ -492,7 +507,7 @@ fn push_safety_context(
     materialized_messages.push(InstructionBundleMaterializedMessage {
         role: "system".to_string(),
         content_ref: content_ref.clone(),
-        safe_content: safety_context.safe_summary,
+        model_content: safety_context.safe_summary,
     });
     messages.push(LoopModelMessage {
         role: "system".to_string(),
@@ -520,7 +535,7 @@ fn push_inline_message(
     materialized_messages.push(InstructionBundleMaterializedMessage {
         role: role.clone(),
         content_ref: content_ref.clone(),
-        safe_content: safe_body,
+        model_content: safe_body,
     });
     messages.push(LoopModelMessage { role, content_ref });
     Ok(())
@@ -580,7 +595,7 @@ fn push_visible_surface(
     materialized_messages.push(InstructionBundleMaterializedMessage {
         role: "system".to_string(),
         content_ref: content_ref.clone(),
-        safe_content: summary,
+        model_content: summary,
     });
     messages.push(LoopModelMessage {
         role: "system".to_string(),
@@ -609,7 +624,7 @@ fn snippet_message_ref(
     synthetic_message_ref(
         section,
         &snippet.snippet_ref,
-        &snippet.safe_summary,
+        &snippet.model_content,
         ordinal,
         synthetic_refs,
     )
@@ -618,12 +633,12 @@ fn snippet_message_ref(
 fn synthetic_message_ref(
     section: &'static str,
     source_ref: &str,
-    safe_summary: &str,
+    content_key: &str,
     ordinal: usize,
     synthetic_refs: &mut SyntheticMessageRefRegistry,
 ) -> Result<LoopMessageRef, AgentLoopHostError> {
     let slug = sanitize_ref_suffix(source_ref);
-    let hash = stable_ref_hash(section, source_ref, safe_summary, ordinal);
+    let hash = stable_ref_hash(section, source_ref, content_key, ordinal);
     let content_ref = LoopMessageRef::new(format!("msg:{section}.{slug}.{ordinal}.{hash:016x}"))
         .map_err(|_| {
             AgentLoopHostError::new(
@@ -633,7 +648,7 @@ fn synthetic_message_ref(
         })?;
     synthetic_refs.record(
         content_ref,
-        SyntheticMessageRefInput::new(section, source_ref, safe_summary, ordinal),
+        SyntheticMessageRefInput::new(section, source_ref, content_key, ordinal),
     )
 }
 
@@ -641,7 +656,7 @@ fn synthetic_message_ref(
 struct SyntheticMessageRefInput {
     section: &'static str,
     source_ref: String,
-    safe_summary: String,
+    content_key: String,
     ordinal: usize,
 }
 
@@ -649,13 +664,13 @@ impl SyntheticMessageRefInput {
     fn new(
         section: &'static str,
         source_ref: impl Into<String>,
-        safe_summary: impl Into<String>,
+        content_key: impl Into<String>,
         ordinal: usize,
     ) -> Self {
         Self {
             section,
             source_ref: source_ref.into(),
-            safe_summary: safe_summary.into(),
+            content_key: content_key.into(),
             ordinal,
         }
     }
@@ -715,6 +730,7 @@ fn compare_snippet_refs(a: &LoopContextSnippet, b: &LoopContextSnippet) -> std::
     a.snippet_ref
         .cmp(&b.snippet_ref)
         .then_with(|| a.safe_summary.cmp(&b.safe_summary))
+        .then_with(|| a.model_content.cmp(&b.model_content))
 }
 
 fn instruction_rank(snippet_ref: &str) -> u8 {
@@ -766,7 +782,28 @@ fn validate_model_safe_text(
     value: String,
     label: &'static str,
 ) -> Result<String, AgentLoopHostError> {
-    if value.is_empty() || value.len() > 4096 {
+    validate_model_text_with_limit(value, label, MODEL_SAFE_SUMMARY_MAX_BYTES, true)
+}
+
+fn validate_model_visible_content(
+    value: String,
+    label: &'static str,
+) -> Result<String, AgentLoopHostError> {
+    validate_model_text_with_limit(
+        value,
+        label,
+        LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES,
+        false,
+    )
+}
+
+fn validate_model_text_with_limit(
+    value: String,
+    label: &'static str,
+    max_bytes: usize,
+    reject_sensitive: bool,
+) -> Result<String, AgentLoopHostError> {
+    if value.is_empty() || value.len() > max_bytes {
         return Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::PolicyDenied,
             format!("{label} is not model-safe"),
@@ -781,7 +818,9 @@ fn validate_model_safe_text(
             format!("{label} contains control characters"),
         ));
     }
-    reject_sensitive_text(&value, label)?;
+    if reject_sensitive {
+        reject_sensitive_text(&value, label)?;
+    }
     Ok(value)
 }
 

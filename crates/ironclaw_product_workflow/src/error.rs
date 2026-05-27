@@ -11,6 +11,7 @@ use ironclaw_turns::{TurnError, TurnErrorCategory};
 use thiserror::Error;
 
 use crate::approval_interaction::ApprovalInteractionRejectionKind;
+use crate::auth_interaction::AuthInteractionRejectionKind;
 
 /// Stable reasons for rejecting an auth continuation before or during turn resume.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +85,10 @@ pub enum ProductWorkflowError {
     ApprovalInteractionRejected {
         kind: ApprovalInteractionRejectionKind,
     },
+
+    /// Auth interaction was rejected with a stable sanitized reason.
+    #[error("auth interaction rejected: {kind:?}")]
+    AuthInteractionRejected { kind: AuthInteractionRejectionKind },
 
     /// Turn coordinator rejected a resume with typed category/status information.
     #[error("turn resume denied: {error}")]
@@ -183,6 +188,14 @@ impl From<ProductWorkflowError> for ProductAdapterError {
                 }
             }
             ProductWorkflowError::ApprovalInteractionRejected { kind } => {
+                ProductAdapterError::WorkflowRejected {
+                    kind: kind.workflow_rejection_kind(),
+                    status_code: kind.status_code(),
+                    retryable: kind.retryable(),
+                    reason: RedactedString::new(kind.sanitized_reason()),
+                }
+            }
+            ProductWorkflowError::AuthInteractionRejected { kind } => {
                 ProductAdapterError::WorkflowRejected {
                     kind: kind.workflow_rejection_kind(),
                     status_code: kind.status_code(),

@@ -93,7 +93,8 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "properties": {
                 "flavor_id": {
                     "type": "string",
-                    "description": "Subagent kind to spawn"
+                    "enum": ["general", "researcher", "coder", "explorer"],
+                    "description": "Subagent flavor. general: read/search only, bounded task. researcher: + web search, prefer evidence over mutation. coder: read/write/shell, file-focused execution. explorer: read/search, deep analysis, no writes."
                 },
                 "task": {
                     "type": "string",
@@ -188,6 +189,24 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["path", "old_string", "new_string"],
             "additionalProperties": false
         }),
+        "schemas/builtin/extension_search.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "Search query for locally available Reborn extensions" }
+            },
+            "required": ["query"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/extension_install.input.v1.json"
+        | "schemas/builtin/extension_activate.input.v1.json"
+        | "schemas/builtin/extension_remove.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "extension_id": { "type": "string", "description": "Extension id from extension_search results" }
+            },
+            "required": ["extension_id"],
+            "additionalProperties": false
+        }),
         "schemas/builtin/skill_list.input.v1.json" => json!({
             "type": "object",
             "properties": {},
@@ -202,7 +221,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 },
                 "content": {
                     "type": "string",
-                    "description": "Raw SKILL.md content to install"
+                    "description": "Raw SKILL.md content to install, or plain Markdown when name is provided"
                 },
                 "url": {
                     "type": "string",
