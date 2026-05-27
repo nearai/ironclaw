@@ -68,7 +68,9 @@ impl Command {
             }
             Self::Hooks(command) => command.execute(),
             Self::Logs(command) => command.execute(),
-            Self::Models(command) => command.execute(),
+            Self::Models(command) => {
+                command.execute(crate::context::RebornCliContext::resolve_from_env()?)
+            }
             Self::Profile(command) => command.execute(),
             Self::Repl(command) => {
                 command.execute(crate::context::RebornCliContext::resolve_from_env()?)

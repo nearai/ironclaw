@@ -25,6 +25,26 @@ fn command_payload_maps_to_typed_model_command_without_v1_parser() {
 }
 
 #[test]
+fn model_command_maps_provider_selection_without_cli_shelling_contract() {
+    let payload = InboundCommandPayload::new(
+        "model",
+        "set-provider openai --model gpt-5-mini",
+        ProductTriggerReason::BotCommand,
+    )
+    .expect("valid command");
+
+    assert_eq!(
+        ProductCommand::from_payload(&payload).expect("parse model provider command"),
+        ProductCommand::Model {
+            action: ProductModelCommand::SetProvider {
+                provider: "openai".to_string(),
+                model: Some("gpt-5-mini".to_string()),
+            }
+        }
+    );
+}
+
+#[test]
 fn command_payload_maps_all_declared_commands_and_unknown_fallback() {
     let cases = [
         (

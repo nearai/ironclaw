@@ -34,7 +34,8 @@
 
 use std::borrow::Cow;
 use std::fs;
-use std::path::Path;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use thiserror::Error;
@@ -260,6 +261,27 @@ pub struct LlmSlotSelection {
     pub base_url: Option<String>,
 }
 
+/// Field update for an existing LLM slot selection.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum LlmSlotFieldUpdate {
+    /// Preserve the field exactly as it appears in the current document.
+    #[default]
+    Keep,
+    /// Set the field to a new string value.
+    Set(String),
+    /// Remove the field from the slot selection.
+    Remove,
+}
+
+/// Typed patch for `[llm.default]` in the operator config file.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DefaultLlmSlotUpdate {
+    pub provider_id: LlmSlotFieldUpdate,
+    pub model: LlmSlotFieldUpdate,
+    pub api_key_env: LlmSlotFieldUpdate,
+    pub base_url: LlmSlotFieldUpdate,
+}
+
 // ─── Errors ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Error)]
@@ -296,6 +318,30 @@ pub enum RebornConfigFileError {
         path: String,
         found: String,
         reason: String,
+    },
+}
+
+#[derive(Debug, Error)]
+pub enum RebornConfigFileUpdateError {
+    #[error("read Reborn config `{}`: {source}", path.display())]
+    Read {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("parse Reborn config `{}` as TOML: {source}", path.display())]
+    Parse {
+        path: PathBuf,
+        source: toml_edit::TomlError,
+    },
+    #[error("validate Reborn config `{}`: {source}", path.display())]
+    Validate {
+        path: PathBuf,
+        source: RebornConfigFileError,
+    },
+    #[error("write Reborn config `{}`: {source}", path.display())]
+    Write {
+        path: PathBuf,
+        source: std::io::Error,
     },
 }
 
@@ -508,8 +554,107 @@ impl RebornConfigFile {
     }
 }
 
+/// Apply a typed patch to `[llm.default]` while preserving unrelated TOML.
+pub fn update_default_llm_slot(
+    path: &Path,
+    update: &DefaultLlmSlotUpdate,
+) -> Result<(), RebornConfigFileUpdateError> {
+    let mut doc = load_edit_document(path)?;
+    apply_llm_slot_field(&mut doc, "provider_id", &update.provider_id);
+    apply_llm_slot_field(&mut doc, "model", &update.model);
+    apply_llm_slot_field(&mut doc, "api_key_env", &update.api_key_env);
+    apply_llm_slot_field(&mut doc, "base_url", &update.base_url);
+    write_edit_document(path, &doc)
+}
+
 fn llm_slot_field_label(slot: &str, field: &str) -> Cow<'static, str> {
     Cow::Owned(format!("llm.{slot}.{field}"))
+}
+
+fn load_edit_document(path: &Path) -> Result<toml_edit::DocumentMut, RebornConfigFileUpdateError> {
+    match fs::read_to_string(path) {
+        Ok(text) => text.parse::<toml_edit::DocumentMut>().map_err(|source| {
+            RebornConfigFileUpdateError::Parse {
+                path: path.to_path_buf(),
+                source,
+            }
+        }),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            Ok(toml_edit::DocumentMut::new())
+        }
+        Err(source) => Err(RebornConfigFileUpdateError::Read {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+fn apply_llm_slot_field(
+    doc: &mut toml_edit::DocumentMut,
+    field: &str,
+    update: &LlmSlotFieldUpdate,
+) {
+    match update {
+        LlmSlotFieldUpdate::Keep => {}
+        LlmSlotFieldUpdate::Set(value) => {
+            ensure_llm_default_table(doc);
+            doc["llm"]["default"][field] = toml_edit::value(value);
+        }
+        LlmSlotFieldUpdate::Remove => {
+            ensure_llm_default_table(doc);
+            if let Some(table) = doc["llm"]["default"].as_table_like_mut() {
+                table.remove(field);
+            }
+        }
+    }
+}
+
+fn ensure_llm_default_table(doc: &mut toml_edit::DocumentMut) {
+    let root = doc.as_table_mut();
+    if root.get("llm").is_none_or(|item| !item.is_table()) {
+        root.insert("llm", toml_edit::Item::Table(toml_edit::Table::new()));
+    }
+    if let Some(llm) = doc["llm"].as_table_mut()
+        && llm.get("default").is_none_or(|item| !item.is_table())
+    {
+        llm.insert("default", toml_edit::Item::Table(toml_edit::Table::new()));
+    }
+}
+
+fn write_edit_document(
+    path: &Path,
+    doc: &toml_edit::DocumentMut,
+) -> Result<(), RebornConfigFileUpdateError> {
+    let text = doc.to_string();
+    RebornConfigFile::parse_text(&text, path).map_err(|source| {
+        RebornConfigFileUpdateError::Validate {
+            path: path.to_path_buf(),
+            source,
+        }
+    })?;
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|source| RebornConfigFileUpdateError::Write {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    let mut tmp = tempfile::NamedTempFile::new_in(path.parent().unwrap_or_else(|| Path::new(".")))
+        .map_err(|source| RebornConfigFileUpdateError::Write {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    tmp.write_all(text.as_bytes())
+        .map_err(|source| RebornConfigFileUpdateError::Write {
+            path: tmp.path().to_path_buf(),
+            source,
+        })?;
+    tmp.persist(path)
+        .map_err(|error| RebornConfigFileUpdateError::Write {
+            path: path.to_path_buf(),
+            source: error.error,
+        })?;
+    Ok(())
 }
 
 fn validate_api_version(found: &str, path: &Path) -> Result<(), RebornConfigFileError> {
@@ -650,6 +795,54 @@ api_key_env = "ANTHROPIC_API_KEY"
         assert_eq!(default_slot.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
         let llm = cfg.llm.as_ref().unwrap();
         assert!(llm.contains_key("mission"));
+    }
+
+    #[test]
+    fn default_llm_update_preserves_unrelated_config() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        fs::write(
+            &path,
+            r#"
+[identity]
+tenant = "acme"
+
+[llm.default]
+provider_id = "openai"
+model = "gpt-5-mini"
+api_key_env = "OPENAI_API_KEY"
+base_url = "https://example.test/v1"
+
+[llm.mission]
+provider_id = "anthropic"
+"#,
+        )
+        .expect("write config");
+
+        update_default_llm_slot(
+            &path,
+            &DefaultLlmSlotUpdate {
+                provider_id: LlmSlotFieldUpdate::Keep,
+                model: LlmSlotFieldUpdate::Set("gpt-5.3-codex".to_string()),
+                api_key_env: LlmSlotFieldUpdate::Keep,
+                base_url: LlmSlotFieldUpdate::Remove,
+            },
+        )
+        .expect("update config");
+
+        let text = fs::read_to_string(&path).expect("read config");
+        assert!(text.contains("[identity]"), "config: {text}");
+        assert!(text.contains("tenant = \"acme\""), "config: {text}");
+        assert!(text.contains("[llm.mission]"), "config: {text}");
+        assert!(text.contains("model = \"gpt-5.3-codex\""), "config: {text}");
+        assert!(
+            text.contains("api_key_env = \"OPENAI_API_KEY\""),
+            "config: {text}"
+        );
+        assert!(!text.contains("base_url"), "config: {text}");
+        RebornConfigFile::load(&path)
+            .expect("valid config")
+            .expect("config present");
     }
 
     #[test]

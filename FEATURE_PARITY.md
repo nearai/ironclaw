@@ -225,7 +225,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `config` | ✅ | ✅ | - | Read/write config plus validate/path helpers |
 | `backup` | ✅ | ❌ | P3 | Create/verify local backup archives |
 | `channels` | ✅ | 🚧 | P2 | `list` implemented; `enable`/`disable`/`status` deferred pending config source unification |
-| `models` | ✅ | 🚧 | P1 | `models list [<provider>]` (`--verbose`, `--json`; fetches live model list when provider specified), `models status` (`--json`), `models set <model>`, `models set-provider <provider> [--model model]` (alias normalization, config.toml + .env persistence). Remaining: `set` doesn't validate model against live list. |
+| `models` | ✅ | 🚧 | P1 | Reborn now uses a shared composition provider-admin facade for CLI `models list [<provider>]` (`--verbose`, `--json`), `models status`, `models set <model>`, `models set-provider <provider> [--model model]`, plus Product Workflow typed `model set-provider ...` parsing without touching v1 state. Remaining: live model fetching, OAuth/API-key login flows, and wiring the provider-admin ProductCommandService into product surfaces. |
 | `status` | ✅ | ✅ | - | System status (enriched session details) |
 | `agents` | ✅ | ❌ | P3 | Multi-agent management |
 | `sessions` | ✅ | ❌ | P3 | Session listing (shows subagent models) |

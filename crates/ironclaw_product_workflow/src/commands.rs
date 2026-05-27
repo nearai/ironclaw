@@ -80,7 +80,13 @@ pub enum ProductCommand {
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum ProductModelCommand {
     Status,
-    Set { model: String },
+    Set {
+        model: String,
+    },
+    SetProvider {
+        provider: String,
+        model: Option<String>,
+    },
 }
 
 impl ProductCommand {
@@ -120,21 +126,47 @@ fn command_spec_for_name(name: &str) -> Option<&'static ProductCommandSpec> {
 }
 
 fn parse_model_command(payload: &InboundCommandPayload) -> ProductCommandParseResult {
-    let model = payload.arguments.split_whitespace().next();
-    Ok(match model {
-        Some(model) => ProductCommand::Model {
-            action: ProductModelCommand::Set {
-                model: model.to_string(),
-            },
-        },
-        None => ProductCommand::Model {
+    let mut args = payload.arguments.split_whitespace();
+    let Some(first) = args.next() else {
+        return Ok(ProductCommand::Model {
             action: ProductModelCommand::Status,
+        });
+    };
+    if matches!(first, "set-provider" | "provider") {
+        let Some(provider) = args.next() else {
+            return invalid_lifecycle_command("model set-provider requires a provider id");
+        };
+        let remaining = args.collect::<Vec<_>>();
+        let model = parse_model_option(&remaining)?;
+        return Ok(ProductCommand::Model {
+            action: ProductModelCommand::SetProvider {
+                provider: provider.to_string(),
+                model,
+            },
+        });
+    }
+    Ok(ProductCommand::Model {
+        action: ProductModelCommand::Set {
+            model: first.to_string(),
         },
     })
 }
 
 fn parse_status_command(_payload: &InboundCommandPayload) -> ProductCommandParseResult {
     Ok(ProductCommand::Status)
+}
+
+fn parse_model_option(args: &[&str]) -> Result<Option<String>, ProductRejection> {
+    if args.is_empty() {
+        return Ok(None);
+    }
+    if args.len() == 2 && args[0] == "--model" {
+        return Ok(Some(args[1].to_string()));
+    }
+    Err(ProductRejection::permanent(
+        ProductRejectionKind::InvalidRequest,
+        "model set-provider accepts only `--model <model>` after provider",
+    ))
 }
 
 pub struct LifecycleProductCommandService {
