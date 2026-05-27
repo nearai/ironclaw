@@ -3,7 +3,10 @@ use std::{
     sync::{Arc, LazyLock, Mutex, Weak},
 };
 
-use crate::{MAX_PROMPT_FILE_SIZE, normalize_line_endings, parse_skill_md, validate_skill_name};
+use crate::{
+    MAX_PROMPT_FILE_SIZE, SkillParseError, normalize_line_endings, parse_skill_md,
+    validate_skill_name,
+};
 use async_trait::async_trait;
 use ironclaw_filesystem::{
     BackendCapabilities, DirEntry, FileStat, FileType, FilesystemError, RootFilesystem,
@@ -302,12 +305,10 @@ pub async fn install_skill(
     }
 
     let normalized = normalize_line_endings(request.content);
-    let parsed = parse_skill_md(&normalized).map_err(|error| {
+    let install_content = normalize_install_content(&normalized, request.name)?;
+    let parsed = parse_skill_md(&install_content).map_err(|error| {
         tracing::debug!(%error, "skill install failed to parse SKILL.md content");
-        SkillManagementError::with_reason(
-            SkillManagementErrorKind::InvalidInput,
-            format!("skill content failed to parse: {error}"),
-        )
+        skill_parse_error(error)
     })?;
     if let Some(requested_name) = request.name
         && requested_name != parsed.manifest.name
@@ -356,7 +357,7 @@ pub async fn install_skill(
     publish_skill_install(
         context,
         &skill_name,
-        &normalized,
+        &install_content,
         request.files,
         request.source,
         request.source_url,
@@ -374,6 +375,60 @@ pub async fn install_skill(
         scoped_path: format!("{USER_SKILLS_ROOT}/{skill_name}/{SKILL_FILE_NAME}"),
         source: installed_skill_source(request.source),
     })
+}
+
+fn normalize_install_content(
+    normalized_content: &str,
+    requested_name: Option<&str>,
+) -> Result<String, SkillManagementError> {
+    match parse_skill_md(normalized_content) {
+        Ok(_) => Ok(normalized_content.to_string()),
+        Err(SkillParseError::MissingFrontmatter)
+            if !starts_with_frontmatter_delimiter(normalized_content) =>
+        {
+            synthesize_install_frontmatter(normalized_content, requested_name)
+        }
+        Err(error) => {
+            tracing::debug!(%error, "skill install failed to parse SKILL.md content");
+            Err(skill_parse_error(error))
+        }
+    }
+}
+
+fn starts_with_frontmatter_delimiter(content: &str) -> bool {
+    let stripped = content.strip_prefix('\u{feff}').unwrap_or(content);
+    stripped.trim_start_matches(['\n', '\r']).starts_with("---")
+}
+
+fn synthesize_install_frontmatter(
+    normalized_content: &str,
+    requested_name: Option<&str>,
+) -> Result<String, SkillManagementError> {
+    let Some(requested_name) = requested_name else {
+        let error = SkillParseError::MissingFrontmatter;
+        tracing::debug!(%error, "skill install failed to parse SKILL.md content");
+        return Err(skill_parse_error(error));
+    };
+    if !validate_skill_name(requested_name) {
+        tracing::debug!(
+            requested_name,
+            "skill install rejected invalid requested name"
+        );
+        return Err(SkillManagementError::new(
+            SkillManagementErrorKind::InvalidInput,
+        ));
+    }
+
+    let mut rendered = format!("---\nname: {requested_name}\n---\n\n");
+    rendered.push_str(normalized_content);
+    Ok(rendered)
+}
+
+fn skill_parse_error(error: SkillParseError) -> SkillManagementError {
+    SkillManagementError::with_reason(
+        SkillManagementErrorKind::InvalidInput,
+        format!("skill content failed to parse: {error}"),
+    )
 }
 
 #[tracing::instrument(
