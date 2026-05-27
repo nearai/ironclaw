@@ -450,22 +450,22 @@ fn push_snippet_message(
     snippet: &LoopContextSnippet,
 ) -> Result<(), AgentLoopHostError> {
     validate_context_ref(snippet.snippet_ref.clone(), "context snippet ref")?;
-    let safe_summary =
-        validate_model_safe_text(snippet.safe_summary.clone(), "context snippet summary").map_err(
-            |error| {
-                tracing::debug!(
-                    section,
-                    ordinal,
-                    snippet_ref = %snippet.snippet_ref,
-                    content_ref = %content_ref.as_str(),
-                    safe_summary_bytes = snippet.safe_summary.len(),
-                    error_kind = ?error.kind,
-                    error_safe_summary = %error.safe_summary,
-                    "instruction bundle rejected context snippet safe summary"
-                );
-                error
-            },
-        )?;
+    let safe_summary = validate_model_safe_text(
+        snippet.safe_summary.clone(),
+        "context snippet summary",
+    )
+    .inspect_err(|error| {
+        tracing::debug!(
+            section,
+            ordinal,
+            snippet_ref = %snippet.snippet_ref,
+            content_ref = %content_ref.as_str(),
+            safe_summary_bytes = snippet.safe_summary.len(),
+            error_kind = ?error.kind,
+            error_safe_summary = %error.safe_summary,
+            "instruction bundle rejected context snippet safe summary"
+        );
+    })?;
     feed_field(fingerprint, b"section", section.as_bytes());
     feed_field(fingerprint, b"ref", content_ref.as_str().as_bytes());
     feed_field(fingerprint, b"source", snippet.snippet_ref.as_bytes());
