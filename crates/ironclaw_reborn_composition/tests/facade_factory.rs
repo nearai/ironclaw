@@ -181,6 +181,10 @@ fn local_dev_builtin_visible_request() -> VisibleCapabilityRequest {
             local_dev_grant("builtin.echo", vec![EffectKind::DispatchCapability]),
             local_dev_grant(
                 "builtin.http",
+                vec![EffectKind::DispatchCapability, EffectKind::Network],
+            ),
+            local_dev_grant(
+                "builtin.http.save",
                 vec![
                     EffectKind::DispatchCapability,
                     EffectKind::Network,
@@ -521,6 +525,10 @@ async fn local_dev_runtime_policy_exposes_http_capability() {
         visible_ids.contains(&"builtin.http"),
         "local-dev facade should expose host HTTP when the runtime policy allows network"
     );
+    assert!(
+        visible_ids.contains(&"builtin.http.save"),
+        "local-dev facade should expose saved-body HTTP when network and filesystem are allowed"
+    );
 }
 
 #[cfg(feature = "libsql")]
@@ -551,6 +559,10 @@ async fn local_dev_runtime_policy_hides_http_capability() {
     assert!(
         !visible_ids.contains(&"builtin.http"),
         "local-dev facade must forward the supplied runtime policy before visible-surface filtering"
+    );
+    assert!(
+        !visible_ids.contains(&"builtin.http.save"),
+        "local-dev facade must hide saved-body HTTP when network is denied"
     );
 }
 

@@ -326,6 +326,7 @@ mod tests {
         assert!(capability_ids.contains(&SKILL_REMOVE_CAPABILITY_ID));
         assert!(capability_ids.contains(&SHELL_CAPABILITY_ID));
         assert!(capability_ids.contains(&HTTP_CAPABILITY_ID));
+        assert!(capability_ids.contains(&HTTP_SAVE_CAPABILITY_ID));
         assert_eq!(
             local_dev_allowed_effects(),
             vec![
@@ -404,15 +405,26 @@ mod tests {
         let http_grant = grant_for(HTTP_CAPABILITY_ID);
         assert_eq!(
             http_grant.constraints.allowed_effects,
+            vec![EffectKind::DispatchCapability, EffectKind::Network]
+        );
+        assert!(http_grant.constraints.mounts.mounts.is_empty());
+        assert_eq!(
+            http_grant.constraints.network,
+            local_dev_shell_network_policy()
+        );
+
+        let http_save_grant = grant_for(HTTP_SAVE_CAPABILITY_ID);
+        assert_eq!(
+            http_save_grant.constraints.allowed_effects,
             vec![
                 EffectKind::DispatchCapability,
                 EffectKind::Network,
                 EffectKind::WriteFilesystem
             ]
         );
-        assert_eq!(http_grant.constraints.mounts, workspace_mounts);
+        assert_eq!(http_save_grant.constraints.mounts, workspace_mounts);
         assert_eq!(
-            http_grant.constraints.network,
+            http_save_grant.constraints.network,
             local_dev_shell_network_policy()
         );
 

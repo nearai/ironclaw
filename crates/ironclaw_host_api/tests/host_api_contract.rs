@@ -1005,7 +1005,7 @@ fn runtime_http_egress_request_defaults_optional_body_controls() {
         response_body_limit: Some(4096),
         save_body_to: Some(RuntimeHttpSaveTarget {
             path: ScopedPath::new("/workspace/body.json").unwrap(),
-            mount_view: None,
+            mount_grant: None,
         }),
         timeout_ms: None,
     })
@@ -1021,16 +1021,15 @@ fn runtime_http_egress_request_defaults_optional_body_controls() {
 }
 
 #[test]
-fn runtime_http_save_target_skips_mount_view_on_wire() {
-    let mount_view = MountView::new(vec![MountGrant::new(
+fn runtime_http_save_target_skips_mount_grant_on_wire() {
+    let mount_grant = MountGrant::new(
         MountAlias::new("/workspace").unwrap(),
         VirtualPath::new("/projects/workspace").unwrap(),
         MountPermissions::read_write(),
-    )])
-    .unwrap();
+    );
     let target = RuntimeHttpSaveTarget {
         path: ScopedPath::new("/workspace/body.json").unwrap(),
-        mount_view: Some(mount_view),
+        mount_grant: Some(mount_grant),
     };
 
     let value = serde_json::to_value(&target).unwrap();
@@ -1038,17 +1037,15 @@ fn runtime_http_save_target_skips_mount_view_on_wire() {
 
     let decoded: RuntimeHttpSaveTarget = serde_json::from_value(json!({
         "path": "/workspace/body.json",
-        "mount_view": {
-            "mounts": [{
-                "alias": "/workspace",
-                "target": "/projects/workspace",
-                "permissions": { "read": true, "write": true }
-            }]
+        "mount_grant": {
+            "alias": "/workspace",
+            "target": "/projects/workspace",
+            "permissions": { "read": true, "write": true }
         }
     }))
     .unwrap();
     assert_eq!(decoded.path.as_str(), "/workspace/body.json");
-    assert_eq!(decoded.mount_view, None);
+    assert_eq!(decoded.mount_grant, None);
 }
 
 #[test]

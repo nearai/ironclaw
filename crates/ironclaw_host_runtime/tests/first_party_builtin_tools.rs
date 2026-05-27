@@ -23,10 +23,10 @@ use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, CapabilitySurfacePolicy, CapabilitySurfaceVersion,
     CommandExecutionOutput, CommandExecutionRequest, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID,
-    GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HostRuntime, HostRuntimeServices, JSON_CAPABILITY_ID,
-    LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeProcessError, RuntimeProcessPort,
-    SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
+    GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime,
+    HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID,
+    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeProcessError,
+    RuntimeProcessPort, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
     SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind,
     TIME_CAPABILITY_ID, TenantSandboxProcessPort, VisibleCapabilityAccess,
     VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
@@ -59,6 +59,7 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
     for descriptor in &package.capabilities {
         let expected_permission = match descriptor.id.as_str() {
             HTTP_CAPABILITY_ID
+            | HTTP_SAVE_CAPABILITY_ID
             | SHELL_CAPABILITY_ID
             | SPAWN_SUBAGENT_CAPABILITY_ID
             | SKILL_INSTALL_CAPABILITY_ID
@@ -86,6 +87,28 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
             EffectKind::ReadFilesystem,
             EffectKind::WriteFilesystem,
             EffectKind::Network
+        ]
+    );
+    let http = package
+        .capabilities
+        .iter()
+        .find(|descriptor| descriptor.id.as_str() == HTTP_CAPABILITY_ID)
+        .expect("http manifest");
+    assert_eq!(
+        http.effects,
+        vec![EffectKind::DispatchCapability, EffectKind::Network]
+    );
+    let http_save = package
+        .capabilities
+        .iter()
+        .find(|descriptor| descriptor.id.as_str() == HTTP_SAVE_CAPABILITY_ID)
+        .expect("http save manifest");
+    assert_eq!(
+        http_save.effects,
+        vec![
+            EffectKind::DispatchCapability,
+            EffectKind::Network,
+            EffectKind::WriteFilesystem
         ]
     );
 
@@ -186,6 +209,7 @@ async fn builtin_first_party_surface_hides_runtime_policy_impossible_tools() {
         .map(|capability| capability.descriptor.id.as_str())
         .collect::<Vec<_>>();
     assert!(!ids.contains(&HTTP_CAPABILITY_ID));
+    assert!(!ids.contains(&HTTP_SAVE_CAPABILITY_ID));
     assert!(ids.contains(&ECHO_CAPABILITY_ID));
 }
 
@@ -695,7 +719,7 @@ async fn builtin_http_invokes_through_host_runtime_egress() {
 }
 
 #[tokio::test]
-async fn builtin_http_passes_save_to_and_returns_saved_body_metadata() {
+async fn builtin_http_save_passes_save_to_and_returns_saved_body_metadata() {
     let egress = Arc::new(
         RecordingRuntimeHttpEgress::with_body(br#"{"accepted":true}"#.to_vec())
             .with_saved_body("/workspace/response.json", 17),
@@ -710,12 +734,16 @@ async fn builtin_http_passes_save_to_and_returns_saved_body_metadata() {
 
     let output = invoke_with_context(
         &runtime,
-        HTTP_CAPABILITY_ID,
+        HTTP_SAVE_CAPABILITY_ID,
         json!({
             "url": "https://api.example.test/v1/items",
             "save_to": "/workspace/response.json"
         }),
-        execution_context_with_mounts_and_network([HTTP_CAPABILITY_ID], mounts, http_test_policy()),
+        execution_context_with_mounts_and_network(
+            [HTTP_SAVE_CAPABILITY_ID],
+            mounts,
+            http_test_policy(),
+        ),
     )
     .await
     .unwrap_or_else(|error| {
@@ -743,10 +771,11 @@ async fn builtin_http_passes_save_to_and_returns_saved_body_metadata() {
         .as_ref()
         .expect("save_to should be passed to host egress");
     assert_eq!(save_target.path.as_str(), "/workspace/response.json");
-    let mount_view = save_target
-        .mount_view
+    let mount_grant = save_target
+        .mount_grant
         .as_ref()
-        .expect("save_to should carry invocation mount authority");
+        .expect("save_to should carry narrowed mount authority");
+    let mount_view = MountView::new(vec![mount_grant.clone()]).unwrap();
     let (virtual_path, grant) = mount_view
         .resolve_with_grant(&save_target.path)
         .expect("saved path should resolve through captured mount view");
@@ -758,34 +787,13 @@ async fn builtin_http_passes_save_to_and_returns_saved_body_metadata() {
 }
 
 #[tokio::test]
-async fn builtin_http_rejects_save_to_without_mount_authority_before_egress() {
-    let egress = Arc::new(RecordingRuntimeHttpEgress::default());
-    let runtime = runtime_with_http_egress(Arc::clone(&egress));
-
-    let error = invoke_with_context(
-        &runtime,
-        HTTP_CAPABILITY_ID,
-        json!({
-            "url": "https://api.example.test/v1/items",
-            "save_to": "/workspace/response.json"
-        }),
-        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
-    )
-    .await
-    .unwrap_err();
-
-    assert_eq!(error, RuntimeFailureKind::InvalidInput);
-    assert!(egress.requests().is_empty());
-}
-
-#[tokio::test]
-async fn builtin_http_rejects_save_to_without_write_mount_before_egress() {
+async fn builtin_http_rejects_save_to_on_network_only_capability_before_egress() {
     let egress = Arc::new(RecordingRuntimeHttpEgress::default());
     let runtime = runtime_with_http_egress(Arc::clone(&egress));
     let mounts = MountView::new(vec![MountGrant::new(
         MountAlias::new("/workspace").unwrap(),
         VirtualPath::new("/projects/workspace").unwrap(),
-        MountPermissions::read_only(),
+        MountPermissions::read_write(),
     )])
     .unwrap();
 
@@ -806,7 +814,89 @@ async fn builtin_http_rejects_save_to_without_write_mount_before_egress() {
 }
 
 #[tokio::test]
-async fn builtin_http_rejects_invalid_or_unresolved_save_to_before_egress() {
+async fn builtin_http_save_rejects_missing_save_to_before_egress() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::default());
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/workspace").unwrap(),
+        MountPermissions::read_write(),
+    )])
+    .unwrap();
+
+    let error = invoke_with_context(
+        &runtime,
+        HTTP_SAVE_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items"
+        }),
+        execution_context_with_mounts_and_network(
+            [HTTP_SAVE_CAPABILITY_ID],
+            mounts,
+            http_test_policy(),
+        ),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert!(egress.requests().is_empty());
+}
+
+#[tokio::test]
+async fn builtin_http_save_rejects_save_to_without_mount_authority_before_egress() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::default());
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let error = invoke_with_context(
+        &runtime,
+        HTTP_SAVE_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "save_to": "/workspace/response.json"
+        }),
+        execution_context_with_network([HTTP_SAVE_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert!(egress.requests().is_empty());
+}
+
+#[tokio::test]
+async fn builtin_http_save_rejects_save_to_without_write_mount_before_egress() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::default());
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/workspace").unwrap(),
+        MountPermissions::read_only(),
+    )])
+    .unwrap();
+
+    let error = invoke_with_context(
+        &runtime,
+        HTTP_SAVE_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "save_to": "/workspace/response.json"
+        }),
+        execution_context_with_mounts_and_network(
+            [HTTP_SAVE_CAPABILITY_ID],
+            mounts,
+            http_test_policy(),
+        ),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert!(egress.requests().is_empty());
+}
+
+#[tokio::test]
+async fn builtin_http_save_rejects_invalid_or_unresolved_save_to_before_egress() {
     for save_to in ["file:///tmp/response.json", "/other/response.json"] {
         let egress = Arc::new(RecordingRuntimeHttpEgress::default());
         let runtime = runtime_with_http_egress(Arc::clone(&egress));
@@ -819,13 +909,13 @@ async fn builtin_http_rejects_invalid_or_unresolved_save_to_before_egress() {
 
         let error = invoke_with_context(
             &runtime,
-            HTTP_CAPABILITY_ID,
+            HTTP_SAVE_CAPABILITY_ID,
             json!({
                 "url": "https://api.example.test/v1/items",
                 "save_to": save_to
             }),
             execution_context_with_mounts_and_network(
-                [HTTP_CAPABILITY_ID],
+                [HTTP_SAVE_CAPABILITY_ID],
                 mounts,
                 http_test_policy(),
             ),
@@ -2130,7 +2220,7 @@ async fn builtin_http_rejects_hosted_allowlist_plan_before_egress() {
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::Authorization);
+    assert_eq!(error, RuntimeFailureKind::Network);
     assert!(egress.requests().is_empty());
 }
 
@@ -4016,12 +4106,13 @@ fn provider_id() -> ExtensionId {
     ExtensionId::new("builtin").unwrap()
 }
 
-fn all_builtin_capability_ids() -> [&'static str; 15] {
+fn all_builtin_capability_ids() -> [&'static str; 16] {
     [
         ECHO_CAPABILITY_ID,
         TIME_CAPABILITY_ID,
         JSON_CAPABILITY_ID,
         HTTP_CAPABILITY_ID,
+        HTTP_SAVE_CAPABILITY_ID,
         SHELL_CAPABILITY_ID,
         SPAWN_SUBAGENT_CAPABILITY_ID,
         READ_FILE_CAPABILITY_ID,

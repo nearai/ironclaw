@@ -42,42 +42,8 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["operation", "data"],
             "additionalProperties": false
         }),
-        "schemas/builtin/http.input.v1.json" => json!({
-            "type": "object",
-            "properties": {
-                "url": { "type": "string", "description": "Absolute HTTP or HTTPS URL" },
-                "method": {
-                    "type": "string",
-                    "enum": ["get", "post", "put", "patch", "delete", "head"],
-                    "description": "HTTP method. Defaults to get."
-                },
-                "headers": {
-                    "description": "HTTP headers as an object or array of {name,value} entries"
-                },
-                "body": { "description": "String or JSON request body" },
-                "body_base64": { "type": "string", "description": "Base64-encoded request body" },
-                "response_body_limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 10485760,
-                    "default": 10485760,
-                    "description": "Maximum response body bytes. Defaults to 10 MiB; smaller values are raised to 10 MiB."
-                },
-                "save_to": {
-                    "type": "string",
-                    "description": "Scoped path to save the sanitized response body, e.g. /workspace/response.json"
-                },
-                "timeout_ms": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 30000,
-                    "default": 10000,
-                    "description": "Request timeout in milliseconds. Defaults to 10s and is capped at 30s."
-                }
-            },
-            "required": ["url"],
-            "additionalProperties": false
-        }),
+        "schemas/builtin/http.input.v1.json" => http_schema(false),
+        "schemas/builtin/http-save.input.v1.json" => http_schema(true),
         "schemas/builtin/shell.input.v1.json" => json!({
             "type": "object",
             "properties": {
@@ -243,5 +209,50 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "additionalProperties": false
         }),
         _ => return None,
+    })
+}
+
+fn http_schema(require_save_to: bool) -> Value {
+    let mut properties = json!({
+        "url": { "type": "string", "description": "Absolute HTTP or HTTPS URL" },
+        "method": {
+            "type": "string",
+            "enum": ["get", "post", "put", "patch", "delete", "head"],
+            "description": "HTTP method. Defaults to get."
+        },
+        "headers": {
+            "description": "HTTP headers as an object or array of {name,value} entries"
+        },
+        "body": { "description": "String or JSON request body" },
+        "body_base64": { "type": "string", "description": "Base64-encoded request body" },
+        "response_body_limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10485760,
+            "default": 10485760,
+            "description": "Maximum response body bytes. Defaults to 10 MiB; smaller values are raised to 10 MiB."
+        },
+        "timeout_ms": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 30000,
+            "default": 10000,
+            "description": "Request timeout in milliseconds. Defaults to 10s and is capped at 30s."
+        }
+    });
+    let mut required = vec!["url"];
+    if require_save_to {
+        properties["save_to"] = json!({
+            "type": "string",
+            "description": "Scoped path to save the sanitized response body, e.g. /workspace/response.json"
+        });
+        required.push("save_to");
+    }
+
+    json!({
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": false
     })
 }

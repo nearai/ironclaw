@@ -2078,8 +2078,7 @@ fn host_http_egress_saves_response_body_to_scoped_filesystem_store() {
     )
     .with_body_store(scoped_filesystem.clone());
 
-    let mut target = save_target("/workspace/pr.diff");
-    target.mount_view = Some(save_mounts);
+    let target = save_target_with_mount("/workspace/pr.diff", &save_mounts);
     let response = service
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::FirstParty,
@@ -2140,8 +2139,7 @@ async fn host_http_egress_saves_response_body_to_scoped_filesystem_store_from_to
     )
     .with_body_store(scoped_filesystem.clone());
 
-    let mut target = save_target("/workspace/from-tokio.txt");
-    target.mount_view = Some(save_mounts);
+    let target = save_target_with_mount("/workspace/from-tokio.txt", &save_mounts);
     let response = service
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::FirstParty,
@@ -2201,15 +2199,13 @@ fn host_http_egress_rejects_save_when_target_mount_view_is_read_only() {
     )
     .with_body_store(scoped_filesystem.clone());
 
-    let mut target = save_target("/workspace/pr.diff");
-    target.mount_view = Some(
-        MountView::new(vec![MountGrant::new(
-            MountAlias::new("/workspace").unwrap(),
-            VirtualPath::new("/projects/workspace").unwrap(),
-            MountPermissions::read_only(),
-        )])
-        .unwrap(),
-    );
+    let read_only_mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/workspace").unwrap(),
+        MountPermissions::read_only(),
+    )])
+    .unwrap();
+    let target = save_target_with_mount("/workspace/pr.diff", &read_only_mounts);
     let error = service
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::FirstParty,
@@ -3264,7 +3260,26 @@ fn sample_capability_id() -> CapabilityId {
 fn save_target(path: &str) -> RuntimeHttpSaveTarget {
     RuntimeHttpSaveTarget {
         path: ScopedPath::new(path).unwrap(),
-        mount_view: None,
+        mount_grant: None,
+    }
+}
+
+fn save_target_with_mount(path: &str, mounts: &MountView) -> RuntimeHttpSaveTarget {
+    let scoped_path = mounts.scoped_path(path.to_string()).unwrap();
+    let (virtual_path, grant) = mounts.resolve_with_grant(&scoped_path).unwrap();
+    RuntimeHttpSaveTarget {
+        mount_grant: Some(MountGrant::new(
+            MountAlias::new(path).unwrap(),
+            virtual_path,
+            MountPermissions {
+                read: false,
+                write: grant.permissions.write,
+                delete: false,
+                list: false,
+                execute: false,
+            },
+        )),
+        path: scoped_path,
     }
 }
 

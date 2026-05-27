@@ -2,7 +2,7 @@ use std::{fmt, sync::LazyLock};
 
 use ironclaw_filesystem::{FilesystemError, FilesystemOperation, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    CapabilityId, ResourceScope, RuntimeHttpEgressError, RuntimeHttpSaveTarget,
+    CapabilityId, MountView, ResourceScope, RuntimeHttpEgressError, RuntimeHttpSaveTarget,
     RuntimeHttpSavedBody,
 };
 use ironclaw_network::NetworkHttpResponse;
@@ -41,16 +41,8 @@ where
         _capability_id: &CapabilityId,
         target: &RuntimeHttpSaveTarget,
     ) -> Result<(), RuntimeHttpBodyStoreError> {
-        let resolved_view;
-        let view = match target.mount_view.as_ref() {
-            Some(view) => view,
-            None => {
-                resolved_view = self
-                    .mount_view(scope)
-                    .map_err(runtime_http_body_store_error)?;
-                &resolved_view
-            }
-        };
+        let mut resolved_view = None;
+        let view = target_mount_view(self, scope, target, &mut resolved_view)?;
         let (_path, grant) = view
             .resolve_with_grant(&target.path)
             .map_err(runtime_http_body_store_error)?;
@@ -73,17 +65,34 @@ where
         target: &RuntimeHttpSaveTarget,
         body: &[u8],
     ) -> Result<(), RuntimeHttpBodyStoreError> {
+        let mut resolved_view = None;
+        let view = target_mount_view(self, scope, target, &mut resolved_view)?;
         let write = async {
-            match target.mount_view.as_ref() {
-                Some(view) => {
-                    self.write_bytes_with_mount_view(view, &target.path, body)
-                        .await
-                }
-                None => self.write_bytes(scope, &target.path, body.to_vec()).await,
-            }
+            self.write_bytes_with_mount_view(view, &target.path, body)
+                .await
         };
         block_on_filesystem(write).map(|_| ())
     }
+}
+
+fn target_mount_view<'a, F>(
+    filesystem: &'a ScopedFilesystem<F>,
+    scope: &ResourceScope,
+    target: &RuntimeHttpSaveTarget,
+    resolved_view: &'a mut Option<MountView>,
+) -> Result<&'a MountView, RuntimeHttpBodyStoreError>
+where
+    F: RootFilesystem + ?Sized,
+{
+    let view = match target.mount_grant.as_ref() {
+        Some(grant) => {
+            MountView::new(vec![grant.clone()]).map_err(runtime_http_body_store_error)?
+        }
+        None => filesystem
+            .mount_view(scope)
+            .map_err(runtime_http_body_store_error)?,
+    };
+    Ok(resolved_view.insert(view))
 }
 
 static FILESYSTEM_RUNTIME: LazyLock<Result<tokio::runtime::Runtime, RuntimeHttpBodyStoreError>> =
