@@ -7,9 +7,9 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet,
-    EffectKind, ExecutionContext, ExtensionId, GrantConstraints, InvocationId, MountView,
-    NetworkPolicy, NetworkTargetPattern, Principal, RuntimeKind, TrustClass, UserId,
+    CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind, ExecutionContext,
+    ExtensionId, GrantConstraints, InvocationId, MountView, NetworkPolicy, NetworkTargetPattern,
+    Principal, RuntimeKind, TrustClass, UserId,
 };
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, CapabilitySurfacePolicy, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID,
@@ -46,6 +46,10 @@ use crate::{
     projection::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore},
 };
 
+mod extension_surface;
+
+use extension_surface::{LocalDevExtensionSurface, LocalDevExtensionSurfaceSource};
+
 pub(super) struct LocalDevCapabilityWiring {
     pub(super) capability_factory: Arc<dyn LoopCapabilityPortFactory>,
     pub(super) capability_input_resolver: Arc<dyn LoopCapabilityInputResolver>,
@@ -65,11 +69,8 @@ pub(super) fn capability_wiring(
     let runtime = services.host_runtime.clone()?;
     let local_runtime = services.local_runtime.as_ref()?;
     let workspace_mounts = local_runtime.workspace_mounts.clone();
-    let active_extension_capabilities = local_runtime
-        .extension_management
-        .as_ref()
-        .map(|extension_management| extension_management.active_model_visible_capabilities())
-        .unwrap_or_default();
+    let extension_surface_source =
+        LocalDevExtensionSurfaceSource::new(local_runtime.extension_management.clone());
     let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
     let capability_io = Arc::new(LocalDevCapabilityIo::new_with_durable_previews(
         Arc::clone(&display_previews),
@@ -83,7 +84,7 @@ pub(super) fn capability_wiring(
             runtime,
             user_id,
             workspace_mounts,
-            active_extension_capabilities,
+            extension_surface_source,
             Arc::clone(&capability_input_resolver),
             Arc::clone(&capability_result_writer),
             milestone_sink,
@@ -106,7 +107,7 @@ struct LocalDevLoopCapabilityPortFactory {
     runtime: Arc<dyn HostRuntime>,
     user_id: UserId,
     workspace_mounts: MountView,
-    active_extension_capabilities: Vec<CapabilityDescriptor>,
+    extension_surface_source: LocalDevExtensionSurfaceSource,
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
@@ -117,7 +118,7 @@ impl LocalDevLoopCapabilityPortFactory {
         runtime: Arc<dyn HostRuntime>,
         user_id: UserId,
         workspace_mounts: MountView,
-        active_extension_capabilities: Vec<CapabilityDescriptor>,
+        extension_surface_source: LocalDevExtensionSurfaceSource,
         input_resolver: Arc<dyn LoopCapabilityInputResolver>,
         result_writer: Arc<dyn LoopCapabilityResultWriter>,
         milestone_sink: Arc<dyn LoopHostMilestoneSink>,
@@ -126,7 +127,7 @@ impl LocalDevLoopCapabilityPortFactory {
             runtime,
             user_id,
             workspace_mounts,
-            active_extension_capabilities,
+            extension_surface_source,
             input_resolver,
             result_writer,
             milestone_sink,
@@ -142,12 +143,13 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
         let workspace_mounts = self.workspace_mounts.clone();
         let skill_mounts = skill_management_mount_view().map_err(host_api_agent_loop_error)?;
+        let extension_surface = self.extension_surface_source.snapshot();
         let visible_request = local_dev_visible_capability_request(
             run_context,
             self.user_id.clone(),
             workspace_mounts.clone(),
             skill_mounts.clone(),
-            &self.active_extension_capabilities,
+            &extension_surface,
         )?;
         let mut factory = HostRuntimeLoopCapabilityPortFactory::new(
             Arc::clone(&self.runtime),
@@ -692,14 +694,13 @@ fn local_dev_visible_capability_request(
     user_id: UserId,
     workspace_mounts: MountView,
     skill_mounts: MountView,
-    active_extension_capabilities: &[CapabilityDescriptor],
+    extension_surface: &LocalDevExtensionSurface,
 ) -> Result<HostVisibleCapabilityRequest, AgentLoopHostError> {
     let extension_id = loop_driver_execution_extension_id(run_context)?;
     let mut grants = local_dev_builtin_grants(&extension_id, &workspace_mounts, &skill_mounts)?;
-    grants.grants.extend(local_dev_extension_grants(
-        &extension_id,
-        active_extension_capabilities,
-    ));
+    grants
+        .grants
+        .extend(extension_surface.grants(&extension_id));
     let mut context = ExecutionContext::local_default(
         user_id,
         extension_id,
@@ -733,9 +734,7 @@ fn local_dev_visible_capability_request(
             evaluated_at: Utc::now(),
         },
     );
-    provider_trust.extend(local_dev_extension_provider_trust(
-        active_extension_capabilities,
-    ));
+    provider_trust.extend(extension_surface.provider_trust());
 
     Ok(HostVisibleCapabilityRequest::new(
         context,
@@ -743,87 +742,6 @@ fn local_dev_visible_capability_request(
     )
     .with_policy(CapabilitySurfacePolicy::allow_all())
     .with_provider_trust(provider_trust))
-}
-
-fn local_dev_extension_grants(
-    grantee: &ExtensionId,
-    active_extension_capabilities: &[CapabilityDescriptor],
-) -> Vec<CapabilityGrant> {
-    active_extension_capabilities
-        .iter()
-        .map(|descriptor| CapabilityGrant {
-            id: CapabilityGrantId::new(),
-            capability: descriptor.id.clone(),
-            grantee: Principal::Extension(grantee.clone()),
-            issued_by: Principal::HostRuntime,
-            constraints: local_dev_extension_grant_constraints(descriptor),
-        })
-        .collect()
-}
-
-fn local_dev_extension_grant_constraints(descriptor: &CapabilityDescriptor) -> GrantConstraints {
-    GrantConstraints {
-        allowed_effects: descriptor.effects.clone(),
-        mounts: MountView::default(),
-        network: NetworkPolicy {
-            allowed_targets: descriptor.runtime_credentials.iter().fold(
-                Vec::new(),
-                |mut targets, credential| {
-                    if !targets.contains(&credential.audience) {
-                        targets.push(credential.audience.clone());
-                    }
-                    targets
-                },
-            ),
-            deny_private_ip_ranges: true,
-            max_egress_bytes: None,
-        },
-        secrets: descriptor.runtime_credentials.iter().fold(
-            Vec::new(),
-            |mut handles, credential| {
-                if !handles.contains(&credential.handle) {
-                    handles.push(credential.handle.clone());
-                }
-                handles
-            },
-        ),
-        resource_ceiling: None,
-        expires_at: None,
-        max_invocations: None,
-    }
-}
-
-fn local_dev_extension_provider_trust(
-    active_extension_capabilities: &[CapabilityDescriptor],
-) -> BTreeMap<ExtensionId, TrustDecision> {
-    let mut effects_by_provider: BTreeMap<ExtensionId, Vec<EffectKind>> = BTreeMap::new();
-    for descriptor in active_extension_capabilities {
-        let effects = effects_by_provider
-            .entry(descriptor.provider.clone())
-            .or_default();
-        for effect in &descriptor.effects {
-            if !effects.contains(effect) {
-                effects.push(*effect);
-            }
-        }
-    }
-    effects_by_provider
-        .into_iter()
-        .map(|(provider, allowed_effects)| {
-            (
-                provider,
-                TrustDecision {
-                    effective_trust: EffectiveTrustClass::user_trusted(),
-                    authority_ceiling: AuthorityCeiling {
-                        allowed_effects,
-                        max_resource_ceiling: None,
-                    },
-                    provenance: TrustProvenance::AdminConfig,
-                    evaluated_at: Utc::now(),
-                },
-            )
-        })
-        .collect()
 }
 
 fn local_dev_builtin_grants(

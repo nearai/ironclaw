@@ -61,6 +61,22 @@ mod tests {
         })
     }
 
+    #[derive(Debug, Default)]
+    struct UnavailableModelGateway;
+
+    #[async_trait::async_trait]
+    impl HostManagedModelGateway for UnavailableModelGateway {
+        async fn stream_model(
+            &self,
+            _request: HostManagedModelRequest,
+        ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+            Err(HostManagedModelError::safe(
+                HostManagedModelErrorKind::Unavailable,
+                "test gateway is not wired",
+            ))
+        }
+    }
+
     #[tokio::test]
     async fn capability_io_writes_durable_preview_message_and_live_upsert_id() {
         let run_context = run_context("durable-preview").await;
@@ -413,7 +429,7 @@ mod tests {
             runtime,
             UserId::new("local-yolo-host-user").expect("user id"), // safety: literal test id is valid.
             workspace_mounts,
-            Vec::new(),
+            LocalDevExtensionSurfaceSource::default(),
             input_resolver,
             result_writer,
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
@@ -508,31 +524,26 @@ mod tests {
         ))
         .await
         .expect("local-dev services rebuild");
-        let runtime = services.host_runtime.clone().expect("host runtime");
-        let local_runtime = services
-            .local_runtime
-            .as_ref()
-            .expect("local runtime substrate");
-        let active_extension_capabilities = local_runtime
-            .extension_management
-            .as_ref()
-            .expect("extension management")
-            .active_model_visible_capabilities();
-        let workspace_mounts = local_runtime.workspace_mounts.clone();
-        let capability_io = Arc::new(LocalDevCapabilityIo::default());
-        let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
-        let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
-        let factory = LocalDevLoopCapabilityPortFactory::new(
-            runtime,
+        let run_context = run_context("github-surface").await;
+        let thread_scope = ThreadScope {
+            tenant_id: run_context.scope.tenant_id.clone(),
+            agent_id: run_context.scope.agent_id.clone().expect("agent id"),
+            project_id: run_context.scope.project_id.clone(),
+            owner_user_id: None,
+            mission_id: None,
+        };
+        let wiring = capability_wiring(
+            &services,
+            Arc::new(InMemorySessionThreadService::default()),
+            thread_scope,
             UserId::new("local-dev-github-user").expect("user id"),
-            workspace_mounts,
-            active_extension_capabilities,
-            input_resolver,
-            result_writer,
+            Arc::new(UnavailableModelGateway),
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
-        );
-        let port = factory
-            .create_capability_port(&run_context("github-surface").await)
+        )
+        .expect("local-dev capability wiring");
+        let port = wiring
+            .capability_factory
+            .create_capability_port(&run_context)
             .await
             .expect("capability port");
         let surface = port

@@ -7,7 +7,10 @@ use ironclaw_extensions::{
     ManifestHash, ManifestSource, SharedExtensionRegistry,
 };
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::{CapabilityDescriptor, ExtensionId, VirtualPath, sha256_digest_token};
+use ironclaw_host_api::{
+    CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, RuntimeCredentialRequirement,
+    VirtualPath, sha256_digest_token,
+};
 use ironclaw_product_workflow::{
     LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload,
     LifecycleProductResponse, ProductWorkflowError,
@@ -34,6 +37,25 @@ pub(crate) struct RebornLocalExtensionManagementPort {
     lifecycle_service: Arc<Mutex<ExtensionLifecycleService>>,
     active_registry: Arc<SharedExtensionRegistry>,
     operation_lock: Arc<Mutex<()>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ActiveExtensionCapability {
+    pub(crate) id: CapabilityId,
+    pub(crate) provider: ExtensionId,
+    pub(crate) effects: Vec<EffectKind>,
+    pub(crate) runtime_credentials: Vec<RuntimeCredentialRequirement>,
+}
+
+impl ActiveExtensionCapability {
+    fn from_descriptor(descriptor: &CapabilityDescriptor) -> Self {
+        Self {
+            id: descriptor.id.clone(),
+            provider: descriptor.provider.clone(),
+            effects: descriptor.effects.clone(),
+            runtime_credentials: descriptor.runtime_credentials.clone(),
+        }
+    }
 }
 
 pub(crate) async fn restore_extension_lifecycle_state(
@@ -120,7 +142,7 @@ impl RebornLocalExtensionManagementPort {
         ))
     }
 
-    pub(crate) fn active_model_visible_capabilities(&self) -> Vec<CapabilityDescriptor> {
+    pub(crate) fn active_model_visible_capabilities(&self) -> Vec<ActiveExtensionCapability> {
         let registry = self.active_registry.snapshot();
         registry
             .capabilities()
@@ -130,7 +152,7 @@ impl RebornLocalExtensionManagementPort {
                     .unwrap_or(CapabilityVisibility::Model)
                     == CapabilityVisibility::Model
             })
-            .cloned()
+            .map(ActiveExtensionCapability::from_descriptor)
             .collect()
     }
 
