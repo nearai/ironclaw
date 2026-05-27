@@ -498,6 +498,45 @@ where
         }
     }
 
+    async fn set_thread_title_if_unset(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        title: String,
+    ) -> Result<SessionThreadRecord, SessionThreadError> {
+        let path = thread_record_path(scope, thread_id)?;
+        for _ in 0..FILESYSTEM_CAS_RETRIES {
+            let (mut stored, version) = self
+                .read_thread_versioned(scope, thread_id)
+                .await?
+                .ok_or_else(|| SessionThreadError::UnknownThread {
+                    thread_id: thread_id.clone(),
+                })?;
+            if stored.record.title.is_some() {
+                return Ok(stored.record);
+            }
+            stored.record.title = Some(title.clone());
+            let entry = Self::thread_entry(&stored)?;
+            match put_with_cas(
+                self.filesystem.as_ref(),
+                &scope.to_resource_scope(),
+                &path,
+                entry,
+                CasExpectation::Version(version),
+            )
+            .await
+            {
+                Ok(()) => return Ok(stored.record),
+                Err(PutError::VersionMismatch) => continue,
+                Err(PutError::Other(error)) => return Err(error),
+            }
+        }
+        Err(SessionThreadError::Backend(format!(
+            "filesystem CAS retries exhausted setting thread title at {}",
+            path.as_str()
+        )))
+    }
+
     async fn accept_inbound_message(
         &self,
         request: AcceptInboundMessageRequest,

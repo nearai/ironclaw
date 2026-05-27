@@ -16,9 +16,11 @@ mod filesystem_service;
 mod identifiers;
 mod in_memory;
 mod service;
+mod title;
 mod tool_result_reference;
 
 pub use filesystem_service::FilesystemSessionThreadService;
+pub use title::derive_title_from_message;
 
 pub use capability_display_preview::{
     CapabilityDisplayPreviewEnvelope, CapabilityDisplayPreviewEnvelopeInput,

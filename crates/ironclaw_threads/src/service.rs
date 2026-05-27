@@ -21,6 +21,32 @@ pub trait SessionThreadService: Send + Sync {
         request: EnsureThreadRequest,
     ) -> Result<SessionThreadRecord, SessionThreadError>;
 
+    /// Set the thread title if and only if it is currently unset.
+    ///
+    /// Atomically checks the existing title and writes `title` only
+    /// when the current value is `None`. Returns the resulting record
+    /// (post-update, or the unchanged record when the call was a
+    /// no-op because the title was already set).
+    ///
+    /// Used by the product workflow to seed a sidebar-friendly title
+    /// from the first inbound user message without clobbering a
+    /// caller-supplied title from `EnsureThreadRequest`.
+    ///
+    /// The default impl fails closed so backends that have not
+    /// implemented enumeration surface a clear `Backend` error rather
+    /// than silently dropping the title update.
+    async fn set_thread_title_if_unset(
+        &self,
+        _scope: &ThreadScope,
+        _thread_id: &ThreadId,
+        _title: String,
+    ) -> Result<SessionThreadRecord, SessionThreadError> {
+        Err(SessionThreadError::Backend(
+            "set_thread_title_if_unset is not implemented by this SessionThreadService backend"
+                .to_string(),
+        ))
+    }
+
     async fn accept_inbound_message(
         &self,
         request: AcceptInboundMessageRequest,

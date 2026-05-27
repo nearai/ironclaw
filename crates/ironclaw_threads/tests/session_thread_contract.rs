@@ -1723,3 +1723,62 @@ async fn list_threads_for_scope_is_scope_filtered_and_paginated() {
         .collect();
     assert_eq!(ids_b, ["t-b-001"]);
 }
+
+#[tokio::test]
+async fn set_thread_title_if_unset_writes_when_title_is_none_and_is_a_noop_otherwise() {
+    let service = InMemorySessionThreadService::default();
+    let scope = scope("title");
+    let thread_id = ThreadId::new("thread-title").unwrap();
+
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: "user-title".to_string(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let after_first = service
+        .set_thread_title_if_unset(&scope, &thread_id, "first attempt".to_string())
+        .await
+        .unwrap();
+    assert_eq!(after_first.title.as_deref(), Some("first attempt"));
+
+    let after_second = service
+        .set_thread_title_if_unset(&scope, &thread_id, "second attempt".to_string())
+        .await
+        .unwrap();
+    assert_eq!(
+        after_second.title.as_deref(),
+        Some("first attempt"),
+        "subsequent calls must be a no-op once a title is set",
+    );
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(history.thread.title.as_deref(), Some("first attempt"));
+}
+
+#[tokio::test]
+async fn set_thread_title_if_unset_returns_unknown_thread_for_missing_id() {
+    let service = InMemorySessionThreadService::default();
+    let scope = scope("unknown-title");
+    let thread_id = ThreadId::new("does-not-exist").unwrap();
+
+    let err = service
+        .set_thread_title_if_unset(&scope, &thread_id, "hello".to_string())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, SessionThreadError::UnknownThread { .. }),
+        "expected UnknownThread, got {err:?}"
+    );
+}

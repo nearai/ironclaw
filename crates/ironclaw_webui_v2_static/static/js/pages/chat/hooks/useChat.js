@@ -51,6 +51,19 @@ export function useChat(threadId) {
   const [isProcessing, setIsProcessing] = React.useState(false);
   const [pendingGate, setPendingGate] = React.useState(null);
 
+  // Per-thread transient state must not leak across thread switches.
+  // Without this reset, clicking "+ New" while the previous thread is
+  // still processing renders the TypingIndicator on the empty new
+  // thread. The SSE subscription for the new thread will set these
+  // back to non-default values if that thread actually has an active
+  // run / gate. `cooldownUntil` is intentionally not reset — it's a
+  // rate-limit timer that applies across threads.
+  React.useEffect(() => {
+    setIsProcessing(false);
+    setPendingGate(null);
+    setActiveRun(null);
+  }, [threadId]);
+
   const cooldownSeconds = Math.max(0, Math.ceil((cooldownUntil - now) / 1000));
 
   React.useEffect(() => {
@@ -138,6 +151,10 @@ export function useChat(threadId) {
           threadId: sendThreadId,
           content,
         });
+        // Refresh the sidebar so the backend-seeded title (from the
+        // first user message), turn_count, and updated_at appear
+        // without waiting for the next manual reload.
+        queryClient.invalidateQueries({ queryKey: ["threads"] });
         if (response?.run_id) {
           setActiveRun({
             runId: response.run_id,

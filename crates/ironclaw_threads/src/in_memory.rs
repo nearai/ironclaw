@@ -101,6 +101,20 @@ impl SessionThreadService for InMemorySessionThreadService {
         Ok(record)
     }
 
+    async fn set_thread_title_if_unset(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        title: String,
+    ) -> Result<SessionThreadRecord, SessionThreadError> {
+        let mut state = self.state.lock().await;
+        let thread = get_thread_mut(&mut state, scope, thread_id)?;
+        if thread.record.title.is_none() {
+            thread.record.title = Some(title);
+        }
+        Ok(thread.record.clone())
+    }
+
     async fn accept_inbound_message(
         &self,
         request: AcceptInboundMessageRequest,
