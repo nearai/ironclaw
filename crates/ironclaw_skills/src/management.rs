@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::{
-    MAX_PROMPT_FILE_SIZE, SkillParseError, normalize_line_endings, parse_skill_md,
+    MAX_PROMPT_FILE_SIZE, ParsedSkill, SkillParseError, normalize_line_endings, parse_skill_md,
     validate_skill_name,
 };
 use async_trait::async_trait;
