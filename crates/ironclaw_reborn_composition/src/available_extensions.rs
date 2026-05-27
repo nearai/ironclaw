@@ -647,11 +647,17 @@ where
             entry.path.as_str().trim_end_matches('/')
         ))
         .map_err(map_binding_error)?;
-        let manifest_bytes = fs.read_file(&manifest_path).await.map_err(|error| {
-            ProductWorkflowError::Transient {
-                reason: format!("failed to read available extension manifest: {error}"),
+        let manifest_bytes = match fs.read_file(&manifest_path).await {
+            Ok(bytes) => bytes,
+            Err(FilesystemError::NotFound { .. }) | Err(FilesystemError::MountNotFound { .. }) => {
+                continue;
             }
-        })?;
+            Err(error) => {
+                return Err(ProductWorkflowError::Transient {
+                    reason: format!("failed to read available extension manifest: {error}"),
+                });
+            }
+        };
         let manifest_toml = String::from_utf8(manifest_bytes).map_err(|error| {
             ProductWorkflowError::InvalidBindingRequest {
                 reason: format!("available extension manifest is not UTF-8: {error}"),
@@ -869,6 +875,26 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["manifest.toml", "wasm/fixture.wasm"]
         );
+    }
+
+    #[tokio::test]
+    async fn filesystem_catalog_skips_extension_dirs_without_manifest() {
+        let fs = InMemoryBackend::default();
+        fs.write_file(
+            &VirtualPath::new("/system/extensions/incomplete/cache/leftover").unwrap(),
+            b"stale",
+        )
+        .await
+        .unwrap();
+
+        let catalog = AvailableExtensionCatalog::from_filesystem_root(
+            &fs,
+            &VirtualPath::new("/system/extensions").unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(catalog.search("").count(), 0);
     }
 
     #[derive(Default)]
