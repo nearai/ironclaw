@@ -12,8 +12,8 @@ use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_auth::{
     AuthContinuationEvent, AuthProductError, AuthProviderClient, InMemoryAuthProductServices,
-    OAuthProviderCallbackRequest, OAuthProviderExchange, OAuthProviderRefresh,
-    OAuthProviderRefreshRequest,
+    OAuthProviderCallbackRequest, OAuthProviderExchange, OAuthProviderExchangeContext,
+    OAuthProviderRefresh, OAuthProviderRefreshRequest,
 };
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_product_workflow::{
@@ -76,6 +76,7 @@ struct FailingProviderClient;
 impl AuthProviderClient for FailingProviderClient {
     async fn exchange_callback(
         &self,
+        _context: OAuthProviderExchangeContext,
         _request: OAuthProviderCallbackRequest,
     ) -> Result<OAuthProviderExchange, AuthProductError> {
         Err(AuthProductError::TokenExchangeFailed)

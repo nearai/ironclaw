@@ -21,7 +21,7 @@ pub use gsuite::{
     GSUITE_REQUEST_BODY_LIMIT, GSUITE_RESPONSE_BODY_LIMIT, GSUITE_TIMEOUT_MS, GoogleCredential,
     GoogleCredentialError, GoogleCredentialResolver, GsuiteCapabilityOperation,
     GsuiteCapabilitySpec, GsuiteCredentialDispatchReason, GsuiteDispatchError,
-    GsuiteDispatchReason, GsuiteDispatchRequest, GsuiteDispatchResult, GsuiteExecutor,
-    GsuitePackageSpec, calendar_package_spec, find_gsuite_capability, gmail_package_spec,
-    google_api_network_policy, google_provider_id, gsuite_package_specs, gsuite_resource_profile,
+    GsuiteDispatchRequest, GsuiteDispatchResult, GsuiteExecutor, GsuitePackageSpec,
+    calendar_package_spec, find_gsuite_capability, gmail_package_spec, google_api_network_policy,
+    google_provider_id, gsuite_package_specs, gsuite_resource_profile,
 };

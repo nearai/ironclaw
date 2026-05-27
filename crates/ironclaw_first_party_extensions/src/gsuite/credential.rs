@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use ironclaw_auth::{
     AuthProductError, AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountId,
-    CredentialAccountLookupRequest, CredentialAccountSelectionRequest, CredentialAccountService,
-    CredentialAccountStatus, CredentialRecoveryProjection, GOOGLE_PROVIDER_ID, ProviderScope,
+    CredentialAccountSelectionRequest, CredentialAccountService, CredentialAccountStatus,
+    CredentialRecoveryProjection, GOOGLE_PROVIDER_ID, ProviderScope,
 };
 use ironclaw_host_api::{ExtensionId, ResourceScope, SecretHandle};
 use thiserror::Error;
@@ -48,36 +48,20 @@ impl GoogleCredentialResolver {
     ) -> Result<GoogleCredential, GoogleCredentialError> {
         let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
         let provider = google_provider_id()?;
-        let selected = self
+        let account = self
             .accounts
-            .select_unique_configured_account(
+            .select_unique_configured_account_record(
                 CredentialAccountSelectionRequest::new(auth_scope.clone(), provider.clone())
                     .for_extension(requester_extension.clone()),
             )
             .await;
-        let selected = match selected {
-            Ok(selected) => selected,
+        let account = match account {
+            Ok(account) => account,
             Err(
                 AuthProductError::CredentialMissing
                 | AuthProductError::CrossScopeDenied
                 | AuthProductError::AccountSelectionRequired,
             ) => {
-                return self
-                    .recovery_required(scope, requester_extension, provider)
-                    .await;
-            }
-            Err(error) => return Err(GoogleCredentialError::Auth(error)),
-        };
-        let account = match self
-            .accounts
-            .get_account(
-                CredentialAccountLookupRequest::new(auth_scope, selected.id)
-                    .for_extension(requester_extension.clone()),
-            )
-            .await
-        {
-            Ok(Some(account)) => account,
-            Ok(None) => {
                 return self
                     .recovery_required(scope, requester_extension, provider)
                     .await;
@@ -149,11 +133,11 @@ mod tests {
     use async_trait::async_trait;
     use ironclaw_auth::{
         CredentialAccount, CredentialAccountChoiceRequest, CredentialAccountLabel,
-        CredentialAccountListPage, CredentialAccountListRequest, CredentialAccountProjection,
-        CredentialAccountSelectionRequest, CredentialOwnership, CredentialRecoveryKind,
-        CredentialRecoveryProjection, CredentialRecoveryReason, CredentialRecoveryRequest,
-        CredentialRefreshReport, CredentialRefreshRequest, InMemoryAuthProductServices,
-        NewCredentialAccount,
+        CredentialAccountListPage, CredentialAccountListRequest, CredentialAccountLookupRequest,
+        CredentialAccountProjection, CredentialAccountSelectionRequest, CredentialOwnership,
+        CredentialRecoveryKind, CredentialRecoveryProjection, CredentialRecoveryReason,
+        CredentialRecoveryRequest, CredentialRefreshReport, CredentialRefreshRequest,
+        InMemoryAuthProductServices, NewCredentialAccount,
     };
     use ironclaw_host_api::{InvocationId, UserId};
 
@@ -457,6 +441,13 @@ mod tests {
             Ok(self.account.projection())
         }
 
+        async fn select_unique_configured_account_record(
+            &self,
+            _request: CredentialAccountSelectionRequest,
+        ) -> Result<CredentialAccount, AuthProductError> {
+            Ok(self.account.clone())
+        }
+
         async fn project_credential_recovery(
             &self,
             _request: CredentialRecoveryRequest,
@@ -519,6 +510,13 @@ mod tests {
             _request: CredentialAccountSelectionRequest,
         ) -> Result<CredentialAccountProjection, AuthProductError> {
             Ok(self.selected.clone())
+        }
+
+        async fn select_unique_configured_account_record(
+            &self,
+            _request: CredentialAccountSelectionRequest,
+        ) -> Result<CredentialAccount, AuthProductError> {
+            Err(AuthProductError::CredentialMissing)
         }
 
         async fn project_credential_recovery(

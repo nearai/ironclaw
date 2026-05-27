@@ -10,9 +10,9 @@ use ironclaw_auth::{
     CredentialAccountUpdateBinding, CredentialRefreshReport, CredentialRefreshRequest,
     CredentialSetupService, InMemoryAuthProductServices, ManualTokenSetupRequest, NewAuthFlow,
     OAuthAuthorizationUrl, OAuthCallbackClaimRequest, OAuthCallbackFailureInput,
-    OAuthCallbackInput, OAuthProviderCallbackRequest, OpaqueStateHash, PkceVerifierHash,
-    ProviderCallbackOutcome, SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
-    SecretSubmitRequest, Timestamp,
+    OAuthCallbackInput, OAuthProviderCallbackRequest, OAuthProviderExchangeContext,
+    OpaqueStateHash, PkceVerifierHash, ProviderCallbackOutcome, SecretCleanupReport,
+    SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest, Timestamp,
 };
 use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
 use secrecy::SecretString;
@@ -89,7 +89,7 @@ pub(crate) struct RebornOAuthStartFlowRequest {
 #[derive(Debug)]
 pub enum RebornOAuthCallbackOutcome {
     Authorized {
-        provider_request: Box<OAuthProviderCallbackRequest>,
+        provider_request: OAuthProviderCallbackRequest,
     },
     ProviderDenied,
     Malformed,
@@ -531,9 +531,7 @@ impl RebornProductAuthServices {
         request: RebornOAuthCallbackRequest,
     ) -> Result<RebornOAuthCallbackResponse, RebornOAuthCallbackError> {
         let completed = match request.outcome {
-            RebornOAuthCallbackOutcome::Authorized {
-                mut provider_request,
-            } => {
+            RebornOAuthCallbackOutcome::Authorized { provider_request } => {
                 let claimed = self
                     .flow_manager
                     .claim_oauth_callback(
@@ -551,10 +549,15 @@ impl RebornProductAuthServices {
                 if claimed.status == AuthFlowStatus::Completed {
                     claimed
                 } else {
-                    provider_request.scope = request.scope.clone();
                     let exchange = match self
                         .provider_client
-                        .exchange_callback(*provider_request)
+                        .exchange_callback(
+                            OAuthProviderExchangeContext {
+                                scope: request.scope.clone(),
+                                flow_id: request.flow_id,
+                            },
+                            provider_request,
+                        )
                         .await
                     {
                         Ok(exchange) => exchange,
@@ -992,6 +995,13 @@ mod tests {
             unreachable!("constructor tests do not call credential-account methods")
         }
 
+        async fn select_unique_configured_account_record(
+            &self,
+            _request: CredentialAccountSelectionRequest,
+        ) -> Result<CredentialAccount, AuthProductError> {
+            unreachable!("constructor tests do not call credential-account methods")
+        }
+
         async fn project_credential_recovery(
             &self,
             _request: CredentialRecoveryRequest,
@@ -1018,6 +1028,7 @@ mod tests {
     impl AuthProviderClient for SharedAuthTestDouble {
         async fn exchange_callback(
             &self,
+            _context: OAuthProviderExchangeContext,
             _request: OAuthProviderCallbackRequest,
         ) -> Result<OAuthProviderExchange, AuthProductError> {
             unreachable!("constructor tests do not call provider-client methods")

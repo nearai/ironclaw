@@ -30,6 +30,7 @@ mod extension_lifecycle;
 mod extension_lifecycle_capabilities;
 mod extension_lifecycle_command;
 mod factory;
+mod google_oauth;
 mod gsuite;
 mod input;
 mod lifecycle;

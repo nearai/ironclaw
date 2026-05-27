@@ -43,8 +43,8 @@ pub use flow::{
     ProviderCallbackOutcome,
 };
 pub use google_provider::{
-    GoogleProviderClient, GoogleProviderEgressPolicyAuthorizer, GoogleProviderStoredTokens,
-    GoogleProviderTokenSet, GoogleProviderTokenSink, GoogleProviderTokenStorageRequest,
+    GoogleProviderEgressPolicyAuthorizer, GoogleProviderStoredTokens, GoogleProviderTokenSet,
+    GoogleProviderTokenSink, GoogleProviderTokenStorageRequest,
 };
 pub use ids::{
     AuthFlowId, AuthGateRef, AuthInteractionId, AuthProviderId, AuthSessionId,
@@ -66,7 +66,8 @@ pub use oauth::{
 };
 pub use provider::{
     AuthProviderClient, OAuthAuthorizationCode, OAuthProviderCallbackRequest,
-    OAuthProviderExchange, OAuthProviderRefresh, OAuthProviderRefreshRequest, PkceVerifierSecret,
+    OAuthProviderExchange, OAuthProviderExchangeContext, OAuthProviderRefresh,
+    OAuthProviderRefreshRequest, PkceVerifierSecret, validate_provider_callback_request,
 };
 pub use scope::{AuthProductScope, AuthSurface};
 

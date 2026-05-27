@@ -109,11 +109,6 @@ pub struct GsuiteDispatchResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GsuiteDispatchReason {
-    Credential(GsuiteCredentialDispatchReason),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GsuiteCredentialDispatchReason {
     MissingAccount,
     AccountSelectionRequired,
@@ -133,7 +128,7 @@ pub enum GsuiteCredentialDispatchReason {
 #[error("GSuite capability dispatch failed: {kind}")]
 pub struct GsuiteDispatchError {
     kind: RuntimeDispatchErrorKind,
-    reason: Option<GsuiteDispatchReason>,
+    reason: Option<GsuiteCredentialDispatchReason>,
     usage: Option<ResourceUsage>,
 }
 
@@ -146,7 +141,7 @@ impl GsuiteDispatchError {
         }
     }
 
-    pub fn with_reason(mut self, reason: GsuiteDispatchReason) -> Self {
+    pub fn with_reason(mut self, reason: GsuiteCredentialDispatchReason) -> Self {
         self.reason = Some(reason);
         self
     }
@@ -160,7 +155,7 @@ impl GsuiteDispatchError {
         self.kind
     }
 
-    pub fn reason(&self) -> Option<&GsuiteDispatchReason> {
+    pub fn reason(&self) -> Option<&GsuiteCredentialDispatchReason> {
         self.reason.as_ref()
     }
 
@@ -694,29 +689,23 @@ fn map_credential_error(error: GoogleCredentialError) -> GsuiteDispatchError {
                     GsuiteCredentialDispatchReason::UnknownRecovery,
                 ),
             };
-            GsuiteDispatchError::new(kind).with_reason(GsuiteDispatchReason::Credential(reason))
+            GsuiteDispatchError::new(kind).with_reason(reason)
         }
-        GoogleCredentialError::MissingScopes { missing_scopes } => GsuiteDispatchError::new(
-            RuntimeDispatchErrorKind::Client,
-        )
-        .with_reason(GsuiteDispatchReason::Credential(
-            GsuiteCredentialDispatchReason::MissingScopes { missing_scopes },
-        )),
-        GoogleCredentialError::MissingAccessSecret => GsuiteDispatchError::new(
-            RuntimeDispatchErrorKind::Client,
-        )
-        .with_reason(GsuiteDispatchReason::Credential(
-            GsuiteCredentialDispatchReason::MissingAccessSecret,
-        )),
+        GoogleCredentialError::MissingScopes { missing_scopes } => {
+            GsuiteDispatchError::new(RuntimeDispatchErrorKind::Client)
+                .with_reason(GsuiteCredentialDispatchReason::MissingScopes { missing_scopes })
+        }
+        GoogleCredentialError::MissingAccessSecret => {
+            GsuiteDispatchError::new(RuntimeDispatchErrorKind::Client)
+                .with_reason(GsuiteCredentialDispatchReason::MissingAccessSecret)
+        }
         GoogleCredentialError::Auth(_) => {
-            GsuiteDispatchError::new(RuntimeDispatchErrorKind::Backend).with_reason(
-                GsuiteDispatchReason::Credential(GsuiteCredentialDispatchReason::BackendAuth),
-            )
+            GsuiteDispatchError::new(RuntimeDispatchErrorKind::Backend)
+                .with_reason(GsuiteCredentialDispatchReason::BackendAuth)
         }
         GoogleCredentialError::HostApi(_) => {
-            GsuiteDispatchError::new(RuntimeDispatchErrorKind::Backend).with_reason(
-                GsuiteDispatchReason::Credential(GsuiteCredentialDispatchReason::HostApi),
-            )
+            GsuiteDispatchError::new(RuntimeDispatchErrorKind::Backend)
+                .with_reason(GsuiteCredentialDispatchReason::HostApi)
         }
     }
 }
@@ -992,9 +981,7 @@ mod tests {
         ));
         assert!(matches!(
             selection.reason(),
-            Some(GsuiteDispatchReason::Credential(
-                GsuiteCredentialDispatchReason::AccountSelectionRequired
-            ))
+            Some(GsuiteCredentialDispatchReason::AccountSelectionRequired)
         ));
 
         assert_eq!(
@@ -1009,9 +996,7 @@ mod tests {
                 ironclaw_auth::AuthProductError::BackendUnavailable,
             ))
             .reason(),
-            Some(GsuiteDispatchReason::Credential(
-                GsuiteCredentialDispatchReason::BackendAuth
-            ))
+            Some(GsuiteCredentialDispatchReason::BackendAuth)
         ));
         assert_eq!(
             map_credential_error(GoogleCredentialError::HostApi(
@@ -1029,9 +1014,7 @@ mod tests {
                 },
             ))
             .reason(),
-            Some(GsuiteDispatchReason::Credential(
-                GsuiteCredentialDispatchReason::HostApi
-            ))
+            Some(GsuiteCredentialDispatchReason::HostApi)
         ));
 
         let impossible_recovery = map_credential_error(GoogleCredentialError::Recovery(
@@ -1047,9 +1030,7 @@ mod tests {
         );
         assert!(matches!(
             impossible_recovery.reason(),
-            Some(GsuiteDispatchReason::Credential(
-                GsuiteCredentialDispatchReason::UnknownRecovery
-            ))
+            Some(GsuiteCredentialDispatchReason::UnknownRecovery)
         ));
     }
 

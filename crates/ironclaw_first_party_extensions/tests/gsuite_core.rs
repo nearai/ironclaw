@@ -16,9 +16,8 @@ use ironclaw_first_party_extensions::{
     GMAIL_GET_MESSAGE_CAPABILITY_ID, GMAIL_LIST_MESSAGES_CAPABILITY_ID,
     GMAIL_REPLY_TO_MESSAGE_CAPABILITY_ID, GMAIL_SEND_MESSAGE_CAPABILITY_ID,
     GMAIL_TRASH_MESSAGE_CAPABILITY_ID, GSUITE_OUTPUT_BYTES_LIMIT, GSUITE_REQUEST_BODY_LIMIT,
-    GSUITE_RESPONSE_BODY_LIMIT, GsuiteCredentialDispatchReason, GsuiteDispatchReason,
-    GsuiteDispatchRequest, GsuiteExecutor, google_provider_id, gsuite_package_specs,
-    gsuite_resource_profile,
+    GSUITE_RESPONSE_BODY_LIMIT, GsuiteCredentialDispatchReason, GsuiteDispatchRequest,
+    GsuiteExecutor, google_provider_id, gsuite_package_specs, gsuite_resource_profile,
 };
 use ironclaw_host_api::{
     ExtensionId, NetworkMethod, NetworkScheme, RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED,
@@ -376,9 +375,7 @@ async fn gsuite_handler_fails_before_egress_when_account_is_not_configured() {
     );
     assert!(matches!(
         error.reason(),
-        Some(GsuiteDispatchReason::Credential(
-            GsuiteCredentialDispatchReason::PendingSetup
-        ))
+        Some(GsuiteCredentialDispatchReason::PendingSetup)
     ));
     assert!(egress.requests().is_empty());
 }
@@ -410,9 +407,7 @@ async fn gsuite_handler_fails_before_egress_when_access_secret_is_missing() {
     );
     assert!(matches!(
         error.reason(),
-        Some(GsuiteDispatchReason::Credential(
-            GsuiteCredentialDispatchReason::MissingAccessSecret
-        ))
+        Some(GsuiteCredentialDispatchReason::MissingAccessSecret)
     ));
     assert!(egress.requests().is_empty());
 }
@@ -567,9 +562,7 @@ async fn gsuite_handler_fails_before_egress_when_google_account_is_missing_or_am
     assert_eq!(error.kind(), RuntimeDispatchErrorKind::Client);
     assert!(matches!(
         error.reason(),
-        Some(GsuiteDispatchReason::Credential(
-            GsuiteCredentialDispatchReason::MissingAccount
-        ))
+        Some(GsuiteCredentialDispatchReason::MissingAccount)
     ));
     assert!(egress.requests().is_empty());
 
@@ -603,9 +596,7 @@ async fn gsuite_handler_fails_before_egress_when_google_account_is_missing_or_am
     assert_eq!(error.kind(), RuntimeDispatchErrorKind::Client);
     assert!(matches!(
         error.reason(),
-        Some(GsuiteDispatchReason::Credential(
-            GsuiteCredentialDispatchReason::MissingAccount
-        ))
+        Some(GsuiteCredentialDispatchReason::MissingAccount)
     ));
     assert!(egress.requests().is_empty());
 
@@ -639,9 +630,7 @@ async fn gsuite_handler_fails_before_egress_when_google_account_is_missing_or_am
     assert_eq!(error.kind(), RuntimeDispatchErrorKind::Client);
     assert!(matches!(
         error.reason(),
-        Some(GsuiteDispatchReason::Credential(
-            GsuiteCredentialDispatchReason::AccountSelectionRequired
-        ))
+        Some(GsuiteCredentialDispatchReason::AccountSelectionRequired)
     ));
     assert!(egress.requests().is_empty());
 }
@@ -689,7 +678,7 @@ async fn gsuite_handler_fails_before_egress_for_non_configured_account_states() 
         assert_eq!(error.kind(), RuntimeDispatchErrorKind::Client);
         assert!(matches!(
             error.reason(),
-            Some(GsuiteDispatchReason::Credential(reason)) if reason == &expected_reason
+            Some(reason) if reason == &expected_reason
         ));
         assert!(egress.requests().is_empty());
     }
@@ -714,9 +703,7 @@ async fn gsuite_handler_fails_before_egress_when_missing_scopes() {
     assert_eq!(error.kind(), RuntimeDispatchErrorKind::Client);
     assert!(matches!(
         error.reason(),
-        Some(GsuiteDispatchReason::Credential(
-            GsuiteCredentialDispatchReason::MissingScopes { missing_scopes }
-        )) if missing_scopes == &vec![provider_scope(GOOGLE_GMAIL_MODIFY_SCOPE)]
+        Some(GsuiteCredentialDispatchReason::MissingScopes { missing_scopes }) if missing_scopes == &vec![provider_scope(GOOGLE_GMAIL_MODIFY_SCOPE)]
     ));
     assert!(egress.requests().is_empty());
 }

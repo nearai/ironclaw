@@ -495,6 +495,11 @@ pub trait CredentialAccountService: Send + Sync {
         request: CredentialAccountSelectionRequest,
     ) -> Result<CredentialAccountProjection, AuthProductError>;
 
+    async fn select_unique_configured_account_record(
+        &self,
+        request: CredentialAccountSelectionRequest,
+    ) -> Result<CredentialAccount, AuthProductError>;
+
     async fn project_credential_recovery(
         &self,
         request: CredentialRecoveryRequest,

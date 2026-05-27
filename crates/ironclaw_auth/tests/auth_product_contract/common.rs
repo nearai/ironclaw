@@ -1,5 +1,4 @@
 pub use chrono::{Duration, Utc};
-pub use ironclaw_auth::GOOGLE_PROVIDER_ID;
 pub use ironclaw_auth::{
     AuthChallenge, AuthContinuationRef, AuthErrorCode, AuthFlowKind, AuthFlowManager,
     AuthFlowStatus, AuthGateRef, AuthInteractionService, AuthProductError, AuthProductScope,
@@ -17,6 +16,7 @@ pub use ironclaw_auth::{
     OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret, ProviderCallbackOutcome, ProviderScope,
     SecretCleanupAction, SecretCleanupQuarantineReason, SecretCleanupRequest, SecretCleanupService,
     SecretSubmitRequest, SecretSubmitResult, TurnRunRef,
+    OAuthProviderExchangeContext,
 };
 pub use ironclaw_host_api::{ExtensionId, InvocationId, ResourceScope, SecretHandle, UserId};
 pub use secrecy::SecretString;
@@ -32,10 +32,6 @@ pub fn scope(user: &str) -> AuthProductScope {
 
 pub fn provider() -> AuthProviderId {
     AuthProviderId::new("github").expect("valid provider")
-}
-
-pub fn google_provider() -> AuthProviderId {
-    AuthProviderId::new(GOOGLE_PROVIDER_ID).expect("valid provider")
 }
 
 pub fn label(value: &str) -> CredentialAccountLabel {

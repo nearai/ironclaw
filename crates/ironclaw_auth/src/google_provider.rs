@@ -1,30 +1,15 @@
 use std::fmt;
-use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{
-    CapabilityId, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern, ResourceScope,
-    RuntimeCredentialInjection, RuntimeHttpEgress, RuntimeHttpEgressRequest, RuntimeKind,
-    SecretHandle,
-};
-use secrecy::{ExposeSecret, SecretString};
-use serde::Deserialize;
-use url::form_urlencoded::Serializer;
+use ironclaw_host_api::{CapabilityId, NetworkPolicy, ResourceScope, SecretHandle};
+use secrecy::SecretString;
 
-use crate::{
-    AuthProductError, AuthProviderClient, GOOGLE_PROVIDER_ID, GOOGLE_TOKEN_ENDPOINT, OAuthClientId,
-    OAuthProviderCallbackRequest, OAuthProviderExchange, OAuthRedirectUri, OAuthTokenResponse,
-    ProviderScope,
-};
-
-const GOOGLE_OAUTH_CAPABILITY: &str = "ironclaw_auth.google_oauth";
-const DEFAULT_TIMEOUT_MS: u32 = 30_000;
-const DEFAULT_RESPONSE_BODY_LIMIT: u64 = 16 * 1024;
+use crate::{AuthFlowId, AuthProductError};
 
 /// Boundary for turning provider token material into durable secret handles.
 ///
-/// `ironclaw_auth` intentionally does not own durable secret storage; the
-/// caller injects the storage boundary via this trait.
+/// `ironclaw_auth` intentionally does not own durable secret storage; adapter
+/// crates inject the storage boundary via this trait.
 #[async_trait]
 pub trait GoogleProviderTokenSink: Send + Sync {
     async fn store_tokens(
@@ -35,9 +20,8 @@ pub trait GoogleProviderTokenSink: Send + Sync {
 
 /// Boundary for staging/authorizing the Google token-exchange network policy.
 ///
-/// Production Reborn egress uses staged policy handoffs instead of trusting the
-/// policy embedded in `RuntimeHttpEgressRequest`; callers must inject this
-/// authority boundary before token exchange is attempted.
+/// Production Reborn egress uses staged policy handoffs instead of trusting
+/// request-carried fallback policy data.
 #[async_trait]
 pub trait GoogleProviderEgressPolicyAuthorizer: Send + Sync {
     async fn authorize_google_token_exchange(
@@ -69,9 +53,10 @@ impl fmt::Debug for GoogleProviderTokenSet {
 }
 
 /// Scoped token-storage request. Raw provider token material must be bound to
-/// the callback's already-claimed resource scope before it reaches storage.
+/// the already-claimed callback scope and flow before it reaches storage.
 pub struct GoogleProviderTokenStorageRequest {
     pub scope: ResourceScope,
+    pub flow_id: AuthFlowId,
     pub tokens: GoogleProviderTokenSet,
 }
 
@@ -80,306 +65,15 @@ impl fmt::Debug for GoogleProviderTokenStorageRequest {
         formatter
             .debug_struct("GoogleProviderTokenStorageRequest")
             .field("scope", &self.scope)
+            .field("flow_id", &self.flow_id)
             .field("tokens", &self.tokens)
             .finish()
     }
 }
 
+/// Durable secret handles produced after Google OAuth token material is stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GoogleProviderStoredTokens {
     pub access_secret: SecretHandle,
     pub refresh_secret: Option<SecretHandle>,
-}
-
-#[derive(Clone)]
-pub struct GoogleProviderClient {
-    egress: Arc<dyn RuntimeHttpEgress>,
-    token_sink: Arc<dyn GoogleProviderTokenSink>,
-    egress_policy_authorizer: Arc<dyn GoogleProviderEgressPolicyAuthorizer>,
-    client_id: OAuthClientId,
-    client_secret: Option<SecretString>,
-    redirect_uri: OAuthRedirectUri,
-    runtime: RuntimeKind,
-    capability_id: CapabilityId,
-    timeout_ms: u32,
-    response_body_limit: u64,
-}
-
-impl GoogleProviderClient {
-    pub fn new(
-        egress: Arc<dyn RuntimeHttpEgress>,
-        token_sink: Arc<dyn GoogleProviderTokenSink>,
-        egress_policy_authorizer: Arc<dyn GoogleProviderEgressPolicyAuthorizer>,
-        client_id: OAuthClientId,
-        redirect_uri: OAuthRedirectUri,
-    ) -> Result<Self, AuthProductError> {
-        Ok(Self {
-            egress,
-            token_sink,
-            egress_policy_authorizer,
-            client_id,
-            client_secret: None,
-            redirect_uri,
-            runtime: RuntimeKind::System,
-            capability_id: CapabilityId::new(GOOGLE_OAUTH_CAPABILITY).map_err(|_| {
-                AuthProductError::invalid_request("google provider capability id is invalid")
-            })?,
-            timeout_ms: DEFAULT_TIMEOUT_MS,
-            response_body_limit: DEFAULT_RESPONSE_BODY_LIMIT,
-        })
-    }
-
-    pub fn with_runtime(mut self, runtime: RuntimeKind) -> Self {
-        self.runtime = runtime;
-        self
-    }
-
-    pub fn with_timeout_ms(mut self, timeout_ms: u32) -> Self {
-        self.timeout_ms = timeout_ms;
-        self
-    }
-
-    pub fn with_response_body_limit(mut self, response_body_limit: u64) -> Self {
-        self.response_body_limit = response_body_limit;
-        self
-    }
-
-    pub fn with_client_secret(mut self, client_secret: SecretString) -> Self {
-        self.client_secret = Some(client_secret);
-        self
-    }
-}
-
-impl fmt::Debug for GoogleProviderClient {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("GoogleProviderClient")
-            .field("client_id", &self.client_id)
-            .field("redirect_uri", &self.redirect_uri)
-            .field("runtime", &self.runtime)
-            .field("capability_id", &self.capability_id)
-            .field("timeout_ms", &self.timeout_ms)
-            .field("response_body_limit", &self.response_body_limit)
-            .field(
-                "client_secret",
-                &self.client_secret.as_ref().map(|_| "[REDACTED]"),
-            )
-            .field("egress", &"Arc<dyn RuntimeHttpEgress>")
-            .field("token_sink", &"Arc<dyn GoogleProviderTokenSink>")
-            .field(
-                "egress_policy_authorizer",
-                &"Arc<dyn GoogleProviderEgressPolicyAuthorizer>",
-            )
-            .finish()
-    }
-}
-
-#[async_trait]
-impl AuthProviderClient for GoogleProviderClient {
-    async fn exchange_callback(
-        &self,
-        request: OAuthProviderCallbackRequest,
-    ) -> Result<OAuthProviderExchange, AuthProductError> {
-        if request.provider.as_str() != GOOGLE_PROVIDER_ID {
-            return Err(AuthProductError::TokenExchangeFailed);
-        }
-        crate::provider::validate_provider_callback_request(&request)?;
-        let callback_scope = request.scope.resource.clone();
-        if callback_scope.is_system() {
-            return Err(AuthProductError::CrossScopeDenied);
-        }
-
-        let body = serialize_token_request(
-            self.client_id.as_str(),
-            self.redirect_uri.as_str(),
-            self.client_secret.as_ref(),
-            request.authorization_code.expose_secret(),
-            request.pkce_verifier.expose_secret(),
-        );
-        let network_policy = google_token_network_policy(self.response_body_limit);
-        self.egress_policy_authorizer
-            .authorize_google_token_exchange(&callback_scope, &self.capability_id, &network_policy)
-            .await?;
-
-        let egress = Arc::clone(&self.egress);
-        let egress_request = RuntimeHttpEgressRequest {
-            runtime: self.runtime,
-            scope: callback_scope.clone(),
-            capability_id: self.capability_id.clone(),
-            method: NetworkMethod::Post,
-            url: GOOGLE_TOKEN_ENDPOINT.to_string(),
-            headers: vec![
-                (
-                    "content-type".to_string(),
-                    "application/x-www-form-urlencoded".to_string(),
-                ),
-                ("accept".to_string(), "application/json".to_string()),
-            ],
-            body,
-            network_policy,
-            credential_injections: Vec::<RuntimeCredentialInjection>::new(),
-            response_body_limit: Some(self.response_body_limit),
-            save_body_to: None,
-            timeout_ms: Some(self.timeout_ms),
-        };
-        let response = tokio::task::spawn_blocking(move || egress.execute(egress_request))
-            .await
-            .map_err(|_| AuthProductError::BackendUnavailable)?;
-        let response = response.map_err(|_| AuthProductError::BackendUnavailable)?;
-
-        if !(200..300).contains(&response.status) {
-            return Err(AuthProductError::TokenExchangeFailed);
-        }
-
-        let token_response = parse_token_response(&response.body)?;
-        let scopes = scopes_for_exchange(&token_response, &request.scopes);
-        let token_sink = Arc::clone(&self.token_sink);
-        let stored_tokens = token_sink
-            .store_tokens(GoogleProviderTokenStorageRequest {
-                scope: callback_scope,
-                tokens: GoogleProviderTokenSet {
-                    access_token: token_response.response.access_token,
-                    refresh_token: token_response.response.refresh_token,
-                },
-            })
-            .await?;
-
-        Ok(OAuthProviderExchange {
-            provider: request.provider,
-            account_label: request.account_label,
-            authorization_code_hash: request.authorization_code_hash,
-            pkce_verifier_hash: request.pkce_verifier_hash,
-            access_secret: stored_tokens.access_secret,
-            refresh_secret: stored_tokens.refresh_secret,
-            scopes,
-            account_id: None,
-        })
-    }
-}
-
-fn google_token_network_policy(response_body_limit: u64) -> NetworkPolicy {
-    NetworkPolicy {
-        allowed_targets: vec![NetworkTargetPattern {
-            scheme: Some(NetworkScheme::Https),
-            host_pattern: "oauth2.googleapis.com".to_string(),
-            port: None,
-        }],
-        deny_private_ip_ranges: true,
-        max_egress_bytes: Some(response_body_limit),
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-struct GoogleTokenResponseBody {
-    access_token: SecretString,
-    #[serde(default)]
-    refresh_token: Option<SecretString>,
-    #[serde(default)]
-    scope: Option<String>,
-    #[serde(default)]
-    expires_in: Option<u64>,
-    #[serde(default)]
-    token_type: Option<String>,
-}
-
-#[derive(Debug)]
-struct ParsedGoogleTokenResponse {
-    response: OAuthTokenResponse,
-    scope_was_present: bool,
-}
-
-fn parse_token_response(body: &[u8]) -> Result<ParsedGoogleTokenResponse, AuthProductError> {
-    let parsed: GoogleTokenResponseBody =
-        serde_json::from_slice(body).map_err(|_| AuthProductError::TokenExchangeFailed)?;
-    let scope_was_present = parsed.scope.is_some();
-    let response = OAuthTokenResponse::new(
-        parsed.access_token,
-        parsed.refresh_token,
-        parsed.scope.as_deref(),
-        parsed.expires_in,
-    )
-    .map_err(|_| AuthProductError::TokenExchangeFailed)?;
-
-    let _ = parsed.token_type;
-    Ok(ParsedGoogleTokenResponse {
-        response,
-        scope_was_present,
-    })
-}
-
-fn scopes_for_exchange(
-    token_response: &ParsedGoogleTokenResponse,
-    requested_scopes: &[ProviderScope],
-) -> Vec<ProviderScope> {
-    if token_response.scope_was_present {
-        token_response.response.scopes.clone()
-    } else {
-        requested_scopes.to_vec()
-    }
-}
-
-fn serialize_token_request(
-    client_id: &str,
-    redirect_uri: &str,
-    client_secret: Option<&SecretString>,
-    authorization_code: &str,
-    pkce_verifier: &str,
-) -> Vec<u8> {
-    let mut serializer = Serializer::new(String::new());
-    serializer
-        .append_pair("grant_type", "authorization_code")
-        .append_pair("code", authorization_code)
-        .append_pair("code_verifier", pkce_verifier)
-        .append_pair("client_id", client_id)
-        .append_pair("redirect_uri", redirect_uri);
-    if let Some(client_secret) = client_secret {
-        serializer.append_pair("client_secret", client_secret.expose_secret());
-    }
-    serializer.finish().into_bytes()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn response_body_parses_to_token_response() {
-        let response = parse_token_response(
-            br#"{"access_token":"access","refresh_token":"refresh","scope":"repo gmail.readonly","expires_in":3600,"token_type":"Bearer"}"#,
-        )
-        .expect("response");
-        assert!(response.scope_was_present);
-        assert_eq!(response.response.scopes.len(), 2);
-        assert_eq!(response.response.expires_in_seconds, Some(3600));
-    }
-
-    #[test]
-    fn missing_response_scope_falls_back_to_requested_scopes() {
-        let response = parse_token_response(br#"{"access_token":"access","expires_in":3600}"#)
-            .expect("response");
-        let requested_scopes = vec![
-            ProviderScope::new("https://www.googleapis.com/auth/gmail.readonly").expect("scope"),
-            ProviderScope::new("https://www.googleapis.com/auth/gmail.send").expect("scope"),
-        ];
-
-        assert!(!response.scope_was_present);
-        assert_eq!(
-            scopes_for_exchange(&response, &requested_scopes),
-            requested_scopes
-        );
-    }
-
-    #[test]
-    fn token_response_rejects_empty_or_missing_access_token() {
-        assert_eq!(
-            parse_token_response(b"").expect_err("empty response"),
-            AuthProductError::TokenExchangeFailed
-        );
-        assert_eq!(
-            parse_token_response(br#"{"refresh_token":"refresh"}"#)
-                .expect_err("missing access token"),
-            AuthProductError::TokenExchangeFailed
-        );
-    }
 }

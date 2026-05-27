@@ -148,8 +148,7 @@ async fn local_dev_oauth_turn_gate_callback_resumes_default_turn_coordinator() {
             flow_id: flow.id,
             opaque_state_hash: state_hash(),
             outcome: crate::RebornOAuthCallbackOutcome::Authorized {
-                provider_request: Box::new(OAuthProviderCallbackRequest {
-                    scope: auth_scope,
+                provider_request: OAuthProviderCallbackRequest {
                     provider: provider(),
                     account_label: label(),
                     authorization_code: OAuthAuthorizationCode::new(SecretString::from(
@@ -163,7 +162,7 @@ async fn local_dev_oauth_turn_gate_callback_resumes_default_turn_coordinator() {
                     .unwrap(),
                     pkce_verifier_hash: pkce_hash(),
                     scopes: vec![provider_scope("repo")],
-                }),
+                },
             },
         })
         .await
@@ -216,6 +215,42 @@ async fn local_dev_google_oauth_backend_routes_callback_to_composed_google_clien
 
     // The local-dev in-memory provider accepts this otherwise-valid callback.
     // CrossScopeDenied proves composition replaced it with GoogleProviderClient.
+    assert_eq!(error.code, AuthErrorCode::CrossScopeDenied);
+}
+
+#[tokio::test]
+async fn local_dev_google_oauth_backend_accepts_optional_client_secret_config() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let services = build_reborn_services(
+        RebornBuildInput::local_dev(
+            "local-dev-google-oauth-secret-owner",
+            dir.path().join("local-dev"),
+        )
+        .with_google_oauth_backend(OAuthClientConfig {
+            client_id: OAuthClientId::new("google-client-123").expect("client id"),
+            client_secret: Some(SecretString::from("raw-client-secret".to_string())),
+            redirect_uri: OAuthRedirectUri::new("https://app.example/oauth/google/callback")
+                .expect("redirect uri"),
+        }),
+    )
+    .await
+    .expect("local-dev services build");
+    let product_auth = services.product_auth.as_ref().expect("product auth");
+    let auth_scope = system_auth_scope();
+    let flow = create_google_flow(
+        product_auth,
+        auth_scope.clone(),
+        AuthContinuationRef::LifecycleActivation {
+            package_ref: LifecyclePackageRef::new("google-calendar").unwrap(),
+        },
+    )
+    .await;
+
+    let error = product_auth
+        .handle_oauth_callback(google_authorized_request(auth_scope, flow))
+        .await
+        .expect_err("composed Google provider rejects system-scoped callbacks before egress");
+
     assert_eq!(error.code, AuthErrorCode::CrossScopeDenied);
 }
 
@@ -522,14 +557,12 @@ fn authorized_request(
     scope: AuthProductScope,
     flow_id: AuthFlowId,
 ) -> crate::RebornOAuthCallbackRequest {
-    let callback_scope = scope.clone();
     crate::RebornOAuthCallbackRequest {
         scope,
         flow_id,
         opaque_state_hash: state_hash(),
         outcome: crate::RebornOAuthCallbackOutcome::Authorized {
-            provider_request: Box::new(OAuthProviderCallbackRequest {
-                scope: callback_scope,
+            provider_request: OAuthProviderCallbackRequest {
                 provider: provider(),
                 account_label: label(),
                 authorization_code: OAuthAuthorizationCode::new(SecretString::from(
@@ -543,7 +576,7 @@ fn authorized_request(
                 .unwrap(),
                 pkce_verifier_hash: pkce_hash(),
                 scopes: vec![provider_scope("repo")],
-            }),
+            },
         },
     }
 }
@@ -553,14 +586,12 @@ fn google_authorized_request(
     scope: AuthProductScope,
     flow_id: AuthFlowId,
 ) -> crate::RebornOAuthCallbackRequest {
-    let callback_scope = scope.clone();
     crate::RebornOAuthCallbackRequest {
         scope,
         flow_id,
         opaque_state_hash: state_hash(),
         outcome: crate::RebornOAuthCallbackOutcome::Authorized {
-            provider_request: Box::new(OAuthProviderCallbackRequest {
-                scope: callback_scope,
+            provider_request: OAuthProviderCallbackRequest {
                 provider: google_provider(),
                 account_label: google_label(),
                 authorization_code: OAuthAuthorizationCode::new(SecretString::from(
@@ -576,7 +607,7 @@ fn google_authorized_request(
                 scopes: vec![provider_scope(
                     "https://www.googleapis.com/auth/gmail.readonly",
                 )],
-            }),
+            },
         },
     }
 }

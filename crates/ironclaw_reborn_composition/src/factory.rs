@@ -3,21 +3,12 @@ use std::{
     sync::Arc,
 };
 
-use async_trait::async_trait;
-use ironclaw_auth::{
-    AuthProductError, AuthProviderClient, GoogleProviderClient,
-    GoogleProviderEgressPolicyAuthorizer, GoogleProviderStoredTokens, GoogleProviderTokenSink,
-    GoogleProviderTokenStorageRequest,
-};
+use ironclaw_auth::AuthProviderClient;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_authorization::FilesystemCapabilityLeaseStore;
 use ironclaw_authorization::GrantAuthorizer;
 #[cfg(not(feature = "libsql"))]
 use ironclaw_authorization::InMemoryCapabilityLeaseStore;
-use ironclaw_capabilities::{
-    CapabilityObligationHandler, CapabilityObligationPhase, CapabilityObligationRequest,
-};
-use ironclaw_events::InMemoryAuditSink;
 #[cfg(feature = "libsql")]
 use ironclaw_events::{DurableAuditLog, DurableEventLog};
 #[cfg(not(feature = "libsql"))]
@@ -38,15 +29,13 @@ use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
 use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
 use ironclaw_host_api::runtime_policy::FilesystemBackendKind;
 use ironclaw_host_api::{
-    CapabilityId, CapabilitySet, CorrelationId, EffectKind, ExtensionId, HostPath,
-    MountPermissions, MountView, Obligation, PackageId, ResourceEstimate, ResourceScope,
-    RuntimeKind, TrustClass, UserId, VirtualPath,
+    EffectKind, HostPath, MountPermissions, MountView, PackageId, UserId, VirtualPath,
 };
 #[cfg(feature = "libsql")]
 use ironclaw_host_api::{MountAlias, MountGrant};
 use ironclaw_host_runtime::{
-    BuiltinObligationServices, CapabilitySurfaceVersion, FirstPartyCapabilityRegistry,
-    HostRuntimeServices, builtin_first_party_handlers, builtin_first_party_package,
+    CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostRuntimeServices,
+    builtin_first_party_handlers, builtin_first_party_package,
 };
 #[cfg(feature = "libsql")]
 use ironclaw_loop_support::FilesystemCheckpointStateStore;
@@ -82,6 +71,7 @@ use ironclaw_turns::{
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use crate::RebornProductAuthServicePorts;
 use crate::default_system_prompt::seed_default_system_prompt;
+use crate::google_oauth::google_provider_client;
 use crate::input::{OAuthClientConfig, RebornRuntimeProcessBinding, RebornStorageInput};
 use crate::lifecycle::{RebornLocalSkillManagementPort, build_local_skill_management_port};
 use crate::local_dev_mounts::{skill_context_mount_view, workspace_mount_view};
@@ -296,158 +286,6 @@ fn compose_product_auth_services(
         None => ports,
     };
     Arc::new(ports.into_services(auth_continuation_dispatcher(turn_coordinator)))
-}
-
-fn google_provider_client(
-    config: OAuthClientConfig,
-    secret_store: Arc<dyn SecretStore>,
-    resource_governor: Arc<dyn ResourceGovernor>,
-) -> Result<Arc<dyn AuthProviderClient>, RebornBuildError> {
-    let obligation_services = BuiltinObligationServices::new(
-        Arc::new(InMemoryAuditSink::new()),
-        secret_store.clone(),
-        resource_governor,
-    );
-    let egress: Arc<dyn ironclaw_host_api::RuntimeHttpEgress> = Arc::new(
-        obligation_services.host_http_egress(ironclaw_network::PolicyNetworkHttpEgress::new(
-            ironclaw_network::ReqwestNetworkTransport::default(),
-        )),
-    );
-    let token_sink: Arc<dyn GoogleProviderTokenSink> = Arc::new(SecretStoreGoogleTokenSink {
-        store: secret_store,
-    });
-    let authorizer: Arc<dyn GoogleProviderEgressPolicyAuthorizer> =
-        Arc::new(ObligationGoogleEgressPolicyAuthorizer {
-            handler: Arc::new(obligation_services.obligation_handler()),
-        });
-    let mut client = GoogleProviderClient::new(
-        egress,
-        token_sink,
-        authorizer,
-        config.client_id,
-        config.redirect_uri,
-    )
-    .map_err(auth_provider_config_error)?;
-    if let Some(client_secret) = config.client_secret {
-        client = client.with_client_secret(client_secret);
-    }
-    Ok(Arc::new(client))
-}
-
-fn auth_provider_config_error(error: AuthProductError) -> RebornBuildError {
-    RebornBuildError::InvalidConfig {
-        reason: format!("Google OAuth provider backend could not be configured: {error}"),
-    }
-}
-
-struct SecretStoreGoogleTokenSink {
-    store: Arc<dyn SecretStore>,
-}
-
-#[async_trait]
-impl GoogleProviderTokenSink for SecretStoreGoogleTokenSink {
-    async fn store_tokens(
-        &self,
-        request: GoogleProviderTokenStorageRequest,
-    ) -> Result<GoogleProviderStoredTokens, AuthProductError> {
-        let access_secret = google_token_handle(&request.scope, "access")?;
-        self.store
-            .put(
-                request.scope.clone(),
-                access_secret.clone(),
-                request.tokens.access_token,
-            )
-            .await
-            .map_err(|_| AuthProductError::BackendUnavailable)?;
-
-        let refresh_secret = match request.tokens.refresh_token {
-            Some(refresh_token) => {
-                let handle = google_token_handle(&request.scope, "refresh")?;
-                self.store
-                    .put(request.scope, handle.clone(), refresh_token)
-                    .await
-                    .map_err(|_| AuthProductError::BackendUnavailable)?;
-                Some(handle)
-            }
-            None => None,
-        };
-
-        Ok(GoogleProviderStoredTokens {
-            access_secret,
-            refresh_secret,
-        })
-    }
-}
-
-fn google_token_handle(
-    scope: &ResourceScope,
-    token_kind: &'static str,
-) -> Result<ironclaw_host_api::SecretHandle, AuthProductError> {
-    ironclaw_host_api::SecretHandle::new(format!(
-        "google-oauth-{token_kind}-{}",
-        scope.invocation_id
-    ))
-    .map_err(|_| AuthProductError::BackendUnavailable)
-}
-
-struct ObligationGoogleEgressPolicyAuthorizer {
-    handler: Arc<dyn CapabilityObligationHandler>,
-}
-
-#[async_trait]
-impl GoogleProviderEgressPolicyAuthorizer for ObligationGoogleEgressPolicyAuthorizer {
-    async fn authorize_google_token_exchange(
-        &self,
-        scope: &ResourceScope,
-        capability_id: &CapabilityId,
-        policy: &ironclaw_host_api::NetworkPolicy,
-    ) -> Result<(), AuthProductError> {
-        let context = google_oauth_execution_context(scope.clone())?;
-        let estimate = ResourceEstimate {
-            network_egress_bytes: policy.max_egress_bytes,
-            ..ResourceEstimate::default()
-        };
-        self.handler
-            .satisfy(CapabilityObligationRequest {
-                phase: CapabilityObligationPhase::Invoke,
-                context: &context,
-                capability_id,
-                estimate: &estimate,
-                obligations: &[Obligation::ApplyNetworkPolicy {
-                    policy: policy.clone(),
-                }],
-            })
-            .await
-            .map_err(|_| AuthProductError::BackendUnavailable)
-    }
-}
-
-fn google_oauth_execution_context(
-    resource_scope: ResourceScope,
-) -> Result<ironclaw_host_api::ExecutionContext, AuthProductError> {
-    let context = ironclaw_host_api::ExecutionContext {
-        invocation_id: resource_scope.invocation_id,
-        correlation_id: CorrelationId::new(),
-        process_id: None,
-        parent_process_id: None,
-        tenant_id: resource_scope.tenant_id.clone(),
-        user_id: resource_scope.user_id.clone(),
-        agent_id: resource_scope.agent_id.clone(),
-        project_id: resource_scope.project_id.clone(),
-        mission_id: resource_scope.mission_id.clone(),
-        thread_id: resource_scope.thread_id.clone(),
-        extension_id: ExtensionId::new("ironclaw_auth")
-            .map_err(|_| AuthProductError::BackendUnavailable)?,
-        runtime: RuntimeKind::System,
-        trust: TrustClass::System,
-        grants: CapabilitySet::default(),
-        mounts: MountView::default(),
-        resource_scope,
-    };
-    context
-        .validate()
-        .map_err(|_| AuthProductError::BackendUnavailable)?;
-    Ok(context)
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -1475,15 +1313,6 @@ where
         google_oauth_config,
     } = context;
     let secret_store: Arc<dyn SecretStore> = stores.secret_store.clone();
-    let google_provider_client = google_oauth_config
-        .map(|config| {
-            google_provider_client(
-                config,
-                secret_store,
-                Arc::new(InMemoryResourceGovernor::new()),
-            )
-        })
-        .transpose()?;
     let services = HostRuntimeServices::new(
         Arc::new(builtin_extension_registry()?),
         Arc::clone(&stores.filesystem),
@@ -1510,6 +1339,10 @@ where
     .with_filesystem_turn_state_store(stores.scoped_filesystem)
     .with_run_profile_resolver(planned_run_profile_resolver()?)
     .with_turn_run_wake_notifier(production_wiring.turn_run_wake_notifier);
+    let google_resource_governor: Arc<dyn ResourceGovernor> = services.resource_governor();
+    let google_provider_client = google_oauth_config
+        .map(|config| google_provider_client(config, secret_store, google_resource_governor))
+        .transpose()?;
     let services = apply_production_runtime_process_binding(
         services,
         production_wiring.runtime_process_binding,
@@ -1608,7 +1441,7 @@ mod tests {
     use ironclaw_auth::{
         AuthProductScope, AuthSurface, CredentialAccountLabel, CredentialAccountStatus,
         CredentialOwnership, GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_GMAIL_SEND_SCOPE,
-        GoogleProviderTokenSet, NewCredentialAccount, ProviderScope,
+        NewCredentialAccount, ProviderScope,
     };
     use ironclaw_filesystem::FilesystemError;
     use ironclaw_host_api::{
@@ -1622,9 +1455,7 @@ mod tests {
         SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
     };
     use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef};
-    use ironclaw_secrets::InMemorySecretStore;
     use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
-    use secrecy::SecretString;
 
     #[tokio::test]
     async fn local_dev_services_include_repl_runtime_substrate() {
@@ -1649,92 +1480,6 @@ mod tests {
                 .is_some()
         );
         assert_eq!(services.readiness.state, RebornReadinessState::DevOnly);
-    }
-
-    #[tokio::test]
-    async fn google_token_sink_stores_token_material_under_callback_scope() {
-        let store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
-        let sink = SecretStoreGoogleTokenSink {
-            store: Arc::clone(&store),
-        };
-        let scope = ResourceScope::local_default(
-            UserId::new("google-token-owner").expect("valid user"),
-            InvocationId::new(),
-        )
-        .expect("valid scope");
-
-        let stored = sink
-            .store_tokens(GoogleProviderTokenStorageRequest {
-                scope: scope.clone(),
-                tokens: GoogleProviderTokenSet {
-                    access_token: SecretString::from("access-token"),
-                    refresh_token: Some(SecretString::from("refresh-token")),
-                },
-            })
-            .await
-            .expect("tokens stored");
-
-        assert_ne!(
-            stored.access_secret,
-            stored.refresh_secret.clone().expect("refresh handle")
-        );
-        assert!(
-            store
-                .metadata(&scope, &stored.access_secret)
-                .await
-                .expect("access metadata")
-                .is_some()
-        );
-        assert!(
-            store
-                .metadata(&scope, &stored.refresh_secret.expect("refresh handle"))
-                .await
-                .expect("refresh metadata")
-                .is_some()
-        );
-    }
-
-    #[tokio::test]
-    async fn google_egress_authorizer_stages_policy_as_system_auth_capability() {
-        let handler = Arc::new(RecordingObligationHandler::default());
-        let handler_dyn: Arc<dyn CapabilityObligationHandler> = handler.clone();
-        let authorizer = ObligationGoogleEgressPolicyAuthorizer {
-            handler: handler_dyn,
-        };
-        let scope = ResourceScope::local_default(
-            UserId::new("google-egress-owner").expect("valid user"),
-            InvocationId::new(),
-        )
-        .expect("valid scope");
-        let capability_id = CapabilityId::new("ironclaw_auth.google_oauth").expect("capability");
-        let policy = NetworkPolicy {
-            allowed_targets: vec![NetworkTargetPattern {
-                scheme: Some(ironclaw_host_api::NetworkScheme::Https),
-                host_pattern: "oauth2.googleapis.com".to_string(),
-                port: None,
-            }],
-            deny_private_ip_ranges: true,
-            max_egress_bytes: Some(1024),
-        };
-
-        authorizer
-            .authorize_google_token_exchange(&scope, &capability_id, &policy)
-            .await
-            .expect("policy staged");
-
-        let requests = handler.requests();
-        assert_eq!(requests.len(), 1);
-        let request = &requests[0];
-        assert_eq!(request.phase, CapabilityObligationPhase::Invoke);
-        assert_eq!(request.resource_scope, scope);
-        assert_eq!(request.extension_id.as_str(), "ironclaw_auth");
-        assert_eq!(request.runtime, RuntimeKind::System);
-        assert_eq!(request.trust, TrustClass::System);
-        assert_eq!(request.capability_id, capability_id);
-        assert_eq!(
-            request.obligations,
-            vec![Obligation::ApplyNetworkPolicy { policy }]
-        );
     }
 
     #[tokio::test]
@@ -2276,53 +2021,6 @@ mod tests {
             },
             provenance: TrustProvenance::Default,
             evaluated_at: chrono::Utc::now(),
-        }
-    }
-
-    #[derive(Clone, Debug, PartialEq, Eq)]
-    struct RecordedObligationRequest {
-        phase: CapabilityObligationPhase,
-        resource_scope: ResourceScope,
-        extension_id: ExtensionId,
-        runtime: RuntimeKind,
-        trust: TrustClass,
-        capability_id: CapabilityId,
-        obligations: Vec<Obligation>,
-    }
-
-    #[derive(Default)]
-    struct RecordingObligationHandler {
-        requests: std::sync::Mutex<Vec<RecordedObligationRequest>>,
-    }
-
-    impl RecordingObligationHandler {
-        fn requests(&self) -> Vec<RecordedObligationRequest> {
-            self.requests
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone()
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl CapabilityObligationHandler for RecordingObligationHandler {
-        async fn satisfy(
-            &self,
-            request: CapabilityObligationRequest<'_>,
-        ) -> Result<(), ironclaw_capabilities::CapabilityObligationError> {
-            self.requests
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(RecordedObligationRequest {
-                    phase: request.phase,
-                    resource_scope: request.context.resource_scope.clone(),
-                    extension_id: request.context.extension_id.clone(),
-                    runtime: request.context.runtime,
-                    trust: request.context.trust,
-                    capability_id: request.capability_id.clone(),
-                    obligations: request.obligations.to_vec(),
-                });
-            Ok(())
         }
     }
 

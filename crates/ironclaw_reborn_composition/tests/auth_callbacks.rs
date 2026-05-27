@@ -11,8 +11,8 @@ use ironclaw_auth::{
     AuthSessionId, AuthSurface, AuthorizationCodeHash, CredentialAccountLabel,
     InMemoryAuthProductServices, LifecyclePackageRef, NewAuthFlow, OAuthAuthorizationCode,
     OAuthAuthorizationUrl, OAuthProviderCallbackRequest, OAuthProviderExchange,
-    OAuthProviderRefresh, OAuthProviderRefreshRequest, OpaqueStateHash, PkceVerifierHash,
-    PkceVerifierSecret, ProviderScope,
+    OAuthProviderExchangeContext, OAuthProviderRefresh, OAuthProviderRefreshRequest,
+    OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret, ProviderScope,
 };
 use ironclaw_host_api::{InvocationId, ResourceScope, SecretHandle, UserId};
 use ironclaw_reborn_composition::{
@@ -57,6 +57,7 @@ struct FailingProviderClient {
 impl AuthProviderClient for FailingProviderClient {
     async fn exchange_callback(
         &self,
+        _context: OAuthProviderExchangeContext,
         _request: OAuthProviderCallbackRequest,
     ) -> Result<OAuthProviderExchange, AuthProductError> {
         Err(self.error.clone())
@@ -85,6 +86,7 @@ impl CountingProviderClient {
 impl AuthProviderClient for CountingProviderClient {
     async fn exchange_callback(
         &self,
+        _context: OAuthProviderExchangeContext,
         _request: OAuthProviderCallbackRequest,
     ) -> Result<OAuthProviderExchange, AuthProductError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
@@ -115,6 +117,7 @@ impl SuccessfulCountingProviderClient {
 impl AuthProviderClient for SuccessfulCountingProviderClient {
     async fn exchange_callback(
         &self,
+        _context: OAuthProviderExchangeContext,
         request: OAuthProviderCallbackRequest,
     ) -> Result<OAuthProviderExchange, AuthProductError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
@@ -127,6 +130,19 @@ impl AuthProviderClient for SuccessfulCountingProviderClient {
             refresh_secret: Some(SecretHandle::new("oauth-refresh").unwrap()),
             scopes: request.scopes,
             account_id: None,
+        })
+    }
+
+    async fn refresh_token(
+        &self,
+        request: OAuthProviderRefreshRequest,
+    ) -> Result<OAuthProviderRefresh, AuthProductError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(OAuthProviderRefresh {
+            provider: request.provider,
+            access_secret: SecretHandle::new("oauth-refreshed-access").unwrap(),
+            refresh_secret: Some(SecretHandle::new("oauth-refreshed-refresh").unwrap()),
+            scopes: request.scopes,
         })
     }
 }
@@ -223,14 +239,12 @@ async fn create_flow(services: &RebornProductAuthServices, scope: AuthProductSco
 }
 
 fn authorized_request(scope: AuthProductScope, flow_id: AuthFlowId) -> RebornOAuthCallbackRequest {
-    let callback_scope = scope.clone();
     RebornOAuthCallbackRequest {
         scope,
         flow_id,
         opaque_state_hash: state_hash("state-hash"),
         outcome: RebornOAuthCallbackOutcome::Authorized {
-            provider_request: Box::new(OAuthProviderCallbackRequest {
-                scope: callback_scope,
+            provider_request: OAuthProviderCallbackRequest {
                 provider: provider(),
                 account_label: label(),
                 authorization_code: OAuthAuthorizationCode::new(secret("raw-auth-code")).unwrap(),
@@ -238,7 +252,7 @@ fn authorized_request(scope: AuthProductScope, flow_id: AuthFlowId) -> RebornOAu
                 pkce_verifier: PkceVerifierSecret::new(secret("raw-pkce-verifier")).unwrap(),
                 pkce_verifier_hash: pkce_hash("pkce-hash"),
                 scopes: vec![provider_scope("repo")],
-            }),
+            },
         },
     }
 }
