@@ -723,6 +723,7 @@ impl LlmProvider for TraceLlm {
                         input_tokens,
                         output_tokens,
                         finish_reason: FinishReason::Stop,
+                        reasoning: None,
                         cache_read_input_tokens: 0,
                         cache_creation_input_tokens: 0,
                     });

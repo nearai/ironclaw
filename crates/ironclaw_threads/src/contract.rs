@@ -1,6 +1,7 @@
 use ironclaw_host_api::{AgentId, MissionId, ProjectId, TenantId, ThreadId, UserId};
 use serde::{Deserialize, Serialize};
 
+use crate::capability_display_preview::CapabilityDisplayPreviewEnvelope;
 use crate::identifiers::{SummaryArtifactId, ThreadMessageId};
 use crate::tool_result_reference::{ProviderToolCallReferenceEnvelope, ToolResultSafeSummary};
 
@@ -39,7 +40,11 @@ impl ThreadScope {
     }
 }
 
-/// User/model-visible transcript content accepted by this boundary.
+/// Safe transcript text accepted by this boundary.
+///
+/// Model visibility is determined by message kind/status at context-read time;
+/// durable UI-only records such as capability previews also store their
+/// sanitized payloads here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageContent {
     text: String,
@@ -69,6 +74,7 @@ pub enum MessageKind {
     Summary,
     CheckpointReference,
     ToolResultReference,
+    CapabilityDisplayPreview,
 }
 
 /// Explicit transcript status. Callers must not infer this from nullable refs.
@@ -196,6 +202,14 @@ pub struct AppendToolResultReferenceRequest {
     pub result_ref: String,
     pub safe_summary: ToolResultSafeSummary,
     pub provider_call: Option<ProviderToolCallReferenceEnvelope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppendCapabilityDisplayPreviewRequest {
+    pub scope: ThreadScope,
+    pub thread_id: ThreadId,
+    pub turn_run_id: String,
+    pub preview: CapabilityDisplayPreviewEnvelope,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

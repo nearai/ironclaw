@@ -1,9 +1,63 @@
 //! Model discovery and fetching for multiple LLM providers.
+//!
+//! External callers should use [`fetch_models_for`] — a single verb-based
+//! facade that dispatches on a provider ID string. The per-provider
+//! fetcher functions below are `pub(crate)` and not part of the public
+//! surface of `ironclaw_llm`.
+
+/// Options for [`fetch_models_for`].
+#[derive(Debug, Default)]
+pub struct ModelFetchOptions<'a> {
+    /// API key for backends that authenticate per request (anthropic,
+    /// openai, openai-compatible). Optional — fetchers fall back to env
+    /// vars and then to static defaults if no key is available.
+    pub api_key: Option<&'a str>,
+    /// Base URL for self-hosted or proxied backends (ollama,
+    /// openai-compatible). `None` uses the per-backend default
+    /// (e.g. `http://localhost:11434` for ollama).
+    pub base_url: Option<&'a str>,
+}
+
+/// Fetch the model catalog for a given backend.
+///
+/// Dispatches on `provider_id`:
+/// - `"anthropic"` → Anthropic `/v1/models`
+/// - `"openai"` → OpenAI `/v1/models` (filtered to chat-capable models)
+/// - `"ollama"` → local Ollama `/api/tags`
+/// - any other ID → generic OpenAI-compatible `/v1/models` against
+///   `options.base_url`. Used by openrouter, deepseek, custom endpoints,
+///   etc.
+///
+/// For `anthropic` / `openai` / `ollama`, the per-backend fetcher falls
+/// back to its own static default list on network or auth failure so
+/// the setup wizard can still progress offline.
+///
+/// The generic openai-compatible branch has **no static fallback** — it
+/// returns an empty list if `options.base_url` is missing/empty or the
+/// `/v1/models` call fails. Callers must handle the empty case (e.g.
+/// fall back to the registry's default model).
+pub async fn fetch_models_for(
+    provider_id: &str,
+    options: &ModelFetchOptions<'_>,
+) -> Vec<(String, String)> {
+    match provider_id {
+        "anthropic" => fetch_anthropic_models(options.api_key).await,
+        "openai" => fetch_openai_models(options.api_key).await,
+        "ollama" => {
+            let base_url = options.base_url.unwrap_or("http://localhost:11434");
+            fetch_ollama_models(base_url).await
+        }
+        _ => {
+            let base_url = options.base_url.unwrap_or("");
+            fetch_openai_compatible_models(base_url, options.api_key).await
+        }
+    }
+}
 
 /// Fetch models from the Anthropic API.
 ///
 /// Returns `(model_id, display_label)` pairs. Falls back to static defaults on error.
-pub async fn fetch_anthropic_models(cached_key: Option<&str>) -> Vec<(String, String)> {
+pub(crate) async fn fetch_anthropic_models(cached_key: Option<&str>) -> Vec<(String, String)> {
     let static_defaults = vec![
         (
             "claude-opus-4-6".into(),
@@ -86,7 +140,7 @@ pub async fn fetch_anthropic_models(cached_key: Option<&str>) -> Vec<(String, St
 /// Fetch models from the OpenAI API.
 ///
 /// Returns `(model_id, display_label)` pairs. Falls back to static defaults on error.
-pub async fn fetch_openai_models(cached_key: Option<&str>) -> Vec<(String, String)> {
+pub(crate) async fn fetch_openai_models(cached_key: Option<&str>) -> Vec<(String, String)> {
     let static_defaults = vec![
         (
             "gpt-5.3-codex".into(),
@@ -158,7 +212,7 @@ pub async fn fetch_openai_models(cached_key: Option<&str>) -> Vec<(String, Strin
     }
 }
 
-pub fn is_openai_chat_model(model_id: &str) -> bool {
+pub(crate) fn is_openai_chat_model(model_id: &str) -> bool {
     let id = model_id.to_ascii_lowercase();
 
     let is_chat_family = id.starts_with("gpt-")
@@ -179,7 +233,7 @@ pub fn is_openai_chat_model(model_id: &str) -> bool {
     is_chat_family && !is_non_chat_variant
 }
 
-pub fn openai_model_priority(model_id: &str) -> usize {
+pub(crate) fn openai_model_priority(model_id: &str) -> usize {
     let id = model_id.to_ascii_lowercase();
 
     const EXACT_PRIORITY: &[&str] = &[
@@ -215,7 +269,7 @@ pub fn openai_model_priority(model_id: &str) -> usize {
     EXACT_PRIORITY.len() + PREFIX_PRIORITY.len() + 1
 }
 
-pub fn sort_openai_models(models: &mut [(String, String)]) {
+pub(crate) fn sort_openai_models(models: &mut [(String, String)]) {
     models.sort_by(|a, b| {
         openai_model_priority(&a.0)
             .cmp(&openai_model_priority(&b.0))
@@ -226,7 +280,7 @@ pub fn sort_openai_models(models: &mut [(String, String)]) {
 /// Fetch installed models from a local Ollama instance.
 ///
 /// Returns `(model_name, display_label)` pairs. Falls back to static defaults on error.
-pub async fn fetch_ollama_models(base_url: &str) -> Vec<(String, String)> {
+pub(crate) async fn fetch_ollama_models(base_url: &str) -> Vec<(String, String)> {
     let static_defaults = vec![
         ("llama3".into(), "llama3".into()),
         ("mistral".into(), "mistral".into()),
@@ -283,7 +337,7 @@ pub async fn fetch_ollama_models(base_url: &str) -> Vec<(String, String)> {
 /// Fetch models from a generic OpenAI-compatible /v1/models endpoint.
 ///
 /// Used for registry providers like Groq, NVIDIA NIM, etc.
-pub async fn fetch_openai_compatible_models(
+pub(crate) async fn fetch_openai_compatible_models(
     base_url: &str,
     cached_key: Option<&str>,
 ) -> Vec<(String, String)> {
@@ -353,5 +407,53 @@ pub fn build_nearai_model_fetch_config() -> crate::config::LlmConfig {
         response_cache_enabled: false,
         response_cache_ttl_secs: 3600,
         response_cache_max_entries: 1000,
+    }
+}
+
+#[cfg(test)]
+mod classifier_tests {
+    use super::*;
+
+    #[test]
+    fn is_openai_chat_model_includes_gpt5_and_filters_non_chat_variants() {
+        assert!(is_openai_chat_model("gpt-5"));
+        assert!(is_openai_chat_model("gpt-5-mini-2026-01-01"));
+        assert!(is_openai_chat_model("o3-2025-04-16"));
+        assert!(!is_openai_chat_model("chatgpt-image-latest"));
+        assert!(!is_openai_chat_model("gpt-4o-realtime-preview"));
+        assert!(!is_openai_chat_model("gpt-4o-mini-transcribe"));
+        assert!(!is_openai_chat_model("text-embedding-3-large"));
+    }
+
+    #[test]
+    fn sort_openai_models_prioritizes_best_models_first() {
+        let mut models = vec![
+            ("gpt-4o-mini".to_string(), "gpt-4o-mini".to_string()),
+            ("gpt-5-mini".to_string(), "gpt-5-mini".to_string()),
+            ("o3".to_string(), "o3".to_string()),
+            ("gpt-4.1".to_string(), "gpt-4.1".to_string()),
+            ("gpt-5".to_string(), "gpt-5".to_string()),
+        ];
+
+        sort_openai_models(&mut models);
+
+        let ordered: Vec<String> = models.into_iter().map(|(id, _)| id).collect();
+        assert_eq!(
+            ordered,
+            vec![
+                "gpt-5".to_string(),
+                "gpt-5-mini".to_string(),
+                "o3".to_string(),
+                "gpt-4.1".to_string(),
+                "gpt-4o-mini".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_ollama_models_unreachable_fallback() {
+        // Point at a port nothing listens on.
+        let models = fetch_ollama_models("http://127.0.0.1:1").await;
+        assert!(!models.is_empty(), "should fall back to static defaults");
     }
 }

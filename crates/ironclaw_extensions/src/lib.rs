@@ -240,40 +240,7 @@ impl ExtensionPackage {
         root: VirtualPath,
     ) -> Result<Self, ExtensionError> {
         ensure_extension_root_matches(&manifest.id, &root)?;
-        let expected_prefix = format!("{}.", manifest.id.as_str());
-        let mut seen_capabilities = HashSet::new();
-        let capabilities = manifest
-            .capabilities
-            .iter()
-            .map(|capability| {
-                if !capability.id.as_str().starts_with(&expected_prefix) {
-                    return Err(ExtensionError::InvalidManifest {
-                        reason: format!(
-                            "capability id {} must be provider-prefixed with {}",
-                            capability.id.as_str(),
-                            expected_prefix
-                        ),
-                    });
-                }
-                if !seen_capabilities.insert(capability.id.clone()) {
-                    return Err(ExtensionError::DuplicateCapability {
-                        id: capability.id.clone(),
-                    });
-                }
-                Ok(CapabilityDescriptor {
-                    id: capability.id.clone(),
-                    provider: manifest.id.clone(),
-                    runtime: manifest.runtime_kind(),
-                    trust_ceiling: manifest.descriptor_trust_default,
-                    description: capability.description.clone(),
-                    parameters_schema: descriptor_schema_ref(capability),
-                    effects: capability.effects.clone(),
-                    default_permission: capability.default_permission,
-                    runtime_credentials: capability.runtime_credentials.clone(),
-                    resource_profile: capability.resource_profile.clone(),
-                })
-            })
-            .collect::<Result<Vec<_>, ExtensionError>>()?;
+        let capabilities = capability_descriptors_from_manifest(&manifest)?;
 
         Ok(Self {
             id: manifest.id.clone(),
@@ -281,6 +248,25 @@ impl ExtensionPackage {
             manifest,
             capabilities,
         })
+    }
+
+    pub(crate) fn validate_consistency(&self) -> Result<(), ExtensionError> {
+        if self.id != self.manifest.id {
+            return Err(ExtensionError::InvalidManifest {
+                reason: format!(
+                    "package id {} does not match manifest id {}",
+                    self.id, self.manifest.id
+                ),
+            });
+        }
+        ensure_extension_root_matches(&self.manifest.id, &self.root)?;
+        if self.capabilities != capability_descriptors_from_manifest(&self.manifest)? {
+            return Err(ExtensionError::InvalidManifest {
+                reason: "package capability descriptors do not match manifest declarations"
+                    .to_string(),
+            });
+        }
+        Ok(())
     }
 
     /// Build the trust-policy identity for this package.
@@ -356,7 +342,7 @@ pub use installations::{
 pub use lifecycle::{
     ExtensionLifecycleEvent, ExtensionLifecycleEventSink, ExtensionLifecycleService,
 };
-pub use registry::ExtensionRegistry;
+pub use registry::{ExtensionRegistry, SharedExtensionRegistry};
 
 /// Filesystem-backed extension discovery.
 pub struct ExtensionDiscovery;
@@ -455,6 +441,45 @@ fn extension_id_from_package_root(root: &VirtualPath) -> Result<ExtensionId, Ext
         return Err(invalid_package_root(root));
     }
     Ok(ExtensionId::new(extension_id.to_string())?)
+}
+
+fn capability_descriptors_from_manifest(
+    manifest: &ExtensionManifest,
+) -> Result<Vec<CapabilityDescriptor>, ExtensionError> {
+    let expected_prefix = format!("{}.", manifest.id.as_str());
+    let mut seen_capabilities = HashSet::new();
+    manifest
+        .capabilities
+        .iter()
+        .map(|capability| {
+            if !capability.id.as_str().starts_with(&expected_prefix) {
+                return Err(ExtensionError::InvalidManifest {
+                    reason: format!(
+                        "capability id {} must be provider-prefixed with {}",
+                        capability.id.as_str(),
+                        expected_prefix
+                    ),
+                });
+            }
+            if !seen_capabilities.insert(capability.id.clone()) {
+                return Err(ExtensionError::DuplicateCapability {
+                    id: capability.id.clone(),
+                });
+            }
+            Ok(CapabilityDescriptor {
+                id: capability.id.clone(),
+                provider: manifest.id.clone(),
+                runtime: manifest.runtime_kind(),
+                trust_ceiling: manifest.descriptor_trust_default,
+                description: capability.description.clone(),
+                parameters_schema: descriptor_schema_ref(capability),
+                effects: capability.effects.clone(),
+                default_permission: capability.default_permission,
+                runtime_credentials: capability.runtime_credentials.clone(),
+                resource_profile: capability.resource_profile.clone(),
+            })
+        })
+        .collect()
 }
 
 fn invalid_package_root(root: &VirtualPath) -> ExtensionError {

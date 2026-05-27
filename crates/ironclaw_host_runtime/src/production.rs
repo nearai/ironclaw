@@ -21,7 +21,7 @@ use ironclaw_capabilities::{
     CapabilityHost, CapabilityInvocationError, CapabilityInvocationRequest,
     CapabilityInvocationResult, CapabilityObligationHandler, CapabilityResumeRequest,
 };
-use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry};
+use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_host_api::{
     ApprovalRequestId, CapabilityDispatcher, CapabilityId, DispatchFailureKind, InvocationId,
     PackageSource, ResourceScope, RuntimeDispatchErrorKind, RuntimeKind,
@@ -29,7 +29,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_processes::{
     ProcessCancellationRegistry, ProcessError, ProcessHost, ProcessManager, ProcessResultStore,
-    ProcessStatus, ProcessStore,
+    ProcessStart, ProcessStatus, ProcessStore,
 };
 use ironclaw_run_state::{
     ApprovalRequestStore, RunStateApprovalStore, RunStateError, RunStateStore, RunStatus,
@@ -49,7 +49,7 @@ use crate::{
 
 /// Default production wiring for [`HostRuntime`].
 pub struct DefaultHostRuntime {
-    registry: Arc<ExtensionRegistry>,
+    registry: Arc<SharedExtensionRegistry>,
     dispatcher: Arc<dyn CapabilityDispatcher>,
     authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer>,
     trust_policy: Arc<dyn TrustPolicy>,
@@ -70,6 +70,10 @@ pub struct DefaultHostRuntime {
 impl DefaultHostRuntime {
     /// Constructs a default host runtime over the supplied kernel services.
     ///
+    /// This constructor snapshots the supplied registry into an internal
+    /// [`SharedExtensionRegistry`]. Use [`Self::from_shared_registry`] when
+    /// callers need subsequent registry mutations to be shared with the runtime.
+    ///
     /// The runtime starts with an explicit fail-closed host trust policy, so
     /// capability dispatch is denied until composition attaches a concrete
     /// policy with [`Self::with_trust_policy`] or [`Self::with_trust_policy_dyn`].
@@ -86,6 +90,22 @@ impl DefaultHostRuntime {
     /// review.
     pub fn new(
         registry: Arc<ExtensionRegistry>,
+        dispatcher: Arc<dyn CapabilityDispatcher>,
+        authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer>,
+        surface_version: CapabilitySurfaceVersion,
+        runtime_policy: EffectiveRuntimePolicy,
+    ) -> Self {
+        Self::from_shared_registry(
+            Arc::new(SharedExtensionRegistry::new((*registry).clone())),
+            dispatcher,
+            authorizer,
+            surface_version,
+            runtime_policy,
+        )
+    }
+
+    pub fn from_shared_registry(
+        registry: Arc<SharedExtensionRegistry>,
         dispatcher: Arc<dyn CapabilityDispatcher>,
         authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer>,
         surface_version: CapabilitySurfaceVersion,
@@ -243,6 +263,28 @@ impl DefaultHostRuntime {
     pub fn with_builtin_obligation_handler(self) -> Self {
         self.with_obligation_handler(Arc::new(BuiltinObligationHandler::new()))
     }
+
+    /// Spawns an already-authorized process request through the configured
+    /// process manager.
+    pub async fn spawn_process(
+        &self,
+        start: ProcessStart,
+    ) -> Result<crate::RuntimeProcessHandle, HostRuntimeError> {
+        let Some(process_manager) = &self.process_manager else {
+            return Err(HostRuntimeError::Unavailable {
+                reason: "process manager unavailable".to_string(),
+            });
+        };
+        let capability_id = start.capability_id.clone();
+        let record = process_manager
+            .spawn(start)
+            .await
+            .map_err(unavailable_from_process_error)?;
+        Ok(crate::RuntimeProcessHandle {
+            process_id: record.process_id,
+            capability_id,
+        })
+    }
 }
 
 #[async_trait]
@@ -295,7 +337,8 @@ impl HostRuntime for DefaultHostRuntime {
         };
         context.trust = trust_decision.effective_trust.class();
 
-        let host = self.capability_host();
+        let registry = self.registry.snapshot();
+        let host = self.capability_host(&registry);
 
         let invocation = CapabilityInvocationRequest {
             context,
@@ -381,7 +424,8 @@ impl HostRuntime for DefaultHostRuntime {
         };
         context.trust = trust_decision.effective_trust.class();
 
-        let host = self.capability_host();
+        let registry = self.registry.snapshot();
+        let host = self.capability_host(&registry);
         let resume = CapabilityResumeRequest {
             context,
             approval_request_id,
@@ -417,8 +461,9 @@ impl HostRuntime for DefaultHostRuntime {
         &self,
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, HostRuntimeError> {
+        let registry = self.registry.snapshot();
         CapabilityCatalog::new(
-            self.registry.as_ref(),
+            &registry,
             self.authorizer.as_ref(),
             &self.surface_version,
             &self.runtime_policy,
@@ -506,6 +551,7 @@ impl HostRuntime for DefaultHostRuntime {
         request: RuntimeStatusRequest,
     ) -> Result<HostRuntimeStatus, HostRuntimeError> {
         let mut active_work = Vec::new();
+        let registry = self.registry.snapshot();
 
         if let Some(run_state) = &self.run_state {
             let records = run_state
@@ -518,8 +564,7 @@ impl HostRuntime for DefaultHostRuntime {
                     .into_iter()
                     .filter(|record| record.status == RunStatus::Running)
                     .map(|record| {
-                        let runtime = self
-                            .registry
+                        let runtime = registry
                             .get_capability(&record.capability_id)
                             .map(|descriptor| descriptor.runtime);
                         RuntimeWorkSummary {
@@ -565,7 +610,8 @@ impl HostRuntime for DefaultHostRuntime {
 
     /// Returns readiness for runtime backends required by registered capabilities.
     async fn health(&self) -> Result<HostRuntimeHealth, HostRuntimeError> {
-        let required = required_runtime_backends(&self.registry);
+        let registry = self.registry.snapshot();
+        let required = required_runtime_backends(&registry);
         if required.is_empty() {
             return Ok(HostRuntimeHealth {
                 ready: true,
@@ -587,12 +633,12 @@ impl HostRuntime for DefaultHostRuntime {
 }
 
 impl DefaultHostRuntime {
-    fn capability_host(&self) -> CapabilityHost<'_, dyn CapabilityDispatcher> {
-        let mut host = CapabilityHost::new(
-            self.registry.as_ref(),
-            self.dispatcher.as_ref(),
-            self.authorizer.as_ref(),
-        );
+    fn capability_host<'a>(
+        &'a self,
+        registry: &'a ExtensionRegistry,
+    ) -> CapabilityHost<'a, dyn CapabilityDispatcher> {
+        let mut host =
+            CapabilityHost::new(registry, self.dispatcher.as_ref(), self.authorizer.as_ref());
         if let Some(run_state_approval_store) = &self.run_state_approval_store {
             host = host.with_run_state_approval_store(run_state_approval_store.as_ref());
         } else {
@@ -621,12 +667,11 @@ impl DefaultHostRuntime {
     ) -> Result<TrustDecision, TrustEvaluationError> {
         let policy = self.trust_policy.as_ref();
 
-        let descriptor = self
-            .registry
+        let registry = self.registry.snapshot();
+        let descriptor = registry
             .get_capability(capability_id)
             .ok_or(TrustEvaluationError::UnknownCapability)?;
-        let package = self
-            .registry
+        let package = registry
             .get_extension(&descriptor.provider)
             .ok_or(TrustEvaluationError::MissingPackage)?;
         let package_descriptor = package
@@ -658,8 +703,8 @@ impl DefaultHostRuntime {
         &self,
         capability_id: &CapabilityId,
     ) -> Result<(), RuntimePolicyEvaluationError> {
-        let descriptor = self
-            .registry
+        let registry = self.registry.snapshot();
+        let descriptor = registry
             .get_capability(capability_id)
             .ok_or(RuntimePolicyEvaluationError::UnknownCapability)?;
         let plan = plan_capability(descriptor, &self.runtime_policy)

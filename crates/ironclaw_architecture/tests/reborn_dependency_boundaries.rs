@@ -1115,6 +1115,30 @@ fn reborn_product_auth_contract_stays_reborn_native() {
             reason: "Reborn product auth must not retrieve raw secret material directly",
         },
         ForbiddenUse {
+            pattern: "auth-token",
+            reason: "Reborn manual-token setup must not fall back to v1 chat token route names",
+        },
+        ForbiddenUse {
+            pattern: "auth_token",
+            reason: "Reborn manual-token setup must not fall back to v1 chat token command paths",
+        },
+        ForbiddenUse {
+            pattern: "IncomingMessage",
+            reason: "Reborn product auth must not capture manual tokens through chat transcripts",
+        },
+        ForbiddenUse {
+            pattern: "ChatMessage",
+            reason: "Reborn product auth must not capture manual tokens through chat transcripts",
+        },
+        ForbiddenUse {
+            pattern: "secret_name",
+            reason: "Reborn product auth must use scoped credential accounts and opaque handles, not raw v1 secret names",
+        },
+        ForbiddenUse {
+            pattern: "SecretName",
+            reason: "Reborn product auth must use scoped credential accounts and opaque handles, not raw v1 secret names",
+        },
+        ForbiddenUse {
             pattern: "reqwest",
             reason: "Reborn product auth must not own outbound HTTP transport",
         },

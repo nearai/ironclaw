@@ -96,6 +96,33 @@ async fn install_rejects_name_mismatch() {
 }
 
 #[tokio::test]
+async fn install_preserves_parse_error_context() {
+    let filesystem = Arc::new(InMemoryBackend::default());
+    let context = skill_management_context(filesystem, skill_mounts());
+
+    let error = install_skill(
+        &context,
+        SkillInstallRequest {
+            name: None,
+            content: "not a skill manifest",
+            files: &[],
+            source: SkillInstallSource::User,
+            source_url: None,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.kind(), SkillManagementErrorKind::InvalidInput);
+    assert!(
+        error
+            .reason()
+            .is_some_and(|reason| reason.contains("Missing YAML frontmatter")),
+        "parse context should be preserved in the public error reason: {error:?}"
+    );
+}
+
+#[tokio::test]
 async fn install_rejects_invalid_bundle_files() {
     let cases = [
         (
@@ -221,7 +248,7 @@ async fn install_bundle_failure_cleans_up_partial_directory() {
     )
     .await
     .unwrap_err();
-    assert_eq!(error.kind(), SkillManagementErrorKind::InvalidSkill);
+    assert_eq!(error.kind(), SkillManagementErrorKind::FilesystemDenied);
 
     assert_missing(&inner, "/projects/skills/partial-helper/SKILL.md").await;
     assert_missing(
@@ -390,7 +417,7 @@ async fn install_cleanup_failure_is_reported() {
     .await
     .unwrap_err();
 
-    assert_eq!(error.kind(), SkillManagementErrorKind::FilesystemDenied);
+    assert_eq!(error.kind(), SkillManagementErrorKind::InvalidSkill);
     assert_file_contents(
         &inner,
         "/projects/skills/cleanup-helper/references/guide.md",
@@ -465,6 +492,126 @@ async fn list_treats_unmounted_optional_skill_root_as_empty() {
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].name, "local-helper");
     assert_eq!(listed[0].source, SkillSource::User);
+}
+
+#[tokio::test]
+async fn search_skills_empty_query_returns_all_matching_skills() {
+    let filesystem = Arc::new(InMemoryBackend::default());
+    write_file(
+        filesystem.as_ref(),
+        "/projects/system/skills/system-helper/SKILL.md",
+        skill_md(
+            "system-helper",
+            "system skill description",
+            "SYSTEM_SKILL_PROMPT",
+        ),
+    )
+    .await;
+    write_file(
+        filesystem.as_ref(),
+        "/projects/skills/local-helper/SKILL.md",
+        skill_md("local-helper", "local skill description", "LOCAL_PROMPT"),
+    )
+    .await;
+    let context = skill_management_context(filesystem, skill_mounts());
+
+    let result = search_skills(
+        &context,
+        SkillSearchRequest {
+            query: "",
+            limit: 10,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.skills.len(), 2);
+    assert!(!result.truncated);
+    assert!(
+        result
+            .skills
+            .iter()
+            .any(|skill| skill.name == "system-helper")
+    );
+    assert!(
+        result
+            .skills
+            .iter()
+            .any(|skill| skill.name == "local-helper")
+    );
+}
+
+#[tokio::test]
+async fn search_skills_returns_bounded_matches_with_truncation() {
+    let filesystem = Arc::new(InMemoryBackend::default());
+    for name in ["alpha-helper", "beta-helper", "gamma-helper"] {
+        write_file(
+            filesystem.as_ref(),
+            &format!("/projects/skills/{name}/SKILL.md"),
+            skill_md(name, "helper description", "PROMPT"),
+        )
+        .await;
+    }
+    let context = skill_management_context(filesystem, skill_mounts());
+
+    let result = search_skills(
+        &context,
+        SkillSearchRequest {
+            query: "helper",
+            limit: 2,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.skills.len(), 2);
+    assert!(result.truncated);
+}
+
+#[tokio::test]
+async fn search_skills_propagates_filesystem_error() {
+    let context =
+        skill_management_context_with_root(Arc::new(FailingListFilesystem), skill_mounts());
+
+    let error = search_skills(
+        &context,
+        SkillSearchRequest {
+            query: "helper",
+            limit: 10,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.kind(), SkillManagementErrorKind::InvalidSkill);
+}
+
+#[tokio::test]
+async fn search_skills_stops_after_entry_scan_budget() {
+    let filesystem = Arc::new(InMemoryBackend::default());
+    for index in 0..=250 {
+        let name = format!("budget-helper-{index:03}");
+        write_file(
+            filesystem.as_ref(),
+            &format!("/projects/skills/{name}/SKILL.md"),
+            skill_md(&name, "budget helper description", "PROMPT"),
+        )
+        .await;
+    }
+    let context = skill_management_context(filesystem, skill_mounts());
+
+    let result = search_skills(
+        &context,
+        SkillSearchRequest {
+            query: "budget",
+            limit: 1000,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.skills.len(), super::SKILL_SEARCH_ENTRY_SCAN_LIMIT);
+    assert!(result.truncated);
 }
 
 #[tokio::test]
@@ -568,6 +715,40 @@ impl RootFilesystem for FailingBundleWriteFilesystem {
             });
         }
         self.inner.delete(path).await
+    }
+}
+
+#[derive(Clone)]
+struct FailingListFilesystem;
+
+#[async_trait]
+impl RootFilesystem for FailingListFilesystem {
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities::default()
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        Err(FilesystemError::Backend {
+            operation: FilesystemOperation::ListDir,
+            path: path.clone(),
+            reason: "injected list failure".to_string(),
+        })
+    }
+
+    async fn list_dir_bounded(
+        &self,
+        path: &VirtualPath,
+        _max_entries: usize,
+    ) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.list_dir(path).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        Err(FilesystemError::Backend {
+            operation: FilesystemOperation::Stat,
+            path: path.clone(),
+            reason: "injected stat failure".to_string(),
+        })
     }
 }
 

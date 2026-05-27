@@ -44,8 +44,8 @@ pub use identity::{AdapterInstallationId, ProductAdapterId, ProductSurfaceKind};
 pub use inbound::{
     ApprovalDecision, ApprovalResolutionPayload, AuthResolutionPayload, AuthResolutionResult,
     InboundCommandPayload, InboundRetryDisposition, LinkedThreadActionPayload,
-    ParsedProductInbound, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
-    ProductRejection, ProductRejectionDisposition, ProductRejectionKind,
+    ParsedProductInbound, ProductCommandResultPayload, ProductInboundAck, ProductInboundEnvelope,
+    ProductInboundPayload, ProductRejection, ProductRejectionDisposition, ProductRejectionKind,
     ProductSlashCommandParseError, ProductTriggerReason, ProjectionSubscriptionPayload,
     TrustedInboundContext, UserMessagePayload, parse_product_slash_command,
 };

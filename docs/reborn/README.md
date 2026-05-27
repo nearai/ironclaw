@@ -104,3 +104,4 @@ Preserve these Reborn boundaries unless the relevant contract or architecture te
 - Reborn substrate/cutover parent: #2987
 - Reborn compatibility gate: #3020
 - Reborn product-surface migration: #3031
+- Reborn lifecycle UX realignment: `docs/reborn/2026-05-24-3288-lifecycle-ux-realignment.md`

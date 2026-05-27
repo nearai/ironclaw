@@ -345,7 +345,14 @@ async fn dispatch_payload(
         ProductInboundPayload::Command(cmd) => {
             let context =
                 ProductCommandContext::from_envelope(envelope, action_id, action_fingerprint)?;
-            let command = ProductCommand::from_payload(cmd);
+            let command = match ProductCommand::from_payload(cmd) {
+                Ok(command) => command,
+                Err(rejection) => {
+                    let ack = ProductInboundAck::Rejected(rejection);
+                    let dispatch_kind = dispatch_kind_from_ack(&ack, envelope.payload())?;
+                    return Ok(DispatchedAction { ack, dispatch_kind });
+                }
+            };
             match ports
                 .command_admission_service
                 .admit(&context, &command)

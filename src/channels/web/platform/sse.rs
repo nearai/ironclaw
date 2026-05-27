@@ -516,6 +516,105 @@ mod tests {
         assert!(matches!(e, AppEvent::Heartbeat)); // safety: test assertion
     }
 
+    /// Lock down every quadrant of the (subscriber-scope, event-scope) cross
+    /// product so a regression in `subscribe_raw` filtering shows up here
+    /// before it ships. This is the cross-tenant invariant for SSE/WS:
+    /// once a subscriber declares a `user_id`, only that user's scoped
+    /// events plus globally-broadcast (unscoped) events reach them.
+    #[tokio::test]
+    async fn test_filter_quadrants_scoped_subscriber() {
+        let manager = SseManager::new();
+        let mut alice = Box::pin(
+            manager
+                .subscribe_raw(Some("alice".to_string()), false)
+                .expect("alice subscribe"),
+        );
+
+        // (scoped event, matching user)        -> deliver
+        manager.broadcast_for_user(
+            "alice",
+            AppEvent::Status {
+                message: "to_alice".to_string(),
+                thread_id: None,
+            },
+        );
+        // (scoped event, mismatched user)      -> drop
+        manager.broadcast_for_user(
+            "bob",
+            AppEvent::Status {
+                message: "to_bob".to_string(),
+                thread_id: None,
+            },
+        );
+        // (unscoped event, any subscriber)     -> deliver (global)
+        manager.broadcast(AppEvent::Heartbeat);
+
+        // Alice receives her own scoped event and the global heartbeat,
+        // in broadcast order. The intermediate bob-scoped event is filtered
+        // out before alice's stream sees it.
+        let first = alice.next().await.expect("alice receives one event");
+        assert!(
+            matches!(&first, AppEvent::Status { message, .. } if message == "to_alice"),
+            "alice first event should be her scoped Status, got {first:?}"
+        );
+        let second = alice.next().await.expect("alice receives heartbeat");
+        assert!(
+            matches!(second, AppEvent::Heartbeat),
+            "alice second event should be heartbeat after the bob-scoped event was filtered"
+        );
+    }
+
+    /// The unscoped-subscriber branch is the single-tenant compatibility
+    /// path. It delivers every event regardless of scope. Multi-tenant
+    /// callers must NOT pass `user_id = None` to `subscribe_raw` — this
+    /// test exists so the day someone removes that branch is an explicit
+    /// decision, not a stealth refactor.
+    #[tokio::test]
+    async fn test_filter_quadrants_unscoped_subscriber_sees_all() {
+        let manager = SseManager::new();
+        let mut everyone = Box::pin(
+            manager
+                .subscribe_raw(None, false)
+                .expect("unscoped subscribe"),
+        );
+
+        manager.broadcast_for_user(
+            "alice",
+            AppEvent::Status {
+                message: "alice".to_string(),
+                thread_id: None,
+            },
+        );
+        manager.broadcast_for_user(
+            "bob",
+            AppEvent::Status {
+                message: "bob".to_string(),
+                thread_id: None,
+            },
+        );
+        manager.broadcast(AppEvent::Heartbeat);
+
+        let mut seen: Vec<String> = Vec::new();
+        for _ in 0..3 {
+            match everyone.next().await.expect("event") {
+                AppEvent::Status { message, .. } => seen.push(message),
+                AppEvent::Heartbeat => seen.push("heartbeat".to_string()),
+                other => panic!("unexpected variant: {other:?}"),
+            }
+        }
+        assert_eq!(
+            seen,
+            vec![
+                "alice".to_string(),
+                "bob".to_string(),
+                "heartbeat".to_string()
+            ],
+            "unscoped subscriber must observe both scoped events plus the global heartbeat \
+             (single-tenant compat). If this fails, the global-broadcast hole is closed and \
+             the multi-tenant fix in `mod.rs::send_status` should be re-evaluated."
+        );
+    }
+
     #[tokio::test]
     async fn test_verbose_filtering() {
         let manager = SseManager::new();

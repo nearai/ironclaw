@@ -38,6 +38,7 @@ mod fakes;
 mod in_memory_ledger;
 mod inbound_turn;
 mod ledger;
+mod lifecycle;
 mod policy;
 mod reborn_services;
 mod webui_inbound;
@@ -69,7 +70,8 @@ pub use command_dispatch::{
     ProductCommandService, RejectingProductCommandAdmissionService, RejectingProductCommandService,
 };
 pub use commands::{
-    ProductCommand, ProductCommandDescriptor, ProductModelCommand, product_command_descriptors,
+    LifecycleProductCommandService, ProductCommand, ProductCommandDescriptor, ProductModelCommand,
+    product_command_descriptors,
 };
 pub use conversation_binding::{
     ProductConversationBindingService, ProductInstallationKey, ProductInstallationScope,
@@ -86,6 +88,14 @@ pub use inbound_turn::{
     DefaultInboundTurnService, InboundTurnOutcome, InboundTurnService, InboundUserMessageDispatch,
 };
 pub use ledger::{IdempotencyDecision, IdempotencyLedger};
+pub use lifecycle::{
+    LifecycleBlockerRef, LifecycleCommandKind, LifecycleExtensionSource, LifecycleExtensionSummary,
+    LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
+    LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
+    LifecycleProductPayload, LifecycleProductResponse, LifecycleProductSurfaceContext,
+    LifecycleReadinessBlocker, LifecycleSkillSource, LifecycleSkillSummary,
+    UnsupportedLifecycleProductFacade,
+};
 pub use policy::{
     BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,
     NoopBeforeInboundPolicy,
@@ -110,8 +120,8 @@ pub use reborn_services::{
     RebornGetRunStateResponse, RebornListThreadsResponse, RebornResolveGateResponse,
     RebornResumeGateResponse, RebornServices, RebornServicesApi, RebornServicesError,
     RebornServicesErrorCode, RebornServicesErrorKind, RebornSetupExtensionResponse,
-    RebornSetupExtensionStatus, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse,
 };
 pub use webui_inbound::{
     WebUiAuthenticatedCaller, WebUiCancelReason, WebUiCancelRunRequest, WebUiCreateThreadRequest,

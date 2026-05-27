@@ -887,9 +887,10 @@ async fn tool_response_to_host(
             capability_call_count = candidates.len(),
             "reborn model gateway classified provider response as capability calls"
         );
-        return Ok(HostManagedModelResponse::capability_calls(
+        return Ok(HostManagedModelResponse::capability_calls_with_reasoning(
             candidates,
             response.content.unwrap_or_default(),
+            response.reasoning,
         ));
     }
 
@@ -900,7 +901,10 @@ async fn tool_response_to_host(
                 content_bytes = content.len(),
                 "reborn model gateway classified tool-capable provider response as assistant reply"
             );
-            Ok(HostManagedModelResponse::assistant_reply(content))
+            Ok(HostManagedModelResponse::assistant_reply_with_reasoning(
+                content,
+                response.reasoning,
+            ))
         }
         FinishReason::Length => Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::BudgetExceeded,
@@ -967,7 +971,10 @@ fn response_to_host_reply(
     response: CompletionResponse,
 ) -> Result<HostManagedModelResponse, HostManagedModelError> {
     match response.finish_reason {
-        FinishReason::Stop => Ok(HostManagedModelResponse::assistant_reply(response.content)),
+        FinishReason::Stop => Ok(HostManagedModelResponse::assistant_reply_with_reasoning(
+            response.content,
+            response.reasoning,
+        )),
         FinishReason::Length => Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::BudgetExceeded,
             "model response was truncated before completion",

@@ -411,4 +411,3 @@ fn extract_assistant_text(message: &Value) -> Option<String> {
         .as_str()
         .map(std::string::ToString::to_string)
 }
-

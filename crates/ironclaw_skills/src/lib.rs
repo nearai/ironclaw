@@ -66,8 +66,8 @@ pub use management::{
     MAX_INSTALL_BUNDLE_FILE_BYTES, MAX_INSTALL_BUNDLE_FILES, MAX_INSTALL_BUNDLE_TOTAL_BYTES,
     SkillInstallFile, SkillInstallRequest, SkillInstallResult, SkillInstallSource,
     SkillManagementContext, SkillManagementError, SkillManagementErrorKind, SkillRemoveRequest,
-    SkillRemoveResult, SkillSource as ManagedSkillSource, SkillSummary, install_skill, list_skills,
-    remove_skill,
+    SkillRemoveResult, SkillSearchRequest, SkillSearchResult, SkillSource as ManagedSkillSource,
+    SkillSummary, install_skill, list_skills, remove_skill, search_skills, skill_summary_json,
 };
 pub use parser::{ParsedSkill, SkillParseError, parse_skill_md};
 pub use selector::{

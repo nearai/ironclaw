@@ -311,6 +311,19 @@ where
             }
         };
 
+        for safe_delta in &response.safe_reasoning_deltas {
+            if let Err(error) = self
+                .milestones
+                .model_reasoning_delta(safe_delta.clone())
+                .await
+            {
+                tracing::debug!(
+                    kind = ?error.kind,
+                    diagnostic_ref = ?error.diagnostic_ref,
+                    "loop model reasoning milestone failed after successful model response"
+                );
+            }
+        }
         if let Err(error) = self
             .milestones
             .model_completed(response.effective_model_profile_id.clone())
@@ -331,6 +344,12 @@ fn sanitize_model_response(mut response: LoopModelResponse) -> LoopModelResponse
         chunk.safe_text_delta =
             sanitize_model_visible_text(std::mem::take(&mut chunk.safe_text_delta));
     }
+    for safe_delta in &mut response.safe_reasoning_deltas {
+        *safe_delta = sanitize_model_visible_text(std::mem::take(safe_delta));
+    }
+    response
+        .safe_reasoning_deltas
+        .retain(|safe_delta| !safe_delta.is_empty());
     if let ParentLoopOutput::AssistantReply(reply) = &mut response.output {
         reply.content = sanitize_model_visible_text(std::mem::take(&mut reply.content));
     }

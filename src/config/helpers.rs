@@ -165,11 +165,15 @@ pub(crate) const ADMIN_ONLY_LLM_SETTING_KEYS: &[&str] = &[
     "ollama_base_url",
     "openai_compatible_base_url",
     // Provider-selection keys — every member shares one LLM provider chain,
-    // so the choice of backend and the provider-specific endpoint knobs
-    // (Bedrock region / cross-region prefix / AWS profile) must be gated
-    // to admins. Members can still pick their own model via `selected_model`,
-    // which is intentionally NOT in this list.
+    // so the choice of backend must be gated to admins. Members can still
+    // pick their own model via `selected_model`, which is intentionally
+    // NOT in this list.
     "llm_backend",
+    // Legacy bedrock keys retained for backward-compat with
+    // settings.json files written before Layer D moved this config into
+    // `llm_builtin_overrides["bedrock"].extras` (which is already covered
+    // by the `llm_builtin_overrides` prefix-strip below). New code does
+    // not write to these.
     "bedrock_region",
     "bedrock_cross_region",
     "bedrock_profile",
@@ -180,8 +184,31 @@ pub(crate) const ADMIN_ONLY_LLM_SETTING_KEYS: &[&str] = &[
 /// Used by config resolution paths that load per-user DB settings for a
 /// non-operator user, to ensure they cannot inject private/loopback
 /// provider endpoints into the active LLM/embeddings configuration.
+///
+/// Strips both:
+/// - exact-match keys (e.g. `llm_backend`, `bedrock_region`), and
+/// - any key whose dotted path starts with one of the admin-only roots
+///   followed by a `.` (e.g. `llm_builtin_overrides.bedrock.api_key`,
+///   `llm_builtin_overrides.bedrock.extras.region`).
 pub(crate) fn strip_admin_only_llm_keys(map: &mut HashMap<String, serde_json::Value>) {
-    map.retain(|key, _| !ADMIN_ONLY_LLM_SETTING_KEYS.contains(&key.as_str()));
+    map.retain(|key, _| !is_admin_only_llm_key(key));
+}
+
+/// Single source of truth for "is this setting key admin-only?".
+///
+/// Matches both exact keys in [`ADMIN_ONLY_LLM_SETTING_KEYS`] and dotted
+/// subpaths under those roots (e.g. `llm_builtin_overrides.bedrock.extras
+/// .region`). The write-side gate in `channels::web::features::settings`
+/// must call this rather than re-implementing `.contains(key)`, or a
+/// non-admin can sneak past the gate by addressing the same value
+/// through a dotted subpath.
+pub(crate) fn is_admin_only_llm_key(key: &str) -> bool {
+    if ADMIN_ONLY_LLM_SETTING_KEYS.contains(&key) {
+        return true;
+    }
+    ADMIN_ONLY_LLM_SETTING_KEYS.iter().any(|root| {
+        key.len() > root.len() + 1 && key.starts_with(root) && key.as_bytes()[root.len()] == b'.'
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

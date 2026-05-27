@@ -42,8 +42,6 @@
 
 mod chunker;
 mod document;
-mod embedding_cache;
-mod embeddings;
 pub mod extension_state;
 pub mod hygiene;
 pub mod layer;
@@ -63,12 +61,6 @@ pub use document::{
     IDENTITY_PATHS, MemoryChunk, MemoryDocument, PatchResult, VersionSummary, WorkspaceEntry,
     content_sha256, is_config_path, is_identity_path, is_reserved_scope, merge_workspace_entries,
     paths,
-};
-pub use embedding_cache::{CachedEmbeddingProvider, EmbeddingCacheConfig};
-#[cfg(feature = "bedrock")]
-pub use embeddings::BedrockEmbeddings;
-pub use embeddings::{
-    EmbeddingProvider, MockEmbeddings, NearAiEmbeddings, OllamaEmbeddings, OpenAiEmbeddings,
 };
 pub use reborn_identity_context::WorkspaceIdentityContextSource;
 #[cfg(feature = "postgres")]
@@ -96,6 +88,9 @@ use deadpool_postgres::Pool;
 use uuid::Uuid;
 
 use crate::error::WorkspaceError;
+use ironclaw_embeddings::{
+    CachedEmbeddingProvider, EmbeddingCacheConfig, EmbeddingError, EmbeddingProvider,
+};
 use ironclaw_safety::{Sanitizer, Severity};
 
 /// Files injected into the system prompt. Writes to these are scanned for
@@ -2490,7 +2485,7 @@ impl Workspace {
                         "Failed to embed chunk {}: {}{}",
                         chunk.id,
                         e,
-                        if matches!(e, embeddings::EmbeddingError::AuthFailed) {
+                        if matches!(e, EmbeddingError::AuthFailed) {
                             ". Check OPENAI_API_KEY or set EMBEDDING_PROVIDER=ollama for local embeddings"
                         } else {
                             ""

@@ -31,10 +31,10 @@ Multi-provider LLM integration with circuit breaker, retry, failover, and respon
 | `gemini_oauth.rs` | Gemini OAuth provider (Cloud OAuth credentials → `generativelanguage.googleapis.com`) |
 | `github_copilot.rs` | GitHub Copilot Chat provider (uses dedicated reqwest client, not `RigAdapter`) |
 | `github_copilot_auth.rs` | Copilot session-token exchange and refresh (`CopilotTokenManager`) |
-| `oauth_helpers.rs` | Shared OAuth utilities (PKCE, device-code, browser-launch helpers) |
 | `host.rs` | Host-side trait surface: `SessionDb`, `SessionSecrets`, `SessionRenewer`, `SessionKeyPersistor` (binary supplies adapters in `src/llm_host.rs`) |
 | `runtime.rs` | `SwappableLlmProvider` + `LlmReloadHandle` for hot-reloading the provider chain on settings change |
 | `registry.rs` | Provider registry (`ProviderDefinition`, `ProviderProtocol`); resolves backend strings to clients |
+| `resolution.rs` | Full `LlmConfig` resolution for composition roots that select from `providers.json` and need dedicated providers plus the shared provider chain |
 | `tool_schema.rs` | Tool schema normalization policies (`FlattenOnly` for NearAI, strict OpenAI for `RigAdapter` / Codex) |
 | `transcription/{mod,openai,chat_completions}.rs` | Audio transcription pipeline (Whisper / chat-completions back-ends) |
 | `image_models.rs` | Image-generation model metadata table |

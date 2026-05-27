@@ -27,10 +27,10 @@ use ironclaw_product_adapters::{
     ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
 use ironclaw_product_workflow::{
-    ExtensionName, RebornCancelRunResponse, RebornCreateThreadResponse, RebornGetRunStateRequest,
-    RebornGetRunStateResponse, RebornListThreadsResponse, RebornResolveGateResponse,
-    RebornResumeGateResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornSetupExtensionResponse, RebornSetupExtensionStatus,
+    ExtensionName, LifecyclePhase, RebornCancelRunResponse, RebornCreateThreadResponse,
+    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListThreadsResponse,
+    RebornResolveGateResponse, RebornResumeGateResponse, RebornServicesApi, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetupExtensionResponse,
     RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
     RebornTimelineRequest, RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
     WebUiCreateThreadRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
@@ -285,7 +285,9 @@ impl RebornServicesApi for StubServices {
     ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
         Ok(RebornSetupExtensionResponse {
             extension_name,
-            status: RebornSetupExtensionStatus::NotImplemented,
+            phase: LifecyclePhase::UnsupportedOrLegacy,
+            blockers: Vec::new(),
+            package_ref: None,
             payload: None,
         })
     }
@@ -625,7 +627,11 @@ async fn setup_extension_dispatches_typed_extension_name_to_facade() {
         body["extension_name"], "telegram",
         "facade must echo the typed extension name from the path",
     );
-    assert_eq!(body["status"], "not_implemented");
+    assert_eq!(body["phase"], "unsupported_or_legacy");
+    assert!(
+        body.get("status").is_none(),
+        "setup_extension must not expose legacy status aliases: {body}"
+    );
 }
 
 // Companion to the typed-internals fix: a malformed identifier in

@@ -69,6 +69,11 @@ Then Playwright drives a headless Chromium browser against the gateway, making D
 For the live 20+ turn persona workflows and recurring tool-misuse patterns seen
 there, see [`LIVE_TOOL_FAILURES.md`](./LIVE_TOOL_FAILURES.md).
 
+## Skip/xfail debt
+
+For the current inventory of E2E skips/xfails and the policy for keeping browser
+lifecycle tests deterministic, see [`E2E_DEBT.md`](./E2E_DEBT.md).
+
 ## Mocking API responses with `page.route()`
 
 For tabs that depend on external data (extensions, jobs, memory, routines), use
