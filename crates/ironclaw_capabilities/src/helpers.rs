@@ -143,7 +143,23 @@ impl CapabilityInvocationError {
             Self::AuthorizationRequiresAuth { .. } => CapabilityRunStateTransition::BlockAuth {
                 error_kind: "AuthRequired",
             },
-            _ => CapabilityRunStateTransition::Fail {
+            Self::UnknownCapability { .. }
+            | Self::AuthorizationDenied { .. }
+            | Self::AuthorizationRequiresApproval { .. }
+            | Self::InvocationFingerprint { .. }
+            | Self::ApprovalRequestMismatch { .. }
+            | Self::ApprovalFingerprintMismatch { .. }
+            | Self::ApprovalNotApproved { .. }
+            | Self::ApprovalStoreMissing { .. }
+            | Self::ApprovalLeaseMissing { .. }
+            | Self::ResumeStoreMissing { .. }
+            | Self::ProcessManagerMissing { .. }
+            | Self::ResumeNotBlocked { .. }
+            | Self::ResumeContextMismatch { .. }
+            | Self::Lease(_)
+            | Self::RunState(_)
+            | Self::Process(_)
+            | Self::Dispatch { .. } => CapabilityRunStateTransition::Fail {
                 error_kind: "Obligation",
             },
         }
