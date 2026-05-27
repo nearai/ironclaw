@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use ironclaw_extensions::{
     CapabilityVisibility, ExtensionActivationState, ExtensionError, ExtensionInstallation,
@@ -142,10 +142,21 @@ impl RebornLocalExtensionManagementPort {
         ))
     }
 
-    pub(crate) fn active_model_visible_capabilities(&self) -> Vec<ActiveExtensionCapability> {
+    pub(crate) async fn active_model_visible_capabilities(
+        &self,
+    ) -> Result<Vec<ActiveExtensionCapability>, ProductWorkflowError> {
+        let enabled_extension_ids = self
+            .installation_store
+            .list_enabled_installations()
+            .await
+            .map_err(map_extension_installation_error)?
+            .into_iter()
+            .map(|installation| installation.extension_id().clone())
+            .collect::<BTreeSet<_>>();
         let registry = self.active_registry.snapshot();
-        registry
+        Ok(registry
             .capabilities()
+            .filter(|descriptor| enabled_extension_ids.contains(&descriptor.provider))
             .filter(|descriptor| {
                 registry
                     .capability_visibility(&descriptor.id)
@@ -153,7 +164,7 @@ impl RebornLocalExtensionManagementPort {
                     == CapabilityVisibility::Model
             })
             .map(ActiveExtensionCapability::from_descriptor)
-            .collect()
+            .collect())
     }
 
     pub(crate) async fn install(
@@ -701,9 +712,10 @@ mod tests {
     };
     use ironclaw_filesystem::LocalFilesystem;
     use ironclaw_host_api::{
-        ExtensionLifecycleOperation, HostPath, HostPortCatalog, MountAlias, MountGrant,
-        MountPermissions, MountView, TenantId, UserId,
+        CapabilityId, ExtensionLifecycleOperation, HostPath, HostPortCatalog, MountAlias,
+        MountGrant, MountPermissions, MountView, TenantId, UserId,
     };
+    use ironclaw_host_runtime::{SPAWN_SUBAGENT_CAPABILITY_ID, builtin_first_party_package};
     use ironclaw_product_workflow::{
         LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
         LifecycleProductSurfaceContext, LifecycleReadinessBlocker,
@@ -815,6 +827,40 @@ mod tests {
             !storage_root
                 .join("system/extensions/fixture/wasm/fixture.wasm")
                 .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn active_model_visible_capabilities_only_include_enabled_lifecycle_extensions() {
+        let (_dir, _storage_root, port, active_registry, _installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        active_registry
+            .upsert(builtin_first_party_package().expect("builtin package"))
+            .expect("seed builtin package");
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
+            .expect("valid ref");
+        port.install(package_ref.clone())
+            .await
+            .expect("install fixture extension");
+        port.activate(package_ref)
+            .await
+            .expect("activate fixture extension");
+
+        let capability_ids = port
+            .active_model_visible_capabilities()
+            .await
+            .expect("active capabilities")
+            .into_iter()
+            .map(|capability| capability.id)
+            .collect::<Vec<_>>();
+
+        assert!(capability_ids.contains(&CapabilityId::new("fixture.search").unwrap()));
+        assert!(!capability_ids.contains(&CapabilityId::new("fixture.write").unwrap()));
+        assert!(
+            !capability_ids.contains(&CapabilityId::new(SPAWN_SUBAGENT_CAPABILITY_ID).unwrap())
         );
     }
 
@@ -1226,6 +1272,53 @@ mod tests {
             AvailableExtensionCatalog::from_first_party_assets()
                 .expect("first-party GitHub catalog"),
             ExtensionLifecycleService::new(ExtensionRegistry::new()),
+        )
+    }
+
+    fn extension_management_port_fixture_with_catalog_and_service(
+        catalog: AvailableExtensionCatalog,
+        lifecycle_service: ExtensionLifecycleService,
+    ) -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        Arc<RebornLocalExtensionManagementPort>,
+        Arc<SharedExtensionRegistry>,
+        Arc<InMemoryExtensionInstallationStore>,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
+
+        let mut filesystem = LocalFilesystem::new();
+        filesystem
+            .mount_local(
+                VirtualPath::new("/projects").expect("valid virtual path"),
+                HostPath::from_path_buf(storage_root.clone()),
+            )
+            .expect("mount storage root");
+        filesystem
+            .mount_local(
+                VirtualPath::new("/system/extensions").expect("valid virtual path"),
+                HostPath::from_path_buf(storage_root.join("system/extensions")),
+            )
+            .expect("mount system extensions");
+        let filesystem = Arc::new(filesystem);
+        let root_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
+        let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
+        let extension_management = Arc::new(RebornLocalExtensionManagementPort::new(
+            root_filesystem,
+            catalog,
+            installation_store.clone(),
+            Arc::new(Mutex::new(lifecycle_service)),
+            Arc::clone(&active_registry),
+        ));
+        (
+            dir,
+            storage_root,
+            extension_management,
+            active_registry,
+            installation_store,
         )
     }
 

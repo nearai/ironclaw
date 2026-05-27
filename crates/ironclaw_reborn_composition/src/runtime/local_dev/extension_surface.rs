@@ -8,6 +8,7 @@ use ironclaw_host_api::{
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 
 use crate::extension_lifecycle::{ActiveExtensionCapability, RebornLocalExtensionManagementPort};
+use ironclaw_product_workflow::ProductWorkflowError;
 
 #[derive(Clone, Default)]
 pub(super) struct LocalDevExtensionSurfaceSource {
@@ -23,11 +24,11 @@ impl LocalDevExtensionSurfaceSource {
         }
     }
 
-    pub(super) fn snapshot(&self) -> LocalDevExtensionSurface {
-        self.extension_management
-            .as_deref()
-            .map(LocalDevExtensionSurface::from_extension_management)
-            .unwrap_or_default()
+    pub(super) async fn snapshot(&self) -> Result<LocalDevExtensionSurface, ProductWorkflowError> {
+        let Some(extension_management) = self.extension_management.as_deref() else {
+            return Ok(LocalDevExtensionSurface::default());
+        };
+        LocalDevExtensionSurface::from_extension_management(extension_management).await
     }
 }
 
@@ -37,12 +38,14 @@ pub(super) struct LocalDevExtensionSurface {
 }
 
 impl LocalDevExtensionSurface {
-    pub(super) fn from_extension_management(
+    pub(super) async fn from_extension_management(
         extension_management: &RebornLocalExtensionManagementPort,
-    ) -> Self {
-        Self {
-            active_capabilities: extension_management.active_model_visible_capabilities(),
-        }
+    ) -> Result<Self, ProductWorkflowError> {
+        Ok(Self {
+            active_capabilities: extension_management
+                .active_model_visible_capabilities()
+                .await?,
+        })
     }
 
     pub(super) fn grants(&self, grantee: &ExtensionId) -> Vec<CapabilityGrant> {

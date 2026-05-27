@@ -5,6 +5,7 @@ mod tests {
     use super::super::*;
 
     use ironclaw_host_api::{AgentId, MountPermissions, ProjectId, TenantId, ThreadId};
+    use ironclaw_host_runtime::SPAWN_SUBAGENT_CAPABILITY_ID;
     use ironclaw_product_workflow::{
         LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext,
         LifecycleProductFacade, LifecycleProductSurfaceContext,
@@ -99,6 +100,7 @@ mod tests {
         assert!(capability_ids.contains(&"github.search_issues"));
         assert!(capability_ids.contains(&"github.get_issue"));
         assert!(capability_ids.contains(&"github.comment_issue"));
+        assert!(!capability_ids.contains(&SPAWN_SUBAGENT_CAPABILITY_ID));
     }
 
     #[tokio::test]

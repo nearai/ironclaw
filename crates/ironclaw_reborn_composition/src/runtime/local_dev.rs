@@ -143,7 +143,11 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
         let workspace_mounts = self.workspace_mounts.clone();
         let skill_mounts = skill_management_mount_view().map_err(host_api_agent_loop_error)?;
-        let extension_surface = self.extension_surface_source.snapshot();
+        let extension_surface = self
+            .extension_surface_source
+            .snapshot()
+            .await
+            .map_err(host_api_agent_loop_error)?;
         let visible_request = local_dev_visible_capability_request(
             run_context,
             self.user_id.clone(),
