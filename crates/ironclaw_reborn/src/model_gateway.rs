@@ -1038,14 +1038,12 @@ fn convert_messages(
             HostManagedModelMessageRole::ToolResult => {
                 let replay = tool_result_replay_message(message)?;
                 let Some(provider_call) = replay.provider_call else {
-                    converted.push(ChatMessage::system(replay.model_content));
+                    converted.push(ChatMessage::user(tool_summary_message(replay.safe_summary)));
                     index += 1;
                     continue;
                 };
                 if !provider_replay_matches_identity(&provider_call, replay_identity) {
-                    converted.push(ChatMessage::user(tool_summary_message(
-                        replay.model_content,
-                    )));
+                    converted.push(ChatMessage::user(tool_summary_message(replay.safe_summary)));
                     index += 1;
                     continue;
                 }
@@ -1059,12 +1057,12 @@ fn convert_messages(
                 {
                     let next = tool_result_replay_message(&messages[index])?;
                     let Some(next_provider_call) = next.provider_call else {
-                        plain_tool_results.push(next.model_content);
+                        plain_tool_results.push(next.safe_summary);
                         index += 1;
                         continue;
                     };
                     if !provider_replay_matches_identity(&next_provider_call, replay_identity) {
-                        plain_tool_results.push(next.model_content);
+                        plain_tool_results.push(next.safe_summary);
                         index += 1;
                         continue;
                     }
@@ -1076,7 +1074,12 @@ fn convert_messages(
                     index += 1;
                 }
                 converted.extend(provider_tool_roundtrip_messages(provider_results));
-                converted.extend(plain_tool_results.into_iter().map(ChatMessage::system));
+                converted.extend(
+                    plain_tool_results
+                        .into_iter()
+                        .map(tool_summary_message)
+                        .map(ChatMessage::user),
+                );
                 continue;
             }
         }
@@ -1143,21 +1146,25 @@ fn validate_provider_replay_identity(
 
 struct ToolResultReplayMessage {
     provider_call: Option<ProviderToolCallReferenceEnvelope>,
+    safe_summary: String,
     model_content: String,
 }
 
 fn tool_result_replay_message(
     message: &HostManagedModelMessage,
 ) -> Result<ToolResultReplayMessage, HostManagedModelError> {
-    let model_content = match message.tool_result_content.as_ref() {
+    let (safe_summary, model_content) = match message.tool_result_content.as_ref() {
         Some(HostManagedToolResultContent::Reference { envelope }) => {
             debug!(
                 result_ref = %envelope.result_ref,
                 "tool result resolved content unavailable; replaying safe summary fallback"
             );
-            envelope.safe_summary.as_str().to_string()
+            let safe_summary = envelope.safe_summary.as_str().to_string();
+            (safe_summary.clone(), safe_summary)
         }
-        Some(HostManagedToolResultContent::Resolved) => message.content.clone(),
+        Some(HostManagedToolResultContent::Resolved { safe_summary }) => {
+            (safe_summary.as_str().to_string(), message.content.clone())
+        }
         None => {
             return Err(HostManagedModelError::safe(
                 HostManagedModelErrorKind::InvalidRequest,
@@ -1167,6 +1174,7 @@ fn tool_result_replay_message(
     };
     Ok(ToolResultReplayMessage {
         provider_call: message.tool_result_provider_call.clone(),
+        safe_summary,
         model_content,
     })
 }

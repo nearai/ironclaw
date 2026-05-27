@@ -1413,7 +1413,9 @@ pub enum HostManagedToolResultContent {
     Reference {
         envelope: ToolResultReferenceEnvelope,
     },
-    Resolved,
+    Resolved {
+        safe_summary: ToolResultSafeSummary,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

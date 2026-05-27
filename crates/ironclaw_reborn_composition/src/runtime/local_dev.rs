@@ -598,7 +598,7 @@ fn hydrate_tool_result_messages(
         }
         let envelope = match message.tool_result_content.as_ref() {
             Some(HostManagedToolResultContent::Reference { envelope }) => envelope,
-            Some(HostManagedToolResultContent::Resolved) => continue,
+            Some(HostManagedToolResultContent::Resolved { .. }) => continue,
             None => {
                 return Err(HostManagedModelError::safe(
                     HostManagedModelErrorKind::InvalidRequest,
@@ -613,7 +613,9 @@ fn hydrate_tool_result_messages(
             continue;
         };
         message.content = model_visible_tool_result_content(&output)?;
-        message.tool_result_content = Some(HostManagedToolResultContent::Resolved);
+        message.tool_result_content = Some(HostManagedToolResultContent::Resolved {
+            safe_summary: envelope.safe_summary.clone(),
+        });
     }
     Ok(request)
 }
@@ -621,52 +623,80 @@ fn hydrate_tool_result_messages(
 fn model_visible_tool_result_content(
     output: &serde_json::Value,
 ) -> Result<String, HostManagedModelError> {
-    let serialized = serde_json::to_string_pretty(output).map_err(|error| {
-        ironclaw_loop_support::raw_host_managed_model_error(
-            "local_dev_model_replay",
-            "encode_tool_result_content",
+    let mut content =
+        String::with_capacity(LOCAL_DEV_MODEL_VISIBLE_TOOL_RESULT_MAX_BYTES.min(4096));
+    let truncated = append_model_visible_value(output, &mut content);
+    if content.is_empty() {
+        return Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::InvalidRequest,
             "tool result output could not be represented for model replay",
-            error,
-        )
-    })?;
-    let content = sanitize_model_visible_tool_result(serialized);
-    Ok(truncate_model_visible_tool_result(content))
+        ));
+    }
+    if truncated {
+        content.push_str("\n\n[... truncated: showing first ");
+        content.push_str(&LOCAL_DEV_MODEL_VISIBLE_TOOL_RESULT_MAX_BYTES.to_string());
+        content.push_str(" bytes. Use a follow-up tool call to inspect the full result.]");
+    }
+    Ok(content)
 }
 
-fn sanitize_model_visible_tool_result(content: String) -> String {
-    let content = sanitize_model_visible_text(content);
-    content
-        .chars()
-        .map(|character| {
-            if character.is_control()
-                || matches!(
-                    character,
-                    '{' | '}' | '[' | ']' | '`' | '<' | '>' | '/' | '\\'
-                )
-            {
-                ' '
-            } else {
-                character
+fn append_model_visible_value(value: &serde_json::Value, output: &mut String) -> bool {
+    if output.len() >= LOCAL_DEV_MODEL_VISIBLE_TOOL_RESULT_MAX_BYTES {
+        return true;
+    }
+    match value {
+        serde_json::Value::Null => append_sanitized_capped(" null", output),
+        serde_json::Value::Bool(value) => append_sanitized_capped(&format!(" {value}"), output),
+        serde_json::Value::Number(value) => append_sanitized_capped(&format!(" {value}"), output),
+        serde_json::Value::String(value) => append_sanitized_capped(&format!(" {value}"), output),
+        serde_json::Value::Array(values) => {
+            if append_sanitized_capped(" array", output) {
+                return true;
             }
-        })
-        .collect()
+            for value in values {
+                if append_model_visible_value(value, output) {
+                    return true;
+                }
+            }
+            false
+        }
+        serde_json::Value::Object(values) => {
+            if append_sanitized_capped(" object", output) {
+                return true;
+            }
+            for (key, value) in values {
+                if append_sanitized_capped(&format!(" {key}"), output)
+                    || append_model_visible_value(value, output)
+                {
+                    return true;
+                }
+            }
+            false
+        }
+    }
 }
 
-fn truncate_model_visible_tool_result(mut content: String) -> String {
-    if content.len() <= LOCAL_DEV_MODEL_VISIBLE_TOOL_RESULT_MAX_BYTES {
-        return content;
+fn append_sanitized_capped(value: &str, output: &mut String) -> bool {
+    let value = sanitize_model_visible_text(value.to_string());
+    for character in value.chars() {
+        if output.len() >= LOCAL_DEV_MODEL_VISIBLE_TOOL_RESULT_MAX_BYTES {
+            return true;
+        }
+        let character = if character.is_control()
+            || matches!(
+                character,
+                '{' | '}' | '[' | ']' | '`' | '<' | '>' | '/' | '\\'
+            ) {
+            ' '
+        } else {
+            character
+        };
+        if output.len() + character.len_utf8() > LOCAL_DEV_MODEL_VISIBLE_TOOL_RESULT_MAX_BYTES {
+            return true;
+        }
+        output.push(character);
     }
-    let original_len = content.len();
-    let mut cut = LOCAL_DEV_MODEL_VISIBLE_TOOL_RESULT_MAX_BYTES;
-    while cut > 0 && !content.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    content.truncate(cut);
-    content.push_str(&format!(
-        "\n\n[... truncated: showing {cut}/{original_len} bytes. Use a follow-up tool call to inspect the full result.]"
-    ));
-    content
+    false
 }
 
 fn model_capability_io_error(error: AgentLoopHostError) -> HostManagedModelError {
