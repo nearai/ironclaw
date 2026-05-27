@@ -291,7 +291,7 @@ impl RebornServices {
         // `BlockedAttested` and NO run/mission/gate state-machine transition
         // occurs.
         let verified = continuation
-            .verify_and_claim(&scope, run_id, &gate_ref, &claim)
+            .verify_and_claim(&scope, &actor, run_id, &gate_ref, &claim)
             .await
             .map_err(map_attested_continuation_rejection)?;
 

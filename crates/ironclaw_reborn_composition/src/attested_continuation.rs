@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use ironclaw_attested_runtime::{ContinuationError, VerifiedContinuation};
+use ironclaw_attested_runtime::{BindingOwner, ContinuationError, VerifiedContinuation};
 use ironclaw_product_workflow::{
     AttestedContinuationOutcome, AttestedContinuationRejection, AttestedGateContinuationPort,
     AttestedProofClaim, AttestedProofKind, VerifiedAttestedContinuation,
@@ -39,7 +39,7 @@ use ironclaw_product_workflow::{
 use ironclaw_signing_provider::{
     ApprovedTxHash, GateRef as SigningGateRef, SigningProof, SigningProviderError,
 };
-use ironclaw_turns::{GateRef, TurnRunId, TurnScope};
+use ironclaw_turns::{GateRef, TurnActor, TurnRunId, TurnScope};
 use ironclaw_wallet_external::{
     InjectedProofPayload, InjectedScheme, NearAccessKeyScope, NearRedirectProofPayload,
     WalletConnectProofPayload, encode_injected_proof, encode_near_redirect_proof,
@@ -70,11 +70,34 @@ impl RebornAttestedContinuation {
 impl AttestedGateContinuationPort for RebornAttestedContinuation {
     async fn verify_and_claim(
         &self,
-        _scope: &TurnScope,
+        scope: &TurnScope,
+        actor: &TurnActor,
         _run_id: TurnRunId,
         gate_ref: &GateRef,
         claim: &AttestedProofClaim,
     ) -> Result<VerifiedAttestedContinuation, AttestedContinuationRejection> {
+        let signing_gate_ref = SigningGateRef::new(gate_ref.as_str());
+
+        // IDOR DEFENSE (threat #2): assert the calling identity owns the
+        // authoritative binding BEFORE any decode / provider verify / custodial
+        // sign / grant claim. The driver reconstructs and signs the custodial
+        // path from the authoritative binding regardless of who presents the
+        // `gate_ref`, so without this check a second tenant member who learns
+        // another user's `gate_ref` could drive that user's signing
+        // continuation. The thread-ownership probe upstream only proves the
+        // caller owns *their own* thread, not the gate. Fail closed
+        // indistinguishably from a missing binding (no existence oracle).
+        self.driver
+            .assert_binding_owner(
+                &signing_gate_ref,
+                BindingOwner {
+                    tenant_id: scope.tenant_id.as_str(),
+                    user_id: actor.user_id.as_str(),
+                },
+            )
+            .await
+            .map_err(map_continuation_error)?;
+
         // FULL verification + one-shot grant claim, run BEFORE the facade
         // transitions the turn. A malformed proof fails closed here at decode; a
         // forged signature / signer mismatch / already-claimed grant fails closed
@@ -84,7 +107,6 @@ impl AttestedGateContinuationPort for RebornAttestedContinuation {
         // hash against the proof, so the caller can only attest to the bound hash
         // (threat #3), never redefine it.
         let proof = decode_proof(claim)?;
-        let signing_gate_ref = SigningGateRef::new(gate_ref.as_str());
 
         // External-wallet path only: the wallet already signed, so no custodial
         // EVM transaction is supplied. The custodial path is selected purely by
@@ -126,6 +148,20 @@ impl AttestedGateContinuationPort for RebornAttestedContinuation {
     }
 }
 
+/// Upper bound on the serialized size of a single attested-proof blob. The
+/// `proof_json` arrives as an opaque `serde_json::Value` from the browser and
+/// is NOT subject to the `USER_MESSAGE_TEXT_MAX_BYTES` message limit, so an
+/// explicit ceiling keeps a syntactically-valid but pathologically large proof
+/// (and the `parse_input` clone it forces) bounded. Every real proof family
+/// (injected / NEAR-redirect / WalletConnect) is a small fixed struct of
+/// hex/string fields; 16 KiB is generous headroom.
+const ATTESTED_PROOF_MAX_BYTES: usize = 16 * 1024;
+
+/// Upper bound on a WalletConnect `session_topic`. WalletConnect topic ids are
+/// 32-byte hex (64 chars); 256 is generous headroom while bounding an
+/// untrusted, persisted browser-supplied string (finding #5).
+const WALLETCONNECT_SESSION_TOPIC_MAX_LEN: usize = 256;
+
 /// Decode the opaque WebUI proof claim into the concrete provider proof for its
 /// family. Mirrors the legacy monolith wire contract
 /// (`src/channels/web/features/chat/attested.rs`): every byte field arrives as
@@ -134,6 +170,13 @@ impl AttestedGateContinuationPort for RebornAttestedContinuation {
 /// payload's `ApprovedTxHash` serde is a raw byte array, not the hex wire form).
 /// A malformed payload fails closed as `MalformedProof`.
 fn decode_proof(claim: &AttestedProofClaim) -> Result<SigningProof, AttestedContinuationRejection> {
+    // Bound the untrusted proof blob before any clone/parse work.
+    let serialized_len = serde_json::to_vec(&claim.proof_json)
+        .map(|v| v.len())
+        .map_err(|_| AttestedContinuationRejection::MalformedProof)?;
+    if serialized_len > ATTESTED_PROOF_MAX_BYTES {
+        return Err(AttestedContinuationRejection::MalformedProof);
+    }
     match claim.kind {
         AttestedProofKind::InjectedWallet => {
             let input: InjectedWalletProofInput = parse_input(&claim.proof_json)?;
@@ -178,6 +221,9 @@ fn decode_proof(claim: &AttestedProofClaim) -> Result<SigningProof, AttestedCont
         }
         AttestedProofKind::WalletConnect => {
             let input: WalletConnectProofInput = parse_input(&claim.proof_json)?;
+            if input.session_topic.len() > WALLETCONNECT_SESSION_TOPIC_MAX_LEN {
+                return Err(AttestedContinuationRejection::MalformedProof);
+            }
             let payload = WalletConnectProofPayload {
                 session_topic: input.session_topic,
                 approved_tx_hash: parse_hash(&input.approved_tx_hash)?,
@@ -299,7 +345,12 @@ struct WalletConnectProofInput {
 /// Categories only — no chain, signer, or ledger internals cross this boundary.
 fn map_continuation_error(error: ContinuationError) -> AttestedContinuationRejection {
     match error {
-        ContinuationError::MissingBinding => AttestedContinuationRejection::MissingBinding,
+        // A cross-user/cross-tenant gate_ref is surfaced identically to a
+        // non-existent binding (404) so it is not an existence oracle (IDOR
+        // defense, threat #2).
+        ContinuationError::MissingBinding | ContinuationError::OwnerMismatch => {
+            AttestedContinuationRejection::MissingBinding
+        }
         ContinuationError::ProviderMismatch { .. } => {
             AttestedContinuationRejection::ProviderMismatch
         }
@@ -486,6 +537,51 @@ mod tests {
         assert!(matches!(
             rejection,
             AttestedContinuationRejection::ProofRejected
+        ));
+    }
+
+    #[test]
+    fn decode_proof_rejects_oversized_blob() {
+        // A syntactically valid but pathologically large proof blob must be
+        // rejected before any clone/parse work (finding #3).
+        let big = "a".repeat(ATTESTED_PROOF_MAX_BYTES + 1);
+        let claim = AttestedProofClaim {
+            kind: AttestedProofKind::InjectedWallet,
+            approved_tx_hash_hex: hash_hex_64(),
+            proof_json: serde_json::json!({
+                "scheme": "evm",
+                "claimed_signer": "0xabc",
+                "signature": "deadbeef",
+                "approved_tx_hash": hash_hex_64(),
+                "public_key": big,
+            }),
+        };
+        assert!(matches!(
+            decode_proof(&claim),
+            Err(AttestedContinuationRejection::MalformedProof)
+        ));
+    }
+
+    #[test]
+    fn decode_walletconnect_rejects_oversized_session_topic() {
+        // An over-long session_topic must fail closed (finding #5) while a
+        // bounded one still decodes.
+        let long_topic = "t".repeat(WALLETCONNECT_SESSION_TOPIC_MAX_LEN + 1);
+        let claim = AttestedProofClaim {
+            kind: AttestedProofKind::WalletConnect,
+            approved_tx_hash_hex: hash_hex_64(),
+            proof_json: serde_json::json!({
+                "session_topic": long_topic,
+                "claimed_signer": "0xabc",
+                "nonce": "0011",
+                "signed_payload": "cafe",
+                "signature": "deadbeef",
+                "approved_tx_hash": hash_hex_64(),
+            }),
+        };
+        assert!(matches!(
+            decode_proof(&claim),
+            Err(AttestedContinuationRejection::MalformedProof)
         ));
     }
 

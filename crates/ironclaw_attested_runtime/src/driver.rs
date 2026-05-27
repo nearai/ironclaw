@@ -165,6 +165,15 @@ impl VerifiedContinuation {
 pub enum ContinuationError {
     /// No authoritative binding exists for the resolved `gate_ref`.
     MissingBinding,
+    /// The calling identity does not own the binding addressed by `gate_ref`
+    /// (cross-user / cross-tenant IDOR). The binding's authoritative
+    /// `tenant`/`user` (recorded when the gate was raised by the original
+    /// raiser) does not match the caller resolving the gate. Fail-closed
+    /// BEFORE any provider verify / custodial sign / grant claim, so a member
+    /// who merely learns another user's `gate_ref` can never drive that user's
+    /// signing continuation. Surfaced to clients indistinguishably from
+    /// `MissingBinding` (a 404) so it is not an existence oracle.
+    OwnerMismatch,
     /// The carried proof's provider does not match the bound provider, or no
     /// provider is registered for it.
     ProviderMismatch {
@@ -208,6 +217,12 @@ impl std::fmt::Display for ContinuationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::MissingBinding => write!(f, "no authoritative binding for the resolved gate"),
+            Self::OwnerMismatch => {
+                write!(
+                    f,
+                    "calling identity does not own the addressed gate binding"
+                )
+            }
             Self::ProviderMismatch { bound } => {
                 write!(f, "provider mismatch: bound provider is {bound:?}")
             }
@@ -274,6 +289,19 @@ pub struct AttestedSignerContinuationDriver<B, L, S> {
     custodial_signer: Arc<S>,
     ledger: Arc<L>,
     broadcaster: Arc<B>,
+}
+
+/// The calling identity asserting ownership of an attested-gate binding on
+/// resume. Compared against the binding's authoritative `tenant`/`user`
+/// (recorded by the original raiser) before any verify/sign/claim, so a member
+/// who merely learns another user's `gate_ref` cannot drive that user's signing
+/// continuation (IDOR defense). Both axes must match.
+#[derive(Debug, Clone, Copy)]
+pub struct BindingOwner<'a> {
+    /// The caller's tenant boundary.
+    pub tenant_id: &'a str,
+    /// The caller's user identity.
+    pub user_id: &'a str,
 }
 
 impl<B, L, S> AttestedSignerContinuationDriver<B, L, S>
@@ -391,6 +419,40 @@ where
                     .await
             }
         }
+    }
+
+    /// Assert the caller owns the binding addressed by `gate_ref` BEFORE any
+    /// verify / custodial sign / grant claim (IDOR defense).
+    ///
+    /// The binding's authoritative `SigningContext` carries the original
+    /// raiser's `tenant`/`user`. A second tenant member who learns another
+    /// user's `gate_ref` (returned in the gate-raise response) must not be able
+    /// to drive that user's signing continuation — most acutely on the
+    /// custodial path, where the proof payload is ignored and the driver signs
+    /// from the authoritative binding regardless of who presents the gate_ref.
+    ///
+    /// Fail-closed `OwnerMismatch` on either a missing binding *or* an identity
+    /// divergence, so the result is indistinguishable from a non-existent gate
+    /// (no existence oracle). Both tenant and user axes must match. The binding
+    /// is immutable once written, so re-reading it here (separately from
+    /// [`Self::verify_and_sign`]) is race-free; the sealed-grant CAS remains the
+    /// authoritative one-shot guard.
+    pub async fn assert_binding_owner(
+        &self,
+        gate_ref: &GateRef,
+        caller: BindingOwner<'_>,
+    ) -> Result<(), ContinuationError> {
+        let binding = self
+            .bindings
+            .get(gate_ref)
+            .await
+            .ok_or(ContinuationError::MissingBinding)?;
+        if binding.context.tenant.as_str() != caller.tenant_id
+            || binding.context.user.as_str() != caller.user_id
+        {
+            return Err(ContinuationError::OwnerMismatch);
+        }
+        Ok(())
     }
 
     /// One-shot broadcast-idempotency ledger create (threats #6 / #7): an
@@ -677,24 +739,25 @@ where
             // An `InvalidTransition` is expected and benign here: the row is
             // already at or past a terminal. Any OTHER ledger error (e.g. a
             // backend failure) means we could NOT confirm the row is safely
-            // terminal — surface it at `warn!` so it is visible in release
-            // builds, not silently swallowed by a `debug_assert!` that compiles
-            // out. The original broadcast error stays authoritative.
-            if matches!(
+            // terminal. This recovery runs on the background broadcast-failure
+            // path, so per CLAUDE.md ("Background tasks must NEVER use `info!`
+            // — it breaks the interactive display"; the same applies to
+            // `warn!`) we log at `debug!` with a structured `recoverable` field
+            // rather than corrupting the REPL/TUI stream. The original
+            // broadcast error stays authoritative; a ledger row that could not
+            // be confirmed terminal is flagged here for operator triage via a
+            // structured field, not a user-facing warning.
+            let recoverable = matches!(
                 e,
                 ironclaw_attestation::LedgerError::InvalidTransition { .. }
-            ) {
-                tracing::debug!(
-                    gate_ref = %gate_ref.as_str(),
-                    "recover_unknown: row already at/past a terminal state ({e:?})"
-                );
-            } else {
-                tracing::warn!(
-                    gate_ref = %gate_ref.as_str(),
-                    "recover_unknown: failed to move row to Unknown terminal after a \
-                     broadcast failure ({e:?}); the row may be left non-terminal"
-                );
-            }
+            );
+            tracing::debug!(
+                gate_ref = %gate_ref.as_str(),
+                recoverable,
+                "recover_unknown: ledger advance to Unknown terminal returned an error \
+                 ({e:?}); recoverable=true means the row was already terminal (benign), \
+                 recoverable=false means the row may be left non-terminal"
+            );
         }
     }
 

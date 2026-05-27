@@ -90,6 +90,17 @@ pub(crate) type LocalDevContinuationDriver = AttestedSignerContinuationDriver<
 /// the local-dev path can never be mislabeled as a real broadcast. A real
 /// per-chain broadcaster (PR12 / production) reports `submits() == true` and
 /// returns [`BroadcastOutcome::Submitted`].
+///
+/// # PRODUCTION WARNING
+///
+/// This broadcaster intentionally NEVER submits. It exists for local-dev /
+/// test wiring ONLY. Do NOT wire it into a production composition: a real
+/// deployment MUST inject a per-chain broadcaster whose `submits()` returns
+/// `true`. The `submits() -> false` contract is the compile-independent
+/// guard — the driver leaves the ledger at `Signed` and reports `NotBroadcast`
+/// rather than a false success — but a silent mis-wire here would mean
+/// transactions are signed and never broadcast. PR13/PR14 production wiring
+/// must select the real broadcaster, not this one.
 #[derive(Debug, Default)]
 pub struct NoopBroadcaster;
 
