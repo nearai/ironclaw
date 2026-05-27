@@ -182,6 +182,26 @@ pub enum GateResolutionPayload {
     CredentialProvided {
         token: String,
     },
+    /// An external (browser-injected) wallet proof resolving a `BlockedAttested`
+    /// signing gate (attested-signing PR7). The wallet (`window.ethereum` /
+    /// `window.solana`) signed the bound approved-tx hash natively; this payload
+    /// carries the signature material the backend re-verifies through
+    /// `InjectedSigningProvider::verify_resume`. No credential / token identity
+    /// is involved — the wallet holds the keys.
+    InjectedWalletProof {
+        /// Wallet family: `evm` or `solana`.
+        scheme: String,
+        /// `0x`-hex EVM address or lowercase-hex 32-byte ed25519 pubkey the
+        /// wallet claims signed. Never trusted; re-derived from the signature.
+        signer: String,
+        /// Hex (optionally `0x`-prefixed) signature bytes over the bound hash.
+        signature: String,
+        /// Hex of the approved-tx hash the wallet attested to (32 bytes).
+        approved_tx_hash: String,
+        /// Solana only: hex of the 32-byte ed25519 public key. Omitted for EVM.
+        #[serde(default)]
+        public_key: Option<String>,
+    },
     Cancelled,
 }
 

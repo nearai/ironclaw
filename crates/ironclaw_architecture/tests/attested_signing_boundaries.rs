@@ -137,6 +137,65 @@ fn attestation_crate_has_no_chain_secrets_or_webauthn_dependency() {
     );
 }
 
+/// The dependency names the external-wallet crate (PR7) must never carry. It
+/// implements the browser injected provider and holds NO key material, so it
+/// must not pull the heavy chain SDKs (`solana-sdk` / `near-primitives`) nor the
+/// key-custody crate (`ironclaw_secrets`) nor the chain-signing crate
+/// (`ironclaw_chain_signing`). It IS allowed `k256` / `ed25519-dalek` / `sha3` /
+/// `sha2` for signer recovery + ed25519 verification, plus
+/// `ironclaw_signing_provider` and `ironclaw_attestation` — so those are
+/// deliberately absent from this list.
+const WALLET_EXTERNAL_FORBIDDEN_DEPENDENCY_PREFIXES: &[&str] = &[
+    "solana-sdk",
+    "solana-program",
+    "solana",
+    "near-",
+    "ironclaw_secrets",
+    "ironclaw_chain_signing",
+];
+
+#[test]
+fn wallet_external_crate_has_no_chain_sdk_secrets_or_chain_signing_dependency() {
+    let metadata = cargo_metadata();
+    let packages = metadata["packages"]
+        .as_array()
+        .expect("cargo metadata must include packages");
+
+    let package = packages
+        .iter()
+        .find(|package| package["name"] == "ironclaw_wallet_external")
+        .expect(
+            "ironclaw_wallet_external must be a workspace member; add it to the root \
+             Cargo.toml `workspace.members` (see attested-signing PR7)",
+        );
+
+    let dependencies = package["dependencies"]
+        .as_array()
+        .expect("package dependencies must be an array");
+
+    let mut violations = Vec::new();
+    for dependency in dependencies {
+        let Some(name) = dependency["name"].as_str() else {
+            continue;
+        };
+        for forbidden in WALLET_EXTERNAL_FORBIDDEN_DEPENDENCY_PREFIXES {
+            if name == *forbidden || name.starts_with(forbidden) {
+                let kind = dependency["kind"].as_str().unwrap_or("normal").to_string();
+                violations.push(format!("{name} (kind: {kind}) matched `{forbidden}`"));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "ironclaw_wallet_external is the injected-wallet provider (PR7) and holds no key material; \
+         it must carry no chain SDK, secrets, or chain-signing dependency. Broadcasting the \
+         wallet-signed tx (ironclaw_chain_signing) is deferred to PR10. Forbidden dependencies \
+         found:\n{}\nSee docs/plans/2026-05-23-attested-signing-substrate.md.",
+        violations.join("\n")
+    );
+}
+
 fn cargo_metadata() -> Value {
     let manifest_path = workspace_root().join("Cargo.toml");
     let output = Command::new("cargo")
