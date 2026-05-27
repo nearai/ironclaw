@@ -815,6 +815,31 @@ async fn instruction_bundle_rejects_untrusted_skill_security_vocabulary() {
 }
 
 #[tokio::test]
+async fn instruction_bundle_rejects_generic_model_content_security_vocabulary() {
+    let context = claimed_run_context().await;
+    let error = InstructionBundleBuilder::new(context)
+        .build(InstructionBundleRequest {
+            context_bundle: LoopContextBundle {
+                identity_messages: Vec::new(),
+                messages: Vec::new(),
+                instruction_snippets: vec![LoopContextSnippet {
+                    snippet_ref: "instruction:system".to_string(),
+                    model_content: "Review authorization checks before release".to_string(),
+                    safe_summary: "Release review instruction".to_string(),
+                    metadata: None,
+                }],
+                memory_snippets: Vec::new(),
+            },
+            visible_surface: None,
+            safety_context: None,
+            inline_messages: Vec::new(),
+        })
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+}
+
+#[tokio::test]
 async fn instruction_bundle_rejects_trusted_skill_host_path() {
     let context = claimed_run_context().await;
     let error = InstructionBundleBuilder::new(context)

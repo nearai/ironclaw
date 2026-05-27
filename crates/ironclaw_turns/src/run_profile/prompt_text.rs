@@ -23,6 +23,8 @@ const SENSITIVE_TERMS: &[SensitiveTerm] = &[
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SensitiveTerm {
+    /// Some terms, such as "invalid api key", are phrase-only so ordinary
+    /// diagnostic prose after the phrase is not parsed as a credential value.
     phrase: &'static str,
     reject_as_phrase: bool,
     reject_value_after_label: bool,
@@ -273,18 +275,11 @@ fn contains_token_phrase(value: &str, phrase: &str) -> bool {
 }
 
 fn char_before(value: &str, byte_index: usize) -> Option<char> {
-    value
-        .char_indices()
-        .take_while(|(index, _)| *index < byte_index)
-        .last()
-        .map(|(_, character)| character)
+    value.get(..byte_index)?.chars().next_back()
 }
 
 fn char_at(value: &str, byte_index: usize) -> Option<char> {
-    value
-        .char_indices()
-        .find(|(index, _)| *index == byte_index)
-        .map(|(_, character)| character)
+    value.get(byte_index..)?.chars().next()
 }
 
 fn is_token_boundary(character: Option<char>) -> bool {
