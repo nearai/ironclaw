@@ -96,6 +96,7 @@ function toolCardFromPreviewRecord(record) {
 // `CapabilityDisplayPreviewView` (SSE) into the field set
 // `ToolActivityCard` destructures.
 export function toolCardFromPreview(preview) {
+  const failed = preview.status === "failed" || preview.status === "killed";
   return {
     invocationId: preview.invocation_id,
     callId: preview.invocation_id,
@@ -103,9 +104,18 @@ export function toolCardFromPreview(preview) {
     toolStatus: toolStatusFromActivityStatus(preview.status),
     toolDetail: preview.subtitle || null,
     toolParameters: preview.input_summary || null,
-    toolResultPreview:
-      preview.output_preview || preview.output_summary || null,
-    toolError: previewErrorMessage(preview),
+    // On failure the output fields carry the error text — surface it
+    // only through `toolError` so the card renders it once in red,
+    // not twice (once as a teal result preview and once as the error).
+    toolResultPreview: failed
+      ? null
+      : preview.output_preview || preview.output_summary || null,
+    toolError: failed
+      ? preview.output_summary ||
+        preview.output_preview ||
+        preview.result_ref ||
+        null
+      : null,
     toolDurationMs: null,
     updatedAt: preview.updated_at || null,
     resultRef: preview.result_ref || null,
@@ -156,12 +166,3 @@ function toolStatusFromActivityStatus(status) {
   }
 }
 
-function previewErrorMessage(preview) {
-  if (preview.status !== "failed" && preview.status !== "killed") return null;
-  return (
-    preview.output_summary ||
-    preview.output_preview ||
-    preview.result_ref ||
-    null
-  );
-}
