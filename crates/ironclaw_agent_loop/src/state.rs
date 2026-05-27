@@ -20,10 +20,11 @@ use ironclaw_turns::{
     run_profile::{CapabilitySurfaceVersion, LoopInputCursor, LoopRunContext},
 };
 
-/// Checkpoint payload schema reserved for the default Reborn loop.
+/// Initial checkpoint payload schema reserved for the default Reborn loop.
 ///
-/// Changing the payload layout is a compatibility break and requires an
-/// explicit migration plan.
+/// Reborn checkpoint persistence has not shipped yet, so this branch is still
+/// defining the v1 payload shape. Once persisted checkpoints are in use,
+/// changing this layout requires an explicit schema bump and migration plan.
 pub const CHECKPOINT_SCHEMA_ID: &str = "reborn:default-loop-v1";
 pub const CHECKPOINT_SCHEMA_VERSION: u64 = 1;
 

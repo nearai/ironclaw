@@ -63,6 +63,8 @@ pub enum LoopCompactionError {
     SecurityRejected { safe_summary: LoopSafeSummary },
     #[error("compaction inference failed: {safe_summary}")]
     InferenceFailed { safe_summary: LoopSafeSummary },
+    #[error("compaction was cancelled")]
+    Cancelled,
     #[error("compaction persistence failed: {safe_summary}")]
     PersistenceFailed { safe_summary: LoopSafeSummary },
 }

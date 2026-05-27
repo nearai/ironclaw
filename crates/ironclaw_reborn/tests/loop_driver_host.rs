@@ -99,17 +99,18 @@ use ironclaw_turns::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
         BatchPolicyKind, CapabilityDeniedReasonKind, CapabilityDescriptorView,
         CapabilityFailureKind, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
-        CapabilitySurfaceVersion, FinalizeAssistantMessage, InMemoryLoopHostMilestoneSink,
-        InstructionSafetyContext, LoopCancelReasonKind, LoopCancellationPort, LoopCapabilityPort,
-        LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef,
-        LoopContextRequest, LoopDriverId, LoopDriverNoteKind, LoopGateKind, LoopHostMilestone,
-        LoopHostMilestoneKind, LoopInlineMessage, LoopInlineMessageRole, LoopInput,
-        LoopInputAckToken, LoopInputCursor, LoopInputCursorToken, LoopInputPort,
-        LoopModelBudgetAccountant, LoopModelGatewayError, LoopModelPort, LoopModelRequest,
-        LoopModelRouteSnapshot, LoopProgressEvent, LoopPromptBundleRequest, LoopPromptPort,
-        LoopRunContext, LoopSafeSummary, ModelCallOutcome, NoOpBudgetAccountant, NoOpPolicyGuard,
-        ParentLoopOutput, PersonalContextPolicy, PromptMode, SkillVisibility,
-        StageCheckpointPayloadRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        CapabilitySurfaceVersion, CompactionInitiator, FinalizeAssistantMessage,
+        InMemoryLoopHostMilestoneSink, InstructionSafetyContext, LoopCancelReasonKind,
+        LoopCancellationPort, LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort,
+        LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextRequest, LoopDriverId,
+        LoopDriverNoteKind, LoopGateKind, LoopHostMilestone, LoopHostMilestoneKind,
+        LoopInlineMessage, LoopInlineMessageRole, LoopInput, LoopInputAckToken, LoopInputCursor,
+        LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant, LoopModelGatewayError,
+        LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot, LoopProgressEvent,
+        LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopSafeSummary, ModelCallOutcome,
+        NoOpBudgetAccountant, NoOpPolicyGuard, ParentLoopOutput, PersonalContextPolicy, PromptMode,
+        SkillVisibility, StageCheckpointPayloadRequest, SystemInferenceTaskId,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
     runner::{ClaimRunRequest, ClaimedTurnRun, TurnRunTransitionPort},
 };
@@ -452,6 +453,66 @@ async fn progress_port_routes_loop_progress_milestones() {
 }
 
 #[tokio::test]
+async fn progress_port_routes_compaction_progress_milestones() {
+    let fixture = HostFixture::new("thread-progress-compaction", "hello progress").await;
+    let host = fixture.build_host().await;
+    let host_dyn: &(dyn AgentLoopDriverHost + Send + Sync) = &host;
+    let started_task = SystemInferenceTaskId::new();
+    let completed_task = SystemInferenceTaskId::new();
+    let failed_task = SystemInferenceTaskId::new();
+
+    host_dyn
+        .emit_loop_progress(LoopProgressEvent::CompactionStarted {
+            task_id: started_task,
+            initiator: CompactionInitiator::Auto,
+        })
+        .await
+        .unwrap();
+    host_dyn
+        .emit_loop_progress(LoopProgressEvent::CompactionCompleted {
+            task_id: completed_task,
+            compression_ratio_ppm: 250_000,
+        })
+        .await
+        .unwrap();
+    host_dyn
+        .emit_loop_progress(LoopProgressEvent::CompactionFailed {
+            task_id: failed_task,
+            reason_kind: LoopSafeSummary::new("security rejected").unwrap(),
+        })
+        .await
+        .unwrap();
+
+    let milestones = fixture.milestones();
+    assert!(matches!(
+        milestones[0].kind,
+        LoopHostMilestoneKind::CompactionStarted {
+            task_id,
+            initiator: CompactionInitiator::Auto,
+        } if task_id == started_task
+    ));
+    assert!(matches!(
+        milestones[1].kind,
+        LoopHostMilestoneKind::CompactionCompleted {
+            task_id,
+            compression_ratio_ppm: 250_000,
+        } if task_id == completed_task
+    ));
+    assert!(matches!(
+        &milestones[2].kind,
+        LoopHostMilestoneKind::CompactionFailed {
+            task_id,
+            reason_kind,
+        } if *task_id == failed_task && reason_kind.as_str() == "security rejected"
+    ));
+    assert!(milestones.iter().all(|milestone| {
+        milestone.scope == fixture.context.scope
+            && milestone.turn_id == fixture.context.turn_id
+            && milestone.run_id == fixture.context.run_id
+    }));
+}
+
+#[tokio::test]
 async fn progress_port_checkpoint_written_does_not_double_emit() {
     let fixture = HostFixture::new("thread-progress-checkpoint", "hello progress").await;
     let host = fixture.build_host().await;
@@ -509,6 +570,7 @@ async fn progress_event_serde_roundtrip_all_variants() {
     let bundle_ref = ironclaw_turns::run_profile::LoopPromptBundleRef::for_run(&context, "bundle")
         .expect("bundle ref");
     let surface_version = CapabilitySurfaceVersion::new("surface:v1").expect("surface version");
+    let task_id = SystemInferenceTaskId::new();
 
     let events = vec![
         LoopProgressEvent::driver_note(LoopDriverNoteKind::Planning, "safe note").unwrap(),
@@ -541,6 +603,32 @@ async fn progress_event_serde_roundtrip_all_variants() {
         LoopProgressEvent::CheckpointWritten {
             iteration: 1,
             kind: LoopCheckpointKind::Final,
+        },
+        LoopProgressEvent::CompactionStarted {
+            task_id,
+            initiator: CompactionInitiator::Auto,
+        },
+        LoopProgressEvent::CompactionCompleted {
+            task_id,
+            compression_ratio_ppm: 250_000,
+        },
+        LoopProgressEvent::CompactionFailed {
+            task_id,
+            reason_kind: LoopSafeSummary::new("inference failed").unwrap(),
+        },
+        LoopProgressEvent::CompactionLeakDetected {
+            task_id,
+            reason_kind: LoopSafeSummary::new("leak detected").unwrap(),
+        },
+        LoopProgressEvent::GoalRefreshStarted { task_id },
+        LoopProgressEvent::GoalRefreshCompleted { task_id },
+        LoopProgressEvent::GoalRefreshFailed {
+            task_id,
+            reason_kind: LoopSafeSummary::new("goal failed").unwrap(),
+        },
+        LoopProgressEvent::GoalRefreshLeakDetected {
+            task_id,
+            reason_kind: LoopSafeSummary::new("goal leak detected").unwrap(),
         },
     ];
 

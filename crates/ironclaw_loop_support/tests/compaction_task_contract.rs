@@ -19,7 +19,7 @@ use ironclaw_threads::{
 use ironclaw_turns::run_profile::{
     LoopCompactionError, LoopCompactionMode, LoopCompactionPort, LoopCompactionRequest,
     SystemInferenceError, SystemInferencePort, SystemInferenceRequest, SystemInferenceResponse,
-    SystemInferenceTaskId,
+    SystemInferenceTaskId, SystemPromptSource,
 };
 
 #[tokio::test]
@@ -169,6 +169,54 @@ async fn compaction_port_rejects_injected_inference_output() {
     ));
 }
 
+#[tokio::test]
+async fn compaction_task_rejects_zero_drop_through_seq_before_inference() {
+    let fixture = CompactionFixture::new().await;
+    let inference = Arc::new(CapturingInference::new("summary"));
+    let task = Arc::new(CompactionTask::new(
+        inference.clone(),
+        Arc::clone(&fixture.threads),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(CleanLeakScanner),
+        "system prompt",
+    ));
+    let port = HostManagedLoopCompactionPort::new(task, fixture.scope.clone());
+
+    let error = port
+        .compact_loop_context(fixture.request(0))
+        .await
+        .expect_err("zero drop-through sequence should be rejected");
+
+    assert!(matches!(error, LoopCompactionError::InvalidCutPoint));
+    assert!(inference.last_input().is_empty());
+}
+
+#[tokio::test]
+async fn compaction_task_uses_update_prompt_when_mode_is_update() {
+    let fixture = CompactionFixture::new().await;
+    fixture.append_user("visible").await;
+    let inference = Arc::new(CapturingInference::new("summary"));
+    let task = Arc::new(CompactionTask::new(
+        inference.clone(),
+        Arc::clone(&fixture.threads),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(CleanLeakScanner),
+        "system prompt",
+    ));
+    let port = HostManagedLoopCompactionPort::new(task, fixture.scope.clone());
+    let mut request = fixture.request(1);
+    request.mode = LoopCompactionMode::Update;
+
+    port.compact_loop_context(request)
+        .await
+        .expect("update compaction succeeds");
+
+    assert_eq!(
+        inference.last_prompt_id().as_deref(),
+        Some("compaction_summarizer_update")
+    );
+}
+
 struct CompactionFixture {
     threads: Arc<InMemorySessionThreadService>,
     scope: ThreadScope,
@@ -291,6 +339,7 @@ impl CompactionFixture {
 struct CapturingInference {
     output: &'static str,
     last_input: Mutex<Option<String>>,
+    last_prompt_id: Mutex<Option<String>>,
 }
 
 impl CapturingInference {
@@ -298,11 +347,16 @@ impl CapturingInference {
         Self {
             output,
             last_input: Mutex::new(None),
+            last_prompt_id: Mutex::new(None),
         }
     }
 
     fn last_input(&self) -> String {
         self.last_input.lock().unwrap().clone().unwrap_or_default()
+    }
+
+    fn last_prompt_id(&self) -> Option<String> {
+        self.last_prompt_id.lock().unwrap().clone()
     }
 }
 
@@ -312,6 +366,8 @@ impl SystemInferencePort for CapturingInference {
         &self,
         request: SystemInferenceRequest,
     ) -> Result<SystemInferenceResponse, SystemInferenceError> {
+        let SystemPromptSource::Static { prompt_id } = &request.identity.prompt_source;
+        *self.last_prompt_id.lock().unwrap() = Some(prompt_id.clone());
         *self.last_input.lock().unwrap() = Some(request.input_text);
         Ok(SystemInferenceResponse {
             task_id: request.task_id,

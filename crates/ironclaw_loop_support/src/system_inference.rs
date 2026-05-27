@@ -150,11 +150,17 @@ mod tests {
 
     struct RecordingGateway {
         request: Mutex<Option<HostManagedModelRequest>>,
-        response: crate::HostManagedModelResponse,
+        response: Result<crate::HostManagedModelResponse, crate::HostManagedModelError>,
     }
 
     impl RecordingGateway {
         fn new(response: crate::HostManagedModelResponse) -> Self {
+            Self::with_result(Ok(response))
+        }
+
+        fn with_result(
+            response: Result<crate::HostManagedModelResponse, crate::HostManagedModelError>,
+        ) -> Self {
             Self {
                 request: Mutex::new(None),
                 response,
@@ -177,7 +183,22 @@ mod tests {
             request: HostManagedModelRequest,
         ) -> Result<crate::HostManagedModelResponse, crate::HostManagedModelError> {
             *self.request.lock().expect("lock") = Some(request);
-            Ok(self.response.clone())
+            self.response.clone()
+        }
+    }
+
+    struct SlowGateway {
+        delay: std::time::Duration,
+    }
+
+    #[async_trait]
+    impl HostManagedModelGateway for SlowGateway {
+        async fn stream_model(
+            &self,
+            _request: HostManagedModelRequest,
+        ) -> Result<crate::HostManagedModelResponse, crate::HostManagedModelError> {
+            tokio::time::sleep(self.delay).await;
+            Ok(crate::HostManagedModelResponse::assistant_reply("too late"))
         }
     }
 
@@ -302,6 +323,67 @@ mod tests {
             .expect_err("input should exceed token preflight");
 
         assert_eq!(error, SystemInferenceError::InputTooLarge);
+    }
+
+    #[tokio::test]
+    async fn timeout_returns_timeout_error() {
+        let context = test_run_context("system-inference-timeout").await;
+        let port = ModelGatewayBackedSystemInferencePort::new(
+            Arc::new(SlowGateway {
+                delay: std::time::Duration::from_millis(25),
+            }),
+            context,
+        );
+
+        let error = port
+            .call_system_inference(SystemInferenceRequest {
+                task_id: SystemInferenceTaskId::new(),
+                identity: SystemInferenceIdentity {
+                    task_kind: SystemTaskKind::Compaction,
+                    prompt_source: SystemPromptSource::Static {
+                        prompt_id: "test".to_string(),
+                    },
+                    system_prompt: "summarize".to_string(),
+                },
+                input_text: "transcript".to_string(),
+                max_input_tokens: 100,
+                deadline_ms: 1,
+            })
+            .await
+            .expect_err("slow gateway should hit system inference timeout");
+
+        assert_eq!(error, SystemInferenceError::Timeout);
+    }
+
+    #[tokio::test]
+    async fn cancelled_gateway_error_maps_to_cancelled() {
+        let context = test_run_context("system-inference-cancelled").await;
+        let gateway = Arc::new(RecordingGateway::with_result(Err(
+            crate::HostManagedModelError::new(
+                crate::HostManagedModelErrorKind::Cancelled,
+                "cancelled",
+            ),
+        )));
+        let port = ModelGatewayBackedSystemInferencePort::new(gateway, context);
+
+        let error = port
+            .call_system_inference(SystemInferenceRequest {
+                task_id: SystemInferenceTaskId::new(),
+                identity: SystemInferenceIdentity {
+                    task_kind: SystemTaskKind::Compaction,
+                    prompt_source: SystemPromptSource::Static {
+                        prompt_id: "test".to_string(),
+                    },
+                    system_prompt: "summarize".to_string(),
+                },
+                input_text: "transcript".to_string(),
+                max_input_tokens: 100,
+                deadline_ms: 100,
+            })
+            .await
+            .expect_err("cancelled gateway error should be preserved");
+
+        assert_eq!(error, SystemInferenceError::Cancelled);
     }
 
     async fn test_run_context(label: &str) -> LoopRunContext {

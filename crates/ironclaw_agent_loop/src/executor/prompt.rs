@@ -20,14 +20,18 @@ use crate::strategies::CompactionDecision;
 
 use super::{
     AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, HostStage,
-    PendingInputAck, StageContext, apply_capability_filter, debug_host_unavailable, failed_exit,
+    PendingInputAck, StageContext, apply_capability_filter, cancelled_exit, debug_host_unavailable,
+    failed_exit,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct PromptStage;
 
-#[derive(Debug, Default, Clone, Copy)]
-struct PromptPlanningPipeline;
+struct PromptPlanningPipeline<'a> {
+    ctx: StageContext<'a>,
+    state: LoopExecutionState,
+    pending_input_ack: PendingInputAck,
+}
 
 pub(super) struct PromptInput {
     pub(super) state: LoopExecutionState,
@@ -61,29 +65,102 @@ impl ExecutorStage<PromptInput> for PromptStage {
         ctx: StageContext<'_>,
         input: PromptInput,
     ) -> Result<PromptStep, AgentLoopExecutorError> {
-        PromptPlanningPipeline.process(ctx, input).await
+        PromptPlanningPipeline::new(ctx, input).run().await
     }
 }
 
-impl PromptPlanningPipeline {
-    async fn process(
-        &self,
-        ctx: StageContext<'_>,
-        input: PromptInput,
-    ) -> Result<PromptStep, AgentLoopExecutorError> {
-        let mut state = input.state;
-        let mut pending_input_ack = input.pending_input_ack;
+impl<'a> PromptPlanningPipeline<'a> {
+    fn new(ctx: StageContext<'a>, input: PromptInput) -> Self {
+        Self {
+            ctx,
+            state: input.state,
+            pending_input_ack: input.pending_input_ack,
+        }
+    }
 
-        let surface_filter = ctx.planner.capability().filter(&state).await;
-        state = match CheckpointStage
-            .cancel_if_requested_after_pending_input_ack(ctx, state, &mut pending_input_ack)
+    async fn run(mut self) -> Result<PromptStep, AgentLoopExecutorError> {
+        let surface_filter = self.ctx.planner.capability().filter(&self.state).await;
+        if let Some(exit) = self.cancel_boundary().await? {
+            return Ok(PromptStep::Exit(exit));
+        }
+
+        let surface = self.visible_surface(surface_filter).await?;
+        let capability_view = LoopModelCapabilityView {
+            visible_capability_ids: surface
+                .descriptors
+                .iter()
+                .map(|descriptor| descriptor.capability_id.clone())
+                .collect(),
+        };
+        self.state.surface_version = Some(surface.version.clone());
+        if let Some(exit) = self.cancel_boundary().await? {
+            return Ok(PromptStep::Exit(exit));
+        }
+
+        let candidate_bundle = self
+            .build_prompt_bundle(surface.version.clone(), capability_view.clone())
+            .await?;
+        apply_compaction_index_from_prompt_bundle(
+            &mut self.state,
+            &candidate_bundle.compaction_message_index,
+        );
+        if let Some(exit) = self.cancel_boundary().await? {
+            return Ok(PromptStep::Exit(exit));
+        }
+
+        let compaction =
+            maybe_compact_prompt_context(self.ctx, self.state, &mut self.pending_input_ack).await?;
+        if let Some(exit) = compaction.exit {
+            return Ok(PromptStep::Exit(exit));
+        }
+        self.state = compaction.state;
+
+        let final_bundle = if compaction.compacted {
+            let bundle = self
+                .build_prompt_bundle(surface.version.clone(), capability_view.clone())
+                .await?;
+            apply_compaction_index_from_prompt_bundle(
+                &mut self.state,
+                &bundle.compaction_message_index,
+            );
+            if let Some(exit) = self.cancel_boundary().await? {
+                return Ok(PromptStep::Exit(exit));
+            }
+            bundle
+        } else {
+            candidate_bundle
+        };
+
+        Ok(PromptStep::Prepared(Box::new(PromptOutput {
+            state: self.state,
+            pending_input_ack: self.pending_input_ack,
+            surface,
+            messages: final_bundle.messages,
+            capability_view,
+        })))
+    }
+
+    async fn cancel_boundary(&mut self) -> Result<Option<LoopExit>, AgentLoopExecutorError> {
+        self.state = match CheckpointStage
+            .cancel_if_requested_after_pending_input_ack(
+                self.ctx,
+                self.state.clone(),
+                &mut self.pending_input_ack,
+            )
             .await?
         {
             CancelCheck::Continue(state) => *state,
-            CancelCheck::Exit(exit) => return Ok(PromptStep::Exit(exit)),
+            CancelCheck::Exit(exit) => return Ok(Some(exit)),
         };
+        Ok(None)
+    }
 
-        let mut surface = ctx
+    async fn visible_surface(
+        &self,
+        surface_filter: crate::strategies::CapabilityFilter,
+    ) -> Result<VisibleCapabilitySurface, AgentLoopExecutorError> {
+        let mut surface = self
+            .ctx
             .host
             .visible_capabilities(VisibleCapabilityRequest)
             .await
@@ -99,82 +176,23 @@ impl PromptPlanningPipeline {
                 .map(|descriptor| descriptor.capability_id.as_str())
                 .collect::<Vec<_>>();
             debug!(
-                iteration = state.iteration,
+                iteration = self.state.iteration,
                 surface_version = %surface.version,
                 visible_capability_count = surface.descriptors.len(),
                 visible_capability_sample = ?visible_capability_sample,
                 "agent loop prompt capability surface prepared"
             );
         }
-        let capability_view = LoopModelCapabilityView {
-            visible_capability_ids: surface
-                .descriptors
-                .iter()
-                .map(|descriptor| descriptor.capability_id.clone())
-                .collect(),
-        };
-        state.surface_version = Some(surface.version.clone());
-        state = match CheckpointStage
-            .cancel_if_requested_after_pending_input_ack(ctx, state, &mut pending_input_ack)
-            .await?
-        {
-            CancelCheck::Continue(state) => *state,
-            CancelCheck::Exit(exit) => return Ok(PromptStep::Exit(exit)),
-        };
+        Ok(surface)
+    }
 
-        let candidate_bundle = build_prompt_bundle_for_surface(
-            ctx,
-            &state,
-            surface.version.clone(),
-            capability_view.clone(),
-        )
-        .await?;
-        apply_compaction_index_from_prompt_bundle(
-            &mut state,
-            &candidate_bundle.compaction_message_index,
-        );
-        state = match CheckpointStage
-            .cancel_if_requested_after_pending_input_ack(ctx, state, &mut pending_input_ack)
-            .await?
-        {
-            CancelCheck::Continue(state) => *state,
-            CancelCheck::Exit(exit) => return Ok(PromptStep::Exit(exit)),
-        };
-
-        let compaction = maybe_compact_prompt_context(ctx, state, &mut pending_input_ack).await?;
-        if let Some(exit) = compaction.exit {
-            return Ok(PromptStep::Exit(exit));
-        }
-        state = compaction.state;
-
-        let final_bundle = if compaction.compacted {
-            let bundle = build_prompt_bundle_for_surface(
-                ctx,
-                &state,
-                surface.version.clone(),
-                capability_view.clone(),
-            )
-            .await?;
-            apply_compaction_index_from_prompt_bundle(&mut state, &bundle.compaction_message_index);
-            state = match CheckpointStage
-                .cancel_if_requested_after_pending_input_ack(ctx, state, &mut pending_input_ack)
-                .await?
-            {
-                CancelCheck::Continue(state) => *state,
-                CancelCheck::Exit(exit) => return Ok(PromptStep::Exit(exit)),
-            };
-            bundle
-        } else {
-            candidate_bundle
-        };
-
-        Ok(PromptStep::Prepared(Box::new(PromptOutput {
-            state,
-            pending_input_ack,
-            surface,
-            messages: final_bundle.messages,
-            capability_view,
-        })))
+    async fn build_prompt_bundle(
+        &self,
+        surface_version: CapabilitySurfaceVersion,
+        capability_view: LoopModelCapabilityView,
+    ) -> Result<BuiltPromptBundle, AgentLoopExecutorError> {
+        build_prompt_bundle_for_surface(self.ctx, &self.state, surface_version, capability_view)
+            .await
     }
 }
 
@@ -217,29 +235,66 @@ async fn maybe_compact_prompt_context(
             },
         )
         .await;
-    let compaction_result = tokio::time::timeout(
+    state = match CheckpointStage
+        .cancel_if_requested_after_pending_input_ack(ctx, state, pending_input_ack)
+        .await?
+    {
+        CancelCheck::Continue(state) => *state,
+        CancelCheck::Exit(exit) => {
+            return Ok(PromptCompactionOutput {
+                state: LoopExecutionState::initial_for_run(ctx.host.run_context()),
+                exit: Some(exit),
+                compacted: false,
+            });
+        }
+    };
+
+    let compaction_request = LoopCompactionRequest {
+        task_id,
+        thread_id: ctx.host.run_context().thread_id.clone(),
+        last_compacted_through_seq: state.compaction_state.last_compacted_through_seq,
+        drop_through_seq,
+        preserve_tail_tokens,
+        mode: LoopCompactionMode::Fresh,
+        deadline_ms,
+    };
+    let compaction_result = await_compaction_with_cancellation(
+        ctx,
         Duration::from_millis(deadline_ms),
-        ctx.host.compact_loop_context(LoopCompactionRequest {
-            task_id,
-            thread_id: ctx.host.run_context().thread_id.clone(),
-            last_compacted_through_seq: state.compaction_state.last_compacted_through_seq,
-            drop_through_seq,
-            preserve_tail_tokens,
-            mode: LoopCompactionMode::Fresh,
-            deadline_ms,
-        }),
+        ctx.host.compact_loop_context(compaction_request),
     )
     .await;
     let response = match compaction_result {
-        Ok(Ok(response)) => response,
-        Ok(Err(error)) => {
+        CompactionCallOutcome::Completed(Ok(response)) => response,
+        CompactionCallOutcome::Completed(Err(LoopCompactionError::Cancelled))
+        | CompactionCallOutcome::Cancelled => {
+            return compaction_cancelled_exit(ctx, state, pending_input_ack).await;
+        }
+        CompactionCallOutcome::Completed(Err(error)) if is_non_fatal_compaction_skip(&error) => {
+            return compaction_skipped(ctx, state, task_id, &error).await;
+        }
+        CompactionCallOutcome::Completed(Err(error)) => {
             return compaction_failed_exit(ctx, state, pending_input_ack, task_id, &error).await;
         }
-        Err(_) => {
+        CompactionCallOutcome::TimedOut => {
             let error = LoopCompactionError::InferenceFailed {
                 safe_summary: safe("compaction deadline exceeded"),
             };
             return compaction_failed_exit(ctx, state, pending_input_ack, task_id, &error).await;
+        }
+    };
+
+    state = match CheckpointStage
+        .cancel_if_requested_after_pending_input_ack(ctx, state, pending_input_ack)
+        .await?
+    {
+        CancelCheck::Continue(state) => *state,
+        CancelCheck::Exit(exit) => {
+            return Ok(PromptCompactionOutput {
+                state: LoopExecutionState::initial_for_run(ctx.host.run_context()),
+                exit: Some(exit),
+                compacted: false,
+            });
         }
     };
 
@@ -265,6 +320,89 @@ async fn maybe_compact_prompt_context(
         state: checked.state,
         exit: None,
         compacted: true,
+    })
+}
+
+enum CompactionCallOutcome {
+    Completed(Result<ironclaw_turns::run_profile::LoopCompactionResponse, LoopCompactionError>),
+    TimedOut,
+    Cancelled,
+}
+
+async fn await_compaction_with_cancellation<F>(
+    ctx: StageContext<'_>,
+    deadline: Duration,
+    call: F,
+) -> CompactionCallOutcome
+where
+    F: std::future::Future<
+            Output = Result<
+                ironclaw_turns::run_profile::LoopCompactionResponse,
+                LoopCompactionError,
+            >,
+        >,
+{
+    let call = call;
+    tokio::pin!(call);
+    let timeout = tokio::time::sleep(deadline);
+    tokio::pin!(timeout);
+    let mut cancellation_poll = tokio::time::interval(Duration::from_millis(10));
+    cancellation_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            result = &mut call => return CompactionCallOutcome::Completed(result),
+            _ = &mut timeout => return CompactionCallOutcome::TimedOut,
+            _ = cancellation_poll.tick() => {
+                if ctx.host.observe_cancellation().is_some() {
+                    return CompactionCallOutcome::Cancelled;
+                }
+            }
+        }
+    }
+}
+
+fn is_non_fatal_compaction_skip(error: &LoopCompactionError) -> bool {
+    matches!(error, LoopCompactionError::SecurityRejected { .. })
+}
+
+async fn compaction_skipped(
+    ctx: StageContext<'_>,
+    mut state: LoopExecutionState,
+    task_id: SystemInferenceTaskId,
+    error: &LoopCompactionError,
+) -> Result<PromptCompactionOutput, AgentLoopExecutorError> {
+    CheckpointStage
+        .emit_progress(
+            ctx,
+            LoopProgressEvent::CompactionFailed {
+                task_id,
+                reason_kind: loop_compaction_reason(error),
+            },
+        )
+        .await;
+    state.compaction_state.force_compact_on_next_iteration = false;
+    Ok(PromptCompactionOutput {
+        state,
+        exit: None,
+        compacted: false,
+    })
+}
+
+async fn compaction_cancelled_exit(
+    ctx: StageContext<'_>,
+    state: LoopExecutionState,
+    pending_input_ack: &mut PendingInputAck,
+) -> Result<PromptCompactionOutput, AgentLoopExecutorError> {
+    let checked = CheckpointStage
+        .write(ctx, state, CheckpointKind::Final)
+        .await?;
+    pending_input_ack.ack(ctx.host).await?;
+    let exit = cancelled_exit(ctx.host, checked.state, Some(checked.checkpoint_id))?;
+    Ok(PromptCompactionOutput {
+        state: LoopExecutionState::initial_for_run(ctx.host.run_context()),
+        exit: Some(exit),
+        compacted: false,
     })
 }
 
@@ -369,6 +507,7 @@ fn loop_compaction_reason(error: &LoopCompactionError) -> LoopSafeSummary {
         LoopCompactionError::InputTooLarge => "input too large",
         LoopCompactionError::SecurityRejected { .. } => "security rejected",
         LoopCompactionError::InferenceFailed { .. } => "inference failed",
+        LoopCompactionError::Cancelled => "cancelled",
         LoopCompactionError::PersistenceFailed { .. } => "persistence failed",
     };
     LoopSafeSummary::new(value).unwrap_or_else(|_| LoopSafeSummary::model_gateway_failed())

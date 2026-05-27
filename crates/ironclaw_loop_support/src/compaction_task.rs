@@ -29,6 +29,8 @@ pub enum CompactionError {
     LeakDetected,
     #[error("compaction inference failed: {safe_summary}")]
     InferenceFailed { safe_summary: LoopSafeSummary },
+    #[error("compaction was cancelled")]
+    Cancelled,
     #[error("compaction persistence failed: {safe_summary}")]
     PersistenceFailed { safe_summary: LoopSafeSummary },
 }
@@ -377,11 +379,10 @@ fn map_inference_error(error: SystemInferenceError) -> CompactionError {
         SystemInferenceError::Failed { safe_summary } => {
             CompactionError::InferenceFailed { safe_summary }
         }
-        SystemInferenceError::Timeout | SystemInferenceError::Cancelled => {
-            CompactionError::InferenceFailed {
-                safe_summary: safe("system inference unavailable"),
-            }
-        }
+        SystemInferenceError::Timeout => CompactionError::InferenceFailed {
+            safe_summary: safe("system inference unavailable"),
+        },
+        SystemInferenceError::Cancelled => CompactionError::Cancelled,
     }
 }
 
@@ -412,6 +413,7 @@ fn compaction_error_to_loop(error: CompactionError) -> LoopCompactionError {
         CompactionError::InferenceFailed { safe_summary } => {
             LoopCompactionError::InferenceFailed { safe_summary }
         }
+        CompactionError::Cancelled => LoopCompactionError::Cancelled,
         CompactionError::PersistenceFailed { safe_summary } => {
             LoopCompactionError::PersistenceFailed { safe_summary }
         }
