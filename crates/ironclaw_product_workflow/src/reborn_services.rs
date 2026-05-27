@@ -424,20 +424,19 @@ impl RebornServicesApi for RebornServices {
             // metadata, not load-bearing for turn submission, so we
             // log and continue if the backend doesn't support it or
             // the update fails.
-            if accepted.sequence == 1 && !accepted.idempotent_replay {
-                if let Some(title) = derive_title_from_message(&content) {
-                    if let Err(error) = self
-                        .thread_service
-                        .set_thread_title_if_unset(&thread_scope, &accepted.thread_id, title)
-                        .await
-                    {
-                        tracing::debug!(
-                            thread_id = %accepted.thread_id,
-                            error = %error,
-                            "skipped seeding thread title from first message",
-                        );
-                    }
-                }
+            if accepted.sequence == 1
+                && !accepted.idempotent_replay
+                && let Some(title) = derive_title_from_message(&content)
+                && let Err(error) = self
+                    .thread_service
+                    .set_thread_title_if_unset(&thread_scope, &accepted.thread_id, title)
+                    .await
+            {
+                tracing::debug!(
+                    thread_id = %accepted.thread_id,
+                    error = %error,
+                    "skipped seeding thread title from first message",
+                );
             }
             AcceptedWebUiMessage {
                 thread_id: accepted.thread_id,

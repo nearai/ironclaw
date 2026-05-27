@@ -505,6 +505,13 @@ where
         title: String,
     ) -> Result<SessionThreadRecord, SessionThreadError> {
         let path = thread_record_path(scope, thread_id)?;
+        // Byte-only backends (LocalFilesystem) fall through `put_with_cas`
+        // to `CasExpectation::Any`, which writes blind. The per-path
+        // lock is the process-local serialization that fills in for CAS
+        // there, so the entire read-modify-write must run under it —
+        // matching `ensure_thread` above.
+        let record_lock = filesystem_record_lock(&path);
+        let _guard = record_lock.lock().await;
         for _ in 0..FILESYSTEM_CAS_RETRIES {
             let (mut stored, version) = self
                 .read_thread_versioned(scope, thread_id)
