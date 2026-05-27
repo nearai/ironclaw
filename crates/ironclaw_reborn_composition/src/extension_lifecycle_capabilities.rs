@@ -336,6 +336,46 @@ mod tests {
         assert!(!storage_root.join("system/extensions/github").exists());
     }
 
+    #[tokio::test]
+    async fn local_dev_extension_lifecycle_tool_rejects_malformed_and_unknown_inputs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = build_reborn_services(RebornBuildInput::local_dev(
+            "extension-tools-invalid-owner",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+        let runtime = services.host_runtime.expect("host runtime composed");
+
+        assert_eq!(
+            invoke_json(
+                runtime.as_ref(),
+                EXTENSION_SEARCH_CAPABILITY_ID,
+                serde_json::json!({})
+            )
+            .await,
+            Err(RuntimeFailureKind::InvalidInput)
+        );
+        assert_eq!(
+            invoke_json(
+                runtime.as_ref(),
+                EXTENSION_INSTALL_CAPABILITY_ID,
+                serde_json::json!({})
+            )
+            .await,
+            Err(RuntimeFailureKind::InvalidInput)
+        );
+        assert_eq!(
+            invoke_json(
+                runtime.as_ref(),
+                EXTENSION_INSTALL_CAPABILITY_ID,
+                serde_json::json!({"extension_id": "unknown-extension"})
+            )
+            .await,
+            Err(RuntimeFailureKind::InvalidInput)
+        );
+    }
+
     async fn invoke_json(
         runtime: &dyn HostRuntime,
         capability_id: &str,

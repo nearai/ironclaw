@@ -397,6 +397,31 @@ mod tests {
             local_dev_shell_network_policy()
         );
 
+        let extension_search_grant = grant_for(EXTENSION_SEARCH_CAPABILITY_ID);
+        assert_eq!(
+            extension_search_grant.constraints.allowed_effects,
+            vec![EffectKind::DispatchCapability, EffectKind::ReadFilesystem]
+        );
+        assert!(extension_search_grant.constraints.mounts.mounts.is_empty());
+        assert_eq!(
+            extension_search_grant.constraints.network,
+            NetworkPolicy::default()
+        );
+
+        for capability_id in [
+            EXTENSION_INSTALL_CAPABILITY_ID,
+            EXTENSION_ACTIVATE_CAPABILITY_ID,
+            EXTENSION_REMOVE_CAPABILITY_ID,
+        ] {
+            let grant = grant_for(capability_id);
+            assert_eq!(
+                grant.constraints.allowed_effects,
+                local_dev_allowed_effects()
+            );
+            assert!(grant.constraints.mounts.mounts.is_empty());
+            assert_eq!(grant.constraints.network, NetworkPolicy::default());
+        }
+
         let read_file_grant = grant_for(READ_FILE_CAPABILITY_ID);
         assert_eq!(
             read_file_grant.constraints.allowed_effects,
