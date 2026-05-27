@@ -83,6 +83,12 @@ pub struct EffectBridgeAdapter {
     /// capabilities like `missions` are registered here in `router.rs` and
     /// would otherwise be invisible to the LLM despite having active leases.
     capability_registry: RwLock<Option<Arc<CapabilityRegistry>>>,
+    /// Per-thread catalog of caller-supplied external tools (Responses
+    /// API). When set, `execute_action` short-circuits to a
+    /// `GatePaused { resume_kind: External { ext_tool: <call_id> } }`
+    /// for any action name in the catalog, and `available_actions`
+    /// merges the catalog into the LLM-visible action surface.
+    external_tool_catalog: RwLock<Option<Arc<crate::bridge::ExternalToolCatalog>>>,
 }
 
 struct ToolApprovalContext<'a> {
@@ -126,7 +132,40 @@ impl EffectBridgeAdapter {
             skill_registry: RwLock::new(None),
             workspace_mounts: RwLock::new(None),
             capability_registry: RwLock::new(None),
+            external_tool_catalog: RwLock::new(None),
         }
+    }
+
+    /// Install the per-thread external-tool catalog. Set once at bridge
+    /// init; the Responses API handler registers tools onto the same
+    /// catalog instance via its own `Arc` clone.
+    pub async fn set_external_tool_catalog(
+        &self,
+        catalog: Arc<crate::bridge::ExternalToolCatalog>,
+    ) {
+        *self.external_tool_catalog.write().await = Some(catalog);
+    }
+
+    /// Look up the catalog (if installed) for read-only use.
+    async fn external_tool_catalog(&self) -> Option<Arc<crate::bridge::ExternalToolCatalog>> {
+        self.external_tool_catalog.read().await.clone()
+    }
+
+    /// Resolve all catalog keys this `ThreadExecutionContext` may have
+    /// caller-supplied tools registered under. The engine `thread_id`
+    /// is the canonical key after the bridge's post-spawn `transfer`,
+    /// but the executor task can run before that transfer completes —
+    /// `conversation_scope` (stamped into thread metadata by the
+    /// bridge) is the original caller-side key the catalog was
+    /// registered under, used as a race-window fallback.
+    fn external_tool_catalog_keys(
+        context: &ThreadExecutionContext,
+    ) -> impl Iterator<Item = ironclaw_engine::ThreadId> {
+        let scope = context
+            .conversation_scope
+            .filter(|uuid| *uuid != context.thread_id.0)
+            .map(ironclaw_engine::ThreadId);
+        std::iter::once(context.thread_id).chain(scope)
     }
 
     /// Install a per-project workspace mount table on this adapter. When set,
@@ -612,7 +651,12 @@ impl EffectBridgeAdapter {
                         output_value.get("auth_url").and_then(|v| v.as_str()),
                     ),
                 },
-                None,
+                // Carry the install/auth tool's already-computed output
+                // through the gate so the inline-await retry can return
+                // it directly instead of re-running `tool_install` (which
+                // would re-download the WASM and re-raise approval).
+                // Tracked by #3533.
+                Some(output_value.clone()),
                 Some(lease.clone()),
             )),
             _ => None,
@@ -1779,6 +1823,60 @@ impl EffectExecutor for EffectBridgeAdapter {
         lease: &CapabilityLease,
         context: &ThreadExecutionContext,
     ) -> Result<ActionResult, EngineError> {
+        // External-tool short-circuit. If the per-thread catalog claims
+        // this action name, the caller will execute it; we pause the
+        // thread with `ResumeKind::External { ext_tool:<call_id> }` and
+        // wait for the resume payload.
+        //
+        // Parameters skip dispatch-time validation (the caller's tool
+        // schema isn't registered with the host), but the resume
+        // payload is run through `SafetyLayer::sanitize_tool_output`
+        // in `bridge::router` before reaching the LLM — see the
+        // `is_external_tool_callback` branch in `resolve_gate`.
+        //
+        // Known limitation (multi-call batching): the engine pauses on
+        // the first external-tool invocation in an assistant turn. If
+        // the LLM emits N caller-tool calls together, only the first
+        // surfaces as `AppEvent::ExternalToolCall`; subsequent calls
+        // re-emit on the next assistant turn after the caller posts
+        // back the first result. The OpenAI Responses contract allows
+        // "post all N results together"; matching that needs an engine
+        // change to collect N pauses before unwinding (tracked as a
+        // follow-up to PR #3122).
+        if let Some(catalog) = self.external_tool_catalog().await {
+            let mut hit = false;
+            for key in Self::external_tool_catalog_keys(context) {
+                if catalog.contains(key, action_name).await {
+                    hit = true;
+                    break;
+                }
+            }
+            if hit {
+                // Synthesize a call_id when the executor didn't stamp
+                // one (Tier 1 / CodeAct paths can reach here without a
+                // structured call envelope). Without a stable id, the
+                // resume payload can't be correlated back to the
+                // originating action — the `function_call_output` would
+                // arrive with the caller's id but the gate would carry
+                // `ext_tool:` with no suffix.
+                let call_id = match context.current_call_id.as_deref() {
+                    Some(id) if !id.is_empty() => id.to_string(),
+                    _ => format!("call_ext_{}", uuid::Uuid::new_v4().simple()),
+                };
+                return Err(Self::gate_paused(
+                    "external_tool",
+                    action_name,
+                    Some(call_id.as_str()),
+                    parameters,
+                    ironclaw_engine::ResumeKind::External {
+                        callback_id: crate::bridge::external_tool_callback_id(&call_id),
+                    },
+                    None,
+                    Some(lease.clone()),
+                ));
+            }
+        }
+
         // Honor the engine's one-shot approval flag. Set by inline
         // gate-await retry paths after the user resolves the gate;
         // mirrors the legacy `execute_resolved_pending_action` path
@@ -1816,7 +1914,7 @@ impl EffectExecutor for EffectBridgeAdapter {
         let extensions = self
             .fetch_extension_map(auth_manager.as_deref(), context)
             .await;
-        ActionProjector::project_inventory(
+        let mut inventory = ActionProjector::project_inventory(
             self.tools.as_ref(),
             auth_manager.as_deref(),
             capability_registry,
@@ -1824,7 +1922,44 @@ impl EffectExecutor for EffectBridgeAdapter {
             context,
             extensions.as_ref(),
         )
-        .await
+        .await?;
+
+        // Merge per-thread external tools (Responses API caller-supplied
+        // `tools[]`) into the inline action surface so the LLM sees them
+        // as callable. Caller tools are not gated by leases or admin
+        // policy: they're owned by the caller end-to-end. Names are
+        // de-duplicated against the existing inline set; collisions are
+        // rejected up-front by the Responses API handler, but the
+        // dedup keeps a defensive ordering invariant: internal beats
+        // external if they ever collide.
+        //
+        // The lookup walks both the engine `thread_id` and the
+        // caller-side `conversation_scope` because the responses_api
+        // handler registers under the latter and the bridge re-keys
+        // post-spawn. The executor task can poll
+        // `available_action_inventory` before the re-key lands, so we
+        // need both keys to close the race.
+        if let Some(catalog) = self.external_tool_catalog().await {
+            let mut external: Vec<ActionDef> = Vec::new();
+            for key in Self::external_tool_catalog_keys(context) {
+                let entries = catalog.list(key).await;
+                if !entries.is_empty() {
+                    external = entries;
+                    break;
+                }
+            }
+            if !external.is_empty() {
+                let existing: std::collections::HashSet<&str> =
+                    inventory.inline.iter().map(|a| a.name.as_str()).collect();
+                let extras: Vec<ActionDef> = external
+                    .into_iter()
+                    .filter(|a| !existing.contains(a.name.as_str()))
+                    .collect();
+                inventory.inline.extend(extras);
+            }
+        }
+
+        Ok(inventory)
     }
 
     async fn available_capabilities(
@@ -2864,6 +2999,15 @@ mod tests {
 
     struct DefaultAllowNamedApprovalTestTool;
 
+    /// Stand-in for `tool_install`. Its `name()` matches the canonical
+    /// seeded-`AskEachTime` baseline so the explicit-equals-seeded
+    /// regression in `explicit_ask_each_time_for_seeded_default_tool_still_gates`
+    /// actually exercises the value-equality codepath. Mirrors the real
+    /// `tool_install`'s `UnlessAutoApproved` approval requirement so the
+    /// `enforce_tool_permission` branch under test (AskEachTime →
+    /// is_explicit_ask check) is reached.
+    struct SeededAskEachTimeTestTool;
+
     #[async_trait]
     impl Tool for ApprovalTestTool {
         fn name(&self) -> &str {
@@ -2969,6 +3113,41 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl Tool for SeededAskEachTimeTestTool {
+        fn name(&self) -> &str {
+            "tool_install"
+        }
+
+        fn description(&self) -> &str {
+            "Test stand-in for tool_install; name matches a seeded-AskEachTime baseline"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" }
+                }
+            })
+        }
+
+        async fn execute(
+            &self,
+            params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::success(
+                serde_json::json!({ "installed": params }),
+                std::time::Duration::from_millis(1),
+            ))
+        }
+
+        fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+            ApprovalRequirement::UnlessAutoApproved
+        }
+    }
+
     fn lease() -> ironclaw_engine::CapabilityLease {
         ironclaw_engine::CapabilityLease {
             id: ironclaw_engine::types::capability::LeaseId::new(),
@@ -3000,6 +3179,7 @@ mod tests {
             thread_goal: Some("test goal".to_string()),
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
+            conversation_scope: None,
             gate_controller: ironclaw_engine::CancellingGateController::arc(),
             call_approval_granted: false,
             conversation_id: None,
@@ -3824,6 +4004,92 @@ mod tests {
         match err {
             EngineError::GatePaused { gate_name, .. } => {
                 assert_eq!(gate_name, "approval");
+            }
+            other => panic!("expected GatePaused, got {other:?}"),
+        }
+    }
+
+    /// #3559 security review (finding 1): when a user explicitly sets a
+    /// tool's permission to a value that happens to match the code-level
+    /// seeded default (e.g. `tool_install` → `AskEachTime`, which is also
+    /// the seeded baseline), pre-#3559's `ToolPermissionSnapshot::resolve_permission`
+    /// collapsed the DB row to `explicit = None`, then this function's
+    /// `is_explicit_ask` check failed, and `auto_approve_tools` bypassed
+    /// the gate — silently dropping the user's explicit choice.
+    ///
+    /// The companion regression at `bridge::tool_permissions::tests::user_explicit_value_matching_seeded_default_stays_explicit`
+    /// covers the resolver in isolation. Per `.claude/rules/testing.md`
+    /// "Test Through the Caller", this test additionally drives the
+    /// side-effecting call site (`execute_action` → `enforce_tool_permission`)
+    /// with a tool whose name matches a seeded default in `seeded_default_permission`,
+    /// so the value-equality bug would surface here if it were ever
+    /// reintroduced in the resolver.
+    #[tokio::test]
+    async fn explicit_ask_each_time_for_seeded_default_tool_still_gates() {
+        let db_path = std::env::temp_dir().join(format!(
+            "ironclaw-seeded-ask-each-time-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let db = crate::db::connect_from_config(&crate::config::DatabaseConfig::from_libsql_path(
+            db_path.to_str().expect("db path"),
+            None,
+            None,
+        ))
+        .await
+        .expect("db");
+        // Write a user-explicit `AskEachTime` for `tool_install`. Confirm
+        // that `seeded_default_permission("tool_install") == AskEachTime`
+        // — if the seeded baseline ever changes, this test must be
+        // updated to keep its value-equality coverage meaningful.
+        assert_eq!(
+            crate::tools::permissions::seeded_default_permission("tool_install"),
+            Some(crate::tools::permissions::PermissionState::AskEachTime),
+            "this regression test assumes tool_install's seeded baseline is AskEachTime; \
+             if you changed it, point this test at a different seeded-AskEachTime tool"
+        );
+        db.set_setting(
+            "test_user",
+            "tool_permissions.tool_install",
+            &serde_json::to_value(crate::tools::permissions::PermissionState::AskEachTime)
+                .expect("serialize permission"),
+        )
+        .await
+        .expect("save tool permission");
+
+        let tools = Arc::new(ToolRegistry::new().with_database(db));
+        tools.register(Arc::new(SeededAskEachTimeTestTool)).await;
+        let adapter = EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        )
+        .with_global_auto_approve(true);
+
+        let err = adapter
+            .execute_action(
+                "tool_install",
+                serde_json::json!({"name": "gmail"}),
+                &lease(),
+                &exec_ctx(
+                    ironclaw_engine::ThreadId::new(),
+                    Some("call_seeded_ask_each_time"),
+                ),
+            )
+            .await
+            .expect_err(
+                "user-explicit AskEachTime must gate even when value matches seeded default \
+                 and AGENT_AUTO_APPROVE_TOOLS=true",
+            );
+
+        match err {
+            EngineError::GatePaused { gate_name, .. } => {
+                assert_eq!(
+                    gate_name, "approval",
+                    "explicit user choice must surface as approval gate, not bypass"
+                );
             }
             other => panic!("expected GatePaused, got {other:?}"),
         }
@@ -4764,6 +5030,7 @@ mod tests {
             ),
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
+            conversation_scope: None,
             gate_controller: ironclaw_engine::CancellingGateController::arc(),
             call_approval_granted: false,
             conversation_id: None,
@@ -4788,6 +5055,7 @@ mod tests {
             ),
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
+            conversation_scope: None,
             gate_controller: ironclaw_engine::CancellingGateController::arc(),
             call_approval_granted: false,
             conversation_id: None,
@@ -4810,6 +5078,7 @@ mod tests {
             thread_goal: Some("Summarize every product feedback item right now.".to_string()),
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
+            conversation_scope: None,
             gate_controller: ironclaw_engine::CancellingGateController::arc(),
             call_approval_granted: false,
             conversation_id: None,
@@ -4832,6 +5101,7 @@ mod tests {
             thread_goal: Some("Set up the product feedback summary right now.".to_string()),
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
+            conversation_scope: None,
             gate_controller: ironclaw_engine::CancellingGateController::arc(),
             call_approval_granted: false,
             conversation_id: None,
@@ -4857,6 +5127,7 @@ mod tests {
             thread_goal: Some("Set up monitoring now.".to_string()),
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
+            conversation_scope: None,
             gate_controller: ironclaw_engine::CancellingGateController::arc(),
             call_approval_granted: false,
             conversation_id: None,
@@ -4880,6 +5151,7 @@ mod tests {
             thread_goal: Some("Summarize feedback immediately.".to_string()),
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
+            conversation_scope: None,
             gate_controller: ironclaw_engine::CancellingGateController::arc(),
             call_approval_granted: false,
             conversation_id: None,
@@ -5107,6 +5379,7 @@ mod tests {
                 thread_goal: Some(goal.to_string()),
                 available_actions_snapshot: None,
                 available_action_inventory_snapshot: None,
+                conversation_scope: None,
                 gate_controller: ironclaw_engine::CancellingGateController::arc(),
                 call_approval_granted: false,
                 conversation_id: None,
@@ -5391,6 +5664,7 @@ mod tests {
             thread_goal: None,
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
+            conversation_scope: None,
             gate_controller: ironclaw_engine::CancellingGateController::arc(),
             call_approval_granted: false,
             conversation_id: None,
@@ -5494,6 +5768,7 @@ mod tests {
             thread_goal: None,
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
+            conversation_scope: None,
             gate_controller: ironclaw_engine::CancellingGateController::arc(),
             call_approval_granted: false,
             conversation_id: None,
@@ -6105,6 +6380,7 @@ mod tests {
             thread_goal: None,
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
+            conversation_scope: None,
             gate_controller: ironclaw_engine::CancellingGateController::arc(),
             call_approval_granted: false,
             conversation_id: None,
@@ -8211,5 +8487,143 @@ Use this skill to set up a Pika meeting.
             names.contains(&"safe_action"),
             "safe_action should surface through the engine capability path: {names:?}"
         );
+    }
+
+    /// Race-window regression: when the bridge has registered caller
+    /// tools under the conversation_scope (the responses_api handler's
+    /// pre-spawn key) and the engine task starts running before the
+    /// post-spawn `transfer` rebinds onto the engine `thread_id`, the
+    /// adapter must still surface those tools — looked up via the
+    /// `conversation_scope` field plumbed through `ThreadExecutionContext`.
+    #[tokio::test]
+    async fn available_action_inventory_falls_back_to_conversation_scope() {
+        let adapter = make_adapter();
+        let catalog = Arc::new(crate::bridge::ExternalToolCatalog::new());
+        adapter
+            .set_external_tool_catalog(Arc::clone(&catalog))
+            .await;
+
+        let scope_uuid = uuid::Uuid::new_v4();
+        let engine_thread_id = ironclaw_engine::ThreadId::new();
+        assert_ne!(
+            scope_uuid, engine_thread_id.0,
+            "test setup: scope and engine thread must differ"
+        );
+
+        catalog
+            .register(
+                ironclaw_engine::ThreadId(scope_uuid),
+                vec![ironclaw_engine::ActionDef {
+                    name: "lookup_weather".to_string(),
+                    description: "caller tool".to_string(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                    effects: vec![ironclaw_engine::EffectType::Compute],
+                    requires_approval: false,
+                    model_tool_surface: ironclaw_engine::ModelToolSurface::FullSchema,
+                    discovery: None,
+                }],
+            )
+            .await;
+
+        let mut ctx = exec_ctx(engine_thread_id, None);
+        ctx.conversation_scope = Some(scope_uuid);
+
+        let inventory = adapter
+            .available_action_inventory(&[], &ctx)
+            .await
+            .expect("inventory");
+        assert!(
+            inventory.inline.iter().any(|a| a.name == "lookup_weather"),
+            "caller tool registered under scope must surface even before \
+             post-spawn transfer; inline = {:?}",
+            inventory
+                .inline
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Same race-window regression for `execute_action`: a tool name
+    /// registered under the conversation_scope must short-circuit to a
+    /// `GatePaused { External }` even when the engine `thread_id`
+    /// hasn't received the catalog entry yet.
+    #[tokio::test]
+    async fn execute_action_short_circuits_via_conversation_scope() {
+        let adapter = make_adapter();
+        let catalog = Arc::new(crate::bridge::ExternalToolCatalog::new());
+        adapter
+            .set_external_tool_catalog(Arc::clone(&catalog))
+            .await;
+
+        let scope_uuid = uuid::Uuid::new_v4();
+        let engine_thread_id = ironclaw_engine::ThreadId::new();
+        catalog
+            .register(
+                ironclaw_engine::ThreadId(scope_uuid),
+                vec![ironclaw_engine::ActionDef {
+                    name: "lookup_weather".to_string(),
+                    description: "caller tool".to_string(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                    effects: vec![ironclaw_engine::EffectType::Compute],
+                    requires_approval: false,
+                    model_tool_surface: ironclaw_engine::ModelToolSurface::FullSchema,
+                    discovery: None,
+                }],
+            )
+            .await;
+
+        let mut ctx = exec_ctx(engine_thread_id, Some("call_xyz"));
+        ctx.conversation_scope = Some(scope_uuid);
+
+        let result = adapter
+            .execute_action(
+                "lookup_weather",
+                serde_json::json!({"city": "NYC"}),
+                &lease(),
+                &ctx,
+            )
+            .await;
+
+        match result {
+            Err(EngineError::GatePaused { resume_kind, .. }) => {
+                assert!(
+                    matches!(
+                        &*resume_kind,
+                        ironclaw_engine::ResumeKind::External { callback_id }
+                            if callback_id.starts_with("ext_tool:")
+                    ),
+                    "expected ResumeKind::External(ext_tool:...), got {resume_kind:?}"
+                );
+            }
+            other => {
+                panic!("expected GatePaused(External) when catalog hit via scope; got {other:?}")
+            }
+        }
+    }
+
+    /// Sanity guard: the keys helper yields the engine `thread_id`
+    /// first (so post-rebind lookups stay fast) and only emits the
+    /// `conversation_scope` when it differs. Same-key contexts must not
+    /// trigger a duplicate lookup.
+    #[test]
+    fn external_tool_catalog_keys_dedupes_when_scope_equals_thread() {
+        let thread_id = ironclaw_engine::ThreadId::new();
+
+        let mut ctx_no_scope = exec_ctx(thread_id, None);
+        ctx_no_scope.conversation_scope = None;
+        let keys: Vec<_> = EffectBridgeAdapter::external_tool_catalog_keys(&ctx_no_scope).collect();
+        assert_eq!(keys, vec![thread_id]);
+
+        let mut ctx_same = exec_ctx(thread_id, None);
+        ctx_same.conversation_scope = Some(thread_id.0);
+        let keys: Vec<_> = EffectBridgeAdapter::external_tool_catalog_keys(&ctx_same).collect();
+        assert_eq!(keys, vec![thread_id], "scope == thread must dedupe");
+
+        let mut ctx_diff = exec_ctx(thread_id, None);
+        let scope = uuid::Uuid::new_v4();
+        ctx_diff.conversation_scope = Some(scope);
+        let keys: Vec<_> = EffectBridgeAdapter::external_tool_catalog_keys(&ctx_diff).collect();
+        assert_eq!(keys, vec![thread_id, ironclaw_engine::ThreadId(scope)]);
     }
 }

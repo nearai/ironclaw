@@ -63,6 +63,36 @@ impl std::fmt::Display for TurnRunId {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
+pub struct CapabilityActivityId(Uuid);
+
+impl CapabilityActivityId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    pub fn from_uuid(value: Uuid) -> Self {
+        Self(value)
+    }
+
+    pub fn as_uuid(&self) -> Uuid {
+        self.0
+    }
+}
+
+impl Default for CapabilityActivityId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for CapabilityActivityId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct TurnCheckpointId(Uuid);
 
 impl TurnCheckpointId {
@@ -202,6 +232,40 @@ loop_ref!(LoopResultRef, "loop_result_ref", "result:");
 loop_ref!(LoopGateRef, "loop_gate_ref", "gate:");
 loop_ref!(LoopUsageSummaryRef, "loop_usage_summary_ref", "usage:");
 loop_ref!(LoopDiagnosticRef, "loop_diagnostic_ref", "diag:");
+
+// GateRef and LoopGateRef carry the same validated `gate:<id>` string by
+// design (the model-visible `LoopGateRef` is constructed from the host-side
+// `GateRef`). Cross-type equality enforces that invariant at the type
+// system instead of via ad-hoc `.as_str()` string compares in callers.
+impl PartialEq<LoopGateRef> for GateRef {
+    fn eq(&self, other: &LoopGateRef) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl PartialEq<GateRef> for LoopGateRef {
+    fn eq(&self, other: &GateRef) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GateRef, LoopGateRef};
+
+    #[test]
+    fn gate_ref_eq_loop_gate_ref_matches_exact_gate_string() {
+        let gate_ref = GateRef::new("gate:subagent-test").unwrap();
+        let loop_gate_ref = LoopGateRef::new("gate:subagent-test").unwrap();
+        let other_loop_gate_ref = LoopGateRef::new("gate:subagent-other").unwrap();
+        let other_gate_ref = GateRef::new("gate:subagent-other").unwrap();
+
+        assert_eq!(gate_ref, loop_gate_ref);
+        assert_eq!(loop_gate_ref, gate_ref);
+        assert_ne!(gate_ref, other_loop_gate_ref);
+        assert_ne!(loop_gate_ref, other_gate_ref);
+    }
+}
 
 impl RunProfileId {
     pub fn default_profile() -> Self {

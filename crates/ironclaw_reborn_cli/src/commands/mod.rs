@@ -4,6 +4,7 @@ pub(crate) mod channels;
 pub(crate) mod completion;
 pub(crate) mod config;
 pub(crate) mod doctor;
+pub(crate) mod extension;
 pub(crate) mod hooks;
 pub(crate) mod logs;
 pub(crate) mod models;
@@ -25,6 +26,8 @@ pub(crate) enum Command {
     Config(config::ConfigCommand),
     /// Check Reborn binary configuration without creating state.
     Doctor(doctor::DoctorCommand),
+    /// Manage local Reborn extension lifecycle.
+    Extension(extension::ExtensionCommand),
     /// Inspect configured Reborn hooks.
     Hooks(hooks::HooksCommand),
     /// Inspect Reborn logs.
@@ -60,6 +63,9 @@ impl Command {
             Self::Doctor(command) => {
                 command.execute(crate::context::RebornCliContext::resolve_from_env()?)
             }
+            Self::Extension(command) => {
+                command.execute(crate::context::RebornCliContext::resolve_from_env()?)
+            }
             Self::Hooks(command) => command.execute(),
             Self::Logs(command) => command.execute(),
             Self::Models(command) => command.execute(),
@@ -74,7 +80,9 @@ impl Command {
             Self::Serve(command) => {
                 command.execute(crate::context::RebornCliContext::resolve_from_env()?)
             }
-            Self::Skills(command) => command.execute(),
+            Self::Skills(command) => {
+                command.execute(crate::context::RebornCliContext::resolve_from_env()?)
+            }
             Self::Traces(command) => command.execute(),
         }
     }

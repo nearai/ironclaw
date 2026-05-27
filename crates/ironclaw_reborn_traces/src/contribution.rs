@@ -7235,14 +7235,20 @@ fn trace_queue_telemetry_failure_kind(error: &anyhow::Error) -> TraceQueueTeleme
         .to_ascii_lowercase();
     if message.contains("endpoint") || message.contains("invalid trace contribution") {
         TraceQueueTelemetryFailureKind::Endpoint
+    } else if message.contains("rejected by 401")
+        || message.contains("rejected by 403")
+        || message.contains("unauthorized")
+        || message.contains("forbidden")
+    {
+        TraceQueueTelemetryFailureKind::Credential
+    } else if message.contains("rejected by") {
+        TraceQueueTelemetryFailureKind::HttpRejection
     } else if message.contains("not set")
         || message.contains("credentials")
         || message.contains("credential")
         || message.contains("token")
     {
         TraceQueueTelemetryFailureKind::Credential
-    } else if message.contains("rejected by") {
-        TraceQueueTelemetryFailureKind::HttpRejection
     } else if message.contains("network is unreachable")
         || message.contains("no route to host")
         || message.contains("offline")

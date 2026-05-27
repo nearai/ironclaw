@@ -38,15 +38,17 @@ fn resolve_path(
     path: &str,
     operation: FilesystemOperation,
 ) -> Result<ResolvedPath, CodingCapabilityError> {
-    let scoped_path = ScopedPath::new(scoped_path_input(path)).map_err(|_| input_error())?;
+    let mounts = request
+        .mounts
+        .ok_or_else(|| CodingCapabilityError::new(RuntimeDispatchErrorKind::FilesystemDenied))?;
+    let scoped_path = mounts
+        .scoped_path(scoped_path_input(path))
+        .map_err(|_| input_error())?;
     if is_sensitive_scoped_path(scoped_path.as_str()) {
         return Err(CodingCapabilityError::new(
             RuntimeDispatchErrorKind::FilesystemDenied,
         ));
     }
-    let mounts = request
-        .mounts
-        .ok_or_else(|| CodingCapabilityError::new(RuntimeDispatchErrorKind::FilesystemDenied))?;
     let (virtual_path, grant) = mounts
         .resolve_with_grant(&scoped_path)
         .map_err(|_| CodingCapabilityError::new(RuntimeDispatchErrorKind::FilesystemDenied))?;
@@ -114,18 +116,75 @@ pub(super) async fn stat_optional(
     }
 }
 
-pub(super) async fn create_parent_dir(
+pub(super) async fn create_parent_dir_unless_sensitive(
     request: &CodingCapabilityRequest<'_>,
     path: &VirtualPath,
 ) -> Result<(), CodingCapabilityError> {
     let Some(parent) = virtual_parent(path)? else {
         return Ok(());
     };
+    deny_nearest_sensitive_existing_parent(request, parent.clone()).await?;
     request
         .filesystem
         .create_dir_all(&parent)
         .await
-        .map_err(filesystem_error)
+        .map_err(filesystem_denied_if_not_found)
+}
+
+pub(super) async fn deny_sensitive_existing_path(
+    request: &CodingCapabilityRequest<'_>,
+    path: &VirtualPath,
+) -> Result<(), CodingCapabilityError> {
+    let stat = request
+        .filesystem
+        .stat(path)
+        .await
+        .map_err(filesystem_error)?;
+    if stat.sensitive {
+        return Err(CodingCapabilityError::new(
+            RuntimeDispatchErrorKind::FilesystemDenied,
+        ));
+    }
+    Ok(())
+}
+
+/// Walk up the directory tree, denying if any existing parent is sensitive.
+///
+/// Best-effort check for the local-dev threat model: assumes a trusted filesystem
+/// where parent directories do not become sensitive between this walk and the
+/// subsequent `create_dir_all` (TOCTOU).
+async fn deny_nearest_sensitive_existing_parent(
+    request: &CodingCapabilityRequest<'_>,
+    mut candidate: VirtualPath,
+) -> Result<(), CodingCapabilityError> {
+    loop {
+        match request.filesystem.stat(&candidate).await {
+            Ok(stat) => {
+                if stat.sensitive {
+                    return Err(CodingCapabilityError::new(
+                        RuntimeDispatchErrorKind::FilesystemDenied,
+                    ));
+                }
+                return Ok(());
+            }
+            Err(FilesystemError::NotFound { .. }) => {
+                let Some(parent) = virtual_parent(&candidate)? else {
+                    return Ok(());
+                };
+                candidate = parent;
+            }
+            Err(error) => return Err(filesystem_error(error)),
+        }
+    }
+}
+
+fn filesystem_denied_if_not_found(error: FilesystemError) -> CodingCapabilityError {
+    match error {
+        FilesystemError::NotFound { .. } => {
+            CodingCapabilityError::new(RuntimeDispatchErrorKind::FilesystemDenied)
+        }
+        error => filesystem_error(error),
+    }
 }
 
 fn virtual_parent(path: &VirtualPath) -> Result<Option<VirtualPath>, CodingCapabilityError> {
@@ -222,7 +281,7 @@ pub(super) fn filesystem_error(error: FilesystemError) -> CodingCapabilityError 
             CodingCapabilityError::new(RuntimeDispatchErrorKind::FilesystemDenied)
         }
         FilesystemError::NotFound { .. } => operation_error(),
-        FilesystemError::Backend { .. } => {
+        FilesystemError::Backend { .. } | FilesystemError::BackendInfrastructure { .. } => {
             CodingCapabilityError::new(RuntimeDispatchErrorKind::Backend)
         }
         // The unified record/index/CAS variants are surfaced when a backend

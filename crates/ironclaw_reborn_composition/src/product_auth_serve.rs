@@ -12,12 +12,12 @@ use std::{
 
 use axum::{
     Json, Router,
-    extract::{Extension, Path, Query, State},
-    http::StatusCode,
+    extract::{Extension, Path, RawQuery, State},
+    http::{StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use chrono::Utc;
+use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_auth::{
     AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowStatus, AuthProductError,
     AuthProductScope, AuthProviderId, AuthSessionId, AuthSurface, AuthorizationCodeHash,
@@ -39,11 +39,13 @@ use ironclaw_product_workflow::WebUiAuthenticatedCaller;
 use lru::LruCache;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Deserializer, Serialize};
+use url::Url;
 use uuid::Uuid;
 
+use crate::auth::RebornOAuthStartFlowRequest;
 use crate::{
     RebornOAuthCallbackError, RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
-    RebornOAuthCallbackResponse, RebornOAuthStartFlowRequest, RebornProductAuthServices,
+    RebornOAuthCallbackResponse, RebornProductAuthServices,
 };
 
 pub(crate) const OAUTH_START_PATH: &str = "/api/reborn/product-auth/oauth/start";
@@ -76,6 +78,11 @@ const OAUTH_RATE_WINDOW_SECONDS: NonZeroU32 = match NonZeroU32::new(60) {
     // SAFETY: 60 is a non-zero literal rate-limit window.
     None => unreachable!(),
 };
+const OAUTH_FLOW_MAX_TTL_SECONDS: i64 = 10 * 60;
+const OAUTH_CALLBACK_QUERY_MAX_BYTES: usize = 16 * 1024;
+const OAUTH_CALLBACK_FIELD_MAX_BYTES: usize = 512;
+const OAUTH_CALLBACK_SCOPES_MAX_BYTES: usize = 4 * 1024;
+const RAW_OAUTH_VALUE_MAX_BYTES: usize = 4 * 1024;
 
 #[derive(Clone)]
 pub(crate) struct ProductAuthRouteState {
@@ -113,9 +120,12 @@ impl ProductAuthRouteState {
         flow_id: AuthFlowId,
         verifier: SecretString,
         expires_at: Timestamp,
-    ) {
+    ) -> Result<(), ProductAuthRouteFailure> {
         let mut verifiers = self.lock_pkce_verifiers();
         remove_expired_pkce_verifiers(&mut verifiers);
+        if verifiers.len() >= verifiers.cap().get() && !verifiers.contains(&flow_id) {
+            return Err(ProductAuthRouteFailure::backend_unavailable());
+        }
         verifiers.put(
             flow_id,
             StoredPkceVerifier {
@@ -123,6 +133,16 @@ impl ProductAuthRouteState {
                 expires_at,
             },
         );
+        Ok(())
+    }
+
+    fn ensure_pkce_verifier_capacity(&self) -> Result<(), ProductAuthRouteFailure> {
+        let mut verifiers = self.lock_pkce_verifiers();
+        remove_expired_pkce_verifiers(&mut verifiers);
+        if verifiers.len() >= verifiers.cap().get() {
+            return Err(ProductAuthRouteFailure::backend_unavailable());
+        }
+        Ok(())
     }
 
     fn pkce_verifier_for_callback(
@@ -134,7 +154,7 @@ impl ProductAuthRouteState {
         verifiers
             .get(&flow_id)
             .map(|stored| stored.verifier.clone())
-            .ok_or_else(ProductAuthRouteFailure::malformed_callback)
+            .ok_or_else(ProductAuthRouteFailure::unknown_or_expired_flow)
     }
 
     fn remove_pkce_verifier(&self, flow_id: AuthFlowId) {
@@ -274,8 +294,8 @@ fn callback_policy() -> IngressPolicy {
 struct OAuthStartRequest {
     provider: String,
     authorization_url: String,
-    opaque_state: RawCallbackValue,
-    pkce_verifier: RawSecretValue,
+    opaque_state: String,
+    pkce_verifier: String,
     expires_at: Timestamp,
     #[serde(default)]
     session_id: Option<String>,
@@ -353,6 +373,17 @@ impl ProductAuthRouteFailure {
     fn malformed_callback() -> Self {
         Self::new(StatusCode::BAD_REQUEST, AuthErrorCode::MalformedCallback)
     }
+
+    fn unknown_or_expired_flow() -> Self {
+        Self::new(StatusCode::NOT_FOUND, AuthErrorCode::UnknownOrExpiredFlow)
+    }
+
+    fn backend_unavailable() -> Self {
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            AuthErrorCode::BackendUnavailable,
+        )
+    }
 }
 
 impl IntoResponse for ProductAuthRouteFailure {
@@ -399,7 +430,10 @@ async fn oauth_start_handler(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Json(request): Json<OAuthStartRequest>,
 ) -> Result<Json<OAuthStartResponse>, ProductAuthRouteFailure> {
-    if request.expires_at <= Utc::now() {
+    let now = Utc::now();
+    if request.expires_at <= now
+        || request.expires_at > now + ChronoDuration::seconds(OAUTH_FLOW_MAX_TTL_SECONDS)
+    {
         return Err(ProductAuthRouteFailure::invalid_request());
     }
 
@@ -407,25 +441,31 @@ async fn oauth_start_handler(
     let provider = AuthProviderId::new(request.provider).map_err(|_| {
         ProductAuthRouteFailure::new(StatusCode::BAD_REQUEST, AuthErrorCode::InvalidRequest)
     })?;
-    let authorization_url = OAuthAuthorizationUrl::new(request.authorization_url)
-        .map_err(ProductAuthRouteFailure::from)?;
-    let opaque_state_hash = opaque_state_hash(request.opaque_state.as_str())?;
-    let pkce_verifier_hash = pkce_verifier_hash(request.pkce_verifier.expose_secret())?;
-    let pkce_verifier = request.pkce_verifier.clone_secret();
+    let authorization_endpoint = authorization_endpoint_url(&request.authorization_url)?;
+    let opaque_state = RawCallbackValue::new(request.opaque_state)
+        .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
+    let pkce_verifier_value = RawSecretValue::new(request.pkce_verifier)
+        .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
+    let opaque_state_hash = opaque_state_hash(opaque_state.as_str())?;
+    let pkce_verifier_hash = pkce_verifier_hash(pkce_verifier_value.expose_secret())?;
+    let pkce_verifier = pkce_verifier_value.clone_secret();
+    state.ensure_pkce_verifier_capacity()?;
 
     let flow = state
         .product_auth
         .start_setup_oauth_flow(RebornOAuthStartFlowRequest {
             scope: scope.clone(),
             provider: provider.clone(),
-            authorization_url: authorization_url.clone(),
+            authorization_url: OAuthAuthorizationUrl::new(authorization_endpoint.to_string())
+                .map_err(ProductAuthRouteFailure::from)?,
             opaque_state_hash,
             pkce_verifier_hash,
             expires_at: request.expires_at,
         })
         .await
         .map_err(ProductAuthRouteFailure::from)?;
-    state.store_pkce_verifier(flow.id, pkce_verifier, flow.expires_at);
+    state.store_pkce_verifier(flow.id, pkce_verifier, flow.expires_at)?;
+    let authorization_url = compose_authorization_url(authorization_endpoint, flow.id, &scope)?;
 
     Ok(Json(OAuthStartResponse {
         flow_id: flow.id,
@@ -441,8 +481,15 @@ async fn oauth_start_handler(
 async fn oauth_callback_handler(
     State(state): State<ProductAuthRouteState>,
     Path(flow_id): Path<String>,
-    Query(query): Query<OAuthCallbackQuery>,
+    RawQuery(raw_query): RawQuery,
+    uri: Uri,
 ) -> Result<Json<RebornOAuthCallbackResponse>, ProductAuthRouteFailure> {
+    validate_callback_raw_query(raw_query.as_deref())?;
+    let query = axum::extract::Query::<OAuthCallbackQuery>::try_from_uri(&uri)
+        .map_err(|_| ProductAuthRouteFailure::malformed_callback())?
+        .0;
+    validate_callback_query_fields(&query)?;
+
     let flow_id = AuthFlowId::from_uuid(
         Uuid::parse_str(&flow_id).map_err(|_| ProductAuthRouteFailure::malformed_callback())?,
     );
@@ -455,6 +502,13 @@ async fn oauth_callback_handler(
             .as_str(),
     )?;
 
+    if is_authorized_callback_candidate(&query) {
+        state
+            .product_auth
+            .ensure_oauth_callback_flow_known(&scope, flow_id)
+            .await
+            .map_err(ProductAuthRouteFailure::from)?;
+    }
     let outcome = callback_outcome_from_query(&state, flow_id, &query)?;
 
     let response = match state
@@ -520,6 +574,13 @@ fn callback_outcome_from_query(
             scopes: parse_provider_scopes(query.scopes.as_deref())?,
         },
     })
+}
+
+fn is_authorized_callback_candidate(query: &OAuthCallbackQuery) -> bool {
+    query.error.as_deref().is_none_or(|value| value.is_empty())
+        && query.provider.is_some()
+        && query.account_label.is_some()
+        && query.code.is_some()
 }
 
 fn required_callback_value(value: Option<&str>) -> Result<&str, ProductAuthRouteFailure> {
@@ -635,6 +696,87 @@ fn scope_from_callback_query(
     Ok(scope)
 }
 
+fn validate_callback_raw_query(raw_query: Option<&str>) -> Result<(), ProductAuthRouteFailure> {
+    let Some(raw_query) = raw_query else {
+        return Err(ProductAuthRouteFailure::malformed_callback());
+    };
+    if raw_query.len() > OAUTH_CALLBACK_QUERY_MAX_BYTES {
+        return Err(ProductAuthRouteFailure::malformed_callback());
+    }
+    Ok(())
+}
+
+fn validate_callback_query_fields(
+    query: &OAuthCallbackQuery,
+) -> Result<(), ProductAuthRouteFailure> {
+    validate_callback_field(&query.user_id, OAUTH_CALLBACK_FIELD_MAX_BYTES, false)?;
+    validate_callback_field(&query.invocation_id, OAUTH_CALLBACK_FIELD_MAX_BYTES, false)?;
+    validate_optional_callback_field(
+        query.provider.as_deref(),
+        OAUTH_CALLBACK_FIELD_MAX_BYTES,
+        false,
+    )?;
+    validate_optional_callback_field(
+        query.account_label.as_deref(),
+        OAUTH_CALLBACK_FIELD_MAX_BYTES,
+        false,
+    )?;
+    validate_optional_callback_field(
+        query.error.as_deref(),
+        OAUTH_CALLBACK_FIELD_MAX_BYTES,
+        false,
+    )?;
+    validate_optional_callback_field(
+        query.agent_id.as_deref(),
+        OAUTH_CALLBACK_FIELD_MAX_BYTES,
+        false,
+    )?;
+    validate_optional_callback_field(
+        query.project_id.as_deref(),
+        OAUTH_CALLBACK_FIELD_MAX_BYTES,
+        false,
+    )?;
+    validate_optional_callback_field(
+        query.thread_id.as_deref(),
+        OAUTH_CALLBACK_FIELD_MAX_BYTES,
+        false,
+    )?;
+    validate_optional_callback_field(
+        query.session_id.as_deref(),
+        OAUTH_CALLBACK_FIELD_MAX_BYTES,
+        false,
+    )?;
+    validate_optional_callback_field(
+        query.scopes.as_deref(),
+        OAUTH_CALLBACK_SCOPES_MAX_BYTES,
+        true,
+    )?;
+    Ok(())
+}
+
+fn validate_optional_callback_field(
+    value: Option<&str>,
+    max_bytes: usize,
+    allow_empty: bool,
+) -> Result<(), ProductAuthRouteFailure> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    validate_callback_field(value, max_bytes, allow_empty)
+}
+
+fn validate_callback_field(
+    value: &str,
+    max_bytes: usize,
+    allow_empty: bool,
+) -> Result<(), ProductAuthRouteFailure> {
+    if value.is_empty() && allow_empty {
+        return Ok(());
+    }
+    validate_raw_value_with_limit(value, max_bytes)
+        .map_err(|_| ProductAuthRouteFailure::malformed_callback())
+}
+
 fn scope_hint(scope: &AuthProductScope) -> OAuthCallbackScopeHint {
     OAuthCallbackScopeHint {
         user_id: scope.resource.user_id.clone(),
@@ -644,6 +786,45 @@ fn scope_hint(scope: &AuthProductScope) -> OAuthCallbackScopeHint {
         invocation_id: scope.resource.invocation_id,
         session_id: scope.session_id.clone(),
     }
+}
+
+fn authorization_endpoint_url(raw: &str) -> Result<Url, ProductAuthRouteFailure> {
+    let authorization_url =
+        OAuthAuthorizationUrl::new(raw.to_string()).map_err(ProductAuthRouteFailure::from)?;
+    let parsed = Url::parse(authorization_url.as_str())
+        .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(ProductAuthRouteFailure::invalid_request());
+    }
+    Ok(parsed)
+}
+
+fn compose_authorization_url(
+    mut endpoint: Url,
+    flow_id: AuthFlowId,
+    scope: &AuthProductScope,
+) -> Result<OAuthAuthorizationUrl, ProductAuthRouteFailure> {
+    let flow_id = flow_id.to_string();
+    let invocation_id = scope.resource.invocation_id.to_string();
+    {
+        let mut query = endpoint.query_pairs_mut();
+        query.append_pair("reborn_flow_id", &flow_id);
+        query.append_pair("reborn_user_id", scope.resource.user_id.as_str());
+        query.append_pair("reborn_invocation_id", &invocation_id);
+        if let Some(agent_id) = &scope.resource.agent_id {
+            query.append_pair("reborn_agent_id", agent_id.as_str());
+        }
+        if let Some(project_id) = &scope.resource.project_id {
+            query.append_pair("reborn_project_id", project_id.as_str());
+        }
+        if let Some(thread_id) = &scope.resource.thread_id {
+            query.append_pair("reborn_thread_id", thread_id.as_str());
+        }
+        if let Some(session_id) = &scope.session_id {
+            query.append_pair("reborn_session_id", session_id.as_str());
+        }
+    }
+    OAuthAuthorizationUrl::new(endpoint.to_string()).map_err(ProductAuthRouteFailure::from)
 }
 
 fn opaque_state_hash(value: &str) -> Result<OpaqueStateHash, ProductAuthRouteFailure> {
@@ -692,7 +873,7 @@ struct RawCallbackValue(String);
 
 impl RawCallbackValue {
     fn new(value: String) -> Result<Self, &'static str> {
-        validate_raw_value(&value)?;
+        validate_raw_value_with_limit(&value, RAW_OAUTH_VALUE_MAX_BYTES)?;
         Ok(Self(value))
     }
 
@@ -716,7 +897,7 @@ struct RawSecretValue(SecretString);
 
 impl RawSecretValue {
     fn new(value: String) -> Result<Self, &'static str> {
-        validate_raw_value(&value)?;
+        validate_raw_value_with_limit(&value, RAW_OAUTH_VALUE_MAX_BYTES)?;
         Ok(Self(SecretString::from(value)))
     }
 
@@ -739,9 +920,12 @@ impl<'de> Deserialize<'de> for RawSecretValue {
     }
 }
 
-fn validate_raw_value(value: &str) -> Result<(), &'static str> {
+fn validate_raw_value_with_limit(value: &str, max_bytes: usize) -> Result<(), &'static str> {
     if value.is_empty() {
         return Err("value must not be empty");
+    }
+    if value.len() > max_bytes {
+        return Err("value is too long");
     }
     if value.trim() != value {
         return Err("value must not contain leading or trailing whitespace");
@@ -750,4 +934,60 @@ fn validate_raw_value(value: &str) -> Result<(), &'static str> {
         return Err("value must not contain NUL/control characters");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::RebornAuthContinuationDispatcher;
+    use async_trait::async_trait;
+
+    struct NoopDispatcher;
+
+    #[async_trait]
+    impl RebornAuthContinuationDispatcher for NoopDispatcher {
+        async fn dispatch_auth_continuation(
+            &self,
+            _event: ironclaw_auth::AuthContinuationEvent,
+        ) -> Result<(), AuthProductError> {
+            Ok(())
+        }
+    }
+
+    fn test_state() -> ProductAuthRouteState {
+        ProductAuthRouteState::new(
+            Arc::new(RebornProductAuthServices::local_dev_in_memory(Arc::new(
+                NoopDispatcher,
+            ))),
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn pkce_cache_rejects_new_entries_when_full() {
+        let state = test_state();
+        let expires_at = Utc::now() + ChronoDuration::minutes(5);
+        for index in 0..OAUTH_PKCE_VERIFIER_CACHE_CAPACITY.get() {
+            state
+                .store_pkce_verifier(
+                    AuthFlowId::new(),
+                    SecretString::from(format!("pkce-{index}")),
+                    expires_at,
+                )
+                .expect("cache entry");
+        }
+
+        let error = state
+            .store_pkce_verifier(
+                AuthFlowId::new(),
+                SecretString::from("pkce-overflow".to_string()),
+                expires_at,
+            )
+            .expect_err("full cache must reject without LRU eviction");
+
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.body.code, AuthErrorCode::BackendUnavailable);
+    }
 }

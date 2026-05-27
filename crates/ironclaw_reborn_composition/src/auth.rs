@@ -4,14 +4,17 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_auth::{
     AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthErrorCode, AuthFlowId,
-    AuthFlowKind, AuthFlowManager, AuthFlowRecord, AuthFlowStatus, AuthInteractionService,
-    AuthProductError, AuthProductScope, AuthProviderClient, AuthProviderId, CredentialAccountId,
-    CredentialAccountService, CredentialSetupService, InMemoryAuthProductServices, NewAuthFlow,
-    OAuthAuthorizationUrl, OAuthCallbackClaimRequest, OAuthCallbackFailureInput,
-    OAuthCallbackInput, OAuthProviderCallbackRequest, OpaqueStateHash, PkceVerifierHash,
-    ProviderCallbackOutcome, SecretCleanupService,
+    AuthFlowKind, AuthFlowManager, AuthFlowRecord, AuthFlowStatus, AuthInteractionId,
+    AuthInteractionService, AuthProductError, AuthProductScope, AuthProviderClient, AuthProviderId,
+    CredentialAccountId, CredentialAccountLabel, CredentialAccountService, CredentialAccountStatus,
+    CredentialAccountUpdateBinding, CredentialSetupService, InMemoryAuthProductServices,
+    ManualTokenSetupRequest, NewAuthFlow, OAuthAuthorizationUrl, OAuthCallbackClaimRequest,
+    OAuthCallbackFailureInput, OAuthCallbackInput, OAuthProviderCallbackRequest, OpaqueStateHash,
+    PkceVerifierHash, ProviderCallbackOutcome, SecretCleanupService, SecretSubmitRequest,
+    Timestamp,
 };
 use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
 #[async_trait]
@@ -68,13 +71,13 @@ pub struct RebornOAuthCallbackRequest {
 /// The browser-facing route chooses neither flow kind nor continuation. Those
 /// product-auth semantics stay here with the auth service boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RebornOAuthStartFlowRequest {
-    pub scope: AuthProductScope,
-    pub provider: AuthProviderId,
-    pub authorization_url: OAuthAuthorizationUrl,
-    pub opaque_state_hash: OpaqueStateHash,
-    pub pkce_verifier_hash: PkceVerifierHash,
-    pub expires_at: ironclaw_auth::Timestamp,
+pub(crate) struct RebornOAuthStartFlowRequest {
+    pub(crate) scope: AuthProductScope,
+    pub(crate) provider: AuthProviderId,
+    pub(crate) authorization_url: OAuthAuthorizationUrl,
+    pub(crate) opaque_state_hash: OpaqueStateHash,
+    pub(crate) pkce_verifier_hash: PkceVerifierHash,
+    pub(crate) expires_at: ironclaw_auth::Timestamp,
 }
 
 /// Host-route OAuth callback parse result.
@@ -97,21 +100,125 @@ pub struct RebornOAuthCallbackResponse {
     pub continuation: AuthContinuationRef,
 }
 
-/// Stable sanitized callback failure safe for route rendering.
+/// Stable sanitized auth failure safe for route rendering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornOAuthCallbackError {
+pub struct RebornAuthProductError {
     pub code: AuthErrorCode,
     pub retryable: bool,
 }
 
-impl From<AuthProductError> for RebornOAuthCallbackError {
+impl From<AuthProductError> for RebornAuthProductError {
     fn from(error: AuthProductError) -> Self {
         let code = error.code();
         Self {
             code,
-            retryable: matches!(code, AuthErrorCode::BackendUnavailable),
+            retryable: is_retryable_auth_error(code),
         }
     }
+}
+
+/// Stable sanitized callback failure safe for route rendering.
+pub type RebornOAuthCallbackError = RebornAuthProductError;
+
+/// Request to open a Reborn manual-token setup interaction.
+///
+/// This request is intentionally not serializable because the scope must be
+/// constructed from trusted caller/session context, not copied from a browser
+/// body. The raw token is submitted later through
+/// [`RebornManualTokenSubmitRequest`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebornManualTokenSetupRequest {
+    pub scope: AuthProductScope,
+    pub provider: AuthProviderId,
+    pub label: CredentialAccountLabel,
+    pub continuation: AuthContinuationRef,
+    pub update_binding: Option<CredentialAccountUpdateBinding>,
+    pub expires_at: Timestamp,
+}
+
+impl RebornManualTokenSetupRequest {
+    pub fn new(
+        scope: AuthProductScope,
+        provider: AuthProviderId,
+        label: CredentialAccountLabel,
+        continuation: AuthContinuationRef,
+        expires_at: Timestamp,
+    ) -> Self {
+        Self {
+            scope,
+            provider,
+            label,
+            continuation,
+            update_binding: None,
+            expires_at,
+        }
+    }
+
+    pub fn with_update_binding(mut self, update_binding: CredentialAccountUpdateBinding) -> Self {
+        self.update_binding = Some(update_binding);
+        self
+    }
+}
+
+/// Manual-token challenge safe to render to Web/CLI/API surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornManualTokenChallenge {
+    pub interaction_id: AuthInteractionId,
+    pub provider: AuthProviderId,
+    pub label: CredentialAccountLabel,
+    pub expires_at: Timestamp,
+}
+
+/// Secure manual-token submit request.
+///
+/// This type intentionally does not implement serde serialization. Host-owned
+/// routes may construct it after reading a dedicated secret input body, but raw
+/// token material must not be written into product DTOs, projections, logs, or
+/// model-visible messages.
+pub struct RebornManualTokenSubmitRequest {
+    pub scope: AuthProductScope,
+    pub interaction_id: AuthInteractionId,
+    pub secret: SecretString,
+}
+
+impl RebornManualTokenSubmitRequest {
+    pub fn new(
+        scope: AuthProductScope,
+        interaction_id: AuthInteractionId,
+        secret: SecretString,
+    ) -> Self {
+        Self {
+            scope,
+            interaction_id,
+            secret,
+        }
+    }
+}
+
+impl std::fmt::Debug for RebornManualTokenSubmitRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RebornManualTokenSubmitRequest")
+            .field("scope", &self.scope)
+            .field("interaction_id", &self.interaction_id)
+            .field("secret", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Stable sanitized manual-token submit response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornManualTokenSubmitResponse {
+    pub account_id: CredentialAccountId,
+    pub status: CredentialAccountStatus,
+    pub continuation: AuthContinuationRef,
+}
+
+/// Stable sanitized manual-token setup/submit failure safe for route rendering.
+pub type RebornManualTokenError = RebornAuthProductError;
+
+fn is_retryable_auth_error(code: AuthErrorCode) -> bool {
+    matches!(code, AuthErrorCode::BackendUnavailable)
 }
 
 /// Product-auth ports supplied to Reborn composition before the turn coordinator
@@ -472,7 +579,26 @@ impl RebornProductAuthServices {
         })
     }
 
-    pub async fn start_setup_oauth_flow(
+    pub(crate) async fn ensure_oauth_callback_flow_known(
+        &self,
+        scope: &AuthProductScope,
+        flow_id: AuthFlowId,
+    ) -> Result<(), RebornOAuthCallbackError> {
+        let Some(record) = self
+            .flow_manager
+            .get_flow(scope, flow_id)
+            .await
+            .map_err(RebornOAuthCallbackError::from)?
+        else {
+            return Err(AuthProductError::UnknownOrExpiredFlow.into());
+        };
+        if record.expires_at <= Utc::now() {
+            return Err(AuthProductError::UnknownOrExpiredFlow.into());
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn start_setup_oauth_flow(
         &self,
         request: RebornOAuthStartFlowRequest,
     ) -> Result<AuthFlowRecord, AuthProductError> {
@@ -494,6 +620,65 @@ impl RebornProductAuthServices {
             .await
     }
 
+    pub async fn request_manual_token_setup(
+        &self,
+        request: RebornManualTokenSetupRequest,
+    ) -> Result<RebornManualTokenChallenge, RebornManualTokenError> {
+        let challenge = self
+            .interaction_service
+            .request_secret_input(ManualTokenSetupRequest {
+                scope: request.scope,
+                provider: request.provider,
+                label: request.label,
+                continuation: request.continuation,
+                update_binding: request.update_binding,
+                expires_at: request.expires_at,
+            })
+            .await
+            .map_err(RebornManualTokenError::from)?;
+
+        match challenge {
+            ironclaw_auth::AuthChallenge::ManualTokenRequired {
+                interaction_id,
+                provider,
+                label,
+                expires_at,
+            } => Ok(RebornManualTokenChallenge {
+                interaction_id,
+                provider,
+                label,
+                expires_at,
+            }),
+            _ => Err(AuthProductError::InvalidRequest {
+                reason: "manual token setup returned an unexpected challenge".to_string(),
+            }
+            .into()),
+        }
+    }
+
+    pub async fn submit_manual_token(
+        &self,
+        request: RebornManualTokenSubmitRequest,
+    ) -> Result<RebornManualTokenSubmitResponse, RebornManualTokenError> {
+        let result = self
+            .interaction_service
+            .submit_manual_token(
+                &request.scope,
+                SecretSubmitRequest {
+                    interaction_id: request.interaction_id,
+                    secret: request.secret,
+                },
+            )
+            .await
+            .map_err(RebornManualTokenError::from)?;
+
+        Ok(RebornManualTokenSubmitResponse {
+            account_id: result.account_id,
+            status: result.status,
+            continuation: result.continuation,
+        })
+    }
+
     pub(crate) fn local_dev_in_memory(
         continuation_dispatcher: Arc<dyn RebornAuthContinuationDispatcher>,
     ) -> Self {
@@ -507,10 +692,11 @@ mod tests {
     use super::*;
     use ironclaw_auth::{
         AuthChallenge, AuthFlowId, AuthFlowRecord, AuthProductError, AuthProductScope,
-        CredentialAccount, CredentialAccountId, CredentialAccountListPage,
-        CredentialAccountListRequest, CredentialAccountMutation, CredentialAccountProjection,
-        CredentialAccountSelectionRequest, CredentialAccountStatus, NewAuthFlow,
-        NewCredentialAccount, OAuthCallbackClaimRequest, OAuthCallbackFailureInput,
+        CredentialAccount, CredentialAccountChoiceRequest, CredentialAccountId,
+        CredentialAccountListPage, CredentialAccountListRequest, CredentialAccountLookupRequest,
+        CredentialAccountMutation, CredentialAccountProjection, CredentialAccountSelectionRequest,
+        CredentialAccountStatus, CredentialRecoveryProjection, CredentialRecoveryRequest,
+        NewAuthFlow, NewCredentialAccount, OAuthCallbackClaimRequest, OAuthCallbackFailureInput,
         OAuthCallbackInput, OAuthProviderCallbackRequest, OAuthProviderExchange,
         SecretCleanupReport, SecretCleanupRequest, SecretSubmitRequest, SecretSubmitResult,
     };
@@ -681,8 +867,7 @@ mod tests {
 
         async fn get_account(
             &self,
-            _scope: &AuthProductScope,
-            _account_id: CredentialAccountId,
+            _request: CredentialAccountLookupRequest,
         ) -> Result<Option<CredentialAccount>, AuthProductError> {
             unreachable!("constructor tests do not call credential-account methods")
         }
@@ -706,6 +891,20 @@ mod tests {
         async fn select_unique_configured_account(
             &self,
             _request: CredentialAccountSelectionRequest,
+        ) -> Result<CredentialAccountProjection, AuthProductError> {
+            unreachable!("constructor tests do not call credential-account methods")
+        }
+
+        async fn project_credential_recovery(
+            &self,
+            _request: CredentialRecoveryRequest,
+        ) -> Result<CredentialRecoveryProjection, AuthProductError> {
+            unreachable!("constructor tests do not call credential-account methods")
+        }
+
+        async fn select_configured_account(
+            &self,
+            _request: CredentialAccountChoiceRequest,
         ) -> Result<CredentialAccountProjection, AuthProductError> {
             unreachable!("constructor tests do not call credential-account methods")
         }

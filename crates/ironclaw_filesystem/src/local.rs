@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use async_trait::async_trait;
 use ironclaw_host_api::{HostPath, VirtualPath};
@@ -9,6 +12,8 @@ use crate::{
     CasExpectation, DirEntry, Entry, FileStat, FileType, FilesystemError, FilesystemOperation,
     RecordVersion, RootFilesystem, VersionedEntry, path_prefix_matches,
 };
+
+static LOCAL_WRITE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Local filesystem backend mounted into the virtual namespace.
 #[derive(Debug, Default)]
@@ -173,14 +178,14 @@ impl LocalFilesystem {
 #[async_trait]
 impl RootFilesystem for LocalFilesystem {
     /// Native `put` for the byte-only local filesystem. Opaque-file entries
-    /// (`kind = None`, empty `indexed`) with `CasExpectation::Any` delegate
-    /// to `write_file`. Record-shaped entries, populated indexed
-    /// projections, and `CasExpectation::Absent` / `Version(_)` are
-    /// `Unsupported` because the local filesystem has no native metadata or
-    /// version tracking (sidecar metadata is a future addition; see the
-    /// reborn storage rework plan). We implement `put` here rather than
-    /// relying on a trait default so that the put/write_file pair is
-    /// non-recursive even when downstream consumers route through `put`.
+    /// (`kind = None`, empty `indexed`) support `CasExpectation::Any` and
+    /// `CasExpectation::Absent`; record-shaped entries, populated indexed
+    /// projections, and `Version(_)` are `Unsupported` because the local
+    /// filesystem has no native metadata or version tracking (sidecar
+    /// metadata is a future addition; see the reborn storage rework plan).
+    /// We implement `put` here rather than relying on a trait default so that
+    /// the put/write_file pair is non-recursive even when downstream consumers
+    /// route through `put`.
     async fn put(
         &self,
         path: &VirtualPath,
@@ -193,13 +198,13 @@ impl RootFilesystem for LocalFilesystem {
                 operation: FilesystemOperation::WriteFile,
             });
         }
-        if !matches!(cas, CasExpectation::Any) {
+        if matches!(cas, CasExpectation::Version(_)) {
             return Err(FilesystemError::Unsupported {
                 path: path.clone(),
                 operation: FilesystemOperation::WriteFile,
             });
         }
-        self.write_file(path, &entry.body).await?;
+        self.write_file_with_cas(path, &entry.body, cas).await?;
         Ok(RecordVersion::from_backend(0))
     }
 
@@ -266,12 +271,8 @@ impl RootFilesystem for LocalFilesystem {
     }
 
     async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
-        let resolved = self
-            .resolve_for_write(path, FilesystemOperation::WriteFile)
-            .await?;
-        tokio::fs::write(resolved, bytes)
+        self.write_file_with_cas(path, bytes, CasExpectation::Any)
             .await
-            .map_err(|error| io_error(path.clone(), FilesystemOperation::WriteFile, error))
     }
 
     async fn append_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
@@ -294,6 +295,14 @@ impl RootFilesystem for LocalFilesystem {
     }
 
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.list_dir_bounded(path, usize::MAX).await
+    }
+
+    async fn list_dir_bounded(
+        &self,
+        path: &VirtualPath,
+        max_entries: usize,
+    ) -> Result<Vec<DirEntry>, FilesystemError> {
         let resolved = self
             .resolve_existing(path, FilesystemOperation::ListDir)
             .await?;
@@ -301,11 +310,14 @@ impl RootFilesystem for LocalFilesystem {
             .await
             .map_err(|error| io_error(path.clone(), FilesystemOperation::ListDir, error))?;
         let mut entries = Vec::new();
-        while let Some(entry) = read_dir
-            .next_entry()
-            .await
-            .map_err(|error| io_error(path.clone(), FilesystemOperation::ListDir, error))?
-        {
+        while entries.len() < max_entries {
+            let Some(entry) = read_dir
+                .next_entry()
+                .await
+                .map_err(|error| io_error(path.clone(), FilesystemOperation::ListDir, error))?
+            else {
+                break;
+            };
             let name = entry.file_name().to_string_lossy().to_string();
             let entry_path =
                 VirtualPath::new(format!("{}/{}", path.as_str().trim_end_matches('/'), name))?;
@@ -357,6 +369,116 @@ impl RootFilesystem for LocalFilesystem {
     async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         self.resolve_for_create_dir_all(path).await.map(|_| ())
     }
+}
+
+impl LocalFilesystem {
+    async fn write_file_with_cas(
+        &self,
+        path: &VirtualPath,
+        bytes: &[u8],
+        cas: CasExpectation,
+    ) -> Result<(), FilesystemError> {
+        let resolved = self
+            .resolve_for_write(path, FilesystemOperation::WriteFile)
+            .await?;
+        if matches!(cas, CasExpectation::Absent)
+            && tokio::fs::try_exists(&resolved)
+                .await
+                .map_err(|error| io_error(path.clone(), FilesystemOperation::WriteFile, error))?
+        {
+            return Err(FilesystemError::VersionMismatch {
+                path: path.clone(),
+                expected: None,
+                found: Some(RecordVersion::from_backend(0)),
+            });
+        }
+        atomic_write_file(path, &resolved, bytes, cas).await
+    }
+}
+
+async fn atomic_write_file(
+    virtual_path: &VirtualPath,
+    target: &Path,
+    bytes: &[u8],
+    cas: CasExpectation,
+) -> Result<(), FilesystemError> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| FilesystemError::PathOutsideMount {
+            path: virtual_path.clone(),
+        })?;
+    let temp = unique_temp_path(virtual_path, parent, target)?;
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)
+        .await
+        .map_err(|error| io_error(virtual_path.clone(), FilesystemOperation::WriteFile, error))?;
+    file.write_all(bytes)
+        .await
+        .map_err(|error| io_error(virtual_path.clone(), FilesystemOperation::WriteFile, error))?;
+    file.sync_all()
+        .await
+        .map_err(|error| io_error(virtual_path.clone(), FilesystemOperation::WriteFile, error))?;
+    drop(file);
+
+    let install_result = match cas {
+        CasExpectation::Any => tokio::fs::rename(&temp, target)
+            .await
+            .map_err(|error| io_error(virtual_path.clone(), FilesystemOperation::WriteFile, error)),
+        CasExpectation::Absent => match tokio::fs::hard_link(&temp, target).await {
+            Ok(()) => tokio::fs::remove_file(&temp).await.map_err(|error| {
+                io_error(virtual_path.clone(), FilesystemOperation::WriteFile, error)
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let _ = tokio::fs::remove_file(&temp).await;
+                Err(FilesystemError::VersionMismatch {
+                    path: virtual_path.clone(),
+                    expected: None,
+                    found: Some(RecordVersion::from_backend(0)),
+                })
+            }
+            Err(error) => {
+                let _ = tokio::fs::remove_file(&temp).await;
+                Err(io_error(
+                    virtual_path.clone(),
+                    FilesystemOperation::WriteFile,
+                    error,
+                ))
+            }
+        },
+        CasExpectation::Version(_) => Err(FilesystemError::Unsupported {
+            path: virtual_path.clone(),
+            operation: FilesystemOperation::WriteFile,
+        }),
+    };
+
+    install_result?;
+    sync_parent_dir(virtual_path, parent).await
+}
+
+fn unique_temp_path(
+    virtual_path: &VirtualPath,
+    parent: &Path,
+    target: &Path,
+) -> Result<PathBuf, FilesystemError> {
+    let name = target
+        .file_name()
+        .ok_or_else(|| FilesystemError::PathOutsideMount {
+            path: virtual_path.clone(),
+        })?
+        .to_string_lossy();
+    let counter = LOCAL_WRITE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    Ok(parent.join(format!(".{name}.tmp.{counter}")))
+}
+
+async fn sync_parent_dir(virtual_path: &VirtualPath, parent: &Path) -> Result<(), FilesystemError> {
+    let dir = tokio::fs::File::open(parent)
+        .await
+        .map_err(|error| io_error(virtual_path.clone(), FilesystemOperation::WriteFile, error))?;
+    dir.sync_all()
+        .await
+        .map_err(|error| io_error(virtual_path.clone(), FilesystemOperation::WriteFile, error))
 }
 
 async fn ensure_existing_ancestor_contained(

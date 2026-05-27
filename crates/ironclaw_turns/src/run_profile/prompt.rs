@@ -147,13 +147,6 @@ where
             ));
         }
 
-        if !request.inline_messages.is_empty() {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::PolicyDenied,
-                "inline_messages not yet supported by this prompt builder",
-            ));
-        }
-
         if request
             .context_cursor
             .as_ref()
@@ -276,6 +269,7 @@ where
             context_bundle: context,
             visible_surface,
             safety_context: self.safety_context.clone(),
+            inline_messages: request.inline_messages.clone(),
         })?;
         if let Some(store) = self.instruction_materialization_store.as_ref() {
             store.put_materialized_messages(
@@ -335,20 +329,22 @@ mod tests {
             &self,
             _request: LoopContextRequest,
         ) -> Result<LoopContextBundle, AgentLoopHostError> {
-            panic!("inline message guard should run before context loading")
+            Ok(LoopContextBundle::default())
         }
     }
 
     #[tokio::test]
-    async fn host_managed_prompt_port_rejects_inline_messages() {
+    async fn host_managed_prompt_port_materializes_inline_messages() {
         let context = test_context();
+        let store = Arc::new(InMemoryInstructionMaterializationStore::default());
         let port = HostManagedLoopPromptPort::new(
-            context,
+            context.clone(),
             Arc::new(PanicContextPort),
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
-        );
+        )
+        .with_instruction_materialization_store(store.clone());
 
-        let error = port
+        let bundle = port
             .build_prompt_bundle(LoopPromptBundleRequest {
                 mode: PromptMode::TextOnly,
                 context_cursor: None,
@@ -362,13 +358,15 @@ mod tests {
                 }],
             })
             .await
-            .unwrap_err();
+            .unwrap();
 
-        assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
-        assert_eq!(
-            error.safe_summary,
-            "inline_messages not yet supported by this prompt builder"
-        );
+        let inline_ref = &bundle.messages[0].content_ref;
+        let materialized = store
+            .get_materialized_message(&context, inline_ref)
+            .unwrap()
+            .expect("inline message should materialize");
+        assert_eq!(materialized.role, "user");
+        assert_eq!(materialized.safe_content, "safe inline nudge");
     }
 
     /// A context port that returns configurable identity and body messages.

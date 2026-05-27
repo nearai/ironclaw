@@ -213,6 +213,30 @@ async fn builtin_coding_grep_fails_on_explicit_file_read_error() {
 }
 
 #[tokio::test]
+async fn builtin_coding_grep_treats_backend_infrastructure_as_backend_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("fail.rs"), "needle\n").unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem(ReadInfrastructureFailureFilesystem {
+        inner: filesystem,
+        fail_suffix: "/fail.rs",
+    });
+    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+
+    let error = invoke_with_context(
+        &runtime,
+        GREP_CAPABILITY_ID,
+        json!({"path": "/workspace/fail.rs", "pattern": "needle"}),
+        context,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::Backend);
+}
+
+#[tokio::test]
 async fn builtin_coding_list_fails_when_visited_entry_budget_is_exceeded() {
     let temp = tempfile::tempdir().unwrap();
     let (_filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
@@ -406,6 +430,40 @@ impl RootFilesystem for ReadFailureFilesystem {
                 path: path.clone(),
                 operation: FilesystemOperation::ReadFile,
                 reason: "injected read failure".to_string(),
+            });
+        }
+        self.inner.read_file(path).await
+    }
+
+    async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
+        self.inner.write_file(path, bytes).await
+    }
+
+    async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.create_dir_all(path).await
+    }
+}
+
+struct ReadInfrastructureFailureFilesystem {
+    inner: LocalFilesystem,
+    fail_suffix: &'static str,
+}
+
+#[async_trait]
+impl RootFilesystem for ReadInfrastructureFailureFilesystem {
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
+        if path.as_str().ends_with(self.fail_suffix) {
+            return Err(FilesystemError::BackendInfrastructure {
+                operation: FilesystemOperation::ReadFile,
+                reason: "injected read infrastructure failure".to_string(),
             });
         }
         self.inner.read_file(path).await

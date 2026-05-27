@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    CapabilityId, HostApiError, NetworkMethod, NetworkPolicy, ResourceScope, RuntimeKind,
-    SecretHandle,
+    CapabilityId, HostApiError, MountView, NetworkMethod, NetworkPolicy, ResourceScope,
+    RuntimeKind, ScopedPath, SecretHandle,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,10 +34,31 @@ pub struct RuntimeHttpEgressRequest {
     /// authorization/approval, destination policy, and host-approved injection
     /// shape before this request reaches [`RuntimeHttpEgress`].
     pub credential_injections: Vec<RuntimeCredentialInjection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_body_limit: Option<u64>,
+    /// Optional scoped destination for storing the sanitized response body.
+    ///
+    /// This is a scoped path, not a host path. Host composition must provide the
+    /// body store that resolves the scoped destination through filesystem
+    /// authority for the invocation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub save_body_to: Option<RuntimeHttpSaveTarget>,
     /// Host-call timeout in milliseconds, already capped by the invoking
     /// runtime to its remaining execution deadline when applicable.
     pub timeout_ms: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeHttpSaveTarget {
+    pub path: ScopedPath,
+    /// Host-derived mount authority used to parse and authorize `path`.
+    ///
+    /// This is skipped on the wire so guest/runtime-provided requests cannot
+    /// grant themselves filesystem authority by serializing a custom mount
+    /// view. Host translators that already hold an invocation mount view may
+    /// attach it before dispatching to the host egress service.
+    #[serde(skip)]
+    pub mount_view: Option<MountView>,
 }
 
 /// One host-approved credential injection.
@@ -173,6 +194,8 @@ pub struct RuntimeHttpEgressResponse {
     pub status: u16,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_body: Option<RuntimeHttpSavedBody>,
     pub request_bytes: u64,
     pub response_bytes: u64,
     pub redaction_applied: bool,
@@ -184,9 +207,16 @@ pub const RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED: &str = "response_bod
 pub enum RuntimeHttpEgressReasonCode {
     CredentialUnavailable,
     RequestDenied,
+    PolicyDenied,
     NetworkError,
     ResponseError,
     ResponseBodyLimitExceeded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeHttpSavedBody {
+    pub path: ScopedPath,
+    pub bytes_written: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -241,6 +271,9 @@ impl RuntimeHttpEgressError {
             {
                 RuntimeHttpEgressReasonCode::ResponseBodyLimitExceeded
             }
+            Self::Network { reason, .. } if reason == "policy_denied" => {
+                RuntimeHttpEgressReasonCode::PolicyDenied
+            }
             Self::Network { .. } => RuntimeHttpEgressReasonCode::NetworkError,
             Self::Response { .. } => RuntimeHttpEgressReasonCode::ResponseError,
         }
@@ -251,6 +284,7 @@ impl RuntimeHttpEgressError {
         match self.reason_code() {
             RuntimeHttpEgressReasonCode::CredentialUnavailable => "credential_unavailable",
             RuntimeHttpEgressReasonCode::RequestDenied => "request_denied",
+            RuntimeHttpEgressReasonCode::PolicyDenied => "policy_denied",
             RuntimeHttpEgressReasonCode::NetworkError => "network_error",
             RuntimeHttpEgressReasonCode::ResponseError => "response_error",
             RuntimeHttpEgressReasonCode::ResponseBodyLimitExceeded => {

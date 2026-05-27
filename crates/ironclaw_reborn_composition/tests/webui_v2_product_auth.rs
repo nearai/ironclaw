@@ -231,7 +231,7 @@ fn oauth_start_body(state: &str, pkce: &str, extra_fields: serde_json::Value) ->
     let expires_at = (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339();
     let mut body = json!({
         "provider": "github",
-        "authorization_url": "https://provider.example/oauth?client_id=reborn",
+        "authorization_url": "https://provider.example/oauth",
         "opaque_state": state,
         "pkce_verifier": pkce,
         "expires_at": expires_at
@@ -401,10 +401,27 @@ async fn product_auth_oauth_start_invalid_requests_are_sanitized() {
             json!({ "expires_at": (Utc::now() - ChronoDuration::minutes(1)).to_rfc3339() }),
         ),
         oauth_start_body(
+            "far-future-start-state",
+            "far-future-start-pkce",
+            json!({ "expires_at": (Utc::now() + ChronoDuration::hours(1)).to_rfc3339() }),
+        ),
+        oauth_start_body(
             "bad-provider-state",
             "bad-provider-pkce",
             json!({ "provider": "" }),
         ),
+        oauth_start_body(
+            "bad-url-state",
+            "bad-url-pkce",
+            json!({ "authorization_url": "http://provider.example/oauth" }),
+        ),
+        oauth_start_body(
+            "precomposed-url-state",
+            "precomposed-url-pkce",
+            json!({ "authorization_url": "https://provider.example/oauth?state=precomposed-url-state&code_challenge=precomposed-url-pkce" }),
+        ),
+        oauth_start_body(" padded-start-state ", "padded-start-pkce", json!({})),
+        oauth_start_body("bad-pkce-state", " padded-start-pkce ", json!({})),
         oauth_start_body(
             "bad-thread-state",
             "bad-thread-pkce",
@@ -418,7 +435,11 @@ async fn product_auth_oauth_start_invalid_requests_are_sanitized() {
         let body = read_body_string(response).await;
         assert!(body.contains("\"code\":\"invalid_request\""));
         assert!(!body.contains("expired-start-state"));
+        assert!(!body.contains("far-future-start-pkce"));
         assert!(!body.contains("bad-provider-pkce"));
+        assert!(!body.contains("precomposed-url-state"));
+        assert!(!body.contains("precomposed-url-pkce"));
+        assert!(!body.contains("padded-start-pkce"));
         assert!(!body.contains("bad-thread-state"));
     }
 }
@@ -444,6 +465,13 @@ async fn product_auth_oauth_routes_create_flow_and_complete_callback() {
     assert_eq!(callback_scope["agent_id"], AGENT);
     assert_eq!(callback_scope["project_id"], PROJECT);
     assert_eq!(start_json["continuation"]["type"], "setup_only");
+    let authorization_url = start_json["authorization_url"]
+        .as_str()
+        .expect("authorization url");
+    assert!(authorization_url.contains(&started.flow_id));
+    assert!(authorization_url.contains(&started.invocation_id));
+    assert!(!authorization_url.contains("route-state-secret"));
+    assert!(!authorization_url.contains("route-pkce-secret"));
 
     let callback_response = app
         .oneshot(
@@ -521,6 +549,84 @@ async fn product_auth_callback_unknown_flow_is_sanitized() {
     let body = read_body_string(response).await;
     assert!(body.contains("\"code\":\"unknown_or_expired_flow\""));
     assert!(!body.contains("unknown-flow-state"));
+    assert!(dispatcher.events().is_empty());
+}
+
+#[tokio::test]
+async fn product_auth_authorized_callback_unknown_flow_is_sanitized() {
+    let (app, dispatcher) = build_app_with_product_auth();
+    let flow_id = uuid::Uuid::new_v4().to_string();
+    let invocation_id = ironclaw_host_api::InvocationId::new().to_string();
+    let response = app
+        .oneshot(callback_request(callback_uri(
+            &flow_id,
+            &invocation_id,
+            USER,
+            "unknown-authorized-state",
+            "&provider=github&account_label=work%20github&code=unknown-authorized-code",
+        )))
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = read_body_string(response).await;
+    assert!(body.contains("\"code\":\"unknown_or_expired_flow\""));
+    assert!(!body.contains("unknown-authorized-state"));
+    assert!(!body.contains("unknown-authorized-code"));
+    assert!(dispatcher.events().is_empty());
+}
+
+#[tokio::test]
+async fn product_auth_callback_malformed_fields_are_sanitized() {
+    let (app, dispatcher) = build_app_with_product_auth();
+    let started = start_oauth_flow(
+        &app,
+        "malformed-field-state",
+        "malformed-field-pkce",
+        json!({}),
+    )
+    .await;
+
+    let malformed_uris = [
+        format!(
+            "/api/reborn/product-auth/oauth/callback/{}?user_id={USER}&agent_id={AGENT}&project_id={PROJECT}&invocation_id={}&provider=github&account_label=work&code=missing-state-code",
+            started.flow_id, started.invocation_id
+        ),
+        callback_uri(
+            &started.flow_id,
+            &started.invocation_id,
+            USER,
+            "malformed-field-state",
+            "&provider=&account_label=work&code=empty-provider-code",
+        ),
+        callback_uri(
+            &started.flow_id,
+            &started.invocation_id,
+            USER,
+            "malformed-field-state",
+            "&provider=github&account_label=%20work&code=bad-label-code",
+        ),
+        callback_uri(
+            &started.flow_id,
+            &started.invocation_id,
+            USER,
+            "malformed-field-state",
+            "&provider=github&account_label=work&code=bad-scopes-code&scopes=repo,,gist",
+        ),
+    ];
+
+    for uri in malformed_uris {
+        let response = app
+            .clone()
+            .oneshot(callback_request(uri))
+            .await
+            .expect("oneshot");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = read_body_string(response).await;
+        assert!(body.contains("\"code\":\"malformed_callback\""));
+        assert!(!body.contains("malformed-field-state"));
+        assert!(!body.contains("malformed-field-pkce"));
+    }
     assert!(dispatcher.events().is_empty());
 }
 

@@ -104,7 +104,10 @@ async fn oauth_callback_updates_existing_account_from_provider_exchange() {
 
     assert_eq!(completed.credential_account_id, Some(existing.id));
     let updated = services
-        .get_account(&owner, existing.id)
+        .get_account(CredentialAccountLookupRequest::new(
+            owner.clone(),
+            existing.id,
+        ))
         .await
         .expect("lookup")
         .expect("updated account");

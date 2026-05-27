@@ -11,15 +11,24 @@
   wire product auth through V1 OAuth routes, V1 pending maps, V1
   `ExtensionManager`, V1 secret stores, or route-local raw HTTP clients.
 - OAuth callback routes should only parse/validate HTTP input and call
-  `RebornProductAuthServices::handle_oauth_callback`; the handler must claim
-  the scoped flow/state/provider through `AuthFlowManager` before exchanging
-  provider material through `AuthProviderClient`, then complete the flow and
-  emit typed continuations.
+  `RebornProductAuthServices` for flow preflight/callback handling; the
+  handler must claim the scoped flow/state/provider through `AuthFlowManager`
+  before exchanging provider material through `AuthProviderClient`, then
+  complete the flow and emit typed continuations.
 - The first WebUI-mounted OAuth route keeps raw PKCE verifiers in a bounded,
   expiring process-local cache because `ironclaw_auth` durable records may
   store hashes only. Do not treat that route as multi-replica/restart-safe
   until a host-owned encrypted verifier store or equivalent sticky callback
   mechanism is wired.
+- Manual-token setup routes should call
+  `RebornProductAuthServices::request_manual_token_setup` for the typed
+  challenge and `RebornProductAuthServices::submit_manual_token` with a
+  one-shot `RebornManualTokenSubmitRequest` for the dedicated secret-submit
+  body. Build setup request scope from authenticated caller/session context,
+  not a browser body; attach `CredentialAccountUpdateBinding` only after
+  pre-authorizing the existing scoped account. Do not route raw token values
+  through chat commands, model-visible messages, serializable DTOs,
+  projections, or route-local pending maps.
 - Blocked run-state approval/auth gate rendering and resume belongs to #3094;
   keep this crate's #3811 auth seam reusable by that layer without implementing
   a second gate-resolution path.
@@ -107,17 +116,19 @@ Reborn-native product-auth OAuth surface:
 - `POST /api/reborn/product-auth/oauth/start` is inside the existing
   bearer-auth layer. It derives `AuthProductScope` from the
   `WebUiAuthenticatedCaller` inserted by host composition, hashes raw
-  state/PKCE once, and creates an `AuthFlowRecord` through
-  `AuthFlowManager::create_flow`. The route has a 16 KiB JSON body cap
-  and per-caller rate limit in addition to the gateway-wide fallback
-  cap. The browser cannot choose `AuthFlowKind` or
+  state/PKCE once, rejects caller-supplied expiry beyond the route TTL,
+  and creates an `AuthFlowRecord` through `AuthFlowManager::create_flow`.
+  The response authorization URL is composed after flow creation so it can
+  carry flow/callback metadata without serializing raw state or PKCE material.
+  The route has a 16 KiB JSON body cap and per-caller rate limit in addition
+  to the gateway-wide fallback cap. The browser cannot choose `AuthFlowKind` or
   `AuthContinuationRef`; this first route creates integration-credential
   setup flows with `AuthContinuationRef::SetupOnly`.
 - `GET /api/reborn/product-auth/oauth/callback/{flow_id}` is a hosted
   callback route and is intentionally not behind WebUI bearer auth. It
-  reconstructs the scoped callback owner from host/callback metadata,
-  hashes raw state/code/PKCE verifier material, and calls
-  `RebornProductAuthServices::handle_oauth_callback`. The route never
+  bounds the raw query string, reconstructs the scoped callback owner from
+  host/callback metadata, hashes raw state/code/PKCE verifier material, and calls
+  `RebornProductAuthServices` for flow preflight/callback handling. The route never
   exchanges provider tokens, activates extensions, resumes turns, or
   writes secrets directly. Its descriptor declares `NoBody` and a
   transport-peer-IP public callback rate limit.
@@ -149,7 +160,7 @@ rows are inventoried here, not implemented in the current PR.
 | Resolve gate | `POST /api/chat/gate/resolve` | `POST /api/webchat/v2/threads/{tid}/runs/{run_id}/gates/{gate_ref}/resolve` | Mapped |
 | Approval shim | `POST /api/chat/approval` | (Subsumed by `resolve_gate`) | Mapped |
 | Auth-token / auth-cancel | `POST /api/chat/auth-{token,cancel}` | (Engine v1 compatibility shim; delete with v1) | v1-only (legacy) |
-| Extensions onboarding | `GET\|POST /api/extensions/{name}/setup` | `POST /api/webchat/v2/extensions/{name}/setup` | Mapped (skeleton — facade returns `NotImplemented` until v2-aware extension lifecycle lands) |
+| Extensions onboarding | `GET\|POST /api/extensions/{name}/setup` | `POST /api/webchat/v2/extensions/{name}/setup` | Mapped to lifecycle projection; no production setup side effects yet |
 
 ### Security invariants on every "Mapped" row
 
@@ -174,7 +185,7 @@ rows are inventoried here, not implemented in the current PR.
   is kept as defense in depth for paths that don't match any v2
   descriptor.
 - **Rate limit** — descriptor-driven; the v2 crate declares mutation
-  60/60, read 120/60, stream 12/60 per `(tenant, user)`. Reading and
+  60/60, read 120/60, stream 30/60 per `(tenant, user)`. Reading and
   enforcing happens in `webui_rate_limit::build_rate_limit_state`.
 - **Static security headers** — `nosniff`, `DENY`, CSP applied via
   outer `SetResponseHeaderLayer`s; default CSP is
@@ -206,12 +217,13 @@ The `serve` subcommand builds a full local-dev `RebornRuntime`, asks
 `build_webui_services(&runtime, None)` for the WebUI bundle, and hands
 the resulting router to the host-owned `ironclaw_reborn_webui_ingress`
 listener lifecycle. The bundle's default projection stream is backed by
-the runtime's process-local in-memory durable event log plus
-`EventStreamManager`, so `/events` and `/ws` no longer advertise routes
-that only return `Unavailable`. That log is intentionally local-dev
-scaffolding for this slice; production durable retention/live fanout
-belongs in the host runtime/event-store follow-up rather than this
-composition facade.
+the runtime-owned durable event log plus `EventStreamManager`, so
+`/events` and `/ws` no longer advertise routes that only return
+`Unavailable`. In local-dev builds with `libsql` enabled, the log and
+runtime state stores sit behind the composed local-dev root filesystem
+(`reborn-local-dev.db` for durable records, `/projects` for workspace
+files). Production durable retention/live fanout still belongs in the
+host runtime/event-store follow-up rather than this composition facade.
 
 ```rust
 // Inside a host-owned ingress crate / binary (NOT in this crate —

@@ -252,6 +252,10 @@ fn production_wiring_validation_rejects_each_local_only_runtime_policy_field() {
     host_workspace.filesystem_backend = FilesystemBackendKind::HostWorkspace;
     assert_local_only_runtime_policy_rejected(host_workspace, "host_workspace_filesystem");
 
+    let mut host_workspace_and_home = hosted_dev_runtime_policy();
+    host_workspace_and_home.filesystem_backend = FilesystemBackendKind::HostWorkspaceAndHome;
+    assert_local_only_runtime_policy_rejected(host_workspace_and_home, "host_workspace_filesystem");
+
     let mut local_process = hosted_dev_runtime_policy();
     local_process.process_backend = ProcessBackendKind::LocalHost;
     assert_local_only_runtime_policy_rejected(local_process, "local_host_process");
@@ -1211,6 +1215,35 @@ fn production_wiring_validation_tracks_tenant_sandbox_process_port_for_builtin_s
             ProductionWiringIssueKind::UnverifiedProductionImplementation
         ),
         "configured tenant sandbox process port should clear missing but remain unverified: {report:?}"
+    );
+
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_builtin_first_party_package()),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_runtime_policy(hosted_dev_runtime_policy())
+    .with_production_tenant_sandbox_process_port(Arc::new(TenantSandboxProcessPort::new(
+        Arc::new(ProductionCandidateSandboxTransport),
+    )));
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([RuntimeKind::FirstParty]))
+        .expect_err("test service graph still uses local-only backing stores");
+
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::RuntimeProcessPort,
+            ProductionWiringIssueKind::Missing
+        ) && !report.contains(
+            ProductionWiringComponent::RuntimeProcessPort,
+            ProductionWiringIssueKind::UnverifiedProductionImplementation
+        ),
+        "verified tenant sandbox process port should satisfy the process-port gate: {report:?}"
     );
 }
 
@@ -2909,6 +2942,35 @@ async fn host_runtime_services_health_fails_closed_for_unregistered_required_run
 
     assert!(!health.ready);
     assert_eq!(health.missing_runtime_backends, vec![RuntimeKind::Script]);
+}
+
+#[tokio::test]
+async fn host_runtime_routes_system_process_sandbox_to_configured_executor() {
+    let process_services = ProcessServices::in_memory();
+    let result_store = process_services.result_store();
+    let sandbox_executor = Arc::new(RecordingSandboxProcessExecutor::default());
+    let runtime = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        process_services,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_process_sandbox_executor(Arc::clone(&sandbox_executor))
+    .host_runtime_for_local_testing();
+    let scope = sample_scope(InvocationId::new());
+    let process_id = ProcessId::new();
+
+    let handle = runtime
+        .spawn_process(process_sandbox_start(process_id, scope.clone()))
+        .await
+        .unwrap();
+
+    assert_eq!(handle.process_id, process_id);
+    assert_eq!(handle.capability_id, process_sandbox_capability_id());
+    wait_for_sandbox_process_result(&sandbox_executor, &scope, process_id, result_store.as_ref())
+        .await;
 }
 
 #[tokio::test]
@@ -5412,6 +5474,7 @@ impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
             status: self.response_status,
             headers: Vec::new(),
             body: Vec::new(),
+            saved_body: None,
             request_bytes: request.body.len() as u64,
             response_bytes: 0,
             redaction_applied: false,
@@ -5885,6 +5948,30 @@ impl ProcessExecutor for BackgroundExecutor {
     }
 }
 
+#[derive(Default)]
+struct RecordingSandboxProcessExecutor {
+    requests: std::sync::Mutex<Vec<ProcessExecutionRequest>>,
+}
+
+impl RecordingSandboxProcessExecutor {
+    fn requests(&self) -> Vec<ProcessExecutionRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl ProcessExecutor for RecordingSandboxProcessExecutor {
+    async fn execute(
+        &self,
+        request: ProcessExecutionRequest,
+    ) -> Result<ProcessExecutionResult, ironclaw_processes::ProcessExecutionError> {
+        self.requests.lock().unwrap().push(request);
+        Ok(ProcessExecutionResult {
+            output: json!({"executor": "process_sandbox"}),
+        })
+    }
+}
+
 struct FailingSpawnManager;
 
 #[async_trait]
@@ -5926,6 +6013,29 @@ async fn wait_for_status(
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     panic!("process {process_id} did not reach {status:?}");
+}
+
+async fn wait_for_sandbox_process_result(
+    executor: &RecordingSandboxProcessExecutor,
+    scope: &ResourceScope,
+    process_id: ProcessId,
+    result_store: &dyn ProcessResultStore,
+) {
+    for _ in 0..100 {
+        let requests = executor.requests();
+        if let Some(request) = requests.first()
+            && request.process_id == process_id
+            && request.capability_id == process_sandbox_capability_id()
+            && request.runtime == RuntimeKind::System
+            && let Some(result) = result_store.get(scope, process_id).await.unwrap()
+        {
+            assert_eq!(result.status, ProcessStatus::Completed);
+            assert_eq!(result.output, Some(json!({"executor": "process_sandbox"})));
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("process sandbox executor did not complete process {process_id}");
 }
 
 async fn wait_for_result_store_attempt(store: &FailingProcessResultStore, attempt: &'static str) {
@@ -6333,6 +6443,24 @@ fn process_start(
     }
 }
 
+fn process_sandbox_start(process_id: ProcessId, scope: ResourceScope) -> ProcessStart {
+    let invocation_id = scope.invocation_id;
+    ProcessStart {
+        process_id,
+        parent_process_id: None,
+        invocation_id,
+        scope,
+        extension_id: ExtensionId::new("system.process_sandbox").unwrap(),
+        capability_id: process_sandbox_capability_id(),
+        runtime: RuntimeKind::System,
+        grants: CapabilitySet::default(),
+        mounts: MountView::default(),
+        estimated_resources: ResourceEstimate::default(),
+        resource_reservation_id: None,
+        input: json!({"run": {"command": "echo", "args": ["ok"]}}),
+    }
+}
+
 fn script_extension_id() -> ExtensionId {
     ExtensionId::new("script").unwrap()
 }
@@ -6343,6 +6471,10 @@ fn script_capability_id() -> CapabilityId {
 
 fn mcp_capability_id() -> CapabilityId {
     CapabilityId::new("mcp.search").unwrap()
+}
+
+fn process_sandbox_capability_id() -> CapabilityId {
+    CapabilityId::new("system.process_sandbox.run").unwrap()
 }
 
 struct WasmRuntimeFixture {
@@ -6585,6 +6717,10 @@ fn submit_turn_request(thread: &str, idempotency_key: &str) -> SubmitTurnRequest
         requested_run_profile: Some(RunProfileRequest::new("default").unwrap()),
         idempotency_key: IdempotencyKey::new(idempotency_key).unwrap(),
         received_at: Utc::now(),
+        requested_run_id: None,
+        parent_run_id: None,
+        subagent_depth: 0,
+        spawn_tree_root_run_id: None,
     }
 }
 

@@ -1167,6 +1167,49 @@ async fn permanent_turn_error_does_not_rotate_submit_idempotency_key() {
 }
 
 #[tokio::test]
+async fn capacity_exceeded_does_not_rotate_submit_idempotency_key() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-1"),
+            user("alice"),
+        )
+        .await;
+    let coordinator = Arc::new(CapacityFailureTurnCoordinator::default());
+    let inbound = InboundTurnService::new(services.clone(), services.clone(), coordinator.clone());
+    let request = inbound_request(
+        telegram(),
+        external_actor("telegram-user-1"),
+        external_conversation("chat-1", None),
+        "telegram-event-capacity-error",
+    );
+
+    let first = inbound
+        .handle_inbound_turn(request.clone())
+        .await
+        .unwrap_err();
+    let second = inbound.handle_inbound_turn(request).await.unwrap_err();
+
+    assert!(matches!(
+        first,
+        InboundTurnError::TurnSubmissionFailed { .. }
+    ));
+    assert!(matches!(
+        second,
+        InboundTurnError::TurnSubmissionFailed { .. }
+    ));
+    assert_eq!(coordinator.submissions().len(), 2);
+    assert_eq!(
+        coordinator.submissions()[0].idempotency_key,
+        coordinator.submissions()[1].idempotency_key,
+        "capacity errors should keep the original submit idempotency key for replay"
+    );
+}
+
+#[tokio::test]
 async fn turn_submission_failure_preserves_structured_turn_error() {
     let services = InMemoryConversationServices::default();
     services
@@ -2743,6 +2786,11 @@ struct PermanentFailureTurnCoordinator {
     submissions: Mutex<Vec<SubmitTurnRequest>>,
 }
 
+#[derive(Default)]
+struct CapacityFailureTurnCoordinator {
+    submissions: Mutex<Vec<SubmitTurnRequest>>,
+}
+
 impl BusyFirstUniqueKeyCoordinator {
     fn submissions(&self) -> Vec<SubmitTurnRequest> {
         self.submissions.lock().unwrap().clone()
@@ -2761,8 +2809,18 @@ impl PermanentFailureTurnCoordinator {
     }
 }
 
+impl CapacityFailureTurnCoordinator {
+    fn submissions(&self) -> Vec<SubmitTurnRequest> {
+        self.submissions.lock().unwrap().clone()
+    }
+}
+
 #[async_trait]
 impl TurnCoordinator for PermanentFailureTurnCoordinator {
+    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        Ok(TurnRunId::new())
+    }
+
     async fn submit_turn(
         &self,
         request: SubmitTurnRequest,
@@ -2790,7 +2848,44 @@ impl TurnCoordinator for PermanentFailureTurnCoordinator {
 }
 
 #[async_trait]
+impl TurnCoordinator for CapacityFailureTurnCoordinator {
+    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        Ok(TurnRunId::new())
+    }
+
+    async fn submit_turn(
+        &self,
+        request: SubmitTurnRequest,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        self.submissions.lock().unwrap().push(request);
+        Err(TurnError::capacity_exceeded(
+            ironclaw_turns::TurnCapacityResource::SubmitTurn,
+            1,
+        ))
+    }
+
+    async fn resume_turn(
+        &self,
+        _request: ResumeTurnRequest,
+    ) -> Result<ResumeTurnResponse, TurnError> {
+        unimplemented!("not used by inbound facade tests")
+    }
+
+    async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
+        unimplemented!("not used by inbound facade tests")
+    }
+
+    async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        unimplemented!("not used by inbound facade tests")
+    }
+}
+
+#[async_trait]
 impl TurnCoordinator for BusyFirstUniqueKeyCoordinator {
+    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        Ok(TurnRunId::new())
+    }
+
     async fn submit_turn(
         &self,
         request: SubmitTurnRequest,
@@ -2825,6 +2920,10 @@ impl TurnCoordinator for BusyFirstUniqueKeyCoordinator {
 
 #[async_trait]
 impl TurnCoordinator for FailFirstTurnCoordinator {
+    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        Ok(TurnRunId::new())
+    }
+
     async fn submit_turn(
         &self,
         request: SubmitTurnRequest,
@@ -2857,6 +2956,10 @@ impl TurnCoordinator for FailFirstTurnCoordinator {
 
 #[async_trait]
 impl TurnCoordinator for RecordingTurnCoordinator {
+    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        Ok(TurnRunId::new())
+    }
+
     async fn submit_turn(
         &self,
         request: SubmitTurnRequest,

@@ -1,17 +1,18 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{CapabilityId, ExtensionId};
+use ironclaw_host_api::{CapabilityId, ExtensionId, RuntimeKind};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    LoopExitId, LoopGateRef, LoopMessageRef, TurnCheckpointId, TurnId, TurnRunId, TurnScope,
+    CapabilityActivityId, LoopExitId, LoopGateRef, LoopMessageRef, TurnCheckpointId, TurnId,
+    TurnRunId, TurnScope,
 };
 
 use super::host::{
-    AgentLoopHostError, AgentLoopHostErrorKind, BatchPolicyKind, CapabilitySurfaceVersion,
-    LoopCheckpointKind, LoopDriverNoteKind, LoopGateKind, LoopPromptBundleRef, LoopRunContext,
-    LoopSafeSummary, PromptMode,
+    AgentLoopHostError, AgentLoopHostErrorKind, BatchPolicyKind, CapabilityFailureKind,
+    CapabilitySurfaceVersion, LoopCheckpointKind, LoopDriverNoteKind, LoopGateKind,
+    LoopPromptBundleRef, LoopRunContext, LoopSafeSummary, PromptMode,
 };
 use super::refs::{LoopDriverId, ModelProfileId};
 use crate::{LoopCompletionKind, LoopFailureKind};
@@ -73,11 +74,29 @@ pub enum LoopHostMilestoneKind {
     ModelCompleted {
         effective_model_profile_id: ModelProfileId,
     },
+    ModelReasoningDelta {
+        safe_delta: String,
+    },
     ModelFailed {
         reason_kind: AgentLoopHostErrorKind,
     },
     CapabilityInvoked {
+        activity_id: CapabilityActivityId,
         capability_id: CapabilityId,
+    },
+    CapabilityCompleted {
+        activity_id: CapabilityActivityId,
+        capability_id: CapabilityId,
+        provider: ExtensionId,
+        runtime: RuntimeKind,
+        output_bytes: u64,
+    },
+    CapabilityFailed {
+        activity_id: CapabilityActivityId,
+        capability_id: CapabilityId,
+        provider: Option<ExtensionId>,
+        runtime: Option<RuntimeKind>,
+        reason_kind: CapabilityFailureKind,
     },
     CapabilityBatchStarted {
         iteration: u32,
@@ -201,8 +220,11 @@ impl LoopHostMilestoneKind {
             Self::PromptBundleBuilt { .. } => "prompt_bundle_built",
             Self::ModelStarted { .. } => "model_started",
             Self::ModelCompleted { .. } => "model_completed",
+            Self::ModelReasoningDelta { .. } => "model_reasoning_delta",
             Self::ModelFailed { .. } => "model_failed",
             Self::CapabilityInvoked { .. } => "capability_invoked",
+            Self::CapabilityCompleted { .. } => "capability_completed",
+            Self::CapabilityFailed { .. } => "capability_failed",
             Self::CapabilityBatchStarted { .. } => "capability_batch_started",
             Self::CapabilityBatchCompleted { .. } => "capability_batch_completed",
             Self::GateBlocked { .. } => "gate_blocked",
@@ -394,6 +416,14 @@ where
         .await
     }
 
+    pub async fn model_reasoning_delta(
+        &self,
+        safe_delta: String,
+    ) -> Result<(), AgentLoopHostError> {
+        self.publish(LoopHostMilestoneKind::ModelReasoningDelta { safe_delta })
+            .await
+    }
+
     pub async fn model_failed(
         &self,
         reason_kind: AgentLoopHostErrorKind,
@@ -404,10 +434,50 @@ where
 
     pub async fn capability_invoked(
         &self,
+        activity_id: CapabilityActivityId,
         capability_id: CapabilityId,
     ) -> Result<(), AgentLoopHostError> {
-        self.publish(LoopHostMilestoneKind::CapabilityInvoked { capability_id })
-            .await
+        self.publish(LoopHostMilestoneKind::CapabilityInvoked {
+            activity_id,
+            capability_id,
+        })
+        .await
+    }
+
+    pub async fn capability_completed(
+        &self,
+        activity_id: CapabilityActivityId,
+        capability_id: CapabilityId,
+        provider: ExtensionId,
+        runtime: RuntimeKind,
+        output_bytes: u64,
+    ) -> Result<(), AgentLoopHostError> {
+        self.publish(LoopHostMilestoneKind::CapabilityCompleted {
+            activity_id,
+            capability_id,
+            provider,
+            runtime,
+            output_bytes,
+        })
+        .await
+    }
+
+    pub async fn capability_failed(
+        &self,
+        activity_id: CapabilityActivityId,
+        capability_id: CapabilityId,
+        provider: Option<ExtensionId>,
+        runtime: Option<RuntimeKind>,
+        reason_kind: CapabilityFailureKind,
+    ) -> Result<(), AgentLoopHostError> {
+        self.publish(LoopHostMilestoneKind::CapabilityFailed {
+            activity_id,
+            capability_id,
+            provider,
+            runtime,
+            reason_kind,
+        })
+        .await
     }
 
     pub async fn capability_batch_started(

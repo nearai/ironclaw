@@ -1,7 +1,7 @@
 # Reborn Product Auth Contract
 
 - **Status:** contract and composition seam
-- **Issue:** #3289 / #3810 / #3811 / #3812 / #3881
+- **Issue:** #3289 / #3810 / #3811 / #3812 / #3881 / #3882 / #3883
 - **Crate:** `crates/ironclaw_auth`
 - **Composition:** `ironclaw_reborn_composition::RebornProductAuthServices`
 
@@ -16,9 +16,11 @@ login flows.
 
 This slice is contract-first. It defines Reborn-native vocabulary and fake
 services, #3811 adds a Reborn composition seam, #3812 adds callback completion
-handling, and #3881 mounts the first Reborn-native OAuth start/callback HTTP
-routes through `ironclaw_reborn_composition`. It does not migrate production
-extension setup routes, CLI/setup flows, durable secret storage, or runtime
+handling, #3881 mounts the first Reborn-native OAuth start/callback HTTP routes
+through `ironclaw_reborn_composition`, #3882 adds the composition-facing
+manual-token secure-submit entrypoint, and #3883 adds recovery/selection
+facade coverage. It does not migrate production extension setup routes,
+CLI/setup flows, durable secret storage, token refresh execution, or runtime
 credential injection.
 
 Behavior may remain compatible with legacy UX. Code paths must not mingle V1
@@ -49,8 +51,8 @@ stores, provider clients, or cleanup services locally.
 
 Host-owned OAuth callback routes should parse and validate their HTTP input,
 derive hashes for opaque state/code/verifier values, then call
-`RebornProductAuthServices::handle_oauth_callback`. The handler claims the flow
-through `AuthFlowManager`, performs provider exchange through
+`RebornProductAuthServices` for flow preflight/callback handling. The handler
+claims the flow through `AuthFlowManager`, performs provider exchange through
 `AuthProviderClient`, completes the auth flow through `AuthFlowManager`, and
 dispatches an `AuthContinuationEvent` to the injected continuation dispatcher.
 If continuation dispatch fails, the handler returns a sanitized retryable error
@@ -58,6 +60,13 @@ instead of reporting callback success; retrying an already-completed callback
 may re-dispatch the typed continuation without re-exchanging provider code.
 Callback route code must not activate extensions, resume turns, replay prompts,
 or dispatch runtime work directly.
+
+The first WebUI-mounted OAuth start route accepts only a provider authorization
+endpoint shape, not a precomposed browser-owned provider URL. Host composition
+must create the flow first, then return a sanitized authorization URL carrying
+flow/callback metadata; raw state and PKCE verifier material stay hashed or
+process-local and must not be serialized. Callback query parsing is bounded and
+malformed fields fail closed before provider exchange.
 
 `ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher` is the
 product-workflow bridge for `AuthContinuationRef::TurnGateResume`. It converts
@@ -163,8 +172,27 @@ Rules:
 - `extension_owned` accounts require `owner_extension`.
 - Model/tool requests may express provider/capability intent, but cannot invent
   or bind arbitrary account ids.
+- Recovery projections return stable UI-safe states:
+  `configured`, `setup_required`, `reauthorize_required`, and
+  `account_selection_required`.
+- Account-selection challenges and recovery projections carry redacted account
+  projections, not loose account-id lists.
+- Recovery reasons are stable categories only: missing accounts, pending setup,
+  expired credentials, refresh failures, revoked credentials, inactive accounts,
+  and ambiguous account choices. Empty authorized choices use the same public
+  missing-account reason whether no accounts exist or only unauthorized accounts
+  exist, so recovery projections do not reveal hidden account existence.
+  Backend errors, provider response bodies, host paths, state tokens, secret
+  names, leases, and raw tokens must not appear in recovery projections.
 - If policy cannot choose a unique configured account, return
   `account_selection_required` instead of guessing.
+- Explicit account choice must go through `select_configured_account`, which
+  revalidates scope, provider, configured status, ownership, and requester
+  grants before returning a redacted projection. A raw `CredentialAccountId` is
+  never authority by itself.
+- Account lookup and listing requests carry requester extension identity and
+  apply the same ownership/grant filter before returning records or redacted
+  projections.
 - Admin/shared credentials must be explicit accounts/grants, not implicit
   `default` fallback authority.
 - Account updates must name the target `CredentialAccountId` and preserve the
@@ -173,8 +201,8 @@ Rules:
 - OAuth callback account updates must be bound to a pre-authorized
   `CredentialAccountUpdateBinding` on the flow before provider exchange
   completion.
-- Account listing uses explicit limit/cursor pagination and returns redacted
-  projections only.
+- Account listing uses explicit limit/cursor pagination and returns only
+  authorized redacted projections.
 
 ---
 
@@ -187,10 +215,23 @@ request_secret_input -> AuthChallenge::manual_token_required
 submit_manual_token  -> SecretSubmitResult { account_id, status, continuation }
 ```
 
+Host-owned routes should call
+`RebornProductAuthServices::request_manual_token_setup` to mint the typed
+challenge and `RebornProductAuthServices::submit_manual_token` with a
+non-serializable `RebornManualTokenSubmitRequest` after reading the dedicated
+secret-submit body. Routes must not pass manual-token material through chat
+commands, model-visible messages, product projections, route DTOs, or logs.
+The setup request is also not a route DTO: host routes must construct its
+`AuthProductScope` from authenticated caller/session context, and may attach a
+pre-authorized `CredentialAccountUpdateBinding` when the secret submit is
+intended to update an existing scoped account.
+
 Rules:
 
 - Raw token values must not enter model transcript, tool arguments, durable
   chat history, projections, debug output, or errors.
+- Manual-token account updates must be bound to a pre-authorized account update
+  binding before the challenge is minted.
 - Cross-scope submit attempts must not consume another user's pending
   interaction.
 - Empty, expired, malformed, or cross-scope submissions fail closed with stable
@@ -249,7 +290,7 @@ strings.
 | Extension/provider OAuth start | `src/extensions/manager.rs`, `src/auth/mod.rs` | `AuthFlowManager`, `CredentialSetupService`, `AuthProviderClient` | Reborn-native route mounted in composition; production provider wiring deferred |
 | Hosted OAuth callback | `src/channels/web/features/oauth/mod.rs` | `RebornProductAuthServices::handle_oauth_callback`, `ProductAuthTurnGateResumeDispatcher` for turn-gate resume continuations | Reborn-native route mounted in composition; production provider wiring deferred |
 | Local OAuth callback | `src/extensions/manager.rs`, `src/auth/oauth.rs` | `AuthFlowManager`, `AuthProviderClient` | Inventory only |
-| Manual token entry from chat | `src/agent/agent_loop.rs`, `src/agent/thread_ops.rs` | `AuthInteractionService` secure submit | Contracted; route migration deferred |
+| Manual token entry from chat | `src/agent/agent_loop.rs`, `src/agent/thread_ops.rs` | `AuthInteractionService` secure submit via `RebornProductAuthServices::{request_manual_token_setup,submit_manual_token}` | Reborn facade ready; route migration deferred |
 | Engine/gate auth credential submit | `src/bridge/router.rs` | `AuthInteractionService`, `CredentialSetupService`, typed continuation | Contracted; migration deferred |
 | Extension/channel setup token storage | `src/extensions/manager.rs` | `CredentialSetupService`, `CredentialAccountService` | Contracted; migration deferred |
 | MCP OAuth/DCR/discovery/refresh | `src/tools/mcp/auth.rs` | `AuthFlowManager`, `AuthProviderClient`, `CredentialAccountService` | Inventory only |
@@ -268,9 +309,17 @@ strings.
 
 - OAuth start, provider exchange, callback success, callback replay, stale,
   canceled, malformed, denied, and cross-scope callback behavior;
-- secure manual-token submit, cross-scope denial, empty input, expiry, and debug
-  redaction;
+- secure manual-token submit, bound account update, cross-scope denial, empty
+  input, expiry, and debug redaction;
+- composition-facade manual-token request/submit, stale/duplicate/malformed
+  failures, bound account update, sanitized backend/canceled errors, and no
+  raw-token exposure in debug output, serialized responses/errors, or account
+  projections;
 - missing, refresh-failed, single-account, and multi-account selection states;
+- credential recovery states for configured, missing, pending setup, inactive,
+  expired, refresh-failed, revoked, ambiguous, and hidden unauthorized accounts;
+- explicit account-choice validation plus lookup, listing, extension-owned, and
+  shared-admin grant filtering;
 - extension-owned owner validation and deactivate/uninstall cleanup behavior;
 - serde validation for newtypes and snake_case wire enums;
 - serialization checks proving raw code/verifier/token material is absent.

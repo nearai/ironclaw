@@ -14,6 +14,11 @@ pub enum RebornLocalRuntimeProfileError {
     Policy(#[from] ResolveError),
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RebornLocalRuntimeProfileOptions {
+    pub confirm_host_access: bool,
+}
+
 /// Build the local runtime substrate input and its matching runtime policy from
 /// one profile mapping, so yolo policy and process behavior cannot drift.
 pub fn local_runtime_build_input(
@@ -21,7 +26,23 @@ pub fn local_runtime_build_input(
     owner_id: impl Into<String>,
     root: PathBuf,
 ) -> Result<RebornBuildInput, RebornLocalRuntimeProfileError> {
-    let policy = local_runtime_policy(profile)?;
+    local_runtime_build_input_with_options(
+        profile,
+        owner_id,
+        root,
+        RebornLocalRuntimeProfileOptions::default(),
+    )
+}
+
+/// Build the local runtime substrate input while applying local-only operator
+/// confirmations such as trusted host access.
+pub fn local_runtime_build_input_with_options(
+    profile: RebornCompositionProfile,
+    owner_id: impl Into<String>,
+    root: PathBuf,
+    options: RebornLocalRuntimeProfileOptions,
+) -> Result<RebornBuildInput, RebornLocalRuntimeProfileError> {
+    let policy = local_runtime_policy(profile, options)?;
     Ok(
         RebornBuildInput::local_dev_with_profile(profile, owner_id, root)
             .with_runtime_policy(policy),
@@ -30,7 +51,11 @@ pub fn local_runtime_build_input(
 
 /// Resolved policy for the standalone local development runtime profile.
 pub fn local_dev_runtime_policy() -> Result<ResolvedRuntimePolicy, ResolveError> {
-    local_runtime_policy(RebornCompositionProfile::LocalDev).map_err(|error| match error {
+    local_runtime_policy(
+        RebornCompositionProfile::LocalDev,
+        RebornLocalRuntimeProfileOptions::default(),
+    )
+    .map_err(|error| match error {
         RebornLocalRuntimeProfileError::Policy(error) => error,
         RebornLocalRuntimeProfileError::UnsupportedProfile { .. } => {
             unreachable!("local-dev is a local runtime profile")
@@ -40,8 +65,16 @@ pub fn local_dev_runtime_policy() -> Result<ResolvedRuntimePolicy, ResolveError>
 
 /// Resolved policy for trusted single-user local development with inherited
 /// host environment access.
-pub fn local_dev_yolo_runtime_policy() -> Result<ResolvedRuntimePolicy, ResolveError> {
-    local_runtime_policy(RebornCompositionProfile::LocalDevYolo).map_err(|error| match error {
+pub fn local_dev_yolo_runtime_policy(
+    confirm_host_access: bool,
+) -> Result<ResolvedRuntimePolicy, ResolveError> {
+    local_runtime_policy(
+        RebornCompositionProfile::LocalDevYolo,
+        RebornLocalRuntimeProfileOptions {
+            confirm_host_access,
+        },
+    )
+    .map_err(|error| match error {
         RebornLocalRuntimeProfileError::Policy(error) => error,
         RebornLocalRuntimeProfileError::UnsupportedProfile { .. } => {
             unreachable!("local-dev-yolo is a local runtime profile")
@@ -51,10 +84,11 @@ pub fn local_dev_yolo_runtime_policy() -> Result<ResolvedRuntimePolicy, ResolveE
 
 fn local_runtime_policy(
     profile: RebornCompositionProfile,
+    options: RebornLocalRuntimeProfileOptions,
 ) -> Result<ResolvedRuntimePolicy, RebornLocalRuntimeProfileError> {
-    let (runtime_profile, yolo_disclosure_acknowledged) = match profile {
-        RebornCompositionProfile::LocalDev => (RuntimeProfile::LocalDev, false),
-        RebornCompositionProfile::LocalDevYolo => (RuntimeProfile::LocalYolo, true),
+    let runtime_profile = match profile {
+        RebornCompositionProfile::LocalDev => RuntimeProfile::LocalDev,
+        RebornCompositionProfile::LocalDevYolo => RuntimeProfile::LocalYolo,
         RebornCompositionProfile::Disabled
         | RebornCompositionProfile::Production
         | RebornCompositionProfile::MigrationDryRun => {
@@ -62,7 +96,7 @@ fn local_runtime_policy(
         }
     };
     let request = ironclaw_runtime_policy::ResolveRequest {
-        yolo_disclosure_acknowledged,
+        yolo_disclosure_acknowledged: options.confirm_host_access,
         ..ironclaw_runtime_policy::ResolveRequest::new(
             DeploymentMode::LocalSingleUser,
             runtime_profile,

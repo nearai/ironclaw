@@ -1,6 +1,6 @@
 use ironclaw_turns::{
     LoopCancelledReasonKind, LoopCompletionKind, LoopDiagnosticRef, LoopExit, LoopFailureKind,
-    LoopGateRef, LoopResultRef,
+    LoopGateRef, LoopResultRef, TurnRunId,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, CapabilityFailureKind,
         CapabilityInputRef, CapabilityOutcome, CapabilityResultMessage, LoopCancelReasonKind,
@@ -1146,33 +1146,38 @@ async fn checkpoint_payload_rehydrates_with_written_marker() {
 
 #[tokio::test]
 async fn retry_uses_single_call_invocation() {
-    let host = MockHost::new(vec![calls_response()])
-        .with_batch_outcomes(vec![ironclaw_turns::run_profile::CapabilityBatchOutcome {
-            outcomes: vec![CapabilityOutcome::Failed(
-                ironclaw_turns::run_profile::CapabilityFailure {
-                    error_kind: CapabilityFailureKind::Transient,
-                    safe_summary: "temporary failure".to_string(),
+    for error_kind in [
+        CapabilityFailureKind::Transient,
+        CapabilityFailureKind::Network,
+    ] {
+        let host = MockHost::new(vec![calls_response()])
+            .with_batch_outcomes(vec![ironclaw_turns::run_profile::CapabilityBatchOutcome {
+                outcomes: vec![CapabilityOutcome::Failed(
+                    ironclaw_turns::run_profile::CapabilityFailure {
+                        error_kind,
+                        safe_summary: "temporary failure".to_string(),
+                    },
+                )],
+                stopped_on_suspension: false,
+            }])
+            .with_single_outcomes(vec![CapabilityOutcome::Completed(
+                CapabilityResultMessage {
+                    result_ref: LoopResultRef::new("result:retry").expect("valid"),
+                    safe_summary: "retry completed".to_string(),
+                    terminate_hint: true,
                 },
-            )],
-            stopped_on_suspension: false,
-        }])
-        .with_single_outcomes(vec![CapabilityOutcome::Completed(
-            CapabilityResultMessage {
-                result_ref: LoopResultRef::new("result:retry").expect("valid"),
-                safe_summary: "retry completed".to_string(),
-                terminate_hint: true,
-            },
-        )]);
-    let executor = CanonicalAgentLoopExecutor;
-    let state = LoopExecutionState::initial_for_run(host.run_context());
+            )]);
+        let executor = CanonicalAgentLoopExecutor;
+        let state = LoopExecutionState::initial_for_run(host.run_context());
 
-    let exit = executor
-        .execute_family(&crate::families::default(), &host, state)
-        .await
-        .expect("execute");
+        let exit = executor
+            .execute_family(&crate::families::default(), &host, state)
+            .await
+            .expect("execute");
 
-    assert!(matches!(exit, LoopExit::Completed(_)));
-    assert_eq!(final_staged_state(&host).recovery_state, Default::default());
+        assert!(matches!(exit, LoopExit::Completed(_)));
+        assert_eq!(final_staged_state(&host).recovery_state, Default::default());
+    }
 }
 
 #[tokio::test]
@@ -1242,6 +1247,66 @@ async fn spawned_process_fails_closed_until_process_wait_contract_exists() {
             LoopCheckpointKind::Final,
         ]
     );
+}
+
+#[tokio::test]
+async fn spawned_child_run_result_append_failure_propagates_without_completed_result() {
+    let result_ref = LoopResultRef::new("result:spawned-child").expect("valid");
+    let host = MockHost::new(vec![calls_response()])
+        .with_batch_outcomes(vec![ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::SpawnedChildRun {
+                child_run_id: TurnRunId::new(),
+                result_ref,
+                safe_summary: "spawned child completed".to_string(),
+            }],
+            stopped_on_suspension: false,
+        }])
+        .with_failing_result_append();
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let error = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        AgentLoopExecutorError::HostUnavailable {
+            stage: HostStage::Capability
+        }
+    );
+    assert!(host.appended_result_refs().is_empty());
+}
+
+#[tokio::test]
+async fn spawned_child_run_rejects_unsafe_safe_summary_without_appending_result() {
+    let result_ref = LoopResultRef::new("result:spawned-child").expect("valid");
+    let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::SpawnedChildRun {
+                child_run_id: TurnRunId::new(),
+                result_ref,
+                safe_summary: "/Users/alice/.ssh/id_rsa".to_string(),
+            }],
+            stopped_on_suspension: false,
+        },
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let error = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        AgentLoopExecutorError::PlannerContract {
+            detail: "host returned unsafe strategy summary"
+        }
+    );
+    assert!(host.appended_result_refs().is_empty());
 }
 
 #[tokio::test]
@@ -1318,7 +1383,10 @@ async fn denied_provider_call_appends_failure_tool_result_for_replay() {
     assert_eq!(appended.len(), 2);
     assert_eq!(appended[0].result_ref, result_ref);
     assert_eq!(appended[0].safe_summary, "provider call completed");
-    assert_eq!(appended[1].safe_summary, "provider call denied");
+    assert_eq!(
+        appended[1].safe_summary,
+        "capability denied with empty_surface: provider call denied"
+    );
     assert!(
         appended[1]
             .result_ref
@@ -1349,9 +1417,27 @@ async fn denied_provider_call_appends_failure_tool_result_for_replay() {
 
 #[tokio::test]
 async fn model_visible_provider_tool_failures_append_failure_tool_result_for_replay() {
-    for (error_kind, safe_summary) in [
-        (CapabilityFailureKind::InvalidInput, "invalid input"),
-        (CapabilityFailureKind::OperationFailed, "operation failed"),
+    for (error_kind, safe_summary, expected_summary) in [
+        (
+            CapabilityFailureKind::InvalidInput,
+            "invalid input",
+            "capability failed with invalid_input: invalid input",
+        ),
+        (
+            CapabilityFailureKind::MissingRuntime,
+            "runtime missing",
+            "capability failed with missing_runtime: runtime missing",
+        ),
+        (
+            CapabilityFailureKind::OperationFailed,
+            "operation failed",
+            "capability failed with operation_failed: operation failed",
+        ),
+        (
+            CapabilityFailureKind::OutputTooLarge,
+            "response body exceeded limit 10000000",
+            "capability failed with output_too_large: response body exceeded limit 10000000",
+        ),
     ] {
         let host = MockHost::new(vec![provider_calls_response(), reply_response()])
             .with_batch_outcomes(vec![ironclaw_turns::run_profile::CapabilityBatchOutcome {
@@ -1373,7 +1459,7 @@ async fn model_visible_provider_tool_failures_append_failure_tool_result_for_rep
 
         let appended = host.appended_result_refs();
         assert_eq!(appended.len(), 1);
-        assert_eq!(appended[0].safe_summary, safe_summary);
+        assert_eq!(appended[0].safe_summary, expected_summary);
         assert!(
             appended[0]
                 .result_ref
@@ -1398,4 +1484,32 @@ async fn model_visible_provider_tool_failures_append_failure_tool_result_for_rep
             vec![appended[0].result_ref.clone()]
         );
     }
+
+    let long_summary = "a".repeat(512);
+    let host = MockHost::new(vec![provider_calls_response(), reply_response()])
+        .with_batch_outcomes(vec![ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Failed(
+                ironclaw_turns::run_profile::CapabilityFailure {
+                    error_kind: CapabilityFailureKind::OutputTooLarge,
+                    safe_summary: long_summary,
+                },
+            )],
+            stopped_on_suspension: false,
+        }]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    let appended = host.appended_result_refs();
+    assert_eq!(appended.len(), 1);
+    assert!(appended[0].safe_summary.len() <= 512);
+    assert!(
+        appended[0]
+            .safe_summary
+            .starts_with("capability failed with output_too_large: ")
+    );
 }

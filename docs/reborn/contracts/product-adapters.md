@@ -103,8 +103,9 @@ Webhook ack semantics:
 - `adapter_id`, `installation_id`
 - `target: ReplyTargetBindingRef`
 - `projection_cursor: Option<ProjectionCursor>`
-- `payload: ProductOutboundPayload` — FinalReply / Progress / GatePrompt /
-  AuthPrompt / ProjectionSnapshot / ProjectionUpdate
+- `payload: ProductOutboundPayload` — FinalReply / Progress /
+  CapabilityActivity / GatePrompt / AuthPrompt / ProjectionSnapshot /
+  ProjectionUpdate
 - `delivery_attempt_id: Uuid`
 
 Capabilities (`ProductAdapterCapabilities`):

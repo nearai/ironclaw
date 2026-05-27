@@ -14,6 +14,10 @@ pub enum RebornBuildError {
     EmptyProductionTrustPolicy,
     #[error("reborn composition requires live turn scheduler wake notifier")]
     MissingTurnRunWakeNotifier,
+    #[error(
+        "reborn production composition requires a configured or keychain-resolvable secret master key"
+    )]
+    MissingSecretMasterKey,
     #[error("reborn planned run-profile resolver build failed: {reason}")]
     PlannedRunProfileResolver { reason: String },
     #[error("reborn composition failed production validation")]

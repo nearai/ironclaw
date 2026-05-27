@@ -12,9 +12,11 @@ use ironclaw_product_adapters::{
 };
 use ironclaw_product_workflow::{
     ActionDispatchKind, DefaultProductWorkflow, FakeConversationBindingService,
-    FakeIdempotencyLedger, FakeInboundTurnService, ProductCommand, ProductCommandAdmission,
-    ProductCommandAdmissionService, ProductCommandContext, ProductCommandService,
-    ProductModelCommand, ProductWorkflowError,
+    FakeIdempotencyLedger, FakeInboundTurnService, LifecyclePackageKind, LifecyclePackageRef,
+    LifecyclePhase, LifecycleProductAction, LifecycleProductCommandService,
+    LifecycleProductContext, LifecycleProductFacade, LifecycleProductResponse, ProductCommand,
+    ProductCommandAdmission, ProductCommandAdmissionService, ProductCommandContext,
+    ProductCommandService, ProductModelCommand, ProductWorkflowError,
 };
 use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
 
@@ -98,6 +100,68 @@ struct RecordingProductCommandService {
     result: Result<ProductInboundAck, ProductWorkflowError>,
 }
 
+#[derive(Default)]
+struct RecordingLifecycleProductFacade {
+    commands: Mutex<Vec<LifecycleProductAction>>,
+}
+
+impl RecordingLifecycleProductFacade {
+    fn commands(&self) -> Vec<LifecycleProductAction> {
+        self.commands.lock().expect("lock").clone()
+    }
+}
+
+#[async_trait]
+impl LifecycleProductFacade for RecordingLifecycleProductFacade {
+    async fn execute(
+        &self,
+        _context: LifecycleProductContext,
+        action: LifecycleProductAction,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        self.commands.lock().expect("lock").push(action.clone());
+        Ok(LifecycleProductResponse::projection(
+            action.package_ref().cloned(),
+            LifecyclePhase::Installed,
+            vec![],
+        ))
+    }
+
+    async fn project_package(
+        &self,
+        _context: LifecycleProductContext,
+        package_ref: LifecyclePackageRef,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        Ok(LifecycleProductResponse::projection(
+            Some(package_ref),
+            LifecyclePhase::UnsupportedOrLegacy,
+            vec![],
+        ))
+    }
+}
+
+struct FailingLifecycleProductFacade {
+    error: ProductWorkflowError,
+}
+
+#[async_trait]
+impl LifecycleProductFacade for FailingLifecycleProductFacade {
+    async fn execute(
+        &self,
+        _context: LifecycleProductContext,
+        _action: LifecycleProductAction,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        Err(self.error.clone())
+    }
+
+    async fn project_package(
+        &self,
+        _context: LifecycleProductContext,
+        _package_ref: LifecyclePackageRef,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        Err(self.error.clone())
+    }
+}
+
 impl RecordingProductCommandService {
     fn new(result: Result<ProductInboundAck, ProductWorkflowError>) -> Self {
         Self {
@@ -166,6 +230,163 @@ async fn command_payload_dispatches_through_command_service_not_inbound_turn_ser
         settled[0].dispatch_kind,
         Some(ActionDispatchKind::Command { .. })
     ));
+}
+
+#[tokio::test]
+async fn lifecycle_command_dispatches_through_lifecycle_facade() {
+    let inbound = Arc::new(FakeInboundTurnService::new());
+    let ledger = Arc::new(FakeIdempotencyLedger::new());
+    let binding = Arc::new(FakeConversationBindingService::new());
+    let admission_service = Arc::new(RecordingProductCommandAdmissionService::allowing());
+    let lifecycle_facade = Arc::new(RecordingLifecycleProductFacade::default());
+    let command_service = Arc::new(LifecycleProductCommandService::new(
+        lifecycle_facade.clone(),
+    ));
+    let workflow = DefaultProductWorkflow::new(inbound.clone(), ledger.clone(), binding)
+        .with_product_command_admission_service(admission_service)
+        .with_product_command_service(command_service);
+    let envelope =
+        sample_command_envelope("command-extension-install", "extension_install", "github");
+
+    let ack = workflow.accept_inbound(envelope).await.expect("accept");
+
+    let ProductInboundAck::CommandResult { command, payload } = ack else {
+        panic!("expected lifecycle command result ack");
+    };
+    assert_eq!(command, "extension_install");
+    assert_eq!(
+        payload
+            .as_value()
+            .get("phase")
+            .and_then(serde_json::Value::as_str),
+        Some("installed")
+    );
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(
+        lifecycle_facade.commands(),
+        vec![LifecycleProductAction::ExtensionInstall {
+            package_ref: ironclaw_product_workflow::LifecyclePackageRef::new(
+                LifecyclePackageKind::Extension,
+                "github",
+            )
+            .unwrap(),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn malformed_known_lifecycle_command_rejects_before_admission() {
+    let inbound = Arc::new(FakeInboundTurnService::new());
+    let ledger = Arc::new(FakeIdempotencyLedger::new());
+    let binding = Arc::new(FakeConversationBindingService::new());
+    let admission_service = Arc::new(RecordingProductCommandAdmissionService::allowing());
+    let command_service = Arc::new(RecordingProductCommandService::with_ack(
+        ProductInboundAck::NoOp,
+    ));
+    let workflow = DefaultProductWorkflow::new(inbound.clone(), ledger.clone(), binding)
+        .with_product_command_admission_service(admission_service.clone())
+        .with_product_command_service(command_service.clone());
+    let envelope = sample_command_envelope("command-extension-invalid", "extension_install", "{}");
+
+    let ack = workflow.accept_inbound(envelope).await.expect("accept");
+
+    assert!(matches!(
+        ack,
+        ProductInboundAck::Rejected(rejection)
+            if rejection.kind == ironclaw_product_adapters::ProductRejectionKind::InvalidRequest
+    ));
+    assert!(admission_service.records().is_empty());
+    assert!(command_service.commands().is_empty());
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(ledger.settled_count(), 1);
+}
+
+#[tokio::test]
+async fn lifecycle_command_admission_rejects_before_facade_executes() {
+    let inbound = Arc::new(FakeInboundTurnService::new());
+    let ledger = Arc::new(FakeIdempotencyLedger::new());
+    let binding = Arc::new(FakeConversationBindingService::new());
+    let admission_service = Arc::new(RecordingProductCommandAdmissionService::new(Ok(
+        ProductCommandAdmission::Rejected(ironclaw_product_adapters::ProductRejection::permanent(
+            ironclaw_product_adapters::ProductRejectionKind::PolicyDenied,
+            "lifecycle policy denied",
+        )),
+    )));
+    let lifecycle_facade = Arc::new(RecordingLifecycleProductFacade::default());
+    let command_service = Arc::new(LifecycleProductCommandService::new(
+        lifecycle_facade.clone(),
+    ));
+    let workflow = DefaultProductWorkflow::new(inbound.clone(), ledger.clone(), binding)
+        .with_product_command_admission_service(admission_service)
+        .with_product_command_service(command_service);
+    let envelope =
+        sample_command_envelope("command-extension-denied", "extension_activate", "github");
+
+    let ack = workflow.accept_inbound(envelope).await.expect("accept");
+
+    assert!(matches!(ack, ProductInboundAck::Rejected(_)));
+    assert!(lifecycle_facade.commands().is_empty());
+    assert_eq!(inbound.accepted_count(), 0);
+}
+
+#[tokio::test]
+async fn lifecycle_command_service_rejects_non_lifecycle_commands_without_facade_execution() {
+    let inbound = Arc::new(FakeInboundTurnService::new());
+    let ledger = Arc::new(FakeIdempotencyLedger::new());
+    let binding = Arc::new(FakeConversationBindingService::new());
+    let admission_service = Arc::new(RecordingProductCommandAdmissionService::allowing());
+    let lifecycle_facade = Arc::new(RecordingLifecycleProductFacade::default());
+    let command_service = Arc::new(LifecycleProductCommandService::new(
+        lifecycle_facade.clone(),
+    ));
+    let workflow = DefaultProductWorkflow::new(inbound.clone(), ledger.clone(), binding)
+        .with_product_command_admission_service(admission_service)
+        .with_product_command_service(command_service);
+    let envelope = sample_command_envelope("command-status-lifecycle-service", "status", "");
+
+    let ack = workflow.accept_inbound(envelope).await.expect("accept");
+
+    assert!(matches!(
+        ack,
+        ProductInboundAck::Rejected(rejection)
+            if rejection.kind == ironclaw_product_adapters::ProductRejectionKind::PolicyDenied
+    ));
+    assert!(lifecycle_facade.commands().is_empty());
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(ledger.settled_count(), 1);
+}
+
+#[tokio::test]
+async fn lifecycle_facade_error_bubbles_and_releases_idempotency_lease() {
+    let inbound = Arc::new(FakeInboundTurnService::new());
+    let ledger = Arc::new(FakeIdempotencyLedger::new());
+    let binding = Arc::new(FakeConversationBindingService::new());
+    let admission_service = Arc::new(RecordingProductCommandAdmissionService::allowing());
+    let command_service = Arc::new(LifecycleProductCommandService::new(Arc::new(
+        FailingLifecycleProductFacade {
+            error: ProductWorkflowError::Transient {
+                reason: "lifecycle backend unavailable".to_string(),
+            },
+        },
+    )));
+    let workflow = DefaultProductWorkflow::new(inbound.clone(), ledger.clone(), binding)
+        .with_product_command_admission_service(admission_service)
+        .with_product_command_service(command_service);
+    let envelope = sample_command_envelope(
+        "command-extension-facade-error",
+        "extension_install",
+        "github",
+    );
+
+    let err = workflow
+        .accept_inbound(envelope)
+        .await
+        .expect_err("lifecycle facade error must bubble");
+
+    assert!(err.is_retryable());
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(ledger.settled_count(), 0);
+    assert_eq!(ledger.released_count(), 1);
 }
 
 #[tokio::test]

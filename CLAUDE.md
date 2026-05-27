@@ -232,6 +232,7 @@ When modifying a module with a spec, read the spec first. Code follows spec; spe
 | `src/channels/web/` | `src/channels/web/CLAUDE.md` |
 | `src/db/` | `src/db/CLAUDE.md` |
 | `crates/ironclaw_llm/` | `crates/ironclaw_llm/CLAUDE.md` |
+| `crates/ironclaw_embeddings/` | `crates/ironclaw_embeddings/AGENTS.md` |
 | `src/setup/` | `src/setup/README.md` |
 | `src/tools/` | `src/tools/README.md` |
 | `src/workspace/` | `src/workspace/README.md` |

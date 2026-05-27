@@ -595,6 +595,7 @@ async fn reborn_e2e_gate_host_http_consumes_staged_policy_and_secret_once() {
             required: true,
         }],
         response_body_limit: Some(4096),
+        save_body_to: None,
         timeout_ms: None,
     };
 

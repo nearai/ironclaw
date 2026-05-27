@@ -30,6 +30,7 @@ fn help_mentions_reborn_commands() {
     assert!(stdout.contains("completion"), "stdout: {stdout}");
     assert!(stdout.contains("config"), "stdout: {stdout}");
     assert!(stdout.contains("doctor"), "stdout: {stdout}");
+    assert!(stdout.contains("extension"), "stdout: {stdout}");
     assert!(stdout.contains("hooks"), "stdout: {stdout}");
     assert!(stdout.contains("logs"), "stdout: {stdout}");
     assert!(stdout.contains("models"), "stdout: {stdout}");
@@ -172,31 +173,141 @@ fn hooks_list_json_verbose_includes_status_details() {
 }
 
 #[test]
-fn skills_list_reports_unwired_empty_surface_without_reborn_home() {
-    assert_empty_not_wired_surface(
-        &["skills", "list"],
-        "IronClaw Reborn skills",
-        "skills",
-        "configured",
+fn skills_list_reports_reborn_skill_data() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    write_reborn_skill(&reborn_home, "catalog-helper", "catalog helper");
+
+    let output = Command::new(reborn_bin())
+        .arg("skills")
+        .arg("list")
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn skills list should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("IronClaw Reborn skills"),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("configured: 1"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("source: reborn-local-dev"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("- catalog-helper (user)"),
+        "stdout: {stdout}"
+    );
+    assert!(!stdout.contains("not-wired"), "stdout: {stdout}");
+    assert!(!stdout.contains("v1_state"), "stdout: {stdout}");
+}
+
+#[test]
+fn skills_list_verbose_reports_reborn_skill_details() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    write_verbose_reborn_skill(&reborn_home, "verbose-helper", "verbose helper");
+
+    let output = Command::new(reborn_bin())
+        .arg("skills")
+        .arg("list")
+        .arg("--verbose")
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn skills list --verbose should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("profile: local-dev"), "stdout: {stdout}");
+    assert!(stdout.contains("reborn_home:"), "stdout: {stdout}");
+    assert!(stdout.contains("local_dev_root:"), "stdout: {stdout}");
+    assert!(stdout.contains("owner_id: reborn-cli"), "stdout: {stdout}");
+    assert!(stdout.contains("version: 1.2.3"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("keywords: catalog, helper"),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("tags: local-dev"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("requires_skills: companion-helper"),
+        "stdout: {stdout}"
     );
 }
 
 #[test]
-fn skills_list_verbose_explains_missing_reborn_catalog() {
-    assert_verbose_detail(
-        &["skills", "list", "--verbose"],
-        "Reborn skill catalog is not wired yet",
+fn skills_list_json_reports_reborn_skill_data() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    write_reborn_skill(&reborn_home, "json-helper", "json helper");
+
+    let output = Command::new(reborn_bin())
+        .arg("skills")
+        .arg("list")
+        .arg("--json")
+        .arg("--verbose")
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn skills list --json should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    assert_eq!(json["configured"], 1);
+    assert_eq!(json["source"], "reborn-local-dev");
+    assert_eq!(json["skills"][0]["name"], "json-helper");
+    assert_eq!(json["skills"][0]["source"], "user");
+    assert_eq!(json["details"]["profile"], "local-dev");
+    assert_eq!(json["details"]["owner_id"], "reborn-cli");
+    assert!(json.get("limit").is_none(), "json: {json}");
+    assert!(json.get("truncated").is_none(), "json: {json}");
+    assert!(json.get("status").is_none(), "json: {json}");
+    assert!(json.get("v1_state").is_none(), "json: {json}");
 }
 
 #[test]
-fn skills_list_json_verbose_includes_status_details() {
-    assert_json_verbose_detail(
-        &["skills", "list", "--json", "--verbose"],
-        "skills",
-        "configured",
-        "Reborn skill catalog is not wired yet",
-    );
+fn skills_list_rejects_unsupported_profiles() {
+    for profile in ["production", "migration-dry-run"] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let output = Command::new(reborn_bin())
+            .arg("skills")
+            .arg("list")
+            .env_clear()
+            .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
+            .env("IRONCLAW_REBORN_PROFILE", profile)
+            .output()
+            .expect("ironclaw-reborn skills list should run");
+
+        assert!(
+            !output.status.success(),
+            "skills list should reject profile={profile}"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("ironclaw-reborn skills currently supports profile=local-dev"),
+            "stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains(&format!("profile={profile}")),
+            "stderr: {stderr}"
+        );
+    }
 }
 
 #[test]
@@ -320,6 +431,39 @@ fn assert_empty_not_wired_surface(
     );
     assert_eq!(json["status"], "not-wired");
     assert_eq!(json["v1_state"], "not-used");
+}
+
+fn write_reborn_skill(reborn_home: &std::path::Path, name: &str, description: &str) {
+    let skill_dir = reborn_home.join("local-dev/skills").join(name);
+    std::fs::create_dir_all(&skill_dir).expect("skill dir");
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: {description}\n---\nUse {name}.\n"),
+    )
+    .expect("skill file");
+}
+
+fn write_verbose_reborn_skill(reborn_home: &std::path::Path, name: &str, description: &str) {
+    let skill_dir = reborn_home.join("local-dev/skills").join(name);
+    std::fs::create_dir_all(&skill_dir).expect("skill dir");
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        format!(
+            r#"---
+name: {name}
+version: "1.2.3"
+description: {description}
+activation:
+  keywords: ["catalog", "helper"]
+  tags: ["local-dev"]
+requires:
+  skills: ["companion-helper"]
+---
+Use {name}.
+"#
+        ),
+    )
+    .expect("skill file");
 }
 
 fn assert_verbose_detail(args: &[&str], expected_detail: &str) {
@@ -1577,6 +1721,224 @@ fn run_warns_when_falling_back_to_stub_gateway() {
 }
 
 #[test]
+fn run_confirm_host_access_flag_gates_local_dev_yolo() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let missing = local_yolo_command(&temp, &["run", "-m", "ping"])
+        .output()
+        .expect("ironclaw-reborn run should not crash");
+    assert!(!missing.status.success(), "missing confirmation must fail");
+    let missing_stderr = String::from_utf8_lossy(&missing.stderr);
+    assert!(
+        missing_stderr.contains("requires explicit disclosure acknowledgement"),
+        "stderr should require disclosure acknowledgement; got: {missing_stderr}"
+    );
+
+    let confirmed = local_yolo_command(&temp, &["run", "--confirm-host-access", "-m", "ping"])
+        .output()
+        .expect("ironclaw-reborn run should not crash");
+    let confirmed_stderr = String::from_utf8_lossy(&confirmed.stderr);
+    assert!(
+        !confirmed_stderr.contains("requires explicit disclosure acknowledgement")
+            && !confirmed_stderr.contains("requires --confirm-host-access"),
+        "confirmed run should pass the host-access gate; got: {confirmed_stderr}"
+    );
+}
+
+#[test]
+fn run_confirm_host_access_requires_home_or_userprofile() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    std::fs::create_dir_all(&reborn_home).expect("reborn home");
+
+    let output = Command::new(reborn_bin())
+        .args(["run", "--confirm-host-access", "-m", "ping"])
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("IRONCLAW_REBORN_PROFILE", "local-dev-yolo")
+        .output()
+        .expect("ironclaw-reborn run should not crash");
+
+    assert!(!output.status.success(), "missing host home must fail"); // safety: test-only assertion.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        /* safety: test-only assertion. */
+        stderr.contains("HOME or USERPROFILE must be set"),
+        "stderr should require a host home root; got: {stderr}"
+    );
+}
+
+#[test]
+fn run_confirm_host_access_uses_userprofile_when_home_is_absent() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let host_home = temp.path().join("host-home");
+    std::fs::create_dir_all(&reborn_home).expect("reborn home");
+    std::fs::create_dir_all(&host_home).expect("host home");
+
+    let output = Command::new(reborn_bin())
+        .args(["run", "--confirm-host-access", "-m", "ping"])
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("IRONCLAW_REBORN_PROFILE", "local-dev-yolo")
+        .env("USERPROFILE", &host_home)
+        .output()
+        .expect("ironclaw-reborn run should not crash");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("HOME or USERPROFILE must be set")
+            && !stderr.contains("requires explicit disclosure acknowledgement")
+            && !stderr.contains("requires --confirm-host-access"),
+        "confirmed run should use USERPROFILE and pass the host-access gate; got: {stderr}"
+    );
+}
+
+#[test]
+fn repl_confirm_host_access_flag_gates_local_dev_yolo() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let missing = local_yolo_command(&temp, &["repl"])
+        .stdin(Stdio::null())
+        .output()
+        .expect("ironclaw-reborn repl should not crash");
+    assert!(!missing.status.success(), "missing confirmation must fail");
+    let missing_stderr = String::from_utf8_lossy(&missing.stderr);
+    assert!(
+        missing_stderr.contains("requires explicit disclosure acknowledgement"),
+        "stderr should require disclosure acknowledgement; got: {missing_stderr}"
+    );
+
+    let confirmed = local_yolo_command(&temp, &["repl", "--confirm-host-access"])
+        .stdin(Stdio::null())
+        .output()
+        .expect("ironclaw-reborn repl should not crash");
+    let confirmed_stderr = String::from_utf8_lossy(&confirmed.stderr);
+    assert!(
+        !confirmed_stderr.contains("requires explicit disclosure acknowledgement")
+            && !confirmed_stderr.contains("requires --confirm-host-access"),
+        "confirmed repl should pass the host-access gate; got: {confirmed_stderr}"
+    );
+}
+
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn serve_confirm_host_access_flag_gates_local_dev_yolo() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let missing = local_yolo_command(&temp, &["serve"])
+        .output()
+        .expect("ironclaw-reborn serve should not crash");
+    assert!(!missing.status.success(), "missing confirmation must fail");
+    let missing_stderr = String::from_utf8_lossy(&missing.stderr);
+    assert!(
+        missing_stderr.contains("requires explicit disclosure acknowledgement"),
+        "stderr should require disclosure acknowledgement; got: {missing_stderr}"
+    );
+
+    let confirmed = local_yolo_command(&temp, &["serve", "--confirm-host-access"])
+        .output()
+        .expect("ironclaw-reborn serve should not crash");
+    assert!(
+        !confirmed.status.success(),
+        "serve still needs webui token config"
+    );
+    let confirmed_stderr = String::from_utf8_lossy(&confirmed.stderr);
+    assert!(
+        !confirmed_stderr.contains("requires explicit disclosure acknowledgement")
+            && !confirmed_stderr.contains("requires --confirm-host-access"),
+        "confirmed serve should pass the host-access gate; got: {confirmed_stderr}"
+    );
+    assert!(
+        confirmed_stderr.contains("IRONCLAW_REBORN_WEBUI_TOKEN"),
+        "confirmed serve should reach WebUI token resolution; got: {confirmed_stderr}"
+    );
+}
+
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn serve_confirmed_local_dev_yolo_rejects_non_loopback_cli_host() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let output = local_yolo_command(
+        &temp,
+        &["serve", "--confirm-host-access", "--host", "0.0.0.0"],
+    )
+    .env("IRONCLAW_REBORN_WEBUI_TOKEN", "test-token")
+    .env("IRONCLAW_REBORN_WEBUI_USER_ID", "test-user")
+    .output()
+    .expect("ironclaw-reborn serve should not crash");
+
+    assert!(
+        !output.status.success(),
+        "non-loopback confirmed yolo serve must fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("refuses non-loopback listener 0.0.0.0")
+            && stderr.contains("trusted-laptop host access"),
+        "stderr should reject non-loopback trusted-laptop access; got: {stderr}"
+    );
+}
+
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn serve_confirmed_local_dev_yolo_rejects_non_loopback_config_host() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    std::fs::create_dir_all(&reborn_home).expect("reborn home");
+    std::fs::write(
+        reborn_home.join("config.toml"),
+        r#"
+[webui]
+listen_host = "0.0.0.0"
+"#,
+    )
+    .expect("write config");
+
+    let output = local_yolo_command(&temp, &["serve", "--confirm-host-access"])
+        .env("IRONCLAW_REBORN_WEBUI_TOKEN", "test-token")
+        .env("IRONCLAW_REBORN_WEBUI_USER_ID", "test-user")
+        .output()
+        .expect("ironclaw-reborn serve should not crash");
+
+    assert!(
+        !output.status.success(),
+        "non-loopback confirmed yolo serve from config must fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("refuses non-loopback listener 0.0.0.0")
+            && stderr.contains("trusted-laptop host access"),
+        "stderr should reject config-driven non-loopback trusted-laptop access; got: {stderr}"
+    );
+}
+
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn serve_local_dev_allows_non_loopback_without_trusted_laptop_access() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let output = Command::new(reborn_bin())
+        .args(["serve", "--host", "0.0.0.0", "--port", "0"])
+        .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
+        .env_remove("IRONCLAW_REBORN_PROFILE")
+        .env_remove("IRONCLAW_REBORN_WEBUI_TOKEN")
+        .env_remove("IRONCLAW_REBORN_WEBUI_USER_ID")
+        .output()
+        .expect("ironclaw-reborn serve should not crash");
+
+    assert!(
+        !output.status.success(),
+        "serve should still fail closed on missing WebUI token"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("IRONCLAW_REBORN_WEBUI_TOKEN must be set"),
+        "ordinary local-dev serve should reach WebUI token validation; got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("trusted-laptop host access"),
+        "ordinary local-dev serve should not trigger the trusted-laptop listener refusal; got: {stderr}"
+    );
+}
+
+#[test]
 fn run_honors_boot_profile_from_config_file() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
@@ -1913,4 +2275,19 @@ api_key_env = "REBORN_TEST_UNSET_BC8F4D_KEY"
         stderr.contains("REBORN_TEST_UNSET_BC8F4D_KEY"),
         "stderr should name the unset env var; got: {stderr}"
     );
+}
+
+fn local_yolo_command(temp: &tempfile::TempDir, args: &[&str]) -> Command {
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&reborn_home).expect("reborn home");
+    std::fs::create_dir_all(&home).expect("home");
+    let mut command = Command::new(reborn_bin());
+    command
+        .args(args)
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", reborn_home)
+        .env("IRONCLAW_REBORN_PROFILE", "local-dev-yolo")
+        .env("HOME", home);
+    command
 }

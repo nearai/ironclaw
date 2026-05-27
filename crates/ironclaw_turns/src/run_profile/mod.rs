@@ -22,6 +22,8 @@ mod skill_context;
 mod snapshot;
 mod snippet_ref;
 
+pub use crate::CapabilityActivityId;
+
 pub use driver::{
     AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverResumeRequest,
     AgentLoopDriverRunRequest,

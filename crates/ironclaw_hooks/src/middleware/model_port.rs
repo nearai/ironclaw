@@ -129,6 +129,7 @@ mod tests {
             }
             Ok(LoopModelResponse {
                 chunks: Vec::new(),
+                safe_reasoning_deltas: Vec::new(),
                 output: ParentLoopOutput::AssistantReply(AssistantReply {
                     content: "hi".to_string(),
                 }),

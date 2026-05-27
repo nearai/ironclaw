@@ -56,6 +56,15 @@ fn network_target_patterns_validate_declaration_shape() {
     assert!(pattern.validate_declaration().is_ok());
     assert!(
         NetworkTargetPattern {
+            scheme: None,
+            host_pattern: "*".to_string(),
+            port: None,
+        }
+        .validate_declaration()
+        .is_ok()
+    );
+    assert!(
+        NetworkTargetPattern {
             scheme: Some(NetworkScheme::Https),
             host_pattern: "".to_string(),
             port: None,
@@ -320,6 +329,7 @@ fn runtime_dispatch_error_kinds_have_safe_event_tokens() {
         ),
         (RuntimeDispatchErrorKind::OutputDecode, "output_decode"),
         (RuntimeDispatchErrorKind::OutputTooLarge, "output_too_large"),
+        (RuntimeDispatchErrorKind::PolicyDenied, "policy_denied"),
         (RuntimeDispatchErrorKind::Resource, "resource"),
         (RuntimeDispatchErrorKind::SecretDenied, "secret_denied"),
         (
@@ -425,6 +435,27 @@ fn scoped_path_rejects_raw_host_paths_urls_and_traversal() {
             "{invalid:?} should be rejected"
         );
     }
+}
+
+#[test]
+fn scoped_path_accepts_raw_host_path_only_when_mount_alias_matches() {
+    let view = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/Users/alice").unwrap(),
+        VirtualPath::new("/projects/host").unwrap(),
+        MountPermissions::read_write(),
+    )])
+    .unwrap();
+
+    let path = view.scoped_path("/Users/alice/project/README.md").unwrap();
+    assert_eq!(path.as_str(), "/Users/alice/project/README.md");
+    assert_eq!(
+        view.resolve(&path).unwrap().as_str(),
+        "/projects/host/project/README.md"
+    );
+
+    assert!(view.scoped_path("/Users/bob/project/README.md").is_err());
+    assert!(view.scoped_path("/Users/alice2/private.txt").is_err()); // safety: test-only assertion.
+    assert!(view.scoped_path("/etc/passwd").is_err());
 }
 
 #[test]
@@ -957,6 +988,58 @@ fn privileged_runtime_and_trust_classes_cannot_be_self_asserted_from_json() {
     assert!(serde_json::from_value::<RuntimeKind>(json!("system")).is_err());
     assert!(serde_json::from_value::<TrustClass>(json!("first_party")).is_err());
     assert!(serde_json::from_value::<TrustClass>(json!("system")).is_err());
+}
+
+#[test]
+fn runtime_http_egress_request_defaults_optional_body_controls() {
+    let mut value = serde_json::to_value(RuntimeHttpEgressRequest {
+        runtime: RuntimeKind::Wasm,
+        scope: sample_context().resource_scope,
+        capability_id: CapabilityId::new("http.fetch").unwrap(),
+        method: NetworkMethod::Get,
+        url: "https://api.example.test/v1/items".to_string(),
+        headers: vec![],
+        body: vec![],
+        network_policy: sample_network_policy(),
+        credential_injections: vec![],
+        response_body_limit: Some(4096),
+        save_body_to: Some(RuntimeHttpSaveTarget {
+            path: ScopedPath::new("/workspace/body.json").unwrap(),
+            mount_view: None,
+        }),
+        timeout_ms: None,
+    })
+    .unwrap();
+
+    let fields = value.as_object_mut().unwrap();
+    fields.remove("response_body_limit");
+    fields.remove("save_body_to");
+
+    let request: RuntimeHttpEgressRequest = serde_json::from_value(value).unwrap();
+    assert_eq!(request.response_body_limit, None);
+    assert_eq!(request.save_body_to, None);
+}
+
+#[test]
+fn runtime_http_egress_response_defaults_optional_saved_body() {
+    let mut value = serde_json::to_value(RuntimeHttpEgressResponse {
+        status: 200,
+        headers: vec![],
+        body: b"ok".to_vec(),
+        saved_body: Some(RuntimeHttpSavedBody {
+            path: ScopedPath::new("/workspace/body.json").unwrap(),
+            bytes_written: 2,
+        }),
+        request_bytes: 0,
+        response_bytes: 2,
+        redaction_applied: false,
+    })
+    .unwrap();
+
+    value.as_object_mut().unwrap().remove("saved_body");
+
+    let response: RuntimeHttpEgressResponse = serde_json::from_value(value).unwrap();
+    assert_eq!(response.saved_body, None);
 }
 
 #[test]
@@ -1507,5 +1590,17 @@ fn sample_context() -> ExecutionContext {
             thread_id: None,
             invocation_id,
         },
+    }
+}
+
+fn sample_network_policy() -> NetworkPolicy {
+    NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: "api.example.test".to_string(),
+            port: None,
+        }],
+        deny_private_ip_ranges: true,
+        max_egress_bytes: Some(1024 * 1024),
     }
 }

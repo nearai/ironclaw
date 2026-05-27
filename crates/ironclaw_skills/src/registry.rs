@@ -14,12 +14,13 @@
 //! Uses async I/O throughout to avoid blocking the tokio runtime.
 
 use std::collections::HashSet;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::gating;
+use crate::install_metadata::INSTALL_METADATA_FILE_NAME;
+pub use crate::install_metadata::InstalledSkillMetadata;
 use crate::parser::{
     SkillParseError, parse_skill_md, parse_skill_md_for_install_recovery,
     split_skill_md_frontmatter,
@@ -27,7 +28,10 @@ use crate::parser::{
 use crate::types::{
     GatingRequirements, LoadedSkill, MAX_PROMPT_FILE_SIZE, SkillSource, SkillTrust,
 };
-use crate::validation::{normalize_line_endings, normalize_skill_identifier};
+use crate::validation::{
+    SafeRelativePathError, normalize_line_endings, normalize_safe_relative_path,
+    normalize_skill_identifier,
+};
 
 /// Maximum total number of skills that can be discovered across all sources.
 /// Shared across workspace, user, and installed directories.
@@ -210,17 +214,6 @@ pub struct InstallFile {
     pub contents: Vec<u8>,
 }
 
-/// Persisted metadata about how a skill bundle was installed.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InstalledSkillMetadata {
-    #[serde(default)]
-    pub source_url: Option<String>,
-    #[serde(default)]
-    pub source_subdir: Option<String>,
-}
-
-const INSTALL_METADATA_FILE: &str = ".ironclaw-install.json";
-
 fn validate_install_relative_path(path: &Path) -> Result<PathBuf, SkillRegistryError> {
     if path.as_os_str().is_empty() || path.is_absolute() {
         return Err(SkillRegistryError::WriteError {
@@ -229,28 +222,16 @@ fn validate_install_relative_path(path: &Path) -> Result<PathBuf, SkillRegistryE
         });
     }
 
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(part) => normalized.push(part),
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(SkillRegistryError::WriteError {
-                    path: path.display().to_string(),
-                    reason: "install bundle path may not escape the skill directory".to_string(),
-                });
+    normalize_safe_relative_path(path).map_err(|error| SkillRegistryError::WriteError {
+        path: path.display().to_string(),
+        reason: match error {
+            SafeRelativePathError::Traversal => {
+                "install bundle path may not escape the skill directory"
             }
+            _ => "install bundle path must be safe relative ASCII",
         }
-    }
-
-    if normalized.as_os_str().is_empty() {
-        return Err(SkillRegistryError::WriteError {
-            path: path.display().to_string(),
-            reason: "install bundle path normalized to empty".to_string(),
-        });
-    }
-
-    Ok(normalized)
+        .to_string(),
+    })
 }
 
 impl SkillRegistry {
@@ -321,7 +302,7 @@ impl SkillRegistry {
                     0,
                 )
                 .await;
-            self.absorb(skills, &mut seen, &mut loaded_names, "workspace");
+            self.absorb(skills, &mut seen, &mut loaded_names, "user");
         }
 
         // 2. User skills
@@ -348,7 +329,7 @@ impl SkillRegistry {
                     0,
                 )
                 .await;
-            self.absorb(skills, &mut seen, &mut loaded_names, "workspace or user");
+            self.absorb(skills, &mut seen, &mut loaded_names, "installed");
         }
 
         // 4. Bundled skills (compiled into binary, lowest priority)
@@ -676,7 +657,7 @@ impl SkillRegistry {
         }
 
         if let Some(metadata) = install_metadata {
-            let meta_path = skill_dir.join(INSTALL_METADATA_FILE);
+            let meta_path = skill_dir.join(INSTALL_METADATA_FILE_NAME);
             let meta_json = serde_json::to_vec_pretty(metadata).map_err(|e| {
                 SkillRegistryError::WriteError {
                     path: meta_path.display().to_string(),
@@ -832,7 +813,7 @@ impl SkillRegistry {
 
     /// Load persisted install metadata for a skill directory, if present.
     pub async fn read_install_metadata(path: &Path) -> Option<InstalledSkillMetadata> {
-        let meta_path = path.join(INSTALL_METADATA_FILE);
+        let meta_path = path.join(INSTALL_METADATA_FILE_NAME);
         let bytes = tokio::fs::read(&meta_path).await.ok()?;
         serde_json::from_slice(&bytes).ok()
     }
@@ -1230,6 +1211,7 @@ mod tests {
         let metadata = InstalledSkillMetadata {
             source_url: Some("https://github.com/Pika-Labs/Pika-Skills".to_string()),
             source_subdir: Some("pikastream-video-meeting".to_string()),
+            ..Default::default()
         };
 
         let (name, loaded) = SkillRegistry::prepare_install_bundle_to_disk(

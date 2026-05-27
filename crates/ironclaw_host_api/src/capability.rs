@@ -33,6 +33,25 @@ pub enum EffectKind {
     Financial,
 }
 
+impl EffectKind {
+    pub fn is_write(self) -> bool {
+        match self {
+            Self::ReadFilesystem | Self::Network | Self::UseSecret | Self::DispatchCapability => {
+                false
+            }
+            Self::WriteFilesystem
+            | Self::DeleteFilesystem
+            | Self::ExecuteCode
+            | Self::SpawnProcess
+            | Self::ModifyExtension
+            | Self::ModifyApproval
+            | Self::ModifyBudget
+            | Self::ExternalWrite
+            | Self::Financial => true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionMode {

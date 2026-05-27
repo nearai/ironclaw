@@ -1,11 +1,13 @@
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::Duration;
+use std::{future::Future, thread};
 
 use anyhow::Context;
 use ironclaw_reborn_composition::{
-    PollSettings, RebornCompositionProfile, RebornRuntimeIdentity, RebornRuntimeInput,
-    TurnRunnerSettings, build_reborn_runtime, local_runtime_build_input,
+    PollSettings, RebornBuildInput, RebornCompositionProfile, RebornLocalRuntimeProfileOptions,
+    RebornRuntimeIdentity, RebornRuntimeInput, TurnRunnerSettings, build_reborn_runtime,
+    local_runtime_build_input_with_options,
 };
 use ironclaw_reborn_config::{REBORN_PROFILE_ENV, RebornBootConfig, RebornProfile};
 use tokio_util::sync::CancellationToken;
@@ -24,8 +26,43 @@ pub(crate) fn init_tracing() {
         .try_init();
 }
 
-pub(crate) fn execute(context: RebornCliContext, message: Option<String>) -> anyhow::Result<()> {
-    let runtime_input = build_runtime_input(context.boot_config(), RuntimeInputCaller::Run)?;
+pub(crate) fn block_on_cli<F, T, E>(future: F) -> anyhow::Result<T>
+where
+    F: Future<Output = Result<T, E>> + Send + 'static,
+    T: Send + 'static,
+    E: Into<anyhow::Error> + Send + 'static,
+{
+    if tokio::runtime::Handle::try_current().is_ok() {
+        return thread::spawn(move || block_on_cli_future(future))
+            .join()
+            .map_err(|_| anyhow::anyhow!("CLI async task thread panicked"))?;
+    }
+    block_on_cli_future(future)
+}
+
+fn block_on_cli_future<F, T, E>(future: F) -> anyhow::Result<T>
+where
+    F: Future<Output = Result<T, E>>,
+    E: Into<anyhow::Error>,
+{
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(future).map_err(Into::into)
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct RuntimeInputOptions {
+    pub(crate) confirm_host_access: bool,
+}
+
+pub(crate) fn execute(
+    context: RebornCliContext,
+    message: Option<String>,
+    options: RuntimeInputOptions,
+) -> anyhow::Result<()> {
+    let runtime_input =
+        build_runtime_input_with_options(context.boot_config(), RuntimeInputCaller::Run, options)?;
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -200,55 +237,36 @@ pub(crate) enum RuntimeInputCaller {
     Serve,
 }
 
+#[cfg(test)]
 pub(crate) fn build_runtime_input(
     config: &RebornBootConfig,
     caller: RuntimeInputCaller,
 ) -> anyhow::Result<RebornRuntimeInput> {
-    // Read the operator's boot TOML if present. Missing file is OK
-    // (operator may not have run `ironclaw-reborn config init` yet);
-    // sparse fields are OK (each absent field falls back to the
-    // CLI-shaped default baked into composition).
-    let config_file = read_config_file(config)?;
+    build_runtime_input_with_options(config, caller, RuntimeInputOptions::default())
+}
 
-    reject_unsupported_runtime_sections(config_file.as_ref(), caller)?;
-
-    let owner_id = config_file
-        .as_ref()
-        .and_then(|file| file.identity.as_ref())
-        .and_then(|identity| identity.default_owner.as_deref())
-        .unwrap_or("reborn-cli");
-
-    let local_dev_root: PathBuf = config.home().path().join("local-dev");
-
-    let workspace_root = std::env::current_dir()
-        .context("failed to resolve current directory for local-dev workspace")?;
-    let profile = effective_profile(config, config_file.as_ref())?;
-    let services_input = local_runtime_build_input(
-        composition_profile(profile),
-        owner_id,
-        local_dev_root,
-    )
-    .with_context(|| {
-        format!(
-            "ironclaw-reborn run currently supports profile=local-dev or profile=local-dev-yolo; \
-                     got profile={profile}. Production wiring lands in a follow-up slice."
-        )
-    })?
-    .with_local_dev_workspace_root(workspace_root);
+pub(crate) fn build_runtime_input_with_options(
+    config: &RebornBootConfig,
+    caller: RuntimeInputCaller,
+    options: RuntimeInputOptions,
+) -> anyhow::Result<RebornRuntimeInput> {
+    let runtime_services = build_services_input_with_options(config, caller, options)?;
 
     #[allow(unused_mut)]
-    let mut runtime_input = RebornRuntimeInput::from_services(services_input)
-        .with_runner_settings(runner_settings(config_file.as_ref())?)
+    let mut runtime_input = RebornRuntimeInput::from_services(runtime_services.services_input)
+        .with_runner_settings(runner_settings(runtime_services.config_file.as_ref())?)
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(200),
             max_total: Duration::from_secs(180),
         })
-        .with_identity(runtime_identity(config_file.as_ref()));
+        .with_identity(runtime_identity(runtime_services.config_file.as_ref()));
 
     #[cfg(feature = "root-llm-provider")]
     {
-        match ironclaw_reborn_composition::resolve_reborn_runtime_llm(config, config_file.as_ref())?
-        {
+        match ironclaw_reborn_composition::resolve_reborn_runtime_llm(
+            config,
+            runtime_services.config_file.as_ref(),
+        )? {
             Some(llm) => {
                 tracing::debug!(
                     provider_id = %llm.provider_id(),
@@ -271,6 +289,75 @@ pub(crate) fn build_runtime_input(
     Ok(runtime_input)
 }
 
+pub(crate) struct RuntimeServicesInput {
+    pub(crate) services_input: RebornBuildInput,
+    config_file: Option<ironclaw_reborn_config::RebornConfigFile>,
+}
+
+pub(crate) fn build_services_input_with_options(
+    config: &RebornBootConfig,
+    caller: RuntimeInputCaller,
+    options: RuntimeInputOptions,
+) -> anyhow::Result<RuntimeServicesInput> {
+    // Read the operator's boot TOML if present. Missing file is OK
+    // (operator may not have run `ironclaw-reborn config init` yet);
+    // sparse fields are OK (each absent field falls back to the
+    // CLI-shaped default baked into composition).
+    let config_file = read_config_file(config)?;
+
+    reject_unsupported_runtime_sections(config_file.as_ref(), caller)?;
+
+    let owner_id = default_owner_id(config_file.as_ref());
+
+    let local_dev_root: PathBuf = config.home().path().join("local-dev");
+
+    let workspace_root = std::env::current_dir()
+        .context("failed to resolve current directory for local-dev workspace")?;
+    let profile = effective_profile(config, config_file.as_ref())?;
+    let mut services_input = local_runtime_build_input_with_options(
+        composition_profile(profile),
+        owner_id,
+        local_dev_root,
+        RebornLocalRuntimeProfileOptions {
+            confirm_host_access: options.confirm_host_access,
+        },
+    )
+    .with_context(|| {
+        format!(
+            "ironclaw-reborn run currently supports profile=local-dev or profile=local-dev-yolo; \
+                     got profile={profile}. Production wiring lands in a follow-up slice."
+        )
+    })?
+    .with_local_dev_workspace_root(workspace_root);
+    if services_input.requires_local_dev_confirmed_host_home_root() {
+        let host_home_root =
+            confirmed_host_home_root(options).context("local-dev-yolo host access")?;
+        services_input = services_input.with_local_dev_confirmed_host_home_root(host_home_root);
+    }
+
+    Ok(RuntimeServicesInput {
+        services_input,
+        config_file,
+    })
+}
+
+pub(crate) fn default_owner_id(
+    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+) -> &str {
+    config_file
+        .and_then(|file| file.identity.as_ref())
+        .and_then(|identity| identity.default_owner.as_deref())
+        .unwrap_or("reborn-cli")
+}
+
+fn confirmed_host_home_root(options: RuntimeInputOptions) -> anyhow::Result<PathBuf> {
+    debug_assert!(options.confirm_host_access);
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .context("HOME or USERPROFILE must be set")
+}
+
 fn composition_profile(profile: RebornProfile) -> RebornCompositionProfile {
     match profile {
         RebornProfile::LocalDev => RebornCompositionProfile::LocalDev,
@@ -280,7 +367,7 @@ fn composition_profile(profile: RebornProfile) -> RebornCompositionProfile {
     }
 }
 
-fn read_config_file(
+pub(crate) fn read_config_file(
     config: &RebornBootConfig,
 ) -> anyhow::Result<Option<ironclaw_reborn_config::RebornConfigFile>> {
     use ironclaw_reborn_config::RebornConfigFile;
@@ -320,7 +407,7 @@ fn runtime_identity(
     }
 }
 
-fn effective_profile(
+pub(crate) fn effective_profile(
     config: &RebornBootConfig,
     config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
 ) -> anyhow::Result<RebornProfile> {
@@ -414,7 +501,17 @@ mod tests {
     use ironclaw_reborn_composition::RebornCompositionProfile;
     use ironclaw_reborn_config::RebornBootConfig;
 
-    use super::{RuntimeInputCaller, build_runtime_input};
+    use super::{
+        RuntimeInputCaller, RuntimeInputOptions, block_on_cli, build_runtime_input,
+        build_runtime_input_with_options,
+    };
+
+    #[tokio::test]
+    async fn block_on_cli_can_run_inside_existing_tokio_runtime() {
+        let value = block_on_cli(async { Ok::<_, anyhow::Error>(42) }).expect("block future");
+
+        assert_eq!(value, 42);
+    }
 
     #[test]
     fn build_runtime_input_maps_configured_cli_identity() {
@@ -449,7 +546,7 @@ default_owner = "custom-owner"
     }
 
     #[test]
-    fn build_runtime_input_accepts_local_dev_yolo_profile() {
+    fn build_runtime_input_rejects_local_dev_yolo_without_host_access_confirmation() {
         let temp = tempfile::tempdir().expect("tempdir");
         let reborn_home = temp.path().join("reborn-home");
         std::fs::create_dir_all(&reborn_home).expect("mkdir");
@@ -461,12 +558,44 @@ default_owner = "custom-owner"
         )
         .expect("boot config");
 
-        let runtime_input =
-            build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
+        let error = match build_runtime_input(&config, RuntimeInputCaller::Run) {
+            Ok(_) => panic!("local-dev-yolo requires confirmation"),
+            Err(error) => error,
+        };
+
+        assert!(format!("{error:#}").contains("requires explicit disclosure acknowledgement"));
+    }
+
+    #[test]
+    fn build_runtime_input_accepts_confirmed_local_dev_yolo_profile() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            Some("local-dev-yolo".into()),
+        )
+        .expect("boot config");
+
+        let runtime_input = build_runtime_input_with_options(
+            &config,
+            RuntimeInputCaller::Run,
+            RuntimeInputOptions {
+                confirm_host_access: true,
+            },
+        )
+        .expect("runtime input");
+        assert!(runtime_input.grants_trusted_laptop_access());
         let services = runtime_input.services.expect("services input");
         let policy = services.runtime_policy().expect("runtime policy");
 
         assert_eq!(services.profile(), RebornCompositionProfile::LocalDevYolo);
+        assert_eq!(
+            policy.filesystem_backend.as_str(),
+            "host_workspace_and_home"
+        );
         assert_eq!(policy.secret_mode.as_str(), "inherited_env");
     }
 

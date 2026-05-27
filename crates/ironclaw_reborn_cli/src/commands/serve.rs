@@ -6,8 +6,8 @@ use std::sync::Arc;
 use anyhow::{Context, anyhow};
 use clap::Args;
 use ironclaw_reborn_composition::{
-    RebornReadiness, RebornRuntimeIdentity, RebornWebuiBundle, WebuiServeConfig,
-    build_reborn_runtime, build_webui_services, webui_v2_app,
+    RebornReadiness, RebornRuntimeIdentity, RebornRuntimeInput, RebornWebuiBundle,
+    WebuiServeConfig, build_reborn_runtime, build_webui_services, webui_v2_app,
 };
 use ironclaw_reborn_config::IdentitySection;
 use ironclaw_reborn_webui_ingress::{
@@ -16,6 +16,7 @@ use ironclaw_reborn_webui_ingress::{
 use secrecy::SecretString;
 
 use crate::context::RebornCliContext;
+use crate::runtime::RuntimeInputOptions;
 
 const DEFAULT_SERVE_HOST: &str = "127.0.0.1";
 const DEFAULT_SERVE_PORT: u16 = 3000;
@@ -43,6 +44,10 @@ pub(crate) struct ServeCommand {
     /// (when neither is set) is 3000.
     #[arg(long)]
     port: Option<u16>,
+
+    /// Confirm trusted-laptop host filesystem access for local-dev-yolo.
+    #[arg(long = "confirm-host-access")]
+    confirm_host_access: bool,
 }
 
 impl ServeCommand {
@@ -50,9 +55,12 @@ impl ServeCommand {
         crate::runtime::init_tracing();
 
         // Build the runtime config from the operator's TOML.
-        let runtime_input = crate::runtime::build_runtime_input(
+        let runtime_input = crate::runtime::build_runtime_input_with_options(
             context.boot_config(),
             crate::runtime::RuntimeInputCaller::Serve,
+            RuntimeInputOptions {
+                confirm_host_access: self.confirm_host_access,
+            },
         )?;
         let boot_config = context.boot_config();
         let config_file =
@@ -160,6 +168,7 @@ impl ServeCommand {
             DEFAULT_SERVE_PORT
         };
         let listen_addr = SocketAddr::new(host, port);
+        reject_non_loopback_privileged_local_runtime(host, &runtime_input)?;
 
         // CORS allow-origin list. Empty = fail-closed on every
         // cross-origin preflight; operators MUST opt in to the
@@ -298,6 +307,22 @@ impl ServeCommand {
 
         Ok(())
     }
+}
+
+fn reject_non_loopback_privileged_local_runtime(
+    host: IpAddr,
+    runtime_input: &RebornRuntimeInput,
+) -> anyhow::Result<()> {
+    if host.is_loopback() || !runtime_input.grants_trusted_laptop_access() {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "`ironclaw-reborn serve` refuses non-loopback listener {host} because the selected \
+         runtime policy grants trusted-laptop host access (host-home filesystem, local host \
+         process, direct network, inherited environment). Bind to a loopback host such as \
+         127.0.0.1 or ::1, or choose a less privileged profile."
+    );
 }
 
 fn resolve_webui_default_agent(

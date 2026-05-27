@@ -21,7 +21,7 @@ use ironclaw_capabilities::{
     CapabilityHost, CapabilityInvocationError, CapabilityInvocationRequest,
     CapabilityInvocationResult, CapabilityObligationHandler, CapabilityResumeRequest,
 };
-use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry};
+use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_host_api::{
     ApprovalRequestId, CapabilityDispatcher, CapabilityId, DispatchFailureKind, InvocationId,
     PackageSource, ResourceScope, RuntimeDispatchErrorKind, RuntimeKind,
@@ -29,7 +29,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_processes::{
     ProcessCancellationRegistry, ProcessError, ProcessHost, ProcessManager, ProcessResultStore,
-    ProcessStatus, ProcessStore,
+    ProcessStart, ProcessStatus, ProcessStore,
 };
 use ironclaw_run_state::{
     ApprovalRequestStore, RunStateApprovalStore, RunStateError, RunStateStore, RunStatus,
@@ -49,7 +49,7 @@ use crate::{
 
 /// Default production wiring for [`HostRuntime`].
 pub struct DefaultHostRuntime {
-    registry: Arc<ExtensionRegistry>,
+    registry: Arc<SharedExtensionRegistry>,
     dispatcher: Arc<dyn CapabilityDispatcher>,
     authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer>,
     trust_policy: Arc<dyn TrustPolicy>,
@@ -70,6 +70,10 @@ pub struct DefaultHostRuntime {
 impl DefaultHostRuntime {
     /// Constructs a default host runtime over the supplied kernel services.
     ///
+    /// This constructor snapshots the supplied registry into an internal
+    /// [`SharedExtensionRegistry`]. Use [`Self::from_shared_registry`] when
+    /// callers need subsequent registry mutations to be shared with the runtime.
+    ///
     /// The runtime starts with an explicit fail-closed host trust policy, so
     /// capability dispatch is denied until composition attaches a concrete
     /// policy with [`Self::with_trust_policy`] or [`Self::with_trust_policy_dyn`].
@@ -86,6 +90,22 @@ impl DefaultHostRuntime {
     /// review.
     pub fn new(
         registry: Arc<ExtensionRegistry>,
+        dispatcher: Arc<dyn CapabilityDispatcher>,
+        authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer>,
+        surface_version: CapabilitySurfaceVersion,
+        runtime_policy: EffectiveRuntimePolicy,
+    ) -> Self {
+        Self::from_shared_registry(
+            Arc::new(SharedExtensionRegistry::new((*registry).clone())),
+            dispatcher,
+            authorizer,
+            surface_version,
+            runtime_policy,
+        )
+    }
+
+    pub fn from_shared_registry(
+        registry: Arc<SharedExtensionRegistry>,
         dispatcher: Arc<dyn CapabilityDispatcher>,
         authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer>,
         surface_version: CapabilitySurfaceVersion,
@@ -243,6 +263,28 @@ impl DefaultHostRuntime {
     pub fn with_builtin_obligation_handler(self) -> Self {
         self.with_obligation_handler(Arc::new(BuiltinObligationHandler::new()))
     }
+
+    /// Spawns an already-authorized process request through the configured
+    /// process manager.
+    pub async fn spawn_process(
+        &self,
+        start: ProcessStart,
+    ) -> Result<crate::RuntimeProcessHandle, HostRuntimeError> {
+        let Some(process_manager) = &self.process_manager else {
+            return Err(HostRuntimeError::Unavailable {
+                reason: "process manager unavailable".to_string(),
+            });
+        };
+        let capability_id = start.capability_id.clone();
+        let record = process_manager
+            .spawn(start)
+            .await
+            .map_err(unavailable_from_process_error)?;
+        Ok(crate::RuntimeProcessHandle {
+            process_id: record.process_id,
+            capability_id,
+        })
+    }
 }
 
 #[async_trait]
@@ -295,7 +337,8 @@ impl HostRuntime for DefaultHostRuntime {
         };
         context.trust = trust_decision.effective_trust.class();
 
-        let host = self.capability_host();
+        let registry = self.registry.snapshot();
+        let host = self.capability_host(&registry);
 
         let invocation = CapabilityInvocationRequest {
             context,
@@ -381,7 +424,8 @@ impl HostRuntime for DefaultHostRuntime {
         };
         context.trust = trust_decision.effective_trust.class();
 
-        let host = self.capability_host();
+        let registry = self.registry.snapshot();
+        let host = self.capability_host(&registry);
         let resume = CapabilityResumeRequest {
             context,
             approval_request_id,
@@ -417,8 +461,9 @@ impl HostRuntime for DefaultHostRuntime {
         &self,
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, HostRuntimeError> {
+        let registry = self.registry.snapshot();
         CapabilityCatalog::new(
-            self.registry.as_ref(),
+            &registry,
             self.authorizer.as_ref(),
             &self.surface_version,
             &self.runtime_policy,
@@ -506,6 +551,7 @@ impl HostRuntime for DefaultHostRuntime {
         request: RuntimeStatusRequest,
     ) -> Result<HostRuntimeStatus, HostRuntimeError> {
         let mut active_work = Vec::new();
+        let registry = self.registry.snapshot();
 
         if let Some(run_state) = &self.run_state {
             let records = run_state
@@ -518,8 +564,7 @@ impl HostRuntime for DefaultHostRuntime {
                     .into_iter()
                     .filter(|record| record.status == RunStatus::Running)
                     .map(|record| {
-                        let runtime = self
-                            .registry
+                        let runtime = registry
                             .get_capability(&record.capability_id)
                             .map(|descriptor| descriptor.runtime);
                         RuntimeWorkSummary {
@@ -565,7 +610,8 @@ impl HostRuntime for DefaultHostRuntime {
 
     /// Returns readiness for runtime backends required by registered capabilities.
     async fn health(&self) -> Result<HostRuntimeHealth, HostRuntimeError> {
-        let required = required_runtime_backends(&self.registry);
+        let registry = self.registry.snapshot();
+        let required = required_runtime_backends(&registry);
         if required.is_empty() {
             return Ok(HostRuntimeHealth {
                 ready: true,
@@ -587,12 +633,12 @@ impl HostRuntime for DefaultHostRuntime {
 }
 
 impl DefaultHostRuntime {
-    fn capability_host(&self) -> CapabilityHost<'_, dyn CapabilityDispatcher> {
-        let mut host = CapabilityHost::new(
-            self.registry.as_ref(),
-            self.dispatcher.as_ref(),
-            self.authorizer.as_ref(),
-        );
+    fn capability_host<'a>(
+        &'a self,
+        registry: &'a ExtensionRegistry,
+    ) -> CapabilityHost<'a, dyn CapabilityDispatcher> {
+        let mut host =
+            CapabilityHost::new(registry, self.dispatcher.as_ref(), self.authorizer.as_ref());
         if let Some(run_state_approval_store) = &self.run_state_approval_store {
             host = host.with_run_state_approval_store(run_state_approval_store.as_ref());
         } else {
@@ -621,12 +667,11 @@ impl DefaultHostRuntime {
     ) -> Result<TrustDecision, TrustEvaluationError> {
         let policy = self.trust_policy.as_ref();
 
-        let descriptor = self
-            .registry
+        let registry = self.registry.snapshot();
+        let descriptor = registry
             .get_capability(capability_id)
             .ok_or(TrustEvaluationError::UnknownCapability)?;
-        let package = self
-            .registry
+        let package = registry
             .get_extension(&descriptor.provider)
             .ok_or(TrustEvaluationError::MissingPackage)?;
         let package_descriptor = package
@@ -658,8 +703,8 @@ impl DefaultHostRuntime {
         &self,
         capability_id: &CapabilityId,
     ) -> Result<(), RuntimePolicyEvaluationError> {
-        let descriptor = self
-            .registry
+        let registry = self.registry.snapshot();
+        let descriptor = registry
             .get_capability(capability_id)
             .ok_or(RuntimePolicyEvaluationError::UnknownCapability)?;
         let plan = plan_capability(descriptor, &self.runtime_policy)
@@ -742,13 +787,16 @@ impl DefaultHostRuntime {
                             reason: RuntimeBlockedReason::ApprovalRequired,
                         }),
                     ),
-                    Ok(None) => Ok(RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure {
-                        capability_id: capability,
-                        kind: RuntimeFailureKind::Authorization,
-                        message: Some(
-                            "approval required but no approval request was persisted".to_string(),
+                    Ok(None) => Ok(RuntimeCapabilityOutcome::Failed(
+                        RuntimeCapabilityFailure::new(
+                            capability,
+                            RuntimeFailureKind::Authorization,
+                            Some(
+                                "approval required but no approval request was persisted"
+                                    .to_string(),
+                            ),
                         ),
-                    })),
+                    )),
                     Err(host_error) => {
                         // Surface persistence outages as Unavailable rather than
                         // pretending the approval was never persisted; otherwise a
@@ -899,22 +947,22 @@ fn trust_evaluation_failure(
     capability_id: CapabilityId,
     error: TrustEvaluationError,
 ) -> RuntimeCapabilityOutcome {
-    RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure {
+    RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure::new(
         capability_id,
-        kind: trust_evaluation_failure_kind(error),
-        message: Some(error.message().to_string()),
-    })
+        trust_evaluation_failure_kind(error),
+        Some(error.message().to_string()),
+    ))
 }
 
 fn runtime_policy_failure(
     capability_id: CapabilityId,
     error: RuntimePolicyEvaluationError,
 ) -> RuntimeCapabilityOutcome {
-    RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure {
+    RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure::new(
         capability_id,
-        kind: runtime_policy_failure_kind(&error),
-        message: Some(error.message()),
-    })
+        runtime_policy_failure_kind(&error),
+        Some(error.message()),
+    ))
 }
 
 fn runtime_policy_failure_kind(error: &RuntimePolicyEvaluationError) -> RuntimeFailureKind {
@@ -1035,11 +1083,7 @@ fn failure_from(
 ) -> RuntimeCapabilityFailure {
     let kind = failure_kind_from(&error);
     let message = sanitized_failure_message(&error);
-    RuntimeCapabilityFailure {
-        capability_id,
-        kind,
-        message,
-    }
+    RuntimeCapabilityFailure::new(capability_id, kind, message)
 }
 
 /// Returns a stable, redacted summary message for a capability invocation
@@ -1122,10 +1166,12 @@ pub(crate) fn failure_kind_from(error: &CapabilityInvocationError) -> RuntimeFai
 
 fn dispatch_kind_to_failure(kind: DispatchFailureKind) -> RuntimeFailureKind {
     match kind {
-        DispatchFailureKind::UnknownCapability
-        | DispatchFailureKind::UnknownProvider
-        | DispatchFailureKind::MissingRuntimeBackend
-        | DispatchFailureKind::UnsupportedRuntime => RuntimeFailureKind::MissingRuntime,
+        DispatchFailureKind::UnknownCapability | DispatchFailureKind::UnknownProvider => {
+            RuntimeFailureKind::InvalidOutput
+        }
+        DispatchFailureKind::MissingRuntimeBackend | DispatchFailureKind::UnsupportedRuntime => {
+            RuntimeFailureKind::MissingRuntime
+        }
         DispatchFailureKind::RuntimeMismatch => RuntimeFailureKind::Backend,
         DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::ExtensionRuntimeMismatch) => {
             RuntimeFailureKind::MissingRuntime
@@ -1136,6 +1182,9 @@ fn dispatch_kind_to_failure(kind: DispatchFailureKind) -> RuntimeFailureKind {
         }
         DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied) => {
             RuntimeFailureKind::Network
+        }
+        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::PolicyDenied) => {
+            RuntimeFailureKind::PolicyDenied
         }
         DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OutputTooLarge) => {
             RuntimeFailureKind::OutputTooLarge
@@ -1267,6 +1316,10 @@ mod tests {
                 RuntimeFailureKind::OutputTooLarge,
             ),
             (
+                RuntimeDispatchErrorKind::PolicyDenied,
+                RuntimeFailureKind::PolicyDenied,
+            ),
+            (
                 RuntimeDispatchErrorKind::Resource,
                 RuntimeFailureKind::Resource,
             ),
@@ -1301,11 +1354,11 @@ mod tests {
     fn dispatch_kind_to_failure_pins_dispatch_error_top_level_kinds() {
         assert_eq!(
             dispatch_kind_to_failure(DispatchFailureKind::UnknownCapability),
-            RuntimeFailureKind::MissingRuntime
+            RuntimeFailureKind::InvalidOutput
         );
         assert_eq!(
             dispatch_kind_to_failure(DispatchFailureKind::UnknownProvider),
-            RuntimeFailureKind::MissingRuntime
+            RuntimeFailureKind::InvalidOutput
         );
         assert_eq!(
             dispatch_kind_to_failure(DispatchFailureKind::MissingRuntimeBackend),
@@ -1322,12 +1375,9 @@ mod tests {
     }
 
     #[test]
-    fn failure_kind_from_dispatch_unknown_capability_maps_to_missing_runtime() {
+    fn failure_kind_from_dispatch_unknown_capability_maps_to_invalid_output() {
         let error = dispatch(DispatchFailureKind::UnknownCapability);
-        assert_eq!(
-            failure_kind_from(&error),
-            RuntimeFailureKind::MissingRuntime
-        );
+        assert_eq!(failure_kind_from(&error), RuntimeFailureKind::InvalidOutput);
     }
 
     #[test]
@@ -1361,6 +1411,7 @@ mod tests {
         assert_eq!(RuntimeFailureKind::Backend.as_str(), "backend");
         assert_eq!(RuntimeFailureKind::Cancelled.as_str(), "cancelled");
         assert_eq!(RuntimeFailureKind::Dispatcher.as_str(), "dispatcher");
+        assert_eq!(RuntimeFailureKind::Internal.as_str(), "internal");
         assert_eq!(RuntimeFailureKind::InvalidInput.as_str(), "invalid_input");
         assert_eq!(RuntimeFailureKind::InvalidOutput.as_str(), "invalid_output");
         assert_eq!(
@@ -1376,9 +1427,98 @@ mod tests {
             RuntimeFailureKind::OutputTooLarge.as_str(),
             "output_too_large"
         );
+        assert_eq!(RuntimeFailureKind::PolicyDenied.as_str(), "policy_denied");
         assert_eq!(RuntimeFailureKind::Process.as_str(), "process");
         assert_eq!(RuntimeFailureKind::Resource.as_str(), "resource");
+        assert_eq!(RuntimeFailureKind::Transient.as_str(), "transient");
+        assert_eq!(RuntimeFailureKind::Unavailable.as_str(), "unavailable");
         assert_eq!(RuntimeFailureKind::Unknown.as_str(), "unknown");
+    }
+
+    #[test]
+    fn capability_failure_disposition_maps_failure_kinds_once() {
+        use crate::CapabilityFailureDisposition::*;
+
+        let safe = true;
+        let cases = [
+            (RuntimeFailureKind::Authorization, ModelVisibleToolError),
+            (RuntimeFailureKind::Backend, RetrySameCall),
+            (RuntimeFailureKind::Cancelled, RecoverableRunFailure),
+            (RuntimeFailureKind::Dispatcher, RecoverableRunFailure),
+            (RuntimeFailureKind::Internal, RetrySameCall),
+            (RuntimeFailureKind::InvalidInput, ModelVisibleToolError),
+            (RuntimeFailureKind::InvalidOutput, RecoverableRunFailure),
+            (RuntimeFailureKind::MissingRuntime, ModelVisibleToolError),
+            (RuntimeFailureKind::Network, RetrySameCall),
+            (RuntimeFailureKind::OperationFailed, ModelVisibleToolError),
+            (RuntimeFailureKind::OutputTooLarge, ModelVisibleToolError),
+            (RuntimeFailureKind::PolicyDenied, ModelVisibleToolError),
+            (RuntimeFailureKind::Process, ModelVisibleToolError),
+            (RuntimeFailureKind::Resource, ModelVisibleToolError),
+            (RuntimeFailureKind::Transient, RetrySameCall),
+            (RuntimeFailureKind::Unavailable, RetrySameCall),
+            (RuntimeFailureKind::Unknown, RecoverableRunFailure),
+        ];
+
+        for (kind, expected) in cases {
+            assert_eq!(
+                crate::capability_failure_disposition(kind, safe),
+                expected,
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn capability_failure_disposition_retries_retryable_kinds_before_exhaustion() {
+        use crate::CapabilityFailureDisposition::*;
+        for kind in [
+            RuntimeFailureKind::Backend,
+            RuntimeFailureKind::Internal,
+            RuntimeFailureKind::Network,
+            RuntimeFailureKind::Transient,
+            RuntimeFailureKind::Unavailable,
+        ] {
+            assert_eq!(
+                crate::capability_failure_disposition(kind, true),
+                RetrySameCall,
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_failure_summary_is_bounded_and_blank_messages_are_not_safe() {
+        let blank = RuntimeCapabilityFailure::new(
+            cap(),
+            RuntimeFailureKind::InvalidInput,
+            Some("   ".to_string()),
+        );
+        assert!(blank.safe_summary().is_none());
+        assert_eq!(
+            blank.disposition(),
+            crate::CapabilityFailureDisposition::RecoverableRunFailure
+        );
+
+        let long = RuntimeCapabilityFailure::new(
+            cap(),
+            RuntimeFailureKind::InvalidInput,
+            Some("x".repeat(3000)),
+        );
+        let summary = long.safe_summary().expect("long message is still safe");
+        assert_eq!(summary.chars().count(), 515);
+        assert!(summary.ends_with("..."));
+
+        let multibyte = RuntimeCapabilityFailure::new(
+            cap(),
+            RuntimeFailureKind::InvalidInput,
+            Some("é".repeat(3000)),
+        );
+        let summary = multibyte
+            .safe_summary()
+            .expect("long multibyte message is still safe");
+        assert_eq!(summary.chars().count(), 515);
+        assert!(summary.ends_with("..."));
     }
 
     #[test]

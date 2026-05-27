@@ -1214,7 +1214,7 @@ mod tests {
         use crate::config::{WorkspaceConfig, WorkspaceSearchConfig};
         use crate::db::Database as _;
         use crate::db::libsql::LibSqlBackend;
-        use crate::workspace::EmbeddingCacheConfig;
+        use ironclaw_embeddings::EmbeddingCacheConfig;
 
         let dir = tempfile::tempdir().expect("tempdir");
         let backend = LibSqlBackend::new_local(&dir.path().join("multi_tenant_css.db"))
@@ -1363,7 +1363,7 @@ mod tests {
         use crate::config::{WorkspaceConfig, WorkspaceSearchConfig};
         use crate::db::Database as _;
         use crate::db::libsql::LibSqlBackend;
-        use crate::workspace::EmbeddingCacheConfig;
+        use ironclaw_embeddings::EmbeddingCacheConfig;
 
         let dir = tempfile::tempdir().expect("tempdir");
         let backend = LibSqlBackend::new_local(&dir.path().join("multi_tenant_index.db"))

@@ -123,6 +123,10 @@ where
                 requested_run_profile: accepted_message.requested_run_profile.clone(),
                 idempotency_key,
                 received_at: accepted_message.received_at,
+                requested_run_id: None,
+                parent_run_id: None,
+                subagent_depth: 0,
+                spawn_tree_root_run_id: None,
             })
             .await;
         let turn_submission = match turn_submission_result {
@@ -161,6 +165,7 @@ fn should_rotate_submit_key(error: &TurnError) -> bool {
         TurnError::ScopeNotFound
         | TurnError::Unauthorized
         | TurnError::InvalidRequest { .. }
+        | TurnError::CapacityExceeded { .. }
         | TurnError::Conflict { .. }
         | TurnError::InvalidTransition { .. }
         | TurnError::LeaseMismatch => false,

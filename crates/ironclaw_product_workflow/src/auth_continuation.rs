@@ -173,6 +173,7 @@ fn workflow_error_kind(error: &ProductWorkflowError) -> &'static str {
         ProductWorkflowError::TurnSubmissionFailed { error } => match error.category() {
             TurnErrorCategory::ThreadBusy => "turn_thread_busy",
             TurnErrorCategory::AdmissionRejected => "turn_admission_rejected",
+            TurnErrorCategory::CapacityExceeded => "turn_capacity_exceeded",
             TurnErrorCategory::ScopeNotFound => "turn_scope_not_found",
             TurnErrorCategory::Unauthorized => "turn_unauthorized",
             TurnErrorCategory::InvalidRequest => "turn_invalid_request",
@@ -204,6 +205,7 @@ fn workflow_error_kind(error: &ProductWorkflowError) -> &'static str {
         ProductWorkflowError::TurnResumeDenied { error } => match error.category() {
             TurnErrorCategory::ThreadBusy => "turn_resume_thread_busy",
             TurnErrorCategory::AdmissionRejected => "turn_resume_admission_rejected",
+            TurnErrorCategory::CapacityExceeded => "turn_resume_capacity_exceeded",
             TurnErrorCategory::ScopeNotFound => "turn_resume_scope_not_found",
             TurnErrorCategory::Unauthorized => "turn_resume_unauthorized",
             TurnErrorCategory::InvalidRequest => "turn_resume_invalid_request",
@@ -349,6 +351,10 @@ mod tests {
 
     #[async_trait]
     impl TurnCoordinator for RecordingTurnCoordinator {
+        async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+            Ok(TurnRunId::new())
+        }
+
         async fn submit_turn(
             &self,
             _request: SubmitTurnRequest,
@@ -589,6 +595,10 @@ mod tests {
                 requested_run_profile: Some(RunProfileRequest::new("default").unwrap()),
                 idempotency_key: IdempotencyKey::new("idem-auth-real-submit").unwrap(),
                 received_at: Utc::now(),
+                requested_run_id: None,
+                parent_run_id: None,
+                subagent_depth: 0,
+                spawn_tree_root_run_id: None,
             })
             .await
             .expect("submit turn");
@@ -804,5 +814,27 @@ mod tests {
                 kind: AuthContinuationRejectionKind::MissingThreadScope
             }
         ));
+    }
+
+    #[test]
+    fn workflow_error_kind_capacity_exceeded_returns_expected_strings() {
+        let submission = ProductWorkflowError::TurnSubmissionFailed {
+            error: TurnError::capacity_exceeded(
+                ironclaw_turns::TurnCapacityResource::SpawnTreeDescendants,
+                4,
+            ),
+        };
+        assert_eq!(workflow_error_kind(&submission), "turn_capacity_exceeded");
+
+        let resume = ProductWorkflowError::TurnResumeDenied {
+            error: TurnError::capacity_exceeded(
+                ironclaw_turns::TurnCapacityResource::SubmitTurn,
+                7,
+            ),
+        };
+        assert_eq!(
+            workflow_error_kind(&resume),
+            "turn_resume_capacity_exceeded"
+        );
     }
 }
