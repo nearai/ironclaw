@@ -236,6 +236,38 @@ async fn builtin_echo_invokes_through_host_runtime() {
 }
 
 #[tokio::test]
+async fn builtin_time_tolerates_null_string_sentinels_in_optional_fields() {
+    // Weaker models (e.g. quantized local models) tend to fill every optional
+    // parameter with the literal string "null" instead of omitting it. Those
+    // sentinels in optional fields must be treated as absent, not abort the run.
+    let output = invoke(
+        TIME_CAPABILITY_ID,
+        json!({
+            "operation": "now",
+            "timezone": "null",
+            "from_timezone": "null",
+            "format": "null"
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(
+        output.get("iso").and_then(Value::as_str).is_some(),
+        "time `now` should return an iso timestamp, got {output:?}"
+    );
+}
+
+#[tokio::test]
+async fn builtin_echo_preserves_null_string_in_required_field() {
+    // The optional-sentinel normalization must never touch required fields, so a
+    // deliberate "null" payload still round-trips unchanged.
+    let output = invoke(ECHO_CAPABILITY_ID, json!({"message": "null"}))
+        .await
+        .unwrap();
+    assert_eq!(output, Value::String("null".to_string()));
+}
+
+#[tokio::test]
 async fn builtin_spawn_subagent_authorization_invokes_through_host_runtime() {
     let output = invoke(SPAWN_SUBAGENT_CAPABILITY_ID, json!({}))
         .await
@@ -746,6 +778,46 @@ async fn builtin_skill_install_accepts_content_when_network_is_denied() {
     assert_eq!(listed["count"], json!(1));
     assert_eq!(listed["skills"][0]["name"], json!("offline-helper"));
     assert_eq!(listed["skills"][0]["source"], json!("user"));
+}
+
+#[tokio::test]
+async fn builtin_skill_install_accepts_named_plain_markdown_content() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
+    let runtime = runtime_with_filesystem(filesystem);
+
+    let installed = invoke_with_context(
+        &runtime,
+        SKILL_INSTALL_CAPABILITY_ID,
+        json!({
+            "name": "qa-smoke-skill",
+            "content": "# QA Smoke\n\nSay \"qa skill loaded\" when asked.\n"
+        }),
+        // skill_install currently declares Network for URL installs too, so the
+        // first-party harness needs a non-empty policy even for content input.
+        execution_context_with_mounts_and_network(
+            [SKILL_INSTALL_CAPABILITY_ID],
+            mounts.clone(),
+            http_test_policy(),
+        ),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(installed["installed"], json!(true));
+    assert_eq!(installed["name"], json!("qa-smoke-skill"));
+    assert_eq!(installed["source"], json!("user"));
+
+    let listed = invoke_with_context(
+        &runtime,
+        SKILL_LIST_CAPABILITY_ID,
+        json!({}),
+        execution_context_with_mounts([SKILL_LIST_CAPABILITY_ID], mounts),
+    )
+    .await
+    .unwrap();
+    assert_eq!(listed["count"], json!(1));
+    assert_eq!(listed["skills"][0]["name"], json!("qa-smoke-skill"));
 }
 
 #[tokio::test]
