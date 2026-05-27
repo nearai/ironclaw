@@ -571,6 +571,7 @@ impl ironclaw_turns::run_profile::LoopPromptPort for MockAgentLoopDriverHost {
                 content_ref: loop_message_ref("msg:user"),
             }],
             surface_version: Some(surface_version()),
+            compaction_message_index: Vec::new(),
             instruction_fingerprint: None,
             identity_message_count: 0,
             instruction_snippet_count: 0,

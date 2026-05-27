@@ -56,7 +56,7 @@ pub use capability_surface_filter::{
     CapabilitySurfaceProfileFilter, CapabilitySurfaceVisibleFilter,
 };
 pub use compaction_task::{
-    ANTI_INJECTION_PREFIX, CompactionError, CompactionMode, CompactionTask,
+    ANTI_INJECTION_PREFIX, CompactionError, CompactionTask, CompactionTaskRequest,
     HostManagedLoopCompactionPort, default_host_managed_loop_compaction_port,
 };
 pub use filesystem_checkpoint_state::FilesystemCheckpointStateStore;
@@ -118,14 +118,14 @@ use ironclaw_turns::{
         BeginAssistantDraft, CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
         CapabilityDeniedReasonKind, CapabilityInvocation, CapabilityOutcome,
         CapabilitySurfaceVersion, FinalizeAssistantMessage, InstructionMaterializationStore,
-        LoopCapabilityPort, LoopContextBundle, LoopContextMessage, LoopContextPort,
-        LoopContextRequest, LoopDriverNoteKind, LoopHostMilestoneEmitter, LoopHostMilestoneSink,
-        LoopInputCursor, LoopModelBudgetAccountant, LoopModelMessage, LoopModelPort,
-        LoopModelRequest, LoopModelResponse, LoopPromptBundleAuthority, LoopRunContext,
-        LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, ModelCallOutcome, ModelStreamChunk,
-        ParentLoopOutput, PromptMode, UpdateAssistantDraft, VisibleCapabilityRequest,
-        VisibleCapabilitySurface, sanitize_model_visible_text,
-        sort_instruction_snippets_for_prompt,
+        LoopCapabilityPort, LoopContextBundle, LoopContextCompactionKind,
+        LoopContextCompactionMetadata, LoopContextMessage, LoopContextPort, LoopContextRequest,
+        LoopDriverNoteKind, LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopInputCursor,
+        LoopModelBudgetAccountant, LoopModelMessage, LoopModelPort, LoopModelRequest,
+        LoopModelResponse, LoopPromptBundleAuthority, LoopRunContext, LoopRunInfoPort,
+        LoopSafeSummary, LoopTranscriptPort, ModelCallOutcome, ModelStreamChunk, ParentLoopOutput,
+        PromptMode, UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        sanitize_model_visible_text, sort_instruction_snippets_for_prompt,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -1613,11 +1613,30 @@ fn history_summaries_by_ref(summaries: Vec<SummaryArtifact>) -> HashMap<String, 
 
 fn context_message_to_loop_message(message: ContextMessage) -> Option<LoopContextMessage> {
     let message_ref = message_ref_from_context(&message)?;
+    let estimated_tokens = estimate_tokens_from_chars(&message.content).as_u64();
+    let compaction = Some(LoopContextCompactionMetadata {
+        sequence: message.sequence,
+        kind: compaction_kind_for_message(message.kind),
+        estimated_tokens,
+    });
     Some(LoopContextMessage {
         message_ref: Some(message_ref),
         role: role_for_kind(message.kind).to_string(),
         safe_summary: safe_context_summary(message.kind).to_string(),
+        compaction,
     })
+}
+
+fn compaction_kind_for_message(kind: MessageKind) -> LoopContextCompactionKind {
+    match kind {
+        MessageKind::User => LoopContextCompactionKind::User,
+        MessageKind::Assistant => LoopContextCompactionKind::Assistant,
+        MessageKind::System => LoopContextCompactionKind::System,
+        MessageKind::Summary => LoopContextCompactionKind::Summary,
+        MessageKind::CheckpointReference
+        | MessageKind::ToolResultReference
+        | MessageKind::CapabilityDisplayPreview => LoopContextCompactionKind::Other,
+    }
 }
 
 fn message_ref_from_context(message: &ContextMessage) -> Option<LoopMessageRef> {

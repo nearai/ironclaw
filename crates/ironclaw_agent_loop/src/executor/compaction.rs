@@ -7,6 +7,7 @@ use ironclaw_turns::{
         LoopProgressEvent, LoopSafeSummary, SystemInferenceTaskId,
     },
 };
+use std::time::Duration;
 
 use crate::state::LoopExecutionState;
 use crate::strategies::CompactionDecision;
@@ -62,9 +63,10 @@ impl ExecutorStage<CompactionInput> for CompactionStage {
                         },
                     )
                     .await;
-                let response = match ctx
-                    .host
-                    .compact_loop_context(LoopCompactionRequest {
+                let compaction_result = tokio::time::timeout(
+                    Duration::from_millis(deadline_ms),
+                    ctx.host.compact_loop_context(LoopCompactionRequest {
+                        task_id,
                         thread_id: ctx.host.run_context().thread_id.clone(),
                         last_compacted_through_seq: state
                             .compaction_state
@@ -73,11 +75,39 @@ impl ExecutorStage<CompactionInput> for CompactionStage {
                         preserve_tail_tokens,
                         mode: LoopCompactionMode::Fresh,
                         deadline_ms,
-                    })
-                    .await
-                {
-                    Ok(response) => response,
-                    Err(error) => {
+                    }),
+                )
+                .await;
+                let response = match compaction_result {
+                    Ok(Ok(response)) => response,
+                    Ok(Err(error)) => {
+                        CheckpointStage
+                            .emit_progress(
+                                ctx,
+                                LoopProgressEvent::CompactionFailed {
+                                    task_id,
+                                    reason_kind: loop_compaction_reason(&error),
+                                },
+                            )
+                            .await;
+                        let exit = failed_exit(
+                            ctx.host,
+                            state,
+                            LoopFailureKind::CompactionUnavailable,
+                            None,
+                        )?;
+                        return Ok(CompactionOutput {
+                            state: Box::new(LoopExecutionState::initial_for_run(
+                                ctx.host.run_context(),
+                            )),
+                            pending_input_ack: input.pending_input_ack,
+                            exit: Some(exit),
+                        });
+                    }
+                    Err(_) => {
+                        let error = LoopCompactionError::InferenceFailed {
+                            safe_summary: safe("compaction deadline exceeded"),
+                        };
                         CheckpointStage
                             .emit_progress(
                                 ctx,
@@ -110,13 +140,13 @@ impl ExecutorStage<CompactionInput> for CompactionStage {
                 state
                     .compaction_state
                     .message_index
-                    .retain(|entry| entry.sequence >= drop_through_seq);
+                    .retain(|entry| entry.sequence > drop_through_seq);
                 CheckpointStage
                     .emit_progress(
                         ctx,
                         LoopProgressEvent::CompactionCompleted {
                             task_id,
-                            compression_ratio_ppm: 1_000_000,
+                            compression_ratio_ppm: response.compression_ratio_ppm,
                         },
                     )
                     .await;
@@ -139,5 +169,9 @@ fn loop_compaction_reason(error: &LoopCompactionError) -> LoopSafeSummary {
         LoopCompactionError::InferenceFailed { .. } => "inference failed",
         LoopCompactionError::PersistenceFailed { .. } => "persistence failed",
     };
+    LoopSafeSummary::new(value).unwrap_or_else(|_| LoopSafeSummary::model_gateway_failed())
+}
+
+fn safe(value: &'static str) -> LoopSafeSummary {
     LoopSafeSummary::new(value).unwrap_or_else(|_| LoopSafeSummary::model_gateway_failed())
 }

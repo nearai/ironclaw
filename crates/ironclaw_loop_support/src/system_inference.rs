@@ -7,8 +7,8 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostErrorKind, InstructionBundleMaterializedMessage,
         InstructionMaterializationStore, LoopModelMessage, LoopModelPort, LoopModelRequest,
-        LoopProgressEvent, LoopProgressPort, LoopRunContext, LoopSafeSummary, ParentLoopOutput,
-        SystemInferenceError, SystemInferencePort, SystemInferenceRequest, SystemInferenceResponse,
+        LoopProgressPort, LoopRunContext, LoopSafeSummary, ParentLoopOutput, SystemInferenceError,
+        SystemInferencePort, SystemInferenceRequest, SystemInferenceResponse,
     },
 };
 
@@ -17,7 +17,6 @@ use crate::token_estimator::estimate_tokens_from_chars;
 #[derive(Clone)]
 pub struct ModelGatewayBackedSystemInferencePort {
     model: Arc<dyn LoopModelPort>,
-    progress: Arc<dyn LoopProgressPort>,
     run_context: LoopRunContext,
     materialization_store: Arc<dyn InstructionMaterializationStore>,
 }
@@ -25,13 +24,12 @@ pub struct ModelGatewayBackedSystemInferencePort {
 impl ModelGatewayBackedSystemInferencePort {
     pub fn new(
         model: Arc<dyn LoopModelPort>,
-        progress: Arc<dyn LoopProgressPort>,
+        _progress: Arc<dyn LoopProgressPort>,
         run_context: LoopRunContext,
         materialization_store: Arc<dyn InstructionMaterializationStore>,
     ) -> Self {
         Self {
             model,
-            progress,
             run_context,
             materialization_store,
         }
@@ -46,17 +44,6 @@ impl SystemInferencePort for ModelGatewayBackedSystemInferencePort {
     ) -> Result<SystemInferenceResponse, SystemInferenceError> {
         if estimate_tokens_from_chars(&request.input_text).as_u64() > request.max_input_tokens {
             return Err(SystemInferenceError::InputTooLarge);
-        }
-
-        if let Err(error) = self
-            .progress
-            .emit_loop_progress(LoopProgressEvent::CompactionStarted {
-                task_id: request.task_id,
-                initiator: ironclaw_turns::run_profile::CompactionInitiator::Auto,
-            })
-            .await
-        {
-            tracing::debug!(safe_error = %error, "system inference progress start failed");
         }
 
         let started = Instant::now();
@@ -158,7 +145,7 @@ mod tests {
     use ironclaw_turns::{
         RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
         run_profile::{
-            InMemoryInstructionMaterializationStore, InMemoryRunProfileResolver,
+            InMemoryInstructionMaterializationStore, InMemoryRunProfileResolver, LoopProgressEvent,
             SystemInferenceIdentity, SystemInferenceTaskId, SystemPromptSource, SystemTaskKind,
         },
     };

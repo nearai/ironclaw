@@ -2,13 +2,14 @@ use async_trait::async_trait;
 use ironclaw_turns::{
     LoopExit,
     run_profile::{
-        CapabilitySurfaceVersion, LoopModelCapabilityView, LoopModelMessage, LoopProgressEvent,
-        VisibleCapabilityRequest, VisibleCapabilitySurface,
+        CapabilitySurfaceVersion, LoopContextCompactionKind, LoopContextCompactionMetadata,
+        LoopModelCapabilityView, LoopModelMessage, LoopProgressEvent, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     },
 };
 use tracing::debug;
 
-use crate::state::LoopExecutionState;
+use crate::state::{IndexedMessageKind, LoopExecutionState, MessageIndexEntry};
 
 use super::{
     AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, HostStage,
@@ -34,6 +35,11 @@ pub(super) struct PromptOutput {
 pub(super) enum PromptStep {
     Prepared(Box<PromptOutput>),
     Exit(LoopExit),
+}
+
+pub(super) struct BuiltPromptBundle {
+    pub(super) messages: Vec<LoopModelMessage>,
+    pub(super) compaction_message_index: Vec<LoopContextCompactionMetadata>,
 }
 
 #[async_trait]
@@ -96,13 +102,14 @@ impl ExecutorStage<PromptInput> for PromptStage {
             CancelCheck::Exit(exit) => return Ok(PromptStep::Exit(exit)),
         };
 
-        let messages = build_prompt_bundle_for_surface(
+        let bundle = build_prompt_bundle_for_surface(
             ctx,
             &state,
             surface.version.clone(),
             capability_view.clone(),
         )
         .await?;
+        apply_compaction_index_from_prompt_bundle(&mut state, bundle.compaction_message_index);
         state = match CheckpointStage
             .cancel_if_requested_after_pending_input_ack(ctx, state, &mut pending_input_ack)
             .await?
@@ -114,7 +121,7 @@ impl ExecutorStage<PromptInput> for PromptStage {
             state,
             pending_input_ack,
             surface,
-            messages,
+            messages: bundle.messages,
             capability_view,
         })))
     }
@@ -125,7 +132,7 @@ pub(super) async fn build_prompt_bundle_for_surface(
     state: &LoopExecutionState,
     surface_version: CapabilitySurfaceVersion,
     capability_view: LoopModelCapabilityView,
-) -> Result<Vec<LoopModelMessage>, AgentLoopExecutorError> {
+) -> Result<BuiltPromptBundle, AgentLoopExecutorError> {
     let mut context_request = ctx.planner.context().plan_context_request(state).await;
     context_request.surface_version = Some(surface_version);
     context_request.capability_view = Some(capability_view);
@@ -152,5 +159,34 @@ pub(super) async fn build_prompt_bundle_for_surface(
         )
         .await;
 
-    Ok(prompt_bundle.messages)
+    Ok(BuiltPromptBundle {
+        messages: prompt_bundle.messages,
+        compaction_message_index: prompt_bundle.compaction_message_index,
+    })
+}
+
+pub(super) fn apply_compaction_index_from_prompt_bundle(
+    state: &mut LoopExecutionState,
+    index: Vec<LoopContextCompactionMetadata>,
+) {
+    state.compaction_state.message_index = index
+        .into_iter()
+        .map(|entry| MessageIndexEntry {
+            sequence: entry.sequence,
+            kind: match entry.kind {
+                LoopContextCompactionKind::User => IndexedMessageKind::User,
+                LoopContextCompactionKind::Assistant => IndexedMessageKind::Assistant,
+                LoopContextCompactionKind::System => IndexedMessageKind::System,
+                LoopContextCompactionKind::Summary => IndexedMessageKind::Summary,
+                LoopContextCompactionKind::Other => IndexedMessageKind::Other,
+            },
+            estimated_tokens: entry.estimated_tokens,
+        })
+        .collect();
+    state.compaction_state.last_observed_prompt_tokens = state
+        .compaction_state
+        .message_index
+        .iter()
+        .map(|entry| entry.estimated_tokens)
+        .sum();
 }

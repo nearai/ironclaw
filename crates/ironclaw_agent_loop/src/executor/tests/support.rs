@@ -361,6 +361,7 @@ impl ironclaw_turns::run_profile::LoopPromptPort for MockHost {
                 content_ref: LoopMessageRef::new("msg:user").expect("valid"),
             }],
             surface_version: self.prompt_surface_version.clone(),
+            compaction_message_index: Vec::new(),
             instruction_fingerprint: None,
             identity_message_count: 0,
             instruction_snippet_count: 0,

@@ -706,6 +706,25 @@ pub struct LoopContextMessage {
     pub message_ref: Option<LoopMessageRef>,
     pub role: String,
     pub safe_summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<LoopContextCompactionMetadata>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoopContextCompactionMetadata {
+    pub sequence: u64,
+    pub kind: LoopContextCompactionKind,
+    pub estimated_tokens: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopContextCompactionKind {
+    User,
+    Assistant,
+    System,
+    Summary,
+    Other,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1070,6 +1089,8 @@ pub struct LoopPromptBundle {
     pub bundle_ref: LoopPromptBundleRef,
     pub messages: Vec<LoopModelMessage>,
     pub surface_version: Option<CapabilitySurfaceVersion>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compaction_message_index: Vec<LoopContextCompactionMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruction_fingerprint: Option<InstructionBundleFingerprint>,
     #[serde(default)]
@@ -1348,6 +1369,8 @@ pub enum LoopCompactionMode {
 /// Request for host-managed context compaction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopCompactionRequest {
+    /// Unique task id shared by progress events and host-owned inference refs.
+    pub task_id: SystemInferenceTaskId,
     /// Thread whose canonical transcript should be compacted.
     pub thread_id: ThreadId,
     /// Previous compaction high-water mark, if any.
@@ -1367,6 +1390,8 @@ pub struct LoopCompactionRequest {
 pub struct LoopCompactionResponse {
     /// Summary artifact id persisted by the thread service.
     pub summary_artifact_id: String,
+    /// Output bytes divided by input bytes, scaled by 1,000,000.
+    pub compression_ratio_ppm: u32,
 }
 
 /// Failure classes returned by host-managed compaction.

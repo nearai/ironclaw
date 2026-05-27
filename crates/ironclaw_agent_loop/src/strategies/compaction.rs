@@ -1,6 +1,12 @@
 use crate::state::{IndexedMessageKind, LoopExecutionState};
 use ironclaw_turns::run_profile::LoopRunContext;
 
+/// Decides whether to replace older transcript context with a host-managed summary.
+///
+/// The strategy is pure policy: it reads durable compaction state and returns
+/// either `Skip` or the inclusive user-message boundary the executor should
+/// compact through. State mutation, transcript reads, inference, persistence,
+/// and progress events stay in the executor and host compaction port.
 pub(crate) trait CompactionStrategy: Send + Sync {
     fn should_compact(
         &self,
@@ -70,36 +76,22 @@ impl CompactionStrategy for DefaultCompactionStrategy {
             return CompactionDecision::Skip;
         }
 
-        let mut tail_tokens = 0_u64;
+        let mut tail_tokens_after_entry = 0_u64;
         for entry in state.compaction_state.message_index.iter().rev() {
-            tail_tokens = tail_tokens.saturating_add(entry.estimated_tokens);
-            if tail_tokens >= self.preserve_tail_tokens {
-                break;
-            }
-        }
-        let tail_floor = total_tokens.saturating_sub(tail_tokens);
-        let mut compacted_tokens = 0_u64;
-        let mut candidate = None;
-        for entry in &state.compaction_state.message_index {
-            compacted_tokens = compacted_tokens.saturating_add(entry.estimated_tokens);
-            if compacted_tokens > tail_floor {
-                break;
-            }
             if entry.kind == IndexedMessageKind::User
                 && Some(entry.sequence) > state.compaction_state.last_compacted_through_seq
+                && tail_tokens_after_entry <= self.preserve_tail_tokens
             {
-                candidate = Some(entry.sequence);
+                return CompactionDecision::Trigger {
+                    drop_through_seq: entry.sequence,
+                    preserve_tail_tokens: self.preserve_tail_tokens,
+                    deadline_ms: self.deadline_ms,
+                };
             }
+            tail_tokens_after_entry =
+                tail_tokens_after_entry.saturating_add(entry.estimated_tokens);
         }
-
-        match candidate {
-            Some(drop_through_seq) => CompactionDecision::Trigger {
-                drop_through_seq,
-                preserve_tail_tokens: self.preserve_tail_tokens,
-                deadline_ms: self.deadline_ms,
-            },
-            None => CompactionDecision::Skip,
-        }
+        CompactionDecision::Skip
     }
 }
 
@@ -164,7 +156,7 @@ mod tests {
         let strategy = DefaultCompactionStrategy {
             context_limit_tokens: 100,
             reserve_tokens: 10,
-            preserve_tail_tokens: 30,
+            preserve_tail_tokens: 60,
             deadline_ms: 7,
         };
 
@@ -172,7 +164,7 @@ mod tests {
             strategy.should_compact(&state, &context),
             CompactionDecision::Trigger {
                 drop_through_seq: 3,
-                preserve_tail_tokens: 30,
+                preserve_tail_tokens: 60,
                 deadline_ms: 7,
             }
         );

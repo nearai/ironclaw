@@ -3,14 +3,17 @@ use std::collections::VecDeque;
 use ironclaw_agent_loop::{
     executor::{AgentLoopExecutor, CanonicalAgentLoopExecutor},
     families,
-    state::{CheckpointKind, LoopExecutionState},
+    state::{
+        CheckpointKind, CompactionStrategyState, IndexedMessageKind, LoopExecutionState,
+        MessageIndexEntry,
+    },
     test_support::{
         MockAgentLoopDriverHost, MockHostCall, ScenarioScript, ScriptedCapabilityCall,
         ScriptedCapabilityOutcome, ScriptedModelResponse, capability_descriptor, capability_id,
     },
 };
 use ironclaw_turns::{
-    LoopBlockedKind, LoopExit, TurnRunId,
+    LoopBlockedKind, LoopExit, LoopFailureKind, TurnRunId,
     run_profile::{ConcurrencyHint, LoopRunInfoPort},
 };
 
@@ -34,6 +37,35 @@ async fn reply_only_completes() {
         other => panic!("expected completed exit, got {other:?}"),
     }
     checkpoints.assert_sequence(&[(CheckpointKind::BeforeModel, 0), (CheckpointKind::Final, 0)]);
+}
+
+#[tokio::test]
+async fn compaction_failure_returns_failed_exit() {
+    let (host, _) = MockAgentLoopDriverHost::builder()
+        .script(ScenarioScript::reply_only("hi"))
+        .build();
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.compaction_state = CompactionStrategyState {
+        force_compact_on_next_iteration: true,
+        message_index: vec![MessageIndexEntry {
+            sequence: 1,
+            kind: IndexedMessageKind::User,
+            estimated_tokens: 10,
+        }],
+        ..Default::default()
+    };
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(&families::default(), &host, state)
+        .await
+        .expect("loop execution should produce failed exit");
+
+    match exit {
+        LoopExit::Failed(failed) => {
+            assert_eq!(failed.reason_kind, LoopFailureKind::CompactionUnavailable);
+        }
+        other => panic!("expected failed exit, got {other:?}"),
+    }
 }
 
 #[tokio::test]

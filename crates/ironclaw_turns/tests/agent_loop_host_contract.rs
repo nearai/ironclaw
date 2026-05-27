@@ -310,11 +310,13 @@ async fn instruction_bundle_builder_orders_sections_and_rebuilds_deterministical
                 message_ref: Some(LoopMessageRef::new("msg:identity").unwrap()),
                 role: "system".to_string(),
                 safe_summary: "identity safe".to_string(),
+                compaction: None,
             }],
             messages: vec![LoopContextMessage {
                 message_ref: Some(LoopMessageRef::new("msg:user-message").unwrap()),
                 role: "user".to_string(),
                 safe_summary: "user safe".to_string(),
+                compaction: None,
             }],
             instruction_snippets: vec![
                 LoopContextSnippet {
@@ -733,6 +735,7 @@ async fn prompt_bundle_authority_consumes_grant_after_successful_model_authoriza
         bundle_ref: LoopPromptBundleRef::for_run(&context, "bundle-once").unwrap(),
         messages: messages.clone(),
         surface_version: None,
+        compaction_message_index: Vec::new(),
         instruction_fingerprint: None,
         identity_message_count: 0,
         instruction_snippet_count: 0,
@@ -1992,6 +1995,7 @@ impl RecordingAgentLoopHost {
             message_ref: Some(LoopMessageRef::new(message_ref.into()).unwrap()),
             role: "system".to_string(),
             safe_summary: safe_summary.into(),
+            compaction: None,
         });
         self
     }
@@ -2006,6 +2010,7 @@ impl RecordingAgentLoopHost {
             message_ref: Some(LoopMessageRef::new(message_ref.into()).unwrap()),
             role: role.into(),
             safe_summary: safe_summary.into(),
+            compaction: None,
         });
         self
     }
@@ -2105,6 +2110,7 @@ impl LoopContextPort for RecordingAgentLoopHost {
             message_ref: Some(LoopMessageRef::new("msg:user-message").unwrap()),
             role: "user".to_string(),
             safe_summary: self.context_message_safe_summary.clone(),
+            compaction: None,
         }];
         messages.extend(self.context_tail_messages.clone());
         Ok(LoopContextBundle {
@@ -2167,6 +2173,7 @@ impl LoopPromptPort for RecordingAgentLoopHost {
                 })
                 .collect(),
             surface_version: request.surface_version,
+            compaction_message_index: Vec::new(),
             instruction_fingerprint: None,
             identity_message_count: 0,
             instruction_snippet_count: 0,
