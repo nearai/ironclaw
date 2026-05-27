@@ -39,12 +39,12 @@ use ironclaw_trust::{HostTrustPolicy, TrustDecision, TrustError, TrustPolicy, Tr
 use crate::{
     BuiltinObligationHandler, BuiltinObligationServices, CancelRuntimeWorkOutcome,
     CancelRuntimeWorkRequest, CapabilitySurfaceVersion, HostRuntime, HostRuntimeError,
-    HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalGate, RuntimeBackendHealth,
-    RuntimeBlockedReason, RuntimeCapabilityCompleted, RuntimeCapabilityFailure,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
-    RuntimeFailureKind, RuntimeStatusRequest, RuntimeWorkId, RuntimeWorkSummary,
-    VisibleCapabilityRequest, VisibleCapabilitySurface, plan_capability,
-    surface::CapabilityCatalog,
+    HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalGate, RuntimeAuthGate,
+    RuntimeBackendHealth, RuntimeBlockedReason, RuntimeCapabilityCompleted,
+    RuntimeCapabilityFailure, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
+    RuntimeCapabilityResumeRequest, RuntimeFailureKind, RuntimeGateId, RuntimeStatusRequest,
+    RuntimeWorkId, RuntimeWorkSummary, VisibleCapabilityRequest, VisibleCapabilitySurface,
+    plan_capability, surface::CapabilityCatalog,
 };
 
 /// Default production wiring for [`HostRuntime`].
@@ -811,6 +811,14 @@ impl DefaultHostRuntime {
                     }
                 }
             }
+            CapabilityInvocationError::AuthorizationRequiresAuth { capability } => {
+                Ok(RuntimeCapabilityOutcome::AuthRequired(RuntimeAuthGate {
+                    gate_id: RuntimeGateId::new(),
+                    capability_id: capability,
+                    reason: RuntimeBlockedReason::AuthRequired,
+                    required_secrets: Vec::new(),
+                }))
+            }
             other => Ok(RuntimeCapabilityOutcome::Failed(failure_from(
                 other,
                 capability_id,
@@ -1105,6 +1113,7 @@ fn sanitized_failure_message(error: &CapabilityInvocationError) -> Option<String
         | AuthorizationDenied { .. }
         | UnsupportedObligations { .. }
         | ObligationFailed { .. }
+        | AuthorizationRequiresAuth { .. }
         | AuthorizationRequiresApproval { .. }
         | ApprovalRequestMismatch { .. }
         | ApprovalFingerprintMismatch { .. }
@@ -1126,6 +1135,9 @@ fn sanitized_failure_message(error: &CapabilityInvocationError) -> Option<String
 pub(crate) fn failure_kind_from(error: &CapabilityInvocationError) -> RuntimeFailureKind {
     match error {
         CapabilityInvocationError::UnknownCapability { .. } => RuntimeFailureKind::MissingRuntime,
+        CapabilityInvocationError::AuthorizationRequiresAuth { .. } => {
+            RuntimeFailureKind::Authorization
+        }
         CapabilityInvocationError::AuthorizationDenied { .. }
         | CapabilityInvocationError::UnsupportedObligations { .. }
         | CapabilityInvocationError::AuthorizationRequiresApproval { .. }

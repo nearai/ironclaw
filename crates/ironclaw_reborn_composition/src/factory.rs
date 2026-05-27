@@ -65,14 +65,15 @@ use ironclaw_turns::{
     InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore, InMemoryTurnStateStore,
 };
 
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use crate::RebornProductAuthServicePorts;
 use crate::default_system_prompt::seed_default_system_prompt;
 use crate::input::{RebornRuntimeProcessBinding, RebornStorageInput};
 use crate::lifecycle::{RebornLocalSkillManagementPort, build_local_skill_management_port};
 use crate::local_dev_mounts::{skill_context_mount_view, workspace_mount_view};
 use crate::{
     RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
-    RebornFacadeReadiness, RebornProductAuthServicePorts, RebornProductAuthServices,
-    RebornReadiness, RebornReadinessState,
+    RebornFacadeReadiness, RebornProductAuthServices, RebornReadiness, RebornReadinessState,
 };
 use crate::{
     available_extensions::{
@@ -270,6 +271,7 @@ fn auth_continuation_dispatcher(
     Arc::new(ProductAuthTurnGateResumeDispatcher::new(turn_coordinator))
 }
 
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn compose_product_auth_services(
     ports: RebornProductAuthServicePorts,
     turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
@@ -382,12 +384,13 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> = Arc::new(
         DefaultTurnCoordinator::new(Arc::clone(&store_graph.turn_state)),
     );
-    let product_auth = match product_auth_ports {
-        Some(ports) => compose_product_auth_services(ports, turn_coordinator.clone()),
-        None => Arc::new(RebornProductAuthServices::local_dev_in_memory(
-            auth_continuation_dispatcher(turn_coordinator.clone()),
+    let product_auth_services = match product_auth_ports {
+        Some(ports) => ports.into_services(auth_continuation_dispatcher(turn_coordinator.clone())),
+        None => RebornProductAuthServices::local_dev_in_memory(auth_continuation_dispatcher(
+            turn_coordinator.clone(),
         )),
     };
+    let product_auth = Arc::new(product_auth_services);
     let mut first_party_registry = builtin_first_party_registry()?;
     register_bundled_gsuite_first_party_handlers(
         &mut first_party_registry,

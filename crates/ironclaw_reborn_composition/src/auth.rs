@@ -74,6 +74,7 @@ pub struct RebornOAuthCallbackRequest {
 ///
 /// The browser-facing route chooses neither flow kind nor continuation. Those
 /// product-auth semantics stay here with the auth service boundary.
+#[allow(dead_code, reason = "used by upcoming Reborn OAuth setup route wiring")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RebornOAuthStartFlowRequest {
     pub(crate) scope: AuthProductScope,

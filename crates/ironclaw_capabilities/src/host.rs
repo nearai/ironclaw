@@ -12,7 +12,8 @@ use ironclaw_run_state::{
 use tracing::{debug, warn};
 
 use crate::helpers::{
-    CapabilityActionKind, approval_not_approved_error_kind, capability_lease_error_kind,
+    CapabilityActionKind, apply_run_state_transition_if_configured,
+    approval_not_approved_error_kind, capability_lease_error_kind,
     claim_error_may_be_concurrent_resume, complete_run_after_side_effect, fail_run_if_configured,
     invocation_fingerprint_for_kind, matching_approval_lease, resume_context_mismatch_kind,
     run_state_error_kind, validate_approval_request_matches_invocation,
@@ -229,11 +230,11 @@ where
                             error_kind = obligation_invocation_error_kind(&error),
                             "capability invoke obligation preparation failed"
                         );
-                        fail_run_if_configured(
+                        apply_run_state_transition_if_configured(
                             self.run_state,
                             &scope,
                             invocation_id,
-                            obligation_invocation_error_kind(&error),
+                            &error,
                         )
                         .await;
                         return Err(error);
@@ -759,11 +760,11 @@ where
         {
             Ok(outcome) => outcome,
             Err(error) => {
-                fail_run_if_configured(
+                apply_run_state_transition_if_configured(
                     Some(run_state),
                     &scope,
                     invocation_id,
-                    obligation_invocation_error_kind(&error),
+                    &error,
                 )
                 .await;
                 if let Err(revoke_error) = capability_leases
@@ -1132,11 +1133,11 @@ where
         {
             Ok(outcome) => outcome,
             Err(error) => {
-                fail_run_if_configured(
+                apply_run_state_transition_if_configured(
                     Some(run_state),
                     &scope,
                     invocation_id,
-                    obligation_invocation_error_kind(&error),
+                    &error,
                 )
                 .await;
                 if let Err(revoke_error) = capability_leases
@@ -1310,11 +1311,11 @@ where
                         obligation_outcome = outcome;
                     }
                     Err(error) => {
-                        fail_run_if_configured(
+                        apply_run_state_transition_if_configured(
                             self.run_state,
                             &scope,
                             invocation_id,
-                            obligation_invocation_error_kind(&error),
+                            &error,
                         )
                         .await;
                         return Err(error);
@@ -1638,6 +1639,11 @@ fn obligation_error_to_invocation(
                 obligations,
             }
         }
+        CapabilityObligationError::AuthRequired => {
+            CapabilityInvocationError::AuthorizationRequiresAuth {
+                capability: capability_id.clone(),
+            }
+        }
         CapabilityObligationError::Failed { kind } => CapabilityInvocationError::ObligationFailed {
             capability: capability_id.clone(),
             kind,
@@ -1646,9 +1652,5 @@ fn obligation_error_to_invocation(
 }
 
 fn obligation_invocation_error_kind(error: &CapabilityInvocationError) -> &'static str {
-    match error {
-        CapabilityInvocationError::UnsupportedObligations { .. } => "UnsupportedObligations",
-        CapabilityInvocationError::ObligationFailed { .. } => "ObligationFailed",
-        _ => "Obligation",
-    }
+    error.run_state_transition().error_kind()
 }
