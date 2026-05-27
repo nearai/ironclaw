@@ -92,7 +92,7 @@ async fn compaction_port_rejects_ranges_covering_hidden_statuses() {
 }
 
 #[tokio::test]
-async fn compaction_port_skips_model_hidden_capability_previews() {
+async fn compaction_port_rejects_ranges_covering_capability_previews() {
     let fixture = CompactionFixture::new().await;
     fixture.append_user("visible-one").await;
     fixture.append_preview().await;
@@ -107,20 +107,17 @@ async fn compaction_port_skips_model_hidden_capability_previews() {
     ));
     let port = HostManagedLoopCompactionPort::new(task, fixture.scope.clone());
 
-    let response = port
+    let error = port
         .compact_loop_context(fixture.request(3))
         .await
-        .expect("capability preview should not poison compaction");
+        .expect_err("capability previews should not produce ignored replacement summaries");
 
-    assert!(!response.summary_artifact_id.is_empty());
-    let input = inference.last_input();
-    assert!(input.contains("visible-one"));
-    assert!(input.contains("visible-two"));
-    assert!(!input.contains("preview"));
+    assert!(matches!(error, LoopCompactionError::InvalidCutPoint));
+    assert!(inference.last_input().is_empty());
 }
 
 #[tokio::test]
-async fn compaction_task_resolves_thread_scope_when_supported() {
+async fn compaction_task_rejects_resolved_thread_scope_mismatch() {
     let fixture = CompactionFixture::new().await;
     fixture.append_user("visible").await;
     let wrong_scope = ThreadScope {
@@ -139,9 +136,15 @@ async fn compaction_task_resolves_thread_scope_when_supported() {
     ));
     let port = HostManagedLoopCompactionPort::new(task, wrong_scope);
 
-    port.compact_loop_context(fixture.request(1))
+    let error = port
+        .compact_loop_context(fixture.request(1))
         .await
-        .expect("task should resolve the stored thread scope instead of trusting the port scope");
+        .expect_err("task should reject requests outside the run scope");
+
+    assert!(matches!(
+        error,
+        LoopCompactionError::PersistenceFailed { .. }
+    ));
 }
 
 #[tokio::test]

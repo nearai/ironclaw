@@ -8,6 +8,7 @@
 //! and rejects checkpoint-backed prompt state until a durable checkpoint prompt
 //! store is introduced.
 
+mod compaction;
 mod driver;
 mod host;
 mod instruction_bundle;
@@ -21,9 +22,14 @@ mod resolver;
 mod skill_context;
 mod snapshot;
 mod snippet_ref;
+mod system_inference;
 
 pub use crate::CapabilityActivityId;
 
+pub use compaction::{
+    CompactionInitiator, LoopCompactionError, LoopCompactionMode, LoopCompactionPort,
+    LoopCompactionRequest, LoopCompactionResponse,
+};
 pub use driver::{
     AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverResumeRequest,
     AgentLoopDriverRunRequest,
@@ -35,11 +41,10 @@ pub use host::{
     CapabilityDeniedReasonKind, CapabilityDeniedReasonKindValue, CapabilityDescriptorView,
     CapabilityFailure, CapabilityFailureKind, CapabilityFailureKindValue, CapabilityInputRef,
     CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, CapabilitySurfaceVersion,
-    CompactionInitiator, ConcurrencyHint, FinalizeAssistantMessage, LoadCheckpointPayloadRequest,
+    ConcurrencyHint, FinalizeAssistantMessage, LoadCheckpointPayloadRequest,
     LoadedCheckpointPayload, LoopCancelReasonKind, LoopCancellationPort, LoopCancellationSignal,
     LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest,
-    LoopCheckpointStateRef, LoopCompactionError, LoopCompactionMode, LoopCompactionPort,
-    LoopCompactionRequest, LoopCompactionResponse, LoopContextBundle, LoopContextCompactionKind,
+    LoopCheckpointStateRef, LoopContextBundle, LoopContextCompactionKind,
     LoopContextCompactionMetadata, LoopContextMessage, LoopContextPort, LoopContextRequest,
     LoopContextSnippet, LoopContextSnippetMetadata, LoopDriverNoteKind, LoopGateKind,
     LoopInlineMessage, LoopInlineMessageRole, LoopInput, LoopInputAck, LoopInputAckToken,
@@ -50,9 +55,7 @@ pub use host::{
     LoopPromptPort, LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort,
     ModelStreamChunk, ParentLoopOutput, ProcessHandleSummary, PromptMode, ProviderToolCall,
     ProviderToolCallCapabilityIds, ProviderToolCallReference, ProviderToolCallReplay,
-    ProviderToolDefinition, StageCheckpointPayloadRequest, SystemInferenceError,
-    SystemInferenceIdentity, SystemInferencePort, SystemInferenceRequest, SystemInferenceResponse,
-    SystemInferenceTaskId, SystemPromptSource, SystemTaskKind, UpdateAssistantDraft,
+    ProviderToolDefinition, StageCheckpointPayloadRequest, UpdateAssistantDraft,
     VisibleCapabilityRequest, VisibleCapabilitySurface, sanitize_model_visible_text,
     validate_model_route_component_value,
 };
@@ -100,3 +103,7 @@ pub use skill_context::{
 };
 pub use snapshot::{PersonalContextPolicy, ResolvedRunProfile};
 pub use snippet_ref::memory_snippet_display_ref;
+pub use system_inference::{
+    SystemInferenceError, SystemInferenceIdentity, SystemInferencePort, SystemInferenceRequest,
+    SystemInferenceResponse, SystemInferenceTaskId, SystemPromptSource, SystemTaskKind,
+};

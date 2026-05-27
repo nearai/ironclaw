@@ -4,8 +4,8 @@ use ironclaw_turns::run_profile::AgentLoopDriverHost;
 use crate::planner::AgentLoopPlannerInternal;
 
 use super::{
-    AgentLoopExecutorError, AssistantReplyStage, BudgetStage, CapabilityStage, CompactionStage,
-    ExitStage, InputStage, ModelStage, PromptStage, StopStage,
+    AgentLoopExecutorError, AssistantReplyStage, BudgetStage, CapabilityStage, ExitStage,
+    InputStage, ModelStage, PromptStage, StopStage,
 };
 
 #[derive(Clone, Copy)]
@@ -29,7 +29,6 @@ pub(crate) trait ExecutorStage<Input>: Send + Sync {
 pub(crate) struct DefaultExecutorPipeline {
     pub(crate) budget: BudgetStage,
     pub(crate) input: InputStage,
-    pub(crate) compaction: CompactionStage,
     pub(crate) prompt: PromptStage,
     pub(crate) model: ModelStage,
     pub(crate) assistant_reply: AssistantReplyStage,

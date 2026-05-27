@@ -14,14 +14,14 @@ use ironclaw_turns::{
         ContextProfileId, FinalizeAssistantMessage, LoopCancelReasonKind, LoopCancellationPort,
         LoopCancellationSignal, LoopCheckpointKind, LoopCheckpointRequest, LoopCheckpointStateRef,
         LoopCompactionError, LoopCompactionRequest, LoopCompactionResponse, LoopContextBundle,
-        LoopContextRequest, LoopDriverId, LoopInputAck, LoopInputAckToken, LoopInputBatch,
-        LoopInputCursor, LoopInputCursorToken, LoopModelMessage, LoopModelRequest,
-        LoopModelResponse, LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest,
-        LoopRunContext, ModelProfileId, ModelStreamChunk, ParentLoopOutput, ProviderToolCallReplay,
-        RedactedRunProfileProvenance, ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier,
-        RunClassId, RunProfileFingerprint, RuntimeProfileConstraints, SchedulingClass,
-        StageCheckpointPayloadRequest, SteeringPolicy, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        LoopContextCompactionMetadata, LoopContextRequest, LoopDriverId, LoopInputAck,
+        LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopModelMessage,
+        LoopModelRequest, LoopModelResponse, LoopPromptBundle, LoopPromptBundleRef,
+        LoopPromptBundleRequest, LoopRunContext, ModelProfileId, ModelStreamChunk,
+        ParentLoopOutput, ProviderToolCallReplay, RedactedRunProfileProvenance, ResolvedRunProfile,
+        ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
+        RuntimeProfileConstraints, SchedulingClass, StageCheckpointPayloadRequest, SteeringPolicy,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 
@@ -43,6 +43,7 @@ pub(super) struct MockHost {
     model_errors: Arc<Mutex<VecDeque<AgentLoopHostError>>>,
     model_requests: Arc<Mutex<Vec<LoopModelRequest>>>,
     prompt_requests: Arc<Mutex<Vec<LoopPromptBundleRequest>>>,
+    prompt_compaction_indexes: Arc<Mutex<VecDeque<Vec<LoopContextCompactionMetadata>>>>,
     input_batches: Arc<Mutex<VecDeque<LoopInputBatch>>>,
     acked_input_tokens: Arc<Mutex<Vec<LoopInputAckToken>>>,
     batch_outcomes: Arc<Mutex<VecDeque<ironclaw_turns::run_profile::CapabilityBatchOutcome>>>,
@@ -79,6 +80,7 @@ impl MockHost {
             model_errors: Arc::new(Mutex::new(VecDeque::new())),
             model_requests: Arc::new(Mutex::new(Vec::new())),
             prompt_requests: Arc::new(Mutex::new(Vec::new())),
+            prompt_compaction_indexes: Arc::new(Mutex::new(VecDeque::new())),
             input_batches: Arc::new(Mutex::new(VecDeque::new())),
             acked_input_tokens: Arc::new(Mutex::new(Vec::new())),
             batch_outcomes: Arc::new(Mutex::new(VecDeque::new())),
@@ -113,6 +115,22 @@ impl MockHost {
         version: Option<CapabilitySurfaceVersion>,
     ) -> Self {
         self.prompt_surface_version = version;
+        self
+    }
+
+    pub(super) fn with_prompt_compaction_index(
+        self,
+        index: Vec<LoopContextCompactionMetadata>,
+    ) -> Self {
+        *self.prompt_compaction_indexes.lock().expect("lock") = VecDeque::from([index]);
+        self
+    }
+
+    pub(super) fn with_prompt_compaction_indexes(
+        self,
+        indexes: Vec<Vec<LoopContextCompactionMetadata>>,
+    ) -> Self {
+        *self.prompt_compaction_indexes.lock().expect("lock") = indexes.into();
         self
     }
 
@@ -378,7 +396,12 @@ impl ironclaw_turns::run_profile::LoopPromptPort for MockHost {
                 content_ref: LoopMessageRef::new("msg:user").expect("valid"),
             }],
             surface_version: self.prompt_surface_version.clone(),
-            compaction_message_index: Vec::new(),
+            compaction_message_index: self
+                .prompt_compaction_indexes
+                .lock()
+                .expect("lock")
+                .pop_front()
+                .unwrap_or_default(),
             instruction_fingerprint: None,
             identity_message_count: 0,
             instruction_snippet_count: 0,

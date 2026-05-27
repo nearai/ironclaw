@@ -23,13 +23,14 @@ use ironclaw_turns::{
         CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass, ConcurrencyHint, ContextProfileId,
         FinalizeAssistantMessage, LoopCancellationPort, LoopCancellationSignal, LoopCheckpointKind,
         LoopCheckpointRequest, LoopCheckpointStateRef, LoopCompactionError, LoopCompactionRequest,
-        LoopCompactionResponse, LoopContextBundle, LoopContextRequest, LoopDriverId, LoopInput,
-        LoopInputAck, LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputCursorToken,
-        LoopModelMessage, LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopPromptBundle,
-        LoopPromptBundleRef, LoopPromptBundleRequest, LoopRunContext, LoopRunInfoPort,
-        ModelProfileId, ModelStreamChunk, ParentLoopOutput, ProviderToolCallReference,
-        RedactedRunProfileProvenance, ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier,
-        RunClassId, RunProfileFingerprint, RuntimeProfileConstraints, SchedulingClass,
+        LoopCompactionResponse, LoopContextBundle, LoopContextCompactionMetadata,
+        LoopContextRequest, LoopDriverId, LoopInput, LoopInputAck, LoopInputAckToken,
+        LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopModelMessage, LoopModelRequest,
+        LoopModelResponse, LoopProgressEvent, LoopPromptBundle, LoopPromptBundleRef,
+        LoopPromptBundleRequest, LoopRunContext, LoopRunInfoPort, ModelProfileId, ModelStreamChunk,
+        ParentLoopOutput, ProviderToolCallReference, RedactedRunProfileProvenance,
+        ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier, RunClassId,
+        RunProfileFingerprint, RuntimeProfileConstraints, SchedulingClass,
         StageCheckpointPayloadRequest, SteeringPolicy, VisibleCapabilityRequest,
         VisibleCapabilitySurface,
     },
@@ -51,6 +52,7 @@ pub struct MockAgentLoopDriverHost {
     call_log: Mutex<Vec<MockHostCall>>,
     checkpoints: Arc<CheckpointRecorder>,
     visible_capabilities: Vec<CapabilityDescriptorView>,
+    prompt_compaction_indexes: Mutex<VecDeque<Vec<LoopContextCompactionMetadata>>>,
     staged_iterations: Mutex<VecDeque<u32>>,
     fail_prompt_with: Mutex<Option<AgentLoopHostErrorKind>>,
     fail_model_with: Mutex<Option<AgentLoopHostErrorKind>>,
@@ -99,6 +101,7 @@ pub struct MockAgentLoopDriverHostBuilder {
     run_context: LoopRunContext,
     script: ScenarioScript,
     visible_capabilities: Vec<CapabilityDescriptorView>,
+    prompt_compaction_indexes: VecDeque<Vec<LoopContextCompactionMetadata>>,
     fail_prompt_with: Option<AgentLoopHostErrorKind>,
     fail_model_with: Option<AgentLoopHostErrorKind>,
     compaction_result: Result<LoopCompactionResponse, LoopCompactionError>,
@@ -115,6 +118,7 @@ impl MockAgentLoopDriverHostBuilder {
                 capability_id("demo.echo"),
                 ConcurrencyHint::SafeForParallel,
             )],
+            prompt_compaction_indexes: VecDeque::new(),
             fail_prompt_with: None,
             fail_model_with: None,
             compaction_result: Err(LoopCompactionError::InputTooLarge),
@@ -137,6 +141,21 @@ impl MockAgentLoopDriverHostBuilder {
     /// Overrides the visible capability surface descriptors.
     pub fn visible_capabilities(mut self, descriptors: Vec<CapabilityDescriptorView>) -> Self {
         self.visible_capabilities = descriptors;
+        self
+    }
+
+    /// Sets the compaction metadata returned by prompt bundle construction.
+    pub fn prompt_compaction_index(mut self, index: Vec<LoopContextCompactionMetadata>) -> Self {
+        self.prompt_compaction_indexes = VecDeque::from([index]);
+        self
+    }
+
+    /// Sets the compaction metadata returned by successive prompt bundle builds.
+    pub fn prompt_compaction_indexes(
+        mut self,
+        indexes: Vec<Vec<LoopContextCompactionMetadata>>,
+    ) -> Self {
+        self.prompt_compaction_indexes = indexes.into();
         self
     }
 
@@ -177,6 +196,7 @@ impl MockAgentLoopDriverHostBuilder {
                 call_log: Mutex::new(Vec::new()),
                 checkpoints: checkpoints.clone(),
                 visible_capabilities: self.visible_capabilities,
+                prompt_compaction_indexes: Mutex::new(self.prompt_compaction_indexes),
                 staged_iterations: Mutex::new(VecDeque::new()),
                 fail_prompt_with: Mutex::new(self.fail_prompt_with),
                 fail_model_with: Mutex::new(self.fail_model_with),
@@ -591,7 +611,9 @@ impl ironclaw_turns::run_profile::LoopPromptPort for MockAgentLoopDriverHost {
                 content_ref: loop_message_ref("msg:user"),
             }],
             surface_version: Some(surface_version()),
-            compaction_message_index: Vec::new(),
+            compaction_message_index: lock_or_panic(&self.prompt_compaction_indexes)
+                .pop_front()
+                .unwrap_or_default(),
             instruction_fingerprint: None,
             identity_message_count: 0,
             instruction_snippet_count: 0,

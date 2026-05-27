@@ -44,20 +44,20 @@ Making this work would require contract changes to `turns-agent-loop.md`, `turn-
 
 Subagents are LLM-callable delegated work with a goal, parent-scope inheritance, completion handoff, and entry in the subagent tree (`crates/ironclaw_loop_support/src/subagent_spawn_port.rs`). Compaction is system-triggered maintenance, not delegated work. Conflating the two pollutes the subagent contract and the subagent observability tree.
 
-### Port + stage + task pattern
+### Prompt planning + task pattern
 
-The compaction call runs inside `DefaultExecutorPipeline` for the main turn run, using the already-held lease. It calls a new `SystemInferencePort` that wraps `LoopModelPort::stream_model` with locked-down identity (system prompt loaded from a file, no tools — enforced structurally by the adapter constructing the request with an empty tool list, never by a caller-supplied flag). Recovery for transient model errors flows through the existing `DefaultRecoveryStrategy`. Cost flows through the existing `LoopModelBudgetAccountant`. Cancellation flows through `LoopCancellationPort`. No new run is claimed; no contract is changed.
+Compaction is part of prompt planning for the main turn run, using the already-held lease. `PromptStage` builds the candidate prompt bundle, applies the prompt-owned compaction index, asks the compaction strategy, and when needed calls the host `LoopCompactionPort`. After successful durable compaction, prompt planning checkpoints, acks pending input, and rebuilds the final prompt bundle before model dispatch. No new run is claimed; no contract is changed.
 
-The same port and pattern serve future system inference tasks (goal refresh, error classification, memory consolidation). Each new task lands as a new `agent_loop` strategy + executor stage + (optionally) `loop_support` task module, reusing the port. Trivial two-call tasks live inline in their stage; only tasks with real branching, validation, or invariant logic earn a dedicated module.
+`SystemInferencePort` is the host-owned inference boundary used by the compaction task. The Reborn implementation dispatches directly through the host-managed model gateway with already-sanitized system/input text, no assistant prompt-bundle authority, and no capability surface. The same port and pattern serve future system inference tasks (goal refresh, error classification, memory consolidation). Tasks with real branching, validation, or invariant logic live in `loop_support` task modules.
 
 ## 4. Ownership and file map
 
 All listed paths are Reborn-owned crates. Cross-crate dependency rules and architecture boundary tests are exercised by `cargo test -p ironclaw_architecture` (run after any dependency, public API, facade, scope, or boundary change per `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs` and `reborn_composition_boundaries.rs`).
 
 ```text
-crates/ironclaw_turns/src/run_profile/host.rs
-  ADD trait SystemInferencePort                       (peer to LoopModelPort
-                                                       on AgentLoopDriverHost)
+crates/ironclaw_turns/src/run_profile/system_inference.rs
+  ADD trait SystemInferencePort                       (host-owned internal
+                                                       inference boundary)
   ADD types: SystemInferenceRequest, SystemInferenceResponse,
              SystemInferenceIdentity, SystemTaskKind,
              SystemPromptSource, SystemInferenceError (sanitized, no raw
@@ -65,6 +65,14 @@ crates/ironclaw_turns/src/run_profile/host.rs
                                                        strings)
   ADD newtype SystemInferenceTaskId(Uuid)             (validated, serde
                                                        try_from = "String")
+
+crates/ironclaw_turns/src/run_profile/compaction.rs
+  ADD trait LoopCompactionPort
+  ADD types: LoopCompactionRequest, LoopCompactionResponse,
+             LoopCompactionError, LoopCompactionMode
+  ADD enum CompactionInitiator { Auto, Overflow, SubagentScoped }
+
+crates/ironclaw_turns/src/run_profile/host.rs
   ADD LoopProgressEvent variants:
       CompactionStarted, CompactionCompleted, CompactionFailed,
       GoalRefreshStarted, GoalRefreshCompleted, GoalRefreshFailed,
@@ -76,7 +84,6 @@ crates/ironclaw_turns/src/run_profile/host.rs
        variants returning their stable wire string
        (compaction_started, compaction_completed, compaction_failed,
         compaction_leak_detected, goal_refresh_started, ...).
-  ADD enum CompactionInitiator { Auto, Overflow, SubagentScoped }
   REUSE LoopSafeSummary (already public in run_profile/host.rs) for all
         event reason_kind fields — do not introduce a parallel safe-summary
         type.
@@ -170,10 +177,9 @@ crates/ironclaw_loop_support/src/compaction_task.rs                        NEW
   run(thread_id,
       last_compacted_through_seq: Option<u64>,        // EXPLICIT param;
                                                       // None for first
-                                                      // cycle. Caller
-                                                      // (CompactionStage)
-                                                      // passes from state
-                                                      // slot.
+                                                      // cycle. Prompt
+                                                      // planning passes from
+                                                      // the state slot.
       drop_through_seq,
       preserve_tail_tokens,
       mode,
@@ -372,39 +378,28 @@ crates/ironclaw_agent_loop/src/state/slots.rs
   exhaustive struct literal; adding fields without updating it is a compile
   error.
 
-  Note: the per-tick collision-avoidance flag
-  (compaction_fired_this_iteration) lives as a tick-local boolean on
-  DefaultExecutorPipeline, NOT on LoopExecutionState. It is set by
-  CompactionStage on Trigger and read by GoalRefreshStage on the same
-  tick. It is reset implicitly on every tick because each tick
-  constructs the local. Placing it off LoopExecutionState keeps the
-  checkpoint payload free of transient coordination state per
-  state/CLAUDE.md "Store only loop-safe data: refs, cursors, counters,
-  versions, digests, compact safe summaries".
-
-crates/ironclaw_agent_loop/src/executor/compaction.rs                      NEW
-  pub(super) struct CompactionStage;
-  CompactionStage::process
-    0. Use the latest executor-local CompactionPromptSnapshot produced by
-       PromptStage from LoopPromptBundle.compaction_message_index. If the
-       snapshot is empty, the strategy returns Skip.
-    1. Consult strategy.should_compact(state, ctx).
-    2. On Skip: return unchanged state.
-    3. On Trigger: dispatch CompactionTask through the host's
-       system_inference_port and session_thread_service. Pass
-       last_compacted_through_seq from the state slot explicitly into
-       the task signature. Executor stages import zero types from
-       ironclaw_loop_support; the task wiring is constructed inside
-       AgentLoopDriverHost implementations.
-    4. On Ok(summary_id): set
+crates/ironclaw_agent_loop/src/executor/prompt.rs
+  PromptStage prompt-planning compaction:
+    0. Build a candidate prompt bundle.
+    1. Apply LoopPromptBundle.compaction_message_index into the transient
+       CompactionPromptSnapshot. If the snapshot is empty, the strategy
+       returns Skip.
+    2. Consult strategy.should_compact(state, ctx).
+    3. On Skip: use the candidate prompt bundle unchanged.
+    4. On Trigger: dispatch through the host's LoopCompactionPort. Pass
+       last_compacted_through_seq from the state slot explicitly into the
+       request. Executor stages import zero types from ironclaw_loop_support;
+       compaction task wiring is constructed inside AgentLoopDriverHost
+       implementations.
+    5. On Ok(summary_id): set
          state.compaction_state.last_compacted_through_seq = drop_through_seq
          state.compaction_state.force_compact_on_next_iteration = false
          state.compaction_prompt.retain_after_sequence(drop_through_seq)
-         state.compaction_fired_this_iteration = true         // collision
-                                                              // signal
          (Phase 3 reads force_compact and clears it; Phase 1 just sets
          it false defensively.)
-    5. On Err(error):
+       Then write a BeforeModel checkpoint, ack pending input, and rebuild the
+       final prompt bundle.
+    6. On Err(error):
        - InvalidCutPoint | InputTooLarge | InjectionDetected | LeakDetected:
          emit CompactionFailed event with sanitized reason;
          return LoopFailureKind::CompactionUnavailable.
@@ -484,36 +479,25 @@ crates/ironclaw_agent_loop/src/executor/goal_refresh.rs                    NEW (
 
 crates/ironclaw_agent_loop/src/executor/canonical.rs
   EDIT insertion order:
-    (top of each tick) construct tick-local
-        let mut compaction_fired_this_iteration: bool = false;
     InputDrainStage
-    CompactionStage     NEW (Phase 1) — sets compaction_fired_this_iteration
-                                        = true on Trigger Ok path
-    GoalRefreshStage    NEW (Phase 2) — reads
-                                        compaction_fired_this_iteration; if
-                                        true, skips its LLM call.
-    PromptStage
+    PromptStage         EDIT (Phase 1) — owns candidate prompt build,
+                                        optional compaction, checkpoint/ack,
+                                        and final prompt rebuild.
+    GoalRefreshStage    NEW (Phase 2) — must observe prompt-planning
+                                        compaction and avoid duplicate
+                                        system inference in the same tick.
     ModelStage
     AssistantReplyStage / CapabilityStage
     CheckpointStage / BudgetStage / StopStage / LoopExitStage
 
-  Note (Phase 2): CompactionStage runs BEFORE GoalRefreshStage. If both
-  trigger on the same iteration (compaction threshold met AND N=5 goal
-  refresh cadence), CompactionStage runs first and the tick-local
-  compaction_fired_this_iteration boolean is set true. GoalRefreshStage
-  reads it from the pipeline-local context (NOT from LoopExecutionState
-  — transient coordination doesn't belong in the checkpoint payload)
-  and skips the LLM call, updating only its tracking sequence without
-  incrementing refresh_count. This prevents the double-LLM-call
-  collision and keeps the checkpoint serde shape free of per-tick
-  transient state.
+  Note (Phase 2): any collision marker stays tick-local, NOT on
+  LoopExecutionState. Transient coordination does not belong in checkpoint
+  payloads.
 
 crates/ironclaw_agent_loop/src/executor/pipeline.rs
-  EDIT (Phase 1): add named field to DefaultExecutorPipeline:
-        compaction: CompactionStage,
   EDIT (Phase 2): add named field:
         goal_refresh: GoalRefreshStage,
-  EDIT: pipeline constructor wires each with its default strategy.
+  EDIT: pipeline constructor wires the default strategies.
 
 crates/ironclaw_agent_loop/src/executor/mapping.rs
   EDIT honor_retry_alteration                              (Phase 3)
@@ -535,28 +519,14 @@ crates/ironclaw_agent_loop/src/executor/mapping.rs
 ```text
 SystemInferencePort                                    (in ironclaw_turns)
   async fn call(&self, request: SystemInferenceRequest)
-    -> Result<SystemInferenceResponse, SystemInferenceError> {
-    // Default returns Err(Unavailable) so existing concrete
-    // AgentLoopDriverHost implementations (RebornLoopDriverHost,
-    // ResumePayloadHost, MockAgentLoopDriverHost, test hosts in
-    // crates/ironclaw_turns/tests and product workflow tests)
-    // compile without changes. Only ModelGatewayBackedSystemInferencePort
-    // (loop_support) overrides with the real implementation.
-    Err(SystemInferenceError::ProviderUnavailable {
-      safe_summary: LoopSafeSummary::new(
-        "system inference port not configured")?,
-    })
-  }
+    -> Result<SystemInferenceResponse, SystemInferenceError>
 
 SystemInferenceRequest
-  task_kind: SystemTaskKind                            // wire-stable enum
-  // NOTE: no thread_scope field. CompactionTask / GoalRefreshStage
-  // derive scope from thread_id via SessionThreadService::resolve_scope
-  // before constructing this request — and the SystemInferencePort
-  // itself never reads scope. Cost accounting flows through
-  // LoopModelBudgetAccountant.post_model_call with the LoopRunContext
-  // that the port already holds.
-  identity: SystemInferenceIdentity                    // prompt + model route
+  task_id: SystemInferenceTaskId
+  identity: SystemInferenceIdentity                    // task kind + prompt source
+  input_text: String                                   // sanitized task input
+  max_input_tokens: u64
+  deadline_ms: u64
   input_text: String                                   // pre-composed by
                                                        // CompactionTask
                                                        // (already escaped +
@@ -612,14 +582,13 @@ SystemTaskKind                                         // #[serde(rename_all =
 
 SystemInferenceError                                   // sanitized at
                                                        // boundary
-  InputTooLarge { limit: EstimatedTokenCount, observed: EstimatedTokenCount }
-  Timeout { deadline_ms: u64 }
+  InputTooLarge
+  Timeout
   Cancelled
-  ProviderUnavailable { safe_summary: LoopSafeSummary }
-  Internal { safe_summary: LoopSafeSummary }
+  Failed { safe_summary: LoopSafeSummary }
 ```
 
-`SystemInferencePort` is a peer to `LoopModelPort` and `LoopPromptPort` on `AgentLoopDriverHost` (open question resolved: directly on the host trait, not a supertrait subset). The default executor stages obtain it via the host trait.
+`SystemInferencePort` is a host-owned internal inference boundary used by compaction task plumbing. `AgentLoopDriverHost` exposes `LoopCompactionPort`, not raw system inference; concrete host composition wires system inference behind that compaction port.
 
 ### `ThreadGoal` field on `SessionThreadRecord`
 
@@ -693,6 +662,7 @@ SummaryKind                                            // NEW typed enum
                                                        // additive
 
 CreateSummaryArtifactRequest
+  scope: ThreadScope
   thread_id: <thread id>
   start_sequence: <earliest message seq in compacted range>
   end_sequence: <drop_through_seq>
@@ -701,10 +671,13 @@ CreateSummaryArtifactRequest
   content: MessageContent { text: <ANTI_INJECTION_PREFIX +
                                    8-section markdown wrapped in
                                    <summary>...</summary>> }
-  model_context_policy: None                           // reserved for future
-  // NO scope field. SessionThreadService::create_summary_artifact
-  // derives scope internally from thread_id via resolve_scope. Closes
-  // IDOR surface — matches UpdateThreadGoalRequest pattern.
+  model_context_policy: Option<SummaryModelContextPolicy>
+
+SummaryModelContextPolicy                              // NEW typed enum
+  ReplaceRangeWhenSelected
+
+Compaction validates the resolved thread scope against the current run scope
+before reading transcript ranges or persisting summaries.
 ```
 
 Trigger reason (auto vs overflow vs subagent) is observability metadata on the `LoopProgressEvent` stream, not on the durable artifact. Same content = same artifact regardless of why it was made.
@@ -881,7 +854,7 @@ The compaction task adapter:
 2. Loads the persisted `ThreadGoal` (or `None`). Wraps the goal statement in `<persisted_goal>...</persisted_goal>` with `<`, `>`, `&` XML-escaped (same escape discipline as message bodies). If `None`, the wrapper is omitted entirely.
 3. Runs `InjectionScanner` per raw message body BEFORE serialization. Any hit → `InjectionDetected` hard error.
 4. Serializes the transcript head into the `<conversation>` block with per-message structural delimiters and escaped `<`, `>`, `&` in message bodies. Tracks accumulated bytes; aborts as soon as the cap is exceeded (no full-buffer allocation).
-5. Calls `SystemInferencePort.call` with empty tools, `max_output_tokens = 20_000`, `model_route = None`, `max_input_tokens = (ctx_window_tokens - reserve)`, `deadline_ms = 30_000`.
+5. Calls `SystemInferencePort.call` with sanitized system/input text, no capability surface, `max_input_tokens = (ctx_window_tokens - reserve)`, `deadline_ms = 30_000`.
 6. Runs `LeakDetector` on the response. Any hit → `LeakDetected` hard error with sanitized `CompactionFailed`.
 7. Prepends `ANTI_INJECTION_PREFIX`, wraps response into `<summary>...</summary>` for the artifact `content`.
 8. Persists via `create_summary_artifact` with `summary_kind = SummaryKind::Compaction`.
@@ -977,9 +950,9 @@ Phase 1 intentionally has no compaction circuit breaker or naive tail-trim
 fallback. A later recovery phase may add retry/trim behavior behind explicit
 tests and state fields.
 
-All `CompactionError` variants sanitize raw `SessionThreadError` and `SystemInferenceError` text at the `CompactionTask` boundary. Backend paths, SQL fragments, and provider error bodies do not cross into `CompactionStage`, the event stream, or logs. In particular, `LeakDetected` MUST NOT forward `response.output_text` into the event `reason` field — the leak pattern itself is the secret.
+All `CompactionError` variants sanitize raw `SessionThreadError` and `SystemInferenceError` text at the `CompactionTask` boundary. Backend paths, SQL fragments, and provider error bodies do not cross into prompt planning, the event stream, or logs. In particular, `LeakDetected` MUST NOT forward `response.output_text` into the event `reason` field — the leak pattern itself is the secret.
 
-Logging: `CompactionStage` uses `debug!()` only. `info!()` and `warn!()` corrupt the TUI/REPL display per CLAUDE.md "Logging levels matter for REPL/TUI". The user-facing operator signal is the `CompactionFailed` `LoopProgressEvent`, not a log line.
+Logging: prompt-planning compaction uses `debug!()` only. `info!()` and `warn!()` corrupt the TUI/REPL display per CLAUDE.md "Logging levels matter for REPL/TUI". The user-facing operator signal is the `CompactionFailed` `LoopProgressEvent`, not a log line.
 
 ## 11. Observability
 
@@ -1002,7 +975,7 @@ its `Eq` derive.
 
 ## 12. Sub-agent semantics
 
-Subagents run on child threads with child turn runs (`crates/ironclaw_loop_support/src/subagent_spawn_port.rs`). Each child thread has its own `LoopExecutionState`, its own `CompactionStrategyState`, and is subject to the same `CompactionStage` in its executor pipeline.
+Subagents run on child threads with child turn runs (`crates/ironclaw_loop_support/src/subagent_spawn_port.rs`). Each child thread has its own `LoopExecutionState`, its own `CompactionStrategyState`, and is subject to the same prompt-planning compaction path in its executor pipeline.
 
 When a child thread approaches the threshold, it compacts independently. Parent thread `CompactionStrategyState` fields are not mutated by child compaction. Subagent completion handoff continues to return only the final-reply ref to the parent. No child summary is auto-propagated into the parent's transcript.
 
@@ -1042,15 +1015,16 @@ A future phase can land calibration once `LoopModelResponse.usage` is wired thro
 Implementation lands in four phases, each independently mergeable. Each phase touches Reborn crates only and runs the architecture boundary test suite (`cargo test -p ironclaw_architecture`).
 
 **Phase 1 — Compaction core.**
-- New types: `SystemInferencePort` + supporting DTOs in `ironclaw_turns/run_profile/host.rs`.
-- New `SummaryKind` enum + `GoalStatement` newtype + `ThreadGoal` field + `resolve_scope` and `update_thread_goal` service methods in `ironclaw_threads`. (Persistence via `ScopedFilesystem`.)
+- New types: `SystemInferencePort` + supporting DTOs in `ironclaw_turns/run_profile/system_inference.rs`.
+- New compaction host contracts in `ironclaw_turns/run_profile/compaction.rs`.
+- New `SummaryKind` enum + typed `SummaryModelContextPolicy` + `GoalStatement` newtype + `ThreadGoal` field + `resolve_scope` and `update_thread_goal` service methods in `ironclaw_threads`. (Persistence via `ScopedFilesystem`.)
 - New `LoopProgressEvent` variants + `CompactionInitiator` enum + `SystemTaskKind` enum.
 - New `token_estimator` module with `EstimatedTokenCount` newtype and `chars / 4` estimator. Calibration deferred (see §13).
 - New `system_inference.rs` adapter in `ironclaw_loop_support` (timeout, injection scan, structural tool denial).
 - New `compaction_task.rs` in `ironclaw_loop_support` (scope derivation, byte-cap check, leak detection, persistence).
-- New `compaction.rs` strategy + durable `CompactionStrategyState` slot + transient `CompactionPromptSnapshot`.
-- New `CompactionStage` in `ironclaw_agent_loop/executor`.
-- Pipeline + canonical edits.
+- New `compaction.rs` strategy + durable `CompactionStrategyState` slot + transient prompt compaction snapshot.
+- Prompt-planning compaction inside `PromptStage`, including candidate prompt build, optional compaction, checkpoint, input ack, and final prompt rebuild.
+- Pipeline + canonical edits remove the standalone compaction executor stage.
 - Wires auto-trigger only. Goal field unused in this phase (always `None`).
 
 **Phase 2 — ThreadGoal and goal refresh.**
@@ -1063,7 +1037,7 @@ Implementation lands in four phases, each independently mergeable. Each phase to
 **Phase 3 — Overflow recovery wiring.**
 - Extend `honor_retry_alteration` in `crates/ironclaw_agent_loop/src/executor/mapping.rs` so `RetryAlteration::ShrinkContext { drop_messages: _ }` sets a `force_compact_on_next_iteration` flag on `CompactionStrategyState`.
 - `should_compact` respects the flag and forces `Trigger` regardless of normal threshold math.
-- Caller-level test that `ContextOverflow` model error → recovery decides `ShrinkContext` → `CompactionStage` triggers on next iteration.
+- Caller-level test that `ContextOverflow` model error → recovery decides `ShrinkContext` → prompt planning compacts on the next iteration.
 
 **Phase 4 — Update mode.**
 - `CompactionMode::Update` template (`compaction_summarizer_update.md`).
@@ -1105,13 +1079,13 @@ Per `.claude/rules/architecture.md`, `.claude/rules/testing.md`, `crates/ironcla
   - `compaction_task_invokes_leak_detector_before_persistence`
   - `compaction_task_returns_invalid_cut_point_on_non_user_boundary`
   - `compaction_task_passes_last_compacted_through_seq_from_state_slot`
-- `CompactionStage` against `DefaultExecutorPipeline`:
+- Prompt-planning compaction against `DefaultExecutorPipeline`:
   - `compaction_success_updates_state_and_emits_progress`
   - `compaction_failure_returns_failed_exit`
-  - `compaction_stage_timeout_returns_failed_exit`
+  - `prompt_stage_compaction_timeout_returns_failed_exit`
   - `compaction_hard_errors_return_failed_exit` (parameterized over InvalidCutPoint / InputTooLarge / InjectionDetected / LeakDetected)
   - `subagent_compaction_does_not_mutate_parent_compaction_state` (isolation)
-  - `shrink_context_retry_alteration_triggers_compaction_stage` (Phase 3 caller-level integration through `honor_retry_alteration` → `force_compact_on_next_iteration` → CompactionStage)
+  - `shrink_context_retry_alteration_triggers_prompt_compaction` (Phase 3 caller-level integration through `honor_retry_alteration` → `force_compact_on_next_iteration` → prompt planning)
 - `GoalRefreshStage` (Phase 2):
   - `goal_refresh_stage_continues_main_loop_on_inference_error` (failure does not abort)
   - `goal_refresh_stage_continues_main_loop_on_thread_service_error`
@@ -1160,7 +1134,7 @@ Per `.claude/rules/architecture.md`, `.claude/rules/testing.md`, `crates/ironcla
 
 ### Resolved during revision 2 (no longer open)
 
-- `SystemInferencePort` placement → directly on `AgentLoopDriverHost` (peer to `LoopModelPort`).
+- `SystemInferencePort` placement → behind host-owned compaction plumbing; `AgentLoopDriverHost` exposes `LoopCompactionPort`.
 - `compression_ratio` shape → `compression_ratio_ppm: u32` (parts-per-million, input/output, `Eq`-compatible).
 - Calibration window → deferred entirely; v1 ships estimator-only.
 - `TokenUsage` on contract surface → dropped; cost accounting via existing `LoopModelBudgetAccountant`.

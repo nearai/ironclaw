@@ -24,7 +24,8 @@ use ironclaw_threads::{
     CreateSummaryArtifactRequest, EnsureThreadRequest, FilesystemSessionThreadService,
     LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
     MessageStatus, RedactMessageRequest, SessionThreadError, SessionThreadService, SummaryKind,
-    ThreadHistoryRequest, ThreadMessageRangeRequest, ThreadScope, UpdateAssistantDraftRequest,
+    SummaryModelContextPolicy, ThreadHistoryRequest, ThreadMessageRangeRequest, ThreadScope,
+    UpdateAssistantDraftRequest,
 };
 
 #[tokio::test]
@@ -164,6 +165,133 @@ async fn filesystem_store_range_read_returns_only_requested_sequences() {
 }
 
 #[tokio::test]
+async fn filesystem_store_range_read_falls_back_when_sequence_index_has_gap() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-range-gap", "alice");
+    let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let scope = scope("fs-range-gap");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-fs-range-gap").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    for index in 1..=4 {
+        service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: scope.clone(),
+                thread_id: thread.thread_id.clone(),
+                actor_id: "actor-a".into(),
+                source_binding_id: None,
+                reply_target_binding_id: None,
+                external_event_id: Some(format!("gap-event-{index}")),
+                content: user_message(&format!("message {index}")),
+            })
+            .await
+            .unwrap();
+    }
+
+    scoped
+        .delete(
+            &scope.to_resource_scope(),
+            &ScopedPath::new(
+                "/threads/agents/agent-fs-range-gap/projects/project-fs-range-gap/owners/user-fs-range-gap/threads/thread-fs-range-gap/messages_by_sequence/00000000000000000002.json",
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let range = service
+        .list_thread_messages_range(ThreadMessageRangeRequest {
+            scope,
+            thread_id: thread.thread_id,
+            after_sequence: 1,
+            through_sequence: 3,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        range
+            .messages
+            .iter()
+            .map(|message| message.sequence)
+            .collect::<Vec<_>>(),
+        vec![2, 3]
+    );
+    assert_eq!(range.messages[0].content.as_deref(), Some("message 2"));
+    assert_eq!(range.messages[1].content.as_deref(), Some("message 3"));
+}
+
+#[tokio::test]
+async fn filesystem_store_summary_creation_uses_indexed_range_validation() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-summary-range", "alice");
+    let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let scope = scope("fs-summary-range");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-fs-summary-range").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    for index in 1..=4 {
+        service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: scope.clone(),
+                thread_id: thread.thread_id.clone(),
+                actor_id: "actor-a".into(),
+                source_binding_id: None,
+                reply_target_binding_id: None,
+                external_event_id: Some(format!("summary-event-{index}")),
+                content: user_message(&format!("message {index}")),
+            })
+            .await
+            .unwrap();
+    }
+
+    scoped
+        .put(
+            &scope.to_resource_scope(),
+            &ScopedPath::new(
+                "/threads/agents/agent-fs-summary-range/projects/project-fs-summary-range/owners/user-fs-summary-range/threads/thread-fs-summary-range/messages/malformed-out-of-range.json",
+            )
+            .unwrap(),
+            Entry::bytes(b"{not-json".to_vec()),
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+
+    let summary = service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope,
+            thread_id: thread.thread_id,
+            start_sequence: 2,
+            end_sequence: 3,
+            summary_kind: SummaryKind::Compaction,
+            content: MessageContent::text("summary"),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+        })
+        .await
+        .expect("summary creation should not scan malformed out-of-range messages");
+
+    assert_eq!(summary.start_sequence, 2);
+    assert_eq!(summary.end_sequence, 3);
+}
+
+#[tokio::test]
 async fn filesystem_store_persists_preview_history_while_hiding_it_from_context() {
     let backend = Arc::new(InMemoryBackend::new());
     let scoped = scoped_threads_fs_at(backend, "tenant-preview", "alice");
@@ -221,7 +349,7 @@ async fn filesystem_store_persists_preview_history_while_hiding_it_from_context(
             end_sequence: 2,
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("summary must not replace preview range"),
-            model_context_policy: Some("replace_range_when_selected".into()),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
         })
         .await
         .unwrap();
@@ -548,7 +676,7 @@ async fn durable_history_flow(service: &impl SessionThreadService, label: &str) 
             end_sequence: 2,
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("summary that mentions secret token"),
-            model_context_policy: Some("replace_range_when_selected".into()),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
         })
         .await
         .unwrap();

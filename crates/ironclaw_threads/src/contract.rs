@@ -138,11 +138,11 @@ pub struct SummaryArtifact {
     pub end_sequence: u64,
     pub summary_kind: SummaryKind,
     pub content: String,
-    pub model_context_policy: Option<String>,
+    pub model_context_policy: Option<SummaryModelContextPolicy>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(transparent)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct GoalStatement(String);
 
 impl GoalStatement {
@@ -173,13 +173,9 @@ impl TryFrom<String> for GoalStatement {
     }
 }
 
-impl<'de> Deserialize<'de> for GoalStatement {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Self::new(value).map_err(serde::de::Error::custom)
+impl From<GoalStatement> for String {
+    fn from(value: GoalStatement) -> Self {
+        value.0
     }
 }
 
@@ -196,6 +192,13 @@ pub struct ThreadGoal {
 pub enum SummaryKind {
     #[serde(alias = "model_context")]
     Compaction,
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SummaryModelContextPolicy {
+    ReplaceRangeWhenSelected,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -396,7 +399,7 @@ pub struct CreateSummaryArtifactRequest {
     pub end_sequence: u64,
     pub summary_kind: SummaryKind,
     pub content: MessageContent,
-    pub model_context_policy: Option<String>,
+    pub model_context_policy: Option<SummaryModelContextPolicy>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

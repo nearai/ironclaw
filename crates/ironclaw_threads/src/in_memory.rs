@@ -17,10 +17,10 @@ use crate::{
     LatestThreadMessageRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
     LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
     MessageStatus, RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
-    SessionThreadRecord, SessionThreadService, SummaryArtifact, ThreadHistory,
-    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange, ThreadMessageRangeRequest,
-    ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
-    UpdateToolResultReferenceRequest,
+    SessionThreadRecord, SessionThreadService, SummaryArtifact, SummaryModelContextPolicy,
+    ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange,
+    ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope,
+    UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -578,9 +578,10 @@ impl SessionThreadService for InMemorySessionThreadService {
                 end_sequence: request.end_sequence,
             });
         }
-        if request.model_context_policy.as_deref() == Some("replace_range_when_selected")
+        if request.model_context_policy == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
             && thread.summary_artifacts.iter().any(|summary| {
-                summary.model_context_policy.as_deref() == Some("replace_range_when_selected")
+                summary.model_context_policy
+                    == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
                     && ranges_overlap(
                         request.start_sequence,
                         request.end_sequence,
@@ -808,7 +809,8 @@ fn context_messages_with_summary_replacements(thread: &StoredThread) -> Vec<Cont
         .summary_artifacts
         .iter()
         .filter(|summary| {
-            summary.model_context_policy.as_deref() == Some("replace_range_when_selected")
+            summary.model_context_policy
+                == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
                 && !summary_covers_hidden_content(thread, summary)
         })
         .collect::<Vec<_>>();

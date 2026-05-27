@@ -8,10 +8,10 @@ use crate::{family::LoopFamily, state::LoopExecutionState, strategies::TurnEndKi
 
 use super::{
     AgentLoopExecutorError, AssistantReplyInput, BudgetInput, BudgetStep, CancelCheck,
-    CapabilityInput, CheckpointInput, CheckpointKind, CheckpointStage, CompactionInput,
-    DefaultExecutorPipeline, DrainInput, ExecutorStage, ExitInput, InputStep, ModelInput,
-    ModelStep, PendingInputAck, PromptInput, PromptStep, StageContext, StopInput, StopStep,
-    TurnCompletedStep, UserFacingInputDrainMode, completed_exit,
+    CapabilityInput, CheckpointInput, CheckpointKind, CheckpointStage, DefaultExecutorPipeline,
+    DrainInput, ExecutorStage, ExitInput, InputStep, ModelInput, ModelStep, PendingInputAck,
+    PromptInput, PromptStep, StageContext, StopInput, StopStep, TurnCompletedStep,
+    UserFacingInputDrainMode, completed_exit,
 };
 
 impl DefaultExecutorPipeline {
@@ -83,22 +83,6 @@ impl DefaultExecutorPipeline {
                 }
                 InputStep::Exit(exit) => return Ok(exit),
             }
-
-            let compacted = self
-                .compaction
-                .process(
-                    ctx,
-                    CompactionInput {
-                        state,
-                        pending_input_ack: std::mem::take(&mut pending_input_ack),
-                    },
-                )
-                .await?;
-            if let Some(exit) = compacted.exit {
-                return Ok(exit);
-            }
-            state = *compacted.state;
-            pending_input_ack = compacted.pending_input_ack;
 
             let prompt = match self
                 .prompt

@@ -32,6 +32,8 @@
 //! that directory and matches `source_binding_id`+`external_event_id` against
 //! the persisted record body.
 
+mod message_sequence_index;
+
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, OnceLock, Weak},
@@ -57,10 +59,12 @@ use crate::{
     LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
     MessageStatus, ProviderToolCallReferenceEnvelope, RedactMessageRequest,
     ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
-    SessionThreadService, SummaryArtifact, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
-    ThreadMessageRange, ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope,
-    ToolResultReferenceEnvelope, UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
+    SessionThreadService, SummaryArtifact, SummaryModelContextPolicy, ThreadHistory,
+    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange, ThreadMessageRangeRequest,
+    ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
+    UpdateToolResultReferenceRequest,
 };
+use message_sequence_index::MessageSequenceIndexStore;
 
 /// Bound on the CAS retry loop. Mirrors the run-state / authorization
 /// store budgets — enough to absorb routine cross-process contention,
@@ -98,12 +102,6 @@ impl<'a> From<&'a ThreadMessageRecord> for StoredThreadMessageRecord<'a> {
             tool_result_provider_call: &record.tool_result_provider_call,
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct MessageSequenceIndexRecord {
-    sequence: u64,
-    message_id: ThreadMessageId,
 }
 
 /// On-disk inbound idempotency record. Includes the originating scope so
@@ -153,13 +151,6 @@ where
 
     fn message_entry(record: &ThreadMessageRecord) -> Result<Entry, SessionThreadError> {
         let body = serialize_pretty(&StoredThreadMessageRecord::from(record))?;
-        Ok(Entry::bytes(body).with_content_type(ContentType::json()))
-    }
-
-    fn message_sequence_index_entry(
-        record: &MessageSequenceIndexRecord,
-    ) -> Result<Entry, SessionThreadError> {
-        let body = serialize_pretty(record)?;
         Ok(Entry::bytes(body).with_content_type(ContentType::json()))
     }
 
@@ -214,73 +205,15 @@ where
         Ok(Some((record, versioned.version)))
     }
 
-    async fn read_message_sequence_index(
-        &self,
-        scope: &ThreadScope,
-        thread_id: &ThreadId,
-        sequence: u64,
-    ) -> Result<Option<MessageSequenceIndexRecord>, SessionThreadError> {
-        let path = message_sequence_index_path(scope, thread_id, sequence)?;
-        let Some(versioned) = self
-            .filesystem
-            .get(&scope.to_resource_scope(), &path)
-            .await?
-        else {
-            return Ok(None);
-        };
-        let record = deserialize::<MessageSequenceIndexRecord>(&versioned.entry.body)?;
-        if record.sequence != sequence {
-            return Err(SessionThreadError::Backend(format!(
-                "message sequence index at {} contains sequence {}",
-                path.as_str(),
-                record.sequence
-            )));
-        }
-        Ok(Some(record))
-    }
-
     async fn write_message_sequence_index(
         &self,
         scope: &ThreadScope,
         thread_id: &ThreadId,
         message: &ThreadMessageRecord,
     ) -> Result<(), SessionThreadError> {
-        let path = message_sequence_index_path(scope, thread_id, message.sequence)?;
-        let record = MessageSequenceIndexRecord {
-            sequence: message.sequence,
-            message_id: message.message_id,
-        };
-        let entry = Self::message_sequence_index_entry(&record)?;
-        match put_with_cas(
-            self.filesystem.as_ref(),
-            &scope.to_resource_scope(),
-            &path,
-            entry,
-            CasExpectation::Absent,
-        )
-        .await
-        {
-            Ok(()) => Ok(()),
-            Err(PutError::VersionMismatch) => {
-                let existing = self
-                    .read_message_sequence_index(scope, thread_id, message.sequence)
-                    .await?
-                    .ok_or_else(|| {
-                        SessionThreadError::Backend(format!(
-                            "filesystem CAS Absent rejected message sequence index at {} but record is missing",
-                            path.as_str()
-                        ))
-                    })?;
-                if existing.message_id == message.message_id {
-                    return Ok(());
-                }
-                Err(SessionThreadError::Backend(format!(
-                    "message sequence {} already indexes message {}, not {}",
-                    message.sequence, existing.message_id, message.message_id
-                )))
-            }
-            Err(PutError::Other(error)) => Err(error),
-        }
+        MessageSequenceIndexStore::new(self.filesystem.as_ref())
+            .write_new(scope, thread_id, message)
+            .await
     }
 
     async fn write_new_message(
@@ -361,55 +294,14 @@ where
         after_sequence: u64,
         through_sequence: u64,
     ) -> Result<Option<Vec<ThreadMessageRecord>>, SessionThreadError> {
-        let root = message_sequence_index_root(scope, thread_id)?;
-        let mut entries = match self
-            .filesystem
-            .list_dir(&scope.to_resource_scope(), &root)
-            .await
-        {
-            Ok(entries) => entries,
-            Err(error) if is_not_found(&error) => return Ok(None),
-            Err(error) => return Err(error.into()),
-        };
-        entries.sort_by(|left, right| left.name.cmp(&right.name));
-        let first_indexed_sequence = entries
-            .iter()
-            .filter_map(|entry| sequence_from_index_filename(&entry.name))
-            .next();
-        let Some(first_indexed_sequence) = first_indexed_sequence else {
+        let Some(indexes) = MessageSequenceIndexStore::new(self.filesystem.as_ref())
+            .read_range(scope, thread_id, after_sequence, through_sequence)
+            .await?
+        else {
             return Ok(None);
         };
-        if after_sequence.saturating_add(1) < first_indexed_sequence {
-            return Ok(None);
-        }
-
         let mut messages = Vec::new();
-        for entry in entries {
-            let Some(sequence) = sequence_from_index_filename(&entry.name) else {
-                continue;
-            };
-            if sequence <= after_sequence {
-                continue;
-            }
-            if sequence > through_sequence {
-                break;
-            }
-            let index_path = join_scoped(&root, &entry.name)?;
-            let Some(versioned) = self
-                .filesystem
-                .get(&scope.to_resource_scope(), &index_path)
-                .await?
-            else {
-                continue;
-            };
-            let index = deserialize::<MessageSequenceIndexRecord>(&versioned.entry.body)?;
-            if index.sequence != sequence {
-                return Err(SessionThreadError::Backend(format!(
-                    "message sequence index at {} contains sequence {}",
-                    index_path.as_str(),
-                    index.sequence
-                )));
-            }
+        for index in indexes {
             let Some((message, _)) = self
                 .read_message_versioned(scope, thread_id, index.message_id)
                 .await?
@@ -1357,16 +1249,25 @@ where
             .ok_or_else(|| SessionThreadError::UnknownThread {
                 thread_id: request.thread_id.clone(),
             })?;
-        let messages = self
-            .list_thread_messages(&request.scope, &request.thread_id)
-            .await?;
-        let has_start = messages
+        let range_messages = self
+            .list_thread_messages_range_indexed(
+                &request.scope,
+                &request.thread_id,
+                request.start_sequence.saturating_sub(1),
+                request.end_sequence,
+            )
+            .await?
+            .ok_or_else(|| SessionThreadError::InvalidSummaryRange {
+                start_sequence: request.start_sequence,
+                end_sequence: request.end_sequence,
+            })?;
+        if !range_messages
             .iter()
-            .any(|message| message.sequence == request.start_sequence);
-        let has_end = messages
-            .iter()
-            .any(|message| message.sequence == request.end_sequence);
-        if !has_start || !has_end {
+            .any(|message| message.sequence == request.start_sequence)
+            || !range_messages
+                .iter()
+                .any(|message| message.sequence == request.end_sequence)
+        {
             return Err(SessionThreadError::InvalidSummaryRange {
                 start_sequence: request.start_sequence,
                 end_sequence: request.end_sequence,
@@ -1375,9 +1276,10 @@ where
         let existing_summaries = self
             .list_thread_summaries(&request.scope, &request.thread_id)
             .await?;
-        if request.model_context_policy.as_deref() == Some("replace_range_when_selected")
+        if request.model_context_policy == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
             && existing_summaries.iter().any(|summary| {
-                summary.model_context_policy.as_deref() == Some("replace_range_when_selected")
+                summary.model_context_policy
+                    == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
                     && ranges_overlap(
                         request.start_sequence,
                         request.end_sequence,
@@ -1608,28 +1510,6 @@ fn message_record_path(
     ))
 }
 
-fn message_sequence_index_root(
-    scope: &ThreadScope,
-    thread_id: &ThreadId,
-) -> Result<ScopedPath, SessionThreadError> {
-    scoped_path(&format!(
-        "{}/messages_by_sequence",
-        thread_root_string(scope, thread_id)
-    ))
-}
-
-fn message_sequence_index_path(
-    scope: &ThreadScope,
-    thread_id: &ThreadId,
-    sequence: u64,
-) -> Result<ScopedPath, SessionThreadError> {
-    scoped_path(&format!(
-        "{}/messages_by_sequence/{}",
-        thread_root_string(scope, thread_id),
-        sequence_index_filename(sequence)
-    ))
-}
-
 fn summaries_root(
     scope: &ThreadScope,
     thread_id: &ThreadId,
@@ -1704,18 +1584,6 @@ fn join_scoped(prefix: &ScopedPath, leaf: &str) -> Result<ScopedPath, SessionThr
         prefix.as_str().trim_end_matches('/'),
         leaf
     ))
-}
-
-fn sequence_index_filename(sequence: u64) -> String {
-    format!("{sequence:020}.json")
-}
-
-fn sequence_from_index_filename(name: &str) -> Option<u64> {
-    let raw = name.strip_suffix(".json")?;
-    if raw.len() != 20 || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    raw.parse().ok()
 }
 
 fn generated_thread_id() -> Result<ThreadId, SessionThreadError> {
@@ -1844,7 +1712,8 @@ fn context_messages_with_summary_replacements(
     let replacement_summaries = summaries
         .iter()
         .filter(|summary| {
-            summary.model_context_policy.as_deref() == Some("replace_range_when_selected")
+            summary.model_context_policy
+                == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
                 && !summary_covers_hidden_content(messages, summary)
         })
         .collect::<Vec<_>>();
@@ -2076,10 +1945,8 @@ impl From<FilesystemError> for SessionThreadError {
 mod tests {
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 
-    use super::{
-        InboundIdempotencyKey, idempotency_record_key, sequence_from_index_filename,
-        sequence_index_filename,
-    };
+    use super::message_sequence_index::{sequence_from_index_filename, sequence_index_filename};
+    use super::{InboundIdempotencyKey, idempotency_record_key};
     use crate::ThreadScope;
 
     #[test]

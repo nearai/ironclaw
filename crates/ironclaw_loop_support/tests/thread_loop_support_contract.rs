@@ -27,10 +27,10 @@ use ironclaw_threads::{
     CreateSummaryArtifactRequest, EnsureThreadRequest, InMemorySessionThreadService,
     LoadContextMessagesRequest, MessageContent, MessageKind, MessageStatus,
     ProviderToolCallReferenceEnvelope, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
-    SessionThreadError, SessionThreadRecord, SessionThreadService, SummaryArtifact, ThreadHistory,
-    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
-    ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
-    UpdateToolResultReferenceRequest,
+    SessionThreadError, SessionThreadRecord, SessionThreadService, SummaryArtifact,
+    SummaryModelContextPolicy, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
+    ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope, ToolResultSafeSummary,
+    UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
 };
 use ironclaw_turns::{
     LoopMessageRef, LoopResultRef, RunProfileResolutionRequest, RunProfileResolver, TurnActor,
@@ -107,7 +107,7 @@ async fn thread_context_port_preserves_summary_replacements_as_system_messages()
             end_sequence: 1,
             summary_kind: ironclaw_threads::SummaryKind::Compaction,
             content: MessageContent::text("summarized hello"),
-            model_context_policy: Some("replace_range_when_selected".to_string()),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
         })
         .await
         .unwrap();

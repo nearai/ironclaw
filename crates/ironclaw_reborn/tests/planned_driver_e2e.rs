@@ -25,11 +25,12 @@ use ironclaw_turns::{
         CapabilityBatchOutcome, CapabilityInvocation, CapabilityOutcome, FinalizeAssistantMessage,
         LoadCheckpointPayloadRequest, LoadedCheckpointPayload, LoopCancelReasonKind,
         LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointPort,
-        LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextBundle, LoopContextPort,
+        LoopCheckpointRequest, LoopCheckpointStateRef, LoopCompactionError, LoopCompactionPort,
+        LoopCompactionRequest, LoopCompactionResponse, LoopContextBundle, LoopContextPort,
         LoopContextRequest, LoopInput, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
         LoopInputPort, LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent,
         LoopProgressPort, LoopPromptBundle, LoopPromptBundleRequest, LoopPromptPort,
-        LoopRunContext, LoopRunInfoPort, LoopTranscriptPort, RunProfileResolver,
+        LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, RunProfileResolver,
         StageCheckpointPayloadRequest, UpdateAssistantDraft, VisibleCapabilityRequest,
         VisibleCapabilitySurface,
     },
@@ -549,6 +550,20 @@ impl LoopProgressPort for ForbiddenResumeHost {
         _event: LoopProgressEvent,
     ) -> Result<(), AgentLoopHostError> {
         Err(self.forbidden_call("emit_loop_progress"))
+    }
+}
+
+#[async_trait::async_trait]
+impl LoopCompactionPort for ForbiddenResumeHost {
+    async fn compact_loop_context(
+        &self,
+        _request: LoopCompactionRequest,
+    ) -> Result<LoopCompactionResponse, LoopCompactionError> {
+        let error = self.forbidden_call("compact_loop_context");
+        Err(LoopCompactionError::PersistenceFailed {
+            safe_summary: LoopSafeSummary::new(error.safe_summary)
+                .expect("forbidden call summary should be loop-safe"),
+        })
     }
 }
 

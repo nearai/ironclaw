@@ -170,7 +170,7 @@ impl ExecutorStage<ModelInput> for ModelStage {
                             }
                             apply_compaction_index_from_prompt_bundle(
                                 &mut state,
-                                bundle.compaction_message_index,
+                                &bundle.compaction_message_index,
                             );
                             request.messages = bundle.messages;
                         }

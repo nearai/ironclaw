@@ -11,8 +11,9 @@ use ironclaw_threads::{
     InMemorySessionThreadService, ListThreadsForScopeRequest, LoadContextMessagesRequest,
     LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
     ProviderToolCallReferenceEnvelope, RedactMessageRequest, SessionThreadError,
-    SessionThreadService, SummaryKind, ThreadHistoryRequest, ThreadMessageId,
-    ThreadMessageRangeRequest, ThreadScope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
+    SessionThreadService, SummaryKind, SummaryModelContextPolicy, ThreadHistoryRequest,
+    ThreadMessageId, ThreadMessageRangeRequest, ThreadScope, ToolResultSafeSummary,
+    UpdateAssistantDraftRequest,
 };
 
 fn scope(label: &str) -> ThreadScope {
@@ -253,7 +254,7 @@ async fn append_capability_display_preview_is_history_visible_and_model_hidden()
             end_sequence: 2,
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("summary must not replace preview range"),
-            model_context_policy: Some("replace_range_when_selected".into()),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
         })
         .await
         .unwrap();
@@ -996,7 +997,7 @@ async fn summaries_are_range_artifacts_and_policy_filtered_context_replacements(
             end_sequence: 2,
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("one and two summarized"),
-            model_context_policy: Some("replace_range_when_selected".into()),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
         })
         .await
         .unwrap();
@@ -1073,7 +1074,7 @@ async fn summary_covering_redacted_message_is_not_loaded_into_model_context() {
             end_sequence: 2,
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("summary mentions secret token"),
-            model_context_policy: Some("replace_range_when_selected".into()),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
         })
         .await
         .unwrap();
@@ -1333,7 +1334,7 @@ async fn summary_covering_draft_message_is_not_loaded_into_model_context() {
             end_sequence: 2,
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("summary leaks draft secret"),
-            model_context_policy: Some("replace_range_when_selected".into()),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
         })
         .await
         .unwrap();
@@ -1477,7 +1478,7 @@ async fn overlapping_replacement_summaries_are_rejected() {
             end_sequence: 2,
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("one and two summarized"),
-            model_context_policy: Some("replace_range_when_selected".into()),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
         })
         .await
         .unwrap();
@@ -1490,7 +1491,7 @@ async fn overlapping_replacement_summaries_are_rejected() {
             end_sequence: 3,
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("two and three summarized"),
-            model_context_policy: Some("replace_range_when_selected".into()),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
         })
         .await;
 
@@ -1551,7 +1552,7 @@ async fn summary_replacement_still_applies_when_range_starts_with_redacted_messa
             end_sequence: 2,
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("redacted range summary"),
-            model_context_policy: Some("replace_range_when_selected".into()),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
         })
         .await
         .unwrap();

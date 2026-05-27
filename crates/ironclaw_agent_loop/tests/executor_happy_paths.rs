@@ -3,10 +3,7 @@ use std::collections::VecDeque;
 use ironclaw_agent_loop::{
     executor::{AgentLoopExecutor, CanonicalAgentLoopExecutor},
     families,
-    state::{
-        CheckpointKind, CompactionPromptSnapshot, IndexedMessageKind, LoopExecutionState,
-        MessageIndexEntry,
-    },
+    state::{CheckpointKind, LoopExecutionState},
     test_support::{
         MockAgentLoopDriverHost, MockHostCall, ScenarioScript, ScriptedCapabilityCall,
         ScriptedCapabilityOutcome, ScriptedModelResponse, capability_descriptor, capability_id,
@@ -14,8 +11,23 @@ use ironclaw_agent_loop::{
 };
 use ironclaw_turns::{
     LoopBlockedKind, LoopExit, LoopFailureKind, TurnRunId,
-    run_profile::{ConcurrencyHint, LoopCompactionResponse, LoopProgressEvent, LoopRunInfoPort},
+    run_profile::{
+        ConcurrencyHint, LoopCompactionResponse, LoopContextCompactionKind,
+        LoopContextCompactionMetadata, LoopProgressEvent, LoopRunInfoPort,
+    },
 };
+
+fn compaction_metadata(
+    sequence: u64,
+    kind: LoopContextCompactionKind,
+    estimated_tokens: u64,
+) -> LoopContextCompactionMetadata {
+    LoopContextCompactionMetadata {
+        sequence,
+        kind,
+        estimated_tokens,
+    }
+}
 
 #[tokio::test]
 async fn reply_only_completes() {
@@ -43,15 +55,14 @@ async fn reply_only_completes() {
 async fn compaction_failure_returns_failed_exit() {
     let (host, _) = MockAgentLoopDriverHost::builder()
         .script(ScenarioScript::reply_only("hi"))
+        .prompt_compaction_index(vec![compaction_metadata(
+            1,
+            LoopContextCompactionKind::User,
+            10,
+        )])
         .build();
     let mut state = LoopExecutionState::initial_for_run(host.run_context());
     state.compaction_state.force_compact_on_next_iteration = true;
-    state.compaction_prompt =
-        CompactionPromptSnapshot::from_message_index(vec![MessageIndexEntry {
-            sequence: 1,
-            kind: IndexedMessageKind::User,
-            estimated_tokens: 10,
-        }]);
 
     let exit = CanonicalAgentLoopExecutor
         .execute_family(&families::default(), &host, state)
@@ -71,6 +82,17 @@ async fn compaction_failure_returns_failed_exit() {
 async fn compaction_success_updates_state_and_emits_progress() {
     let (host, _) = MockAgentLoopDriverHost::builder()
         .script(ScenarioScript::reply_only("hi"))
+        .prompt_compaction_indexes(vec![
+            vec![
+                compaction_metadata(1, LoopContextCompactionKind::User, 10),
+                compaction_metadata(2, LoopContextCompactionKind::Assistant, 10),
+            ],
+            vec![compaction_metadata(
+                2,
+                LoopContextCompactionKind::Assistant,
+                10,
+            )],
+        ])
         .compaction_result(Ok(LoopCompactionResponse {
             summary_artifact_id: "summary-1".to_string(),
             compression_ratio_ppm: 250_000,
@@ -78,18 +100,6 @@ async fn compaction_success_updates_state_and_emits_progress() {
         .build();
     let mut state = LoopExecutionState::initial_for_run(host.run_context());
     state.compaction_state.force_compact_on_next_iteration = true;
-    state.compaction_prompt = CompactionPromptSnapshot::from_message_index(vec![
-        MessageIndexEntry {
-            sequence: 1,
-            kind: IndexedMessageKind::User,
-            estimated_tokens: 10,
-        },
-        MessageIndexEntry {
-            sequence: 2,
-            kind: IndexedMessageKind::Assistant,
-            estimated_tokens: 10,
-        },
-    ]);
 
     let exit = CanonicalAgentLoopExecutor
         .execute_family(&families::default(), &host, state)

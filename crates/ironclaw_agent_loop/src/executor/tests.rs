@@ -4,17 +4,14 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, CapabilityFailureKind,
         CapabilityInputRef, CapabilityOutcome, CapabilityResultMessage, LoopCancelReasonKind,
-        LoopCheckpointKind, LoopCompactionResponse, LoopInput, LoopInputAckToken, LoopInputBatch,
-        LoopInputCursor, LoopInterruptKind, LoopProcessRef, LoopProgressEvent, LoopRunInfoPort,
-        LoopSafeSummary, ParentLoopOutput, ProcessHandleSummary, ProviderToolCallReplay,
-        VisibleCapabilityRequest,
+        LoopCheckpointKind, LoopCompactionResponse, LoopContextCompactionKind,
+        LoopContextCompactionMetadata, LoopInput, LoopInputAckToken, LoopInputBatch,
+        LoopInputCursor, LoopInterruptKind, LoopProcessRef, LoopRunInfoPort, LoopSafeSummary,
+        ParentLoopOutput, ProcessHandleSummary, ProviderToolCallReplay, VisibleCapabilityRequest,
     },
 };
 
-use crate::state::{
-    CheckpointKind, CompactionPromptSnapshot, IndexedMessageKind, LoopExecutionState,
-    MessageIndexEntry,
-};
+use crate::state::{CheckpointKind, IndexedMessageKind, LoopExecutionState, MessageIndexEntry};
 use crate::strategies::{
     CapabilityFilter, DefaultCompactionStrategy, GateKind, GateOutcome, StopKind, TurnSummary,
 };
@@ -22,15 +19,26 @@ use crate::strategies::{
 use super::{
     AgentLoopExecutor, AgentLoopExecutorError, AssistantReplyInput, AssistantReplyStage, BatchStep,
     BudgetInput, BudgetStage, BudgetStep, CanonicalAgentLoopExecutor, CapabilityInput,
-    CapabilityStage, CompactionInput, CompactionStage, DrainInput, ExecutorStage, ExitInput,
-    ExitStage, GateInput, GateStage, HostStage, InputStage, InputStep, PendingInputAck,
-    PromptInput, PromptStage, StageContext, StopInput, StopStage, StopStep, TurnCompletedStep,
-    UserFacingInputDrainMode, consume_drainable_inputs, sanitize_result_ref_suffix,
-    synthetic_provider_error_result_ref,
+    CapabilityStage, DrainInput, ExecutorStage, ExitInput, ExitStage, GateInput, GateStage,
+    HostStage, InputStage, InputStep, PendingInputAck, PromptInput, PromptStage, PromptStep,
+    StageContext, StopInput, StopStage, StopStep, TurnCompletedStep, UserFacingInputDrainMode,
+    consume_drainable_inputs, sanitize_result_ref_suffix, synthetic_provider_error_result_ref,
 };
 
 #[allow(dead_code)]
 fn _check(_: &dyn AgentLoopExecutor) {}
+
+fn compaction_metadata(
+    sequence: u64,
+    kind: LoopContextCompactionKind,
+    estimated_tokens: u64,
+) -> LoopContextCompactionMetadata {
+    LoopContextCompactionMetadata {
+        sequence,
+        kind,
+        estimated_tokens,
+    }
+}
 
 mod support;
 use support::*;
@@ -141,11 +149,23 @@ async fn budget_stage_exits_at_iteration_limit() {
 }
 
 #[tokio::test]
-async fn compaction_stage_success_updates_state_and_emits_progress() {
-    let host = MockHost::new(Vec::new()).with_compaction_result(Ok(LoopCompactionResponse {
-        summary_artifact_id: "summary-1".to_string(),
-        compression_ratio_ppm: 250_000,
-    }));
+async fn prompt_stage_compacts_candidate_prompt_then_rebuilds_final_bundle() {
+    let host = MockHost::new(Vec::new())
+        .with_prompt_compaction_indexes(vec![
+            vec![
+                compaction_metadata(1, LoopContextCompactionKind::User, 10),
+                compaction_metadata(2, LoopContextCompactionKind::Assistant, 10),
+            ],
+            vec![compaction_metadata(
+                2,
+                LoopContextCompactionKind::Assistant,
+                10,
+            )],
+        ])
+        .with_compaction_result(Ok(LoopCompactionResponse {
+            summary_artifact_id: "summary-1".to_string(),
+            compression_ratio_ppm: 250_000,
+        }));
     let family = family_with_compaction_strategy(DefaultCompactionStrategy {
         deadline_ms: 1,
         ..Default::default()
@@ -156,31 +176,23 @@ async fn compaction_stage_success_updates_state_and_emits_progress() {
     };
     let mut state = LoopExecutionState::initial_for_run(host.run_context());
     state.compaction_state.force_compact_on_next_iteration = true;
-    state.compaction_prompt = CompactionPromptSnapshot::from_message_index(vec![
-        MessageIndexEntry {
-            sequence: 1,
-            kind: IndexedMessageKind::User,
-            estimated_tokens: 10,
-        },
-        MessageIndexEntry {
-            sequence: 2,
-            kind: IndexedMessageKind::Assistant,
-            estimated_tokens: 10,
-        },
-    ]);
 
-    let output = CompactionStage
+    let step = PromptStage
         .process(
             ctx,
-            CompactionInput {
+            PromptInput {
                 state,
                 pending_input_ack: PendingInputAck::default(),
             },
         )
         .await
-        .expect("compaction stage");
+        .expect("prompt stage");
 
-    assert!(output.exit.is_none());
+    let output = match step {
+        PromptStep::Prepared(output) => output,
+        PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
+    };
+    assert_eq!(host.prompt_requests().len(), 2);
     assert_eq!(
         output.state.compaction_state.last_compacted_through_seq,
         Some(1)
@@ -200,22 +212,30 @@ async fn compaction_stage_success_updates_state_and_emits_progress() {
         }]
     );
     assert_eq!(output.state.compaction_prompt.observed_prompt_tokens, 10);
-    let progress_events = host.progress_events();
-    assert!(matches!(
-        progress_events.as_slice(),
-        [
-            LoopProgressEvent::CompactionStarted { .. },
-            LoopProgressEvent::CompactionCompleted {
-                compression_ratio_ppm: 250_000,
-                ..
-            }
+    assert_eq!(
+        host.checkpoint_kinds(),
+        vec![LoopCheckpointKind::BeforeModel]
+    );
+    assert_eq!(
+        host.progress_event_names(),
+        vec![
+            "prompt_bundle_built",
+            "compaction_started",
+            "compaction_completed",
+            "checkpoint_written",
+            "prompt_bundle_built",
         ]
-    ));
+    );
 }
 
 #[tokio::test]
-async fn compaction_stage_timeout_returns_failed_exit() {
+async fn prompt_stage_compaction_timeout_returns_failed_exit() {
     let host = MockHost::new(Vec::new())
+        .with_prompt_compaction_index(vec![compaction_metadata(
+            1,
+            LoopContextCompactionKind::User,
+            10,
+        )])
         .with_compaction_result(Ok(LoopCompactionResponse {
             summary_artifact_id: "summary-1".to_string(),
             compression_ratio_ppm: 250_000,
@@ -231,39 +251,34 @@ async fn compaction_stage_timeout_returns_failed_exit() {
     };
     let mut state = LoopExecutionState::initial_for_run(host.run_context());
     state.compaction_state.force_compact_on_next_iteration = true;
-    state.compaction_prompt =
-        CompactionPromptSnapshot::from_message_index(vec![MessageIndexEntry {
-            sequence: 1,
-            kind: IndexedMessageKind::User,
-            estimated_tokens: 10,
-        }]);
 
-    let output = CompactionStage
+    let step = PromptStage
         .process(
             ctx,
-            CompactionInput {
+            PromptInput {
                 state,
                 pending_input_ack: PendingInputAck::default(),
             },
         )
         .await
-        .expect("compaction stage");
+        .expect("prompt stage");
 
-    match output.exit {
-        Some(LoopExit::Failed(failed)) => {
+    match step {
+        PromptStep::Exit(LoopExit::Failed(failed)) => {
             assert!(failed.checkpoint_id.is_some());
         }
-        other => panic!("expected failed exit, got {other:?}"),
+        _ => panic!("expected failed exit"),
     }
     assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
-    assert!(matches!(
-        host.progress_events().as_slice(),
-        [
-            LoopProgressEvent::CompactionStarted { .. },
-            LoopProgressEvent::CompactionFailed { .. },
-            LoopProgressEvent::CheckpointWritten { .. }
+    assert_eq!(
+        host.progress_event_names(),
+        vec![
+            "prompt_bundle_built",
+            "compaction_started",
+            "compaction_failed",
+            "checkpoint_written",
         ]
-    ));
+    );
 }
 
 #[tokio::test]

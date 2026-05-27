@@ -4,7 +4,8 @@ use ironclaw_host_api::ThreadId;
 use ironclaw_safety::{InjectionScanner, LeakDetector, LeakScanner, Sanitizer};
 use ironclaw_threads::{
     CreateSummaryArtifactRequest, MessageContent, MessageKind, MessageStatus, SessionThreadError,
-    SessionThreadService, SummaryKind, ThreadMessageRangeRequest, ThreadScope,
+    SessionThreadService, SummaryKind, SummaryModelContextPolicy, ThreadMessageRangeRequest,
+    ThreadScope,
 };
 use ironclaw_turns::run_profile::{
     LoopCompactionError, LoopCompactionMode, LoopCompactionPort, LoopCompactionRequest,
@@ -156,6 +157,11 @@ where
                 });
             }
         };
+        if thread_scope != expected_scope {
+            return Err(CompactionError::PersistenceFailed {
+                safe_summary: safe("thread scope mismatch"),
+            });
+        }
         let range = self
             .threads
             .list_thread_messages_range(ThreadMessageRangeRequest {
@@ -185,7 +191,7 @@ where
         let mut input = String::new();
         for message in &messages {
             if message.kind == MessageKind::CapabilityDisplayPreview {
-                continue;
+                return Err(CompactionError::InvalidCutPoint);
             }
             if !is_compaction_model_visible(message.kind, message.status) {
                 return Err(CompactionError::InvalidCutPoint);
@@ -262,7 +268,7 @@ where
                 end_sequence: drop_through_seq,
                 summary_kind: SummaryKind::Compaction,
                 content: MessageContent::text(content),
-                model_context_policy: Some("replace_range_when_selected".to_string()),
+                model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
             })
             .await
             .map_err(|_| CompactionError::PersistenceFailed {

@@ -8,7 +8,6 @@ use chrono::{DateTime, Utc};
 use ironclaw_host_api::{CapabilityId, ExtensionId, RuntimeKind, ThreadId};
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
-use uuid::Uuid;
 
 use crate::{
     AcceptedMessageRef, LoopDiagnosticRef, LoopGateRef, LoopMessageRef, LoopResultRef,
@@ -17,9 +16,11 @@ use crate::{
 };
 
 use super::{
+    compaction::{CompactionInitiator, LoopCompactionPort},
     instruction_bundle::InstructionBundleFingerprint,
     refs::{CheckpointSchemaId, LoopDriverId, ModelProfileId},
     snapshot::ResolvedRunProfile,
+    system_inference::SystemInferenceTaskId,
 };
 
 const FORBIDDEN_MODEL_ROUTE_MARKERS: &[&str] = &[
@@ -903,127 +904,6 @@ pub struct LoopModelMessage {
     pub content_ref: LoopMessageRef,
 }
 
-/// Opaque id for an internal system inference task.
-///
-/// This is distinct from turn/run ids because the task is host-owned work
-/// performed on behalf of the loop, not a user-visible turn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
-#[serde(transparent)]
-pub struct SystemInferenceTaskId(Uuid);
-
-impl SystemInferenceTaskId {
-    pub fn new() -> Self {
-        Self(Uuid::new_v4())
-    }
-
-    pub fn as_uuid(&self) -> Uuid {
-        self.0
-    }
-}
-
-impl Default for SystemInferenceTaskId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl TryFrom<String> for SystemInferenceTaskId {
-    type Error = String;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Uuid::parse_str(&value)
-            .map(Self)
-            .map_err(|error| format!("system inference task id must be a UUID: {error}"))
-    }
-}
-
-impl<'de> Deserialize<'de> for SystemInferenceTaskId {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Self::try_from(value).map_err(serde::de::Error::custom)
-    }
-}
-
-/// System-owned inference job class.
-///
-/// These tasks run through the normal model port and materialization store, but
-/// are not assistant replies and must not dispatch capabilities.
-#[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SystemTaskKind {
-    Compaction,
-    GoalRefresh,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CompactionInitiator {
-    Auto,
-    Overflow,
-    SubagentScoped,
-}
-
-/// Origin metadata for the system prompt used by a system inference task.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SystemPromptSource {
-    /// Static prompt embedded in the host binary or support crate.
-    Static { prompt_id: String },
-}
-
-/// Auditable identity for a host-owned inference call.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SystemInferenceIdentity {
-    /// Class of host task being executed.
-    pub task_kind: SystemTaskKind,
-    /// Stable source id for the prompt text.
-    pub prompt_source: SystemPromptSource,
-    /// Sanitized system prompt text materialized behind a host-owned ref.
-    pub system_prompt: String,
-}
-
-/// Request to run bounded, host-owned inference outside the assistant loop.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SystemInferenceRequest {
-    /// Unique task id used for progress and synthetic materialized refs.
-    pub task_id: SystemInferenceTaskId,
-    /// Prompt identity and content.
-    pub identity: SystemInferenceIdentity,
-    /// Sanitized user-side task input.
-    pub input_text: String,
-    /// Preflight token ceiling for `input_text`.
-    pub max_input_tokens: u64,
-    /// Wall-clock deadline for the underlying model call.
-    pub deadline_ms: u64,
-}
-
-/// Successful system inference result.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SystemInferenceResponse {
-    /// Echoes the request task id.
-    pub task_id: SystemInferenceTaskId,
-    /// Sanitized model output text.
-    pub output_text: String,
-    /// Elapsed model-call time in milliseconds.
-    pub elapsed_ms: u64,
-}
-
-#[derive(Debug, Clone, Error, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "kind")]
-pub enum SystemInferenceError {
-    #[error("system inference input too large")]
-    InputTooLarge,
-    #[error("system inference timed out")]
-    Timeout,
-    #[error("system inference cancelled")]
-    Cancelled,
-    #[error("system inference failed: {safe_summary}")]
-    Failed { safe_summary: LoopSafeSummary },
-}
-
 /// Prompt construction mode requested by an agent-loop driver.
 ///
 /// `TextOnly` builds a prompt from transcript/context message refs and is the
@@ -1341,85 +1221,6 @@ pub trait LoopModelPort: Send + Sync {
         &self,
         request: LoopModelRequest,
     ) -> Result<LoopModelResponse, AgentLoopHostError>;
-}
-
-/// Host boundary for internal inference tasks such as compaction.
-///
-/// Implementations must use the same model authorization/materialization path
-/// as normal loop model calls and must not expose raw prompt/input content on
-/// public progress surfaces.
-#[async_trait]
-pub trait SystemInferencePort: Send + Sync {
-    async fn call_system_inference(
-        &self,
-        request: SystemInferenceRequest,
-    ) -> Result<SystemInferenceResponse, SystemInferenceError>;
-}
-
-/// Requested compaction algorithm shape.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LoopCompactionMode {
-    /// Build a fresh summary for the selected transcript range.
-    Fresh,
-    /// Update an existing summary with a later transcript range.
-    Update,
-}
-
-/// Request for host-managed context compaction.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LoopCompactionRequest {
-    /// Unique task id shared by progress events and host-owned inference refs.
-    pub task_id: SystemInferenceTaskId,
-    /// Thread whose canonical transcript should be compacted.
-    pub thread_id: ThreadId,
-    /// Previous compaction high-water mark, if any.
-    pub last_compacted_through_seq: Option<u64>,
-    /// Inclusive transcript sequence through which context may be replaced.
-    pub drop_through_seq: u64,
-    /// Estimated tail budget the strategy wanted preserved outside the range.
-    pub preserve_tail_tokens: u64,
-    /// Fresh versus incremental summary mode.
-    pub mode: LoopCompactionMode,
-    /// Deadline for any inference work needed by compaction.
-    pub deadline_ms: u64,
-}
-
-/// Durable artifact produced by host-managed compaction.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LoopCompactionResponse {
-    /// Summary artifact id persisted by the thread service.
-    pub summary_artifact_id: String,
-    /// Output bytes divided by input bytes, scaled by 1,000,000.
-    pub compression_ratio_ppm: u32,
-}
-
-/// Failure classes returned by host-managed compaction.
-#[derive(Debug, Clone, Error, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "kind")]
-pub enum LoopCompactionError {
-    #[error("compaction cut point is invalid")]
-    InvalidCutPoint,
-    #[error("compaction input is too large")]
-    InputTooLarge,
-    #[error("compaction security check failed: {safe_summary}")]
-    SecurityRejected { safe_summary: LoopSafeSummary },
-    #[error("compaction inference failed: {safe_summary}")]
-    InferenceFailed { safe_summary: LoopSafeSummary },
-    #[error("compaction persistence failed: {safe_summary}")]
-    PersistenceFailed { safe_summary: LoopSafeSummary },
-}
-
-/// Host boundary for compaction.
-///
-/// The agent loop decides when compaction is needed; the host owns transcript
-/// reads, scope checks, security scanning, inference, and summary persistence.
-#[async_trait]
-pub trait LoopCompactionPort: Send + Sync {
-    async fn compact_loop_context(
-        &self,
-        request: LoopCompactionRequest,
-    ) -> Result<LoopCompactionResponse, LoopCompactionError>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
