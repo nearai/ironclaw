@@ -881,28 +881,42 @@ mod tests {
             RuntimeDispatchErrorKind::Client
         );
         assert_eq!(
-            map_credential_error(GoogleCredentialError::MissingScopes {
-                missing_scopes: Vec::new(),
-            })
-            .kind(),
+            map_credential_error(GoogleCredentialError::MissingAccessSecret).reason(),
+            Some(&GsuiteCredentialDispatchReason::MissingAccessSecret)
+        );
+        let missing_scope =
+            ProviderScope::new("https://www.googleapis.com/auth/gmail.modify").expect("scope");
+        let missing_scopes_error = map_credential_error(GoogleCredentialError::MissingScopes {
+            missing_scopes: vec![missing_scope.clone()],
+        });
+        assert_eq!(
+            missing_scopes_error.kind(),
             RuntimeDispatchErrorKind::Client
         );
-
         assert_eq!(
-            map_credential_error(GoogleCredentialError::Auth(
-                ironclaw_auth::AuthProductError::BackendUnavailable,
-            ))
-            .kind(),
-            RuntimeDispatchErrorKind::Backend
+            missing_scopes_error.reason(),
+            Some(&GsuiteCredentialDispatchReason::MissingScopes {
+                missing_scopes: vec![missing_scope],
+            })
         );
+
+        let backend_error = map_credential_error(GoogleCredentialError::Auth(
+            ironclaw_auth::AuthProductError::BackendUnavailable,
+        ));
+        assert_eq!(backend_error.kind(), RuntimeDispatchErrorKind::Backend);
         assert_eq!(
-            map_credential_error(GoogleCredentialError::HostApi(
-                HostApiError::InvariantViolation {
-                    reason: "bad contract".to_string(),
-                },
-            ))
-            .kind(),
-            RuntimeDispatchErrorKind::Backend
+            backend_error.reason(),
+            Some(&GsuiteCredentialDispatchReason::BackendAuth)
+        );
+        let host_api_error = map_credential_error(GoogleCredentialError::HostApi(
+            HostApiError::InvariantViolation {
+                reason: "bad contract".to_string(),
+            },
+        ));
+        assert_eq!(host_api_error.kind(), RuntimeDispatchErrorKind::Backend);
+        assert_eq!(
+            host_api_error.reason(),
+            Some(&GsuiteCredentialDispatchReason::HostApi)
         );
 
         let configured_recovery = map_credential_error(GoogleCredentialError::Recovery(

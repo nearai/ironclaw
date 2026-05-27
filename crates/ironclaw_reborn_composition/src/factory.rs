@@ -1108,6 +1108,11 @@ async fn build_production_shaped(
         require_runtime_http_egress,
         require_wasm_credentials,
     );
+    if google_oauth_config.is_some() && product_auth_ports.is_none() {
+        return Err(RebornBuildError::InvalidConfig {
+            reason: "Google OAuth backend config requires product-auth ports".to_string(),
+        });
+    }
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     let _ = (
         production_trust_policy,

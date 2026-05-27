@@ -476,7 +476,7 @@ mod tests {
     };
     use ironclaw_secrets::InMemorySecretStore;
     use secrecy::ExposeSecret;
-    use std::collections::VecDeque;
+    use std::collections::{BTreeMap, VecDeque};
     use std::sync::Mutex;
 
     #[test]
@@ -605,6 +605,24 @@ mod tests {
         assert_eq!(request.capability_id.as_str(), "ironclaw_auth.google_oauth");
         assert_eq!(request.method, NetworkMethod::Post);
         assert_eq!(request.url, GOOGLE_TOKEN_ENDPOINT);
+        let form = token_request_form(&request.body);
+        assert_eq!(
+            form.get("grant_type").map(String::as_str),
+            Some("authorization_code")
+        );
+        assert_eq!(form.get("code").map(String::as_str), Some("raw-auth-code"));
+        assert_eq!(
+            form.get("code_verifier").map(String::as_str),
+            Some("raw-pkce-verifier")
+        );
+        assert_eq!(
+            form.get("client_id").map(String::as_str),
+            Some("google-client-123")
+        );
+        assert_eq!(
+            form.get("redirect_uri").map(String::as_str),
+            Some("https://app.example/oauth/callback")
+        );
         assert!(request.network_policy.deny_private_ip_ranges);
         assert_eq!(request.network_policy.max_egress_bytes, Some(8 * 1024));
         assert_eq!(request.response_body_limit, Some(8 * 1024));
@@ -994,6 +1012,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn google_token_sink_reports_refresh_write_failure_after_access_write() {
+        let store = Arc::new(RecordingSecretStore::fail_on_second_put());
+        let sink = SecretStoreGoogleTokenSink {
+            store: store.clone(),
+        };
+        let error = sink
+            .store_tokens(token_storage_request(
+                resource_scope("google-token-store-refresh-failure"),
+                AuthFlowId::new(),
+            ))
+            .await
+            .expect_err("refresh write failure is surfaced");
+
+        assert_eq!(error, AuthProductError::BackendUnavailable);
+        assert_eq!(
+            store.put_handles(),
+            vec!["google-oauth-access", "google-oauth-refresh"]
+        );
+    }
+
+    #[tokio::test]
     async fn google_provider_refresh_token_returns_refresh_failed_without_egress() {
         let egress = Arc::new(RecordingEgress::ok(RuntimeHttpEgressResponse {
             status: 200,
@@ -1124,6 +1163,12 @@ mod tests {
             refresh_secret: SecretHandle::new("google-refresh-secret").expect("valid handle"),
             scopes: provider_scopes(&[GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE]),
         }
+    }
+
+    fn token_request_form(body: &[u8]) -> BTreeMap<String, String> {
+        url::form_urlencoded::parse(body)
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect()
     }
 
     fn scope(user: &str) -> AuthProductScope {
@@ -1358,14 +1403,21 @@ mod tests {
 
     #[derive(Debug)]
     struct RecordingSecretStore {
-        fail_first_put: bool,
+        fail_on_put: Option<usize>,
         put_handles: Mutex<Vec<String>>,
     }
 
     impl RecordingSecretStore {
         fn fail_on_first_put() -> Self {
             Self {
-                fail_first_put: true,
+                fail_on_put: Some(1),
+                put_handles: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn fail_on_second_put() -> Self {
+            Self {
+                fail_on_put: Some(2),
                 put_handles: Mutex::new(Vec::new()),
             }
         }
@@ -1396,7 +1448,7 @@ mod tests {
         ) -> Result<ironclaw_secrets::SecretMetadata, ironclaw_secrets::SecretStoreError> {
             let mut handles = self.put_handles.lock().expect("put handles");
             handles.push(handle.to_string());
-            if self.fail_first_put && handles.len() == 1 {
+            if self.fail_on_put == Some(handles.len()) {
                 return Err(ironclaw_secrets::SecretStoreError::StoreUnavailable {
                     reason: "injected failure".to_string(),
                 });

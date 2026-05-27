@@ -49,46 +49,34 @@ impl GoogleCredentialResolver {
         let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
         let provider = google_provider_id()?;
         let selected_account = self
-            .accounts
-            .select_unique_configured_account(
-                CredentialAccountSelectionRequest::new(auth_scope.clone(), provider.clone())
-                    .for_extension(requester_extension.clone()),
+            .recoverable_result(
+                self.accounts
+                    .select_unique_configured_account(
+                        CredentialAccountSelectionRequest::new(
+                            auth_scope.clone(),
+                            provider.clone(),
+                        )
+                        .for_extension(requester_extension.clone()),
+                    )
+                    .await,
+                scope,
+                requester_extension,
+                &provider,
             )
-            .await;
-        let selected_account = match selected_account {
-            Ok(account) => account,
-            Err(
-                AuthProductError::CredentialMissing
-                | AuthProductError::CrossScopeDenied
-                | AuthProductError::AccountSelectionRequired,
-            ) => {
-                return self
-                    .recovery_required(scope, requester_extension, provider)
-                    .await;
-            }
-            Err(error) => return Err(GoogleCredentialError::Auth(error)),
-        };
-        let account = match self
-            .accounts
-            .get_account(
-                CredentialAccountLookupRequest::new(auth_scope, selected_account.id)
-                    .for_extension(requester_extension.clone()),
+            .await?;
+        let account = self
+            .recoverable_lookup(
+                self.accounts
+                    .get_account(
+                        CredentialAccountLookupRequest::new(auth_scope, selected_account.id)
+                            .for_extension(requester_extension.clone()),
+                    )
+                    .await,
+                scope,
+                requester_extension,
+                &provider,
             )
-            .await
-        {
-            Ok(Some(account)) => account,
-            Ok(None)
-            | Err(
-                AuthProductError::CredentialMissing
-                | AuthProductError::CrossScopeDenied
-                | AuthProductError::AccountSelectionRequired,
-            ) => {
-                return self
-                    .recovery_required(scope, requester_extension, provider)
-                    .await;
-            }
-            Err(error) => return Err(GoogleCredentialError::Auth(error)),
-        };
+            .await?;
         if account.status != CredentialAccountStatus::Configured {
             return self
                 .recovery_required(scope, requester_extension, provider)
@@ -120,10 +108,62 @@ impl GoogleCredentialResolver {
         requester_extension: &ExtensionId,
         provider: AuthProviderId,
     ) -> Result<GoogleCredential, GoogleCredentialError> {
-        Err(GoogleCredentialError::Recovery(
-            self.project_recovery(scope, requester_extension, provider)
-                .await?,
-        ))
+        Err(self
+            .recovery_error(scope, requester_extension, provider)
+            .await)
+    }
+
+    async fn recovery_error(
+        &self,
+        scope: &ResourceScope,
+        requester_extension: &ExtensionId,
+        provider: AuthProviderId,
+    ) -> GoogleCredentialError {
+        match self
+            .project_recovery(scope, requester_extension, provider)
+            .await
+        {
+            Ok(recovery) => GoogleCredentialError::Recovery(recovery),
+            Err(error) => error,
+        }
+    }
+
+    async fn recoverable_result<T>(
+        &self,
+        result: Result<T, AuthProductError>,
+        scope: &ResourceScope,
+        requester_extension: &ExtensionId,
+        provider: &AuthProviderId,
+    ) -> Result<T, GoogleCredentialError> {
+        match result {
+            Ok(value) => Ok(value),
+            Err(
+                AuthProductError::CredentialMissing
+                | AuthProductError::CrossScopeDenied
+                | AuthProductError::AccountSelectionRequired,
+            ) => Err(self
+                .recovery_error(scope, requester_extension, provider.clone())
+                .await),
+            Err(error) => Err(GoogleCredentialError::Auth(error)),
+        }
+    }
+
+    async fn recoverable_lookup<T>(
+        &self,
+        result: Result<Option<T>, AuthProductError>,
+        scope: &ResourceScope,
+        requester_extension: &ExtensionId,
+        provider: &AuthProviderId,
+    ) -> Result<T, GoogleCredentialError> {
+        match self
+            .recoverable_result(result, scope, requester_extension, provider)
+            .await?
+        {
+            Some(value) => Ok(value),
+            None => Err(self
+                .recovery_error(scope, requester_extension, provider.clone())
+                .await),
+        }
     }
 
     async fn project_recovery(
