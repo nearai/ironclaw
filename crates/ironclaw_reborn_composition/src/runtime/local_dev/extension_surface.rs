@@ -100,27 +100,27 @@ impl LocalDevExtensionSurface {
             network: NetworkPolicy {
                 // Installed extensions get only their declared credential audiences as
                 // egress targets; missing audiences intentionally fail closed.
-                allowed_targets: capability.runtime_credentials.iter().fold(
-                    Vec::new(),
-                    |mut targets, credential| {
+                allowed_targets: {
+                    let mut targets = Vec::new();
+                    for credential in &capability.runtime_credentials {
                         if !targets.contains(&credential.audience) {
                             targets.push(credential.audience.clone());
                         }
-                        targets
-                    },
-                ),
+                    }
+                    targets
+                },
                 deny_private_ip_ranges: true,
                 max_egress_bytes: None,
             },
-            secrets: capability.runtime_credentials.iter().fold(
-                Vec::new(),
-                |mut handles, credential| {
+            secrets: {
+                let mut handles = Vec::new();
+                for credential in &capability.runtime_credentials {
                     if !handles.contains(&credential.handle) {
                         handles.push(credential.handle.clone());
                     }
-                    handles
-                },
-            ),
+                }
+                handles
+            },
             resource_ceiling: None,
             expires_at: None,
             max_invocations: None,
