@@ -91,11 +91,6 @@ const PLACEHOLDER_SECRET_MARKERS: &[&str] = &[
     "fixme",
 ];
 
-/// Standalone placeholder tokens rejected when the whole secret equals one of
-/// them (after trimming + lowercasing). Kept separate from the substring list
-/// so short common words don't false-positive inside legitimate random secrets.
-const PLACEHOLDER_SECRET_EXACT: &[&str] = &["test", "secret", "key", "near", "state"];
-
 /// Errors raised when present attested-provider config is invalid. Fail-closed:
 /// an invalid present value is an error, never a silently-accepted weak config.
 ///
@@ -106,6 +101,13 @@ pub enum AttestedConfigError {
     /// A required URL field was empty after trimming.
     #[error("attested config: {field} must not be empty")]
     EmptyUrl { field: &'static str },
+    /// A multi-field ceremony was half-configured: some env vars were present
+    /// while a required one (`field`) was absent. Distinct from [`Self::EmptyUrl`]
+    /// (a *present* but empty value) so the operator sees "you didn't set this"
+    /// rather than "your URL was blank" — the field may not even be a URL (e.g.
+    /// the NEAR `state_secret`).
+    #[error("attested config: {field} is required but was not set (partial configuration)")]
+    MissingRequired { field: &'static str },
     /// A URL field was present but not a valid http(s) URL with a host.
     #[error("attested config: {field} is not a valid http(s) URL with a host")]
     InvalidUrl { field: &'static str },
@@ -204,11 +206,15 @@ impl StateSecret {
     /// marker substrings, single repeated byte, or fewer than
     /// [`MIN_DISTINCT_SECRET_BYTES`] distinct bytes (e.g. "abababab…" or
     /// 8-symbol patterns) across a >=32-byte string.
+    ///
+    /// Note: an exact-match list of short words ("test", "key", "near", …) was
+    /// dropped as dead code — every such word is shorter than
+    /// [`MIN_STATE_SECRET_BYTES`] (32) and is therefore already rejected by the
+    /// length floor in [`StateSecret::new`] before this function runs, so the
+    /// exact list could never fire. The substring markers below plus the
+    /// distinct-byte floor cover the real >=32-byte degenerate cases.
     fn is_low_entropy(value: &str) -> bool {
         let lower = value.to_ascii_lowercase();
-        if PLACEHOLDER_SECRET_EXACT.contains(&lower.as_str()) {
-            return true;
-        }
         if PLACEHOLDER_SECRET_MARKERS
             .iter()
             .any(|marker| lower.contains(marker))
@@ -364,8 +370,11 @@ impl AttestedProvidersConfig {
             (Some(wallet_base_url), Some(callback_url), Some(state_secret)) => Ok(Some(
                 NearRedirectConfig::new(wallet_base_url, callback_url, state_secret)?,
             )),
-            // Partial config: treat as invalid present config (fail-closed).
-            (wallet_base_url, callback_url, _) => Err(AttestedConfigError::EmptyUrl {
+            // Partial config: treat as invalid present config (fail-closed). The
+            // missing field was *absent*, not present-but-empty, so report it as
+            // `MissingRequired` — `near_state_secret` is not a URL, and even the
+            // URL fields read more clearly as "not set" than "must not be empty".
+            (wallet_base_url, callback_url, _) => Err(AttestedConfigError::MissingRequired {
                 field: if wallet_base_url.is_none() {
                     "near_wallet_base_url"
                 } else if callback_url.is_none() {

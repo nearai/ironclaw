@@ -53,6 +53,20 @@ use crate::attested::{LocalDevAttestedComposition, LocalDevContinuationDriver};
 ///
 /// Holds the assembled signer-continuation driver shared with the reborn
 /// runtime (the same driver + binding store + ledger the resume port reads).
+///
+/// Production-driver wiring (deferred): this port is constructed over the
+/// concrete [`LocalDevContinuationDriver`] monomorphization because
+/// [`crate::RebornRuntime`] itself holds a concrete
+/// [`crate::attested::LocalDevAttestedComposition`] field — there is currently
+/// no type through which `build_webui_services` could hand it the durable
+/// (`Postgres*`/`LibSql*`) driver produced by
+/// [`crate::attested_durable::assemble_postgres`] / `assemble_libsql`. The
+/// runtime is also gated to local-dev (`build_reborn_runtime` rejects every
+/// other profile), so this cannot silently take the in-memory path in a
+/// production deployment: a production deployment cannot construct a
+/// `RebornRuntime` at all today. Erasing `RebornRuntime.attested_signing`
+/// behind a trait/enum so it can hold a durable monomorphization — and wiring
+/// this port over it — is the dedicated follow-up slice.
 pub struct RebornAttestedContinuation {
     driver: Arc<LocalDevContinuationDriver>,
 }
@@ -128,11 +142,15 @@ impl AttestedGateContinuationPort for RebornAttestedContinuation {
         verified: VerifiedAttestedContinuation,
     ) -> Result<AttestedContinuationOutcome, AttestedContinuationRejection> {
         // Recover the concrete verified continuation produced by
-        // `verify_and_claim`. A type mismatch (only possible if a different port
-        // implementation produced the handle) fails closed rather than panicking.
+        // `verify_and_claim`. A type mismatch is only reachable if a *different*
+        // port implementation produced the handle — i.e. an internal composition
+        // wiring bug, not a bad client proof. Surface it as a backend-health
+        // failure (503), never `ProofRejected` (400), so a wiring regression
+        // cannot masquerade as a client proof rejection. Still fails closed (no
+        // broadcast) rather than panicking.
         let verified = *verified
             .downcast::<VerifiedContinuation>()
-            .map_err(|_| AttestedContinuationRejection::ProofRejected)?;
+            .map_err(|_| AttestedContinuationRejection::BackendUnavailable)?;
 
         // Broadcast only — the proof is already verified and the grant already
         // claimed. No re-verification, no re-claim.
@@ -393,6 +411,11 @@ fn map_continuation_error(error: ContinuationError) -> AttestedContinuationRejec
         ContinuationError::ChainSigning(_) | ContinuationError::Broadcast { .. } => {
             AttestedContinuationRejection::BackendUnavailable
         }
+        // A startup/assembly misconfiguration should never reach this runtime
+        // mapping (it is raised while building the durable composition, long
+        // before any gate resolves). If one ever does, surface it as a backend
+        // health failure rather than a client proof rejection.
+        ContinuationError::Config { .. } => AttestedContinuationRejection::BackendUnavailable,
     }
 }
 
@@ -778,6 +801,14 @@ mod decoder_tests {
         assert_eq!(
             map_continuation_error(ContinuationError::Broadcast {
                 reason: "rpc 503".to_string(),
+            }),
+            AttestedContinuationRejection::BackendUnavailable
+        );
+        // Config (startup misconfig) -> BackendUnavailable (should never reach
+        // this runtime mapping in practice, but must stay exhaustive + safe).
+        assert_eq!(
+            map_continuation_error(ContinuationError::Config {
+                reason: "evm RPC URL is not a valid URL".to_string(),
             }),
             AttestedContinuationRejection::BackendUnavailable
         );

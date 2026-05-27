@@ -95,13 +95,17 @@ fn validate_optional_rpc_url(
         None => Ok(None),
         Some(value) => {
             let trimmed = value.trim();
-            let parsed = url::Url::parse(trimmed).map_err(|_| ContinuationError::Broadcast {
+            // Startup misconfiguration is surfaced as `ContinuationError::Config`
+            // (not `Broadcast`) so an operator can distinguish "RPC URL was bad at
+            // boot" from "RPC endpoint is down at runtime" — the latter is the
+            // only one that should look like a transient broadcast outage.
+            let parsed = url::Url::parse(trimmed).map_err(|_| ContinuationError::Config {
                 reason: format!("{family} RPC URL is not a valid URL"),
             })?;
             match parsed.scheme() {
                 "http" | "https" => {}
                 _ => {
-                    return Err(ContinuationError::Broadcast {
+                    return Err(ContinuationError::Config {
                         reason: format!("{family} RPC URL must be http(s)"),
                     });
                 }
@@ -109,11 +113,11 @@ fn validate_optional_rpc_url(
             let host = parsed
                 .host_str()
                 .filter(|host| !host.is_empty())
-                .ok_or_else(|| ContinuationError::Broadcast {
+                .ok_or_else(|| ContinuationError::Config {
                     reason: format!("{family} RPC URL must have a host"),
                 })?;
             if is_internal_host(host) {
-                return Err(ContinuationError::Broadcast {
+                return Err(ContinuationError::Config {
                     reason: format!("{family} RPC URL targets a disallowed internal/metadata host"),
                 });
             }
@@ -228,7 +232,7 @@ mod libsql_assembly {
         let bindings = Arc::new(
             LibSqlAttestedGateBindingStore::connect(Arc::clone(&db))
                 .await
-                .map_err(|error| ContinuationError::Broadcast {
+                .map_err(|error| ContinuationError::Config {
                     reason: format!("libsql attested gate-binding store: {error}"),
                 })?,
         );
@@ -237,14 +241,14 @@ mod libsql_assembly {
         grants
             .run_migrations()
             .await
-            .map_err(|error| ContinuationError::Broadcast {
+            .map_err(|error| ContinuationError::Config {
                 reason: format!("libsql grant store migration: {error}"),
             })?;
         let ledger = Arc::new(LibSqlSigningLedger::new(Arc::clone(&db)));
         ledger
             .run_migrations()
             .await
-            .map_err(|error| ContinuationError::Broadcast {
+            .map_err(|error| ContinuationError::Config {
                 reason: format!("libsql signing ledger migration: {error}"),
             })?;
 
@@ -299,7 +303,7 @@ mod postgres_assembly {
         let bindings = Arc::new(
             PostgresAttestedGateBindingStore::connect(pool.clone())
                 .await
-                .map_err(|error| ContinuationError::Broadcast {
+                .map_err(|error| ContinuationError::Config {
                     reason: format!("postgres attested gate-binding store: {error}"),
                 })?,
         );
@@ -308,14 +312,14 @@ mod postgres_assembly {
         grants
             .run_migrations()
             .await
-            .map_err(|error| ContinuationError::Broadcast {
+            .map_err(|error| ContinuationError::Config {
                 reason: format!("postgres grant store migration: {error}"),
             })?;
         let ledger = Arc::new(PostgresSigningLedger::new(pool));
         ledger
             .run_migrations()
             .await
-            .map_err(|error| ContinuationError::Broadcast {
+            .map_err(|error| ContinuationError::Config {
                 reason: format!("postgres signing ledger migration: {error}"),
             })?;
 

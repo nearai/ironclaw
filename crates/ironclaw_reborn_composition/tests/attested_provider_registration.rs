@@ -439,6 +439,89 @@ fn partial_near_config_fails_closed() {
     });
 }
 
+/// The remaining partial-config permutations that `partial_near_config_fails_closed`
+/// does not cover: exactly one of the three NEAR vars present. Each is a
+/// fail-closed `MissingRequired` naming the first absent field — never a
+/// silently-unconfigured provider and never the misleading "must not be empty"
+/// (`EmptyUrl`) message for a var the operator never set. This is a security
+/// invariant (a half-wired NEAR verifier must not register), so the missing
+/// sub-cases are made explicit.
+#[test]
+fn partial_near_config_single_var_fails_closed_with_missing_required() {
+    use ironclaw_reborn_composition::AttestedConfigError;
+
+    // Only state_secret set: the first absent field reported is the base URL.
+    with_clean_attested_env(|| {
+        unsafe {
+            std::env::set_var("ATTESTED_NEAR_STATE_SECRET", strong_state_secret());
+        }
+        let err = AttestedProvidersConfig::from_env()
+            .expect_err("state_secret-only partial NEAR config must fail closed");
+        assert_eq!(
+            err,
+            AttestedConfigError::MissingRequired {
+                field: "near_wallet_base_url"
+            },
+            "absent field must be reported as MissingRequired, not EmptyUrl"
+        );
+    });
+
+    // Only callback URL set: base URL still the first absent field.
+    with_clean_attested_env(|| {
+        unsafe {
+            std::env::set_var("ATTESTED_NEAR_CALLBACK_URL", "https://app.example/cb");
+        }
+        let err = AttestedProvidersConfig::from_env()
+            .expect_err("callback-only partial NEAR config must fail closed");
+        assert_eq!(
+            err,
+            AttestedConfigError::MissingRequired {
+                field: "near_wallet_base_url"
+            }
+        );
+    });
+
+    // Base URL + state_secret, no callback: the absent field is the callback.
+    with_clean_attested_env(|| {
+        unsafe {
+            std::env::set_var(
+                "ATTESTED_NEAR_WALLET_BASE_URL",
+                "https://wallet.near.org/sign",
+            );
+            std::env::set_var("ATTESTED_NEAR_STATE_SECRET", strong_state_secret());
+        }
+        let err = AttestedProvidersConfig::from_env()
+            .expect_err("missing-callback partial NEAR config must fail closed");
+        assert_eq!(
+            err,
+            AttestedConfigError::MissingRequired {
+                field: "near_callback_url"
+            }
+        );
+    });
+
+    // Base URL + callback, no state_secret: the absent field is the secret —
+    // and crucially is NOT reported as an empty URL.
+    with_clean_attested_env(|| {
+        unsafe {
+            std::env::set_var(
+                "ATTESTED_NEAR_WALLET_BASE_URL",
+                "https://wallet.near.org/sign",
+            );
+            std::env::set_var("ATTESTED_NEAR_CALLBACK_URL", "https://app.example/cb");
+        }
+        let err = AttestedProvidersConfig::from_env()
+            .expect_err("missing-state_secret partial NEAR config must fail closed");
+        assert_eq!(
+            err,
+            AttestedConfigError::MissingRequired {
+                field: "near_state_secret"
+            },
+            "missing state_secret must be MissingRequired, not the misleading EmptyUrl"
+        );
+    });
+}
+
 /// A present-but-invalid attested provider config makes the build path fail
 /// (fail-closed at startup), exercised through `from_env` — the same call
 /// `build_attested_composition` makes before wrapping the error as

@@ -328,9 +328,11 @@ async fn durable_libsql_rejects_malformed_rpc_url() {
         AttestedProvidersConfig::default(),
     )
     .await;
+    // A startup misconfiguration is surfaced as `Config` (not `Broadcast`) so an
+    // operator can distinguish boot-time misconfig from a runtime RPC outage.
     assert!(
-        matches!(result, Err(ContinuationError::Broadcast { .. })),
-        "malformed RPC URL must be rejected at assembly time"
+        matches!(result, Err(ContinuationError::Config { .. })),
+        "malformed RPC URL must be rejected at assembly time as a Config error"
     );
 }
 
@@ -358,8 +360,8 @@ async fn durable_libsql_rejects_internal_metadata_rpc_url() {
     )
     .await;
     assert!(
-        matches!(result, Err(ContinuationError::Broadcast { .. })),
-        "metadata-host RPC URL must be rejected"
+        matches!(result, Err(ContinuationError::Config { .. })),
+        "metadata-host RPC URL must be rejected as a Config error"
     );
 }
 

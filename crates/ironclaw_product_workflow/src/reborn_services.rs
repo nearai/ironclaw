@@ -6599,6 +6599,20 @@ where
         // broadcast failure does NOT roll the turn back (the resume guard already
         // consumed the one-shot); it surfaces as a sanitized error so the client
         // can observe the failure category.
+        //
+        // Stuck-state semantics (intentional, non-retryable): when the broadcast
+        // submit itself fails, the driver moves the signing-ledger row to the
+        // `Unknown` TERMINAL state (`recover_unknown`) — the tx may or may not
+        // have landed on-chain, so the outcome is genuinely unknown. A client
+        // retry is therefore deliberately NOT offered (`retryable: false` in
+        // `map_attested_continuation_rejection`): re-driving would either hit the
+        // consumed one-shot / terminal ledger row (no-op) or, worse, risk a
+        // double-submission of a tx that already landed. Recovery is
+        // operator-mediated reconciliation against the chain, not automatic
+        // client retry. A future pollable `BroadcastPending` ledger state (the
+        // driver's deferred cross-crate follow-up) would give the client a
+        // poll-for-outcome path; until then this is the safe, fail-closed
+        // behavior and the turn correctly stays `AttestedResolved`.
         continuation
             .broadcast_resolved(&scope, run_id, &gate_ref, verified)
             .await
@@ -7783,9 +7797,13 @@ fn map_attested_continuation_rejection(
         // A chain-signing / broadcast backend failure is an infrastructure
         // health failure, so it must surface as 503 (not a 400 proof rejection
         // that would mislead the client and suppress the backend-health
-        // signal). It stays non-retryable like every other category here: the
-        // resume guard already consumed the one-shot, so a client retry would
-        // be rejected at the CAS rather than re-driving the sign/broadcast.
+        // signal). It stays non-retryable like every other category here, and
+        // for a broadcast-stage failure that is a deliberate safety choice, not
+        // an oversight: the driver has already moved the ledger row to the
+        // `Unknown` TERMINAL state, so the on-chain outcome is unknown. Offering
+        // `retryable: true` would invite an unsafe rebroadcast of a tx that may
+        // already have landed (double-submission); recovery is operator-mediated
+        // reconciliation. See `resolve_attested_gate` for the full rationale.
         AttestedContinuationRejection::BackendUnavailable => (
             RebornServicesErrorCode::Unavailable,
             RebornServicesErrorKind::ServiceUnavailable,
