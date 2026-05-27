@@ -29,6 +29,7 @@ pub(crate) enum CompactionDecision {
 pub(crate) struct DefaultCompactionStrategy {
     pub context_limit_tokens: u64,
     pub reserve_tokens: u64,
+    pub main_loop_max_output_tokens: u64,
     pub preserve_tail_tokens: u64,
     pub deadline_ms: u64,
 }
@@ -36,6 +37,7 @@ pub(crate) struct DefaultCompactionStrategy {
 impl DefaultCompactionStrategy {
     pub const DEFAULT_CONTEXT_LIMIT_TOKENS: u64 = 128_000;
     pub const DEFAULT_RESERVE_TOKENS: u64 = 20_000;
+    pub const DEFAULT_MAIN_LOOP_MAX_OUTPUT_TOKENS: u64 = 0;
     pub const DEFAULT_PRESERVE_TAIL_TOKENS: u64 = 8_000;
     pub const DEFAULT_DEADLINE_MS: u64 = 30_000;
 }
@@ -45,6 +47,7 @@ impl Default for DefaultCompactionStrategy {
         Self {
             context_limit_tokens: Self::DEFAULT_CONTEXT_LIMIT_TOKENS,
             reserve_tokens: Self::DEFAULT_RESERVE_TOKENS,
+            main_loop_max_output_tokens: Self::DEFAULT_MAIN_LOOP_MAX_OUTPUT_TOKENS,
             preserve_tail_tokens: Self::DEFAULT_PRESERVE_TAIL_TOKENS,
             deadline_ms: Self::DEFAULT_DEADLINE_MS,
         }
@@ -60,9 +63,8 @@ impl CompactionStrategy for DefaultCompactionStrategy {
         if state.compaction_prompt.message_index.is_empty() {
             return CompactionDecision::Skip;
         }
-        let threshold = self
-            .context_limit_tokens
-            .saturating_sub(self.reserve_tokens);
+        let output_buffer = self.reserve_tokens.max(self.main_loop_max_output_tokens);
+        let threshold = self.context_limit_tokens.saturating_sub(output_buffer);
         if threshold <= self.preserve_tail_tokens {
             return CompactionDecision::Skip;
         }
@@ -70,21 +72,42 @@ impl CompactionStrategy for DefaultCompactionStrategy {
         if !state.compaction_state.force_compact_on_next_iteration && total_tokens < threshold {
             return CompactionDecision::Skip;
         }
+        if state.compaction_state.force_compact_on_next_iteration {
+            return state
+                .compaction_prompt
+                .message_index
+                .iter()
+                .rev()
+                .find(|entry| {
+                    entry.kind == IndexedMessageKind::User
+                        && Some(entry.sequence) > state.compaction_state.last_compacted_through_seq
+                })
+                .map(|entry| CompactionDecision::Trigger {
+                    drop_through_seq: entry.sequence,
+                    preserve_tail_tokens: self.preserve_tail_tokens,
+                    deadline_ms: self.deadline_ms,
+                })
+                .unwrap_or(CompactionDecision::Skip);
+        }
 
-        let mut tail_tokens_after_entry = 0_u64;
+        let mut tail_tokens = 0_u64;
+        let mut latest_user_boundary = None;
         for entry in state.compaction_prompt.message_index.iter().rev() {
             if entry.kind == IndexedMessageKind::User
                 && Some(entry.sequence) > state.compaction_state.last_compacted_through_seq
-                && tail_tokens_after_entry <= self.preserve_tail_tokens
+            {
+                latest_user_boundary = Some(entry.sequence);
+            }
+            tail_tokens = tail_tokens.saturating_add(entry.estimated_tokens);
+            if tail_tokens >= self.preserve_tail_tokens
+                && let Some(sequence) = latest_user_boundary
             {
                 return CompactionDecision::Trigger {
-                    drop_through_seq: entry.sequence,
+                    drop_through_seq: sequence,
                     preserve_tail_tokens: self.preserve_tail_tokens,
                     deadline_ms: self.deadline_ms,
                 };
             }
-            tail_tokens_after_entry =
-                tail_tokens_after_entry.saturating_add(entry.estimated_tokens);
         }
         CompactionDecision::Skip
     }
@@ -105,6 +128,7 @@ mod tests {
         let strategy = DefaultCompactionStrategy {
             context_limit_tokens: 100,
             reserve_tokens: 10,
+            main_loop_max_output_tokens: 0,
             preserve_tail_tokens: 1,
             deadline_ms: 1,
         };
@@ -128,6 +152,7 @@ mod tests {
         let strategy = DefaultCompactionStrategy {
             context_limit_tokens: 100,
             reserve_tokens: 10,
+            main_loop_max_output_tokens: 0,
             preserve_tail_tokens: 1,
             deadline_ms: 1,
         };
@@ -167,6 +192,7 @@ mod tests {
         let strategy = DefaultCompactionStrategy {
             context_limit_tokens: 100,
             reserve_tokens: 10,
+            main_loop_max_output_tokens: 0,
             preserve_tail_tokens: 60,
             deadline_ms: 7,
         };
@@ -176,6 +202,117 @@ mod tests {
             CompactionDecision::Trigger {
                 drop_through_seq: 3,
                 preserve_tail_tokens: 60,
+                deadline_ms: 7,
+            }
+        );
+    }
+
+    #[test]
+    fn evaluate_triggers_when_newest_assistant_block_exceeds_tail_budget() {
+        let context = crate::test_support::test_run_context("compaction-strategy-tail-overflow");
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        state.compaction_state = CompactionStrategyState::default();
+        state.compaction_prompt = CompactionPromptSnapshot::from_message_index(vec![
+            MessageIndexEntry {
+                sequence: 1,
+                kind: IndexedMessageKind::User,
+                estimated_tokens: 10,
+            },
+            MessageIndexEntry {
+                sequence: 2,
+                kind: IndexedMessageKind::Assistant,
+                estimated_tokens: 100,
+            },
+        ]);
+        let strategy = DefaultCompactionStrategy {
+            context_limit_tokens: 100,
+            reserve_tokens: 10,
+            main_loop_max_output_tokens: 0,
+            preserve_tail_tokens: 60,
+            deadline_ms: 7,
+        };
+
+        assert_eq!(
+            strategy.should_compact(&state, &context),
+            CompactionDecision::Trigger {
+                drop_through_seq: 1,
+                preserve_tail_tokens: 60,
+                deadline_ms: 7,
+            }
+        );
+    }
+
+    #[test]
+    fn evaluate_skips_when_latest_user_boundary_was_already_compacted() {
+        let context = crate::test_support::test_run_context("compaction-strategy-compacted");
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        state.compaction_state.last_compacted_through_seq = Some(3);
+        state.compaction_state.force_compact_on_next_iteration = true;
+        state.compaction_prompt = CompactionPromptSnapshot::from_message_index(vec![
+            MessageIndexEntry {
+                sequence: 1,
+                kind: IndexedMessageKind::User,
+                estimated_tokens: 10,
+            },
+            MessageIndexEntry {
+                sequence: 2,
+                kind: IndexedMessageKind::Assistant,
+                estimated_tokens: 10,
+            },
+            MessageIndexEntry {
+                sequence: 3,
+                kind: IndexedMessageKind::User,
+                estimated_tokens: 10,
+            },
+            MessageIndexEntry {
+                sequence: 4,
+                kind: IndexedMessageKind::Assistant,
+                estimated_tokens: 100,
+            },
+        ]);
+        let strategy = DefaultCompactionStrategy {
+            context_limit_tokens: 100,
+            reserve_tokens: 10,
+            main_loop_max_output_tokens: 0,
+            preserve_tail_tokens: 60,
+            deadline_ms: 7,
+        };
+
+        assert_eq!(
+            strategy.should_compact(&state, &context),
+            CompactionDecision::Skip
+        );
+    }
+
+    #[test]
+    fn evaluate_uses_output_budget_when_larger_than_reserve() {
+        let context = crate::test_support::test_run_context("compaction-strategy-output-budget");
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        state.compaction_prompt = CompactionPromptSnapshot::from_message_index(vec![
+            MessageIndexEntry {
+                sequence: 1,
+                kind: IndexedMessageKind::User,
+                estimated_tokens: 40,
+            },
+            MessageIndexEntry {
+                sequence: 2,
+                kind: IndexedMessageKind::Assistant,
+                estimated_tokens: 35,
+            },
+        ]);
+        let strategy = DefaultCompactionStrategy {
+            context_limit_tokens: 100,
+            reserve_tokens: 10,
+            main_loop_max_output_tokens: 30,
+            preserve_tail_tokens: 1,
+            deadline_ms: 7,
+        };
+
+        assert_eq!(
+            strategy.should_compact(&state, &context),
+            CompactionDecision::Trigger {
+                drop_through_seq: 1,
+                preserve_tail_tokens: 1,
                 deadline_ms: 7,
             }
         );

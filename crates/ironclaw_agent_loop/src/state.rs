@@ -58,7 +58,7 @@ pub struct LoopExecutionState {
     pub model_state: ModelStrategyState,
     #[serde(default)]
     pub compaction_state: CompactionStrategyState,
-    #[serde(skip)]
+    #[serde(default)]
     pub compaction_prompt: CompactionPromptSnapshot,
     #[serde(default)]
     pub goal_refresh_state: GoalRefreshStrategyState,
@@ -405,7 +405,7 @@ mod tests {
     }
 
     #[test]
-    fn compaction_prompt_snapshot_is_not_checkpointed() {
+    fn compaction_prompt_snapshot_round_trips_through_checkpoints() {
         let context = test_run_context();
         let mut state = LoopExecutionState::initial_for_run(&context);
         state.compaction_prompt =
@@ -417,15 +417,14 @@ mod tests {
 
         let value = serde_json::to_value(&state).unwrap();
         assert!(
-            !value
+            value
                 .as_object()
                 .expect("state serializes as object")
                 .contains_key("compaction_prompt")
         );
         let restored: LoopExecutionState = serde_json::from_value(value).unwrap();
 
-        assert!(restored.compaction_prompt.message_index.is_empty());
-        assert_eq!(restored.compaction_prompt.observed_prompt_tokens, 0);
+        assert_eq!(restored.compaction_prompt, state.compaction_prompt);
         assert_eq!(restored.compaction_state, state.compaction_state);
     }
 

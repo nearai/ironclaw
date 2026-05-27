@@ -19,7 +19,7 @@ pub struct CompactionStrategyState {
     pub force_compact_on_next_iteration: bool,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CompactionPromptSnapshot {
     pub message_index: Vec<MessageIndexEntry>,
     pub observed_prompt_tokens: u64,
@@ -38,12 +38,15 @@ impl CompactionPromptSnapshot {
     }
 
     pub fn retain_after_sequence(&mut self, sequence: u64) {
-        self.message_index.retain(|entry| entry.sequence > sequence);
-        self.observed_prompt_tokens = self
-            .message_index
-            .iter()
-            .map(|entry| entry.estimated_tokens)
-            .sum();
+        let mut removed_tokens = 0_u64;
+        self.message_index.retain(|entry| {
+            let keep = entry.sequence > sequence;
+            if !keep {
+                removed_tokens = removed_tokens.saturating_add(entry.estimated_tokens);
+            }
+            keep
+        });
+        self.observed_prompt_tokens = self.observed_prompt_tokens.saturating_sub(removed_tokens);
     }
 }
 

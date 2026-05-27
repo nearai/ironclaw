@@ -9,7 +9,7 @@ use ironclaw_turns::{
 };
 use std::time::Duration;
 
-use crate::state::LoopExecutionState;
+use crate::state::{CheckpointKind, LoopExecutionState};
 use crate::strategies::CompactionDecision;
 
 use super::{
@@ -90,11 +90,14 @@ impl ExecutorStage<CompactionInput> for CompactionStage {
                                 },
                             )
                             .await;
+                        let checked = CheckpointStage
+                            .write(ctx, state, CheckpointKind::Final)
+                            .await?;
                         let exit = failed_exit(
                             ctx.host,
-                            state,
+                            checked.state,
                             LoopFailureKind::CompactionUnavailable,
-                            None,
+                            Some(checked.checkpoint_id),
                         )?;
                         return Ok(CompactionOutput {
                             state: Box::new(LoopExecutionState::initial_for_run(
@@ -117,11 +120,14 @@ impl ExecutorStage<CompactionInput> for CompactionStage {
                                 },
                             )
                             .await;
+                        let checked = CheckpointStage
+                            .write(ctx, state, CheckpointKind::Final)
+                            .await?;
                         let exit = failed_exit(
                             ctx.host,
-                            state,
+                            checked.state,
                             LoopFailureKind::CompactionUnavailable,
-                            None,
+                            Some(checked.checkpoint_id),
                         )?;
                         return Ok(CompactionOutput {
                             state: Box::new(LoopExecutionState::initial_for_run(

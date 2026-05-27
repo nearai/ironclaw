@@ -249,12 +249,19 @@ async fn compaction_stage_timeout_returns_failed_exit() {
         .await
         .expect("compaction stage");
 
-    assert!(matches!(output.exit, Some(LoopExit::Failed(_))));
+    match output.exit {
+        Some(LoopExit::Failed(failed)) => {
+            assert!(failed.checkpoint_id.is_some());
+        }
+        other => panic!("expected failed exit, got {other:?}"),
+    }
+    assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
     assert!(matches!(
         host.progress_events().as_slice(),
         [
             LoopProgressEvent::CompactionStarted { .. },
-            LoopProgressEvent::CompactionFailed { .. }
+            LoopProgressEvent::CompactionFailed { .. },
+            LoopProgressEvent::CheckpointWritten { .. }
         ]
     ));
 }

@@ -61,6 +61,7 @@ async fn compaction_failure_returns_failed_exit() {
     match exit {
         LoopExit::Failed(failed) => {
             assert_eq!(failed.reason_kind, LoopFailureKind::CompactionUnavailable);
+            assert!(failed.checkpoint_id.is_some());
         }
         other => panic!("expected failed exit, got {other:?}"),
     }

@@ -1,14 +1,19 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use chrono::Utc;
+use ironclaw_host_api::{
+    AgentId, CapabilityId, InvocationId, ProjectId, TenantId, ThreadId, UserId,
+};
 use ironclaw_loop_support::{CompactionTask, HostManagedLoopCompactionPort};
 use ironclaw_safety::{
     InjectionScanner, InjectionWarning, LeakAction, LeakMatch, LeakScanResult, LeakScanner,
     LeakSeverity, Severity,
 };
 use ironclaw_threads::{
-    AcceptInboundMessageRequest, AppendAssistantDraftRequest, EnsureThreadRequest,
+    AcceptInboundMessageRequest, AppendAssistantDraftRequest,
+    AppendCapabilityDisplayPreviewRequest, CapabilityDisplayPreviewEnvelope,
+    CapabilityDisplayPreviewEnvelopeInput, CapabilityDisplayPreviewStatus, EnsureThreadRequest,
     InMemorySessionThreadService, MessageContent, SessionThreadService, ThreadScope,
 };
 use ironclaw_turns::run_profile::{
@@ -84,6 +89,59 @@ async fn compaction_port_rejects_ranges_covering_hidden_statuses() {
 
     assert!(matches!(error, LoopCompactionError::InvalidCutPoint));
     assert!(inference.last_input().is_empty());
+}
+
+#[tokio::test]
+async fn compaction_port_skips_model_hidden_capability_previews() {
+    let fixture = CompactionFixture::new().await;
+    fixture.append_user("visible-one").await;
+    fixture.append_preview().await;
+    fixture.append_user("visible-two").await;
+    let inference = Arc::new(CapturingInference::new("summary"));
+    let task = Arc::new(CompactionTask::new(
+        inference.clone(),
+        Arc::clone(&fixture.threads),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(CleanLeakScanner),
+        "system prompt",
+    ));
+    let port = HostManagedLoopCompactionPort::new(task, fixture.scope.clone());
+
+    let response = port
+        .compact_loop_context(fixture.request(3))
+        .await
+        .expect("capability preview should not poison compaction");
+
+    assert!(!response.summary_artifact_id.is_empty());
+    let input = inference.last_input();
+    assert!(input.contains("visible-one"));
+    assert!(input.contains("visible-two"));
+    assert!(!input.contains("preview"));
+}
+
+#[tokio::test]
+async fn compaction_task_resolves_thread_scope_when_supported() {
+    let fixture = CompactionFixture::new().await;
+    fixture.append_user("visible").await;
+    let wrong_scope = ThreadScope {
+        tenant_id: TenantId::new("tenant-wrong").unwrap(),
+        agent_id: AgentId::new("agent-wrong").unwrap(),
+        project_id: Some(ProjectId::new("project-wrong").unwrap()),
+        owner_user_id: Some(UserId::new("user-wrong").unwrap()),
+        mission_id: None,
+    };
+    let task = Arc::new(CompactionTask::new(
+        Arc::new(CapturingInference::new("summary")),
+        Arc::clone(&fixture.threads),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(CleanLeakScanner),
+        "system prompt",
+    ));
+    let port = HostManagedLoopCompactionPort::new(task, wrong_scope);
+
+    port.compact_loop_context(fixture.request(1))
+        .await
+        .expect("task should resolve the stored thread scope instead of trusting the port scope");
 }
 
 #[tokio::test]
@@ -192,6 +250,35 @@ impl CompactionFixture {
                 thread_id: self.thread_id.clone(),
                 turn_run_id: "run-hidden".to_string(),
                 content: MessageContent::text(content),
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn append_preview(&self) {
+        self.threads
+            .append_capability_display_preview(AppendCapabilityDisplayPreviewRequest {
+                scope: self.scope.clone(),
+                thread_id: self.thread_id.clone(),
+                turn_run_id: "run-preview".to_string(),
+                preview: CapabilityDisplayPreviewEnvelope::new(
+                    CapabilityDisplayPreviewEnvelopeInput {
+                        invocation_id: InvocationId::new(),
+                        capability_id: CapabilityId::new("demo.preview").unwrap(),
+                        status: CapabilityDisplayPreviewStatus::Completed,
+                        title: "Preview".to_string(),
+                        subtitle: None,
+                        input_summary: Some("preview input".to_string()),
+                        output_summary: Some("preview output".to_string()),
+                        output_preview: Some("preview text".to_string()),
+                        output_kind: Some("text".to_string()),
+                        output_bytes: Some(12),
+                        result_ref: None,
+                        truncated: false,
+                        updated_at: Utc::now(),
+                    },
+                )
+                .unwrap(),
             })
             .await
             .unwrap();

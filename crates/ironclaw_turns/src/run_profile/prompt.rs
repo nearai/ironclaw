@@ -319,11 +319,12 @@ mod tests {
 
     use super::*;
     use crate::{
-        RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope,
+        LoopMessageRef, RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope,
         run_profile::{
             InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
-            LoopContextBundle, LoopContextMessage, LoopInlineMessage, LoopInlineMessageRole,
-            LoopSafeSummary, ResolvedRunProfile,
+            LoopContextBundle, LoopContextCompactionKind, LoopContextCompactionMetadata,
+            LoopContextMessage, LoopInlineMessage, LoopInlineMessageRole, LoopSafeSummary,
+            ResolvedRunProfile,
         },
     };
 
@@ -512,6 +513,42 @@ mod tests {
             .unwrap()
             .expect("summary-only body message should be materialized");
         assert_eq!(materialized.safe_content, "What is the capital of France?");
+    }
+
+    #[tokio::test]
+    async fn host_managed_prompt_port_preserves_compaction_message_index() {
+        let context = test_context();
+        let compaction = LoopContextCompactionMetadata {
+            sequence: 7,
+            kind: LoopContextCompactionKind::User,
+            estimated_tokens: 13,
+        };
+        let message = LoopContextMessage {
+            message_ref: Some(LoopMessageRef::new("msg:compaction-source").unwrap()),
+            role: "user".to_string(),
+            safe_summary: "visible message".to_string(),
+            compaction: Some(compaction.clone()),
+        };
+        let port = HostManagedLoopPromptPort::new(
+            context,
+            Arc::new(StubContextPort::new(vec![], vec![message])),
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        );
+
+        let bundle = port
+            .build_prompt_bundle(LoopPromptBundleRequest {
+                mode: PromptMode::TextOnly,
+                context_cursor: None,
+                surface_version: None,
+                checkpoint_state_ref: None,
+                max_messages: Some(8),
+                capability_view: None,
+                inline_messages: vec![],
+            })
+            .await
+            .expect("bundle should preserve compaction metadata");
+
+        assert_eq!(bundle.compaction_message_index, vec![compaction]);
     }
 
     fn test_context() -> LoopRunContext {

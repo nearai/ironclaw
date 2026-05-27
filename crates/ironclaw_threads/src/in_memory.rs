@@ -684,6 +684,12 @@ impl SessionThreadService for InMemorySessionThreadService {
             .ok_or(SessionThreadError::UnknownThread { thread_id })
     }
 
+    async fn resolve_scope(&self, thread_id: ThreadId) -> Result<ThreadScope, SessionThreadError> {
+        self.read_thread_by_id(thread_id)
+            .await
+            .map(|thread| thread.scope)
+    }
+
     async fn update_thread_goal(
         &self,
         request: crate::UpdateThreadGoalRequest,

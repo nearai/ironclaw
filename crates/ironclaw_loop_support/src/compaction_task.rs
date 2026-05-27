@@ -3,8 +3,8 @@ use std::sync::Arc;
 use ironclaw_host_api::ThreadId;
 use ironclaw_safety::{InjectionScanner, LeakDetector, LeakScanner, Sanitizer};
 use ironclaw_threads::{
-    CreateSummaryArtifactRequest, MessageContent, MessageKind, MessageStatus, SessionThreadService,
-    SummaryKind, ThreadMessageRangeRequest, ThreadScope,
+    CreateSummaryArtifactRequest, MessageContent, MessageKind, MessageStatus, SessionThreadError,
+    SessionThreadService, SummaryKind, ThreadMessageRangeRequest, ThreadScope,
 };
 use ironclaw_turns::run_profile::{
     LoopCompactionError, LoopCompactionMode, LoopCompactionPort, LoopCompactionRequest,
@@ -143,10 +143,23 @@ where
             return Err(CompactionError::InvalidCutPoint);
         }
         let start_exclusive = last_compacted_through_seq.unwrap_or(0);
+        let thread_scope = match self.threads.resolve_scope(thread_id.clone()).await {
+            Ok(scope) => scope,
+            Err(SessionThreadError::Backend(message))
+                if message.contains("resolve_scope is not implemented") =>
+            {
+                expected_scope.clone()
+            }
+            Err(_) => {
+                return Err(CompactionError::PersistenceFailed {
+                    safe_summary: safe("thread scope unavailable"),
+                });
+            }
+        };
         let range = self
             .threads
             .list_thread_messages_range(ThreadMessageRangeRequest {
-                scope: expected_scope.clone(),
+                scope: thread_scope.clone(),
                 thread_id: thread_id.clone(),
                 after_sequence: start_exclusive,
                 through_sequence: drop_through_seq,
@@ -155,7 +168,7 @@ where
             .map_err(|_| CompactionError::PersistenceFailed {
                 safe_summary: safe("thread message range unavailable"),
             })?;
-        if range.thread.scope != expected_scope {
+        if range.thread.scope != thread_scope {
             return Err(CompactionError::PersistenceFailed {
                 safe_summary: safe("thread scope mismatch"),
             });
@@ -171,17 +184,25 @@ where
 
         let mut input = String::new();
         for message in &messages {
+            if message.kind == MessageKind::CapabilityDisplayPreview {
+                continue;
+            }
             if !is_compaction_model_visible(message.kind, message.status) {
                 return Err(CompactionError::InvalidCutPoint);
             }
             let body = message.content.as_deref().unwrap_or_default();
-            append_escaped_message(&mut input, message.sequence, message.kind, body);
-            if input.len() > self.max_input_bytes {
+            let observed_bytes = input.len().saturating_add(escaped_message_len(
+                message.sequence,
+                message.kind,
+                body,
+            ));
+            if observed_bytes > self.max_input_bytes {
                 return Err(CompactionError::InputTooLarge {
                     cap: self.max_input_bytes,
-                    observed_bytes: input.len(),
+                    observed_bytes,
                 });
             }
+            append_escaped_message(&mut input, message.sequence, message.kind, body);
         }
         if !self.injection_scanner.scan_injection(&input).is_empty() {
             return Err(CompactionError::InjectionDetected);
@@ -235,7 +256,7 @@ where
         let artifact = self
             .threads
             .create_summary_artifact(CreateSummaryArtifactRequest {
-                scope: expected_scope,
+                scope: thread_scope,
                 thread_id,
                 start_sequence: start_exclusive.saturating_add(1),
                 end_sequence: drop_through_seq,
@@ -295,7 +316,24 @@ fn append_escaped_message(output: &mut String, sequence: u64, kind: MessageKind,
     output.push_str("<message sequence=\"");
     output.push_str(&sequence.to_string());
     output.push_str("\" kind=\"");
-    output.push_str(match kind {
+    output.push_str(message_kind_name(kind));
+    output.push_str("\">");
+    output.push_str(&escape_xml(body));
+    output.push_str("</message>\n");
+}
+
+fn escaped_message_len(sequence: u64, kind: MessageKind, body: &str) -> usize {
+    "<message sequence=\"".len()
+        + sequence.to_string().len()
+        + "\" kind=\"".len()
+        + message_kind_name(kind).len()
+        + "\">".len()
+        + escaped_xml_len(body)
+        + "</message>\n".len()
+}
+
+fn message_kind_name(kind: MessageKind) -> &'static str {
+    match kind {
         MessageKind::User => "user",
         MessageKind::Assistant => "assistant",
         MessageKind::System => "system",
@@ -303,10 +341,19 @@ fn append_escaped_message(output: &mut String, sequence: u64, kind: MessageKind,
         MessageKind::CheckpointReference => "checkpoint_reference",
         MessageKind::ToolResultReference => "tool_result_reference",
         MessageKind::CapabilityDisplayPreview => "capability_display_preview",
-    });
-    output.push_str("\">");
-    output.push_str(&escape_xml(body));
-    output.push_str("</message>\n");
+    }
+}
+
+fn escaped_xml_len(value: &str) -> usize {
+    value
+        .chars()
+        .map(|character| match character {
+            '&' => "&amp;".len(),
+            '<' => "&lt;".len(),
+            '>' => "&gt;".len(),
+            _ => character.len_utf8(),
+        })
+        .sum()
 }
 
 fn escape_xml(value: &str) -> String {
