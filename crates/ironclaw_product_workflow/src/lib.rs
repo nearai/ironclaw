@@ -89,11 +89,12 @@ pub use inbound_turn::{
 };
 pub use ledger::{IdempotencyDecision, IdempotencyLedger};
 pub use lifecycle::{
-    LifecycleBlockerRef, LifecycleCommandKind, LifecyclePackageId, LifecyclePackageKind,
-    LifecyclePackageRef, LifecyclePhase, LifecycleProductAction, LifecycleProductContext,
-    LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
-    LifecycleProductSurfaceContext, LifecycleReadinessBlocker, LifecycleSkillSource,
-    LifecycleSkillSummary, UnsupportedLifecycleProductFacade,
+    LifecycleBlockerRef, LifecycleCommandKind, LifecycleExtensionSource, LifecycleExtensionSummary,
+    LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
+    LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
+    LifecycleProductPayload, LifecycleProductResponse, LifecycleProductSurfaceContext,
+    LifecycleReadinessBlocker, LifecycleSkillSource, LifecycleSkillSummary,
+    UnsupportedLifecycleProductFacade,
 };
 pub use policy::{
     BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,

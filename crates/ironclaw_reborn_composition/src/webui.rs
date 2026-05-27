@@ -82,9 +82,13 @@ pub fn build_webui_services(
         );
     }
     if let Some(local_runtime) = &services.local_runtime {
-        api = api.with_lifecycle_product_facade(Arc::new(RebornLocalLifecycleFacade::new(
-            local_runtime.skill_management.clone(),
-        )));
+        let mut lifecycle_facade =
+            RebornLocalLifecycleFacade::new(local_runtime.skill_management.clone());
+        if let Some(extension_management) = &local_runtime.extension_management {
+            lifecycle_facade =
+                lifecycle_facade.with_extension_management(extension_management.clone());
+        }
+        api = api.with_lifecycle_product_facade(Arc::new(lifecycle_facade));
     }
     api = api.with_event_stream(event_stream.unwrap_or_else(|| runtime.webui_event_stream()));
 

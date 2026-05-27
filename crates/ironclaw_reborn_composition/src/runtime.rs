@@ -101,7 +101,7 @@ pub use skills::{
 use skills::skill_asset_error;
 
 #[cfg(feature = "root-llm-provider")]
-use crate::runtime_input::{ResolvedRebornLlm, ResolvedRebornLlmSource};
+use crate::runtime_input::ResolvedRebornLlm;
 
 /// Stable identifier for a Reborn CLI conversation. Wraps a `ThreadId`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -410,7 +410,7 @@ impl RebornRuntime {
     /// from the session thread service.
     ///
     /// Without an LLM gateway wired in (i.e. when this crate is built
-    /// without the `root-llm-provider` feature or `RebornLlmConfig` is not
+    /// without the `root-llm-provider` feature or an LLM config is not
     /// provided), the run will fail and the returned reply will surface
     /// that failure via `status = Failed` and `text = None`.
     pub async fn send_user_message(
@@ -924,14 +924,14 @@ pub async fn build_reborn_runtime(
             gateway
         } else {
             match llm {
-                Some(cfg) => build_llm_gateway(cfg)?,
+                Some(cfg) => build_llm_gateway(cfg).await?,
                 None => build_stub_gateway(),
             }
         }
         #[cfg(not(test))]
         {
             match llm {
-                Some(cfg) => build_llm_gateway(cfg)?,
+                Some(cfg) => build_llm_gateway(cfg).await?,
                 None => build_stub_gateway(),
             }
         }
@@ -986,6 +986,8 @@ pub async fn build_reborn_runtime(
         .with_live_reasoning_milestone_sink(durable_milestone_sink, actor_user_id.clone());
     let local_dev_capabilities = local_dev::capability_wiring(
         &services,
+        Arc::clone(&thread_service) as Arc<dyn SessionThreadService>,
+        thread_scope.clone(),
         actor_user_id.clone(),
         model_gateway,
         milestone_sink.clone(),
@@ -1257,33 +1259,17 @@ impl CapabilitySurfaceProfileResolver for AllowAllCapabilitySurfaceResolver {
 }
 
 #[cfg(feature = "root-llm-provider")]
-fn build_llm_gateway(
+async fn build_llm_gateway(
     llm: ResolvedRebornLlm,
 ) -> Result<Arc<dyn ironclaw_loop_support::HostManagedModelGateway>, RebornRuntimeError> {
-    use ironclaw_llm::RegistryProviderConfig;
     use ironclaw_reborn::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
     use ironclaw_turns::run_profile::ModelProfileId;
 
     let model = llm.model().to_string();
-    let provider = match llm.source {
-        ResolvedRebornLlmSource::Catalog(cfg) => {
-            let protocol = parse_provider_protocol(&cfg.protocol)?;
-            let registry_config = RegistryProviderConfig::generic(
-                protocol,
-                cfg.provider_id.clone(),
-                cfg.api_key.clone(),
-                cfg.base_url.clone(),
-                cfg.model.clone(),
-            )
-            .with_extra_headers(cfg.extra_headers.clone());
-            ironclaw_llm::create_registry_provider(&registry_config, cfg.request_timeout_secs)
-        }
-        ResolvedRebornLlmSource::RegistryProvider {
-            config,
-            request_timeout_secs,
-        } => ironclaw_llm::create_registry_provider(&config, request_timeout_secs),
-    }
-    .map_err(|error| RebornRuntimeError::LlmProvider(error.to_string()))?;
+    let session = ironclaw_llm::create_session_manager(llm.config.session.clone()).await;
+    let provider = ironclaw_llm::build_static_provider_chain(&llm.config, session)
+        .await
+        .map_err(|error| RebornRuntimeError::LlmProvider(error.to_string()))?;
 
     let model_profile_id = ModelProfileId::new("interactive_model").map_err(|reason| {
         RebornRuntimeError::LlmProvider(format!("invalid interactive model profile id: {reason}"))
@@ -1291,32 +1277,6 @@ fn build_llm_gateway(
     let policy = LlmModelProfilePolicy::new().allow_model_profile(model_profile_id, Some(model));
     let gateway = LlmProviderModelGateway::new(provider, policy);
     Ok(Arc::new(gateway))
-}
-
-#[cfg(feature = "root-llm-provider")]
-fn parse_provider_protocol(
-    protocol: &str,
-) -> Result<ironclaw_llm::ProviderProtocol, RebornRuntimeError> {
-    use ironclaw_llm::ProviderProtocol;
-
-    match protocol {
-        "open_ai_completions" | "openai_completions" | "openai" => {
-            Ok(ProviderProtocol::OpenAiCompletions)
-        }
-        "anthropic" => Ok(ProviderProtocol::Anthropic),
-        "ollama" => Ok(ProviderProtocol::Ollama),
-        "github_copilot" => Ok(ProviderProtocol::GithubCopilot),
-        "deep_seek" | "deepseek" => Ok(ProviderProtocol::DeepSeek),
-        "gemini" => Ok(ProviderProtocol::Gemini),
-        "open_router" | "openrouter" => Ok(ProviderProtocol::OpenRouter),
-        "bedrock" => Ok(ProviderProtocol::Bedrock),
-        "openai_codex" | "open_ai_codex" => Ok(ProviderProtocol::OpenAiCodex),
-        "gemini_oauth" => Ok(ProviderProtocol::GeminiOauth),
-        "nearai" | "near_ai" => Ok(ProviderProtocol::NearAi),
-        _ => Err(RebornRuntimeError::LlmProvider(format!(
-            "unsupported llm protocol: {protocol}"
-        ))),
-    }
 }
 
 fn build_stub_gateway() -> Arc<dyn ironclaw_loop_support::HostManagedModelGateway> {
@@ -1663,6 +1623,120 @@ mod tests {
         HostManagedModelError::safe(HostManagedModelErrorKind::Unavailable, safe_summary)
     }
 
+    #[cfg(feature = "root-llm-provider")]
+    struct RuntimeEnvGuard {
+        name: &'static str,
+        previous: Option<String>,
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    impl RuntimeEnvGuard {
+        fn set(name: &'static str, value: &str) -> Self {
+            let previous = ironclaw_common::env_helpers::env_or_override(name);
+            ironclaw_common::env_helpers::set_runtime_env(name, value);
+            Self { name, previous }
+        }
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    impl Drop for RuntimeEnvGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => ironclaw_common::env_helpers::set_runtime_env(self.name, value),
+                None => ironclaw_common::env_helpers::remove_runtime_env(self.name),
+            }
+        }
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    async fn start_nearai_auth_capture_server() -> (String, tokio::sync::oneshot::Receiver<String>)
+    {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpSocket;
+
+        let socket = TcpSocket::new_v4().expect("test server socket");
+        socket
+            .bind("127.0.0.1:0".parse().expect("test server address"))
+            .expect("test server binds");
+        let listener = socket.listen(1024).expect("test server listens");
+        let base_url = format!("http://{}", listener.local_addr().expect("local addr"));
+        let (auth_tx, auth_rx) = tokio::sync::oneshot::channel();
+
+        tokio::spawn(async move {
+            let mut auth_tx = Some(auth_tx);
+            loop {
+                let (mut stream, _) = listener.accept().await.expect("accept test request");
+                let mut buffer = Vec::new();
+                loop {
+                    let mut chunk = [0_u8; 1024];
+                    let read = stream.read(&mut chunk).await.expect("read test request");
+                    if read == 0 {
+                        break;
+                    }
+                    buffer.extend_from_slice(&chunk[..read]);
+                    if buffer.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+
+                let request = String::from_utf8_lossy(&buffer);
+                let request_line = request.lines().next().unwrap_or_default();
+                let auth_header = request
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                    .map(|(_, value)| value.trim())
+                    .unwrap_or_default()
+                    .to_string();
+                let is_chat_completion = request_line.contains("/v1/chat/completions");
+                let body = if is_chat_completion {
+                    r#"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#
+                } else {
+                    r#"{"data":[]}"#
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write test response");
+
+                if is_chat_completion {
+                    if let Some(auth_tx) = auth_tx.take() {
+                        let _ = auth_tx.send(auth_header);
+                    }
+                    break;
+                }
+            }
+        });
+
+        (base_url, auth_rx)
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    fn nearai_gateway_test_request() -> HostManagedModelRequest {
+        HostManagedModelRequest {
+            model_profile_id: ironclaw_turns::run_profile::ModelProfileId::new("interactive_model")
+                .expect("model profile id"),
+            messages: vec![ironclaw_loop_support::HostManagedModelMessage {
+                role: HostManagedModelMessageRole::User,
+                content: "hello model".to_string(),
+                content_ref: ironclaw_turns::LoopMessageRef::new(
+                    "msg:22222222-2222-2222-2222-222222222222",
+                )
+                .expect("message ref"),
+                tool_result_provider_call: None,
+            }],
+            surface_version: None,
+            resolved_model_route: None,
+            run_id: TurnRunId::new(),
+            turn_id: TurnId::new(),
+        }
+    }
+
     fn skill_md(name: &str, description: &str, prompt: &str) -> String {
         format!(
             "---\nname: {name}\ndescription: {description}\nactivation:\n  keywords: [\"{name}\"]\n---\n\n{prompt}"
@@ -1685,6 +1759,65 @@ mod tests {
             .lock()
             .expect("recording gateway requests lock poisoned")
             .len()
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    #[tokio::test]
+    async fn root_llm_gateway_bootstraps_nearai_session_token_from_env() {
+        let _token_guard = RuntimeEnvGuard::set("NEARAI_SESSION_TOKEN", "sess_reborn_env_token");
+        let session_dir = tempfile::tempdir().expect("session tempdir");
+        let (base_url, auth_rx) = start_nearai_auth_capture_server().await;
+
+        let config = ironclaw_llm::LlmConfig {
+            backend: "nearai".to_string(),
+            session: ironclaw_llm::SessionConfig {
+                auth_base_url: base_url.clone(),
+                session_path: session_dir.path().join("session.json"),
+            },
+            nearai: ironclaw_llm::NearAiConfig {
+                model: "test-model".to_string(),
+                cheap_model: None,
+                base_url,
+                api_key: None,
+                fallback_model: None,
+                max_retries: 0,
+                circuit_breaker_threshold: None,
+                circuit_breaker_recovery_secs: 30,
+                response_cache_enabled: false,
+                response_cache_ttl_secs: 3600,
+                response_cache_max_entries: 1000,
+                failover_cooldown_secs: 300,
+                failover_cooldown_threshold: 3,
+                smart_routing_cascade: false,
+            },
+            provider: None,
+            bedrock: None,
+            gemini_oauth: None,
+            openai_codex: None,
+            request_timeout_secs: 5,
+            cheap_model: None,
+            smart_routing_cascade: false,
+            max_retries: 0,
+            circuit_breaker_threshold: None,
+            circuit_breaker_recovery_secs: 30,
+            response_cache_enabled: false,
+            response_cache_ttl_secs: 3600,
+            response_cache_max_entries: 1000,
+        };
+        let llm = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config);
+
+        let gateway = super::build_llm_gateway(llm).await.expect("gateway builds");
+        let response = gateway
+            .stream_model(nearai_gateway_test_request())
+            .await
+            .expect("gateway calls NEAR AI provider");
+
+        assert_eq!(response.safe_text_deltas, vec!["ok".to_string()]);
+        let auth_header = tokio::time::timeout(Duration::from_secs(2), auth_rx)
+            .await
+            .expect("chat request should be captured")
+            .expect("auth header should be sent by capture server");
+        assert_eq!(auth_header, "Bearer sess_reborn_env_token");
     }
 
     #[tokio::test]
@@ -2857,7 +2990,7 @@ mod tests {
             setup.blockers.iter().any(|blocker| matches!(
                 blocker,
                 LifecycleReadinessBlocker::Runtime { ref_id: Some(ref_id) }
-                    if ref_id.as_str() == "extension_lifecycle_store_unwired"
+                    if ref_id.as_str() == "extension_lifecycle_local_runtime_unwired"
             )),
             "local webui bundle should use the local lifecycle facade projection"
         );
@@ -3225,65 +3358,5 @@ mod tests {
         assert!(combined_skill_context.contains("WEBUI_HELPER_PROMPT_SENTINEL"));
 
         runtime.shutdown().await.expect("runtime shutdown");
-    }
-}
-
-#[cfg(all(test, feature = "root-llm-provider"))]
-mod llm_provider_tests {
-    use ironclaw_llm::ProviderProtocol;
-
-    use super::parse_provider_protocol;
-
-    #[test]
-    fn parses_supported_provider_protocols_without_wildcard_mapping() {
-        assert_eq!(
-            parse_provider_protocol("open_ai_completions").unwrap(),
-            ProviderProtocol::OpenAiCompletions
-        );
-        assert_eq!(
-            parse_provider_protocol("openai_completions").unwrap(),
-            ProviderProtocol::OpenAiCompletions
-        );
-        assert_eq!(
-            parse_provider_protocol("openai").unwrap(),
-            ProviderProtocol::OpenAiCompletions
-        );
-        assert_eq!(
-            parse_provider_protocol("anthropic").unwrap(),
-            ProviderProtocol::Anthropic
-        );
-        assert_eq!(
-            parse_provider_protocol("ollama").unwrap(),
-            ProviderProtocol::Ollama
-        );
-        assert_eq!(
-            parse_provider_protocol("deep_seek").unwrap(),
-            ProviderProtocol::DeepSeek
-        );
-        assert_eq!(
-            parse_provider_protocol("deepseek").unwrap(),
-            ProviderProtocol::DeepSeek
-        );
-        assert_eq!(
-            parse_provider_protocol("gemini").unwrap(),
-            ProviderProtocol::Gemini
-        );
-        assert_eq!(
-            parse_provider_protocol("open_router").unwrap(),
-            ProviderProtocol::OpenRouter
-        );
-        assert_eq!(
-            parse_provider_protocol("openrouter").unwrap(),
-            ProviderProtocol::OpenRouter
-        );
-        assert_eq!(
-            parse_provider_protocol("github_copilot").unwrap(),
-            ProviderProtocol::GithubCopilot
-        );
-    }
-
-    #[test]
-    fn rejects_unsupported_provider_protocol() {
-        assert!(parse_provider_protocol("made_up_protocol").is_err());
     }
 }

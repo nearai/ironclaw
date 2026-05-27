@@ -14,7 +14,9 @@ use ironclaw_events::{DurableAuditLog, DurableEventLog};
 use ironclaw_events::{
     DurableAuditLog, DurableEventLog, InMemoryDurableAuditLog, InMemoryDurableEventLog,
 };
-use ironclaw_extensions::ExtensionRegistry;
+use ironclaw_extensions::{
+    ExtensionLifecycleService, ExtensionRegistry, InMemoryExtensionInstallationStore,
+};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_filesystem::RootFilesystem;
 #[cfg(feature = "libsql")]
@@ -72,6 +74,10 @@ use crate::{
     RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
     RebornFacadeReadiness, RebornProductAuthServicePorts, RebornProductAuthServices,
     RebornReadiness, RebornReadinessState,
+};
+use crate::{
+    available_extensions::AvailableExtensionCatalog,
+    extension_lifecycle::RebornLocalExtensionManagementPort,
 };
 
 #[cfg(feature = "libsql")]
@@ -179,6 +185,10 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) skill_management: Arc<RebornLocalSkillManagementPort>,
+    // LocalSingleUser-only for now. Production and multi-tenant lifecycle
+    // wiring need scoped storage/registry ownership before this is reused
+    // outside local-dev composition. Tracked in #4091.
+    pub(crate) extension_management: Option<Arc<RebornLocalExtensionManagementPort>>,
     pub(crate) skill_mounts: MountView,
     pub(crate) skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     pub(crate) workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
@@ -297,6 +307,11 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     std::fs::create_dir_all(&root).map_err(|_| RebornBuildError::InvalidConfig {
         reason: "local-dev storage root could not be initialized".to_string(),
     })?;
+    std::fs::create_dir_all(root.join("system/extensions")).map_err(|_| {
+        RebornBuildError::InvalidConfig {
+            reason: "local-dev system extensions root could not be initialized".to_string(),
+        }
+    })?;
     let workspace_root = workspace_root.unwrap_or_else(|| root.join("workspace"));
     std::fs::create_dir_all(&workspace_root).map_err(|_| RebornBuildError::InvalidConfig {
         reason: "local-dev workspace root could not be initialized".to_string(),
@@ -340,7 +355,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     let owner_user_id = UserId::new(owner_id).map_err(|error| RebornBuildError::InvalidConfig {
         reason: error.to_string(),
     })?;
-    let store_graph = build_local_dev_store_graph(
+    let mut store_graph = build_local_dev_store_graph(
         Arc::clone(&filesystem),
         owner_user_id,
         skill_filesystem,
@@ -352,7 +367,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
 
     let mut services = HostRuntimeServices::new(
         Arc::new(builtin_extension_registry()?),
-        filesystem,
+        Arc::clone(&filesystem),
         Arc::clone(&store_graph.resource_governor),
         Arc::new(GrantAuthorizer::new()),
         store_graph.process_services.clone(),
@@ -372,6 +387,37 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         services = services.with_runtime_policy(runtime_policy);
     }
     services = apply_runtime_process_binding(services, runtime_process_binding);
+    let mut available_extensions = AvailableExtensionCatalog::from_filesystem_root(
+        filesystem.as_ref(),
+        &VirtualPath::new("/system/extensions")?,
+    )
+    .await
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("available extension catalog could not be loaded: {error}"),
+    })?;
+    available_extensions.extend(
+        AvailableExtensionCatalog::from_first_party_assets().map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: format!("first-party extension catalog could not be loaded: {error}"),
+            }
+        })?,
+    );
+    let extension_management = Arc::new(RebornLocalExtensionManagementPort::new(
+        filesystem,
+        available_extensions,
+        Arc::new(InMemoryExtensionInstallationStore::default()),
+        Arc::new(tokio::sync::Mutex::new(ExtensionLifecycleService::new(
+            services.shared_extension_registry().snapshot_owned(),
+        ))),
+        services.shared_extension_registry(),
+    ));
+    if let Some(local_runtime) = Arc::get_mut(&mut store_graph.local_runtime) {
+        local_runtime.extension_management = Some(extension_management);
+    } else {
+        return Err(RebornBuildError::InvalidConfig {
+            reason: "local-dev extension lifecycle facade could not be attached".to_string(),
+        });
+    }
 
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
         Arc::new(services.host_runtime_for_local_testing());
@@ -440,6 +486,7 @@ fn build_local_dev_store_graph(
         loop_checkpoint_store,
         thread_service,
         skill_management,
+        extension_management: None,
         skill_mounts,
         skill_filesystem,
         workspace_filesystem,
@@ -504,6 +551,7 @@ fn build_local_dev_store_graph(
         loop_checkpoint_store,
         thread_service,
         skill_management,
+        extension_management: None,
         skill_mounts,
         skill_filesystem,
         workspace_filesystem,
@@ -588,7 +636,19 @@ async fn build_local_dev_root_filesystem(
             IndexPolicy::NotIndexed,
             local_dev_bytes_capabilities(),
         )?,
-        local,
+        Arc::clone(&local),
+    )?;
+    root.mount(
+        local_dev_mount_descriptor(
+            "/system/extensions",
+            "local-dev-system-extensions",
+            BackendKind::LocalFilesystem,
+            StorageClass::FileContent,
+            ContentKind::ExtensionPackage,
+            IndexPolicy::NotIndexed,
+            local_dev_bytes_capabilities(),
+        )?,
+        Arc::clone(&local),
     )?;
     Ok(Arc::new(root))
 }
@@ -619,6 +679,10 @@ fn local_dev_project_filesystem(
     filesystem.mount_local(
         VirtualPath::new("/projects/workspace")?,
         HostPath::from_path_buf(workspace_root.to_path_buf()),
+    )?;
+    filesystem.mount_local(
+        VirtualPath::new("/system/extensions")?,
+        HostPath::from_path_buf(root.join("system/extensions")),
     )?;
     if let Some(host_home_root) = host_home_root {
         filesystem.mount_local(
@@ -810,6 +874,7 @@ fn validate_local_dev_workspace_skill_isolation(
             storage_root.join("tenant-shared/skills"),
         ),
         ("/system/skills", storage_root.join("system/skills")),
+        ("/system/extensions", storage_root.join("system/extensions")),
     ] {
         if paths_overlap(workspace_root, &skill_root) {
             return Err(RebornBuildError::InvalidConfig {
@@ -1220,8 +1285,8 @@ mod tests {
     use ironclaw_host_api::{
         CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
         ExecutionContext, ExtensionId, GrantConstraints, InvocationId, MountAlias, MountGrant,
-        NetworkPolicy, Principal, ResourceEstimate, ResourceScope, RuntimeKind, ScopedPath,
-        TrustClass, UserId, VirtualPath,
+        NetworkPolicy, NetworkTargetPattern, Principal, ResourceEstimate, ResourceScope,
+        RuntimeKind, ScopedPath, TrustClass, UserId, VirtualPath,
     };
     use ironclaw_host_runtime::{
         RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind,
@@ -1243,6 +1308,14 @@ mod tests {
         assert!(services.turn_coordinator.is_some());
         assert!(services.product_auth.is_some());
         assert!(services.local_runtime.is_some());
+        assert!(
+            services
+                .local_runtime
+                .as_ref()
+                .expect("local runtime")
+                .extension_management
+                .is_some()
+        );
         assert_eq!(services.readiness.state, RebornReadinessState::DevOnly);
     }
 
@@ -1578,7 +1651,7 @@ mod tests {
             constraints: GrantConstraints {
                 allowed_effects: allowed_effects(),
                 mounts,
-                network: NetworkPolicy::default(),
+                network: network_policy(),
                 secrets: Vec::new(),
                 resource_ceiling: None,
                 expires_at: None,
@@ -1617,7 +1690,20 @@ mod tests {
             EffectKind::DispatchCapability,
             EffectKind::ReadFilesystem,
             EffectKind::WriteFilesystem,
+            EffectKind::Network,
         ]
+    }
+
+    fn network_policy() -> NetworkPolicy {
+        NetworkPolicy {
+            allowed_targets: vec![NetworkTargetPattern {
+                scheme: None,
+                host_pattern: "*".to_string(),
+                port: None,
+            }],
+            deny_private_ip_ranges: true,
+            max_egress_bytes: None,
+        }
     }
 
     fn trust_decision() -> TrustDecision {

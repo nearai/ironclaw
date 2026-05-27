@@ -26,7 +26,11 @@ use ironclaw_loop_support::{
     loop_driver_execution_extension_id,
 };
 use ironclaw_reborn::loop_driver_host::LoopCapabilityPortFactory;
-use ironclaw_threads::{ToolResultReferenceEnvelope, ToolResultSafeSummary};
+use ironclaw_threads::{
+    AppendCapabilityDisplayPreviewRequest, CapabilityDisplayPreviewEnvelope,
+    CapabilityDisplayPreviewEnvelopeInput, CapabilityDisplayPreviewStatus, SessionThreadService,
+    ThreadScope, ToolResultReferenceEnvelope, ToolResultSafeSummary,
+};
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use ironclaw_turns::{
     LoopResultRef,
@@ -52,6 +56,8 @@ pub(super) struct LocalDevCapabilityWiring {
 
 pub(super) fn capability_wiring(
     services: &RebornServices,
+    thread_service: Arc<dyn SessionThreadService>,
+    thread_scope: ThreadScope,
     user_id: UserId,
     model_gateway: Arc<dyn HostManagedModelGateway>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
@@ -62,7 +68,11 @@ pub(super) fn capability_wiring(
         .as_ref()
         .map(|runtime| runtime.workspace_mounts.clone())?;
     let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
-    let capability_io = Arc::new(LocalDevCapabilityIo::new(Arc::clone(&display_previews)));
+    let capability_io = Arc::new(LocalDevCapabilityIo::new_with_durable_previews(
+        Arc::clone(&display_previews),
+        thread_service,
+        thread_scope,
+    ));
     let capability_input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
     let capability_result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
     let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
@@ -157,6 +167,13 @@ struct LocalDevCapabilityIo {
     inputs: StdMutex<StagedValueStore>,
     results: StdMutex<StagedValueStore>,
     display_previews: Arc<CapabilityDisplayPreviewStore>,
+    durable_previews: Option<DurableCapabilityDisplayPreviewSink>,
+}
+
+#[derive(Clone)]
+struct DurableCapabilityDisplayPreviewSink {
+    thread_service: Arc<dyn SessionThreadService>,
+    thread_scope: ThreadScope,
 }
 
 impl Default for LocalDevCapabilityIo {
@@ -171,8 +188,26 @@ impl LocalDevCapabilityIo {
             inputs: StdMutex::new(StagedValueStore::default()),
             results: StdMutex::new(StagedValueStore::default()),
             display_previews,
+            durable_previews: None,
         }
     }
+
+    fn new_with_durable_previews(
+        display_previews: Arc<CapabilityDisplayPreviewStore>,
+        thread_service: Arc<dyn SessionThreadService>,
+        thread_scope: ThreadScope,
+    ) -> Self {
+        Self {
+            inputs: StdMutex::new(StagedValueStore::default()),
+            results: StdMutex::new(StagedValueStore::default()),
+            display_previews,
+            durable_previews: Some(DurableCapabilityDisplayPreviewSink {
+                thread_service,
+                thread_scope,
+            }),
+        }
+    }
+
     fn result_output(
         &self,
         result_ref: &str,
@@ -181,6 +216,73 @@ impl LocalDevCapabilityIo {
             .lock()
             .map_err(|_| capability_io_error())
             .map(|results| results.get(result_ref).cloned())
+    }
+
+    async fn append_durable_display_preview(
+        &self,
+        run_context: &LoopRunContext,
+        invocation_id: InvocationId,
+        capability_id: &CapabilityId,
+    ) -> Result<(), AgentLoopHostError> {
+        let Some(durable_previews) = &self.durable_previews else {
+            return Ok(());
+        };
+        let Some(record) = self.display_previews.record_for_invocation(invocation_id) else {
+            tracing::debug!(
+                invocation_id = %invocation_id,
+                capability_id = capability_id.as_str(),
+                "capability display preview record missing after result staging"
+            );
+            return Ok(());
+        };
+        let preview =
+            match CapabilityDisplayPreviewEnvelope::new(CapabilityDisplayPreviewEnvelopeInput {
+                invocation_id,
+                capability_id: capability_id.clone(),
+                status: CapabilityDisplayPreviewStatus::Completed,
+                title: record.title,
+                subtitle: record.subtitle,
+                input_summary: record.input_summary,
+                output_summary: record.output_summary,
+                output_preview: record.output_preview,
+                output_kind: record.output_kind,
+                output_bytes: record.output_bytes,
+                result_ref: record.result_ref,
+                truncated: record.truncated,
+                updated_at: Utc::now(),
+            }) {
+                Ok(preview) => preview,
+                Err(error) => {
+                    tracing::debug!(
+                        invocation_id = %invocation_id,
+                        capability_id = capability_id.as_str(),
+                        error,
+                        "capability display preview envelope validation failed"
+                    );
+                    return Err(capability_io_error());
+                }
+            };
+        let message = durable_previews
+            .thread_service
+            .append_capability_display_preview(AppendCapabilityDisplayPreviewRequest {
+                scope: durable_previews.thread_scope.clone(),
+                thread_id: run_context.thread_id.clone(),
+                turn_run_id: run_context.run_id.to_string(),
+                preview,
+            })
+            .await
+            .map_err(|error| {
+                tracing::debug!(
+                    invocation_id = %invocation_id,
+                    capability_id = capability_id.as_str(),
+                    error = %error,
+                    "capability display preview durable append failed"
+                );
+                capability_io_error()
+            })?;
+        self.display_previews
+            .attach_timeline_message_id(invocation_id, message.message_id);
+        Ok(())
     }
 }
 
@@ -345,8 +447,10 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
                     )
                 })?;
         let output_bytes = staged_value_bytes(&output)?.try_into().unwrap_or(u64::MAX);
-        let mut results = self.results.lock().map_err(|_| capability_io_error())?;
-        results.insert_with_oldest_eviction(result_ref.as_str().to_string(), output.clone())?;
+        {
+            let mut results = self.results.lock().map_err(|_| capability_io_error())?;
+            results.insert_with_oldest_eviction(result_ref.as_str().to_string(), output.clone())?;
+        }
         self.display_previews
             .record_result(CapabilityDisplayPreviewResult {
                 run_id: &run_context.run_id.to_string(),
@@ -357,6 +461,8 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
                 output: &output,
                 output_bytes,
             });
+        self.append_durable_display_preview(run_context, invocation_id, _capability_id)
+            .await?;
         Ok(result_ref)
     }
 
@@ -646,6 +752,7 @@ enum LocalDevCapabilityKind {
     Workspace,
     AmbientShell,
     Network,
+    SkillInstall,
     SkillManagement,
 }
 
@@ -654,8 +761,9 @@ fn local_dev_capability_kind(capability_id: &str) -> LocalDevCapabilityKind {
         LocalDevCapabilityKind::AmbientShell
     } else if capability_id == HTTP_CAPABILITY_ID {
         LocalDevCapabilityKind::Network
+    } else if capability_id == SKILL_INSTALL_CAPABILITY_ID {
+        LocalDevCapabilityKind::SkillInstall
     } else if capability_id == SKILL_LIST_CAPABILITY_ID
-        || capability_id == SKILL_INSTALL_CAPABILITY_ID
         || capability_id == SKILL_REMOVE_CAPABILITY_ID
     {
         LocalDevCapabilityKind::SkillManagement
@@ -668,7 +776,10 @@ fn local_dev_skill_management_capability_ids() -> impl Iterator<Item = &'static 
     local_dev_builtin_capability_ids()
         .into_iter()
         .filter(|capability_id| {
-            local_dev_capability_kind(capability_id) == LocalDevCapabilityKind::SkillManagement
+            matches!(
+                local_dev_capability_kind(capability_id),
+                LocalDevCapabilityKind::SkillInstall | LocalDevCapabilityKind::SkillManagement
+            )
         })
 }
 
@@ -706,6 +817,15 @@ pub(super) fn local_dev_grant_constraints(
             allowed_effects: local_dev_allowed_effects(),
             mounts: workspace_mounts.clone(),
             network: NetworkPolicy::default(),
+            secrets: Vec::new(),
+            resource_ceiling: None,
+            expires_at: None,
+            max_invocations: None,
+        },
+        LocalDevCapabilityKind::SkillInstall => GrantConstraints {
+            allowed_effects: local_dev_skill_install_allowed_effects(),
+            mounts: skill_mounts.clone(),
+            network: local_dev_shell_network_policy(),
             secrets: Vec::new(),
             resource_ceiling: None,
             expires_at: None,
@@ -752,6 +872,12 @@ fn local_dev_allowed_effects() -> Vec<EffectKind> {
         EffectKind::ReadFilesystem,
         EffectKind::WriteFilesystem,
     ]
+}
+
+fn local_dev_skill_install_allowed_effects() -> Vec<EffectKind> {
+    let mut effects = local_dev_allowed_effects();
+    effects.push(EffectKind::Network);
+    effects
 }
 
 fn local_dev_shell_allowed_effects() -> Vec<EffectKind> {

@@ -16,6 +16,8 @@ use ironclaw_skills::{
     remove_skill, search_skills,
 };
 
+use crate::extension_lifecycle::RebornLocalExtensionManagementPort;
+
 const SKILL_SEARCH_RESULT_LIMIT: usize = 50;
 
 #[derive(Clone)]
@@ -165,11 +167,23 @@ fn invalid_skill_context(error: impl std::fmt::Display) -> RebornLocalSkillManag
 #[derive(Clone)]
 pub(crate) struct RebornLocalLifecycleFacade {
     skill_management: Arc<RebornLocalSkillManagementPort>,
+    extension_management: Option<Arc<RebornLocalExtensionManagementPort>>,
 }
 
 impl RebornLocalLifecycleFacade {
     pub(crate) fn new(skill_management: Arc<RebornLocalSkillManagementPort>) -> Self {
-        Self { skill_management }
+        Self {
+            skill_management,
+            extension_management: None,
+        }
+    }
+
+    pub(crate) fn with_extension_management(
+        mut self,
+        extension_management: Arc<RebornLocalExtensionManagementPort>,
+    ) -> Self {
+        self.extension_management = Some(extension_management);
+        self
     }
 
     async fn execute_action(
@@ -231,13 +245,33 @@ impl RebornLocalLifecycleFacade {
                     },
                 ))
             }
-            LifecycleProductAction::ExtensionSearch { .. } => unsupported_projection(None),
-            LifecycleProductAction::ExtensionInstall { package_ref }
-            | LifecycleProductAction::ExtensionAuth { package_ref }
-            | LifecycleProductAction::ExtensionActivate { package_ref }
-            | LifecycleProductAction::ExtensionConfigure { package_ref, .. }
-            | LifecycleProductAction::ExtensionRemove { package_ref } => {
-                unsupported_projection(Some(package_ref.clone()))
+            LifecycleProductAction::ExtensionSearch { query } => {
+                let Some(extension_management) = &self.extension_management else {
+                    return unsupported_projection(None);
+                };
+                extension_management.search(&query).await
+            }
+            LifecycleProductAction::ExtensionInstall { package_ref } => {
+                let Some(extension_management) = &self.extension_management else {
+                    return unsupported_projection(Some(package_ref));
+                };
+                extension_management.install(package_ref).await
+            }
+            LifecycleProductAction::ExtensionActivate { package_ref } => {
+                let Some(extension_management) = &self.extension_management else {
+                    return unsupported_projection(Some(package_ref));
+                };
+                extension_management.activate(package_ref).await
+            }
+            LifecycleProductAction::ExtensionRemove { package_ref } => {
+                let Some(extension_management) = &self.extension_management else {
+                    return unsupported_projection(Some(package_ref));
+                };
+                extension_management.remove(package_ref).await
+            }
+            LifecycleProductAction::ExtensionAuth { package_ref }
+            | LifecycleProductAction::ExtensionConfigure { package_ref, .. } => {
+                unsupported_extension_auth_configure_projection(Some(package_ref))
             }
         }
     }
@@ -266,7 +300,7 @@ fn skill_package_ref(name: &str) -> Result<LifecyclePackageRef, ProductWorkflowE
     LifecyclePackageRef::new(LifecyclePackageKind::Skill, name)
 }
 
-fn response_with_payload(
+pub(crate) fn response_with_payload(
     package_ref: Option<LifecyclePackageRef>,
     phase: LifecyclePhase,
     payload: LifecycleProductPayload,
@@ -305,7 +339,19 @@ fn unsupported_projection(
         package_ref,
         LifecyclePhase::UnsupportedOrLegacy,
         vec![LifecycleReadinessBlocker::runtime(Some(
-            "extension_lifecycle_store_unwired".to_string(),
+            "extension_lifecycle_local_runtime_unwired".to_string(),
+        ))?],
+    ))
+}
+
+fn unsupported_extension_auth_configure_projection(
+    package_ref: Option<LifecyclePackageRef>,
+) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+    Ok(LifecycleProductResponse::projection(
+        package_ref,
+        LifecyclePhase::UnsupportedOrLegacy,
+        vec![LifecycleReadinessBlocker::runtime(Some(
+            "extension_auth_and_configure_not_yet_wired".to_string(),
         ))?],
     ))
 }

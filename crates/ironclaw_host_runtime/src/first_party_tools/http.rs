@@ -137,6 +137,7 @@ pub(super) async fn dispatch(
         // Always send a bounded limit, even when caller omits the field, so the
         // host transport stays fail-closed instead of inheriting an unbounded cap.
         response_body_limit: Some(response_body_limit),
+        save_body_to: None,
         timeout_ms: Some(timeout_ms),
     };
     let response = tokio::task::spawn_blocking(move || egress.execute(http_request))

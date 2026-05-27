@@ -5,6 +5,9 @@ mod tests {
     use super::super::*;
 
     use ironclaw_host_api::{AgentId, MountPermissions, ProjectId, TenantId, ThreadId};
+    use ironclaw_threads::{
+        EnsureThreadRequest, InMemorySessionThreadService, MessageKind, ThreadHistoryRequest,
+    };
     use ironclaw_turns::{
         RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
         run_profile::{
@@ -43,6 +46,128 @@ mod tests {
             reasoning: None,
             signature: None,
         }
+    }
+
+    #[tokio::test]
+    async fn capability_io_writes_durable_preview_message_and_live_upsert_id() {
+        let run_context = run_context("durable-preview").await;
+        let thread_scope = ThreadScope {
+            tenant_id: run_context.scope.tenant_id.clone(),
+            agent_id: run_context.scope.agent_id.clone().expect("agent id"),
+            project_id: run_context.scope.project_id.clone(),
+            owner_user_id: None,
+            mission_id: None,
+        };
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        thread_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: thread_scope.clone(),
+                thread_id: Some(run_context.thread_id.clone()),
+                created_by_actor_id: "actor-a".to_string(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .expect("thread exists");
+        let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
+        let capability_io = LocalDevCapabilityIo::new_with_durable_previews(
+            Arc::clone(&display_previews),
+            thread_service.clone(),
+            thread_scope.clone(),
+        );
+        let input_ref = capability_io
+            .register_provider_tool_call_input(
+                &run_context,
+                &provider_tool_call(serde_json::json!({"message": "hello"})),
+            )
+            .await
+            .expect("input stages");
+        let invocation_id = InvocationId::new();
+
+        let result_ref = capability_io
+            .write_capability_result(
+                &run_context,
+                &input_ref,
+                invocation_id,
+                &CapabilityId::new("builtin.echo").expect("capability id"),
+                serde_json::json!({"content": "hello"}),
+            )
+            .await
+            .expect("result stages");
+
+        let history = thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: thread_scope,
+                thread_id: run_context.thread_id.clone(),
+            })
+            .await
+            .expect("history loads");
+        let preview_message = history
+            .messages
+            .iter()
+            .find(|message| message.kind == MessageKind::CapabilityDisplayPreview)
+            .expect("durable preview message");
+        let run_id = run_context.run_id.to_string();
+        assert_eq!(
+            preview_message.turn_run_id.as_deref(),
+            Some(run_id.as_str())
+        );
+        assert_eq!(
+            preview_message.tool_result_ref.as_deref(),
+            Some(result_ref.as_str())
+        );
+        assert!(preview_message.tool_result_provider_call.is_none());
+        let preview_record = display_previews
+            .record_for_invocation(invocation_id)
+            .expect("live preview record");
+        assert_eq!(
+            preview_record.timeline_message_id,
+            Some(preview_message.message_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn capability_io_fails_result_when_durable_preview_append_fails() {
+        let run_context = run_context("durable-preview-failure").await;
+        let thread_scope = ThreadScope {
+            tenant_id: run_context.scope.tenant_id.clone(),
+            agent_id: run_context.scope.agent_id.clone().expect("agent id"),
+            project_id: run_context.scope.project_id.clone(),
+            owner_user_id: None,
+            mission_id: None,
+        };
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
+        let capability_io = LocalDevCapabilityIo::new_with_durable_previews(
+            Arc::clone(&display_previews),
+            thread_service,
+            thread_scope,
+        );
+        let input_ref = capability_io
+            .register_provider_tool_call_input(
+                &run_context,
+                &provider_tool_call(serde_json::json!({"message": "hello"})),
+            )
+            .await
+            .expect("input stages");
+        let invocation_id = InvocationId::new();
+
+        let error = capability_io
+            .write_capability_result(
+                &run_context,
+                &input_ref,
+                invocation_id,
+                &CapabilityId::new("builtin.echo").expect("capability id"),
+                serde_json::json!({"content": "hello"}),
+            )
+            .await
+            .expect_err("missing thread rejects durable preview append");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::Internal);
+        let preview_record = display_previews
+            .record_for_invocation(invocation_id)
+            .expect("live preview record was staged before durable append");
+        assert!(preview_record.timeline_message_id.is_none());
     }
 
     #[tokio::test]
@@ -229,10 +354,14 @@ mod tests {
         );
 
         let skill_install_grant = grant_for(SKILL_INSTALL_CAPABILITY_ID);
+        assert_eq!(
+            skill_install_grant.constraints.allowed_effects,
+            local_dev_skill_install_allowed_effects()
+        );
         assert_eq!(skill_install_grant.constraints.mounts, skill_mounts);
         assert_eq!(
             skill_install_grant.constraints.network,
-            NetworkPolicy::default()
+            local_dev_shell_network_policy()
         );
     }
 

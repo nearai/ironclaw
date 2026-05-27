@@ -21,8 +21,10 @@
 use std::sync::Arc;
 
 mod auth;
+mod available_extensions;
 mod default_system_prompt;
 mod error;
+mod extension_lifecycle;
 mod factory;
 mod gsuite;
 mod input;
@@ -92,12 +94,12 @@ pub use runtime::{
     RebornSkillActivationMode, RebornSkillAsset, RebornSkillBundle, RebornSkillExecutionPlan,
     RebornSkillExecutionResult, RebornSkillSourceKind, build_reborn_runtime,
 };
+#[cfg(feature = "root-llm-provider")]
+pub use runtime_input::ResolvedRebornLlm;
 pub use runtime_input::{
     DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL, DEFAULT_TURN_RUNNER_POLL_INTERVAL, PollSettings,
     RebornRuntimeIdentity, RebornRuntimeInput, TurnRunnerSettings,
 };
-#[cfg(feature = "root-llm-provider")]
-pub use runtime_input::{RebornLlmConfig, ResolvedRebornLlm};
 pub use skill_listing::{RebornSkillListError, list_reborn_local_skills};
 pub use webui::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]

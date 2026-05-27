@@ -120,6 +120,7 @@ pub(super) async fn fetch_url_response(
         network_policy: skill_url_network_policy(),
         credential_injections: Vec::new(),
         response_body_limit: Some(SKILL_URL_RESPONSE_BODY_LIMIT_BYTES),
+        save_body_to: None,
         timeout_ms: Some(SKILL_URL_FETCH_TIMEOUT_MS),
     };
     let response = tokio::task::spawn_blocking(move || egress.execute(http_request))

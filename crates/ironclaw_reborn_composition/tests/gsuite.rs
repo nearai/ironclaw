@@ -42,6 +42,7 @@ impl RuntimeHttpEgress for RecordingEgress {
             status: 200,
             headers: Vec::new(),
             body: br#"{"id":"sent-message"}"#.to_vec(),
+            saved_body: None,
             request_bytes: 123,
             response_bytes: 21,
             redaction_applied: true,

@@ -147,6 +147,7 @@ mod tests {
         assert_eq!(BUILTIN_SUBAGENT_FLAVORS.len(), 2);
         assert!(lookup_flavor(SubagentFlavorId::General).is_some());
         assert!(lookup_flavor(SubagentFlavorId::Researcher).is_some());
+        assert!(parse_flavor_id("unknown").is_none());
     }
 
     #[test]
