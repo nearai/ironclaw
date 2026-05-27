@@ -5,6 +5,10 @@ mod tests {
     use super::super::*;
 
     use ironclaw_host_api::{AgentId, MountPermissions, ProjectId, TenantId, ThreadId};
+    use ironclaw_product_workflow::{
+        LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext,
+        LifecycleProductFacade, LifecycleProductSurfaceContext,
+    };
     use ironclaw_threads::{
         EnsureThreadRequest, InMemorySessionThreadService, MessageKind, ThreadHistoryRequest,
     };
@@ -46,6 +50,15 @@ mod tests {
             reasoning: None,
             signature: None,
         }
+    }
+
+    fn lifecycle_context(label: &str) -> LifecycleProductContext {
+        LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
+            tenant_id: TenantId::new(format!("tenant-{label}")).expect("tenant id"),
+            user_id: UserId::new(format!("user-{label}")).expect("user id"),
+            agent_id: None,
+            project_id: None,
+        })
     }
 
     #[tokio::test]
@@ -400,6 +413,7 @@ mod tests {
             runtime,
             UserId::new("local-yolo-host-user").expect("user id"), // safety: literal test id is valid.
             workspace_mounts,
+            Vec::new(),
             input_resolver,
             result_writer,
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
@@ -441,6 +455,99 @@ mod tests {
             output["content"],
             serde_json::json!("     1│ safe host file")
         );
+    }
+
+    #[tokio::test]
+    async fn local_dev_capability_port_restores_activated_github_extension_surface() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        let owner_id = "local-dev-github-surface-owner";
+        {
+            let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+                owner_id,
+                storage_root.clone(),
+            ))
+            .await
+            .expect("local-dev services build");
+            let local_runtime = services
+                .local_runtime
+                .as_ref()
+                .expect("local runtime substrate");
+            let extension_management = local_runtime
+                .extension_management
+                .as_ref()
+                .expect("extension management")
+                .clone();
+            let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
+                local_runtime.skill_management.clone(),
+            )
+            .with_extension_management(extension_management);
+            let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
+                .expect("valid github ref");
+            facade
+                .execute(
+                    lifecycle_context("github-install"),
+                    LifecycleProductAction::ExtensionInstall {
+                        package_ref: package_ref.clone(),
+                    },
+                )
+                .await
+                .expect("install github extension");
+            facade
+                .execute(
+                    lifecycle_context("github-activate"),
+                    LifecycleProductAction::ExtensionActivate { package_ref },
+                )
+                .await
+                .expect("activate github extension");
+        }
+
+        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+            owner_id,
+            storage_root,
+        ))
+        .await
+        .expect("local-dev services rebuild");
+        let runtime = services.host_runtime.clone().expect("host runtime");
+        let local_runtime = services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime substrate");
+        let active_extension_capabilities = local_runtime
+            .extension_management
+            .as_ref()
+            .expect("extension management")
+            .active_model_visible_capabilities();
+        let workspace_mounts = local_runtime.workspace_mounts.clone();
+        let capability_io = Arc::new(LocalDevCapabilityIo::default());
+        let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
+        let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
+        let factory = LocalDevLoopCapabilityPortFactory::new(
+            runtime,
+            UserId::new("local-dev-github-user").expect("user id"),
+            workspace_mounts,
+            active_extension_capabilities,
+            input_resolver,
+            result_writer,
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        );
+        let port = factory
+            .create_capability_port(&run_context("github-surface").await)
+            .await
+            .expect("capability port");
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible surface");
+        let capability_ids = surface
+            .descriptors
+            .iter()
+            .map(|descriptor| descriptor.capability_id.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(capability_ids.contains(&"github.search_issues"));
+        assert!(capability_ids.contains(&"github.get_issue"));
+        assert!(capability_ids.contains(&"github.comment_issue"));
     }
 
     #[test]

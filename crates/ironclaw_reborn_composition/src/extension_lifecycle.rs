@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
 use ironclaw_extensions::{
-    ExtensionActivationState, ExtensionError, ExtensionInstallation, ExtensionInstallationError,
-    ExtensionInstallationId, ExtensionInstallationStore, ExtensionLifecycleService,
-    ExtensionManifestRecord, ExtensionManifestRef, ExtensionPackage, ManifestHash, ManifestSource,
-    SharedExtensionRegistry,
+    CapabilityVisibility, ExtensionActivationState, ExtensionError, ExtensionInstallation,
+    ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
+    ExtensionLifecycleService, ExtensionManifestRecord, ExtensionManifestRef, ExtensionPackage,
+    ManifestHash, ManifestSource, SharedExtensionRegistry,
 };
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::{ExtensionId, VirtualPath, sha256_digest_token};
+use ironclaw_host_api::{CapabilityDescriptor, ExtensionId, VirtualPath, sha256_digest_token};
 use ironclaw_product_workflow::{
     LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload,
     LifecycleProductResponse, ProductWorkflowError,
@@ -118,6 +118,20 @@ impl RebornLocalExtensionManagementPort {
                 count,
             },
         ))
+    }
+
+    pub(crate) fn active_model_visible_capabilities(&self) -> Vec<CapabilityDescriptor> {
+        let registry = self.active_registry.snapshot();
+        registry
+            .capabilities()
+            .filter(|descriptor| {
+                registry
+                    .capability_visibility(&descriptor.id)
+                    .unwrap_or(CapabilityVisibility::Model)
+                    == CapabilityVisibility::Model
+            })
+            .cloned()
+            .collect()
     }
 
     pub(crate) async fn install(
