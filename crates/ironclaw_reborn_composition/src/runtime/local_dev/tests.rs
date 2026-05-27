@@ -4,7 +4,9 @@ mod tests {
 
     use super::super::*;
 
-    use ironclaw_host_api::{AgentId, EffectKind, MountPermissions, ProjectId, TenantId, ThreadId};
+    use ironclaw_host_api::{
+        AgentId, EffectKind, MountPermissions, NetworkPolicy, ProjectId, TenantId, ThreadId,
+    };
     use ironclaw_host_runtime::{
         APPLY_PATCH_CAPABILITY_ID, HTTP_CAPABILITY_ID, READ_FILE_CAPABILITY_ID,
         SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
@@ -127,46 +129,27 @@ mod tests {
 
     #[test]
     fn local_dev_builtin_surface_grants_capability_classes() {
-        let capability_ids =
-            local_dev_builtin_capability_ids().expect("local-dev capability policy parses");
+        let policy = crate::local_dev_capability_policy::local_dev_capability_policy()
+            .expect("local-dev capability policy parses");
+        let capability_ids = policy
+            .capability_ids()
+            .map(CapabilityId::as_str)
+            .collect::<Vec<_>>();
+        let workspace_effects = vec![
+            EffectKind::DispatchCapability,
+            EffectKind::ReadFilesystem,
+            EffectKind::WriteFilesystem,
+        ];
 
-        assert!(
-            capability_ids
-                .iter()
-                .any(|id| id == WRITE_FILE_CAPABILITY_ID)
-        );
-        assert!(
-            capability_ids
-                .iter()
-                .any(|id| id == APPLY_PATCH_CAPABILITY_ID)
-        );
-        assert!(
-            capability_ids
-                .iter()
-                .any(|id| id == SKILL_LIST_CAPABILITY_ID)
-        );
-        assert!(
-            capability_ids
-                .iter()
-                .any(|id| id == SKILL_INSTALL_CAPABILITY_ID)
-        );
-        assert!(
-            capability_ids
-                .iter()
-                .any(|id| id == SKILL_REMOVE_CAPABILITY_ID)
-        );
-        assert!(capability_ids.iter().any(|id| id == SHELL_CAPABILITY_ID));
-        assert!(capability_ids.iter().any(|id| id == HTTP_CAPABILITY_ID));
+        assert!(capability_ids.contains(&WRITE_FILE_CAPABILITY_ID));
+        assert!(capability_ids.contains(&APPLY_PATCH_CAPABILITY_ID));
+        assert!(capability_ids.contains(&SKILL_LIST_CAPABILITY_ID));
+        assert!(capability_ids.contains(&SKILL_INSTALL_CAPABILITY_ID));
+        assert!(capability_ids.contains(&SKILL_REMOVE_CAPABILITY_ID));
+        assert!(capability_ids.contains(&SHELL_CAPABILITY_ID));
+        assert!(capability_ids.contains(&HTTP_CAPABILITY_ID));
         assert_eq!(
-            local_dev_allowed_effects().expect("local-dev default effects parse"),
-            vec![
-                EffectKind::DispatchCapability,
-                EffectKind::ReadFilesystem,
-                EffectKind::WriteFilesystem
-            ]
-        );
-        assert_eq!(
-            local_dev_provider_allowed_effects().expect("local-dev provider effects parse"),
+            policy.provider.authority_effects,
             vec![
                 EffectKind::DispatchCapability,
                 EffectKind::ReadFilesystem,
@@ -200,12 +183,11 @@ mod tests {
             mount_for("/system/skills").permissions,
             MountPermissions::read_only()
         );
-        let grants = local_dev_builtin_grants(
+        let grants = policy.builtin_grants(
             &ExtensionId::new("loop-driver").expect("valid extension id"),
             &workspace_mounts,
             &skill_mounts,
-        )
-        .expect("local-dev grants build");
+        );
         let grant_for = |capability_id: &str| {
             grants
                 .grants
@@ -229,7 +211,7 @@ mod tests {
         assert!(shell_grant.constraints.mounts.mounts.is_empty());
         assert_eq!(
             shell_grant.constraints.network,
-            local_dev_shell_network_policy()
+            crate::local_dev_capability_policy::local_dev_wildcard_network_policy()
         );
 
         let http_grant = grant_for(HTTP_CAPABILITY_ID);
@@ -240,13 +222,13 @@ mod tests {
         assert!(http_grant.constraints.mounts.mounts.is_empty());
         assert_eq!(
             http_grant.constraints.network,
-            local_dev_shell_network_policy()
+            crate::local_dev_capability_policy::local_dev_wildcard_network_policy()
         );
 
         let read_file_grant = grant_for(READ_FILE_CAPABILITY_ID);
         assert_eq!(
             read_file_grant.constraints.allowed_effects,
-            local_dev_allowed_effects().expect("local-dev default effects parse")
+            workspace_effects
         );
         assert_eq!(read_file_grant.constraints.mounts, workspace_mounts);
         assert_eq!(

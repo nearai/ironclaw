@@ -1,12 +1,13 @@
 use async_trait::async_trait;
-use ironclaw_approvals::LeaseApproval;
-use ironclaw_host_api::{Action, CapabilityId, EffectKind, MountView, Principal};
+use ironclaw_host_api::MountView;
 use ironclaw_product_workflow::{
     ApprovalGateRecord, ApprovalInteractionRejectionKind, ApprovalLeaseTermsProvider,
     ProductWorkflowError,
 };
 
-use super::local_dev;
+use crate::local_dev_capability_policy::{
+    LocalDevApprovalPolicyAction, local_dev_capability_policy,
+};
 
 pub(super) struct LocalDevApprovalLeaseTermsProvider {
     workspace_mounts: MountView,
@@ -22,72 +23,25 @@ impl LocalDevApprovalLeaseTermsProvider {
     }
 }
 
-enum LocalDevApprovalAction<'a> {
-    Dispatch { capability: &'a CapabilityId },
-    SpawnCapability { capability: &'a CapabilityId },
-}
-
-impl<'a> LocalDevApprovalAction<'a> {
-    fn from_action(action: &'a Action) -> Result<Self, ProductWorkflowError> {
-        match action {
-            Action::Dispatch { capability, .. } => Ok(Self::Dispatch { capability }),
-            Action::SpawnCapability { capability, .. } => Ok(Self::SpawnCapability { capability }),
-            _ => Err(ProductWorkflowError::ApprovalInteractionRejected {
-                kind: ApprovalInteractionRejectionKind::UnsupportedAction,
-            }),
-        }
-    }
-
-    fn capability(&self) -> &CapabilityId {
-        match self {
-            Self::Dispatch { capability } | Self::SpawnCapability { capability } => capability,
-        }
-    }
-
-    fn requires_spawn_process(&self) -> bool {
-        matches!(self, Self::SpawnCapability { .. })
-    }
-}
-
 #[async_trait]
 impl ApprovalLeaseTermsProvider for LocalDevApprovalLeaseTermsProvider {
     async fn lease_terms_for(
         &self,
         gate: &ApprovalGateRecord,
-    ) -> Result<LeaseApproval, ProductWorkflowError> {
-        let action = LocalDevApprovalAction::from_action(gate.request().action.as_ref())?;
-        let mut constraints = if action.requires_spawn_process() {
-            local_dev::local_dev_spawn_capability_constraints(
-                action.capability().as_str(),
-                &self.workspace_mounts,
-                &self.skill_mounts,
-            )
-        } else {
-            local_dev::local_dev_grant_constraints(
-                action.capability().as_str(),
-                &self.workspace_mounts,
-                &self.skill_mounts,
-            )
-        }
-        .map_err(|_| ProductWorkflowError::ApprovalInteractionRejected {
-            kind: ApprovalInteractionRejectionKind::LeaseTermsUnavailable,
+    ) -> Result<ironclaw_approvals::LeaseApproval, ProductWorkflowError> {
+        let action = LocalDevApprovalPolicyAction::from_host_action(gate.request().action.as_ref())
+            .ok_or(ProductWorkflowError::ApprovalInteractionRejected {
+                kind: ApprovalInteractionRejectionKind::UnsupportedAction,
+            })?;
+        let policy = local_dev_capability_policy().map_err(|_| {
+            ProductWorkflowError::ApprovalInteractionRejected {
+                kind: ApprovalInteractionRejectionKind::LeaseTermsUnavailable,
+            }
         })?;
-        if action.requires_spawn_process()
-            && !constraints
-                .allowed_effects
-                .contains(&EffectKind::SpawnProcess)
-        {
-            constraints.allowed_effects.push(EffectKind::SpawnProcess);
-        }
-        Ok(LeaseApproval {
-            issued_by: Principal::HostRuntime,
-            allowed_effects: constraints.allowed_effects,
-            mounts: constraints.mounts,
-            network: constraints.network,
-            secrets: constraints.secrets,
-            resource_ceiling: constraints.resource_ceiling,
-            expires_at: constraints.expires_at,
-            max_invocations: Some(1),
-        })
+        policy
+            .lease_approval_for(action, &self.workspace_mounts, &self.skill_mounts)
+            .map_err(|_| ProductWorkflowError::ApprovalInteractionRejected {
+                kind: ApprovalInteractionRejectionKind::LeaseTermsUnavailable,
+            })
     }
 }

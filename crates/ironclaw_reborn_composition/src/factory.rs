@@ -26,7 +26,7 @@ use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
 use ironclaw_host_api::runtime_policy::FilesystemBackendKind;
-use ironclaw_host_api::{HostPath, MountPermissions, MountView, PackageId, UserId, VirtualPath};
+use ironclaw_host_api::{HostPath, MountPermissions, MountView, UserId, VirtualPath};
 #[cfg(feature = "libsql")]
 use ironclaw_host_api::{MountAlias, MountGrant};
 use ironclaw_host_runtime::{
@@ -876,11 +876,7 @@ fn local_dev_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuildEr
         })?;
     HostTrustPolicy::new(vec![Box::new(AdminConfig::with_entries(vec![
         AdminEntry::for_local_manifest(
-            PackageId::new(&policy.provider.id).map_err(|error| {
-                RebornBuildError::InvalidConfig {
-                    reason: format!("built-in first-party package id is invalid: {error}"),
-                }
-            })?,
+            policy.provider.id,
             policy.provider.manifest_path,
             None,
             HostTrustAssignment::first_party(),
