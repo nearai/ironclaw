@@ -54,6 +54,8 @@ pub struct MockAgentLoopDriverHost {
     staged_iterations: Mutex<VecDeque<u32>>,
     fail_prompt_with: Mutex<Option<AgentLoopHostErrorKind>>,
     fail_model_with: Mutex<Option<AgentLoopHostErrorKind>>,
+    compaction_result: Mutex<Result<LoopCompactionResponse, LoopCompactionError>>,
+    progress_events: Mutex<Vec<LoopProgressEvent>>,
     acked_tokens: Mutex<Vec<LoopInputAckToken>>,
     cancellation: Mutex<Option<LoopCancellationSignal>>,
 }
@@ -82,6 +84,11 @@ impl MockAgentLoopDriverHost {
         lock_or_panic(&self.acked_tokens).clone()
     }
 
+    /// Returns loop progress events emitted through the host progress port.
+    pub fn progress_events(&self) -> Vec<LoopProgressEvent> {
+        clone_mutex_vec(&self.progress_events)
+    }
+
     fn record_call(&self, call: MockHostCall) {
         lock_or_panic(&self.call_log).push(call);
     }
@@ -94,6 +101,7 @@ pub struct MockAgentLoopDriverHostBuilder {
     visible_capabilities: Vec<CapabilityDescriptorView>,
     fail_prompt_with: Option<AgentLoopHostErrorKind>,
     fail_model_with: Option<AgentLoopHostErrorKind>,
+    compaction_result: Result<LoopCompactionResponse, LoopCompactionError>,
     cancellation: Option<LoopCancellationSignal>,
 }
 
@@ -109,6 +117,7 @@ impl MockAgentLoopDriverHostBuilder {
             )],
             fail_prompt_with: None,
             fail_model_with: None,
+            compaction_result: Err(LoopCompactionError::InputTooLarge),
             cancellation: None,
         }
     }
@@ -143,6 +152,15 @@ impl MockAgentLoopDriverHostBuilder {
         self
     }
 
+    /// Sets the response returned by the host compaction port.
+    pub fn compaction_result(
+        mut self,
+        result: Result<LoopCompactionResponse, LoopCompactionError>,
+    ) -> Self {
+        self.compaction_result = result;
+        self
+    }
+
     /// Sets the cancellation signal returned by the host accessor.
     pub fn cancellation_signal(mut self, signal: LoopCancellationSignal) -> Self {
         self.cancellation = Some(signal);
@@ -162,6 +180,8 @@ impl MockAgentLoopDriverHostBuilder {
                 staged_iterations: Mutex::new(VecDeque::new()),
                 fail_prompt_with: Mutex::new(self.fail_prompt_with),
                 fail_model_with: Mutex::new(self.fail_model_with),
+                compaction_result: Mutex::new(self.compaction_result),
+                progress_events: Mutex::new(Vec::new()),
                 acked_tokens: Mutex::new(Vec::new()),
                 cancellation: Mutex::new(self.cancellation),
             },
@@ -755,10 +775,8 @@ impl ironclaw_turns::run_profile::LoopCheckpointPort for MockAgentLoopDriverHost
 
 #[async_trait]
 impl ironclaw_turns::run_profile::LoopProgressPort for MockAgentLoopDriverHost {
-    async fn emit_loop_progress(
-        &self,
-        _event: LoopProgressEvent,
-    ) -> Result<(), AgentLoopHostError> {
+    async fn emit_loop_progress(&self, event: LoopProgressEvent) -> Result<(), AgentLoopHostError> {
+        lock_or_panic(&self.progress_events).push(event);
         Ok(())
     }
 }
@@ -769,7 +787,7 @@ impl ironclaw_turns::run_profile::LoopCompactionPort for MockAgentLoopDriverHost
         &self,
         _request: LoopCompactionRequest,
     ) -> Result<LoopCompactionResponse, LoopCompactionError> {
-        Err(LoopCompactionError::InputTooLarge)
+        lock_or_panic(&self.compaction_result).clone()
     }
 }
 

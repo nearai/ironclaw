@@ -9,7 +9,9 @@ use ironclaw_turns::{
 };
 use tracing::debug;
 
-use crate::state::{IndexedMessageKind, LoopExecutionState, MessageIndexEntry};
+use crate::state::{
+    CompactionPromptSnapshot, IndexedMessageKind, LoopExecutionState, MessageIndexEntry,
+};
 
 use super::{
     AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, HostStage,
@@ -169,7 +171,7 @@ pub(super) fn apply_compaction_index_from_prompt_bundle(
     state: &mut LoopExecutionState,
     index: Vec<LoopContextCompactionMetadata>,
 ) {
-    state.compaction_state.message_index = index
+    let message_index = index
         .into_iter()
         .map(|entry| MessageIndexEntry {
             sequence: entry.sequence,
@@ -183,10 +185,5 @@ pub(super) fn apply_compaction_index_from_prompt_bundle(
             estimated_tokens: entry.estimated_tokens,
         })
         .collect();
-    state.compaction_state.last_observed_prompt_tokens = state
-        .compaction_state
-        .message_index
-        .iter()
-        .map(|entry| entry.estimated_tokens)
-        .sum();
+    state.compaction_prompt = CompactionPromptSnapshot::from_message_index(message_index);
 }

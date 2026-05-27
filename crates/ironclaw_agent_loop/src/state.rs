@@ -9,9 +9,10 @@ pub use bounded_ring::BoundedRing;
 pub use ironclaw_turns::LoopFailureKind;
 pub use signature::{ArgsHash, CapabilityCallSignature, CapabilityCallSignatureError};
 pub use slots::{
-    CapabilityStrategyState, CompactionStrategyState, ContextStrategyState, GateStrategyState,
-    GoalRefreshStrategyState, IndexedMessageKind, MessageIndexEntry, ModelStrategyState,
-    RecoveryAttemptClass, RecoveryStrategyState, StopStrategyState,
+    CapabilityStrategyState, CompactionPromptSnapshot, CompactionStrategyState,
+    ContextStrategyState, GateStrategyState, GoalRefreshStrategyState, IndexedMessageKind,
+    MessageIndexEntry, ModelStrategyState, RecoveryAttemptClass, RecoveryStrategyState,
+    StopStrategyState,
 };
 
 use ironclaw_turns::{
@@ -57,6 +58,8 @@ pub struct LoopExecutionState {
     pub model_state: ModelStrategyState,
     #[serde(default)]
     pub compaction_state: CompactionStrategyState,
+    #[serde(skip)]
+    pub compaction_prompt: CompactionPromptSnapshot,
     #[serde(default)]
     pub goal_refresh_state: GoalRefreshStrategyState,
     pub recovery_state: RecoveryStrategyState,
@@ -87,6 +90,7 @@ impl LoopExecutionState {
             capability_state: CapabilityStrategyState::default(),
             model_state: ModelStrategyState::default(),
             compaction_state: CompactionStrategyState::default(),
+            compaction_prompt: CompactionPromptSnapshot::default(),
             goal_refresh_state: GoalRefreshStrategyState::default(),
             recovery_state: RecoveryStrategyState::default(),
             stop_state: StopStrategyState::default(),
@@ -398,6 +402,31 @@ mod tests {
         let restored: LoopExecutionState = serde_json::from_value(value).unwrap();
 
         assert_eq!(restored, state);
+    }
+
+    #[test]
+    fn compaction_prompt_snapshot_is_not_checkpointed() {
+        let context = test_run_context();
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        state.compaction_prompt =
+            CompactionPromptSnapshot::from_message_index(vec![MessageIndexEntry {
+                sequence: 1,
+                kind: IndexedMessageKind::User,
+                estimated_tokens: 42,
+            }]);
+
+        let value = serde_json::to_value(&state).unwrap();
+        assert!(
+            !value
+                .as_object()
+                .expect("state serializes as object")
+                .contains_key("compaction_prompt")
+        );
+        let restored: LoopExecutionState = serde_json::from_value(value).unwrap();
+
+        assert!(restored.compaction_prompt.message_index.is_empty());
+        assert_eq!(restored.compaction_prompt.observed_prompt_tokens, 0);
+        assert_eq!(restored.compaction_state, state.compaction_state);
     }
 
     #[test]

@@ -22,7 +22,7 @@ pub enum CompactionError {
     InvalidCutPoint,
     #[error("compaction input too large")]
     InputTooLarge { cap: usize, observed_bytes: usize },
-    #[error("compaction input contains injection markers")]
+    #[error("compaction content contains injection markers")]
     InjectionDetected,
     #[error("compaction output contains leaked secret markers")]
     LeakDetected,
@@ -172,7 +172,7 @@ where
         let mut input = String::new();
         for message in &messages {
             if !is_compaction_model_visible(message.kind, message.status) {
-                continue;
+                return Err(CompactionError::InvalidCutPoint);
             }
             let body = message.content.as_deref().unwrap_or_default();
             append_escaped_message(&mut input, message.sequence, message.kind, body);
@@ -213,6 +213,13 @@ where
             .await
             .map_err(map_inference_error)?;
 
+        if !self
+            .injection_scanner
+            .scan_injection(&response.output_text)
+            .is_empty()
+        {
+            return Err(CompactionError::InjectionDetected);
+        }
         if !self
             .leak_detector
             .scan_leaks(&response.output_text)
@@ -279,6 +286,7 @@ fn is_compaction_model_visible(kind: MessageKind, status: MessageStatus) -> bool
             | MessageKind::Assistant
             | MessageKind::System
             | MessageKind::Summary
+            | MessageKind::CheckpointReference
             | MessageKind::ToolResultReference
     )
 }
@@ -354,5 +362,30 @@ fn compaction_error_to_loop(error: CompactionError) -> LoopCompactionError {
         CompactionError::PersistenceFailed { safe_summary } => {
             LoopCompactionError::PersistenceFailed { safe_summary }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compaction_visibility_matches_model_context_reference_kinds() {
+        assert!(is_compaction_model_visible(
+            MessageKind::CheckpointReference,
+            MessageStatus::Finalized
+        ));
+        assert!(is_compaction_model_visible(
+            MessageKind::ToolResultReference,
+            MessageStatus::Finalized
+        ));
+        assert!(!is_compaction_model_visible(
+            MessageKind::CapabilityDisplayPreview,
+            MessageStatus::Finalized
+        ));
+        assert!(!is_compaction_model_visible(
+            MessageKind::User,
+            MessageStatus::Redacted
+        ));
     }
 }

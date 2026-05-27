@@ -15,16 +15,36 @@ pub struct ModelStrategyState {
 pub struct CompactionStrategyState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_compacted_through_seq: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_summary_artifact_id: Option<String>,
-    #[serde(default)]
-    pub consecutive_failures: u8,
     #[serde(default)]
     pub force_compact_on_next_iteration: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CompactionPromptSnapshot {
     pub message_index: Vec<MessageIndexEntry>,
-    #[serde(default)]
-    pub last_observed_prompt_tokens: u64,
+    pub observed_prompt_tokens: u64,
+}
+
+impl CompactionPromptSnapshot {
+    pub fn from_message_index(message_index: Vec<MessageIndexEntry>) -> Self {
+        let observed_prompt_tokens = message_index
+            .iter()
+            .map(|entry| entry.estimated_tokens)
+            .sum();
+        Self {
+            message_index,
+            observed_prompt_tokens,
+        }
+    }
+
+    pub fn retain_after_sequence(&mut self, sequence: u64) {
+        self.message_index.retain(|entry| entry.sequence > sequence);
+        self.observed_prompt_tokens = self
+            .message_index
+            .iter()
+            .map(|entry| entry.estimated_tokens)
+            .sum();
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

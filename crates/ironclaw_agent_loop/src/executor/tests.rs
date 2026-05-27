@@ -4,22 +4,29 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, CapabilityFailureKind,
         CapabilityInputRef, CapabilityOutcome, CapabilityResultMessage, LoopCancelReasonKind,
-        LoopCheckpointKind, LoopInput, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
-        LoopInterruptKind, LoopProcessRef, LoopRunInfoPort, LoopSafeSummary, ParentLoopOutput,
-        ProcessHandleSummary, ProviderToolCallReplay, VisibleCapabilityRequest,
+        LoopCheckpointKind, LoopCompactionResponse, LoopInput, LoopInputAckToken, LoopInputBatch,
+        LoopInputCursor, LoopInterruptKind, LoopProcessRef, LoopProgressEvent, LoopRunInfoPort,
+        LoopSafeSummary, ParentLoopOutput, ProcessHandleSummary, ProviderToolCallReplay,
+        VisibleCapabilityRequest,
     },
 };
 
-use crate::state::{CheckpointKind, LoopExecutionState};
-use crate::strategies::{CapabilityFilter, GateKind, GateOutcome, StopKind, TurnSummary};
+use crate::state::{
+    CheckpointKind, CompactionPromptSnapshot, IndexedMessageKind, LoopExecutionState,
+    MessageIndexEntry,
+};
+use crate::strategies::{
+    CapabilityFilter, DefaultCompactionStrategy, GateKind, GateOutcome, StopKind, TurnSummary,
+};
 
 use super::{
     AgentLoopExecutor, AgentLoopExecutorError, AssistantReplyInput, AssistantReplyStage, BatchStep,
     BudgetInput, BudgetStage, BudgetStep, CanonicalAgentLoopExecutor, CapabilityInput,
-    CapabilityStage, DrainInput, ExecutorStage, ExitInput, ExitStage, GateInput, GateStage,
-    HostStage, InputStage, InputStep, PendingInputAck, PromptInput, PromptStage, StageContext,
-    StopInput, StopStage, StopStep, TurnCompletedStep, UserFacingInputDrainMode,
-    consume_drainable_inputs, sanitize_result_ref_suffix, synthetic_provider_error_result_ref,
+    CapabilityStage, CompactionInput, CompactionStage, DrainInput, ExecutorStage, ExitInput,
+    ExitStage, GateInput, GateStage, HostStage, InputStage, InputStep, PendingInputAck,
+    PromptInput, PromptStage, StageContext, StopInput, StopStage, StopStep, TurnCompletedStep,
+    UserFacingInputDrainMode, consume_drainable_inputs, sanitize_result_ref_suffix,
+    synthetic_provider_error_result_ref,
 };
 
 #[allow(dead_code)]
@@ -107,7 +114,10 @@ async fn progress_port_failure_does_not_abort_reply_only_run() {
 #[tokio::test]
 async fn budget_stage_exits_at_iteration_limit() {
     let host = MockHost::new(Vec::new());
-    let family = crate::families::default();
+    let family = family_with_compaction_strategy(DefaultCompactionStrategy {
+        deadline_ms: 1,
+        ..Default::default()
+    });
     let ctx = StageContext {
         planner: family.planner(),
         host: &host,
@@ -128,6 +138,125 @@ async fn budget_stage_exits_at_iteration_limit() {
 
     assert!(matches!(step, BudgetStep::Exit(LoopExit::Failed(_))));
     assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
+}
+
+#[tokio::test]
+async fn compaction_stage_success_updates_state_and_emits_progress() {
+    let host = MockHost::new(Vec::new()).with_compaction_result(Ok(LoopCompactionResponse {
+        summary_artifact_id: "summary-1".to_string(),
+        compression_ratio_ppm: 250_000,
+    }));
+    let family = family_with_compaction_strategy(DefaultCompactionStrategy {
+        deadline_ms: 1,
+        ..Default::default()
+    });
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.compaction_state.force_compact_on_next_iteration = true;
+    state.compaction_prompt = CompactionPromptSnapshot::from_message_index(vec![
+        MessageIndexEntry {
+            sequence: 1,
+            kind: IndexedMessageKind::User,
+            estimated_tokens: 10,
+        },
+        MessageIndexEntry {
+            sequence: 2,
+            kind: IndexedMessageKind::Assistant,
+            estimated_tokens: 10,
+        },
+    ]);
+
+    let output = CompactionStage
+        .process(
+            ctx,
+            CompactionInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await
+        .expect("compaction stage");
+
+    assert!(output.exit.is_none());
+    assert_eq!(
+        output.state.compaction_state.last_compacted_through_seq,
+        Some(1)
+    );
+    assert!(
+        !output
+            .state
+            .compaction_state
+            .force_compact_on_next_iteration
+    );
+    assert_eq!(
+        output.state.compaction_prompt.message_index,
+        vec![MessageIndexEntry {
+            sequence: 2,
+            kind: IndexedMessageKind::Assistant,
+            estimated_tokens: 10,
+        }]
+    );
+    assert_eq!(output.state.compaction_prompt.observed_prompt_tokens, 10);
+    let progress_events = host.progress_events();
+    assert!(matches!(
+        progress_events.as_slice(),
+        [
+            LoopProgressEvent::CompactionStarted { .. },
+            LoopProgressEvent::CompactionCompleted {
+                compression_ratio_ppm: 250_000,
+                ..
+            }
+        ]
+    ));
+}
+
+#[tokio::test]
+async fn compaction_stage_timeout_returns_failed_exit() {
+    let host = MockHost::new(Vec::new())
+        .with_compaction_result(Ok(LoopCompactionResponse {
+            summary_artifact_id: "summary-1".to_string(),
+            compression_ratio_ppm: 250_000,
+        }))
+        .with_compaction_delay(std::time::Duration::from_millis(25));
+    let family = family_with_compaction_strategy(DefaultCompactionStrategy {
+        deadline_ms: 1,
+        ..Default::default()
+    });
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.compaction_state.force_compact_on_next_iteration = true;
+    state.compaction_prompt =
+        CompactionPromptSnapshot::from_message_index(vec![MessageIndexEntry {
+            sequence: 1,
+            kind: IndexedMessageKind::User,
+            estimated_tokens: 10,
+        }]);
+
+    let output = CompactionStage
+        .process(
+            ctx,
+            CompactionInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await
+        .expect("compaction stage");
+
+    assert!(matches!(output.exit, Some(LoopExit::Failed(_))));
+    assert!(matches!(
+        host.progress_events().as_slice(),
+        [
+            LoopProgressEvent::CompactionStarted { .. },
+            LoopProgressEvent::CompactionFailed { .. }
+        ]
+    ));
 }
 
 #[tokio::test]

@@ -18,7 +18,7 @@ mod sealed {
 
 impl sealed::Sealed for crate::default_planner::DefaultPlanner {}
 
-/// A planner is a Builtin composition of the nine loop strategies.
+/// A planner is a Builtin composition of the loop strategies.
 ///
 /// The planner has no `run()` or `tick()` method; loop mechanics live in the
 /// executor. Public callers can only observe the family id and content identity

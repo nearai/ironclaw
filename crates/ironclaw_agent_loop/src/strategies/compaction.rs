@@ -57,7 +57,7 @@ impl CompactionStrategy for DefaultCompactionStrategy {
         state: &LoopExecutionState,
         _ctx: &LoopRunContext,
     ) -> CompactionDecision {
-        if state.compaction_state.message_index.is_empty() {
+        if state.compaction_prompt.message_index.is_empty() {
             return CompactionDecision::Skip;
         }
         let threshold = self
@@ -66,18 +66,13 @@ impl CompactionStrategy for DefaultCompactionStrategy {
         if threshold <= self.preserve_tail_tokens {
             return CompactionDecision::Skip;
         }
-        let total_tokens: u64 = state
-            .compaction_state
-            .message_index
-            .iter()
-            .map(|entry| entry.estimated_tokens)
-            .sum();
+        let total_tokens = state.compaction_prompt.observed_prompt_tokens;
         if !state.compaction_state.force_compact_on_next_iteration && total_tokens < threshold {
             return CompactionDecision::Skip;
         }
 
         let mut tail_tokens_after_entry = 0_u64;
-        for entry in state.compaction_state.message_index.iter().rev() {
+        for entry in state.compaction_prompt.message_index.iter().rev() {
             if entry.kind == IndexedMessageKind::User
                 && Some(entry.sequence) > state.compaction_state.last_compacted_through_seq
                 && tail_tokens_after_entry <= self.preserve_tail_tokens
@@ -98,20 +93,38 @@ impl CompactionStrategy for DefaultCompactionStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{CompactionStrategyState, LoopExecutionState, MessageIndexEntry};
+    use crate::state::{
+        CompactionPromptSnapshot, CompactionStrategyState, LoopExecutionState, MessageIndexEntry,
+    };
+
+    #[test]
+    fn evaluate_skips_when_message_index_is_empty() {
+        let context = crate::test_support::test_run_context("compaction-strategy-empty");
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        state.compaction_state.force_compact_on_next_iteration = true;
+        let strategy = DefaultCompactionStrategy {
+            context_limit_tokens: 100,
+            reserve_tokens: 10,
+            preserve_tail_tokens: 1,
+            deadline_ms: 1,
+        };
+
+        assert_eq!(
+            strategy.should_compact(&state, &context),
+            CompactionDecision::Skip
+        );
+    }
 
     #[test]
     fn evaluate_skips_when_no_eligible_user_message_boundary_exists() {
         let context = crate::test_support::test_run_context("compaction-strategy");
         let mut state = LoopExecutionState::initial_for_run(&context);
-        state.compaction_state = CompactionStrategyState {
-            message_index: vec![MessageIndexEntry {
+        state.compaction_prompt =
+            CompactionPromptSnapshot::from_message_index(vec![MessageIndexEntry {
                 sequence: 1,
                 kind: IndexedMessageKind::Assistant,
                 estimated_tokens: 100,
-            }],
-            ..Default::default()
-        };
+            }]);
         let strategy = DefaultCompactionStrategy {
             context_limit_tokens: 100,
             reserve_tokens: 10,
@@ -128,31 +141,29 @@ mod tests {
     fn evaluate_triggers_at_latest_user_boundary_outside_tail() {
         let context = crate::test_support::test_run_context("compaction-strategy-trigger");
         let mut state = LoopExecutionState::initial_for_run(&context);
-        state.compaction_state = CompactionStrategyState {
-            message_index: vec![
-                MessageIndexEntry {
-                    sequence: 1,
-                    kind: IndexedMessageKind::User,
-                    estimated_tokens: 30,
-                },
-                MessageIndexEntry {
-                    sequence: 2,
-                    kind: IndexedMessageKind::Assistant,
-                    estimated_tokens: 30,
-                },
-                MessageIndexEntry {
-                    sequence: 3,
-                    kind: IndexedMessageKind::User,
-                    estimated_tokens: 30,
-                },
-                MessageIndexEntry {
-                    sequence: 4,
-                    kind: IndexedMessageKind::Assistant,
-                    estimated_tokens: 30,
-                },
-            ],
-            ..Default::default()
-        };
+        state.compaction_state = CompactionStrategyState::default();
+        state.compaction_prompt = CompactionPromptSnapshot::from_message_index(vec![
+            MessageIndexEntry {
+                sequence: 1,
+                kind: IndexedMessageKind::User,
+                estimated_tokens: 30,
+            },
+            MessageIndexEntry {
+                sequence: 2,
+                kind: IndexedMessageKind::Assistant,
+                estimated_tokens: 30,
+            },
+            MessageIndexEntry {
+                sequence: 3,
+                kind: IndexedMessageKind::User,
+                estimated_tokens: 30,
+            },
+            MessageIndexEntry {
+                sequence: 4,
+                kind: IndexedMessageKind::Assistant,
+                estimated_tokens: 30,
+            },
+        ]);
         let strategy = DefaultCompactionStrategy {
             context_limit_tokens: 100,
             reserve_tokens: 10,

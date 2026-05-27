@@ -133,14 +133,10 @@ impl ExecutorStage<CompactionInput> for CompactionStage {
                     }
                 };
                 state.compaction_state.last_compacted_through_seq = Some(drop_through_seq);
-                state.compaction_state.consecutive_failures = 0;
-                state.compaction_state.last_summary_artifact_id =
-                    Some(response.summary_artifact_id);
                 state.compaction_state.force_compact_on_next_iteration = false;
                 state
-                    .compaction_state
-                    .message_index
-                    .retain(|entry| entry.sequence > drop_through_seq);
+                    .compaction_prompt
+                    .retain_after_sequence(drop_through_seq);
                 CheckpointStage
                     .emit_progress(
                         ctx,

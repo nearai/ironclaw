@@ -31,8 +31,8 @@ use crate::{
     state::{CheckpointKind, GateStrategyState, LoopExecutionState},
     strategies::{
         CapabilityErrorClass, CapabilityErrorSummary, CapabilityFilter, CapabilityStrategy,
-        GateHandlingStrategy, GateOutcome, GateSummary, InputDrainStrategy, ModelErrorSummary,
-        RecoveryOutcome, RecoveryStrategy, RetryScope,
+        DefaultCompactionStrategy, GateHandlingStrategy, GateOutcome, GateSummary,
+        InputDrainStrategy, ModelErrorSummary, RecoveryOutcome, RecoveryStrategy, RetryScope,
     },
 };
 
@@ -56,6 +56,8 @@ pub(super) struct MockHost {
     prompt_surface_version: Option<CapabilitySurfaceVersion>,
     visible_surface_version: CapabilitySurfaceVersion,
     progress_events: Arc<Mutex<Vec<ironclaw_turns::run_profile::LoopProgressEvent>>>,
+    compaction_result: Arc<Mutex<Result<LoopCompactionResponse, LoopCompactionError>>>,
+    compaction_delay: Arc<Mutex<Option<std::time::Duration>>>,
     fail_progress_port: bool,
     fail_append_result_ref: bool,
     cancellation: Arc<Mutex<Option<LoopCancellationSignal>>>,
@@ -90,6 +92,8 @@ impl MockHost {
             prompt_surface_version: Some(surface_version()),
             visible_surface_version: surface_version(),
             progress_events: Arc::new(Mutex::new(Vec::new())),
+            compaction_result: Arc::new(Mutex::new(Err(LoopCompactionError::InputTooLarge))),
+            compaction_delay: Arc::new(Mutex::new(None)),
             fail_progress_port: false,
             fail_append_result_ref: false,
             cancellation: Arc::new(Mutex::new(None)),
@@ -147,6 +151,19 @@ impl MockHost {
 
     pub(super) fn with_failing_prompt_bundle(mut self) -> Self {
         self.fail_prompt_bundle = true;
+        self
+    }
+
+    pub(super) fn with_compaction_result(
+        self,
+        result: Result<LoopCompactionResponse, LoopCompactionError>,
+    ) -> Self {
+        *self.compaction_result.lock().expect("lock") = result;
+        self
+    }
+
+    pub(super) fn with_compaction_delay(self, delay: std::time::Duration) -> Self {
+        *self.compaction_delay.lock().expect("lock") = Some(delay);
         self
     }
 
@@ -600,7 +617,11 @@ impl ironclaw_turns::run_profile::LoopCompactionPort for MockHost {
         &self,
         _request: LoopCompactionRequest,
     ) -> Result<LoopCompactionResponse, LoopCompactionError> {
-        Err(LoopCompactionError::InputTooLarge)
+        let delay = *self.compaction_delay.lock().expect("lock");
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
+        self.compaction_result.lock().expect("lock").clone()
     }
 }
 
@@ -827,6 +848,14 @@ pub(super) fn family_with_gate_outcome(outcome: GateOutcome) -> LoopFamily {
         DefaultPlanner::compose_default().with_gate(Arc::new(FixedGateStrategy { outcome }));
     let id = LoopFamilyId::new("executor-gate-test").expect("valid test family id");
     let version = ComponentIdentity::from_static("executor-gate-test", ComponentDigest([4; 32]));
+    LoopFamily::new(id, version, Arc::new(planner))
+}
+
+pub(super) fn family_with_compaction_strategy(strategy: DefaultCompactionStrategy) -> LoopFamily {
+    let planner = DefaultPlanner::compose_default().with_compaction(Arc::new(strategy));
+    let id = LoopFamilyId::new("executor-compaction-test").expect("valid test family id");
+    let version =
+        ComponentIdentity::from_static("executor-compaction-test", ComponentDigest([5; 32]));
     LoopFamily::new(id, version, Arc::new(planner))
 }
 

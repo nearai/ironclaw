@@ -18,8 +18,7 @@ use crate::strategies::{
     RecoveryStrategy, StopConditionStrategy,
 };
 
-/// The reference planner: a concrete, Builtin-only composition of nine
-/// strategies.
+/// The reference planner: a concrete, Builtin-only strategy composition.
 #[allow(dead_code)]
 #[derive(Clone)]
 pub(crate) struct DefaultPlanner {

@@ -4,7 +4,7 @@ use ironclaw_agent_loop::{
     executor::{AgentLoopExecutor, CanonicalAgentLoopExecutor},
     families,
     state::{
-        CheckpointKind, CompactionStrategyState, IndexedMessageKind, LoopExecutionState,
+        CheckpointKind, CompactionPromptSnapshot, IndexedMessageKind, LoopExecutionState,
         MessageIndexEntry,
     },
     test_support::{
@@ -14,7 +14,7 @@ use ironclaw_agent_loop::{
 };
 use ironclaw_turns::{
     LoopBlockedKind, LoopExit, LoopFailureKind, TurnRunId,
-    run_profile::{ConcurrencyHint, LoopRunInfoPort},
+    run_profile::{ConcurrencyHint, LoopCompactionResponse, LoopProgressEvent, LoopRunInfoPort},
 };
 
 #[tokio::test]
@@ -45,15 +45,13 @@ async fn compaction_failure_returns_failed_exit() {
         .script(ScenarioScript::reply_only("hi"))
         .build();
     let mut state = LoopExecutionState::initial_for_run(host.run_context());
-    state.compaction_state = CompactionStrategyState {
-        force_compact_on_next_iteration: true,
-        message_index: vec![MessageIndexEntry {
+    state.compaction_state.force_compact_on_next_iteration = true;
+    state.compaction_prompt =
+        CompactionPromptSnapshot::from_message_index(vec![MessageIndexEntry {
             sequence: 1,
             kind: IndexedMessageKind::User,
             estimated_tokens: 10,
-        }],
-        ..Default::default()
-    };
+        }]);
 
     let exit = CanonicalAgentLoopExecutor
         .execute_family(&families::default(), &host, state)
@@ -66,6 +64,61 @@ async fn compaction_failure_returns_failed_exit() {
         }
         other => panic!("expected failed exit, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn compaction_success_updates_state_and_emits_progress() {
+    let (host, _) = MockAgentLoopDriverHost::builder()
+        .script(ScenarioScript::reply_only("hi"))
+        .compaction_result(Ok(LoopCompactionResponse {
+            summary_artifact_id: "summary-1".to_string(),
+            compression_ratio_ppm: 250_000,
+        }))
+        .build();
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.compaction_state.force_compact_on_next_iteration = true;
+    state.compaction_prompt = CompactionPromptSnapshot::from_message_index(vec![
+        MessageIndexEntry {
+            sequence: 1,
+            kind: IndexedMessageKind::User,
+            estimated_tokens: 10,
+        },
+        MessageIndexEntry {
+            sequence: 2,
+            kind: IndexedMessageKind::Assistant,
+            estimated_tokens: 10,
+        },
+    ]);
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(&families::default(), &host, state)
+        .await
+        .expect("loop execution should succeed after compaction");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    let progress_events = host.progress_events();
+    assert!(progress_events.iter().any(|event| {
+        matches!(
+            event,
+            LoopProgressEvent::CompactionStarted {
+                initiator: ironclaw_turns::run_profile::CompactionInitiator::Auto,
+                ..
+            }
+        )
+    }));
+    assert!(progress_events.iter().any(|event| {
+        matches!(
+            event,
+            LoopProgressEvent::CompactionCompleted {
+                compression_ratio_ppm: 250_000,
+                ..
+            }
+        )
+    }));
+    assert!(
+        host.call_log()
+            .contains(&MockHostCall::FinalizeAssistantMessage)
+    );
 }
 
 #[tokio::test]
