@@ -321,7 +321,7 @@ impl HostRuntime for DefaultHostRuntime {
         };
         context.trust = trust_decision.effective_trust.class();
 
-        let host = self.capability_host();
+        let host = self.capability_host(self.registry.as_ref());
 
         let invocation = CapabilityInvocationRequest {
             context,
@@ -394,7 +394,7 @@ impl HostRuntime for DefaultHostRuntime {
         };
         context.trust = trust_decision.effective_trust.class();
 
-        let host = self.capability_host();
+        let host = self.capability_host(self.registry.as_ref());
         let spawn = CapabilitySpawnRequest {
             context,
             capability_id: capability_id.clone(),
@@ -479,7 +479,7 @@ impl HostRuntime for DefaultHostRuntime {
         };
         context.trust = trust_decision.effective_trust.class();
 
-        let host = self.capability_host();
+        let host = self.capability_host(self.registry.as_ref());
         let resume = CapabilityResumeRequest {
             context,
             approval_request_id,
@@ -571,7 +571,7 @@ impl HostRuntime for DefaultHostRuntime {
         };
         context.trust = trust_decision.effective_trust.class();
 
-        let host = self.capability_host();
+        let host = self.capability_host(self.registry.as_ref());
         let resume = CapabilityResumeRequest {
             context,
             approval_request_id,
@@ -774,12 +774,12 @@ impl HostRuntime for DefaultHostRuntime {
 }
 
 impl DefaultHostRuntime {
-    fn capability_host(&self) -> CapabilityHost<'_, dyn CapabilityDispatcher> {
-        let mut host = CapabilityHost::new(
-            self.registry.as_ref(),
-            self.dispatcher.as_ref(),
-            self.authorizer.as_ref(),
-        );
+    fn capability_host<'a>(
+        &'a self,
+        registry: &'a ExtensionRegistry,
+    ) -> CapabilityHost<'a, dyn CapabilityDispatcher> {
+        let mut host =
+            CapabilityHost::new(registry, self.dispatcher.as_ref(), self.authorizer.as_ref());
         if let Some(run_state_approval_store) = &self.run_state_approval_store {
             host = host.with_run_state_approval_store(run_state_approval_store.as_ref());
         } else {
