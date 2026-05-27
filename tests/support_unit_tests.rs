@@ -394,7 +394,7 @@ mod reborn_support_tests {
     use ironclaw_threads::ProviderToolCallReferenceEnvelope;
     use ironclaw_threads::{
         AcceptInboundMessageRequest, AppendAssistantDraftRequest, EnsureThreadRequest,
-        MessageContent, SessionThreadService, ThreadScope,
+        MessageContent, SessionThreadService, ThreadScope, ToolResultSafeSummary,
     };
     use ironclaw_turns::{
         CancelRunRequest, CancelRunResponse, GetRunStateRequest, LoopMessageRef,
@@ -2115,7 +2115,9 @@ mod reborn_support_tests {
                 reasoning: None,
                 signature: None,
             }),
-            tool_result_content: Some(HostManagedToolResultContent::Resolved),
+            tool_result_content: Some(HostManagedToolResultContent::Resolved {
+                safe_summary: ToolResultSafeSummary::new("tool completed").unwrap(),
+            }),
         }
     }
 
