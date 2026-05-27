@@ -90,6 +90,7 @@ fn fake_thread_history(owner: &WebUiAuthenticatedCaller, thread_id: &str) -> Thr
             created_by_actor_id: owner.user_id.as_str().to_string(),
             title: Some("M2 facade contract thread".to_string()),
             metadata_json: None,
+            goal: None,
         },
         messages: vec![ThreadMessageRecord {
             message_id: ThreadMessageId::new(),
@@ -751,6 +752,7 @@ impl SessionThreadService for ScriptedThreadService {
                     created_by_actor_id: "user-alpha".to_string(),
                     title: None,
                     metadata_json: None,
+                    goal: None,
                 },
                 messages: Vec::new(),
                 summary_artifacts: Vec::new(),

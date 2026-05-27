@@ -92,6 +92,7 @@ impl RebornServicesApi for StubServices {
                 created_by_actor_id: USER.to_string(),
                 title: None,
                 metadata_json: None,
+                goal: None,
             },
         })
     }
@@ -132,6 +133,7 @@ impl RebornServicesApi for StubServices {
                 created_by_actor_id: USER.to_string(),
                 title: None,
                 metadata_json: None,
+                goal: None,
             },
             messages: Vec::new(),
             summary_artifacts: Vec::new(),

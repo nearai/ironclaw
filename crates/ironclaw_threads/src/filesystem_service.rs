@@ -1257,7 +1257,7 @@ where
                 request.end_sequence,
             )
             .await?
-            .ok_or_else(|| SessionThreadError::InvalidSummaryRange {
+            .ok_or(SessionThreadError::InvalidSummaryRange {
                 start_sequence: request.start_sequence,
                 end_sequence: request.end_sequence,
             })?;

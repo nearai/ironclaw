@@ -137,6 +137,7 @@ impl RebornServicesApi for StubServices {
                     .client_action_id
                     .as_ref()
                     .map(|id| format!("{{\"client_action_id\":\"{id}\"}}")),
+                goal: None,
             },
         })
     }
@@ -188,6 +189,7 @@ impl RebornServicesApi for StubServices {
                 created_by_actor_id: "user-alpha".to_string(),
                 title: None,
                 metadata_json: None,
+                goal: None,
             },
             messages: Vec::new(),
             summary_artifacts: Vec::new(),
