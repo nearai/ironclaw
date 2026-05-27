@@ -598,7 +598,7 @@ impl RebornProductAuthServices {
         })
     }
 
-    #[expect(dead_code, reason = "used by upcoming Reborn OAuth setup route wiring")]
+    #[allow(dead_code, reason = "used by upcoming Reborn OAuth setup route wiring")]
     pub(crate) async fn ensure_oauth_callback_flow_known(
         &self,
         scope: &AuthProductScope,
@@ -618,7 +618,7 @@ impl RebornProductAuthServices {
         Ok(())
     }
 
-    #[expect(dead_code, reason = "used by upcoming Reborn OAuth setup route wiring")]
+    #[allow(dead_code, reason = "used by upcoming Reborn OAuth setup route wiring")]
     pub(crate) async fn start_setup_oauth_flow(
         &self,
         request: RebornOAuthStartFlowRequest,
