@@ -903,7 +903,11 @@ fn trust_policy_input_for_local_manifest(
     package: &ExtensionPackage,
 ) -> Result<ironclaw_trust::TrustPolicyInput, TrustEvaluationError> {
     package
-        .trust_policy_input(local_manifest_source(package), None, None)
+        .trust_policy_input(
+            local_manifest_source(package),
+            package.manifest_digest(),
+            None,
+        )
         .map_err(|_| TrustEvaluationError::TrustInput)
 }
 
@@ -1236,9 +1240,11 @@ mod tests {
 
     use super::*;
     use ironclaw_capabilities::CapabilityInvocationError;
+    use ironclaw_extensions::{ExtensionManifest, ManifestSource};
     use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
     use ironclaw_host_api::{
-        CapabilityId, DispatchFailureKind, RuntimeDispatchErrorKind, VirtualPath,
+        CapabilityId, DispatchFailureKind, HostPortCatalog, PackageSource,
+        RuntimeDispatchErrorKind, VirtualPath, sha256_digest_token,
     };
 
     fn cap() -> CapabilityId {
@@ -1247,6 +1253,58 @@ mod tests {
 
     fn dispatch(kind: DispatchFailureKind) -> CapabilityInvocationError {
         CapabilityInvocationError::Dispatch { kind }
+    }
+
+    #[test]
+    fn local_manifest_trust_input_includes_manifest_digest() {
+        const MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "test"
+name = "Test"
+version = "0.1.0"
+description = "test extension"
+trust = "third_party"
+
+[runtime]
+kind = "script"
+runner = "sandboxed_process"
+command = "echo"
+
+[[capabilities]]
+id = "test.cap"
+description = "Test capability"
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/test.input.json"
+output_schema_ref = "schemas/test.output.json"
+"#;
+        let manifest = ExtensionManifest::parse(
+            MANIFEST,
+            ManifestSource::HostBundled,
+            &HostPortCatalog::empty(),
+        )
+        .unwrap();
+        let package = ExtensionPackage::from_manifest_toml(
+            manifest,
+            VirtualPath::new("/system/extensions/test").unwrap(),
+            MANIFEST,
+        )
+        .unwrap();
+
+        let input = trust_policy_input_for_local_manifest(&package).unwrap();
+
+        assert_eq!(
+            input.identity.source,
+            PackageSource::LocalManifest {
+                path: "/system/extensions/test/manifest.toml".to_string()
+            }
+        );
+        let expected_digest = sha256_digest_token(MANIFEST.as_bytes());
+        assert_eq!(
+            input.identity.digest.as_deref(),
+            Some(expected_digest.as_str())
+        );
     }
 
     #[test]

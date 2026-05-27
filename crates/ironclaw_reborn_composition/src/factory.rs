@@ -75,7 +75,9 @@ use crate::{
     RebornReadiness, RebornReadinessState,
 };
 use crate::{
-    available_extensions::AvailableExtensionCatalog,
+    available_extensions::{
+        AvailableExtensionCatalog, gmail_manifest_digest, google_calendar_manifest_digest,
+    },
     extension_installation_store::FilesystemExtensionInstallationStore,
     extension_lifecycle::{RebornLocalExtensionManagementPort, restore_extension_lifecycle_state},
     gsuite::register_bundled_gsuite_first_party_handlers,
@@ -977,7 +979,7 @@ fn local_dev_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuildEr
                 reason: format!("Google Calendar first-party package id is invalid: {error}"),
             })?,
             "/system/extensions/google-calendar/manifest.toml".to_string(),
-            None,
+            Some(google_calendar_manifest_digest()),
             HostTrustAssignment::first_party(),
             gsuite_allowed_effects(),
             None,
@@ -987,7 +989,7 @@ fn local_dev_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuildEr
                 reason: format!("Gmail first-party package id is invalid: {error}"),
             })?,
             "/system/extensions/gmail/manifest.toml".to_string(),
-            None,
+            Some(gmail_manifest_digest()),
             HostTrustAssignment::first_party(),
             gsuite_allowed_effects(),
             None,

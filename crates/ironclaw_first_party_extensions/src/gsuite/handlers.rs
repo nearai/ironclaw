@@ -1,4 +1,9 @@
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap,
+    io::{self, Write},
+    sync::Arc,
+    time::Instant,
+};
 
 use ironclaw_auth::{CredentialAccountService, ProviderScope};
 use ironclaw_host_api::{
@@ -12,8 +17,8 @@ use serde_json::{Value, json};
 use crate::gsuite::{
     credential::{GoogleCredentialError, GoogleCredentialResolver},
     manifest::{
-        GSUITE_RESPONSE_BODY_LIMIT, GSUITE_TIMEOUT_MS, GsuiteCapabilityOperation,
-        GsuiteCapabilitySpec, find_gsuite_capability,
+        GSUITE_REQUEST_BODY_LIMIT, GSUITE_RESPONSE_BODY_LIMIT, GSUITE_TIMEOUT_MS,
+        GsuiteCapabilityOperation, GsuiteCapabilitySpec, find_gsuite_capability,
     },
     network::google_api_network_policy,
 };
@@ -410,7 +415,15 @@ fn calendar_find_free_slots_request(
 fn calendar_create_event_request(
     input: &Value,
 ) -> Result<(NetworkMethod, String, Vec<u8>), GsuiteDispatchError> {
-    let query = CalendarEventsQuery::parse(input)?;
+    let query = CalendarEventsQuery {
+        calendar_id: optional_str(input, "calendar_id")?
+            .unwrap_or("primary")
+            .to_string(),
+        time_min: None,
+        time_max: None,
+        page_token: None,
+        max_results: None,
+    };
     Ok((
         NetworkMethod::Post,
         calendar_events_url(&query, None),
@@ -686,7 +699,44 @@ fn required_array<'a>(input: &'a Value, key: &str) -> Result<&'a Value, GsuiteDi
 }
 
 fn json_body(value: &Value) -> Result<Vec<u8>, GsuiteDispatchError> {
-    serde_json::to_vec(value).map_err(|_| input_error())
+    let mut writer = BoundedJsonBody::new(GSUITE_REQUEST_BODY_LIMIT);
+    serde_json::to_writer(&mut writer, value).map_err(|_| input_error())?;
+    Ok(writer.into_inner())
+}
+
+struct BoundedJsonBody {
+    bytes: Vec<u8>,
+    limit: usize,
+}
+
+impl BoundedJsonBody {
+    fn new(limit: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            limit,
+        }
+    }
+
+    fn into_inner(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+impl Write for BoundedJsonBody {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.bytes.len().saturating_add(buf.len()) > self.limit {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "JSON request body exceeds GSuite request body limit",
+            ));
+        }
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 fn merge_attendees(mut existing: Vec<Value>, additions: Vec<Value>) -> Vec<Value> {

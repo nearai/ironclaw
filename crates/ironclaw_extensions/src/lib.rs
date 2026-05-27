@@ -9,7 +9,7 @@ use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, ExtensionId, ExtensionLifecycleOperation, HostApiError,
     HostPortCatalog, PackageId, PackageIdentity, PackageSource, RequestedTrustClass, RuntimeKind,
-    TrustClass, VirtualPath,
+    TrustClass, VirtualPath, sha256_digest_token,
 };
 use ironclaw_trust::TrustPolicyInput;
 use std::collections::{BTreeSet, HashSet};
@@ -232,12 +232,33 @@ pub struct ExtensionPackage {
     pub root: VirtualPath,
     pub manifest: ExtensionManifest,
     pub capabilities: Vec<CapabilityDescriptor>,
+    pub manifest_digest: Option<String>,
 }
 
 impl ExtensionPackage {
     pub fn from_manifest(
         manifest: ExtensionManifest,
         root: VirtualPath,
+    ) -> Result<Self, ExtensionError> {
+        Self::from_manifest_with_digest(manifest, root, None)
+    }
+
+    pub fn from_manifest_toml(
+        manifest: ExtensionManifest,
+        root: VirtualPath,
+        manifest_toml: &str,
+    ) -> Result<Self, ExtensionError> {
+        Self::from_manifest_with_digest(
+            manifest,
+            root,
+            Some(sha256_digest_token(manifest_toml.as_bytes())),
+        )
+    }
+
+    pub fn from_manifest_with_digest(
+        manifest: ExtensionManifest,
+        root: VirtualPath,
+        manifest_digest: Option<String>,
     ) -> Result<Self, ExtensionError> {
         ensure_extension_root_matches(&manifest.id, &root)?;
         let capabilities = capability_descriptors_from_manifest(&manifest)?;
@@ -247,7 +268,12 @@ impl ExtensionPackage {
             root,
             manifest,
             capabilities,
+            manifest_digest,
         })
+    }
+
+    pub fn manifest_digest(&self) -> Option<String> {
+        self.manifest_digest.clone()
     }
 
     pub(crate) fn validate_consistency(&self) -> Result<(), ExtensionError> {
@@ -410,7 +436,7 @@ impl ExtensionDiscovery {
                     actual: manifest.id,
                 });
             }
-            let package = ExtensionPackage::from_manifest(manifest, entry.path)?;
+            let package = ExtensionPackage::from_manifest_toml(manifest, entry.path, &text)?;
             registry.insert(package)?;
         }
 

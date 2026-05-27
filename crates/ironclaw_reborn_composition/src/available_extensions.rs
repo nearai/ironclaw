@@ -3,7 +3,7 @@ use ironclaw_extensions::{
     ExtensionRuntime, ManifestSource,
 };
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
-use ironclaw_host_api::{CapabilityId, ExtensionId, VirtualPath};
+use ironclaw_host_api::{CapabilityId, ExtensionId, VirtualPath, sha256_digest_token};
 use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
     ProductWorkflowError,
@@ -147,6 +147,14 @@ fn gmail_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
     bundled_extension_package("gmail", "Gmail", GMAIL_MANIFEST, gmail_assets())
 }
 
+pub(crate) fn google_calendar_manifest_digest() -> String {
+    sha256_digest_token(GOOGLE_CALENDAR_MANIFEST.as_bytes())
+}
+
+pub(crate) fn gmail_manifest_digest() -> String {
+    sha256_digest_token(GMAIL_MANIFEST.as_bytes())
+}
+
 fn bundled_extension_package(
     id: &str,
     label: &str,
@@ -175,11 +183,12 @@ fn bundled_extension_package(
     .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
         reason: format!("bundled {label} extension manifest is invalid: {error}"),
     })?;
-    let package = ExtensionPackage::from_manifest(manifest, root).map_err(|error| {
-        ProductWorkflowError::InvalidBindingRequest {
-            reason: format!("bundled {label} extension package is invalid: {error}"),
-        }
-    })?;
+    let package =
+        ExtensionPackage::from_manifest_toml(manifest, root, manifest_toml).map_err(|error| {
+            ProductWorkflowError::InvalidBindingRequest {
+                reason: format!("bundled {label} extension package is invalid: {error}"),
+            }
+        })?;
     Ok(AvailableExtensionPackage {
         package_ref,
         manifest_toml: manifest_toml.to_string(),
@@ -645,8 +654,8 @@ where
             &contracts,
         )
         .map_err(map_binding_error)?;
-        let package =
-            ExtensionPackage::from_manifest(manifest, entry.path).map_err(map_binding_error)?;
+        let package = ExtensionPackage::from_manifest_toml(manifest, entry.path, &manifest_toml)
+            .map_err(map_binding_error)?;
         let mut assets = vec![AvailableExtensionAsset {
             path: "manifest.toml".to_string(),
             content: AvailableExtensionAssetContent::Bytes(manifest_toml.as_bytes().to_vec()),
@@ -706,7 +715,10 @@ pub(crate) fn visible_capability_ids(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::{
+        collections::HashSet,
+        sync::{Arc, Mutex},
+    };
 
     use async_trait::async_trait;
     use ironclaw_extensions::{ExtensionManifest, ManifestSource};
@@ -729,6 +741,45 @@ mod tests {
         assert_eq!(visible, vec![CapabilityId::new("fixture.search").unwrap()]);
         assert!(EffectKind::ExternalWrite.is_write());
         assert!(!EffectKind::Network.is_write());
+    }
+
+    #[test]
+    fn bundled_gsuite_manifest_asset_refs_are_packaged() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+
+        for extension_id in ["google-calendar", "gmail"] {
+            let package_ref =
+                LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id).unwrap();
+            let package = catalog.resolve(&package_ref).unwrap();
+            let assets = package
+                .assets
+                .iter()
+                .map(|asset| asset.path.as_str())
+                .collect::<HashSet<_>>();
+
+            for capability in &package.package.manifest.capabilities {
+                assert!(
+                    assets.contains(capability.input_schema_ref.as_str()),
+                    "{extension_id} capability {} missing input schema asset {}",
+                    capability.id,
+                    capability.input_schema_ref.as_str()
+                );
+                assert!(
+                    assets.contains(capability.output_schema_ref.as_str()),
+                    "{extension_id} capability {} missing output schema asset {}",
+                    capability.id,
+                    capability.output_schema_ref.as_str()
+                );
+                if let Some(prompt_doc_ref) = &capability.prompt_doc_ref {
+                    assert!(
+                        assets.contains(prompt_doc_ref.as_str()),
+                        "{extension_id} capability {} missing prompt doc asset {}",
+                        capability.id,
+                        prompt_doc_ref.as_str()
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test]
