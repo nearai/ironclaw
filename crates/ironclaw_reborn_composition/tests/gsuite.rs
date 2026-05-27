@@ -80,6 +80,22 @@ fn asset_manifest(extension_id: &str) -> ironclaw_extensions::ExtensionManifest 
     .unwrap()
 }
 
+fn asset_schema(path: &str) -> serde_json::Value {
+    let schema_json = match path {
+        "google-calendar/create_event.input.v1.json" => include_str!(
+            "../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/create_event.input.v1.json"
+        ),
+        "google-calendar/list_events.input.v1.json" => include_str!(
+            "../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/list_events.input.v1.json"
+        ),
+        "gmail/list_messages.input.v1.json" => include_str!(
+            "../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/list_messages.input.v1.json"
+        ),
+        other => panic!("unknown GSuite asset schema {other}"),
+    };
+    serde_json::from_str(schema_json).unwrap()
+}
+
 async fn auth_with_google_account(scope: &ResourceScope) -> Arc<InMemoryAuthProductServices> {
     let auth = Arc::new(InMemoryAuthProductServices::new());
     auth.create_account(NewCredentialAccount {
@@ -97,6 +113,33 @@ async fn auth_with_google_account(scope: &ResourceScope) -> Arc<InMemoryAuthProd
     .await
     .unwrap();
     auth
+}
+
+#[test]
+fn bundled_gsuite_input_schemas_reject_reviewed_shape_regressions() {
+    let create_event = asset_schema("google-calendar/create_event.input.v1.json");
+    let create_event_properties = create_event["properties"].as_object().unwrap();
+    assert!(create_event_properties.contains_key("calendar_id"));
+    assert!(create_event_properties.contains_key("event"));
+    assert!(
+        !create_event_properties.contains_key("time_min"),
+        "create_event schema must not accept list_events query parameters"
+    );
+    assert!(!create_event_properties.contains_key("time_max"));
+    assert!(!create_event_properties.contains_key("page_token"));
+    assert!(!create_event_properties.contains_key("max_results"));
+
+    let list_events = asset_schema("google-calendar/list_events.input.v1.json");
+    assert_eq!(
+        list_events["properties"]["max_results"]["oneOf"][1]["pattern"],
+        "^(?:[1-9][0-9]{0,2}|[12][0-9]{3}|2[0-4][0-9]{2}|2500)$"
+    );
+
+    let list_messages = asset_schema("gmail/list_messages.input.v1.json");
+    assert_eq!(
+        list_messages["properties"]["max_results"]["oneOf"][1]["pattern"],
+        "^(?:[1-9][0-9]{0,1}|[1-4][0-9]{2}|500)$"
+    );
 }
 
 #[test]
