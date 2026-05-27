@@ -1370,11 +1370,13 @@ async fn prompt_and_model_ports_resolve_instruction_memory_and_identity_refs() {
             }],
             instruction_snippets: vec![LoopContextSnippet {
                 snippet_ref: "instruction:project".to_string(),
+                model_content: "project instruction summary".to_string(),
                 safe_summary: "project instruction summary".to_string(),
                 metadata: None,
             }],
             memory_snippets: vec![LoopContextSnippet {
                 snippet_ref: "memory:project-summary".to_string(),
+                model_content: "project memory summary".to_string(),
                 safe_summary: "project memory summary".to_string(),
                 metadata: None,
             }],

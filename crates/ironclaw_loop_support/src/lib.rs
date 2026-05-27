@@ -97,7 +97,7 @@ use ironclaw_threads::{
     LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
     MessageStatus, ProviderToolCallReferenceEnvelope, SessionThreadError, SessionThreadService,
     SummaryArtifact, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
-    ToolResultSafeSummary, UpdateAssistantDraftRequest,
+    ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
 };
 use ironclaw_turns::{
     LoopMessageRef, TurnId, TurnRunId,
@@ -1157,19 +1157,20 @@ where
             .map_err(context_read_error)?;
 
         if requested_messages.is_empty() {
-            let messages = context
-                .messages
-                .into_iter()
-                .filter_map(|message| {
-                    let content_ref = message_ref_from_context(&message)?;
-                    Some(HostManagedModelMessage {
-                        role: model_role_for_kind(message.kind),
-                        content: message.content,
-                        content_ref,
-                        tool_result_provider_call: message.tool_result_provider_call,
-                    })
-                })
-                .collect();
+            let mut messages = Vec::with_capacity(context.messages.len());
+            for message in context.messages {
+                let Some(content_ref) = message_ref_from_context(&message) else {
+                    continue;
+                };
+                let tool_result_content = tool_result_content_for_context_message(&message)?;
+                messages.push(HostManagedModelMessage {
+                    role: model_role_for_kind(message.kind),
+                    content: message.content,
+                    content_ref,
+                    tool_result_provider_call: message.tool_result_provider_call,
+                    tool_result_content,
+                });
+            }
             return Ok(messages);
         }
 
@@ -1264,6 +1265,7 @@ where
                     content: content.content,
                     content_ref: message.content_ref,
                     tool_result_provider_call: None,
+                    tool_result_content: None,
                 });
                 continue;
             }
@@ -1282,9 +1284,10 @@ where
                 }
                 resolved.push(HostManagedModelMessage {
                     role: materialized_role,
-                    content: materialized.safe_content,
+                    content: materialized.model_content,
                     content_ref: message.content_ref,
                     tool_result_provider_call: None,
+                    tool_result_content: None,
                 });
                 continue;
             }
@@ -1322,6 +1325,7 @@ where
                 content: context_message.content.clone(),
                 content_ref: message.content_ref,
                 tool_result_provider_call: context_message.tool_result_provider_call.clone(),
+                tool_result_content: tool_result_content_for_context_message(context_message)?,
             });
         }
         Ok(resolved)
@@ -1340,16 +1344,17 @@ where
         for (ordinal, snippet) in snippets.into_iter().enumerate() {
             let content_ref = skill_context::snippet_model_message_ref(
                 &snippet.snippet_ref,
-                &snippet.safe_summary,
+                &snippet.model_content,
                 ordinal,
             )?;
             messages.insert(
                 content_ref.as_str().to_string(),
                 HostManagedModelMessage {
                     role: HostManagedModelMessageRole::System,
-                    content: snippet.safe_summary,
+                    content: snippet.model_content,
                     content_ref,
                     tool_result_provider_call: None,
+                    tool_result_content: None,
                 },
             );
         }
@@ -1399,6 +1404,17 @@ pub struct HostManagedModelMessage {
     pub content_ref: LoopMessageRef,
     #[serde(default, skip_serializing)]
     pub tool_result_provider_call: Option<ProviderToolCallReferenceEnvelope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_result_content: Option<HostManagedToolResultContent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum HostManagedToolResultContent {
+    Reference {
+        envelope: ToolResultReferenceEnvelope,
+    },
+    Resolved,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1436,12 +1452,12 @@ pub struct HostManagedModelResponse {
 impl HostManagedModelResponse {
     pub fn assistant_reply(content: impl Into<String>) -> Self {
         let content = content.into();
-        let safe_content = sanitize_model_visible_text(content);
+        let sanitized_content = sanitize_model_visible_text(content);
         Self {
-            safe_text_deltas: vec![safe_content.clone()],
+            safe_text_deltas: vec![sanitized_content.clone()],
             safe_reasoning_deltas: Vec::new(),
             output: ParentLoopOutput::AssistantReply(AssistantReply {
-                content: safe_content,
+                content: sanitized_content,
             }),
         }
     }
@@ -1689,6 +1705,25 @@ fn model_role_for_kind(kind: MessageKind) -> HostManagedModelMessageRole {
         MessageKind::ToolResultReference => HostManagedModelMessageRole::ToolResult,
         MessageKind::CapabilityDisplayPreview => HostManagedModelMessageRole::System,
     }
+}
+
+fn tool_result_content_for_context_message(
+    message: &ContextMessage,
+) -> Result<Option<HostManagedToolResultContent>, AgentLoopHostError> {
+    if message.kind != MessageKind::ToolResultReference {
+        return Ok(None);
+    }
+    let envelope: ToolResultReferenceEnvelope =
+        serde_json::from_str(&message.content).map_err(|error| {
+            raw_agent_loop_host_error(
+                "model_context",
+                "decode_tool_result_reference",
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "tool result reference transcript content is invalid",
+                error,
+            )
+        })?;
+    Ok(Some(HostManagedToolResultContent::Reference { envelope }))
 }
 
 fn safe_context_summary(kind: MessageKind) -> &'static str {

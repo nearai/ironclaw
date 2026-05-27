@@ -224,6 +224,7 @@ fn map_search_result_to_snippet(result: MemorySearchResult) -> Option<LoopContex
     let safe_summary = sanitize_snippet_text(&result.snippet)?;
     Some(LoopContextSnippet {
         snippet_ref,
+        model_content: safe_summary.clone(),
         safe_summary,
         metadata: None,
     })

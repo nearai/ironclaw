@@ -685,42 +685,48 @@ fn default_prompt_mode() -> PromptMode {
     PromptMode::TextOnly
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub const LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES: usize = 64 * 1024;
+pub const LOOP_CONTEXT_TOTAL_MODEL_CONTENT_MAX_BYTES: usize = 256 * 1024;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LoopContextBundle {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub identity_messages: Vec<LoopContextMessage>,
     pub messages: Vec<LoopContextMessage>,
     pub instruction_snippets: Vec<LoopContextSnippet>,
     pub memory_snippets: Vec<LoopContextSnippet>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoopContextMessage {
     /// Reference to the persisted message content.
     ///
     /// `None` means "summary-only entry; prompt port MUST NOT resolve content —
     /// use `safe_summary` verbatim instead." Mirrors the
     /// `SkillTrustLevel::Installed` carrying `prompt_content: None` pattern.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_ref: Option<LoopMessageRef>,
     pub role: String,
     pub safe_summary: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoopContextSnippetMetadata {
     pub source_name: String,
     pub trust_level: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoopContextSnippet {
     pub snippet_ref: String,
+    /// Full model-visible content for this context snippet.
+    ///
+    /// This is intentionally distinct from `safe_summary`: prompt assembly must
+    /// materialize this field, while summaries remain short metadata for
+    /// fingerprints, transcript displays, and diagnostics.
+    pub model_content: String,
     pub safe_summary: String,
     /// Safe metadata for prompt milestones. Skill snippet producers using the
     /// `skill:` ref namespace must populate this so telemetry can record active
     /// skill name/trust without leaking prompt content.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<LoopContextSnippetMetadata>,
 }
 

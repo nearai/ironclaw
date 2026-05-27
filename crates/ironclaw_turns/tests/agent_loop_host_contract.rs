@@ -318,11 +318,13 @@ async fn instruction_bundle_builder_orders_sections_and_rebuilds_deterministical
             instruction_snippets: vec![
                 LoopContextSnippet {
                     snippet_ref: "instruction:project".to_string(),
+                    model_content: "project rule".to_string(),
                     safe_summary: "project rule".to_string(),
                     metadata: None,
                 },
                 LoopContextSnippet {
                     snippet_ref: "skill:alpha".to_string(),
+                    model_content: "alpha skill".to_string(),
                     safe_summary: "alpha skill".to_string(),
                     metadata: Some(LoopContextSnippetMetadata {
                         source_name: "alpha".to_string(),
@@ -331,22 +333,26 @@ async fn instruction_bundle_builder_orders_sections_and_rebuilds_deterministical
                 },
                 LoopContextSnippet {
                     snippet_ref: "instruction:system".to_string(),
+                    model_content: "system rule".to_string(),
                     safe_summary: "system rule".to_string(),
                     metadata: None,
                 },
                 LoopContextSnippet {
                     snippet_ref: "instruction:user".to_string(),
+                    model_content: "user rule".to_string(),
                     safe_summary: "user rule".to_string(),
                     metadata: None,
                 },
                 LoopContextSnippet {
                     snippet_ref: "instruction:agent".to_string(),
+                    model_content: "agent rule".to_string(),
                     safe_summary: "agent rule".to_string(),
                     metadata: None,
                 },
             ],
             memory_snippets: vec![LoopContextSnippet {
                 snippet_ref: "memory:project-summary".to_string(),
+                model_content: "project memory".to_string(),
                 safe_summary: "project memory".to_string(),
                 metadata: None,
             }],
@@ -462,6 +468,8 @@ async fn instruction_bundle_builder_allows_safe_domain_terms_in_summaries() {
                 messages: Vec::new(),
                 instruction_snippets: vec![LoopContextSnippet {
                     snippet_ref: "instruction:system".to_string(),
+                    model_content: "Explain how to rotate a secret without exposing values"
+                        .to_string(),
                     safe_summary: "Explain how to rotate a secret without exposing values"
                         .to_string(),
                     metadata: None,
@@ -487,6 +495,7 @@ async fn instruction_bundle_builder_allows_terms_inside_larger_words() {
                 messages: Vec::new(),
                 instruction_snippets: vec![LoopContextSnippet {
                     snippet_ref: "instruction:system".to_string(),
+                    model_content: "Explain preauthorization sync behavior".to_string(),
                     safe_summary: "Explain preauthorization sync behavior".to_string(),
                     metadata: None,
                 }],
@@ -511,6 +520,7 @@ async fn instruction_bundle_builder_rejects_secret_credential_phrases() {
                 messages: Vec::new(),
                 instruction_snippets: vec![LoopContextSnippet {
                     snippet_ref: "instruction:system".to_string(),
+                    model_content: "client secret should not appear in prompt context".to_string(),
                     safe_summary: "client secret should not appear in prompt context".to_string(),
                     metadata: None,
                 }],
@@ -569,6 +579,7 @@ async fn instruction_bundle_serialization_hides_materialized_content() {
                 messages: Vec::new(),
                 instruction_snippets: vec![LoopContextSnippet {
                     snippet_ref: "instruction:system".to_string(),
+                    model_content: "RAW_MATERIALIZED_PROMPT_SENTINEL".to_string(),
                     safe_summary: "RAW_MATERIALIZED_PROMPT_SENTINEL".to_string(),
                     metadata: None,
                 }],
@@ -584,11 +595,133 @@ async fn instruction_bundle_serialization_hides_materialized_content() {
         bundle
             .materialized_messages
             .iter()
-            .any(|message| message.safe_content == "RAW_MATERIALIZED_PROMPT_SENTINEL")
+            .any(|message| message.model_content == "RAW_MATERIALIZED_PROMPT_SENTINEL")
     );
     let wire = serde_json::to_string(&bundle).unwrap();
     assert!(!wire.contains("RAW_MATERIALIZED_PROMPT_SENTINEL"));
     assert!(!wire.contains("materialized_messages"));
+}
+
+#[tokio::test]
+async fn instruction_bundle_materializes_oversized_snippet_content_separate_from_summary() {
+    let context = claimed_run_context().await;
+    let model_content = format!(
+        "skill description\n\n{}",
+        "trusted skill prompt content ".repeat(220)
+    );
+    assert!(model_content.len() > 4096);
+
+    let bundle = InstructionBundleBuilder::new(context)
+        .build(InstructionBundleRequest {
+            context_bundle: LoopContextBundle {
+                identity_messages: Vec::new(),
+                messages: Vec::new(),
+                instruction_snippets: vec![LoopContextSnippet {
+                    snippet_ref: "skill:github".to_string(),
+                    model_content: model_content.clone(),
+                    safe_summary: "GitHub skill".to_string(),
+                    metadata: Some(LoopContextSnippetMetadata {
+                        source_name: "github".to_string(),
+                        trust_level: "trusted".to_string(),
+                    }),
+                }],
+                memory_snippets: Vec::new(),
+            },
+            visible_surface: None,
+            safety_context: None,
+            inline_messages: Vec::new(),
+        })
+        .unwrap();
+
+    assert!(bundle.materialized_messages.iter().any(|message| {
+        message.model_content == model_content
+            && message
+                .content_ref
+                .as_str()
+                .starts_with("msg:snippet.skill.github.")
+    }));
+}
+
+#[tokio::test]
+async fn instruction_bundle_allows_security_vocabulary_in_model_content() {
+    let context = claimed_run_context().await;
+    let model_content = concat!(
+        "Review authorization checks, bearer handling, password flows, ",
+        "and API key redaction without treating these words as leaked values."
+    )
+    .to_string();
+
+    let bundle = InstructionBundleBuilder::new(context)
+        .build(InstructionBundleRequest {
+            context_bundle: LoopContextBundle {
+                identity_messages: Vec::new(),
+                messages: Vec::new(),
+                instruction_snippets: vec![LoopContextSnippet {
+                    snippet_ref: "skill:security-review".to_string(),
+                    model_content: model_content.clone(),
+                    safe_summary: "Security review skill".to_string(),
+                    metadata: Some(LoopContextSnippetMetadata {
+                        source_name: "security-review".to_string(),
+                        trust_level: "trusted".to_string(),
+                    }),
+                }],
+                memory_snippets: Vec::new(),
+            },
+            visible_surface: None,
+            safety_context: None,
+            inline_messages: Vec::new(),
+        })
+        .unwrap();
+
+    assert!(bundle.materialized_messages.iter().any(|message| {
+        message.model_content == model_content
+            && message
+                .content_ref
+                .as_str()
+                .starts_with("msg:snippet.skill.security-review.")
+    }));
+}
+
+#[tokio::test]
+async fn instruction_bundle_orders_snippets_by_model_content_when_summary_matches() {
+    let context = claimed_run_context().await;
+
+    let bundle = InstructionBundleBuilder::new(context)
+        .build(InstructionBundleRequest {
+            context_bundle: LoopContextBundle {
+                identity_messages: Vec::new(),
+                messages: Vec::new(),
+                instruction_snippets: Vec::new(),
+                memory_snippets: vec![
+                    LoopContextSnippet {
+                        snippet_ref: "memory:shared".to_string(),
+                        model_content: "zeta model content".to_string(),
+                        safe_summary: "same summary".to_string(),
+                        metadata: None,
+                    },
+                    LoopContextSnippet {
+                        snippet_ref: "memory:shared".to_string(),
+                        model_content: "alpha model content".to_string(),
+                        safe_summary: "same summary".to_string(),
+                        metadata: None,
+                    },
+                ],
+            },
+            visible_surface: None,
+            safety_context: None,
+            inline_messages: Vec::new(),
+        })
+        .unwrap();
+
+    let model_contents: Vec<&str> = bundle
+        .materialized_messages
+        .iter()
+        .map(|message| message.model_content.as_str())
+        .collect();
+    assert_eq!(
+        model_contents,
+        ["alpha model content", "zeta model content"]
+    );
 }
 
 #[tokio::test]
@@ -603,6 +736,7 @@ async fn instruction_bundle_builder_rejects_unsafe_instruction_context() {
                 messages: Vec::new(),
                 instruction_snippets: vec![LoopContextSnippet {
                     snippet_ref: "instruction:system".to_string(),
+                    model_content: "leaks /Users/alice/.ssh/id_rsa path".to_string(),
                     safe_summary: "leaks /Users/alice/.ssh/id_rsa path".to_string(),
                     metadata: None,
                 }],
@@ -712,12 +846,12 @@ async fn loop_prompt_port_filters_visible_surface_by_capability_view() {
             store
                 .get_materialized_message(&host.context, &message.content_ref)
                 .unwrap()
-                .filter(|materialized| materialized.safe_content.starts_with("surface "))
+                .filter(|materialized| materialized.model_content.starts_with("surface "))
         })
         .expect("surface instruction materialized");
 
-    assert!(surface_message.safe_content.contains("demo.echo"));
-    assert!(!surface_message.safe_content.contains("demo.hidden"));
+    assert!(surface_message.model_content.contains("demo.echo"));
+    assert!(!surface_message.model_content.contains("demo.hidden"));
 }
 
 #[tokio::test]
@@ -2018,6 +2152,7 @@ impl RecordingAgentLoopHost {
         safe_summary: impl Into<String>,
     ) -> Self {
         let snippet_ref = snippet_ref.into();
+        let safe_summary = safe_summary.into();
         let metadata =
             snippet_ref
                 .strip_prefix("skill:")
@@ -2027,7 +2162,8 @@ impl RecordingAgentLoopHost {
                 });
         self.context_instruction_snippets.push(LoopContextSnippet {
             snippet_ref,
-            safe_summary: safe_summary.into(),
+            model_content: safe_summary.clone(),
+            safe_summary,
             metadata,
         });
         self
@@ -2038,9 +2174,11 @@ impl RecordingAgentLoopHost {
         snippet_ref: impl Into<String>,
         safe_summary: impl Into<String>,
     ) -> Self {
+        let safe_summary = safe_summary.into();
         self.context_memory_snippets.push(LoopContextSnippet {
             snippet_ref: snippet_ref.into(),
-            safe_summary: safe_summary.into(),
+            model_content: safe_summary.clone(),
+            safe_summary,
             metadata: None,
         });
         self

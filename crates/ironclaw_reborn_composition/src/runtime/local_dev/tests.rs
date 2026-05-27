@@ -444,13 +444,14 @@ mod tests {
     }
 
     #[test]
-    fn model_visible_tool_output_truncates_at_utf8_boundary() {
-        let output = model_visible_tool_output(&serde_json::json!({
-            "message": "é".repeat(300),
-        }));
+    fn model_visible_tool_result_content_truncates_at_utf8_boundary() {
+        let output = model_visible_tool_result_content(&serde_json::json!({
+            "message": "é".repeat(LOCAL_DEV_MODEL_VISIBLE_TOOL_RESULT_MAX_BYTES),
+        }))
+        .expect("model-visible tool result content");
 
-        assert!(output.len() <= MODEL_VISIBLE_TOOL_OUTPUT_MAX_BYTES);
+        assert!(output.len() > LOCAL_DEV_MODEL_VISIBLE_TOOL_RESULT_MAX_BYTES);
         assert!(output.is_char_boundary(output.len()));
-        ToolResultSafeSummary::new(output).expect("summary remains safe");
+        assert!(output.contains("[... truncated: showing "));
     }
 }

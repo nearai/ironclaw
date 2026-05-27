@@ -139,7 +139,35 @@ async fn trusted_skill_includes_prompt_content() {
     let snippets = service.skill_snippets(&snapshot).await.unwrap();
     assert_eq!(snippets.len(), 1);
     assert!(snippets[0].safe_summary.contains("the description"));
-    assert!(snippets[0].safe_summary.contains("the prompt content"));
+    assert!(!snippets[0].safe_summary.contains("the prompt content"));
+    assert!(snippets[0].model_content.contains("the description"));
+    assert!(snippets[0].model_content.contains("the prompt content"));
+}
+
+#[tokio::test]
+async fn trusted_skill_allows_operational_paths_in_prompt_content() {
+    let prompt = concat!(
+        "Create a review worktree under /tmp/ironclaw-review-123 and ",
+        "write the GitHub payload to /tmp/cr-review-payload.json."
+    );
+    let snapshot =
+        SkillRunSnapshot::from_entries(vec![visible_trusted("alpha", "the description", prompt)]);
+    let service = SkillContextService::new(snapshot.clone());
+
+    let snippets = service.skill_snippets(&snapshot).await.unwrap();
+
+    assert_eq!(snippets.len(), 1);
+    assert_eq!(snippets[0].safe_summary, "the description");
+    assert!(
+        snippets[0]
+            .model_content
+            .contains("/tmp/ironclaw-review-123")
+    );
+    assert!(
+        snippets[0]
+            .model_content
+            .contains("/tmp/cr-review-payload.json")
+    );
 }
 
 #[tokio::test]
@@ -150,8 +178,9 @@ async fn installed_skill_excludes_prompt_content() {
     let snippets = service.skill_snippets(&snapshot).await.unwrap();
     assert_eq!(snippets.len(), 1);
     assert!(snippets[0].safe_summary.contains("the description"));
+    assert!(snippets[0].model_content.contains("the description"));
     assert!(
-        !snippets[0].safe_summary.contains("secret prompt"),
+        !snippets[0].model_content.contains("secret prompt"),
         "installed skill must not expose prompt content"
     );
 }
@@ -341,27 +370,11 @@ async fn unsafe_visible_metadata_fails_before_loop_snippet_emission() {
             )]),
         ),
         (
-            "unsafe trusted prompt would leak through safe_summary",
-            SkillRunSnapshot::from_entries(vec![visible_trusted(
-                "alpha",
-                "safe description",
-                "load secret://oauth-token",
-            )]),
-        ),
-        (
             "uppercase capability marker in description would leak through safe_summary",
             SkillRunSnapshot::from_entries(vec![visible_trusted(
                 "alpha",
                 "raw capability handle CAP_file_read_123",
                 "safe prompt",
-            )]),
-        ),
-        (
-            "mixed-case secret marker in prompt would leak through safe_summary",
-            SkillRunSnapshot::from_entries(vec![visible_trusted(
-                "alpha",
-                "safe description",
-                "load Secret://oauth-token",
             )]),
         ),
     ];
@@ -442,7 +455,9 @@ async fn mixed_visibility_correct_filtering() {
         .find(|s| s.snippet_ref == "skill:alpha")
         .unwrap();
     assert!(alpha.safe_summary.contains("trusted visible"));
-    assert!(alpha.safe_summary.contains("trusted prompt"));
+    assert!(!alpha.safe_summary.contains("trusted prompt"));
+    assert!(alpha.model_content.contains("trusted visible"));
+    assert!(alpha.model_content.contains("trusted prompt"));
 
     // Installed excludes prompt
     let beta = snippets
@@ -451,7 +466,7 @@ async fn mixed_visibility_correct_filtering() {
         .unwrap();
     assert!(beta.safe_summary.contains("installed visible"));
     assert!(
-        !beta.safe_summary.contains("secret prompt"),
+        !beta.model_content.contains("secret prompt"),
         "installed skill must not expose prompt content"
     );
 

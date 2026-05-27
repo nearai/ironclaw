@@ -21,13 +21,10 @@ use ironclaw_llm::{
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelMessage, HostManagedModelMessageRole, HostManagedModelRequest,
-    HostManagedModelResponse, HostManagedModelRouteSnapshot, ThreadBackedLoopContextPort,
-    ThreadBackedLoopModelPort,
+    HostManagedModelResponse, HostManagedModelRouteSnapshot, HostManagedToolResultContent,
+    ThreadBackedLoopContextPort, ThreadBackedLoopModelPort,
 };
-use ironclaw_threads::{
-    ProviderToolCallReferenceEnvelope, SessionThreadService, ThreadScope,
-    ToolResultReferenceEnvelope,
-};
+use ironclaw_threads::{ProviderToolCallReferenceEnvelope, SessionThreadService, ThreadScope};
 use ironclaw_turns::{
     TurnId, TurnRunId,
     run_profile::{
@@ -1041,21 +1038,21 @@ fn convert_messages(
             HostManagedModelMessageRole::ToolResult => {
                 let replay = tool_result_replay_message(message)?;
                 let Some(provider_call) = replay.provider_call else {
-                    converted.push(ChatMessage::system(replay.safe_summary));
+                    converted.push(ChatMessage::system(replay.model_content));
                     index += 1;
                     continue;
                 };
                 validate_provider_replay_identity(&provider_call, replay_identity)?;
                 let provider_turn_id = provider_call.provider_turn_id.clone();
-                let mut provider_results = vec![(provider_call, replay.safe_summary)];
-                let mut plain_tool_summaries = Vec::new();
+                let mut provider_results = vec![(provider_call, replay.model_content)];
+                let mut plain_tool_results = Vec::new();
                 index += 1;
                 while index < messages.len()
                     && messages[index].role == HostManagedModelMessageRole::ToolResult
                 {
                     let next = tool_result_replay_message(&messages[index])?;
                     let Some(next_provider_call) = next.provider_call else {
-                        plain_tool_summaries.push(next.safe_summary);
+                        plain_tool_results.push(next.model_content);
                         index += 1;
                         continue;
                     };
@@ -1063,11 +1060,11 @@ fn convert_messages(
                     if next_provider_call.provider_turn_id != provider_turn_id {
                         break;
                     }
-                    provider_results.push((next_provider_call, next.safe_summary));
+                    provider_results.push((next_provider_call, next.model_content));
                     index += 1;
                 }
                 converted.extend(provider_tool_roundtrip_messages(provider_results));
-                converted.extend(plain_tool_summaries.into_iter().map(ChatMessage::system));
+                converted.extend(plain_tool_results.into_iter().map(ChatMessage::system));
                 continue;
             }
         }
@@ -1102,25 +1099,31 @@ fn validate_provider_replay_identity(
 
 struct ToolResultReplayMessage {
     provider_call: Option<ProviderToolCallReferenceEnvelope>,
-    safe_summary: String,
+    model_content: String,
 }
 
 fn tool_result_replay_message(
     message: &HostManagedModelMessage,
 ) -> Result<ToolResultReplayMessage, HostManagedModelError> {
-    let envelope: ToolResultReferenceEnvelope =
-        serde_json::from_str(&message.content).map_err(|error| {
-            ironclaw_loop_support::raw_host_managed_model_error(
-                "tool_result_replay",
-                "decode_transcript_envelope",
+    let model_content = match message.tool_result_content.as_ref() {
+        Some(HostManagedToolResultContent::Reference { envelope }) => {
+            debug!(
+                result_ref = %envelope.result_ref,
+                "tool result content unavailable; replaying safe summary fallback"
+            );
+            envelope.safe_summary.as_str().to_string()
+        }
+        Some(HostManagedToolResultContent::Resolved) => message.content.clone(),
+        None => {
+            return Err(HostManagedModelError::safe(
                 HostManagedModelErrorKind::InvalidRequest,
-                "tool result reference transcript content is invalid",
-                error,
-            )
-        })?;
+                "tool result replay content is missing",
+            ));
+        }
+    };
     Ok(ToolResultReplayMessage {
         provider_call: message.tool_result_provider_call.clone(),
-        safe_summary: envelope.safe_summary.as_str().to_string(),
+        model_content,
     })
 }
 
