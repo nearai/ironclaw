@@ -301,6 +301,94 @@ async fn prompt_stage_compacts_candidate_prompt_then_rebuilds_final_bundle() {
 }
 
 #[tokio::test]
+async fn prompt_stage_compaction_index_maps_system_summary_and_other_kinds() {
+    let host = MockHost::new(Vec::new()).with_prompt_compaction_index(vec![
+        compaction_metadata(1, LoopContextCompactionKind::System, 4),
+        compaction_metadata(2, LoopContextCompactionKind::Summary, 5),
+        compaction_metadata(3, LoopContextCompactionKind::Other, 6),
+    ]);
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let step = PromptStage
+        .process(
+            ctx,
+            PromptInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await
+        .expect("prompt stage");
+
+    let output = match step {
+        PromptStep::Prepared(output) => output,
+        PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
+    };
+    assert_eq!(
+        output.state.compaction_prompt.message_index,
+        vec![
+            MessageIndexEntry {
+                sequence: 1,
+                kind: IndexedMessageKind::System,
+                estimated_tokens: 4,
+            },
+            MessageIndexEntry {
+                sequence: 2,
+                kind: IndexedMessageKind::Summary,
+                estimated_tokens: 5,
+            },
+            MessageIndexEntry {
+                sequence: 3,
+                kind: IndexedMessageKind::Other,
+                estimated_tokens: 6,
+            },
+        ]
+    );
+    assert_eq!(host.prompt_requests().len(), 1);
+}
+
+#[tokio::test]
+async fn prompt_stage_cancellation_after_prompt_bundle_returns_cancelled_exit() {
+    let host = MockHost::new(Vec::new()).cancel_after_prompt_bundle(1);
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let step = PromptStage
+        .process(
+            ctx,
+            PromptInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await
+        .expect("prompt stage");
+
+    match step {
+        PromptStep::Exit(LoopExit::Cancelled(cancelled)) => {
+            assert!(cancelled.checkpoint_id.is_some());
+        }
+        PromptStep::Prepared(_) => panic!("expected cancelled exit"),
+        PromptStep::Exit(exit) => panic!("expected cancelled exit, got {exit:?}"),
+    }
+    assert_eq!(host.prompt_requests().len(), 1);
+    assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
+    assert_eq!(
+        host.progress_event_names(),
+        vec!["prompt_bundle_built", "checkpoint_written"]
+    );
+}
+
+#[tokio::test]
 async fn prompt_stage_compaction_timeout_returns_failed_exit() {
     let host = MockHost::new(Vec::new())
         .with_prompt_compaction_index(vec![compaction_metadata(
@@ -354,7 +442,7 @@ async fn prompt_stage_compaction_timeout_returns_failed_exit() {
 }
 
 #[tokio::test]
-async fn prompt_stage_compaction_security_rejection_skips_and_continues() {
+async fn prompt_stage_compaction_security_rejection_returns_failed_exit() {
     let host = MockHost::new(Vec::new())
         .with_prompt_compaction_index(vec![compaction_metadata(
             1,
@@ -386,24 +474,22 @@ async fn prompt_stage_compaction_security_rejection_skips_and_continues() {
         .await
         .expect("prompt stage");
 
-    let output = match step {
-        PromptStep::Prepared(output) => output,
-        PromptStep::Exit(exit) => panic!("security rejection should not end the run: {exit:?}"),
-    };
+    match step {
+        PromptStep::Exit(LoopExit::Failed(failed)) => {
+            assert!(failed.checkpoint_id.is_some());
+        }
+        PromptStep::Prepared(_) => panic!("security rejection should end the run"),
+        PromptStep::Exit(exit) => panic!("expected failed exit, got {exit:?}"),
+    }
     assert_eq!(host.prompt_requests().len(), 1);
-    assert_eq!(host.checkpoint_kinds(), Vec::<LoopCheckpointKind>::new());
-    assert!(
-        !output
-            .state
-            .compaction_state
-            .force_compact_on_next_iteration
-    );
+    assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
     assert_eq!(
         host.progress_event_names(),
         vec![
             "prompt_bundle_built",
             "compaction_started",
             "compaction_failed",
+            "checkpoint_written",
         ]
     );
 }

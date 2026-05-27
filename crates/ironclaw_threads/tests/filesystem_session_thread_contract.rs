@@ -230,6 +230,68 @@ async fn filesystem_store_range_read_falls_back_when_sequence_index_has_gap() {
 }
 
 #[tokio::test]
+async fn filesystem_store_range_read_errors_when_indexed_message_is_missing() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-range-missing", "alice");
+    let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let scope = scope("fs-range-missing");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-fs-range-missing").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let mut message_ids = Vec::new();
+    for index in 1..=4 {
+        let accepted = service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: scope.clone(),
+                thread_id: thread.thread_id.clone(),
+                actor_id: "actor-a".into(),
+                source_binding_id: None,
+                reply_target_binding_id: None,
+                external_event_id: Some(format!("missing-event-{index}")),
+                content: user_message(&format!("message {index}")),
+            })
+            .await
+            .unwrap();
+        message_ids.push(accepted.message_id);
+    }
+
+    scoped
+        .delete(
+            &scope.to_resource_scope(),
+            &ScopedPath::new(format!(
+                "/threads/agents/agent-fs-range-missing/projects/project-fs-range-missing/owners/user-fs-range-missing/threads/thread-fs-range-missing/messages/{}.json",
+                message_ids[1]
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let err = service
+        .list_thread_messages_range(ThreadMessageRangeRequest {
+            scope,
+            thread_id: thread.thread_id,
+            after_sequence: 1,
+            through_sequence: 3,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        SessionThreadError::UnknownMessage { message_id } if message_id == message_ids[1]
+    ));
+}
+
+#[tokio::test]
 async fn filesystem_store_summary_creation_uses_indexed_range_validation() {
     let backend = Arc::new(InMemoryBackend::new());
     let scoped = scoped_threads_fs_at(backend, "tenant-summary-range", "alice");

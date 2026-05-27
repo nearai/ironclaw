@@ -824,10 +824,6 @@ pub type HookGateRefFactoryBuilder = Arc<
         + Sync,
 >;
 
-struct CompactionHostPorts {
-    compaction: Arc<dyn LoopCompactionPort>,
-}
-
 impl<S, G> RebornLoopDriverHostFactory<S, G>
 where
     S: SessionThreadService + ?Sized + Send + Sync + 'static,
@@ -885,19 +881,18 @@ where
         self.cancellation_factory.observation_kind()
     }
 
-    fn build_compaction_ports(&self, run_context: &LoopRunContext) -> CompactionHostPorts {
+    fn build_compaction_ports(&self, run_context: &LoopRunContext) -> Arc<dyn LoopCompactionPort> {
         let system_inference: Arc<dyn SystemInferencePort> =
             Arc::new(ModelGatewayBackedSystemInferencePort::new(
                 Arc::clone(&self.model_gateway),
                 run_context.clone(),
             ));
-        let compaction = default_host_managed_loop_compaction_port(
+        default_host_managed_loop_compaction_port(
             system_inference,
             Arc::clone(&self.thread_service),
             self.thread_scope.clone(),
             include_str!("../../ironclaw_loop_support/prompts/compaction_summarizer_fresh.md"),
-        );
-        CompactionHostPorts { compaction }
+        )
     }
 
     pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {
@@ -1407,7 +1402,7 @@ where
             run_context.clone(),
             Arc::clone(&self.milestone_sink),
         ));
-        let compaction = self.build_compaction_ports(&run_context).compaction;
+        let compaction = self.build_compaction_ports(&run_context);
         let cancellation_handle = self
             .cancellation_factory
             .handle_for_run(&run_context.scope, run_context.run_id)

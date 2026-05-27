@@ -141,10 +141,14 @@ impl<'a> PromptPlanningPipeline<'a> {
     }
 
     async fn cancel_boundary(&mut self) -> Result<Option<LoopExit>, AgentLoopExecutorError> {
+        let state = std::mem::replace(
+            &mut self.state,
+            LoopExecutionState::initial_for_run(self.ctx.host.run_context()),
+        );
         self.state = match CheckpointStage
             .cancel_if_requested_after_pending_input_ack(
                 self.ctx,
-                self.state.clone(),
+                state,
                 &mut self.pending_input_ack,
             )
             .await?
@@ -270,9 +274,6 @@ async fn maybe_compact_prompt_context(
         | CompactionCallOutcome::Cancelled => {
             return compaction_cancelled_exit(ctx, state, pending_input_ack).await;
         }
-        CompactionCallOutcome::Completed(Err(error)) if is_non_fatal_compaction_skip(&error) => {
-            return compaction_skipped(ctx, state, task_id, &error).await;
-        }
         CompactionCallOutcome::Completed(Err(error)) => {
             return compaction_failed_exit(ctx, state, pending_input_ack, task_id, &error).await;
         }
@@ -360,33 +361,6 @@ where
             }
         }
     }
-}
-
-fn is_non_fatal_compaction_skip(error: &LoopCompactionError) -> bool {
-    matches!(error, LoopCompactionError::SecurityRejected { .. })
-}
-
-async fn compaction_skipped(
-    ctx: StageContext<'_>,
-    mut state: LoopExecutionState,
-    task_id: SystemInferenceTaskId,
-    error: &LoopCompactionError,
-) -> Result<PromptCompactionOutput, AgentLoopExecutorError> {
-    CheckpointStage
-        .emit_progress(
-            ctx,
-            LoopProgressEvent::CompactionFailed {
-                task_id,
-                reason_kind: loop_compaction_reason(error),
-            },
-        )
-        .await;
-    state.compaction_state.force_compact_on_next_iteration = false;
-    Ok(PromptCompactionOutput {
-        state,
-        exit: None,
-        compacted: false,
-    })
 }
 
 async fn compaction_cancelled_exit(

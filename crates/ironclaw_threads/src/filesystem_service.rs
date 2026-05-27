@@ -40,6 +40,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use futures::future::join_all;
 use ironclaw_filesystem::{
     CasExpectation, ContentType, Entry, FileType, FilesystemError, FilesystemOperation,
     RecordVersion, RootFilesystem, ScopedFilesystem,
@@ -70,6 +71,9 @@ use message_sequence_index::MessageSequenceIndexStore;
 /// store budgets — enough to absorb routine cross-process contention,
 /// small enough to surface pathological loops loudly.
 const FILESYSTEM_CAS_RETRIES: usize = 8;
+
+/// Conservative fan-out for indexed range materialization.
+const INDEXED_RANGE_MESSAGE_READ_CONCURRENCY: usize = 8;
 
 /// On-disk thread state record. The transcript boundary's
 /// [`SessionThreadRecord`] is the user-visible shape; this struct adds
@@ -300,17 +304,20 @@ where
         else {
             return Ok(None);
         };
-        let mut messages = Vec::new();
-        for index in indexes {
-            let Some((message, _)) = self
-                .read_message_versioned(scope, thread_id, index.message_id)
-                .await?
-            else {
-                return Err(SessionThreadError::UnknownMessage {
-                    message_id: index.message_id,
-                });
-            };
-            messages.push(message);
+        let mut messages = Vec::with_capacity(indexes.len());
+        for chunk in indexes.chunks(INDEXED_RANGE_MESSAGE_READ_CONCURRENCY) {
+            let reads = chunk
+                .iter()
+                .map(|index| self.read_message_versioned(scope, thread_id, index.message_id));
+            let results = join_all(reads).await;
+            for (index, result) in chunk.iter().zip(results) {
+                let Some((message, _)) = result? else {
+                    return Err(SessionThreadError::UnknownMessage {
+                        message_id: index.message_id,
+                    });
+                };
+                messages.push(message);
+            }
         }
         messages.sort_by_key(|message| message.sequence);
         Ok(Some(messages))

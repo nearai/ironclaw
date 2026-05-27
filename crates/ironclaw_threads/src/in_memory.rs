@@ -685,6 +685,10 @@ impl SessionThreadService for InMemorySessionThreadService {
             .ok_or(SessionThreadError::UnknownThread { thread_id })
     }
 
+    fn supports_resolve_scope(&self) -> bool {
+        true
+    }
+
     async fn resolve_scope(&self, thread_id: ThreadId) -> Result<ThreadScope, SessionThreadError> {
         self.read_thread_by_id(thread_id)
             .await

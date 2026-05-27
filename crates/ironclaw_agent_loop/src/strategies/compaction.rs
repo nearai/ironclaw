@@ -163,6 +163,36 @@ mod tests {
     }
 
     #[test]
+    fn evaluate_skips_when_below_threshold_with_valid_user_boundary_and_forcing_is_off() {
+        let context = crate::test_support::test_run_context("compaction-strategy-below-threshold");
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        state.compaction_prompt = CompactionPromptSnapshot::from_message_index(vec![
+            MessageIndexEntry {
+                sequence: 1,
+                kind: IndexedMessageKind::User,
+                estimated_tokens: 20,
+            },
+            MessageIndexEntry {
+                sequence: 2,
+                kind: IndexedMessageKind::Assistant,
+                estimated_tokens: 20,
+            },
+        ]);
+        let strategy = DefaultCompactionStrategy {
+            context_limit_tokens: 100,
+            reserve_tokens: 10,
+            main_loop_max_output_tokens: 0,
+            preserve_tail_tokens: 60,
+            deadline_ms: 1,
+        };
+
+        assert_eq!(
+            strategy.should_compact(&state, &context),
+            CompactionDecision::Skip
+        );
+    }
+
+    #[test]
     fn evaluate_triggers_at_latest_user_boundary_outside_tail() {
         let context = crate::test_support::test_run_context("compaction-strategy-trigger");
         let mut state = LoopExecutionState::initial_for_run(&context);

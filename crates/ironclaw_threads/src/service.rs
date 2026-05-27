@@ -174,6 +174,16 @@ pub trait SessionThreadService: Send + Sync {
         request: CreateSummaryArtifactRequest,
     ) -> Result<SummaryArtifact, SessionThreadError>;
 
+    /// Returns `true` when `resolve_scope` is a backend-supported operation.
+    ///
+    /// Callers use this to decide whether they should probe the backend for
+    /// the thread's scope or fall back to the already trusted expected scope.
+    /// Backends that cannot resolve scope directly should leave the default
+    /// `false` in place.
+    fn supports_resolve_scope(&self) -> bool {
+        false
+    }
+
     async fn resolve_scope(&self, _thread_id: ThreadId) -> Result<ThreadScope, SessionThreadError> {
         Err(SessionThreadError::Backend(
             "resolve_scope is not implemented by this SessionThreadService backend".to_string(),

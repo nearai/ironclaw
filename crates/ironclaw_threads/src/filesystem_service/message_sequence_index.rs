@@ -1,3 +1,4 @@
+use futures::future::join_all;
 use ironclaw_filesystem::{CasExpectation, ContentType, Entry, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{ScopedPath, ThreadId};
 use serde::{Deserialize, Serialize};
@@ -7,6 +8,9 @@ use crate::{SessionThreadError, ThreadMessageId, ThreadMessageRecord, ThreadScop
 use super::{
     PutError, deserialize, put_with_cas, scoped_path, serialize_pretty, thread_root_string,
 };
+
+/// Conservative fan-out for indexed sequence reads.
+const MESSAGE_SEQUENCE_INDEX_READ_CONCURRENCY: usize = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct MessageSequenceIndexRecord {
@@ -67,12 +71,22 @@ where
         let start = after_sequence.checked_add(1).ok_or_else(|| {
             SessionThreadError::Backend("message sequence range overflowed".to_string())
         })?;
-        let mut records = Vec::new();
-        for sequence in start..=through_sequence {
-            let Some(record) = self.read(scope, thread_id, sequence).await? else {
-                return Ok(None);
-            };
-            records.push(record);
+        let mut records = Vec::with_capacity((through_sequence - start + 1) as usize);
+        for chunk_start in
+            (start..=through_sequence).step_by(MESSAGE_SEQUENCE_INDEX_READ_CONCURRENCY)
+        {
+            let chunk_end = through_sequence.min(
+                chunk_start.saturating_add(MESSAGE_SEQUENCE_INDEX_READ_CONCURRENCY as u64 - 1),
+            );
+            let reads =
+                (chunk_start..=chunk_end).map(|sequence| self.read(scope, thread_id, sequence));
+            let results = join_all(reads).await;
+            for result in results {
+                let Some(record) = result? else {
+                    return Ok(None);
+                };
+                records.push(record);
+            }
         }
         Ok(Some(records))
     }

@@ -3,9 +3,8 @@ use std::sync::Arc;
 use ironclaw_host_api::ThreadId;
 use ironclaw_safety::{InjectionScanner, LeakDetector, LeakScanner, Sanitizer};
 use ironclaw_threads::{
-    CreateSummaryArtifactRequest, MessageContent, MessageKind, MessageStatus, SessionThreadError,
-    SessionThreadService, SummaryKind, SummaryModelContextPolicy, ThreadMessageRangeRequest,
-    ThreadScope,
+    CreateSummaryArtifactRequest, MessageContent, MessageKind, MessageStatus, SessionThreadService,
+    SummaryKind, SummaryModelContextPolicy, ThreadMessageRangeRequest, ThreadScope,
 };
 use ironclaw_turns::run_profile::{
     LoopCompactionError, LoopCompactionMode, LoopCompactionPort, LoopCompactionRequest,
@@ -146,18 +145,17 @@ where
             return Err(CompactionError::InvalidCutPoint);
         }
         let start_exclusive = last_compacted_through_seq.unwrap_or(0);
-        let thread_scope = match self.threads.resolve_scope(thread_id.clone()).await {
-            Ok(scope) => scope,
-            Err(SessionThreadError::Backend(message))
-                if message.contains("resolve_scope is not implemented") =>
-            {
-                expected_scope.clone()
+        let thread_scope = if self.threads.supports_resolve_scope() {
+            match self.threads.resolve_scope(thread_id.clone()).await {
+                Ok(scope) => scope,
+                Err(_) => {
+                    return Err(CompactionError::PersistenceFailed {
+                        safe_summary: safe("thread scope unavailable"),
+                    });
+                }
             }
-            Err(_) => {
-                return Err(CompactionError::PersistenceFailed {
-                    safe_summary: safe("thread scope unavailable"),
-                });
-            }
+        } else {
+            expected_scope.clone()
         };
         if thread_scope != expected_scope {
             return Err(CompactionError::PersistenceFailed {
