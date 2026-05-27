@@ -597,6 +597,27 @@ async fn product_auth_callback_malformed_fields_are_sanitized() {
             &started.invocation_id,
             USER,
             "malformed-field-state",
+            "&account_label=work&code=missing-provider-code",
+        ),
+        callback_uri(
+            &started.flow_id,
+            &started.invocation_id,
+            USER,
+            "malformed-field-state",
+            "&provider=github&code=missing-label-code",
+        ),
+        callback_uri(
+            &started.flow_id,
+            &started.invocation_id,
+            USER,
+            "malformed-field-state",
+            "&provider=github&account_label=work",
+        ),
+        callback_uri(
+            &started.flow_id,
+            &started.invocation_id,
+            USER,
+            "malformed-field-state",
             "&provider=&account_label=work&code=empty-provider-code",
         ),
         callback_uri(
