@@ -524,11 +524,12 @@ Detailed per-phase docs with pseudo code:
   parallel-blocking E2E, early-completion (all children terminate
   before the parent blocks), child-authority (a child cannot use a lease the
   parent holds), child-approval-by-parent-owner, fork-bomb (caps reject — incl.
-  per-tree atomic), autonomous-continuation-budget-stop, cancellation subtree
-  + tombstone, restart-reconciliation (kill process between child terminal and
-  observer dispatch, restart, assert delivery), blocking-interruption, and
-  no-deadlock regression (child `thread_id` ≠ parent). Background E2E coverage
-  is deferred until #4147 defines durable delivery.
+  per-tree atomic), cancellation subtree + tombstone, restart-reconciliation
+  (kill process between child terminal and observer dispatch, restart, assert
+  delivery), blocking-interruption, and no-deadlock regression (child
+  `thread_id` ≠ parent). Background E2E coverage, including
+  autonomous-continuation-budget-stop, is deferred until #4147 defines durable
+  delivery.
 - **Quality gate:** `cargo fmt`; `cargo clippy --all --benches --tests --examples
   --all-features` (zero warnings); `cargo test`.
 - **Architecture guardrails:** `cargo test -p ironclaw_architecture --test

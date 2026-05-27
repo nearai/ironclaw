@@ -84,6 +84,114 @@ async fn blocking_spawn_parks_parent_then_resumes_with_child_result() {
 }
 
 #[tokio::test]
+async fn legacy_explicit_blocking_spawn_still_parks_parent_and_resumes() {
+    let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
+        RebornModelReplayStep::ProviderToolCalls {
+            calls: vec![spawn_call(
+                "spawn_legacy_explicit_blocking",
+                serde_json::json!({
+                    "flavor_id": "general",
+                    "task": "answer with legacy blocking fields",
+                    "mode": "blocking",
+                    "run_in_background": false,
+                }),
+            )],
+            expected_tool_results: Vec::new(),
+        },
+        RebornModelReplayStep::DelayedResponse {
+            response: HostManagedModelResponse::assistant_reply("legacy blocking child output"),
+            delay: Duration::from_millis(50),
+            expected_tool_results: Vec::new(),
+        },
+        RebornModelReplayStep::Response {
+            response: HostManagedModelResponse::assistant_reply("legacy blocking parent resumed"),
+            expected_tool_results: Vec::new(),
+        },
+    ]);
+    let mut harness = spawn_harness("room-subagent-legacy-blocking", model_gateway).await;
+    harness.start();
+
+    let submitted = harness
+        .submit_text(
+            "event-subagent-legacy-blocking",
+            "delegate with legacy blocking",
+        )
+        .await
+        .expect("submit root turn");
+    harness
+        .wait_for_status(submitted.run_id, TurnStatus::BlockedDependentRun)
+        .await
+        .expect("parent parks on legacy blocking child");
+
+    let child = await_single_child(&harness, &submitted).await;
+    assert_child_thread_invariants(&submitted, &child);
+    harness
+        .wait_for_status_in_scope(child.scope.clone(), child.run_id, TurnStatus::Completed)
+        .await
+        .expect("legacy blocking child completes");
+    harness
+        .wait_for_status(submitted.run_id, TurnStatus::Completed)
+        .await
+        .expect("parent resumes after legacy blocking child completion");
+    harness
+        .assert_final_reply("legacy blocking parent resumed")
+        .await
+        .expect("parent final reply");
+    harness.assert_model_exhausted();
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn background_spawn_is_rejected_before_child_run_or_auth_invocation() {
+    let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
+        RebornModelReplayStep::ProviderToolCalls {
+            calls: vec![spawn_call(
+                "spawn_background_disabled",
+                serde_json::json!({
+                    "flavor_id": "general",
+                    "task": "run in the background",
+                    "mode": "background",
+                }),
+            )],
+            expected_tool_results: Vec::new(),
+        },
+    ]);
+    let mut harness = spawn_harness("room-subagent-background-disabled", model_gateway).await;
+    harness.start();
+
+    let submitted = harness
+        .submit_text(
+            "event-subagent-background-disabled",
+            "try background delegation",
+        )
+        .await
+        .expect("submit root turn");
+    let state = harness
+        .wait_for_status(submitted.run_id, TurnStatus::RecoveryRequired)
+        .await
+        .expect("background spawn rejects the parent turn");
+
+    assert_eq!(
+        state.failure.expect("failure category").category(),
+        "driver_unavailable"
+    );
+    assert!(
+        harness
+            .children_of(&submitted.scope, submitted.run_id)
+            .await
+            .expect("children")
+            .is_empty(),
+        "disabled background spawn must not create a child run"
+    );
+    assert!(
+        harness.capability_invocations().is_empty(),
+        "disabled background spawn must reject before inner authorization invocation"
+    );
+    harness.assert_model_exhausted();
+    harness.shutdown().await;
+}
+
+#[tokio::test]
 async fn blocking_spawn_waits_while_child_is_blocked_on_approval_then_resumes() {
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
         RebornModelReplayStep::ProviderToolCalls {
