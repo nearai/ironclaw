@@ -923,6 +923,49 @@ impl RootFilesystem for LibSqlRootFilesystem {
         Ok(out)
     }
 
+    async fn head_seq(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+    ) -> Result<Option<SeqNo>, FilesystemError> {
+        let conn = self.connect().await?;
+        let from_raw = i64::try_from(from.get()).map_err(|_| FilesystemError::Backend {
+            path: path.clone(),
+            operation: FilesystemOperation::Tail,
+            reason: "tail cursor exceeds i64".to_string(),
+        })?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT MAX(seq) AS head
+                FROM root_filesystem_events
+                WHERE path = ?1 AND seq > ?2
+                "#,
+                libsql::params![path.as_str(), from_raw],
+            )
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Tail, error))?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Tail, error))?
+        else {
+            return Ok(None);
+        };
+        // `MAX(...)` over an empty match set yields SQL NULL.
+        let head_raw: Option<i64> = row
+            .get(0)
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Tail, error))?;
+        match head_raw {
+            Some(seq_raw) => Ok(Some(seq_no_from_i64(
+                path,
+                seq_raw,
+                FilesystemOperation::Tail,
+            )?)),
+            None => Ok(None),
+        }
+    }
+
     async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         let conn = self.connect().await?;
         let transaction = conn.transaction().await.map_err(|error| {

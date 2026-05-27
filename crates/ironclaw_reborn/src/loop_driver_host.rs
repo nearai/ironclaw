@@ -624,6 +624,7 @@ impl EventTriggeredHookSubscription {
     /// Override the read scope on a freshly-cloned subscription. Used by the
     /// host build path to install the derived effective scope before the
     /// background task spawns. See [`Self::effective_read_scope`].
+    #[must_use]
     pub(crate) fn with_read_scope(mut self, read_scope: ReadScope) -> Self {
         self.read_scope = read_scope;
         self
@@ -3131,6 +3132,114 @@ mod event_subscription_scope_tests {
             replay.entries[0].record.scope.project_id.as_ref(),
             Some(&project),
             "the single observed event must belong to our project"
+        );
+    }
+
+    /// A `DurableEventLog` whose `head_cursor` always fails. Used to exercise
+    /// the fail-closed subscription-spawn path.
+    struct HeadCursorFailingLog;
+
+    #[async_trait::async_trait]
+    impl DurableEventLog for HeadCursorFailingLog {
+        async fn append(
+            &self,
+            _event: RuntimeEvent,
+        ) -> Result<ironclaw_events::EventLogEntry<RuntimeEvent>, ironclaw_events::EventError>
+        {
+            unreachable!("append is not exercised by the spawn-failure test")
+        }
+
+        async fn read_after_cursor(
+            &self,
+            _stream: &EventStreamKey,
+            _filter: &ReadScope,
+            _after: Option<EventCursor>,
+            _limit: usize,
+        ) -> Result<ironclaw_events::EventReplay<RuntimeEvent>, ironclaw_events::EventError>
+        {
+            unreachable!("read_after_cursor is not reached once head_cursor fails")
+        }
+
+        async fn head_cursor(
+            &self,
+            _stream: &EventStreamKey,
+            _after: EventCursor,
+        ) -> Result<EventCursor, ironclaw_events::EventError> {
+            Err(ironclaw_events::EventError::DurableLog {
+                reason: "stub head_cursor failure".to_string(),
+            })
+        }
+    }
+
+    /// PR #3931 (Hole 1) fail-closed contract: when `head_cursor` fails at
+    /// subscription start the host cannot classify replay vs live, so it must
+    /// not silently disappear. It spawns a task that emits the operator-visible
+    /// `EventSubscriptionTerminated` milestone and returns a dead handle that
+    /// never dispatches.
+    #[tokio::test]
+    async fn event_triggered_head_cursor_failure_emits_terminated_milestone() {
+        use ironclaw_turns::run_profile::{
+            InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, LoopDriverNoteKind,
+            LoopHostMilestoneKind, LoopRunContext, RunProfileResolutionRequest, RunProfileResolver,
+        };
+        use ironclaw_turns::{TurnId, TurnRunId};
+
+        let (tenant, agent, user, project, thread) = ids();
+        let sub = EventTriggeredHookSubscription::new(
+            Arc::new(HeadCursorFailingLog),
+            stream_key(&tenant, &user, &agent),
+            ReadScope::any(),
+            EventCursor::origin(),
+        );
+
+        let dispatcher = ironclaw_hooks::dispatch::HookDispatcherBuilder::new(
+            ironclaw_hooks::HookRegistry::new(),
+        )
+        .build_arc();
+
+        let turn_scope = run_scope(&tenant, &agent, &project, &thread);
+        let resolved = InMemoryRunProfileResolver::default()
+            .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+            .await
+            .expect("resolve run profile");
+        let run_context =
+            LoopRunContext::new(turn_scope, TurnId::new(), TurnRunId::new(), resolved);
+        let _ = &user;
+
+        let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+        let sink: Arc<dyn LoopHostMilestoneSink> = milestone_sink.clone();
+
+        // Keep the handle alive: its `Drop` aborts the spawned task, so the
+        // terminated-note task must finish before `_handle` is dropped.
+        let _handle = sub
+            .spawn(dispatcher, tenant.clone(), run_context, sink)
+            .await;
+
+        // The terminated note is emitted from a spawned task; yield until it
+        // lands (bounded) rather than racing the assertion.
+        let mut milestones = milestone_sink.milestones();
+        for _ in 0..1000 {
+            if !milestones.is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+            milestones = milestone_sink.milestones();
+        }
+        assert_eq!(
+            milestones.len(),
+            1,
+            "fail-closed spawn must emit exactly one milestone, got {milestones:?}"
+        );
+        assert!(
+            matches!(
+                &milestones[0].kind,
+                LoopHostMilestoneKind::DriverNote {
+                    kind: LoopDriverNoteKind::EventSubscriptionTerminated,
+                    ..
+                }
+            ),
+            "expected EventSubscriptionTerminated milestone, got {:?}",
+            milestones[0].kind
         );
     }
 }

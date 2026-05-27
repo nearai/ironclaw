@@ -1477,9 +1477,91 @@ async fn create_secure_dir_all(path: &Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::{AgentId, TenantId, UserId};
+    use ironclaw_host_api::{
+        AgentId, CapabilityId, InvocationId, ProjectId, ResourceScope, TenantId, UserId,
+    };
 
     use super::*;
+
+    fn jsonl_scope() -> ResourceScope {
+        ResourceScope {
+            tenant_id: TenantId::new("default").expect("tenant id"),
+            user_id: UserId::new("alice").expect("user id"),
+            agent_id: Some(AgentId::new("default").expect("agent id")),
+            project_id: Some(ProjectId::new("project-a").expect("project id")),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        }
+    }
+
+    async fn jsonl_event_log(root: std::path::PathBuf) -> Arc<dyn DurableEventLog> {
+        build_reborn_event_stores(
+            RebornProfile::LocalDev,
+            RebornEventStoreConfig::Jsonl {
+                root,
+                accept_single_node_durable: false,
+            },
+        )
+        .await
+        .expect("build jsonl event store")
+        .events
+    }
+
+    #[tokio::test]
+    async fn jsonl_head_cursor_reports_latest_and_rejects_future() {
+        // The JSONL production backend's head_cursor is the replay/live
+        // boundary probe taken at subscription start. A cursor-arithmetic bug
+        // or a missed ReplayGap would silently misclassify replay vs live, so
+        // exercise the empty-stream, post-append, mid-stream, and future-cursor
+        // cases directly. Mirrors the filesystem backend contract test.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let log = jsonl_event_log(temp.path().join("event-store")).await;
+        let scope = jsonl_scope();
+        let stream = EventStreamKey::from_scope(&scope);
+        let capability = CapabilityId::new("demo.echo").expect("capability id");
+
+        // Empty stream: head is origin (no records yet).
+        assert_eq!(
+            log.head_cursor(&stream, EventCursor::origin())
+                .await
+                .expect("head of empty stream"),
+            EventCursor::origin()
+        );
+
+        for _ in 0..3 {
+            log.append(RuntimeEvent::dispatch_requested(
+                scope.clone(),
+                capability.clone(),
+            ))
+            .await
+            .expect("append");
+        }
+
+        // Head is the latest appended cursor.
+        assert_eq!(
+            log.head_cursor(&stream, EventCursor::origin())
+                .await
+                .expect("head after 3 appends"),
+            EventCursor::new(3)
+        );
+        // Probing from a valid mid-stream cursor still returns the true head.
+        assert_eq!(
+            log.head_cursor(&stream, EventCursor::new(2))
+                .await
+                .expect("head from mid-stream cursor"),
+            EventCursor::new(3)
+        );
+        // A cursor beyond head is a foreign/future cursor -> ReplayGap.
+        let err = log
+            .head_cursor(&stream, EventCursor::new(99))
+            .await
+            .expect_err("future cursor must be rejected");
+        assert!(
+            matches!(err, EventError::ReplayGap { .. }),
+            "expected ReplayGap, got {err:?}"
+        );
+    }
 
     #[tokio::test]
     async fn jsonl_stream_lock_registry_prunes_released_locks() {

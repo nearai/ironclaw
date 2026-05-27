@@ -198,29 +198,26 @@ where
         after: EventCursor,
     ) -> Result<EventCursor, EventError> {
         let path = stream_path(StreamKind::Runtime, stream)?;
-        // Atomic head read: a single `tail` observation from just before the
-        // caller's resume cursor. `tail(after - 1)` returns every record with
-        // seq >= after in one consistent snapshot; the maximum seq it observes
-        // is the true head at the instant of the call. This is NOT a
-        // page-by-page drain loop — a concurrent append either lands inside
-        // this snapshot (and becomes the head) or after it (correctly
-        // classified live), so the boundary is race-free. The scan is bounded
-        // by the gap from `after` to head, not the whole stream length,
-        // matching the bounded-probe pattern already used on the
-        // `read_after_cursor` cold path.
-        let records = self
+        // Atomic head read: a single `head_seq` observation from just before
+        // the caller's resume cursor. `head_seq(after - 1)` returns the maximum
+        // seq with `seq >= after` in one consistent snapshot — the true head at
+        // the instant of the call. This is NOT a page-by-page drain loop: a
+        // concurrent append either lands inside this snapshot (and becomes the
+        // head) or after it (correctly classified live), so the boundary is
+        // race-free. SQL-backed mounts (Postgres, libSQL) serve this with an
+        // O(1) `MAX(seq)` lookup rather than materializing the gap, so a fresh
+        // subscription (`after = 0`) does not load the whole stream into
+        // memory just to find its head.
+        let head = self
             .fs
-            .tail(
+            .head_seq(
                 &ResourceScope::system(),
                 &path,
                 SeqNo::from_backend(after.as_u64().saturating_sub(1)),
             )
             .await
-            .map_err(map_filesystem_tail_error)?;
-        let head = records
-            .iter()
-            .map(|record| record.seq.get())
-            .max()
+            .map_err(map_filesystem_tail_error)?
+            .map(|seq| seq.get())
             .unwrap_or_else(|| after.as_u64().saturating_sub(1));
         if after.as_u64() > head {
             // No record at or after `after`: the caller asked for a foreign /
