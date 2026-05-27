@@ -129,35 +129,28 @@ impl SkillTrustLevel {
 // ---------------------------------------------------------------------------
 
 const EMPTY_SNAPSHOT_VERSION: &str = "empty";
-const DEFAULT_MAX_SKILL_SNIPPET_BYTES: usize = 8 * 1024;
 const DEFAULT_MAX_SKILL_CONTEXT_BYTES: usize = 32 * 1024;
 
 /// Byte budgets for model-visible skill context produced by [`SkillContextService`].
 ///
 /// Hosts can map a run's context profile to these limits via
-/// [`SkillContextService::with_budget`]. Both limits fail closed when exceeded.
+/// [`SkillContextService::with_budget`]. The aggregate limit fails closed when exceeded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SkillContextBudget {
-    /// Maximum bytes for one snippet summary.
-    pub max_snippet_bytes: usize,
     /// Maximum aggregate bytes across emitted snippet refs and summaries.
     pub max_context_bytes: usize,
 }
 
 impl SkillContextBudget {
     /// Create explicit skill-context budget limits.
-    pub const fn new(max_snippet_bytes: usize, max_context_bytes: usize) -> Self {
-        Self {
-            max_snippet_bytes,
-            max_context_bytes,
-        }
+    pub const fn new(max_context_bytes: usize) -> Self {
+        Self { max_context_bytes }
     }
 }
 
 impl Default for SkillContextBudget {
     fn default() -> Self {
         Self {
-            max_snippet_bytes: DEFAULT_MAX_SKILL_SNIPPET_BYTES,
             max_context_bytes: DEFAULT_MAX_SKILL_CONTEXT_BYTES,
         }
     }
@@ -346,10 +339,6 @@ impl SkillContextSource for SkillContextService {
                 SkillTrustLevel::Installed => entry.safe_description.clone(),
             };
 
-            if safe_summary.len() > self.budget.max_snippet_bytes {
-                return Err(SkillContextError::ContextBudgetExceeded);
-            }
-
             validate_model_visible_skill_name(&entry.name)?;
             validate_model_visible_text(&safe_summary)?;
 
@@ -482,10 +471,7 @@ fn validate_snapshot(snapshot: &SkillRunSnapshot) -> Result<(), SkillContextErro
 }
 
 fn validate_budget(budget: SkillContextBudget) -> Result<(), SkillContextError> {
-    if budget.max_snippet_bytes == 0
-        || budget.max_context_bytes == 0
-        || budget.max_snippet_bytes > budget.max_context_bytes
-    {
+    if budget.max_context_bytes == 0 {
         return Err(SkillContextError::BudgetMisconfigured);
     }
 

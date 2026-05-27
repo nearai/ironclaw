@@ -220,7 +220,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 },
                 "content": {
                     "type": "string",
-                    "description": "Raw SKILL.md content to install"
+                    "description": "Raw SKILL.md content to install, or plain Markdown when name is provided"
                 },
                 "url": {
                     "type": "string",

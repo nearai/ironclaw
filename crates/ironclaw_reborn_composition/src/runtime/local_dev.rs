@@ -52,8 +52,10 @@ use crate::{
 };
 
 mod extension_surface;
+mod surface_disclosure;
 
 use extension_surface::{LocalDevExtensionSurface, LocalDevExtensionSurfaceSource};
+use surface_disclosure::wrap_local_dev_surface_disclosure;
 
 pub(super) struct LocalDevCapabilityWiring {
     pub(super) capability_factory: Arc<dyn LoopCapabilityPortFactory>,
@@ -160,6 +162,7 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
             skill_mounts.clone(),
             &extension_surface,
         )?;
+        let disclosure_mounts = workspace_mounts.clone();
         let mut factory = HostRuntimeLoopCapabilityPortFactory::new(
             Arc::clone(&self.runtime),
             visible_request,
@@ -174,7 +177,8 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
                 skill_mounts.clone(),
             );
         }
-        Ok(factory.for_run_context(run_context.clone()))
+        let port = factory.for_run_context(run_context.clone());
+        Ok(wrap_local_dev_surface_disclosure(port, &disclosure_mounts))
     }
 }
 

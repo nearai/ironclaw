@@ -452,6 +452,11 @@ mod tests {
         let host_home = dir.path().join("home");
         std::fs::create_dir_all(&host_home).expect("host home"); // safety: test-only setup in #[cfg(test)] module.
         std::fs::write(host_home.join("safe.txt"), "safe host file\n").expect("host file"); // safety: test-only setup in #[cfg(test)] module.
+        let raw_host_home = host_home
+            .canonicalize()
+            .expect("canonical host home")
+            .to_string_lossy()
+            .into_owned();
 
         let services = crate::build_reborn_services(
             crate::RebornBuildInput::local_dev_with_profile(
@@ -462,7 +467,7 @@ mod tests {
             .with_runtime_policy(
                 crate::local_dev_yolo_runtime_policy(true).expect("local-yolo policy resolves"), // safety: test-only helper in #[cfg(test)] module.
             )
-            .with_local_dev_confirmed_host_home_root(host_home),
+            .with_local_dev_confirmed_host_home_root(host_home.clone()),
         )
         .await
         .expect("local-dev-yolo services build"); // safety: test-only assertion in #[cfg(test)] module.
@@ -494,6 +499,101 @@ mod tests {
             .visible_capabilities(VisibleCapabilityRequest {})
             .await
             .expect("visible surface"); // safety: test-only assertion in #[cfg(test)] module.
+        for capability_id in [
+            READ_FILE_CAPABILITY_ID,
+            WRITE_FILE_CAPABILITY_ID,
+            LIST_DIR_CAPABILITY_ID,
+            GLOB_CAPABILITY_ID,
+            GREP_CAPABILITY_ID,
+            APPLY_PATCH_CAPABILITY_ID,
+        ] {
+            let descriptor = surface
+                .descriptors
+                .iter()
+                .find(|descriptor| descriptor.capability_id.as_str() == capability_id)
+                .unwrap_or_else(|| panic!("{capability_id} descriptor visible"));
+            assert!(
+                descriptor.safe_description.contains("/host"),
+                "{capability_id} description should disclose confirmed host mount: {}",
+                descriptor.safe_description
+            );
+            assert!(
+                !descriptor.safe_description.contains(&raw_host_home),
+                "model-visible description must not disclose raw host home path"
+            );
+            let path_description =
+                descriptor.parameters_schema["properties"]["path"]["description"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{capability_id} path description"));
+            assert!(
+                path_description.contains("/host"),
+                "{capability_id} path schema should disclose confirmed host mount: {path_description}"
+            );
+            assert!(
+                !path_description.contains(&raw_host_home),
+                "model-visible schema must not disclose raw host home path"
+            );
+        }
+        let shell_descriptor = surface
+            .descriptors
+            .iter()
+            .find(|descriptor| descriptor.capability_id.as_str() == SHELL_CAPABILITY_ID)
+            .expect("shell descriptor visible");
+        assert!(
+            !shell_descriptor.safe_description.contains("/host"),
+            "shell does not receive scoped filesystem disclosure"
+        );
+        assert!(
+            shell_descriptor.safe_description.contains("local host")
+                && shell_descriptor
+                    .safe_description
+                    .contains("shell process and network access"),
+            "shell should disclose local-dev host shell authority: {}",
+            shell_descriptor.safe_description
+        );
+        let tool_definitions = port.tool_definitions().expect("tool definitions");
+        for capability_id in [
+            READ_FILE_CAPABILITY_ID,
+            WRITE_FILE_CAPABILITY_ID,
+            LIST_DIR_CAPABILITY_ID,
+            GLOB_CAPABILITY_ID,
+            GREP_CAPABILITY_ID,
+            APPLY_PATCH_CAPABILITY_ID,
+        ] {
+            let tool = tool_definitions
+                .iter()
+                .find(|definition| definition.capability_id.as_str() == capability_id)
+                .unwrap_or_else(|| panic!("{capability_id} tool definition visible"));
+            assert!(
+                tool.description.contains("/host"),
+                "{capability_id} provider tool description should disclose confirmed host mount: {}",
+                tool.description
+            );
+            let tool_path_description = tool.parameters["properties"]["path"]["description"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{capability_id} tool path description"));
+            assert!(
+                tool_path_description.contains("/host"),
+                "{capability_id} provider tool path schema should disclose confirmed host mount: {tool_path_description}"
+            );
+            assert!(
+                !tool.description.contains(&raw_host_home)
+                    && !tool_path_description.contains(&raw_host_home),
+                "provider-visible tool surface must not disclose raw host home path"
+            );
+        }
+        let shell_tool = tool_definitions
+            .iter()
+            .find(|definition| definition.capability_id.as_str() == SHELL_CAPABILITY_ID)
+            .expect("shell tool definition visible");
+        assert!(
+            shell_tool.description.contains("local host")
+                && shell_tool
+                    .description
+                    .contains("shell process and network access"),
+            "provider tool shell description should disclose local-dev host shell authority: {}",
+            shell_tool.description
+        );
         let input_ref = capability_io
             .register_provider_tool_call_input(
                 &run_context,
@@ -521,6 +621,95 @@ mod tests {
         assert_eq!(
             output["content"],
             serde_json::json!("     1│ safe host file")
+        );
+    }
+
+    #[tokio::test]
+    async fn local_dev_capability_port_omits_host_disclosure_without_confirmed_host_mount() {
+        let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only setup in #[cfg(test)] module.
+        let storage_root = dir.path().join("local-dev");
+        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+            "local-dev-no-host-owner",
+            storage_root,
+        ))
+        .await
+        .expect("local-dev services build"); // safety: test-only assertion in #[cfg(test)] module.
+        let runtime = services.host_runtime.clone().expect("host runtime"); // safety: test-only assertion in #[cfg(test)] module.
+        let workspace_mounts = services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime substrate") // safety: test-only assertion in #[cfg(test)] module.
+            .workspace_mounts
+            .clone();
+        let capability_io = Arc::new(LocalDevCapabilityIo::default());
+        let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
+        let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
+        let factory = LocalDevLoopCapabilityPortFactory::new(
+            runtime,
+            UserId::new("local-dev-no-host-user").expect("user id"), // safety: literal test id is valid.
+            workspace_mounts,
+            LocalDevExtensionSurfaceSource::default(),
+            input_resolver,
+            result_writer,
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        );
+        let run_context = run_context("no-host-disclosure").await;
+        let port = factory
+            .create_capability_port(&run_context)
+            .await
+            .expect("capability port"); // safety: test-only assertion in #[cfg(test)] module.
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible surface"); // safety: test-only assertion in #[cfg(test)] module.
+        let read_descriptor = surface
+            .descriptors
+            .iter()
+            .find(|descriptor| descriptor.capability_id.as_str() == READ_FILE_CAPABILITY_ID)
+            .expect("read_file descriptor visible");
+        assert!(
+            !read_descriptor.safe_description.contains("/host")
+                && !read_descriptor
+                    .safe_description
+                    .contains("Available scoped roots"),
+            "normal local-dev read_file description must not disclose host roots: {}",
+            read_descriptor.safe_description
+        );
+        let shell_descriptor = surface
+            .descriptors
+            .iter()
+            .find(|descriptor| descriptor.capability_id.as_str() == SHELL_CAPABILITY_ID)
+            .expect("shell descriptor visible");
+        assert!(
+            !shell_descriptor
+                .safe_description
+                .contains("shell process and network access"),
+            "normal local-dev shell description should not receive yolo disclosure: {}",
+            shell_descriptor.safe_description
+        );
+        let tool_definitions = port.tool_definitions().expect("tool definitions");
+        let read_file_tool = tool_definitions
+            .iter()
+            .find(|definition| definition.capability_id.as_str() == READ_FILE_CAPABILITY_ID)
+            .expect("read_file tool definition visible");
+        assert!(
+            !read_file_tool.description.contains("/host")
+                && !read_file_tool
+                    .description
+                    .contains("Available scoped roots"),
+            "normal local-dev provider tool description must not disclose host roots: {}",
+            read_file_tool.description
+        );
+        let shell_tool = tool_definitions
+            .iter()
+            .find(|definition| definition.capability_id.as_str() == SHELL_CAPABILITY_ID)
+            .expect("shell tool definition visible");
+        assert!(
+            !shell_tool
+                .description
+                .contains("shell process and network access"),
+            "normal local-dev shell provider tool should not receive yolo disclosure: {}",
+            shell_tool.description
         );
     }
 
