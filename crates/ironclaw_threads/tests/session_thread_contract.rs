@@ -10,8 +10,9 @@ use ironclaw_threads::{
     CapabilityDisplayPreviewStatus, CreateSummaryArtifactRequest, EnsureThreadRequest,
     InMemorySessionThreadService, LoadContextMessagesRequest, LoadContextWindowRequest,
     MessageContent, MessageKind, MessageStatus, ProviderToolCallReferenceEnvelope,
-    RedactMessageRequest, SessionThreadError, SessionThreadService, ThreadHistoryRequest,
-    ThreadMessageId, ThreadScope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
+    RedactMessageRequest, SessionThreadError, SessionThreadService, SummaryKind,
+    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRangeRequest, ThreadScope,
+    ToolResultSafeSummary, UpdateAssistantDraftRequest,
 };
 
 fn scope(label: &str) -> ThreadScope {
@@ -126,6 +127,58 @@ async fn append_tool_result_reference_is_finalized_and_idempotent_per_run_result
 }
 
 #[tokio::test]
+async fn message_range_read_returns_only_requested_sequences() {
+    let service = InMemorySessionThreadService::default();
+    let scope = scope("range-read");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-range-read").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    for index in 1..=4 {
+        service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: scope.clone(),
+                thread_id: thread.thread_id.clone(),
+                actor_id: "actor-a".into(),
+                source_binding_id: None,
+                reply_target_binding_id: None,
+                external_event_id: Some(format!("event-{index}")),
+                content: user_message(&format!("message {index}")),
+            })
+            .await
+            .unwrap();
+    }
+
+    let range = service
+        .list_thread_messages_range(ThreadMessageRangeRequest {
+            scope,
+            thread_id: thread.thread_id,
+            after_sequence: 1,
+            through_sequence: 3,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        range
+            .messages
+            .iter()
+            .map(|message| message.sequence)
+            .collect::<Vec<_>>(),
+        vec![2, 3]
+    );
+    assert_eq!(range.messages[0].content.as_deref(), Some("message 2"));
+    assert_eq!(range.messages[1].content.as_deref(), Some("message 3"));
+}
+
+#[tokio::test]
 async fn append_capability_display_preview_is_history_visible_and_model_hidden() {
     let service = InMemorySessionThreadService::default();
     let scope = scope("display-preview");
@@ -198,7 +251,7 @@ async fn append_capability_display_preview_is_history_visible_and_model_hidden()
             thread_id: thread.thread_id.clone(),
             start_sequence: 1,
             end_sequence: 2,
-            summary_kind: "model_context".into(),
+            summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("summary must not replace preview range"),
             model_context_policy: Some("replace_range_when_selected".into()),
         })
@@ -941,7 +994,7 @@ async fn summaries_are_range_artifacts_and_policy_filtered_context_replacements(
             thread_id: thread.thread_id.clone(),
             start_sequence: 1,
             end_sequence: 2,
-            summary_kind: "model_context".into(),
+            summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("one and two summarized"),
             model_context_policy: Some("replace_range_when_selected".into()),
         })
@@ -1018,7 +1071,7 @@ async fn summary_covering_redacted_message_is_not_loaded_into_model_context() {
             thread_id: thread.thread_id.clone(),
             start_sequence: 1,
             end_sequence: 2,
-            summary_kind: "model_context".into(),
+            summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("summary mentions secret token"),
             model_context_policy: Some("replace_range_when_selected".into()),
         })
@@ -1278,7 +1331,7 @@ async fn summary_covering_draft_message_is_not_loaded_into_model_context() {
             thread_id: thread.thread_id.clone(),
             start_sequence: 1,
             end_sequence: 2,
-            summary_kind: "model_context".into(),
+            summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("summary leaks draft secret"),
             model_context_policy: Some("replace_range_when_selected".into()),
         })
@@ -1422,7 +1475,7 @@ async fn overlapping_replacement_summaries_are_rejected() {
             thread_id: thread.thread_id.clone(),
             start_sequence: 1,
             end_sequence: 2,
-            summary_kind: "model_context".into(),
+            summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("one and two summarized"),
             model_context_policy: Some("replace_range_when_selected".into()),
         })
@@ -1435,7 +1488,7 @@ async fn overlapping_replacement_summaries_are_rejected() {
             thread_id: thread.thread_id,
             start_sequence: 2,
             end_sequence: 3,
-            summary_kind: "model_context".into(),
+            summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("two and three summarized"),
             model_context_policy: Some("replace_range_when_selected".into()),
         })
@@ -1496,7 +1549,7 @@ async fn summary_replacement_still_applies_when_range_starts_with_redacted_messa
             thread_id: thread.thread_id.clone(),
             start_sequence: 1,
             end_sequence: 2,
-            summary_kind: "model_context".into(),
+            summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("redacted range summary"),
             model_context_policy: Some("replace_range_when_selected".into()),
         })

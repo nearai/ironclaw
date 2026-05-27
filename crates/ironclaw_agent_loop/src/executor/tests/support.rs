@@ -13,8 +13,9 @@ use ironclaw_turns::{
         CapabilitySurfaceVersion, CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass,
         ContextProfileId, FinalizeAssistantMessage, LoopCancelReasonKind, LoopCancellationPort,
         LoopCancellationSignal, LoopCheckpointKind, LoopCheckpointRequest, LoopCheckpointStateRef,
-        LoopContextBundle, LoopContextRequest, LoopDriverId, LoopInputAck, LoopInputAckToken,
-        LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopModelMessage, LoopModelRequest,
+        LoopCompactionError, LoopCompactionRequest, LoopCompactionResponse, LoopContextBundle,
+        LoopContextRequest, LoopDriverId, LoopInputAck, LoopInputAckToken, LoopInputBatch,
+        LoopInputCursor, LoopInputCursorToken, LoopModelMessage, LoopModelRequest,
         LoopModelResponse, LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest,
         LoopRunContext, ModelProfileId, ModelStreamChunk, ParentLoopOutput, ProviderToolCallReplay,
         RedactedRunProfileProvenance, ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier,
@@ -589,6 +590,16 @@ impl ironclaw_turns::run_profile::LoopProgressPort for MockHost {
         }
         self.progress_events.lock().expect("lock").push(event);
         Ok(())
+    }
+}
+
+#[async_trait]
+impl ironclaw_turns::run_profile::LoopCompactionPort for MockHost {
+    async fn compact_loop_context(
+        &self,
+        _request: LoopCompactionRequest,
+    ) -> Result<LoopCompactionResponse, LoopCompactionError> {
+        Err(LoopCompactionError::InputTooLarge)
     }
 }
 

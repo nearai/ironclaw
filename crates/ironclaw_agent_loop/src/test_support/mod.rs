@@ -22,15 +22,16 @@ use ironclaw_turns::{
         CapabilityResultMessage, CapabilitySurfaceProfileId, CapabilitySurfaceVersion,
         CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass, ConcurrencyHint, ContextProfileId,
         FinalizeAssistantMessage, LoopCancellationPort, LoopCancellationSignal, LoopCheckpointKind,
-        LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextBundle, LoopContextRequest,
-        LoopDriverId, LoopInput, LoopInputAck, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
-        LoopInputCursorToken, LoopModelMessage, LoopModelRequest, LoopModelResponse,
-        LoopProgressEvent, LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest,
-        LoopRunContext, LoopRunInfoPort, ModelProfileId, ModelStreamChunk, ParentLoopOutput,
-        ProviderToolCallReference, RedactedRunProfileProvenance, ResolvedRunProfile,
-        ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
-        RuntimeProfileConstraints, SchedulingClass, StageCheckpointPayloadRequest, SteeringPolicy,
-        VisibleCapabilityRequest, VisibleCapabilitySurface,
+        LoopCheckpointRequest, LoopCheckpointStateRef, LoopCompactionError, LoopCompactionRequest,
+        LoopCompactionResponse, LoopContextBundle, LoopContextRequest, LoopDriverId, LoopInput,
+        LoopInputAck, LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputCursorToken,
+        LoopModelMessage, LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopPromptBundle,
+        LoopPromptBundleRef, LoopPromptBundleRequest, LoopRunContext, LoopRunInfoPort,
+        ModelProfileId, ModelStreamChunk, ParentLoopOutput, ProviderToolCallReference,
+        RedactedRunProfileProvenance, ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier,
+        RunClassId, RunProfileFingerprint, RuntimeProfileConstraints, SchedulingClass,
+        StageCheckpointPayloadRequest, SteeringPolicy, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     },
 };
 
@@ -758,6 +759,16 @@ impl ironclaw_turns::run_profile::LoopProgressPort for MockAgentLoopDriverHost {
         _event: LoopProgressEvent,
     ) -> Result<(), AgentLoopHostError> {
         Ok(())
+    }
+}
+
+#[async_trait]
+impl ironclaw_turns::run_profile::LoopCompactionPort for MockAgentLoopDriverHost {
+    async fn compact_loop_context(
+        &self,
+        _request: LoopCompactionRequest,
+    ) -> Result<LoopCompactionResponse, LoopCompactionError> {
+        Err(LoopCompactionError::InputTooLarge)
     }
 }
 

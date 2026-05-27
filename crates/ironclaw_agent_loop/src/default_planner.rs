@@ -1,4 +1,4 @@
-//! `DefaultPlanner` — the reference composition of the nine strategies.
+//! `DefaultPlanner` — the reference composition of the built-in strategies.
 //!
 //! Construction is crate-private. Public callers get a sealed
 //! `AgentLoopPlanner` through `families::*` and `LoopFamilyRegistry`; they
@@ -12,10 +12,10 @@ use crate::planner::{AgentLoopPlanner, AgentLoopPlannerInternal};
 use crate::strategies::{
     BatchPolicyStrategy, BudgetStrategy, CapabilityStrategy, ContextStrategy,
     DefaultBatchPolicyStrategy, DefaultBudgetStrategy, DefaultCapabilityStrategy,
-    DefaultContextStrategy, DefaultGateHandlingStrategy, DefaultInputDrainStrategy,
-    DefaultModelStrategy, DefaultRecoveryStrategy, DefaultStopConditionStrategy,
-    GateHandlingStrategy, InputDrainStrategy, ModelStrategy, RecoveryStrategy,
-    StopConditionStrategy,
+    DefaultCompactionStrategy, DefaultContextStrategy, DefaultGateHandlingStrategy,
+    DefaultInputDrainStrategy, DefaultModelStrategy, DefaultRecoveryStrategy,
+    DefaultStopConditionStrategy, GateHandlingStrategy, InputDrainStrategy, ModelStrategy,
+    RecoveryStrategy, StopConditionStrategy,
 };
 
 /// The reference planner: a concrete, Builtin-only composition of nine
@@ -26,6 +26,7 @@ pub(crate) struct DefaultPlanner {
     id: LoopFamilyId,
     version: ComponentIdentity,
     context: Arc<dyn ContextStrategy>,
+    compaction: Arc<dyn crate::strategies::CompactionStrategy>,
     capability: Arc<dyn CapabilityStrategy>,
     model: Arc<dyn ModelStrategy>,
     batch: Arc<dyn BatchPolicyStrategy>,
@@ -58,6 +59,7 @@ impl DefaultPlanner {
             id,
             version,
             context: slots.context,
+            compaction: slots.compaction,
             capability: slots.capability,
             model: slots.model,
             batch: slots.batch,
@@ -81,6 +83,14 @@ impl DefaultPlanner {
 
     pub(crate) fn with_context(mut self, strategy: Arc<dyn ContextStrategy>) -> Self {
         self.context = strategy;
+        self
+    }
+
+    pub(crate) fn with_compaction(
+        mut self,
+        strategy: Arc<dyn crate::strategies::CompactionStrategy>,
+    ) -> Self {
+        self.compaction = strategy;
         self
     }
 
@@ -140,6 +150,10 @@ impl AgentLoopPlannerInternal for DefaultPlanner {
         &*self.context
     }
 
+    fn compaction(&self) -> &dyn crate::strategies::CompactionStrategy {
+        &*self.compaction
+    }
+
     fn capability(&self) -> &dyn CapabilityStrategy {
         &*self.capability
     }
@@ -179,6 +193,7 @@ impl AgentLoopPlannerInternal for DefaultPlanner {
 /// without making strategy traits constructible outside this crate.
 pub(crate) struct DefaultStrategySlots {
     context: Arc<dyn ContextStrategy>,
+    compaction: Arc<dyn crate::strategies::CompactionStrategy>,
     capability: Arc<dyn CapabilityStrategy>,
     model: Arc<dyn ModelStrategy>,
     batch: Arc<dyn BatchPolicyStrategy>,
@@ -193,6 +208,7 @@ impl Default for DefaultStrategySlots {
     fn default() -> Self {
         Self {
             context: Arc::new(DefaultContextStrategy::default()),
+            compaction: Arc::new(DefaultCompactionStrategy::default()),
             capability: Arc::new(DefaultCapabilityStrategy),
             model: Arc::new(DefaultModelStrategy),
             batch: Arc::new(DefaultBatchPolicyStrategy),

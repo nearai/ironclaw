@@ -9,7 +9,8 @@ pub use bounded_ring::BoundedRing;
 pub use ironclaw_turns::LoopFailureKind;
 pub use signature::{ArgsHash, CapabilityCallSignature, CapabilityCallSignatureError};
 pub use slots::{
-    CapabilityStrategyState, ContextStrategyState, GateStrategyState, ModelStrategyState,
+    CapabilityStrategyState, CompactionStrategyState, ContextStrategyState, GateStrategyState,
+    GoalRefreshStrategyState, IndexedMessageKind, MessageIndexEntry, ModelStrategyState,
     RecoveryAttemptClass, RecoveryStrategyState, StopStrategyState,
 };
 
@@ -54,6 +55,10 @@ pub struct LoopExecutionState {
     pub context_state: ContextStrategyState,
     pub capability_state: CapabilityStrategyState,
     pub model_state: ModelStrategyState,
+    #[serde(default)]
+    pub compaction_state: CompactionStrategyState,
+    #[serde(default)]
+    pub goal_refresh_state: GoalRefreshStrategyState,
     pub recovery_state: RecoveryStrategyState,
     pub stop_state: StopStrategyState,
     pub gate_state: GateStrategyState,
@@ -81,6 +86,8 @@ impl LoopExecutionState {
             context_state: ContextStrategyState::default(),
             capability_state: CapabilityStrategyState::default(),
             model_state: ModelStrategyState::default(),
+            compaction_state: CompactionStrategyState::default(),
+            goal_refresh_state: GoalRefreshStrategyState::default(),
             recovery_state: RecoveryStrategyState::default(),
             stop_state: StopStrategyState::default(),
             gate_state: GateStrategyState::default(),

@@ -19,6 +19,7 @@
 pub(crate) mod batch;
 mod budget;
 mod capability;
+mod compaction;
 mod context;
 mod drain;
 pub(crate) mod gate;
@@ -32,6 +33,7 @@ pub(crate) use batch::{
 };
 pub(crate) use budget::{BudgetStrategy, DefaultBudgetStrategy};
 pub(crate) use capability::{CapabilityFilter, CapabilityStrategy, DefaultCapabilityStrategy};
+pub(crate) use compaction::{CompactionDecision, CompactionStrategy, DefaultCompactionStrategy};
 pub(crate) use context::{ContextStrategy, DefaultContextStrategy};
 pub(crate) use drain::{DefaultInputDrainStrategy, InputDrainStrategy};
 pub(crate) use gate::{

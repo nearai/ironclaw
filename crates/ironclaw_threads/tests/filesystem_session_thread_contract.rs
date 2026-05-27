@@ -21,8 +21,8 @@ use ironclaw_threads::{
     CapabilityDisplayPreviewEnvelopeInput, CapabilityDisplayPreviewStatus,
     CreateSummaryArtifactRequest, EnsureThreadRequest, FilesystemSessionThreadService,
     LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
-    MessageStatus, RedactMessageRequest, SessionThreadError, SessionThreadService,
-    ThreadHistoryRequest, ThreadScope, UpdateAssistantDraftRequest,
+    MessageStatus, RedactMessageRequest, SessionThreadError, SessionThreadService, SummaryKind,
+    ThreadHistoryRequest, ThreadMessageRangeRequest, ThreadScope, UpdateAssistantDraftRequest,
 };
 
 #[tokio::test]
@@ -67,6 +67,60 @@ async fn filesystem_store_rejects_wrong_scope_history_reads() {
         .await;
 
     assert!(err.is_err(), "wrong-scope history lookup must fail closed");
+}
+
+#[tokio::test]
+async fn filesystem_store_range_read_returns_only_requested_sequences() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-range", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("fs-range");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-fs-range").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    for index in 1..=4 {
+        service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: scope.clone(),
+                thread_id: thread.thread_id.clone(),
+                actor_id: "actor-a".into(),
+                source_binding_id: None,
+                reply_target_binding_id: None,
+                external_event_id: Some(format!("event-{index}")),
+                content: user_message(&format!("message {index}")),
+            })
+            .await
+            .unwrap();
+    }
+
+    let range = service
+        .list_thread_messages_range(ThreadMessageRangeRequest {
+            scope,
+            thread_id: thread.thread_id,
+            after_sequence: 1,
+            through_sequence: 3,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        range
+            .messages
+            .iter()
+            .map(|message| message.sequence)
+            .collect::<Vec<_>>(),
+        vec![2, 3]
+    );
+    assert_eq!(range.messages[0].content.as_deref(), Some("message 2"));
+    assert_eq!(range.messages[1].content.as_deref(), Some("message 3"));
 }
 
 #[tokio::test]
@@ -125,7 +179,7 @@ async fn filesystem_store_persists_preview_history_while_hiding_it_from_context(
             thread_id: thread.thread_id.clone(),
             start_sequence: 1,
             end_sequence: 2,
-            summary_kind: "model_context".into(),
+            summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("summary must not replace preview range"),
             model_context_policy: Some("replace_range_when_selected".into()),
         })
@@ -452,7 +506,7 @@ async fn durable_history_flow(service: &impl SessionThreadService, label: &str) 
             thread_id: thread.thread_id.clone(),
             start_sequence: 1,
             end_sequence: 2,
-            summary_kind: "model_context".into(),
+            summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("summary that mentions secret token"),
             model_context_policy: Some("replace_range_when_selected".into()),
         })
@@ -567,6 +621,10 @@ fn scope(label: &str) -> ThreadScope {
         owner_user_id: Some(UserId::new(format!("user-{label}")).unwrap()),
         mission_id: None,
     }
+}
+
+fn user_message(text: &str) -> MessageContent {
+    MessageContent::text(text)
 }
 
 fn preview_envelope(invocation_id: InvocationId) -> CapabilityDisplayPreviewEnvelope {

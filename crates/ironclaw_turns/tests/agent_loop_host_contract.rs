@@ -24,7 +24,8 @@ use ironclaw_turns::{
         InstructionBundleBuilder, InstructionBundleFingerprint, InstructionBundleRequest,
         InstructionMaterializationStore, InstructionSafetyContext, LoopCancellationPort,
         LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort,
-        LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextBundle, LoopContextMessage,
+        LoopCheckpointRequest, LoopCheckpointStateRef, LoopCompactionError, LoopCompactionPort,
+        LoopCompactionRequest, LoopCompactionResponse, LoopContextBundle, LoopContextMessage,
         LoopContextPort, LoopContextRequest, LoopContextSnippet, LoopContextSnippetMetadata,
         LoopDriverId, LoopDriverNoteKind, LoopGateKind, LoopHostMilestone,
         LoopHostMilestoneEmitter, LoopHostMilestoneKind, LoopHostMilestoneSink, LoopInputAckToken,
@@ -1050,11 +1051,8 @@ async fn loop_prompt_port_rejects_malformed_same_run_checkpoint_ref() {
             context_cursor: None,
             surface_version: None,
             checkpoint_state_ref: Some(
-                LoopCheckpointStateRef::new(format!(
-                    "checkpoint:{}:/host/path",
-                    host.context.run_id
-                ))
-                .unwrap(),
+                LoopCheckpointStateRef::new(format!("checkpoint:{}:", host.context.run_id))
+                    .unwrap(),
             ),
             max_messages: None,
             inline_messages: Vec::new(),
@@ -2297,6 +2295,16 @@ impl LoopProgressPort for RecordingAgentLoopHost {
     async fn emit_loop_progress(&self, event: LoopProgressEvent) -> Result<(), AgentLoopHostError> {
         self.record(format!("progress:{}", event.kind_name()));
         Ok(())
+    }
+}
+
+#[async_trait]
+impl LoopCompactionPort for RecordingAgentLoopHost {
+    async fn compact_loop_context(
+        &self,
+        _request: LoopCompactionRequest,
+    ) -> Result<LoopCompactionResponse, LoopCompactionError> {
+        Err(LoopCompactionError::InputTooLarge)
     }
 }
 

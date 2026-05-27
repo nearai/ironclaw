@@ -98,7 +98,7 @@ async fn thread_context_port_preserves_summary_replacements_as_system_messages()
             thread_id: fixture.thread_id.clone(),
             start_sequence: 1,
             end_sequence: 1,
-            summary_kind: "model_context".to_string(),
+            summary_kind: ironclaw_threads::SummaryKind::Compaction,
             content: MessageContent::text("summarized hello"),
             model_context_policy: Some("replace_range_when_selected".to_string()),
         })

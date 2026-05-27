@@ -57,8 +57,9 @@ use crate::{
     MessageContent, MessageKind, MessageStatus, ProviderToolCallReferenceEnvelope,
     RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
     SessionThreadRecord, SessionThreadService, SummaryArtifact, ThreadHistory,
-    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
-    ToolResultReferenceEnvelope, UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
+    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange, ThreadMessageRangeRequest,
+    ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
+    UpdateToolResultReferenceRequest,
 };
 
 /// Bound on the CAS retry loop. Mirrors the run-state / authorization
@@ -459,6 +460,7 @@ where
             created_by_actor_id: request.created_by_actor_id,
             title: request.title,
             metadata_json: request.metadata_json,
+            goal: None,
         };
         let stored = StoredThreadRecord {
             record: record.clone(),
@@ -1117,6 +1119,33 @@ where
             thread: thread.record,
             summary_artifacts: history_summary_artifacts(&messages, summaries),
             messages: history_messages(&messages),
+        })
+    }
+
+    async fn list_thread_messages_range(
+        &self,
+        request: ThreadMessageRangeRequest,
+    ) -> Result<ThreadMessageRange, SessionThreadError> {
+        let thread = self
+            .read_thread_versioned(&request.scope, &request.thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: request.thread_id.clone(),
+            })?
+            .0;
+        let messages = self
+            .list_thread_messages(&request.scope, &request.thread_id)
+            .await?;
+        Ok(ThreadMessageRange {
+            thread: thread.record,
+            messages: messages
+                .iter()
+                .filter(|message| {
+                    message.sequence > request.after_sequence
+                        && message.sequence <= request.through_sequence
+                })
+                .map(history_message)
+                .collect(),
         })
     }
 
