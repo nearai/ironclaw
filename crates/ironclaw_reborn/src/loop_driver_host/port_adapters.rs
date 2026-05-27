@@ -357,6 +357,7 @@ impl LoopProgressPort for HostManagedLoopProgressPort {
             // `CheckpointWritten` carries only the checkpoint kind/iteration,
             // so emitting it here would either duplicate or weaken that record.
             LoopProgressEvent::CheckpointWritten { .. } => Ok(()),
+            _ => Ok(()),
         }
     }
 }

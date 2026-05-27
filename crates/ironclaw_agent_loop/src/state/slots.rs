@@ -11,6 +11,45 @@ pub struct ModelStrategyState {
     pub fallback_index: u32,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CompactionStrategyState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_compacted_through_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_summary_artifact_id: Option<String>,
+    #[serde(default)]
+    pub consecutive_failures: u8,
+    #[serde(default)]
+    pub force_compact_on_next_iteration: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub message_index: Vec<MessageIndexEntry>,
+    #[serde(default)]
+    pub last_observed_prompt_tokens: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MessageIndexEntry {
+    pub sequence: u64,
+    pub kind: IndexedMessageKind,
+    pub estimated_tokens: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IndexedMessageKind {
+    User,
+    Assistant,
+    System,
+    Summary,
+    Other,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GoalRefreshStrategyState {
+    #[serde(default)]
+    pub turns_since_refresh: u32,
+}
+
 /// Per-error-class attempt counters for the recovery strategy.
 ///
 /// Semantics: the retry budget is *not* durable across resume — on rehydration

@@ -8,6 +8,7 @@ mod canonical;
 mod capabilities;
 mod capability_helpers;
 mod checkpoint;
+mod compaction;
 mod exit_helpers;
 mod gates;
 mod input;
@@ -30,6 +31,7 @@ use capability_helpers::{
 #[cfg(test)]
 use capability_helpers::{sanitize_result_ref_suffix, synthetic_provider_error_result_ref};
 use checkpoint::{CheckpointInput, CheckpointStage};
+use compaction::{CompactionInput, CompactionStage};
 use exit_helpers::{
     cancelled_exit, cancelled_exit_with_reason, cancelled_reason_from_signal, completed_exit,
     exit_id, failed_exit,

@@ -20,9 +20,10 @@ use ironclaw_loop_support::{
     CapabilityResolveError, CapabilitySurfaceProfileFilter, CapabilitySurfaceProfileResolver,
     EmptyLoopCapabilityPort, HostIdentityContextSource, HostInputQueue, HostManagedModelGateway,
     HostQueueLoopInputPort, HostSkillContextSource, LoopCapabilityInputResolver,
-    RunCancellationFactory, RunCancellationObservationKind, RunStateLoopCancellationPort,
-    SubagentLoopPromptPort, SubagentPromptComposer, ThreadBackedLoopContextPort,
-    ThreadBackedLoopTranscriptPort, TurnStateRunCancellationFactory,
+    ModelGatewayBackedSystemInferencePort, RunCancellationFactory, RunCancellationObservationKind,
+    RunStateLoopCancellationPort, SubagentLoopPromptPort, SubagentPromptComposer,
+    ThreadBackedLoopContextPort, ThreadBackedLoopTranscriptPort, TurnStateRunCancellationFactory,
+    default_host_managed_loop_compaction_port,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 
@@ -63,7 +64,8 @@ use ironclaw_turns::{
         InstructionBundleMaterializedMessage, InstructionMaterializationStore,
         InstructionSafetyContext, LoadCheckpointPayloadRequest, LoadedCheckpointPayload,
         LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointPort,
-        LoopCheckpointRequest, LoopContextBundle, LoopContextPort, LoopContextRequest,
+        LoopCheckpointRequest, LoopCompactionError, LoopCompactionPort, LoopCompactionRequest,
+        LoopCompactionResponse, LoopContextBundle, LoopContextPort, LoopContextRequest,
         LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputPort,
         LoopModelBudgetAccountant, LoopModelPolicyGuard, LoopModelPort, LoopModelRequest,
         LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
@@ -1386,6 +1388,19 @@ where
             run_context.clone(),
             Arc::clone(&self.milestone_sink),
         ));
+        let system_inference: Arc<dyn ironclaw_turns::run_profile::SystemInferencePort> =
+            Arc::new(ModelGatewayBackedSystemInferencePort::new(
+                Arc::clone(&model),
+                Arc::clone(&progress),
+                run_context.clone(),
+                Arc::clone(&instruction_materialization_store),
+            ));
+        let compaction = default_host_managed_loop_compaction_port(
+            system_inference,
+            Arc::clone(&self.thread_service),
+            self.thread_scope.clone(),
+            include_str!("../../ironclaw_loop_support/prompts/compaction_summarizer_fresh.md"),
+        );
         let cancellation_handle = self
             .cancellation_factory
             .handle_for_run(&run_context.scope, run_context.run_id)
@@ -1406,6 +1421,7 @@ where
             capabilities,
             transcript,
             progress,
+            compaction,
             cancellation,
             _event_subscription: event_subscription,
         })
@@ -1472,6 +1488,7 @@ pub struct RebornLoopDriverHost {
     capabilities: Arc<dyn LoopCapabilityPort>,
     transcript: Arc<dyn LoopTranscriptPort>,
     progress: Arc<dyn LoopProgressPort>,
+    compaction: Arc<dyn LoopCompactionPort>,
     cancellation: Arc<dyn LoopCancellationPort>,
     _event_subscription: Option<EventTriggeredHookSubscriptionHandle>,
 }
@@ -1648,6 +1665,16 @@ impl LoopCheckpointPort for RebornLoopDriverHost {
 impl LoopProgressPort for RebornLoopDriverHost {
     async fn emit_loop_progress(&self, event: LoopProgressEvent) -> Result<(), AgentLoopHostError> {
         self.progress.emit_loop_progress(event).await
+    }
+}
+
+#[async_trait]
+impl LoopCompactionPort for RebornLoopDriverHost {
+    async fn compact_loop_context(
+        &self,
+        request: LoopCompactionRequest,
+    ) -> Result<LoopCompactionResponse, LoopCompactionError> {
+        self.compaction.compact_loop_context(request).await
     }
 }
 

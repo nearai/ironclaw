@@ -18,8 +18,9 @@ use crate::{
     LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
     MessageStatus, RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
     SessionThreadRecord, SessionThreadService, SummaryArtifact, ThreadHistory,
-    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
-    ToolResultReferenceEnvelope, UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
+    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange, ThreadMessageRangeRequest,
+    ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
+    UpdateToolResultReferenceRequest,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -88,6 +89,7 @@ impl SessionThreadService for InMemorySessionThreadService {
             created_by_actor_id: request.created_by_actor_id,
             title: request.title,
             metadata_json: request.metadata_json,
+            goal: None,
         };
         state.threads.insert(
             thread_id,
@@ -507,6 +509,26 @@ impl SessionThreadService for InMemorySessionThreadService {
         })
     }
 
+    async fn list_thread_messages_range(
+        &self,
+        request: ThreadMessageRangeRequest,
+    ) -> Result<ThreadMessageRange, SessionThreadError> {
+        let state = self.state.lock().await;
+        let thread = get_thread(&state, &request.scope, &request.thread_id)?;
+        Ok(ThreadMessageRange {
+            thread: thread.record.clone(),
+            messages: thread
+                .messages
+                .iter()
+                .filter(|message| {
+                    message.sequence > request.after_sequence
+                        && message.sequence <= request.through_sequence
+                })
+                .map(history_message)
+                .collect(),
+        })
+    }
+
     async fn latest_thread_message(
         &self,
         request: LatestThreadMessageRequest,
@@ -584,7 +606,6 @@ impl SessionThreadService for InMemorySessionThreadService {
         thread.summary_artifacts.push(artifact.clone());
         Ok(artifact)
     }
-
     async fn list_threads_for_scope(
         &self,
         request: ListThreadsForScopeRequest,
@@ -649,6 +670,34 @@ impl SessionThreadService for InMemorySessionThreadService {
             threads: page,
             next_cursor,
         })
+    }
+
+    async fn read_thread_by_id(
+        &self,
+        thread_id: ThreadId,
+    ) -> Result<SessionThreadRecord, SessionThreadError> {
+        let state = self.state.lock().await;
+        state
+            .threads
+            .get(&thread_id)
+            .map(|thread| thread.record.clone())
+            .ok_or(SessionThreadError::UnknownThread { thread_id })
+    }
+
+    async fn update_thread_goal(
+        &self,
+        request: crate::UpdateThreadGoalRequest,
+    ) -> Result<crate::ThreadGoal, SessionThreadError> {
+        let mut state = self.state.lock().await;
+        let thread =
+            state
+                .threads
+                .get_mut(&request.thread_id)
+                .ok_or(SessionThreadError::UnknownThread {
+                    thread_id: request.thread_id,
+                })?;
+        thread.record.goal = Some(request.goal.clone());
+        Ok(request.goal)
     }
 }
 

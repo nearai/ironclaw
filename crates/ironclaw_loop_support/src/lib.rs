@@ -19,6 +19,7 @@ mod capability_allow_set;
 mod capability_info;
 mod capability_port;
 mod capability_surface_filter;
+mod compaction_task;
 mod filesystem_checkpoint_state;
 mod filesystem_skill_bundle_source;
 pub mod identity_context;
@@ -29,6 +30,8 @@ mod skill_bundle_source;
 mod skill_context;
 mod subagent_prompt_port;
 mod subagent_spawn_port;
+mod system_inference;
+mod token_estimator;
 mod turn_event_publisher;
 
 pub use budget_accountant::{
@@ -51,6 +54,10 @@ pub use capability_port::{
 };
 pub use capability_surface_filter::{
     CapabilitySurfaceProfileFilter, CapabilitySurfaceVisibleFilter,
+};
+pub use compaction_task::{
+    ANTI_INJECTION_PREFIX, CompactionError, CompactionMode, CompactionTask,
+    HostManagedLoopCompactionPort, default_host_managed_loop_compaction_port,
 };
 pub use filesystem_checkpoint_state::FilesystemCheckpointStateStore;
 pub use filesystem_skill_bundle_source::{FilesystemSkillBundleRoot, FilesystemSkillBundleSource};
@@ -86,6 +93,10 @@ pub use subagent_spawn_port::{
     SubagentGateResolutionStore, SubagentGoalRecord, SubagentKindId, SubagentSpawnCapabilityPort,
     SubagentSpawnDeps, SubagentSpawnGoalStore, SubagentSpawnLimits, SubagentThreadKind,
     SubagentThreadMetadata,
+};
+pub use system_inference::ModelGatewayBackedSystemInferencePort;
+pub use token_estimator::{
+    CHARS_PER_TOKEN_DEFAULT, EstimatedTokenCount, estimate_tokens_from_chars,
 };
 pub use turn_event_publisher::EventPublishingTurnRunTransitionPort;
 
