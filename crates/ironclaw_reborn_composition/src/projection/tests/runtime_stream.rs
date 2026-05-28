@@ -1,9 +1,14 @@
 use super::*;
+use ironclaw_first_party_extension_ports::{
+    SkillActivationMode, SkillActivationObservedEvent, SkillActivationRequest,
+};
+use ironclaw_product_adapters::ProductWorkSummaryPhase;
 use ironclaw_turns::{
     TurnId,
     run_profile::{
-        CapabilityInputRef, InMemoryLoopHostMilestoneSink, LoopDriverId, LoopDriverNoteKind,
-        LoopHostMilestone, LoopHostMilestoneKind, LoopSafeSummary,
+        CapabilityInputRef, InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver,
+        LoopDriverId, LoopDriverNoteKind, LoopHostMilestone, LoopHostMilestoneKind, LoopRunContext,
+        LoopSafeSummary, RunProfileResolutionRequest, RunProfileResolver,
     },
 };
 
@@ -402,9 +407,9 @@ async fn webui_event_stream_drains_live_reasoning_projection_from_update_source(
         event_log,
         ReplyTargetBindingRef::new("webui-thinking-reply").unwrap(),
     );
-    let sink = services.with_live_progress_milestone_sink(
+    let sink = services.with_live_progress_milestone_sink_for_publisher(
         Arc::new(InMemoryLoopHostMilestoneSink::default()),
-        user_id.clone(),
+        services.live_projection_publisher(user_id.clone()),
     );
     let scope = TurnScope::new(
         tenant_id.clone(),
@@ -449,6 +454,78 @@ async fn webui_event_stream_drains_live_reasoning_projection_from_update_source(
 }
 
 #[tokio::test]
+async fn webui_event_stream_drains_skill_activation_projection_from_observer() {
+    let tenant_id = TenantId::new("webui-skill-activation-tenant").unwrap();
+    let user_id = UserId::new("webui-skill-activation-user").unwrap();
+    let agent_id = AgentId::new("webui-skill-activation-agent").unwrap();
+    let thread_id = ThreadId::new("webui-skill-activation-thread").unwrap();
+    let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let services = build_reborn_projection_services(
+        event_log,
+        ReplyTargetBindingRef::new("webui-skill-activation-reply").unwrap(),
+    );
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+    let run_id = TurnRunId::new();
+    let observer =
+        services.skill_activation_observer(services.live_projection_publisher(user_id.clone()));
+
+    observer.observe_skill_activation(SkillActivationObservedEvent {
+        run_context: LoopRunContext::new(
+            scope.clone(),
+            TurnId::new(),
+            run_id,
+            InMemoryRunProfileResolver::default()
+                .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+                .await
+                .unwrap(),
+        ),
+        activations: vec![SkillActivationRequest {
+            name: "code-review".to_string(),
+            source: None,
+            bundle_id: None,
+            mode: SkillActivationMode::ExplicitMention,
+        }],
+        feedback: vec!["code-review: force-activated via explicit mention".to_string()],
+    });
+
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id),
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(events.iter().any(|event| {
+        matches!(
+            event.payload(),
+            ProductOutboundPayload::ProjectionUpdate { state }
+                if state.thread_id == thread_id.to_string()
+                    && state.items.iter().any(|item| matches!(
+                        item,
+                        ProductProjectionItem::SkillActivation {
+                            run_id: observed_run_id,
+                            skill_names,
+                            feedback,
+                            ..
+                        } if *observed_run_id == run_id
+                            && skill_names == &vec!["code-review".to_string()]
+                            && feedback == &vec![
+                                "code-review: force-activated via explicit mention".to_string()
+                            ]
+                    ))
+        )
+    }));
+}
+
+#[tokio::test]
 async fn webui_event_stream_drains_work_summary_projection_from_driver_note() {
     let tenant_id = TenantId::new("webui-work-summary-tenant").unwrap();
     let user_id = UserId::new("webui-work-summary-user").unwrap();
@@ -459,9 +536,9 @@ async fn webui_event_stream_drains_work_summary_projection_from_driver_note() {
         event_log,
         ReplyTargetBindingRef::new("webui-work-summary-reply").unwrap(),
     );
-    let sink = services.with_live_progress_milestone_sink(
+    let sink = services.with_live_progress_milestone_sink_for_publisher(
         Arc::new(InMemoryLoopHostMilestoneSink::default()),
-        user_id.clone(),
+        services.live_projection_publisher(user_id.clone()),
     );
     let scope = TurnScope::new(
         tenant_id.clone(),
@@ -523,9 +600,9 @@ async fn webui_event_stream_maps_subscription_terminated_work_summary_to_context
         event_log,
         ReplyTargetBindingRef::new("webui-terminated-summary-reply").unwrap(),
     );
-    let sink = services.with_live_progress_milestone_sink(
+    let sink = services.with_live_progress_milestone_sink_for_publisher(
         Arc::new(InMemoryLoopHostMilestoneSink::default()),
-        user_id.clone(),
+        services.live_projection_publisher(user_id.clone()),
     );
     let scope = TurnScope::new(
         tenant_id.clone(),
@@ -587,9 +664,9 @@ async fn webui_event_stream_skips_empty_work_summary_body() {
         event_log,
         ReplyTargetBindingRef::new("webui-empty-summary-reply").unwrap(),
     );
-    let sink = services.with_live_progress_milestone_sink(
+    let sink = services.with_live_progress_milestone_sink_for_publisher(
         Arc::new(InMemoryLoopHostMilestoneSink::default()),
-        user_id.clone(),
+        services.live_projection_publisher(user_id.clone()),
     );
     let scope = TurnScope::new(
         tenant_id.clone(),

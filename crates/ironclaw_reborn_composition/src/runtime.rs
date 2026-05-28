@@ -990,8 +990,20 @@ pub async fn build_reborn_runtime(
         Arc::clone(&event_log),
         validated_identity.reply_target_binding_ref.clone(),
     );
-    let milestone_sink = projection_services
-        .with_live_progress_milestone_sink(durable_milestone_sink, actor_user_id.clone());
+    let live_projection_publisher =
+        projection_services.live_projection_publisher(actor_user_id.clone());
+    if let Some(skill_activation_source) = &skill_activation_source {
+        skill_activation_source
+            .set_activation_observer(
+                projection_services
+                    .skill_activation_observer(Arc::clone(&live_projection_publisher)),
+            )
+            .map_err(|error| RebornRuntimeError::SkillExecution(error.to_string()))?;
+    }
+    let milestone_sink = projection_services.with_live_progress_milestone_sink_for_publisher(
+        durable_milestone_sink,
+        live_projection_publisher,
+    );
     let local_dev_capability_policy = Arc::new(local_dev_capability_policy().map_err(|error| {
         tracing::error!(%error, "local-dev capability policy is invalid");
         RebornRuntimeError::InvalidArgument {

@@ -12,9 +12,11 @@ use ironclaw_event_streams::{
     ThreadLiveProjectionUpdate, ThreadLiveWorkSummaryPhase,
 };
 use ironclaw_events::{EventCursor, EventStreamKey, ReadScope};
+use ironclaw_first_party_extension_ports::{SkillActivationObservedEvent, SkillActivationObserver};
 use ironclaw_host_api::UserId;
+use ironclaw_product_adapters::{ProductProjectionItem, ProductWorkSummaryPhase};
 use ironclaw_turns::{
-    TurnRunId,
+    TurnRunId, TurnScope,
     run_profile::{
         AgentLoopHostError, LoopDriverNoteKind, LoopHostMilestone, LoopHostMilestoneKind,
         LoopHostMilestoneSink, LoopSafeSummary, sanitize_model_visible_text,
@@ -30,19 +32,50 @@ const LIVE_PROGRESS_CURSOR_BASE: u64 = 1 << 62;
 
 pub(super) struct LiveProgressMilestoneSink {
     inner: Arc<dyn LoopHostMilestoneSink>,
+    publisher: Arc<LiveProjectionPublisher>,
+}
+
+#[derive(Debug)]
+pub(super) struct LiveSkillActivationObserver {
+    publisher: Arc<LiveProjectionPublisher>,
+}
+
+pub(crate) struct LiveProjectionPublisher {
     update_source: Arc<InMemoryProjectionUpdateSource>,
     actor_user_id: UserId,
     next_sequence: AtomicU64,
 }
 
+impl std::fmt::Debug for LiveProjectionPublisher {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LiveProjectionPublisher")
+            .field("actor_user_id", &self.actor_user_id)
+            .finish_non_exhaustive()
+    }
+}
+
 impl LiveProgressMilestoneSink {
     pub(super) fn new(
         inner: Arc<dyn LoopHostMilestoneSink>,
+        publisher: Arc<LiveProjectionPublisher>,
+    ) -> Self {
+        Self { inner, publisher }
+    }
+}
+
+impl LiveSkillActivationObserver {
+    pub(super) fn new(publisher: Arc<LiveProjectionPublisher>) -> Self {
+        Self { publisher }
+    }
+}
+
+impl LiveProjectionPublisher {
+    pub(super) fn new(
         update_source: Arc<InMemoryProjectionUpdateSource>,
         actor_user_id: UserId,
     ) -> Self {
         Self {
-            inner,
             update_source,
             actor_user_id,
             next_sequence: AtomicU64::new(0),
@@ -53,19 +86,14 @@ impl LiveProgressMilestoneSink {
         self.next_sequence.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    fn publish_live_item(
-        &self,
-        milestone: &LoopHostMilestone,
-        sequence: u64,
-        item: ThreadLiveProjectionItem,
-    ) {
+    fn publish_live_item(&self, scope: &TurnScope, sequence: u64, item: ThreadLiveProjectionItem) {
         let cursor = EventProjectionCursor::for_scope(
-            self.projection_scope(milestone),
+            self.projection_scope(scope),
             EventCursor::new(LIVE_PROGRESS_CURSOR_BASE.saturating_add(sequence)),
         );
         let update = ThreadLiveProjectionUpdate {
             cursor,
-            thread_id: milestone.scope.thread_id.clone(),
+            thread_id: scope.thread_id.clone(),
             items: vec![item],
         };
         if let Err(error) = self
@@ -74,12 +102,77 @@ impl LiveProgressMilestoneSink {
         {
             tracing::debug!(
                 error = %error,
-                run_id = %milestone.run_id,
                 "failed to publish live progress projection"
             );
         }
     }
 
+    fn projection_scope(&self, scope: &TurnScope) -> EventProjectionScope {
+        EventProjectionScope {
+            stream: EventStreamKey::new(
+                scope.tenant_id.clone(),
+                self.actor_user_id.clone(),
+                scope.agent_id.clone(),
+            ),
+            read_scope: ReadScope {
+                project_id: scope.project_id.clone(),
+                mission_id: None,
+                thread_id: Some(scope.thread_id.clone()),
+                process_id: None,
+            },
+        }
+    }
+}
+
+pub(super) fn product_items_for_live_update(
+    update: &ThreadLiveProjectionUpdate,
+) -> Vec<ProductProjectionItem> {
+    update
+        .items
+        .iter()
+        .map(|item| match item {
+            ThreadLiveProjectionItem::Thinking { id, body } => ProductProjectionItem::Thinking {
+                id: id.clone(),
+                body: body.clone(),
+            },
+            ThreadLiveProjectionItem::WorkSummary {
+                id,
+                run_id,
+                phase,
+                body,
+            } => ProductProjectionItem::WorkSummary {
+                id: id.clone(),
+                run_id: *run_id,
+                phase: live_work_summary_phase_to_product_phase(*phase),
+                body: body.clone(),
+            },
+            ThreadLiveProjectionItem::SkillActivation {
+                id,
+                run_id,
+                skill_names,
+                feedback,
+            } => ProductProjectionItem::SkillActivation {
+                id: id.clone(),
+                run_id: *run_id,
+                skill_names: skill_names.clone(),
+                feedback: feedback.clone(),
+            },
+        })
+        .collect()
+}
+
+fn live_work_summary_phase_to_product_phase(
+    phase: ThreadLiveWorkSummaryPhase,
+) -> ProductWorkSummaryPhase {
+    match phase {
+        ThreadLiveWorkSummaryPhase::Planning => ProductWorkSummaryPhase::Planning,
+        ThreadLiveWorkSummaryPhase::Waiting => ProductWorkSummaryPhase::Waiting,
+        ThreadLiveWorkSummaryPhase::Retrying => ProductWorkSummaryPhase::Retrying,
+        ThreadLiveWorkSummaryPhase::Context => ProductWorkSummaryPhase::Context,
+    }
+}
+
+impl LiveProgressMilestoneSink {
     fn publish_reasoning_delta(&self, milestone: &LoopHostMilestone, safe_delta: &str) {
         // The delta is already model-visible sanitized upstream. Re-sanitize at
         // the product projection boundary so this publish path has its own
@@ -88,9 +181,9 @@ impl LiveProgressMilestoneSink {
         if safe_delta.is_empty() {
             return;
         }
-        let sequence = self.next_live_sequence();
-        self.publish_live_item(
-            milestone,
+        let sequence = self.publisher.next_live_sequence();
+        self.publisher.publish_live_item(
+            &milestone.scope,
             sequence,
             ThreadLiveProjectionItem::Thinking {
                 id: thinking_id(milestone.run_id, sequence),
@@ -120,9 +213,9 @@ impl LiveProgressMilestoneSink {
                 return;
             }
         };
-        let sequence = self.next_live_sequence();
-        self.publish_live_item(
-            milestone,
+        let sequence = self.publisher.next_live_sequence();
+        self.publisher.publish_live_item(
+            &milestone.scope,
             sequence,
             ThreadLiveProjectionItem::WorkSummary {
                 id: work_summary_id(milestone.run_id, sequence),
@@ -132,21 +225,40 @@ impl LiveProgressMilestoneSink {
             },
         );
     }
+}
 
-    fn projection_scope(&self, milestone: &LoopHostMilestone) -> EventProjectionScope {
-        EventProjectionScope {
-            stream: EventStreamKey::new(
-                milestone.scope.tenant_id.clone(),
-                self.actor_user_id.clone(),
-                milestone.scope.agent_id.clone(),
-            ),
-            read_scope: ReadScope {
-                project_id: milestone.scope.project_id.clone(),
-                mission_id: None,
-                thread_id: Some(milestone.scope.thread_id.clone()),
-                process_id: None,
-            },
+impl SkillActivationObserver for LiveSkillActivationObserver {
+    fn observe_skill_activation(&self, event: SkillActivationObservedEvent) {
+        let skill_names = event
+            .activations
+            .iter()
+            .map(|activation| {
+                sanitize_model_visible_text(&activation.name)
+                    .trim()
+                    .to_string()
+            })
+            .filter(|name| !name.is_empty())
+            .collect::<Vec<_>>();
+        let feedback = event
+            .feedback
+            .iter()
+            .map(|note| sanitize_model_visible_text(note).trim().to_string())
+            .filter(|note| !note.is_empty())
+            .collect::<Vec<_>>();
+        if skill_names.is_empty() && feedback.is_empty() {
+            return;
         }
+        let sequence = self.publisher.next_live_sequence();
+        self.publisher.publish_live_item(
+            &event.run_context.scope,
+            sequence,
+            ThreadLiveProjectionItem::SkillActivation {
+                id: skill_activation_id(event.run_context.run_id, sequence),
+                run_id: event.run_context.run_id,
+                skill_names,
+                feedback,
+            },
+        );
     }
 }
 
@@ -176,6 +288,10 @@ fn thinking_id(run_id: TurnRunId, sequence: u64) -> String {
 
 fn work_summary_id(run_id: TurnRunId, sequence: u64) -> String {
     format!("work-summary:{run_id}:{sequence}")
+}
+
+fn skill_activation_id(run_id: TurnRunId, sequence: u64) -> String {
+    format!("skill-activation:{run_id}:{sequence}")
 }
 
 fn driver_note_kind_to_live_work_summary_phase(
