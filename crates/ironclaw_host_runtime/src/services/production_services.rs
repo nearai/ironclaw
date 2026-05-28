@@ -95,12 +95,12 @@ where
             self.push_missing(
                 &mut issues,
                 ProductionWiringComponent::CredentialAccountStore,
-                self.credential_account_store.is_some(),
+                self.component_types.credential_account_store.is_some(),
             );
             self.push_missing(
                 &mut issues,
                 ProductionWiringComponent::CredentialSessionStore,
-                self.credential_session_store.is_some(),
+                self.component_types.credential_session_store.is_some(),
             );
         }
 

@@ -583,7 +583,7 @@ where
         T: CredentialAccountStore + 'static,
     {
         self.component_types.credential_account_store = Some(ProductionComponentType::of::<T>());
-        self.credential_account_store = Some(store);
+        self.credential_account_store = store;
         self
     }
 
@@ -592,7 +592,7 @@ where
         T: CredentialSessionStore + 'static,
     {
         self.component_types.credential_session_store = Some(ProductionComponentType::of::<T>());
-        self.credential_session_store = Some(store);
+        self.credential_session_store = store;
         self
     }
 

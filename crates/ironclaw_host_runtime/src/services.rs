@@ -135,11 +135,8 @@ where
     event_sink: Option<Arc<dyn EventSink>>,
     audit_sink: Option<Arc<dyn AuditSink>>,
     secret_store: Option<Arc<dyn SecretStore>>,
-    // arch-exempt: optional_arc, broker remains optional while #3088 migration
-    // keeps legacy/test host-runtime constructors alive; split ProductionWiringValidator
-    // before the next component in #3946.
-    credential_account_store: Option<Arc<dyn CredentialAccountStore>>,
-    credential_session_store: Option<Arc<dyn CredentialSessionStore>>,
+    credential_account_store: Arc<dyn CredentialAccountStore>,
+    credential_session_store: Arc<dyn CredentialSessionStore>,
     network_policy_store: Arc<NetworkObligationPolicyStore>,
     secret_injection_store: Arc<RuntimeSecretInjectionStore>,
     process_lifecycle_store: Arc<ProcessObligationLifecycleStore>,
@@ -216,6 +213,9 @@ where
             Arc::clone(&secret_injection_store),
             governor.clone(),
         ));
+        let credential_broker = Arc::new(InMemoryCredentialBroker::new());
+        let credential_account_store: Arc<dyn CredentialAccountStore> = credential_broker.clone();
+        let credential_session_store: Arc<dyn CredentialSessionStore> = credential_broker;
         Self {
             registry: Arc::new(SharedExtensionRegistry::new((*registry).clone())),
             trust_policy: Arc::new(HostTrustPolicy::fail_closed()),
@@ -232,8 +232,8 @@ where
             event_sink: None,
             audit_sink: None,
             secret_store: None,
-            credential_account_store: None,
-            credential_session_store: None,
+            credential_account_store,
+            credential_session_store,
             network_policy_store,
             secret_injection_store,
             process_lifecycle_store,
