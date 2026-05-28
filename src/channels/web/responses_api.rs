@@ -1166,17 +1166,23 @@ pub async fn create_response_handler(
             "invalid_request_error",
         ));
     }
-    if req.temperature.is_some() {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            "Per-request 'temperature' is not supported on this endpoint; configure the default via settings",
-            "invalid_request_error",
-        ));
-    }
     if req.max_output_tokens.is_some() {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
             "The 'max_output_tokens' field is not yet supported",
+            "invalid_request_error",
+        ));
+    }
+    // Reject non-finite or out-of-range temperature at the API boundary.
+    // The provider-side path clamps to [0, 2] later, but callers modelling
+    // against the OpenAI Responses contract expect a 400 here rather than
+    // silent normalization (e.g. 9.0 → 2.0).
+    if let Some(t) = req.temperature
+        && (!t.is_finite() || !(0.0..=2.0).contains(&t))
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "The 'temperature' field must be a finite number in [0, 2]",
             "invalid_request_error",
         ));
     }
@@ -1395,6 +1401,9 @@ pub async fn create_response_handler(
     });
     if let Some(ref ctx) = req.x_context {
         metadata["context"] = ctx.clone();
+    }
+    if let Some(t) = req.temperature {
+        metadata["temperature"] = serde_json::json!(t);
     }
     let msg = crate::channels::web::util::web_incoming_message_with_metadata(
         "gateway",

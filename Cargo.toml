@@ -24,7 +24,7 @@ exclude = [
 
 [package]
 name = "ironclaw"
-version = "0.28.2"
+version = "0.29.0"
 edition = "2024"
 rust-version = "1.92"
 description = "Secure personal AI assistant that protects your data and expands its capabilities on the fly"
@@ -156,9 +156,9 @@ open = "5"
 pgvector = { version = "0.4", features = ["postgres"], optional = true }
 
 # WASM sandbox for untrusted tool execution
-wasmtime = { version = "43.0.2", features = ["component-model"] }
-wasmtime-wasi = "43.0.2"  # WASI support for component model
-wasmparser = "0.245.1"  # WASM binary parsing for validation
+wasmtime = { version = "44.0.2", features = ["component-model"] }
+wasmtime-wasi = "44.0.2"  # WASI support for component model
+wasmparser = "0.246.2"  # WASM binary parsing for validation
 
 # Cryptography for secrets management
 aes = "0.8"

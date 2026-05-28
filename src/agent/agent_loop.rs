@@ -245,8 +245,9 @@ async fn build_outgoing_response_for_thread(
     session: &Arc<tokio::sync::Mutex<crate::agent::session::Session>>,
     thread_id: Uuid,
     content: impl Into<String>,
+    attachment_paths: Vec<String>,
 ) -> OutgoingResponse {
-    let mut response = OutgoingResponse::text(content);
+    let mut response = OutgoingResponse::text(content).with_attachments(attachment_paths);
     let attachments = {
         let sess = session.lock().await;
         sess.threads
@@ -256,11 +257,41 @@ async fn build_outgoing_response_for_thread(
             .unwrap_or_default()
     };
 
-    if !attachments.is_empty() {
+    if response.attachments.is_empty() && !attachments.is_empty() {
         response = response.with_inline_attachments(attachments);
     }
 
     response
+}
+
+async fn submission_response_to_handle_outcome(
+    session: &Arc<tokio::sync::Mutex<crate::agent::session::Session>>,
+    thread_id: Uuid,
+    content: String,
+    attachments: Vec<String>,
+) -> HandleOutcome {
+    let has_attachments = !attachments.is_empty();
+
+    // Suppress silent replies only when there is truly nothing else to deliver.
+    // Image-only generated responses intentionally have empty text plus staged
+    // attachments, and must still reach the originating channel.
+    if ironclaw_llm::is_silent_reply(&content) {
+        if !has_attachments {
+            tracing::debug!("Suppressing silent reply token");
+            return HandleOutcome::Shutdown;
+        }
+        return HandleOutcome::Respond(
+            build_outgoing_response_for_thread(session, thread_id, "", attachments).await,
+        );
+    }
+
+    if content.is_empty() && !has_attachments {
+        HandleOutcome::NoResponse
+    } else {
+        HandleOutcome::Respond(
+            build_outgoing_response_for_thread(session, thread_id, content, attachments).await,
+        )
+    }
 }
 
 async fn resolve_channel_notification_user(
@@ -499,7 +530,11 @@ impl Agent {
         message: &IncomingMessage,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
+        let staged_generated_attachments = response.attachments.clone();
         let respond_result = self.channels.respond(message, response).await;
+        crate::generated_images::remove_staged_generated_image_attachments(
+            &staged_generated_attachments,
+        );
         // Always emit Done regardless of whether respond succeeded, so the
         // client knows the turn is over even when the response delivery fails.
         if let Err(e) = self
@@ -1306,6 +1341,9 @@ impl Agent {
                     match self.hooks().run(&event).await {
                         Err(err) => {
                             tracing::warn!("BeforeOutbound hook blocked response: {}", err);
+                            crate::generated_images::remove_staged_generated_image_attachments(
+                                &response.attachments,
+                            );
                             // Still send Done so the client knows the turn is complete
                             // even though the response was suppressed by the hook.
                             self.send_done(&message).await;
@@ -1335,8 +1373,6 @@ impl Agent {
                     }
                 }
                 Ok(HandleOutcome::NoResponse) => {
-                    // Empty response (e.g. routine consumed the message, silent reply).
-                    // Send Done so the client knows the turn is complete.
                     tracing::debug!(
                         channel = %message.channel,
                         user = %message.user_id,
@@ -1345,10 +1381,6 @@ impl Agent {
                     self.send_done(&message).await;
                 }
                 Ok(HandleOutcome::Pending) => {
-                    // Turn paused awaiting user action (approval, auth, etc).
-                    // Do NOT emit Done — the thread is not in a terminal state.
-                    // The relevant ApprovalNeeded/AuthRequired status was already
-                    // sent by the inner handler before returning.
                     tracing::debug!(
                         channel = %message.channel,
                         user = %message.user_id,
@@ -1356,7 +1388,6 @@ impl Agent {
                     );
                 }
                 Ok(HandleOutcome::Shutdown) => {
-                    // Shutdown signal received (/quit, /exit, /shutdown)
                     tracing::debug!("Shutdown command received, exiting...");
                     break;
                 }
@@ -1949,7 +1980,11 @@ impl Agent {
                 // - `Error`: soft error — draining more messages after an error
                 //    would produce confusing interleaved output
                 // - `Err(_)`: hard error
-                while let Ok(SubmissionResult::Response { content: outgoing }) = &result {
+                while let Ok(SubmissionResult::Response {
+                    content: outgoing,
+                    attachments,
+                }) = &result
+                {
                     let merged = {
                         let mut sess = session.lock().await;
                         sess.threads
@@ -1979,9 +2014,13 @@ impl Agent {
                     //   identity will attribute every response to the first
                     //   message. This is acceptable for the current
                     //   single-user-per-thread model.
-                    let response =
-                        build_outgoing_response_for_thread(&session, thread_id, outgoing.clone())
-                            .await;
+                    let response = build_outgoing_response_for_thread(
+                        &session,
+                        thread_id,
+                        outgoing.clone(),
+                        attachments.clone(),
+                    )
+                    .await;
                     if let Err(e) = self.respond_then_done(message, response).await {
                         tracing::warn!(
                             thread_id = %thread_id,
@@ -2035,9 +2074,18 @@ impl Agent {
                         .handle_reasoning_command(&args, &session, thread_id)
                         .await;
                     return match result {
-                        SubmissionResult::Response { content } => {
-                            Ok(HandleOutcome::Respond(OutgoingResponse::text(content)))
-                        }
+                        SubmissionResult::Response {
+                            content,
+                            attachments,
+                        } => Ok(HandleOutcome::Respond(
+                            build_outgoing_response_for_thread(
+                                &session,
+                                thread_id,
+                                content,
+                                attachments,
+                            )
+                            .await,
+                        )),
                         SubmissionResult::Ok { message } => Ok(HandleOutcome::from_legacy(message)),
                         SubmissionResult::Error { message } => Ok(HandleOutcome::Respond(
                             OutgoingResponse::text(format!("Error: {}", message)),
@@ -2165,7 +2213,11 @@ impl Agent {
                         )
                         .await;
 
-                    while let Ok(SubmissionResult::Response { content: outgoing }) = &result {
+                    while let Ok(SubmissionResult::Response {
+                        content: outgoing,
+                        attachments,
+                    }) = &result
+                    {
                         let merged = {
                             let mut sess = session.lock().await;
                             sess.threads
@@ -2180,6 +2232,7 @@ impl Agent {
                             &session,
                             thread_id,
                             outgoing.clone(),
+                            attachments.clone(),
                         )
                         .await;
                         if let Err(e) = self.respond_then_done(message, response).await {
@@ -2219,7 +2272,10 @@ impl Agent {
                 // identically (#3317).
                 match crate::bridge::handle_pairing_claim(self, message, &channel, &code).await {
                     Ok(crate::bridge::BridgeOutcome::Respond(text)) => {
-                        Ok(SubmissionResult::Response { content: text })
+                        Ok(SubmissionResult::Response {
+                            content: text,
+                            attachments: Vec::new(),
+                        })
                     }
                     Ok(crate::bridge::BridgeOutcome::NoResponse)
                     | Ok(crate::bridge::BridgeOutcome::Pending) => {
@@ -2269,20 +2325,16 @@ impl Agent {
 
         // Convert SubmissionResult to a HandleOutcome.
         match result? {
-            SubmissionResult::Response { content } => {
-                // Suppress silent replies (e.g. from group chat "nothing to say" responses).
-                // Silent replies exit single-message REPL invocations.
-                if ironclaw_llm::is_silent_reply(&content) {
-                    tracing::debug!("Suppressing silent reply token");
-                    Ok(HandleOutcome::Shutdown)
-                } else if content.is_empty() {
-                    Ok(HandleOutcome::NoResponse)
-                } else {
-                    Ok(HandleOutcome::Respond(
-                        build_outgoing_response_for_thread(&session, thread_id, content).await,
-                    ))
-                }
-            }
+            SubmissionResult::Response {
+                content,
+                attachments,
+            } => Ok(submission_response_to_handle_outcome(
+                &session,
+                thread_id,
+                content,
+                attachments,
+            )
+            .await),
             SubmissionResult::Ok {
                 message: output_message,
             } => {
@@ -2833,7 +2885,8 @@ mod tests {
             thread_id
         };
 
-        let response = build_outgoing_response_for_thread(&session, thread_id, "done").await;
+        let response =
+            build_outgoing_response_for_thread(&session, thread_id, "done", Vec::new()).await;
 
         assert_eq!(response.content, "done");
         assert!(response.attachments.is_empty());
@@ -2844,6 +2897,36 @@ mod tests {
         );
         assert_eq!(response.inline_attachments[0].mime_type, "image/png");
         assert_eq!(response.inline_attachments[0].data, b"png-bytes");
+    }
+
+    #[tokio::test]
+    async fn empty_submission_response_with_attachments_is_delivered() {
+        use super::submission_response_to_handle_outcome;
+        use crate::agent::session::Session;
+        use std::sync::Arc;
+
+        let session: Arc<tokio::sync::Mutex<Session>> =
+            Arc::new(tokio::sync::Mutex::new(Session::new("user-123")));
+        let thread_id = {
+            let mut sess = session.lock().await;
+            sess.create_thread(None).id
+        };
+
+        let outcome = submission_response_to_handle_outcome(
+            &session,
+            thread_id,
+            String::new(),
+            vec!["/tmp/generated-image.png".to_string()],
+        )
+        .await;
+
+        match outcome {
+            HandleOutcome::Respond(response) => {
+                assert!(response.content.is_empty());
+                assert_eq!(response.attachments, vec!["/tmp/generated-image.png"]);
+            }
+            other => panic!("expected attachment response, got {other:?}"),
+        }
     }
 
     #[tokio::test]
