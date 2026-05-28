@@ -75,6 +75,7 @@ use crate::google_oauth::google_provider_client;
 use crate::input::OAuthClientConfig;
 use crate::input::{RebornRuntimeProcessBinding, RebornStorageInput};
 use crate::lifecycle::{RebornLocalSkillManagementPort, build_local_skill_management_port};
+use crate::local_dev_capability_policy::local_dev_capability_policy;
 use crate::local_dev_mounts::{skill_context_mount_view, workspace_mount_view};
 use crate::{
     RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
@@ -1085,22 +1086,17 @@ fn local_dev_builtin_extension_registry() -> Result<ExtensionRegistry, RebornBui
 }
 
 fn local_dev_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuildError> {
+    let policy =
+        local_dev_capability_policy().map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("local-dev capability policy is invalid: {error}"),
+        })?;
     HostTrustPolicy::new(vec![Box::new(AdminConfig::with_entries(vec![
         AdminEntry::for_local_manifest(
-            PackageId::new("builtin").map_err(|error| RebornBuildError::InvalidConfig {
-                reason: format!("built-in first-party package id is invalid: {error}"),
-            })?,
-            "/system/extensions/builtin/manifest.toml".to_string(),
+            policy.provider.id,
+            policy.provider.manifest_path,
             None,
             HostTrustAssignment::first_party(),
-            vec![
-                EffectKind::DispatchCapability,
-                EffectKind::ReadFilesystem,
-                EffectKind::WriteFilesystem,
-                EffectKind::Network,
-                EffectKind::SpawnProcess,
-                EffectKind::ExecuteCode,
-            ],
+            policy.provider.authority_effects,
             None,
         ),
         AdminEntry::for_local_manifest(
