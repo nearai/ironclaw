@@ -30,6 +30,7 @@ mod extension_lifecycle;
 mod extension_lifecycle_capabilities;
 mod extension_lifecycle_command;
 mod factory;
+mod google_oauth;
 mod gsuite;
 mod input;
 mod lifecycle;
@@ -44,6 +45,10 @@ mod product_live_adapters;
 mod production_runtime_policy;
 mod profile;
 mod projection;
+#[cfg(feature = "root-llm-provider")]
+mod provider_admin;
+#[cfg(feature = "root-llm-provider")]
+mod provider_admin_product_command;
 mod readiness;
 mod runtime;
 mod runtime_input;
@@ -74,7 +79,7 @@ pub use extension_lifecycle_command::{
 };
 pub use factory::{RebornServices, build_reborn_services};
 pub use gsuite::{bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers};
-pub use input::{RebornBuildInput, RebornRuntimeProcessBinding};
+pub use input::{OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding};
 pub use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePhase, LifecycleProductPayload,
     LifecycleProductResponse,
@@ -102,6 +107,14 @@ pub use product_live_adapters::{
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use production_runtime_policy::RebornProductionRuntimePolicy;
 pub use profile::{RebornCompositionProfile, RebornCompositionProfileParseError};
+#[cfg(feature = "root-llm-provider")]
+pub use provider_admin::{
+    RebornModelRoutesState, RebornProviderAdmin, RebornProviderAdminError, RebornProviderInfo,
+    RebornProviderList, RebornProviderMetadata, RebornProviderSelection, RebornProviderStatus,
+    RebornProviderWriteOutcome, RebornV1State,
+};
+#[cfg(feature = "root-llm-provider")]
+pub use provider_admin_product_command::RebornProviderAdminProductCommandService;
 pub use readiness::{RebornFacadeReadiness, RebornReadiness, RebornReadinessState};
 pub use runtime::{
     AssistantReply, ConversationId, RebornRuntime, RebornRuntimeError, RebornSkillActivation,

@@ -10,9 +10,9 @@ use ironclaw_auth::{
     CredentialAccountUpdateBinding, CredentialRefreshReport, CredentialRefreshRequest,
     CredentialSetupService, InMemoryAuthProductServices, ManualTokenSetupRequest, NewAuthFlow,
     OAuthAuthorizationUrl, OAuthCallbackClaimRequest, OAuthCallbackFailureInput,
-    OAuthCallbackInput, OAuthProviderCallbackRequest, OpaqueStateHash, PkceVerifierHash,
-    ProviderCallbackOutcome, SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
-    SecretSubmitRequest, Timestamp,
+    OAuthCallbackInput, OAuthProviderCallbackRequest, OAuthProviderExchangeContext,
+    OpaqueStateHash, PkceVerifierHash, ProviderCallbackOutcome, SecretCleanupReport,
+    SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest, Timestamp,
 };
 use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
 use secrecy::SecretString;
@@ -75,7 +75,6 @@ pub struct RebornOAuthCallbackRequest {
 ///
 /// The browser-facing route chooses neither flow kind nor continuation. Those
 /// product-auth semantics stay here with the auth service boundary.
-#[allow(dead_code, reason = "used by upcoming Reborn OAuth setup route wiring")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RebornOAuthStartFlowRequest {
     pub(crate) scope: AuthProductScope,
@@ -324,6 +323,11 @@ impl RebornProductAuthServicePorts {
             continuation_dispatcher,
         )
     }
+
+    pub fn with_provider_client(mut self, provider_client: Arc<dyn AuthProviderClient>) -> Self {
+        self.provider_client = provider_client;
+        self
+    }
 }
 
 /// Reborn product-auth service bundle exposed by the composition root.
@@ -547,7 +551,13 @@ impl RebornProductAuthServices {
                 } else {
                     let exchange = match self
                         .provider_client
-                        .exchange_callback(provider_request)
+                        .exchange_callback(
+                            OAuthProviderExchangeContext {
+                                scope: request.scope.clone(),
+                                flow_id: request.flow_id,
+                            },
+                            provider_request,
+                        )
                         .await
                     {
                         Ok(exchange) => exchange,
@@ -622,6 +632,12 @@ impl RebornProductAuthServices {
                 error_code = ?error.code(),
                 "reborn auth callback completed but continuation dispatch failed"
             );
+            let error = match error {
+                AuthProductError::TokenExchangeFailed
+                | AuthProductError::ProviderDenied
+                | AuthProductError::MalformedCallback => AuthProductError::BackendUnavailable,
+                error => error,
+            };
             return Err(error.into());
         }
 
@@ -1005,6 +1021,7 @@ mod tests {
     impl AuthProviderClient for SharedAuthTestDouble {
         async fn exchange_callback(
             &self,
+            _context: OAuthProviderExchangeContext,
             _request: OAuthProviderCallbackRequest,
         ) -> Result<OAuthProviderExchange, AuthProductError> {
             unreachable!("constructor tests do not call provider-client methods")

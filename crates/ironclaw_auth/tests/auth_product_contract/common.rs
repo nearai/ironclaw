@@ -12,10 +12,11 @@ pub use ironclaw_auth::{
     CredentialSelectionInput, CredentialSetupService, InMemoryAuthProductServices,
     LifecyclePackageRef, ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount,
     OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthCallbackInput,
-    OAuthProviderCallbackRequest, OAuthProviderExchange, OAuthProviderRefreshRequest,
-    OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret, ProviderCallbackOutcome, ProviderScope,
-    SecretCleanupAction, SecretCleanupQuarantineReason, SecretCleanupRequest, SecretCleanupService,
-    SecretSubmitRequest, SecretSubmitResult, TurnRunRef,
+    OAuthProviderCallbackRequest, OAuthProviderExchange, OAuthProviderExchangeContext,
+    OAuthProviderRefreshRequest, OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret,
+    ProviderCallbackOutcome, ProviderScope, SecretCleanupAction, SecretCleanupQuarantineReason,
+    SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest, SecretSubmitResult,
+    TurnRunRef,
 };
 pub use ironclaw_host_api::{ExtensionId, InvocationId, ResourceScope, SecretHandle, UserId};
 pub use secrecy::SecretString;

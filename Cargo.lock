@@ -4872,6 +4872,7 @@ dependencies = [
  "ironclaw_approvals",
  "ironclaw_auth",
  "ironclaw_authorization",
+ "ironclaw_capabilities",
  "ironclaw_common",
  "ironclaw_event_projections",
  "ironclaw_event_streams",
@@ -4924,10 +4925,12 @@ dependencies = [
 name = "ironclaw_reborn_config"
 version = "0.1.0"
 dependencies = [
+ "fs4",
  "serde",
  "tempfile",
  "thiserror 2.0.18",
  "toml 0.8.23",
+ "toml_edit 0.22.27",
 ]
 
 [[package]]

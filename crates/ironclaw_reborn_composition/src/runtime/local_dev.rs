@@ -13,8 +13,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, CapabilitySurfacePolicy, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID,
-    GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HostRuntime, JSON_CAPABILITY_ID,
-    LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
+    GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime,
+    JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
     SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SurfaceKind,
     TIME_CAPABILITY_ID, VisibleCapabilityRequest as HostVisibleCapabilityRequest,
     WRITE_FILE_CAPABILITY_ID,
@@ -787,6 +787,7 @@ enum LocalDevCapabilityKind {
     Workspace,
     AmbientShell,
     Network,
+    NetworkFileSave,
     ExtensionLifecycleSearch,
     ExtensionLifecycleMutation,
     SkillInstall,
@@ -798,6 +799,8 @@ fn local_dev_capability_kind(capability_id: &str) -> LocalDevCapabilityKind {
         LocalDevCapabilityKind::AmbientShell
     } else if capability_id == HTTP_CAPABILITY_ID {
         LocalDevCapabilityKind::Network
+    } else if capability_id == HTTP_SAVE_CAPABILITY_ID {
+        LocalDevCapabilityKind::NetworkFileSave
     } else if capability_id == EXTENSION_SEARCH_CAPABILITY_ID {
         LocalDevCapabilityKind::ExtensionLifecycleSearch
     } else if capability_id == EXTENSION_INSTALL_CAPABILITY_ID
@@ -854,6 +857,15 @@ pub(super) fn local_dev_grant_constraints(
             expires_at: None,
             max_invocations: None,
         },
+        LocalDevCapabilityKind::NetworkFileSave => GrantConstraints {
+            allowed_effects: local_dev_network_file_save_allowed_effects(),
+            mounts: workspace_mounts.clone(),
+            network: local_dev_shell_network_policy(),
+            secrets: Vec::new(),
+            resource_ceiling: None,
+            expires_at: None,
+            max_invocations: None,
+        },
         LocalDevCapabilityKind::ExtensionLifecycleSearch => GrantConstraints {
             allowed_effects: local_dev_extension_lifecycle_search_allowed_effects(),
             mounts: MountView::default(),
@@ -902,12 +914,13 @@ pub(super) fn local_dev_grant_constraints(
     }
 }
 
-fn local_dev_builtin_capability_ids() -> [&'static str; 18] {
+fn local_dev_builtin_capability_ids() -> [&'static str; 19] {
     [
         ECHO_CAPABILITY_ID,
         TIME_CAPABILITY_ID,
         JSON_CAPABILITY_ID,
         HTTP_CAPABILITY_ID,
+        HTTP_SAVE_CAPABILITY_ID,
         SHELL_CAPABILITY_ID,
         READ_FILE_CAPABILITY_ID,
         WRITE_FILE_CAPABILITY_ID,
@@ -927,6 +940,14 @@ fn local_dev_builtin_capability_ids() -> [&'static str; 18] {
 
 fn local_dev_network_allowed_effects() -> Vec<EffectKind> {
     vec![EffectKind::DispatchCapability, EffectKind::Network]
+}
+
+fn local_dev_network_file_save_allowed_effects() -> Vec<EffectKind> {
+    vec![
+        EffectKind::DispatchCapability,
+        EffectKind::Network,
+        EffectKind::WriteFilesystem,
+    ]
 }
 
 fn local_dev_extension_lifecycle_search_allowed_effects() -> Vec<EffectKind> {

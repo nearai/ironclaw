@@ -157,7 +157,7 @@ impl ExecutorStage<ModelInput> for ModelStage {
                                     })?,
                                 )
                                 .await;
-                            let messages = build_prompt_bundle_for_surface(
+                            let bundle = build_prompt_bundle_for_surface(
                                 ctx,
                                 &state,
                                 surface_version.clone(),
@@ -168,7 +168,7 @@ impl ExecutorStage<ModelInput> for ModelStage {
                                 CancelCheck::Continue(next) => state = *next,
                                 CancelCheck::Exit(exit) => return Ok(ModelStep::Exit(exit)),
                             }
-                            request.messages = messages;
+                            request.messages = bundle.into_model_messages(&mut state);
                         }
                         RecoveryOutcome::ToolErrorResult { .. } => {
                             return Err(AgentLoopExecutorError::PlannerContract {

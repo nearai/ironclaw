@@ -292,7 +292,10 @@ async fn oversized_single_snippet_is_allowed_within_aggregate_budget() {
 
     let snippets = service.skill_snippets(&snapshot).await.unwrap();
     assert_eq!(snippets.len(), 1);
-    assert!(snippets[0].safe_summary.contains(&"x".repeat(128)));
+    assert_eq!(snippets[0].safe_summary, "desc");
+    assert!(!snippets[0].safe_summary.contains(&"x".repeat(128)));
+    assert!(snippets[0].model_content.contains("desc"));
+    assert!(snippets[0].model_content.contains(&"x".repeat(128)));
 }
 
 #[tokio::test]

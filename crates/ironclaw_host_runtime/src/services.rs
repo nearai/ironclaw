@@ -15,6 +15,7 @@ use ironclaw_approvals::ApprovalResolver;
 use ironclaw_authorization::{
     CapabilityLeaseStore, InMemoryCapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer,
 };
+use ironclaw_capabilities::CapabilityObligationHandler;
 use ironclaw_dispatcher::{
     RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher,
 };
@@ -151,6 +152,37 @@ where
     turn_run_transition_port: Option<Arc<dyn TurnRunTransitionPort>>,
     turn_run_wake_notifier: Option<Arc<dyn TurnRunWakeNotifier>>,
     component_types: ProductionComponentTypes,
+}
+
+/// Canonical host-runtime ports used by product-auth provider adapters.
+///
+/// This intentionally exposes only the already-composed egress and obligation
+/// handler. Product/auth adapters must not receive the mutable handoff stores
+/// that back those ports.
+#[derive(Clone)]
+pub struct ProductAuthProviderRuntimePorts {
+    runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
+    obligation_handler: Arc<dyn CapabilityObligationHandler>,
+}
+
+impl ProductAuthProviderRuntimePorts {
+    fn new(
+        runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
+        obligation_handler: Arc<dyn CapabilityObligationHandler>,
+    ) -> Self {
+        Self {
+            runtime_http_egress,
+            obligation_handler,
+        }
+    }
+
+    pub fn runtime_http_egress(&self) -> Arc<dyn RuntimeHttpEgress> {
+        Arc::clone(&self.runtime_http_egress)
+    }
+
+    pub fn obligation_handler(&self) -> Arc<dyn CapabilityObligationHandler> {
+        Arc::clone(&self.obligation_handler)
+    }
 }
 
 impl<F, G, S, R> HostRuntimeServices<F, G, S, R>
@@ -314,6 +346,16 @@ where
     /// Builds the upper facade without production validation.
     pub fn shared_extension_registry(&self) -> Arc<SharedExtensionRegistry> {
         Arc::clone(&self.registry)
+    }
+
+    /// Returns the canonical host-runtime egress/obligation ports for
+    /// product-auth provider adapters.
+    pub fn product_auth_provider_runtime_ports(&self) -> Option<ProductAuthProviderRuntimePorts> {
+        let runtime_http_egress = runtime_http_egress(&self.runtime_http_egress)?;
+        Some(ProductAuthProviderRuntimePorts::new(
+            runtime_http_egress,
+            Arc::new(self.builtin_obligation_handler()),
+        ))
     }
 
     #[doc(hidden)]

@@ -2158,9 +2158,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
                     "properties": {
                         "flavor_id": {"type": "string"},
                         "task": {"type": "string"},
-                        "handoff": {"type": "string"},
-                        "mode": {"type": "string", "enum": ["blocking", "background"]},
-                        "run_in_background": {"type": "boolean"}
+                        "handoff": {"type": "string"}
                     },
                     "required": ["flavor_id", "task"]
                 }),
