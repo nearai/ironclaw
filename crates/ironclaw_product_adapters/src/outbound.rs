@@ -184,6 +184,16 @@ pub enum ProgressKind {
     Reflecting,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductWorkSummaryPhase {
+    Planning,
+    Working,
+    Waiting,
+    Retrying,
+    Context,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityActivityView {
     pub invocation_id: InvocationId,
@@ -530,16 +540,36 @@ pub struct AuthPromptView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProductProjectionItem {
-    Text { id: String, body: String },
-    Thinking { id: String, body: String },
-    RunStatus { run_id: TurnRunId, status: String },
-    Gate { gate_ref: String, headline: String },
+    Text {
+        id: String,
+        body: String,
+    },
+    Thinking {
+        id: String,
+        body: String,
+    },
+    WorkSummary {
+        id: String,
+        run_id: TurnRunId,
+        phase: ProductWorkSummaryPhase,
+        body: String,
+    },
+    RunStatus {
+        run_id: TurnRunId,
+        status: String,
+    },
+    Gate {
+        gate_ref: String,
+        headline: String,
+    },
 }
 
 impl ProductProjectionItem {
     fn validate(&self) -> Result<(), ProductAdapterError> {
         match self {
-            Self::Text { id, body } | Self::Thinking { id, body } => {
+            Self::Text { id, body }
+            | Self::Thinking { id, body }
+            | Self::WorkSummary { id, body, .. } => {
                 validate_bounded_text("projection_item_id", id, PROJECTION_ITEM_ID_MAX_BYTES)?;
                 validate_bounded_text("projection_text", body, PROJECTION_TEXT_MAX_BYTES)
             }
@@ -572,14 +602,43 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
         #[derive(Deserialize)]
         #[serde(rename_all = "snake_case")]
         enum Wire {
-            Text { id: String, body: String },
-            Thinking { id: String, body: String },
-            RunStatus { run_id: TurnRunId, status: String },
-            Gate { gate_ref: String, headline: String },
+            Text {
+                id: String,
+                body: String,
+            },
+            Thinking {
+                id: String,
+                body: String,
+            },
+            WorkSummary {
+                id: String,
+                run_id: TurnRunId,
+                phase: ProductWorkSummaryPhase,
+                body: String,
+            },
+            RunStatus {
+                run_id: TurnRunId,
+                status: String,
+            },
+            Gate {
+                gate_ref: String,
+                headline: String,
+            },
         }
         let value = match Wire::deserialize(deserializer)? {
             Wire::Text { id, body } => ProductProjectionItem::Text { id, body },
             Wire::Thinking { id, body } => ProductProjectionItem::Thinking { id, body },
+            Wire::WorkSummary {
+                id,
+                run_id,
+                phase,
+                body,
+            } => ProductProjectionItem::WorkSummary {
+                id,
+                run_id,
+                phase,
+                body,
+            },
             Wire::RunStatus { run_id, status } => {
                 ProductProjectionItem::RunStatus { run_id, status }
             }
@@ -754,6 +813,30 @@ mod tests {
         assert_eq!(value["items"][0]["thinking"]["body"], "checking context");
         let decoded: ProductProjectionState =
             serde_json::from_value(value).expect("deserialize thinking projection");
+        assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn projection_state_round_trips_work_summary_item() {
+        let run_id = TurnRunId::new();
+        let state = ProductProjectionState::new(
+            "thread-1",
+            vec![ProductProjectionItem::WorkSummary {
+                id: "work-summary:run:1".to_string(),
+                run_id,
+                phase: ProductWorkSummaryPhase::Planning,
+                body: "checking branch state".to_string(),
+            }],
+        )
+        .expect("valid work summary projection");
+        let value = serde_json::to_value(&state).expect("serialize");
+        assert_eq!(
+            value["items"][0]["work_summary"]["body"],
+            "checking branch state"
+        );
+        assert_eq!(value["items"][0]["work_summary"]["phase"], "planning");
+        let decoded: ProductProjectionState =
+            serde_json::from_value(value).expect("deserialize work summary projection");
         assert_eq!(decoded, state);
     }
 

@@ -2,8 +2,8 @@ use super::*;
 use ironclaw_turns::{
     TurnId,
     run_profile::{
-        CapabilityInputRef, InMemoryLoopHostMilestoneSink, LoopDriverId, LoopHostMilestone,
-        LoopHostMilestoneKind,
+        CapabilityInputRef, InMemoryLoopHostMilestoneSink, LoopDriverId, LoopDriverNoteKind,
+        LoopHostMilestone, LoopHostMilestoneKind, LoopSafeSummary,
     },
 };
 
@@ -402,7 +402,7 @@ async fn webui_event_stream_drains_live_reasoning_projection_from_update_source(
         event_log,
         ReplyTargetBindingRef::new("webui-thinking-reply").unwrap(),
     );
-    let sink = services.with_live_reasoning_milestone_sink(
+    let sink = services.with_live_progress_milestone_sink(
         Arc::new(InMemoryLoopHostMilestoneSink::default()),
         user_id.clone(),
     );
@@ -443,6 +443,70 @@ async fn webui_event_stream_drains_live_reasoning_projection_from_update_source(
                     && state.items.iter().any(|item| matches!(
                         item,
                         ProductProjectionItem::Thinking { body, .. } if body == "checking context"
+                    ))
+        )
+    }));
+}
+
+#[tokio::test]
+async fn webui_event_stream_drains_work_summary_projection_from_driver_note() {
+    let tenant_id = TenantId::new("webui-work-summary-tenant").unwrap();
+    let user_id = UserId::new("webui-work-summary-user").unwrap();
+    let agent_id = AgentId::new("webui-work-summary-agent").unwrap();
+    let thread_id = ThreadId::new("webui-work-summary-thread").unwrap();
+    let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let services = build_reborn_projection_services(
+        event_log,
+        ReplyTargetBindingRef::new("webui-work-summary-reply").unwrap(),
+    );
+    let sink = services.with_live_progress_milestone_sink(
+        Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        user_id.clone(),
+    );
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+    let run_id = TurnRunId::new();
+
+    sink.publish_loop_milestone(LoopHostMilestone {
+        scope: scope.clone(),
+        turn_id: TurnId::new(),
+        run_id,
+        loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
+        kind: LoopHostMilestoneKind::DriverNote {
+            kind: LoopDriverNoteKind::Planning,
+            safe_summary: LoopSafeSummary::new("checking branch state").unwrap(),
+        },
+    })
+    .await
+    .unwrap();
+
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id),
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(events.iter().any(|event| {
+        matches!(
+            event.payload(),
+            ProductOutboundPayload::ProjectionUpdate { state }
+                if state.thread_id == thread_id.to_string()
+                    && state.items.iter().any(|item| matches!(
+                        item,
+                        ProductProjectionItem::WorkSummary {
+                            run_id: observed_run_id,
+                            phase: ProductWorkSummaryPhase::Planning,
+                            body,
+                            ..
+                        } if *observed_run_id == run_id && body == "checking branch state"
                     ))
         )
     }));

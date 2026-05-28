@@ -112,6 +112,10 @@ Reducer rules:
 - product-facing model reasoning projections must use model-visible-sanitized
   reasoning deltas only. They are live UI hints, not canonical transcript,
   checkpoint, audit, or replay state.
+- product-facing work summary projections must use sanitized driver
+  `LoopSafeSummary` text only. They describe host/driver progress phases such
+  as planning, waiting, retrying, or context work, and remain distinct from raw
+  model reasoning and durable transcript content.
 - transport adapters may bound activity fan-out per projection item; bounded
   snapshots must prefer the most recently updated activity facts and keep
   reconnect cursors resumable

@@ -15,7 +15,7 @@ use ironclaw_event_streams::{
     ProjectionStreamError as EventProjectionStreamError, ProjectionStreamItem,
     ProjectionSubscribeRequest, ProjectionSubscription as EventProjectionSubscription,
     ProjectionTarget, ProjectionViewClass, SubscriberCapabilities, ThreadLiveProjectionItem,
-    ThreadLiveProjectionUpdate,
+    ThreadLiveProjectionUpdate, ThreadLiveWorkSummaryPhase,
 };
 use ironclaw_events::{DurableEventLog, EventCursor, EventStreamKey, ReadScope};
 use ironclaw_host_api::UserId;
@@ -24,9 +24,9 @@ use ironclaw_product_adapters::{
     AdapterInstallationId, CapabilityActivityStatusView, CapabilityActivityView,
     CapabilityActivityViewInput, ExternalActorRef, ExternalConversationRef, ProductAdapterError,
     ProductAdapterId, ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
-    ProductProjectionItem, ProductProjectionState, ProductWorkflowRejectionKind,
-    ProjectionCursor as ProductProjectionCursor, ProjectionStream, ProjectionSubscriptionRequest,
-    RedactedString,
+    ProductProjectionItem, ProductProjectionState, ProductWorkSummaryPhase,
+    ProductWorkflowRejectionKind, ProjectionCursor as ProductProjectionCursor, ProjectionStream,
+    ProjectionSubscriptionRequest, RedactedString,
 };
 use ironclaw_turns::{
     ReplyTargetBindingRef, TurnActor, TurnCoordinator, TurnEventProjectionCursor,
@@ -34,11 +34,11 @@ use ironclaw_turns::{
 };
 
 mod display_preview;
-mod live_reasoning;
+mod live_progress;
 mod runtime_replay;
 mod turn_events;
 use display_preview::{CapabilityDisplayPreviewSource, NoopCapabilityDisplayPreviewSource};
-use live_reasoning::LiveReasoningMilestoneSink;
+use live_progress::LiveProgressMilestoneSink;
 use runtime_replay::{
     RuntimePayloadCandidate, replay_payload_candidates, snapshot_payload_candidates,
 };
@@ -89,12 +89,12 @@ impl RebornProjectionServices {
         })
     }
 
-    pub(crate) fn with_live_reasoning_milestone_sink(
+    pub(crate) fn with_live_progress_milestone_sink(
         &self,
         inner: Arc<dyn LoopHostMilestoneSink>,
         actor_user_id: UserId,
     ) -> Arc<dyn LoopHostMilestoneSink> {
-        Arc::new(LiveReasoningMilestoneSink::new(
+        Arc::new(LiveProgressMilestoneSink::new(
             inner,
             Arc::clone(&self.live_updates),
             actor_user_id,
@@ -546,6 +546,17 @@ fn live_update_payloads(
                 id: id.clone(),
                 body: body.clone(),
             },
+            ThreadLiveProjectionItem::WorkSummary {
+                id,
+                run_id,
+                phase,
+                body,
+            } => ProductProjectionItem::WorkSummary {
+                id: id.clone(),
+                run_id: *run_id,
+                phase: work_summary_phase(*phase),
+                body: body.clone(),
+            },
         })
         .collect::<Vec<_>>();
     if items.is_empty() {
@@ -559,6 +570,16 @@ fn live_update_payloads(
         total: 1,
         already_delivered: 0,
     }))
+}
+
+fn work_summary_phase(phase: ThreadLiveWorkSummaryPhase) -> ProductWorkSummaryPhase {
+    match phase {
+        ThreadLiveWorkSummaryPhase::Planning => ProductWorkSummaryPhase::Planning,
+        ThreadLiveWorkSummaryPhase::Working => ProductWorkSummaryPhase::Working,
+        ThreadLiveWorkSummaryPhase::Waiting => ProductWorkSummaryPhase::Waiting,
+        ThreadLiveWorkSummaryPhase::Retrying => ProductWorkSummaryPhase::Retrying,
+        ThreadLiveWorkSummaryPhase::Context => ProductWorkSummaryPhase::Context,
+    }
 }
 
 async fn snapshot_payloads(

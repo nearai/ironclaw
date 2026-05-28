@@ -56,7 +56,8 @@ pub use outbound::{
     CapabilityDisplayPreviewView, CapabilityDisplayPreviewViewInput, FinalReplyView,
     GatePromptView, ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
     ProductProjectionItem, ProductProjectionState, ProductRenderOutcome,
-    ProductSynchronousResponse, ProgressKind, ProgressUpdateView, ProjectionCursor,
+    ProductSynchronousResponse, ProductWorkSummaryPhase, ProgressKind, ProgressUpdateView,
+    ProjectionCursor,
 };
 pub use projection::{ProjectionStream, ProjectionSubscriptionRequest};
 pub use redaction::{REDACTED_PLACEHOLDER, RedactedDebug, RedactedString};

@@ -991,7 +991,7 @@ pub async fn build_reborn_runtime(
         validated_identity.reply_target_binding_ref.clone(),
     );
     let milestone_sink = projection_services
-        .with_live_reasoning_milestone_sink(durable_milestone_sink, actor_user_id.clone());
+        .with_live_progress_milestone_sink(durable_milestone_sink, actor_user_id.clone());
     let local_dev_capability_policy = Arc::new(local_dev_capability_policy().map_err(|error| {
         tracing::error!(%error, "local-dev capability policy is invalid");
         RebornRuntimeError::InvalidArgument {
