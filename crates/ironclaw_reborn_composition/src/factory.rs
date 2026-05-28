@@ -2052,6 +2052,7 @@ mod tests {
             EffectKind::DispatchCapability,
             EffectKind::ReadFilesystem,
             EffectKind::WriteFilesystem,
+            EffectKind::DeleteFilesystem,
             EffectKind::Network,
         ]
     }

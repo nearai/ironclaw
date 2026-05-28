@@ -86,7 +86,21 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
         vec![
             EffectKind::ReadFilesystem,
             EffectKind::WriteFilesystem,
+            EffectKind::DeleteFilesystem,
             EffectKind::Network
+        ]
+    );
+    let skill_remove = package
+        .capabilities
+        .iter()
+        .find(|descriptor| descriptor.id.as_str() == SKILL_REMOVE_CAPABILITY_ID)
+        .expect("skill_remove manifest");
+    assert_eq!(
+        skill_remove.effects,
+        vec![
+            EffectKind::ReadFilesystem,
+            EffectKind::WriteFilesystem,
+            EffectKind::DeleteFilesystem
         ]
     );
     let http = package
@@ -4615,6 +4629,7 @@ fn builtin_effects() -> Vec<EffectKind> {
         EffectKind::DispatchCapability,
         EffectKind::ReadFilesystem,
         EffectKind::WriteFilesystem,
+        EffectKind::DeleteFilesystem,
         EffectKind::Network,
         EffectKind::SpawnProcess,
         EffectKind::ExecuteCode,

@@ -5,6 +5,7 @@ authority_effects = [
     "dispatch_capability",
     "read_filesystem",
     "write_filesystem",
+    "delete_filesystem",
     "spawn_process",
     "execute_code",
     "network",
@@ -134,12 +135,12 @@ network = "default"
 
 [[grants]]
 capability = "builtin.skill_install"
-effects = ["dispatch_capability", "read_filesystem", "write_filesystem", "network"]
+effects = ["dispatch_capability", "read_filesystem", "write_filesystem", "delete_filesystem", "network"]
 mounts = "skill_management"
 network = "local_dev_wildcard"
 
 [[grants]]
 capability = "builtin.skill_remove"
-effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
+effects = ["dispatch_capability", "read_filesystem", "write_filesystem", "delete_filesystem"]
 mounts = "skill_management"
 network = "default"
