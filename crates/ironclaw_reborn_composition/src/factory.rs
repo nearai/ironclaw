@@ -875,7 +875,6 @@ fn local_dev_bytes_capabilities() -> BackendCapabilities {
         .with(Capability::Delete)
 }
 
-#[cfg(feature = "libsql")]
 fn local_dev_scoped_filesystem(
     filesystem: Arc<LocalDevRootFilesystem>,
 ) -> Arc<ScopedFilesystem<LocalDevRootFilesystem>> {
@@ -1252,15 +1251,9 @@ async fn build_production_shaped(
 async fn resolve_secret_master_key(
     explicit: Option<ironclaw_secrets::SecretMaterial>,
 ) -> Result<ironclaw_secrets::SecretMaterial, RebornBuildError> {
-    if let Some(master_key) = explicit {
-        Ok(master_key)
-    } else if let Some(master_key) =
-        ironclaw_secrets::keychain::resolve_master_key_material().await?
-    {
-        Ok(master_key)
-    } else {
-        Err(RebornBuildError::MissingSecretMasterKey)
-    }
+    resolve_explicit_or_keychain_master_key(explicit)
+        .await?
+        .ok_or(RebornBuildError::MissingSecretMasterKey)
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -1431,10 +1424,6 @@ where
     .await?;
     let services = apply_production_runtime_process_binding(services, process_binding);
 
-    // safety: `with_secret_store` is called unconditionally above on the same
-    // builder chain, so `try_with_host_http_egress` can only return a
-    // `Missing(SecretStore)` wiring report if the host-runtime builder API
-    // regresses; treat that as infallible here.
     let services = services
         .try_with_host_http_egress_with_body_store(
             ironclaw_network::PolicyNetworkHttpEgress::new(
@@ -1442,7 +1431,7 @@ where
             ),
             Arc::clone(&scoped_filesystem),
         )
-        .expect("secret_store wired above guarantees host HTTP egress is buildable"); // safety: see comment above
+        .map_err(crate::RebornCompositionError::from)?;
 
     Ok(services)
 }
@@ -1463,7 +1452,9 @@ async fn build_filesystem_secret_store<F>(
 where
     F: RootFilesystem + 'static,
 {
-    let master_key = resolve_composition_secret_master_key(master_key).await?;
+    let master_key = resolve_explicit_or_keychain_master_key(master_key)
+        .await?
+        .ok_or(crate::RebornCompositionError::MissingSecretMasterKey)?;
     let crypto = Arc::new(ironclaw_secrets::SecretsCrypto::new(master_key)?);
     Ok(Arc::new(FilesystemSecretStore::new(
         scoped_filesystem,
@@ -1472,17 +1463,17 @@ where
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-async fn resolve_composition_secret_master_key(
+async fn resolve_explicit_or_keychain_master_key(
     explicit: Option<ironclaw_secrets::SecretMaterial>,
-) -> Result<ironclaw_secrets::SecretMaterial, crate::RebornCompositionError> {
+) -> Result<Option<ironclaw_secrets::SecretMaterial>, ironclaw_secrets::SecretError> {
     if let Some(master_key) = explicit {
-        Ok(master_key)
+        Ok(Some(master_key))
     } else if let Some(master_key) =
         ironclaw_secrets::keychain::resolve_master_key_material().await?
     {
-        Ok(master_key)
+        Ok(Some(master_key))
     } else {
-        Err(crate::RebornCompositionError::MissingSecretMasterKey)
+        Ok(None)
     }
 }
 

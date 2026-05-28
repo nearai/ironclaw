@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use std::sync::Arc;
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
+#[cfg(feature = "libsql")]
 use chrono::Utc;
 #[cfg(feature = "postgres")]
 use deadpool_postgres::tokio_postgres;
@@ -12,13 +12,13 @@ use ironclaw_auth::{OAuthClientId, OAuthRedirectUri};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{
     AuditMode, DeploymentMode, EffectKind, FilesystemBackendKind, NetworkMode, PackageId,
-    ProcessBackendKind, RuntimeKind, RuntimeProfile, SecretMode, UserId,
+    ProcessBackendKind, RuntimeKind, RuntimeProfile, SecretMode,
     runtime_policy::{ApprovalPolicy, EffectiveRuntimePolicy},
 };
 #[cfg(feature = "libsql")]
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, ExecutionContext, ExtensionId,
-    GrantConstraints, MountView, NetworkPolicy, Principal, TrustClass,
+    GrantConstraints, MountView, NetworkPolicy, Principal, TrustClass, UserId,
 };
 #[cfg(feature = "libsql")]
 use ironclaw_host_runtime::{CapabilitySurfacePolicy, SurfaceKind, VisibleCapabilityRequest};
@@ -27,11 +27,9 @@ use ironclaw_host_runtime::{
     SchedulerTurnRunWakeNotifier, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
     TurnRunSchedulerConfig, TurnRunSchedulerHandle,
 };
-#[cfg(all(feature = "postgres", not(feature = "libsql")))]
-use ironclaw_reborn_composition::RebornCompositionProfile;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_reborn_composition::RebornRuntimeProcessBinding;
 #[cfg(feature = "libsql")]
+use ironclaw_reborn_composition::RebornRuntimeProcessBinding;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_reborn_composition::{RebornBuildError, RebornCompositionProfile};
 use ironclaw_reborn_composition::{
     RebornBuildInput, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,
@@ -368,7 +366,7 @@ async fn local_dev_builds_facades_without_production_claim() {
     assert!(services.product_auth.is_some());
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
+#[cfg(feature = "libsql")]
 fn test_sandbox_process_binding() -> RebornRuntimeProcessBinding {
     let process_port = Arc::new(ironclaw_host_runtime::TenantSandboxProcessPort::new(
         Arc::new(ProductionReadySandboxTransport),
@@ -376,11 +374,11 @@ fn test_sandbox_process_binding() -> RebornRuntimeProcessBinding {
     RebornRuntimeProcessBinding::tenant_sandbox(process_port)
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
+#[cfg(feature = "libsql")]
 #[derive(Debug)]
 struct ProductionReadySandboxTransport;
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
+#[cfg(feature = "libsql")]
 #[async_trait::async_trait]
 impl ironclaw_host_runtime::SandboxCommandTransport for ProductionReadySandboxTransport {
     async fn run_command(
@@ -787,10 +785,37 @@ async fn production_libsql_resolved_secret_master_key_rejects_invalid_env_key() 
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
-#[ignore = "TODO(#3856): restore when tenant sandbox process-port wiring exists"]
 async fn production_libsql_services_wire_first_party_runtime_http_egress() {
-    // Restore the ProductionValidated readiness and host_runtime.health()
-    // happy-path assertions that are temporarily fail-closed below.
+    let dir = tempfile::tempdir().unwrap();
+    let db = libsql_db_at(dir.path().join("reborn.db")).await;
+    let (notifier, handle) = live_wake_notifier();
+
+    let result = build_reborn_services(
+        RebornBuildInput::libsql(
+            RebornCompositionProfile::Production,
+            "test-owner",
+            db,
+            dir.path().join("events.db").to_string_lossy(),
+            None,
+            test_master_key(),
+        )
+        .with_production_trust_policy(production_trust_policy())
+        .with_runtime_policy(production_runtime_policy())
+        .with_turn_run_wake_notifier(notifier)
+        .with_runtime_process_binding(test_sandbox_process_binding()),
+    )
+    .await;
+
+    handle.shutdown().await;
+
+    let services =
+        result.expect("production libsql services should build with a sandbox process binding");
+    assert_eq!(
+        services.readiness.state,
+        RebornReadinessState::ProductionValidated
+    );
+    assert!(services.host_runtime.is_some());
+    assert!(services.turn_coordinator.is_some());
 }
 
 #[cfg(feature = "postgres")]
@@ -876,10 +901,37 @@ async fn production_postgres_services_require_process_port_for_first_party_runti
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
-#[ignore = "TODO(#3856): restore when tenant sandbox process-port wiring exists"]
 async fn migration_dry_run_validates_libsql_shape() {
-    // Restore the MigrationDryRunValidated readiness and planned-profile
-    // submit_turn assertions that are temporarily fail-closed below.
+    let dir = tempfile::tempdir().unwrap();
+    let db = libsql_db_at(dir.path().join("reborn.db")).await;
+    let (notifier, handle) = live_wake_notifier();
+
+    let result = build_reborn_services(
+        RebornBuildInput::libsql(
+            RebornCompositionProfile::MigrationDryRun,
+            "test-owner",
+            db,
+            dir.path().join("events.db").to_string_lossy(),
+            None,
+            test_master_key(),
+        )
+        .with_production_trust_policy(production_trust_policy())
+        .with_runtime_policy(production_runtime_policy())
+        .with_turn_run_wake_notifier(notifier)
+        .with_runtime_process_binding(test_sandbox_process_binding()),
+    )
+    .await;
+
+    handle.shutdown().await;
+
+    let services = result
+        .expect("migration dry-run libsql services should build with a sandbox process binding");
+    assert_eq!(
+        services.readiness.state,
+        RebornReadinessState::MigrationDryRunValidated
+    );
+    assert!(services.host_runtime.is_some());
+    assert!(services.turn_coordinator.is_some());
 }
 
 #[cfg(feature = "postgres")]
@@ -903,7 +955,7 @@ async fn migration_dry_run_requires_libsql_process_port_for_first_party_runtime(
             RebornCompositionProfile::MigrationDryRun,
             "test-owner",
             db,
-            db_path.to_string_lossy(),
+            dir.path().join("events.db").to_string_lossy(),
             None,
             test_master_key(),
         )
