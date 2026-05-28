@@ -1169,6 +1169,7 @@ where
 
         let mut redaction_values = Vec::new();
         let mut credential_materials = Vec::new();
+        let mut parsed_url = None;
         let credential_injections = std::mem::take(&mut request.credential_injections);
         for injection in &credential_injections {
             let value = match credential_value_for_injection(
@@ -1196,13 +1197,19 @@ where
             // layer and response-body scanner consume raw bytes — but the
             // cache itself never holds a non-zeroizing copy.
             let plaintext = value.expose_secret();
-            if let Err(error) =
-                apply_credential_injection(&mut request, &injection.target, plaintext)
-            {
+            if let Err(error) = apply_credential_injection(
+                &mut request,
+                &mut parsed_url,
+                &injection.target,
+                plaintext,
+            ) {
                 self.discard_staged_policy_for_request(&request);
                 return Err(error);
             }
             redaction_values.extend(redaction_values_for_secret(plaintext));
+        }
+        if let Some(url) = parsed_url {
+            request.url = url.to_string();
         }
 
         let response = self
@@ -1420,6 +1427,7 @@ fn sanitized_secret_error(error: &SecretStoreError) -> String {
 
 fn apply_credential_injection(
     request: &mut RuntimeHttpEgressRequest,
+    parsed_url: &mut Option<url::Url>,
     target: &RuntimeCredentialTarget,
     value: &str,
 ) -> Result<(), RuntimeHttpEgressError> {
@@ -1442,12 +1450,8 @@ fn apply_credential_injection(
             request.headers.push((name.clone(), injected));
         }
         RuntimeCredentialTarget::QueryParam { name } => {
-            let mut url =
-                url::Url::parse(&request.url).map_err(|_| RuntimeHttpEgressError::Credential {
-                    reason: "credential injection target URL is invalid".to_string(),
-                })?;
+            let url = parsed_request_url(&request.url, parsed_url)?;
             url.query_pairs_mut().append_pair(name, value);
-            request.url = url.to_string();
         }
         RuntimeCredentialTarget::PathPlaceholder { placeholder } => {
             if !valid_path_credential_segment(placeholder) {
@@ -1460,10 +1464,7 @@ fn apply_credential_injection(
                     reason: "credential injection path value is invalid".to_string(),
                 });
             }
-            let mut url =
-                url::Url::parse(&request.url).map_err(|_| RuntimeHttpEgressError::Credential {
-                    reason: "credential injection target URL is invalid".to_string(),
-                })?;
+            let url = parsed_request_url(&request.url, parsed_url)?;
             if url.scheme() != "https" {
                 return Err(RuntimeHttpEgressError::Credential {
                     reason: "credential injection path placeholder requires HTTPS".to_string(),
@@ -1506,10 +1507,28 @@ fn apply_credential_injection(
                 }
             }
             url.set_path(&rewritten_path);
-            request.url = url.to_string();
         }
     }
     Ok(())
+}
+
+fn parsed_request_url<'a>(
+    raw_url: &str,
+    parsed_url: &'a mut Option<url::Url>,
+) -> Result<&'a mut url::Url, RuntimeHttpEgressError> {
+    if parsed_url.is_none() {
+        *parsed_url =
+            Some(
+                url::Url::parse(raw_url).map_err(|_| RuntimeHttpEgressError::Credential {
+                    reason: "credential injection target URL is invalid".to_string(),
+                })?,
+            );
+    }
+    parsed_url
+        .as_mut()
+        .ok_or_else(|| RuntimeHttpEgressError::Credential {
+            reason: "credential injection target URL is invalid".to_string(),
+        })
 }
 
 fn valid_path_credential_segment(segment: &str) -> bool {
