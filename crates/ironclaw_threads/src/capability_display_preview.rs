@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 
 const CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES: usize = 2 * 1024;
 const CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES: usize = 16 * 1024;
-const CAPABILITY_DISPLAY_PREVIEW_MAX_LINES: usize = 120;
 const CAPABILITY_DISPLAY_KIND_MAX_BYTES: usize = 32;
 const CAPABILITY_DISPLAY_RESULT_REF_MAX_BYTES: usize = 256;
 
@@ -159,17 +158,7 @@ fn validate_output_preview(value: Option<&str>) -> Result<(), String> {
         "capability display output preview",
         value,
         CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES,
-    )?;
-    if value
-        .lines()
-        .nth(CAPABILITY_DISPLAY_PREVIEW_MAX_LINES)
-        .is_some()
-    {
-        return Err(format!(
-            "capability display output preview must be at most {CAPABILITY_DISPLAY_PREVIEW_MAX_LINES} lines"
-        ));
-    }
-    Ok(())
+    )
 }
 
 fn validate_output_kind(value: Option<&str>) -> Result<(), String> {
@@ -215,6 +204,19 @@ mod tests {
         input.output_preview = Some("line one\nline two".to_string());
 
         CapabilityDisplayPreviewEnvelope::new(input).expect("multiline preview is safe");
+    }
+
+    #[test]
+    fn preview_envelope_accepts_many_preview_lines() {
+        let mut input = preview_input();
+        input.output_preview = Some(
+            (0..=240)
+                .map(|index| format!("line {index}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+
+        CapabilityDisplayPreviewEnvelope::new(input).expect("line count is not capped");
     }
 
     fn preview_input() -> CapabilityDisplayPreviewEnvelopeInput {

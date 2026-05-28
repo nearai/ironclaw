@@ -7,11 +7,12 @@ use ironclaw_auth::{
     AuthFlowKind, AuthFlowManager, AuthFlowRecord, AuthFlowStatus, AuthInteractionId,
     AuthInteractionService, AuthProductError, AuthProductScope, AuthProviderClient, AuthProviderId,
     CredentialAccountId, CredentialAccountLabel, CredentialAccountService, CredentialAccountStatus,
-    CredentialAccountUpdateBinding, CredentialSetupService, InMemoryAuthProductServices,
-    ManualTokenSetupRequest, NewAuthFlow, OAuthAuthorizationUrl, OAuthCallbackClaimRequest,
-    OAuthCallbackFailureInput, OAuthCallbackInput, OAuthProviderCallbackRequest, OpaqueStateHash,
-    PkceVerifierHash, ProviderCallbackOutcome, SecretCleanupService, SecretSubmitRequest,
-    Timestamp,
+    CredentialAccountUpdateBinding, CredentialRefreshReport, CredentialRefreshRequest,
+    CredentialSetupService, InMemoryAuthProductServices, ManualTokenSetupRequest, NewAuthFlow,
+    OAuthAuthorizationUrl, OAuthCallbackClaimRequest, OAuthCallbackFailureInput,
+    OAuthCallbackInput, OAuthProviderCallbackRequest, OAuthProviderExchangeContext,
+    OpaqueStateHash, PkceVerifierHash, ProviderCallbackOutcome, SecretCleanupReport,
+    SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest, Timestamp,
 };
 use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
 use secrecy::SecretString;
@@ -74,7 +75,6 @@ pub struct RebornOAuthCallbackRequest {
 ///
 /// The browser-facing route chooses neither flow kind nor continuation. Those
 /// product-auth semantics stay here with the auth service boundary.
-#[allow(dead_code, reason = "used by upcoming Reborn OAuth setup route wiring")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RebornOAuthStartFlowRequest {
     pub(crate) scope: AuthProductScope,
@@ -222,6 +222,9 @@ pub struct RebornManualTokenSubmitResponse {
 /// Stable sanitized manual-token setup/submit failure safe for route rendering.
 pub type RebornManualTokenError = RebornAuthProductError;
 
+/// Stable sanitized lifecycle failure safe for Web/CLI/API surfaces.
+pub type RebornCredentialLifecycleError = RebornAuthProductError;
+
 fn is_retryable_auth_error(code: AuthErrorCode) -> bool {
     matches!(code, AuthErrorCode::BackendUnavailable)
 }
@@ -319,6 +322,11 @@ impl RebornProductAuthServicePorts {
             self.cleanup_service,
             continuation_dispatcher,
         )
+    }
+
+    pub fn with_provider_client(mut self, provider_client: Arc<dyn AuthProviderClient>) -> Self {
+        self.provider_client = provider_client;
+        self
     }
 }
 
@@ -488,6 +496,36 @@ impl RebornProductAuthServices {
         self
     }
 
+    /// Refresh a credential account through the injected product-auth port.
+    ///
+    /// Concrete account services own the durable account update and provider
+    /// egress wiring; callers enter here so WebUI/setup/lifecycle code does not
+    /// reconstruct refresh authority locally.
+    pub async fn refresh_credential_account(
+        &self,
+        request: CredentialRefreshRequest,
+    ) -> Result<CredentialRefreshReport, RebornCredentialLifecycleError> {
+        self.credential_account_service
+            .refresh_account(request)
+            .await
+            .map_err(RebornCredentialLifecycleError::from)
+    }
+
+    /// Apply ownership-aware credential cleanup for extension lifecycle events.
+    ///
+    /// This facade keeps lifecycle callers on the Reborn product-auth boundary
+    /// instead of depending on V1 extension-manager cleanup or route-local
+    /// secret authority.
+    pub async fn cleanup_credentials_for_lifecycle(
+        &self,
+        request: SecretCleanupRequest,
+    ) -> Result<SecretCleanupReport, RebornCredentialLifecycleError> {
+        self.cleanup_service
+            .cleanup_for_lifecycle(request)
+            .await
+            .map_err(RebornCredentialLifecycleError::from)
+    }
+
     pub async fn handle_oauth_callback(
         &self,
         request: RebornOAuthCallbackRequest,
@@ -513,7 +551,13 @@ impl RebornProductAuthServices {
                 } else {
                     let exchange = match self
                         .provider_client
-                        .exchange_callback(provider_request)
+                        .exchange_callback(
+                            OAuthProviderExchangeContext {
+                                scope: request.scope.clone(),
+                                flow_id: request.flow_id,
+                            },
+                            provider_request,
+                        )
                         .await
                     {
                         Ok(exchange) => exchange,
@@ -588,6 +632,12 @@ impl RebornProductAuthServices {
                 error_code = ?error.code(),
                 "reborn auth callback completed but continuation dispatch failed"
             );
+            let error = match error {
+                AuthProductError::TokenExchangeFailed
+                | AuthProductError::ProviderDenied
+                | AuthProductError::MalformedCallback => AuthProductError::BackendUnavailable,
+                error => error,
+            };
             return Err(error.into());
         }
 
@@ -736,9 +786,11 @@ mod tests {
         CredentialAccountListPage, CredentialAccountListRequest, CredentialAccountLookupRequest,
         CredentialAccountMutation, CredentialAccountProjection, CredentialAccountSelectionRequest,
         CredentialAccountStatus, CredentialRecoveryProjection, CredentialRecoveryRequest,
-        NewAuthFlow, NewCredentialAccount, OAuthCallbackClaimRequest, OAuthCallbackFailureInput,
-        OAuthCallbackInput, OAuthProviderCallbackRequest, OAuthProviderExchange,
-        SecretCleanupReport, SecretCleanupRequest, SecretSubmitRequest, SecretSubmitResult,
+        CredentialRefreshReport, CredentialRefreshRequest, NewAuthFlow, NewCredentialAccount,
+        OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
+        OAuthProviderCallbackRequest, OAuthProviderExchange, OAuthProviderRefresh,
+        OAuthProviderRefreshRequest, SecretCleanupReport, SecretCleanupRequest,
+        SecretSubmitRequest, SecretSubmitResult,
     };
 
     struct SharedAuthTestDouble;
@@ -956,14 +1008,29 @@ mod tests {
         ) -> Result<CredentialAccountProjection, AuthProductError> {
             unreachable!("constructor tests do not call credential-account methods")
         }
+
+        async fn refresh_account(
+            &self,
+            _request: CredentialRefreshRequest,
+        ) -> Result<CredentialRefreshReport, AuthProductError> {
+            unreachable!("constructor tests do not call credential-account methods")
+        }
     }
 
     #[async_trait::async_trait]
     impl AuthProviderClient for SharedAuthTestDouble {
         async fn exchange_callback(
             &self,
+            _context: OAuthProviderExchangeContext,
             _request: OAuthProviderCallbackRequest,
         ) -> Result<OAuthProviderExchange, AuthProductError> {
+            unreachable!("constructor tests do not call provider-client methods")
+        }
+
+        async fn refresh_token(
+            &self,
+            _request: OAuthProviderRefreshRequest,
+        ) -> Result<OAuthProviderRefresh, AuthProductError> {
             unreachable!("constructor tests do not call provider-client methods")
         }
     }

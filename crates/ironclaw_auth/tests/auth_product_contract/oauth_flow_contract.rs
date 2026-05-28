@@ -22,7 +22,13 @@ async fn oauth_callback_exchanges_provider_code_then_completes_once() {
     assert!(!debug.contains("raw-pkce-verifier"));
 
     let exchange = services
-        .exchange_callback(request)
+        .exchange_callback(
+            OAuthProviderExchangeContext {
+                scope: owner.clone(),
+                flow_id: flow.id,
+            },
+            request,
+        )
         .await
         .expect("provider exchange");
     let completed = services

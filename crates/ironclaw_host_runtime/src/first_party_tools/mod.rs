@@ -39,7 +39,7 @@ use crate::{
 pub(crate) use self::schemas::resolve_builtin_input_schema_ref;
 
 pub use echo::ECHO_CAPABILITY_ID;
-pub use http::HTTP_CAPABILITY_ID;
+pub use http::{HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID};
 pub use json::JSON_CAPABILITY_ID;
 pub use shell::SHELL_CAPABILITY_ID;
 pub use skill_management::{
@@ -143,6 +143,7 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                     time::manifest()?,
                     json::manifest()?,
                     http::manifest()?,
+                    http::save_manifest()?,
                     shell::manifest()?,
                     spawn_subagent::manifest()?,
                 ];
@@ -178,6 +179,7 @@ pub fn builtin_first_party_handlers() -> Result<FirstPartyCapabilityRegistry, Ho
         .with_handler(CapabilityId::new(TIME_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(JSON_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(HTTP_CAPABILITY_ID)?, handler.clone())
+        .with_handler(CapabilityId::new(HTTP_SAVE_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(SHELL_CAPABILITY_ID)?, handler.clone());
     for metadata in CODING_CAPABILITIES {
         registry.insert_handler(CapabilityId::new(metadata.id)?, handler.clone());
@@ -237,7 +239,7 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
             ECHO_CAPABILITY_ID => echo::dispatch(&request.input)?,
             TIME_CAPABILITY_ID => time::dispatch(&request.input)?,
             JSON_CAPABILITY_ID => json::dispatch(&request.input)?,
-            HTTP_CAPABILITY_ID => {
+            HTTP_CAPABILITY_ID | HTTP_SAVE_CAPABILITY_ID => {
                 let result = http::dispatch(&request).await?;
                 network_egress_bytes = result.network_egress_bytes;
                 result.output
@@ -287,7 +289,7 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
         };
         let wall_clock_ms = start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
         let output_limit_bytes = match request.capability_id.as_str() {
-            HTTP_CAPABILITY_ID => http::MAX_HTTP_OUTPUT_BYTES,
+            HTTP_CAPABILITY_ID | HTTP_SAVE_CAPABILITY_ID => http::MAX_HTTP_OUTPUT_BYTES,
             _ => FIRST_PARTY_MAX_OUTPUT_BYTES,
         };
         let output_bytes = bounded_output_bytes(&output, output_limit_bytes).map_err(|error| {

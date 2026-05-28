@@ -18,6 +18,7 @@ mod model;
 mod model_work;
 mod policy;
 mod prompt;
+mod prompt_text;
 mod refs;
 mod resolver;
 mod skill_context;

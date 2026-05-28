@@ -135,7 +135,7 @@ pub(crate) fn scope() -> ResourceScope {
     ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap()
 }
 
-fn auth_scope(scope: &ResourceScope) -> AuthProductScope {
+pub(crate) fn auth_scope(scope: &ResourceScope) -> AuthProductScope {
     AuthProductScope::new(scope.clone(), AuthSurface::Api)
 }
 

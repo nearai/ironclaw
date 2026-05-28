@@ -10423,13 +10423,11 @@ mod tests {
     #[tokio::test]
     async fn queue_flush_classifies_status_sync_request_failure_through_call_site() {
         let scope = format!("trace-status-sync-classification-test-{}", Uuid::new_v4());
-        let _token_guard = EnvVarRestore::set("TRACE_COMMONS_TEST_TOKEN", "super-secret-token");
         write_trace_policy_for_scope(
             Some(&scope),
             &StandingTraceContributionPolicy {
                 enabled: true,
                 ingestion_endpoint: Some("http://127.0.0.1:9/v1/traces".to_string()),
-                bearer_token_env: "TRACE_COMMONS_TEST_TOKEN".to_string(),
                 auto_submit_high_value_traces: true,
                 min_submission_score: 0.0,
                 ..Default::default()
@@ -10442,9 +10440,16 @@ mod tests {
         )
         .expect("local record writes");
 
-        flush_trace_contribution_queue_for_scope(Some(&scope), 10)
-            .await
-            .expect("status sync failure is nonfatal during flush");
+        flush_trace_contribution_queue_for_scope_with_credential_provider(
+            Some(&scope),
+            10,
+            &RefreshingTestUploadCredentialProvider::new(
+                "super-secret-token",
+                "super-secret-token",
+            ),
+        )
+        .await
+        .expect("status sync failure is nonfatal during flush");
         let diagnostics = trace_queue_diagnostics_for_scope(Some(&scope)).expect("diagnostics");
         let failure = diagnostics
             .telemetry
