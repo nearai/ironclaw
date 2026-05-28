@@ -14,6 +14,8 @@
 //!   callback rejects any ID token whose `hd` claim does not match —
 //!   the URL hint is a UX nudge, not a security boundary.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
@@ -25,6 +27,12 @@ use super::profile::OAuthUserProfile;
 const GOOGLE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const GOOGLE_ISSUER: &str = "https://accounts.google.com";
+/// Per-request timeout on the Google token endpoint. The default
+/// `reqwest::Client` has no timeout, which would let a hung Google
+/// response pin the callback handler indefinitely. 10s comfortably
+/// covers the worst-case TLS handshake + token exchange while
+/// failing loud on a real outage.
+const GOOGLE_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Provider trait — the route handlers dispatch by provider name and
 /// never depend on a concrete provider impl. Google is the only
@@ -72,14 +80,7 @@ impl GoogleProvider {
     /// Build a provider from an operator-supplied
     /// [`GoogleOAuthConfig`] using the real Google endpoints.
     pub fn new(config: GoogleOAuthConfig) -> Self {
-        Self {
-            client_id: config.client_id,
-            client_secret: config.client_secret,
-            allowed_hd: config.allowed_hd,
-            http: reqwest::Client::new(),
-            token_endpoint: GOOGLE_TOKEN_URL.to_string(),
-            auth_endpoint: GOOGLE_AUTH_URL.to_string(),
-        }
+        Self::with_endpoints_inner(config, GOOGLE_AUTH_URL, GOOGLE_TOKEN_URL)
     }
 
     /// Test-only constructor: lets the caller-level test harness
@@ -93,11 +94,27 @@ impl GoogleProvider {
         auth_endpoint: impl Into<String>,
         token_endpoint: impl Into<String>,
     ) -> Self {
+        Self::with_endpoints_inner(config, auth_endpoint, token_endpoint)
+    }
+
+    fn with_endpoints_inner(
+        config: GoogleOAuthConfig,
+        auth_endpoint: impl Into<String>,
+        token_endpoint: impl Into<String>,
+    ) -> Self {
+        let http = reqwest::Client::builder()
+            .timeout(GOOGLE_HTTP_TIMEOUT)
+            .build()
+            // Builder failure here means rustls / tokio runtime is
+            // genuinely broken; fall back to the default client so
+            // we still surface a real OAuthError on the request
+            // rather than a constructor panic.
+            .unwrap_or_else(|_| reqwest::Client::new());
         Self {
             client_id: config.client_id,
             client_secret: config.client_secret,
             allowed_hd: config.allowed_hd,
-            http: reqwest::Client::new(),
+            http,
             token_endpoint: token_endpoint.into(),
             auth_endpoint: auth_endpoint.into(),
         }
@@ -166,7 +183,7 @@ impl OAuthProvider for GoogleProvider {
             // Body is logged at the route handler via tracing; never
             // echoed back to the browser.
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
+            let body = resp.text().await.unwrap_or_default(); // silent-ok: error already non-success, body only used for the operator tracing line
             return Err(OAuthError::CodeExchange(format!(
                 "Google token endpoint returned {status}: {body}"
             )));

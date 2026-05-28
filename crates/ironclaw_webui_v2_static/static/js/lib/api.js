@@ -292,6 +292,9 @@ export async function fetchAuthProviders() {
       providers: Array.isArray(data?.providers) ? data.providers : [],
     };
   } catch (_) {
+    // silent-ok: login UI fail-safe — a broken /auth/providers hides
+    // OAuth buttons rather than breaking the login page, which still
+    // accepts manual token paste.
     return { providers: [] };
   }
 }

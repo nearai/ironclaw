@@ -31,12 +31,12 @@ use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_workflow::{
     ExtensionName, LifecyclePhase, RebornCancelRunResponse, RebornCreateThreadResponse,
     RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListThreadsResponse,
-    RebornResolveGateResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornSetupExtensionResponse, RebornStreamEventsRequest,
-    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
+    RebornSetupExtensionResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
+    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
+    WebUiSetupExtensionRequest,
 };
 use ironclaw_reborn_composition::{
     RebornReadiness, RebornWebuiBundle, WebuiServeConfig, webui_v2_app,
@@ -172,17 +172,6 @@ impl RebornServicesApi for StubServices {
             payload: None,
         })
     }
-}
-
-// Suppress dead-code lint on the future-safety `Internal` constants
-// — they exist so a `RebornServicesError` constructor in this test
-// file stays valid if upstream changes.
-#[allow(dead_code)]
-fn _kinds() -> (RebornServicesErrorCode, RebornServicesErrorKind) {
-    (
-        RebornServicesErrorCode::Internal,
-        RebornServicesErrorKind::Internal,
-    )
 }
 
 // ─── stub OAuth provider ──────────────────────────────────────────────

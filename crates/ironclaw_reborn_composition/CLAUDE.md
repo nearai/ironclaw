@@ -168,6 +168,23 @@ product-auth descriptors, and a host-supplied route would silently
 miss-match. The OAuth router owns its own bounded pending-flow
 store as the rate-floor.
 
+**Rate-limit tradeoff (#4116 follow-up).** The OAuth router's
+public routes (`/auth/login/*`, `/auth/callback/*`,
+`/auth/providers`, `/auth/logout`) currently have NO per-IP
+rate-limit middleware. Memory is bounded by the pending-flow
+store's 1024-entry cap + 5-minute TTL, so a sustained flood
+cannot OOM the gateway — but an attacker who can sustain
+~3.4 req/s on `/auth/login/*` can keep the cache full of attacker
+state and push legitimate users' pending entries off the
+oldest-evict tail. The accepted tradeoff: this is observable on
+any access-log monitoring and only DOSes new logins (existing
+sessions are unaffected; the SessionAuthenticator path doesn't
+go through the pending store). A future PR can plug a `PerIp`
+rate-limit middleware in front of the host-supplied router, OR
+extend the composition descriptor-driven rate limit to accept
+host-supplied descriptors so this seam picks up the same machinery
+the v2 facade routes already use.
+
 This seam must NOT be used to re-introduce v1 `/auth/*` handlers
 into the v2 listener; the only intended consumer is the
 Reborn-native auth router. v1 gateway code remains untouched —

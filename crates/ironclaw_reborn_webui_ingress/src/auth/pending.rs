@@ -27,6 +27,7 @@ use base64::Engine;
 use parking_lot::Mutex;
 use rand::RngCore;
 use rand::rngs::OsRng;
+use secrecy::{ExposeSecret, SecretString};
 use sha2::{Digest, Sha256};
 
 /// State entries older than this are evicted on every access.
@@ -34,22 +35,44 @@ const STATE_TTL: Duration = Duration::from_secs(300);
 /// Hard cap on pending-flow entries to bound memory under flood.
 const MAX_PENDING_STATES: usize = 1024;
 
-/// A pending OAuth flow awaiting callback completion.
-#[derive(Clone)]
+/// A pending OAuth flow awaiting callback completion. The
+/// `code_verifier` is wrapped in [`SecretString`] so accidental
+/// `Debug`/`Serialize` of the struct (e.g. into trace logs) does
+/// not leak the PKCE material — the verifier is one half of the
+/// only secret a tampering middleman could use to complete a token
+/// exchange against a captured authorization code.
 pub(super) struct PendingFlow {
     /// Provider name the login was initiated for. The callback
     /// rejects cross-provider state replay by comparing this against
     /// the URL `{provider}` segment.
     pub provider: String,
     /// PKCE code verifier — the original 32-byte random value
-    /// (base64url-encoded). The callback hands it to the provider's
+    /// (base64url-encoded), wrapped in `SecretString` for redacted
+    /// `Debug`. The callback hands the raw value to the provider's
     /// token exchange unchanged.
-    pub code_verifier: String,
+    pub code_verifier: SecretString,
+    /// PKCE S256 code challenge pre-computed at mint time so the
+    /// login handler doesn't recompute SHA-256 every redirect. The
+    /// challenge is non-secret (it's emitted in the authorization
+    /// URL), so it stays a plain `String`.
+    pub code_challenge: String,
     /// Validated redirect target the SPA should land on after the
     /// callback completes. Always starts with `/`; the validator
     /// rejected anything that could escape the same origin.
     pub redirect_after: Option<String>,
     created_at: Instant,
+}
+
+impl Clone for PendingFlow {
+    fn clone(&self) -> Self {
+        Self {
+            provider: self.provider.clone(),
+            code_verifier: SecretString::from(self.code_verifier.expose_secret().to_string()),
+            code_challenge: self.code_challenge.clone(),
+            redirect_after: self.redirect_after.clone(),
+            created_at: self.created_at,
+        }
+    }
 }
 
 /// Thread-safe pending-flow store.
@@ -65,15 +88,17 @@ impl PendingFlowStore {
 
     /// Generate a PKCE code verifier: 32 random bytes, base64url
     /// (no padding). RFC 7636 requires 43-128 chars; this yields 43.
-    pub(super) fn generate_code_verifier() -> String {
+    fn generate_code_verifier() -> String {
         let mut bytes = [0u8; 32];
         OsRng.fill_bytes(&mut bytes);
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
     }
 
     /// Compute the PKCE S256 code challenge from a verifier:
-    /// `base64url_no_pad(sha256(verifier))`.
-    pub(super) fn code_challenge(verifier: &str) -> String {
+    /// `base64url_no_pad(sha256(verifier))`. Called once at mint
+    /// time and cached on the `PendingFlow`; the login handler
+    /// reads `flow.code_challenge` directly.
+    fn code_challenge(verifier: &str) -> String {
         let hash = Sha256::digest(verifier.as_bytes());
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hash)
     }
@@ -105,9 +130,12 @@ impl PendingFlowStore {
             guard.remove(&oldest);
         }
 
+        let verifier_raw = Self::generate_code_verifier();
+        let challenge = Self::code_challenge(&verifier_raw);
         let flow = PendingFlow {
             provider,
-            code_verifier: Self::generate_code_verifier(),
+            code_verifier: SecretString::from(verifier_raw),
+            code_challenge: challenge,
             redirect_after,
             created_at: now,
         };
@@ -135,18 +163,24 @@ impl PendingFlowStore {
 fn mint_state_token() -> String {
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push_str(&format!("{byte:02x}"));
-    }
-    out
+    hex::encode(bytes)
 }
 
 /// Sanitize a caller-supplied `redirect_after` value: must start with
-/// `/`, must not start with `//` or `/\` (protocol-relative), and
-/// must contain only RFC-3986 path/query/fragment characters. The
-/// percent-decoded form must also pass — `%2f%2f` decodes to `//`,
-/// and a naive check on the raw value would miss that.
+/// `/`, must not start with `//` or `/\` (protocol-relative), must
+/// contain only RFC-3986 path/query characters, and must NOT contain
+/// a `#` fragment marker.
+///
+/// `#` is deliberately rejected because the OAuth success redirect
+/// concatenates the bearer as `{redirect_after}#token=<bearer>`. A
+/// caller-supplied `redirect_after` carrying its own `#…` would
+/// produce `…#user_fragment#token=<bearer>`, which the SPA's
+/// `URLSearchParams` parses as `token=user_fragment#token=<bearer>`
+/// — the user gets stuck on a malformed bearer rather than being
+/// logged in. Not an exfiltration path (the real bearer never
+/// reaches the attacker), but a clean DoS we can close at the
+/// boundary. The percent-decoded form is also checked so `%23`
+/// smuggling fails.
 pub(super) fn sanitize_redirect(input: Option<String>) -> Option<String> {
     input.filter(|raw| is_safe_redirect(raw))
 }
@@ -165,8 +199,10 @@ fn check_redirect_chars(url: &str) -> bool {
     if !url.starts_with('/') || url.starts_with("//") || url.starts_with("/\\") {
         return false;
     }
+    // Allowed: alphanumerics + pchar/query subset from RFC 3986,
+    // MINUS `#` (see `sanitize_redirect` docstring).
     url.bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b"/_-.~:@!$&'()*+,;=?#[]%".contains(&b))
+        .all(|b| b.is_ascii_alphanumeric() || b"/_-.~:@!$&'()*+,;=?[]%".contains(&b))
 }
 
 #[cfg(test)]
@@ -188,8 +224,27 @@ mod tests {
         assert!(!state.is_empty());
         let taken = store.take(&state).expect("flow present");
         assert_eq!(taken.provider, "google");
-        assert_eq!(taken.code_verifier, flow.code_verifier);
+        assert_eq!(
+            taken.code_verifier.expose_secret(),
+            flow.code_verifier.expose_secret()
+        );
+        assert_eq!(taken.code_challenge, flow.code_challenge);
         assert_eq!(taken.redirect_after.as_deref(), Some("/v2"));
+    }
+
+    // Regression: the challenge stored on the flow MUST equal the
+    // SHA-256 of the actual verifier the provider's token endpoint
+    // will receive. A bug that decoupled `code_verifier` from
+    // `code_challenge` would make every Google token exchange fail
+    // with `invalid_grant`.
+    #[test]
+    fn stored_challenge_matches_sha256_of_verifier() {
+        let store = PendingFlowStore::new();
+        let (state, flow) = store.insert("google", None);
+        let recomputed = PendingFlowStore::code_challenge(flow.code_verifier.expose_secret());
+        assert_eq!(flow.code_challenge, recomputed);
+        let taken = store.take(&state).expect("flow");
+        assert_eq!(taken.code_challenge, recomputed);
     }
 
     #[test]
@@ -211,7 +266,7 @@ mod tests {
         assert!(is_safe_redirect("/"));
         assert!(is_safe_redirect("/v2"));
         assert!(is_safe_redirect("/v2/threads/abc"));
-        assert!(is_safe_redirect("/v2?tab=settings#section"));
+        assert!(is_safe_redirect("/v2?tab=settings"));
     }
 
     #[test]
@@ -226,6 +281,20 @@ mod tests {
         assert!(!is_safe_redirect("/%5cevil.example"));
     }
 
+    // Regression: `#` in the caller-supplied redirect would collide
+    // with the OAuth success transport (`/v2#token=<bearer>`) and
+    // strand the user on a malformed token. Reject both raw and
+    // percent-encoded forms.
+    #[test]
+    fn redirects_with_fragment_marker_are_blocked() {
+        assert!(!is_safe_redirect("/v2#token=fake"));
+        assert!(!is_safe_redirect("/v2#section"));
+        assert!(!is_safe_redirect("/v2/threads/abc#detail"));
+        // Percent-encoded `#` (%23) decodes to `#`.
+        assert!(!is_safe_redirect("/v2%23token=fake"));
+        assert!(!is_safe_redirect("/v2%23section"));
+    }
+
     #[test]
     fn sanitize_redirect_strips_unsafe_inputs() {
         assert_eq!(
@@ -233,6 +302,11 @@ mod tests {
             Some("/v2".to_string())
         );
         assert_eq!(sanitize_redirect(Some("//attacker".to_string())), None);
+        assert_eq!(
+            sanitize_redirect(Some("/v2#token=fake".to_string())),
+            None,
+            "`#` in redirect must be stripped to prevent fragment collision",
+        );
         assert_eq!(sanitize_redirect(None), None);
     }
 }

@@ -173,9 +173,10 @@ async fn login_handler(
 
     let redirect_after = sanitize_redirect(params.redirect_after);
     let (csrf_state, flow) = state.pending.insert(provider.name(), redirect_after);
-    let challenge = PendingFlowStore::code_challenge(&flow.code_verifier);
     let callback_url = state.callback_url(provider.name());
-    let auth_url = provider.authorization_url(&callback_url, &csrf_state, &challenge);
+    // `flow.code_challenge` is the SHA-256 the pending store
+    // pre-computed at mint time — no second hash per login redirect.
+    let auth_url = provider.authorization_url(&callback_url, &csrf_state, &flow.code_challenge);
 
     Redirect::temporary(&auth_url).into_response()
 }
@@ -239,7 +240,7 @@ async fn callback_handler(
 
     let callback_url = state.callback_url(provider.name());
     let profile = match provider
-        .exchange_code(&code, &callback_url, &flow.code_verifier)
+        .exchange_code(&code, &callback_url, flow.code_verifier.expose_secret())
         .await
     {
         Ok(profile) => profile,
@@ -370,7 +371,6 @@ fn error_code_for(err: &OAuthError) -> &'static str {
     match err {
         OAuthError::CodeExchange(_) | OAuthError::ProfileFetch(_) => "exchange_failed",
         OAuthError::Denied(_) => "unauthorized",
-        OAuthError::NotConfigured(_) => "server_error",
     }
 }
 

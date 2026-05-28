@@ -53,20 +53,17 @@ function consumeTokenFromUrl() {
   const url = new URL(window.location.href);
   const queryToken = (url.searchParams.get("token") || "").trim();
   const fragmentToken = readFragmentParam(url.hash, "token").trim();
+  // Fragment wins so an OAuth callback's `#token=` overrides a
+  // stale `?token=` left over in the address bar.
   const token = fragmentToken || queryToken;
-  if (!token && !queryToken && !fragmentToken) {
-    return "";
-  }
+  if (!token) return "";
 
-  // Always strip the token from query AND fragment, even if we
-  // won't use it — leaving it in the address bar would let a
-  // copy-paste leak the token regardless of whether it ends up
-  // authenticating this session.
+  // Always strip the token from query AND fragment — leaving it in
+  // the address bar would let a copy-paste leak it onward even
+  // after we've consumed it for this session.
   if (queryToken) url.searchParams.delete("token");
   const newHash = fragmentToken ? stripFragmentParam(url.hash, "token") : url.hash;
   window.history.replaceState({}, "", url.pathname + url.search + newHash);
-
-  if (!token) return "";
 
   if (readStoredToken()) {
     // A stored token already exists — refuse to overwrite it. The

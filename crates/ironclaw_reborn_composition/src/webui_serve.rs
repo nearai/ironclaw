@@ -185,6 +185,19 @@ impl WebuiServeConfig {
     /// `ironclaw_reborn_webui_ingress::webui_v2_auth_router` plugs
     /// into; future host-owned public surfaces can reuse the same
     /// hook without re-opening composition.
+    ///
+    /// **Do NOT pass a v1 gateway router through this hook.** v1's
+    /// `/auth/*` handlers in `src/channels/web/handlers/auth.rs`
+    /// share path names with the v2-native router from
+    /// `webui_v2_auth_router` (`/auth/providers`,
+    /// `/auth/login/{p}`, `/auth/callback/{p}`, `/auth/logout`) by
+    /// design — they implement the same protocol on two
+    /// independent listeners. Merging the v1 router here would
+    /// conflict with the v2-native router and, more importantly,
+    /// would route v1 traffic into the v2 host-owned `SessionStore`
+    /// it never had access to. The v2 listener is exclusively for
+    /// `webui_v2_auth_router` (and any future host-native public
+    /// surface that follows the same boundary rules).
     pub fn with_public_router(mut self, router: Router) -> Self {
         self.public_router = Some(router);
         self

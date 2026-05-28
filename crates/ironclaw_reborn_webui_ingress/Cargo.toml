@@ -18,13 +18,16 @@ default = []
 # would happily accept it, but sessions would vanish on every restart
 # and the O(n) constant-time lookup would scale poorly under real
 # user load. Local dev and tests opt in by enabling this feature.
-dev-in-memory-session = []
+# The feature also pulls in `uuid`, the only consumer of which is
+# the in-memory store itself.
+dev-in-memory-session = ["dep:uuid"]
 
 [dependencies]
 async-trait = "0.1"
 axum = "0.8"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+hex = "0.4.3"
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", features = ["webui-v2-beta"] }
 jsonwebtoken = "9"
@@ -41,7 +44,11 @@ tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "
 tracing = "0.1"
 url = "2"
 urlencoding = "2"
-uuid = { version = "1", features = ["v4"] }
+# `uuid` is only consumed by the `dev-in-memory-session` impl
+# (session.rs::create_session). Make it optional and pulled in by
+# that feature so production builds don't link in a dep they never
+# touch.
+uuid = { version = "1", features = ["v4"], optional = true }
 
 [dev-dependencies]
 axum = { version = "0.8", features = ["macros"] }

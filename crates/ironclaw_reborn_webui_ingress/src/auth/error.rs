@@ -26,9 +26,4 @@ pub enum OAuthError {
     /// (unverified email, disallowed hosted domain, unmapped user).
     #[error("authorization denied: {0}")]
     Denied(String),
-    /// A required configuration handle (session store, base URL) is
-    /// missing at runtime. Surfaces a `503` rather than `400` because
-    /// the user did nothing wrong.
-    #[error("oauth not configured: {0}")]
-    NotConfigured(String),
 }
