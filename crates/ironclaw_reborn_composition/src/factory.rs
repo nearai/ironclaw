@@ -35,7 +35,7 @@ use ironclaw_host_api::{
 use ironclaw_host_api::{MountAlias, MountGrant};
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostRuntimeServices,
-    builtin_first_party_handlers, builtin_first_party_package,
+    ProductAuthProviderRuntimePorts, builtin_first_party_handlers, builtin_first_party_package,
 };
 #[cfg(feature = "libsql")]
 use ironclaw_loop_support::FilesystemCheckpointStateStore;
@@ -162,6 +162,22 @@ where
             services.with_tenant_sandbox_process_port(process_port)
         }
     }
+}
+
+fn require_product_auth_runtime_ports<F, G, S, R>(
+    services: &HostRuntimeServices<F, G, S, R>,
+) -> Result<ProductAuthProviderRuntimePorts, RebornBuildError>
+where
+    F: ironclaw_filesystem::RootFilesystem + 'static,
+    G: ironclaw_resources::ResourceGovernor + 'static,
+    S: ironclaw_processes::ProcessStore + 'static,
+    R: ironclaw_processes::ProcessResultStore + 'static,
+{
+    services
+        .product_auth_provider_runtime_ports()
+        .ok_or_else(|| RebornBuildError::InvalidConfig {
+            reason: "Google OAuth provider backend requires host runtime HTTP egress".to_string(),
+        })
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -424,13 +440,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     services = apply_runtime_process_binding(services, runtime_process_binding);
     let google_provider_client = google_oauth_config
         .map(|config| {
-            let runtime_ports =
-                services
-                    .product_auth_provider_runtime_ports()
-                    .ok_or_else(|| RebornBuildError::InvalidConfig {
-                        reason: "Google OAuth provider backend requires host runtime HTTP egress"
-                            .to_string(),
-                    })?;
+            let runtime_ports = require_product_auth_runtime_ports(&services)?;
             google_provider_client(config, Arc::clone(&secret_store), runtime_ports)
         })
         .transpose()?;
@@ -1348,13 +1358,7 @@ where
     .with_turn_run_wake_notifier(production_wiring.turn_run_wake_notifier);
     let google_provider_client = google_oauth_config
         .map(|config| {
-            let runtime_ports =
-                services
-                    .product_auth_provider_runtime_ports()
-                    .ok_or_else(|| RebornBuildError::InvalidConfig {
-                        reason: "Google OAuth provider backend requires host runtime HTTP egress"
-                            .to_string(),
-                    })?;
+            let runtime_ports = require_product_auth_runtime_ports(&services)?;
             google_provider_client(config, secret_store, runtime_ports)
         })
         .transpose()?;

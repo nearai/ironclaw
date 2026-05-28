@@ -92,16 +92,16 @@ impl GoogleProviderTokenSink for SecretStoreGoogleTokenSink {
             .await
             .map_err(|_| AuthProductError::BackendUnavailable)?;
 
-        let refresh_secret = match (refresh_handle, refresh_token) {
-            (Some(handle), Some(refresh_token)) => {
+        let refresh_secret = match refresh_token {
+            Some(refresh_token) => {
+                let handle = refresh_handle.ok_or(AuthProductError::BackendUnavailable)?;
                 self.store
                     .put(scope.clone(), handle.clone(), refresh_token)
                     .await
                     .map_err(|_| AuthProductError::BackendUnavailable)?;
                 Some(handle)
             }
-            (None, None) => None,
-            _ => return Err(AuthProductError::BackendUnavailable),
+            None => None,
         };
 
         Ok(GoogleProviderStoredTokens {

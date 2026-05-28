@@ -65,15 +65,24 @@ mod tests {
         OAuthProviderCallbackRequest, OAuthProviderExchangeContext, OAuthProviderRefreshRequest,
         OAuthRedirectUri, PkceVerifierHash, PkceVerifierSecret, ProviderScope,
     };
+    use ironclaw_authorization::GrantAuthorizer;
     use ironclaw_capabilities::{
         CapabilityObligationHandler, CapabilityObligationPhase, CapabilityObligationRequest,
     };
+    use ironclaw_extensions::ExtensionRegistry;
+    use ironclaw_filesystem::LocalFilesystem;
     use ironclaw_host_api::{
         CapabilityId, ExtensionId, InvocationId, NetworkMethod, NetworkPolicy, NetworkScheme,
         NetworkTargetPattern, Obligation, ResourceScope, RuntimeHttpEgress, RuntimeHttpEgressError,
         RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind, SecretHandle, TrustClass,
         UserId,
     };
+    use ironclaw_host_runtime::{CapabilitySurfaceVersion, HostRuntimeServices};
+    use ironclaw_network::{
+        NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
+    };
+    use ironclaw_processes::ProcessServices;
+    use ironclaw_resources::InMemoryResourceGovernor;
     use ironclaw_secrets::{InMemorySecretStore, SecretStore};
     use secrecy::{ExposeSecret, SecretString};
     use std::collections::{BTreeMap, VecDeque};
@@ -594,6 +603,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn google_token_sink_stores_access_only_tokens_without_refresh_secret() {
+        let store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+        let sink = SecretStoreGoogleTokenSink {
+            store: Arc::clone(&store),
+        };
+        let scope = resource_scope("google-token-owner-access-only");
+
+        let stored = sink
+            .store_tokens(token_storage_request_with_refresh(
+                scope.clone(),
+                AuthFlowId::new(),
+                None,
+            ))
+            .await
+            .expect("access-only token set stored");
+
+        assert!(stored.refresh_secret.is_none());
+        assert!(
+            store
+                .metadata(&scope, &stored.access_secret)
+                .await
+                .expect("access metadata")
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
     async fn google_token_sink_writes_access_before_refresh() {
         let store = Arc::new(RecordingSecretStore::fail_on_first_put());
         let sink = SecretStoreGoogleTokenSink {
@@ -629,6 +665,57 @@ mod tests {
         assert_eq!(
             store.put_handles(),
             vec!["google-oauth-access", "google-oauth-refresh"]
+        );
+    }
+
+    #[tokio::test]
+    async fn google_provider_client_factory_wires_runtime_ports_and_secret_sink() {
+        let network = RecordingNetwork::google_token_response();
+        let network_requests = network.requests_handle();
+        let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+        let services = test_host_runtime_services()
+            .with_secret_store_dyn(Arc::clone(&secret_store))
+            .try_with_host_http_egress(network)
+            .expect("host egress should wire with graph secret store");
+        let client = google_provider_client(
+            oauth_config(),
+            Arc::clone(&secret_store),
+            services
+                .product_auth_provider_runtime_ports()
+                .expect("runtime ports"),
+        )
+        .expect("provider client");
+        let owner = scope("google-provider-factory");
+        let resource_scope = owner.resource.clone();
+        let flow_id = AuthFlowId::new();
+
+        let exchange = client
+            .exchange_callback(
+                exchange_context(owner.clone(), flow_id),
+                callback_request(google_provider(), label("work gmail")),
+            )
+            .await
+            .expect("exchange");
+
+        {
+            let requests = network_requests.lock().expect("network requests");
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].url, GOOGLE_TOKEN_ENDPOINT);
+        }
+        assert!(
+            secret_store
+                .metadata(&resource_scope, &exchange.access_secret)
+                .await
+                .expect("access metadata")
+                .is_some()
+        );
+        let refresh_secret = exchange.refresh_secret.expect("refresh secret");
+        assert!(
+            secret_store
+                .metadata(&resource_scope, &refresh_secret)
+                .await
+                .expect("refresh metadata")
+                .is_some()
         );
     }
 
@@ -722,14 +809,51 @@ mod tests {
         scope: ResourceScope,
         flow_id: AuthFlowId,
     ) -> GoogleProviderTokenStorageRequest {
+        token_storage_request_with_refresh(
+            scope,
+            flow_id,
+            Some(SecretString::from("refresh-token")),
+        )
+    }
+
+    fn token_storage_request_with_refresh(
+        scope: ResourceScope,
+        flow_id: AuthFlowId,
+        refresh_token: Option<SecretString>,
+    ) -> GoogleProviderTokenStorageRequest {
         GoogleProviderTokenStorageRequest {
             scope,
             flow_id,
             tokens: GoogleProviderTokenSet {
                 access_token: SecretString::from("access-token"),
-                refresh_token: Some(SecretString::from("refresh-token")),
+                refresh_token,
             },
         }
+    }
+
+    fn oauth_config() -> OAuthClientConfig {
+        OAuthClientConfig {
+            client_id: OAuthClientId::new("google-client-123").expect("client id"),
+            client_secret: None,
+            redirect_uri: OAuthRedirectUri::new("https://app.example/oauth/callback")
+                .expect("redirect uri"),
+        }
+    }
+
+    fn test_host_runtime_services() -> HostRuntimeServices<
+        LocalFilesystem,
+        InMemoryResourceGovernor,
+        ironclaw_processes::InMemoryProcessStore,
+        ironclaw_processes::InMemoryProcessResultStore,
+    > {
+        HostRuntimeServices::new(
+            Arc::new(ExtensionRegistry::new()),
+            Arc::new(LocalFilesystem::new()),
+            Arc::new(InMemoryResourceGovernor::new()),
+            Arc::new(GrantAuthorizer::new()),
+            ProcessServices::in_memory(),
+            CapabilitySurfaceVersion::new("surface-v1").expect("surface version"),
+        )
     }
 
     fn exchange_context(
@@ -862,6 +986,46 @@ mod tests {
                         response_bytes: 0,
                     })
                 })
+        }
+    }
+
+    struct RecordingNetwork {
+        response_body: Vec<u8>,
+        requests: Arc<Mutex<Vec<NetworkHttpRequest>>>,
+    }
+
+    impl RecordingNetwork {
+        fn google_token_response() -> Self {
+            Self {
+                response_body: br#"{"access_token":"provider-access-token","refresh_token":"provider-refresh-token","scope":"https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send","expires_in":3600,"token_type":"Bearer"}"#.to_vec(),
+                requests: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn requests_handle(&self) -> Arc<Mutex<Vec<NetworkHttpRequest>>> {
+            Arc::clone(&self.requests)
+        }
+    }
+
+    impl NetworkHttpEgress for RecordingNetwork {
+        fn execute(
+            &self,
+            request: NetworkHttpRequest,
+        ) -> Result<NetworkHttpResponse, NetworkHttpError> {
+            self.requests
+                .lock()
+                .expect("network requests")
+                .push(request.clone());
+            Ok(NetworkHttpResponse {
+                status: 200,
+                headers: vec![("content-type".to_string(), "application/json".to_string())],
+                body: self.response_body.clone(),
+                usage: NetworkUsage {
+                    request_bytes: request.body.len() as u64,
+                    response_bytes: self.response_body.len() as u64,
+                    resolved_ip: None,
+                },
+            })
         }
     }
 
