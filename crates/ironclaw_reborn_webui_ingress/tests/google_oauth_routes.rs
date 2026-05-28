@@ -116,6 +116,12 @@ fn build_router(
     providers: Vec<Arc<dyn OAuthProvider>>,
     session_store: Arc<dyn SessionStore>,
 ) -> axum::Router {
+    // These tests drive the route table directly via `oneshot` and
+    // deliberately bypass the descriptor-driven rate-limit /
+    // body-limit middleware that lives in the composition layer.
+    // The `.router` field is sufficient for the per-handler
+    // assertions below; end-to-end coverage of the descriptor-
+    // mounted shape lives in `tests/session_round_trip.rs`.
     let config = OAuthRouterConfig::new(
         tenant(),
         session_store,
@@ -124,7 +130,7 @@ fn build_router(
         "https://gateway.example",
     )
     .with_session_lifetime(ChronoDuration::hours(1));
-    webui_v2_auth_router(config)
+    webui_v2_auth_router(config).router
 }
 
 async fn body_string(body: Body) -> String {
@@ -366,6 +372,11 @@ async fn callback_with_unknown_state_redirects_with_error_code() {
 
 #[tokio::test]
 async fn callback_with_state_replay_fails_closed() {
+    // The bug class being locked: a successfully-consumed state
+    // token must not be re-usable on the SAME router. The earlier
+    // version of this test built a fresh router for the replay,
+    // which only exercised "unknown state" — already covered by
+    // `callback_with_unknown_state_redirects_with_error_code`.
     let store_inner: Arc<InMemorySessionStore> = Arc::new(InMemorySessionStore::new());
     let session_store: Arc<dyn SessionStore> = store_inner.clone();
     let provider = StubProvider::google_with_profile(alice_profile());
@@ -374,6 +385,7 @@ async fn callback_with_state_replay_fails_closed() {
         session_store.clone(),
     );
 
+    // 1. Login → capture state.
     let login = router
         .clone()
         .oneshot(
@@ -385,32 +397,54 @@ async fn callback_with_state_replay_fails_closed() {
         )
         .await
         .expect("oneshot");
-    let location = login
-        .headers()
-        .get(header::LOCATION)
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .to_string();
-    let state = state_from_location(&location);
-
-    // First callback consumes the state and creates a session. Need
-    // a second provider that still returns a profile, since the stub
-    // we built only fires once.
-    let provider2 = StubProvider::google_with_profile(alice_profile());
-    let router2 = build_router(
-        vec![provider2 as Arc<dyn OAuthProvider>],
-        session_store.clone(),
+    let state = state_from_location(
+        login
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap(),
     );
-    // Replay the (still-unknown-to-router2) state against a fresh
-    // router. Different pending stores → second call must fail
-    // closed with `invalid_state`.
-    let replay = router2
+
+    // 2. First callback consumes the state, mints a session, and
+    //    redirects with a token in the fragment.
+    let first = router
+        .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
                 .uri(format!(
-                    "/auth/callback/google?code=c&state={}",
+                    "/auth/callback/google?code=auth-code&state={}",
+                    urlencoding::encode(&state)
+                ))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(first.status(), StatusCode::SEE_OTHER);
+    let first_location = first
+        .headers()
+        .get(header::LOCATION)
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(
+        first_location.starts_with("/v2#token="),
+        "first callback must succeed; got {first_location}"
+    );
+    assert_eq!(store_inner.len(), 1, "first callback must mint a session");
+
+    // 3. Replay the SAME state token against the SAME router. The
+    //    pending-flow store's single-use semantics must drop the
+    //    second `take` to `None`, so the callback hits the
+    //    `invalid_state` branch — no new session, no provider call.
+    let replay = router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/auth/callback/google?code=auth-code&state={}",
                     urlencoding::encode(&state)
                 ))
                 .body(Body::empty())
@@ -419,13 +453,18 @@ async fn callback_with_state_replay_fails_closed() {
         .await
         .expect("oneshot");
     assert_eq!(replay.status(), StatusCode::SEE_OTHER);
-    let location = replay
+    let replay_location = replay
         .headers()
         .get(header::LOCATION)
         .unwrap()
         .to_str()
         .unwrap();
-    assert_eq!(location, "/v2?login_error=invalid_state");
+    assert_eq!(replay_location, "/v2?login_error=invalid_state");
+    assert_eq!(
+        store_inner.len(),
+        1,
+        "replay must NOT mint a second session",
+    );
 }
 
 #[tokio::test]

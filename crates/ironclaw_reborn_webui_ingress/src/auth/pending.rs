@@ -111,7 +111,6 @@ impl PendingFlowStore {
         redirect_after: Option<String>,
     ) -> (String, PendingFlow) {
         let provider = provider.into();
-        let now = Instant::now();
         let mut guard = self.inner.lock();
 
         // Opportunistic GC on insert: if at capacity, sweep expired
@@ -119,7 +118,7 @@ impl PendingFlowStore {
         // keeps the map size bounded under flood without a background
         // task.
         if guard.len() >= MAX_PENDING_STATES {
-            guard.retain(|_, flow| now.duration_since(flow.created_at) < STATE_TTL);
+            guard.retain(|_, flow| flow.created_at.elapsed() < STATE_TTL);
         }
         if guard.len() >= MAX_PENDING_STATES
             && let Some(oldest) = guard
@@ -137,7 +136,7 @@ impl PendingFlowStore {
             code_verifier: SecretString::from(verifier_raw),
             code_challenge: challenge,
             redirect_after,
-            created_at: now,
+            created_at: Instant::now(),
         };
         let state = mint_state_token();
         guard.insert(state.clone(), flow.clone());
@@ -151,7 +150,7 @@ impl PendingFlowStore {
     pub(super) fn take(&self, state: &str) -> Option<PendingFlow> {
         let mut guard = self.inner.lock();
         let flow = guard.remove(state)?;
-        if Instant::now().duration_since(flow.created_at) >= STATE_TTL {
+        if flow.created_at.elapsed() >= STATE_TTL {
             return None;
         }
         Some(flow)

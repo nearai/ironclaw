@@ -146,44 +146,32 @@ Reborn-native product-auth OAuth surface:
 rate-limit middlewares consume so the two enforcers cannot drift on
 which request belongs to which descriptor.
 
-### Host-supplied public router (#4116 — SSO login surface)
+### Host-supplied public route mount (#4116 — SSO login surface)
 
-`WebuiServeConfig::with_public_router(Router)` attaches a
-host-supplied axum `Router` that is merged into the composed app
-OUTSIDE the bearer-auth layer but INSIDE the outer security-header
-/ CORS / global-body-limit stack. The seam exists for the WebChat
-v2 SSO login surface shipped by
-`ironclaw_reborn_webui_ingress::webui_v2_auth_router`, which mounts
-`/auth/providers`, `/auth/login/{provider}`,
+`WebuiServeConfig::with_public_route_mount(PublicRouteMount)`
+attaches a host-supplied `{ router, descriptors }` pair that is
+merged into the composed app OUTSIDE the bearer-auth layer but
+INSIDE the outer security-header / CORS / global-body-limit
+stack. The seam exists for the WebChat v2 SSO login surface
+shipped by
+`ironclaw_reborn_webui_ingress::webui_v2_auth_router`, which
+mounts `/auth/providers`, `/auth/login/{provider}`,
 `/auth/callback/{provider}`, and `/auth/logout`. The browser must
 reach those routes without a session (the whole point of login),
 so they cannot live behind the bearer middleware; they still
 inherit the same defense-in-depth headers and CORS allow-list as
 every other response.
 
-The public router is intentionally NOT routed through the
-descriptor-driven per-route body-limit / rate-limit middlewares
-above. Those middlewares key on `webui_v2_routes()` plus
-product-auth descriptors, and a host-supplied route would silently
-miss-match. The OAuth router owns its own bounded pending-flow
-store as the rate-floor.
-
-**Rate-limit tradeoff (#4116 follow-up).** The OAuth router's
-public routes (`/auth/login/*`, `/auth/callback/*`,
-`/auth/providers`, `/auth/logout`) currently have NO per-IP
-rate-limit middleware. Memory is bounded by the pending-flow
-store's 1024-entry cap + 5-minute TTL, so a sustained flood
-cannot OOM the gateway — but an attacker who can sustain
-~3.4 req/s on `/auth/login/*` can keep the cache full of attacker
-state and push legitimate users' pending entries off the
-oldest-evict tail. The accepted tradeoff: this is observable on
-any access-log monitoring and only DOSes new logins (existing
-sessions are unaffected; the SessionAuthenticator path doesn't
-go through the pending store). A future PR can plug a `PerIp`
-rate-limit middleware in front of the host-supplied router, OR
-extend the composition descriptor-driven rate limit to accept
-host-supplied descriptors so this seam picks up the same machinery
-the v2 facade routes already use.
+The mount's `descriptors` are folded into the SAME descriptor
+list the v2 facade and the product-auth callback already use, so
+the descriptor-driven per-route rate-limit and body-limit
+middlewares apply to the host-supplied surface exactly like they
+do to every other route — no side door. Today the SSO mount
+declares its four routes as `LocalGateway`/`OAuthCallback` +
+`IngressAuthPolicy::Public` + `RateLimitScope::PerIp` (60–120
+req/min/IP, 60s window) + tight body limits, so a sustained
+`/auth/login/*` flood is bounded by the same per-IP counter the
+public OAuth callback uses.
 
 This seam must NOT be used to re-introduce v1 `/auth/*` handlers
 into the v2 listener; the only intended consumer is the
@@ -237,7 +225,7 @@ rows are inventoried here, not implemented in the current PR.
 | Approval shim | `POST /api/chat/approval` | (Subsumed by `resolve_gate`) | Mapped |
 | Auth-token / auth-cancel | `POST /api/chat/auth-{token,cancel}` | (Engine v1 compatibility shim; delete with v1) | v1-only (legacy) |
 | Extensions onboarding | `GET\|POST /api/extensions/{name}/setup` | `POST /api/webchat/v2/extensions/{name}/setup` | Mapped to lifecycle projection; no production setup side effects yet |
-| SSO login (Google) | `GET /auth/providers`, `GET /auth/login/{p}`, `GET /auth/callback/{p}`, `POST /auth/logout` | Same paths on the v2 listener via `ironclaw_reborn_webui_ingress::webui_v2_auth_router`, merged into `webui_v2_app` through [`WebuiServeConfig::with_public_router`] | Mapped (Google); GitHub + NEAR follow under #4116 |
+| SSO login (Google) | `GET /auth/providers`, `GET /auth/login/{p}`, `GET /auth/callback/{p}`, `POST /auth/logout` | Same paths on the v2 listener via `ironclaw_reborn_webui_ingress::webui_v2_auth_router`, merged into `webui_v2_app` through [`WebuiServeConfig::with_public_route_mount`] (typed `{ router, descriptors }` so the per-route body-limit / rate-limit middleware applies) | Mapped (Google); GitHub + NEAR follow under #4116 |
 
 ### Security invariants on every "Mapped" row
 

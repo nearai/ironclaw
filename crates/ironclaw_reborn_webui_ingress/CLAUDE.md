@@ -20,8 +20,9 @@ v1 secrets / settings / DB.
 | `SessionStore` trait | Pluggable session storage; durable impl is host's; `InMemorySessionStore` for local dev / tests |
 | `SessionAuthenticator` | `WebuiAuthenticator` that resolves bearer tokens through a `SessionStore` |
 | `OidcAuthenticator` | OIDC bearer-token verifier (JWKS + standard claims) |
-| `webui_v2_auth_router(config)` | OAuth login router mounting `/auth/providers`, `/auth/login/{p}`, `/auth/callback/{p}`, `/auth/logout` |
-| `OAuthProvider` trait | Extension point for per-provider URL / code-exchange logic; `GoogleProvider` ships today |
+| `webui_v2_auth_router(config) -> PublicRouteMount` | OAuth login router + route descriptors. The descriptors travel with the router so composition can fold them into the descriptor-driven per-route rate-limit / body-limit middleware — same machinery the v2 facade and product-auth callback already use, no side door. |
+| `PublicRouteMount` | `{ router, descriptors }` pair handed to `WebuiServeConfig::with_public_route_mount` |
+| `OAuthProvider` trait (in `auth/provider.rs`) | Extension point for per-provider URL / code-exchange logic. Deliberately lives in its own module so future GitHub / NEAR providers do not depend on the Google module. `GoogleProvider` ships today. |
 | `OAuthRouterConfig` | Tenant + `SessionStore` + `UserDirectory` + provider list + base URL |
 | `UserDirectory` trait | Host-supplied mapping from `(provider, OAuthUserProfile)` to `UserId` |
 | `EmailUserDirectory` | Local-dev default impl (verified email → `UserId`); gated on `dev-in-memory-session` |
@@ -34,8 +35,12 @@ the session lifecycle types. The OAuth callback's job is exactly that
 — so the login mint path belongs in the same host-owned crate, not
 behind the product/API seam in `ironclaw_reborn_composition`.
 
-Composition merges the router supplied by `webui_v2_auth_router`
-through `WebuiServeConfig::with_public_router`. That keeps the
+Composition merges the `PublicRouteMount` supplied by
+`webui_v2_auth_router` through
+`WebuiServeConfig::with_public_route_mount`. The router merges
+outside bearer auth (the user has no session yet); the
+descriptors fold into the same per-route policy stack the rest of
+the WebChat v2 surface already rides on. That keeps the
 product/API boundary intact: composition never sees provider
 secrets, never speaks to Google, never reads a `SessionStore` row.
 

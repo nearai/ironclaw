@@ -30,7 +30,8 @@ use ironclaw_product_workflow::{
     WebUiSendMessageRequest, WebUiSetupExtensionRequest,
 };
 use ironclaw_reborn_composition::{
-    RebornReadiness, RebornWebuiBundle, WebuiAuthenticator, WebuiServeConfig, webui_v2_app,
+    PublicRouteMount, RebornReadiness, RebornWebuiBundle, WebuiAuthenticator, WebuiServeConfig,
+    webui_v2_app,
 };
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 use ironclaw_turns::{EventCursor, RunProfileId, RunProfileVersion, TurnRunId, TurnStatus};
@@ -1454,7 +1455,17 @@ async fn js_client_resolve_gate_path_decodes_percent_encoded_gate_ref() {
 /// unauthenticated `GET /auth/providers` would 401 before the
 /// host's OAuth router ever ran.
 #[tokio::test]
-async fn public_router_is_merged_without_bearer_auth() {
+async fn public_route_mount_is_merged_without_bearer_auth_and_keeps_descriptor_policy() {
+    use axum::extract::ConnectInfo;
+    use ironclaw_host_api::ingress::{
+        AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthPolicy,
+        IngressJustification, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor,
+        ListenerClass, RateLimitPolicy, RateLimitScope, StreamingMode, WebSocketOriginPolicy,
+    };
+    use ironclaw_host_api::{IngressScopeSource, NetworkMethod};
+    use std::net::SocketAddr;
+    use std::num::NonZeroU32;
+
     let services = Arc::new(StubServices::default());
     let bundle = RebornWebuiBundle {
         api: services,
@@ -1465,6 +1476,33 @@ async fn public_router_is_merged_without_bearer_auth() {
         "/auth/providers",
         axum::routing::get(|| async { axum::Json(serde_json::json!({ "providers": [] })) }),
     );
+    let descriptor = IngressRouteDescriptor::new(
+        "webui.sso.providers.test".to_string(),
+        NetworkMethod::Get,
+        "/auth/providers".to_string(),
+        IngressPolicy::new(IngressPolicyParts {
+            listener_class: ListenerClass::LocalGateway,
+            auth: IngressAuthPolicy::Public {
+                justification: IngressJustification::new("test public", "regression test")
+                    .expect("justification"),
+            },
+            scope_source: IngressScopeSource::PublicRoute,
+            body_limit: BodyLimitPolicy::NoBody,
+            rate_limit: RateLimitPolicy::Limited {
+                scope: RateLimitScope::PerIp,
+                max_requests: NonZeroU32::new(120).expect("120 != 0"),
+                window_seconds: NonZeroU32::new(60).expect("60 != 0"),
+            },
+            cors: CorsPolicy::SameOriginOnly,
+            websocket_origin: WebSocketOriginPolicy::NotApplicable,
+            streaming: StreamingMode::None,
+            audit: AuditTraceClass::PublicCallback,
+            effect_path: AllowedEffectPath::NoEffect,
+        })
+        .expect("policy"),
+    )
+    .expect("descriptor");
+
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
         Arc::new(OnlyValidToken),
@@ -1472,22 +1510,27 @@ async fn public_router_is_merged_without_bearer_auth() {
     )
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
     .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-    .with_public_router(public);
+    .with_public_route_mount(PublicRouteMount {
+        router: public,
+        descriptors: vec![descriptor],
+    });
     let app = webui_v2_app(bundle, config).expect("webui v2 app");
 
-    // No Authorization header — `with_public_router` MUST merge
-    // outside the bearer-auth layer.
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/auth/providers")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
+    // No Authorization header — `with_public_route_mount` MUST
+    // merge outside the bearer-auth layer.
+    // ConnectInfo is required because the descriptor's PerIp rate
+    // limit middleware reads the peer address; the production
+    // listener injects this via `into_make_service_with_connect_info`,
+    // so the oneshot harness simulates it.
+    let mut req = Request::builder()
+        .method(Method::GET)
+        .uri("/auth/providers")
+        .body(Body::empty())
+        .expect("request");
+    req.extensions_mut()
+        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 1234))));
+
+    let response = app.clone().oneshot(req).await.expect("oneshot");
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response
@@ -1495,7 +1538,7 @@ async fn public_router_is_merged_without_bearer_auth() {
             .get(header::X_CONTENT_TYPE_OPTIONS)
             .and_then(|v| v.to_str().ok()),
         Some("nosniff"),
-        "outer security headers must still wrap the public router",
+        "outer security headers must still wrap the public route mount",
     );
     let body = read_body_string(response).await;
     assert!(body.contains("\"providers\""), "got body {body}");

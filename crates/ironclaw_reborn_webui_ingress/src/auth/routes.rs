@@ -12,6 +12,7 @@
 //! has its own per-route bearer check inside the handler so a bare
 //! request without a header is harmless.
 
+use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::Arc;
 
 use axum::Json;
@@ -20,13 +21,19 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use chrono::Duration as ChronoDuration;
+use ironclaw_host_api::NetworkMethod;
 use ironclaw_host_api::TenantId;
+use ironclaw_host_api::ingress::{
+    AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthPolicy,
+    IngressJustification, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor, ListenerClass,
+    RateLimitPolicy, RateLimitScope, StreamingMode, WebSocketOriginPolicy,
+};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 
 use super::error::OAuthError;
-use super::google::OAuthProvider;
 use super::pending::{PendingFlowStore, sanitize_redirect};
+use super::provider::OAuthProvider;
 use super::user_directory::{UserDirectory, UserDirectoryError};
 use crate::session::SessionStore;
 
@@ -106,10 +113,54 @@ impl RouterState {
 
 type RouterStateHandle = Arc<RouterState>;
 
+// ── route paths + descriptor IDs ──────────────────────────────────────
+
+const PATH_PROVIDERS: &str = "/auth/providers";
+const PATH_LOGIN: &str = "/auth/login/{provider}";
+const PATH_CALLBACK: &str = "/auth/callback/{provider}";
+const PATH_LOGOUT: &str = "/auth/logout";
+
+const ROUTE_ID_PROVIDERS: &str = "webui.sso.providers";
+const ROUTE_ID_LOGIN: &str = "webui.sso.login";
+const ROUTE_ID_CALLBACK: &str = "webui.sso.callback";
+const ROUTE_ID_LOGOUT: &str = "webui.sso.logout";
+
+/// Maximum logout body size. The handler doesn't read a body — the
+/// bearer comes from the `Authorization` header — but a tight cap
+/// still bounds an oversized POST before the handler runs.
+const LOGOUT_BODY_LIMIT_BYTES: NonZeroU64 = NonZeroU64::new(1024).expect("1024 != 0");
+
+/// Per-IP rate-limit window shared across every public SSO route.
+/// 60-second sliding window mirrors the product-auth callback's
+/// shape; the per-route `max_requests` differs by intent.
+const SSO_RATE_WINDOW_SECONDS: NonZeroU32 = NonZeroU32::new(60).expect("60 != 0");
+/// Discovery is cheap on the server side but the SPA hammers it on
+/// every login-page render. 120/min/IP is comfortable for legitimate
+/// browsers while blocking sustained floods.
+const SSO_PROVIDERS_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(120).expect("120 != 0");
+/// Login redirects insert into the pending-flow cache. 60/min/IP
+/// caps the attack surface for filling the cache.
+const SSO_LOGIN_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(60).expect("60 != 0");
+/// Callbacks consume cache entries. Same per-IP cap as login so a
+/// flood of fake callbacks cannot starve real ones.
+const SSO_CALLBACK_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(60).expect("60 != 0");
+/// Logout. Per-IP, generous, because a sign-out blip should not 429.
+const SSO_LOGOUT_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(60).expect("60 != 0");
+
+/// Bundle returned by [`webui_v2_auth_router`] — the host
+/// composition layer merges `router` and folds `descriptors` into the
+/// descriptor-driven per-route rate-limit / body-limit middlewares
+/// so the SSO routes ride on the same policy stack as the rest of
+/// the WebChat v2 surface (no side door).
+pub struct PublicRouteMount {
+    pub router: axum::Router,
+    pub descriptors: Vec<IngressRouteDescriptor>,
+}
+
 /// Build the unauthenticated axum sub-router that mounts the OAuth
-/// login endpoints. Composition merges this router as a public route
-/// group alongside the bearer-protected WebChat v2 routes.
-pub fn webui_v2_auth_router(config: OAuthRouterConfig) -> axum::Router {
+/// login endpoints plus the route descriptors composition needs to
+/// install the per-route policy middleware around them.
+pub fn webui_v2_auth_router(config: OAuthRouterConfig) -> PublicRouteMount {
     let state: RouterStateHandle = Arc::new(RouterState {
         tenant_id: config.tenant_id,
         session_store: config.session_store,
@@ -120,12 +171,121 @@ pub fn webui_v2_auth_router(config: OAuthRouterConfig) -> axum::Router {
         pending: PendingFlowStore::new(),
     });
 
-    axum::Router::new()
-        .route("/auth/providers", get(providers_handler))
-        .route("/auth/login/{provider}", get(login_handler))
-        .route("/auth/callback/{provider}", get(callback_handler))
-        .route("/auth/logout", post(logout_handler))
-        .with_state(state)
+    let router = axum::Router::new()
+        .route(PATH_PROVIDERS, get(providers_handler))
+        .route(PATH_LOGIN, get(login_handler))
+        .route(PATH_CALLBACK, get(callback_handler))
+        .route(PATH_LOGOUT, post(logout_handler))
+        .with_state(state);
+
+    PublicRouteMount {
+        router,
+        descriptors: sso_route_descriptors(),
+    }
+}
+
+// ── descriptors ───────────────────────────────────────────────────────
+
+fn sso_route_descriptors() -> Vec<IngressRouteDescriptor> {
+    vec![
+        descriptor(
+            ROUTE_ID_PROVIDERS,
+            NetworkMethod::Get,
+            PATH_PROVIDERS,
+            public_policy(BodyLimitPolicy::NoBody, SSO_PROVIDERS_MAX_REQUESTS),
+        ),
+        descriptor(
+            ROUTE_ID_LOGIN,
+            NetworkMethod::Get,
+            PATH_LOGIN,
+            public_policy(BodyLimitPolicy::NoBody, SSO_LOGIN_MAX_REQUESTS),
+        ),
+        descriptor(
+            ROUTE_ID_CALLBACK,
+            NetworkMethod::Get,
+            PATH_CALLBACK,
+            // OAuthCallback listener class + Public auth + NoEffect
+            // is the only shape `IngressPolicy::new` accepts for an
+            // unauthenticated OAuth callback. Mirrors the existing
+            // product-auth callback policy.
+            callback_policy(SSO_CALLBACK_MAX_REQUESTS),
+        ),
+        descriptor(
+            ROUTE_ID_LOGOUT,
+            NetworkMethod::Post,
+            PATH_LOGOUT,
+            public_policy(
+                BodyLimitPolicy::Limited {
+                    max_bytes: LOGOUT_BODY_LIMIT_BYTES,
+                },
+                SSO_LOGOUT_MAX_REQUESTS,
+            ),
+        ),
+    ]
+}
+
+fn descriptor(
+    route_id: &str,
+    method: NetworkMethod,
+    pattern: &str,
+    policy: IngressPolicy,
+) -> IngressRouteDescriptor {
+    IngressRouteDescriptor::new(route_id.to_string(), method, pattern.to_string(), policy)
+        .expect("SSO route descriptor must validate at startup") // safety: ids/patterns are crate-local literals and policies are constructed by sibling helpers.
+}
+
+fn public_policy(body_limit: BodyLimitPolicy, max_requests: NonZeroU32) -> IngressPolicy {
+    IngressPolicy::new(IngressPolicyParts {
+        listener_class: ListenerClass::LocalGateway,
+        auth: IngressAuthPolicy::Public {
+            justification: sso_justification(),
+        },
+        scope_source: ironclaw_host_api::IngressScopeSource::PublicRoute,
+        body_limit,
+        rate_limit: RateLimitPolicy::Limited {
+            scope: RateLimitScope::PerIp,
+            max_requests,
+            window_seconds: SSO_RATE_WINDOW_SECONDS,
+        },
+        cors: CorsPolicy::SameOriginOnly,
+        websocket_origin: WebSocketOriginPolicy::NotApplicable,
+        streaming: StreamingMode::None,
+        audit: AuditTraceClass::PublicCallback,
+        effect_path: AllowedEffectPath::NoEffect,
+    })
+    .expect("SSO public policy must validate") // safety: LocalGateway + Public + NoEffect is permitted; rate-limit window/max are non-zero by construction.
+}
+
+fn callback_policy(max_requests: NonZeroU32) -> IngressPolicy {
+    IngressPolicy::new(IngressPolicyParts {
+        listener_class: ListenerClass::OAuthCallback,
+        auth: IngressAuthPolicy::Public {
+            justification: sso_justification(),
+        },
+        scope_source: ironclaw_host_api::IngressScopeSource::PublicRoute,
+        body_limit: BodyLimitPolicy::NoBody,
+        rate_limit: RateLimitPolicy::Limited {
+            scope: RateLimitScope::PerIp,
+            max_requests,
+            window_seconds: SSO_RATE_WINDOW_SECONDS,
+        },
+        cors: CorsPolicy::NotApplicable,
+        websocket_origin: WebSocketOriginPolicy::NotApplicable,
+        streaming: StreamingMode::None,
+        audit: AuditTraceClass::PublicCallback,
+        effect_path: AllowedEffectPath::NoEffect,
+    })
+    .expect("SSO callback policy must validate") // safety: OAuthCallback + Public + NoEffect is the documented exception in `validate_listener_auth`.
+}
+
+fn sso_justification() -> IngressJustification {
+    IngressJustification::new(
+        "webui-v2 sso",
+        "OAuth login surface is unauthenticated by design — \
+         the user has no session yet; the handler mints one on \
+         successful callback through SessionStore",
+    )
+    .expect("SSO justification literal must validate") // safety: non-empty, no leading/trailing whitespace.
 }
 
 // ─── /auth/providers ──────────────────────────────────────────────────

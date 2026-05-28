@@ -23,6 +23,7 @@ use serde::Deserialize;
 use super::config::GoogleOAuthConfig;
 use super::error::OAuthError;
 use super::profile::OAuthUserProfile;
+use super::provider::OAuthProvider;
 
 const GOOGLE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
@@ -33,34 +34,6 @@ const GOOGLE_ISSUER: &str = "https://accounts.google.com";
 /// covers the worst-case TLS handshake + token exchange while
 /// failing loud on a real outage.
 const GOOGLE_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Provider trait — the route handlers dispatch by provider name and
-/// never depend on a concrete provider impl. Google is the only
-/// implementation today; GitHub / NEAR will add their own impls under
-/// the same trait without changing the route handlers.
-#[async_trait]
-pub trait OAuthProvider: Send + Sync + 'static {
-    /// Stable provider identifier exposed on `/auth/providers` and
-    /// matched against the `{provider}` path segment on login /
-    /// callback. Lowercase, ASCII.
-    fn name(&self) -> &'static str;
-
-    /// Build the provider-side authorization URL the browser is
-    /// redirected to. `callback_url` is the v2-owned
-    /// `/auth/callback/{provider}` URL; `state` is the CSRF token
-    /// stored in the pending-flow cache; `code_challenge` is the
-    /// PKCE S256 challenge.
-    fn authorization_url(&self, callback_url: &str, state: &str, code_challenge: &str) -> String;
-
-    /// Exchange the authorization code returned by the provider for
-    /// a normalized [`OAuthUserProfile`].
-    async fn exchange_code(
-        &self,
-        code: &str,
-        callback_url: &str,
-        code_verifier: &str,
-    ) -> Result<OAuthUserProfile, OAuthError>;
-}
 
 /// Google OIDC provider.
 pub struct GoogleProvider {

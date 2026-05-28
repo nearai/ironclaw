@@ -29,7 +29,7 @@ mod session;
 pub use auth::EmailUserDirectory;
 pub use auth::{
     GoogleOAuthConfig, GoogleProvider, OAuthError, OAuthProvider, OAuthRouterConfig,
-    OAuthUserProfile, UserDirectory, UserDirectoryError, webui_v2_auth_router,
+    OAuthUserProfile, PublicRouteMount, UserDirectory, UserDirectoryError, webui_v2_auth_router,
 };
 pub use oidc::{
     AudienceClaim, ClaimToUserIdFn, IdTokenClaims, OidcAuthenticator, OidcAuthenticatorConfig,

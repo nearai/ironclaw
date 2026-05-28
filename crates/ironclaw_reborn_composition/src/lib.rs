@@ -134,7 +134,8 @@ pub use webui::{RebornWebuiBundle, build_webui_services};
 pub use webui_rate_limit::RateLimitConfigError;
 #[cfg(feature = "webui-v2-beta")]
 pub use webui_serve::{
-    WebuiAuthenticator, WebuiServeConfig, WebuiServeConfigError, WebuiServeError, webui_v2_app,
+    PublicRouteMount, WebuiAuthenticator, WebuiServeConfig, WebuiServeConfigError, WebuiServeError,
+    webui_v2_app,
 };
 
 /// Re-exported identity vocabulary host binaries need to construct

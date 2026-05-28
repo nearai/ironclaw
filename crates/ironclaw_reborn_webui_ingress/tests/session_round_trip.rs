@@ -23,8 +23,11 @@
 
 use std::sync::{Arc, Mutex};
 
+use std::net::SocketAddr;
+
 use async_trait::async_trait;
 use axum::body::Body;
+use axum::extract::ConnectInfo;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use chrono::Duration as ChronoDuration;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
@@ -39,7 +42,7 @@ use ironclaw_product_workflow::{
     WebUiSetupExtensionRequest,
 };
 use ironclaw_reborn_composition::{
-    RebornReadiness, RebornWebuiBundle, WebuiServeConfig, webui_v2_app,
+    PublicRouteMount, RebornReadiness, RebornWebuiBundle, WebuiServeConfig, webui_v2_app,
 };
 use ironclaw_reborn_webui_ingress::{
     EmailUserDirectory, InMemorySessionStore, OAuthProvider, OAuthRouterConfig, OAuthUserProfile,
@@ -239,7 +242,7 @@ fn build_app() -> (axum::Router, Arc<StubServices>, Arc<InMemorySessionStore>) {
     let session_store: Arc<InMemorySessionStore> = Arc::new(InMemorySessionStore::new());
     let bearer_authenticator = Arc::new(SessionAuthenticator::new(session_store.clone()));
 
-    let oauth_router = webui_v2_auth_router(
+    let oauth_mount = webui_v2_auth_router(
         OAuthRouterConfig::new(
             TenantId::new(TENANT).expect("tenant"),
             session_store.clone() as Arc<dyn SessionStore>,
@@ -263,9 +266,23 @@ fn build_app() -> (axum::Router, Arc<StubServices>, Arc<InMemorySessionStore>) {
     )
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
     .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-    .with_public_router(oauth_router);
+    .with_public_route_mount(PublicRouteMount {
+        router: oauth_mount.router,
+        descriptors: oauth_mount.descriptors,
+    });
     let app = webui_v2_app(bundle, config).expect("webui v2 app");
     (app, services, session_store)
+}
+
+/// Helper: tag a request with `ConnectInfo` so the descriptor-
+/// driven PerIp rate-limit middleware can resolve a peer address.
+/// In production, host composition injects this through
+/// `into_make_service_with_connect_info`; the `oneshot` harness
+/// has to do it explicitly.
+fn with_peer(mut req: Request<Body>) -> Request<Body> {
+    req.extensions_mut()
+        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 1234))));
+    req
 }
 
 // ─── test ─────────────────────────────────────────────────────────────
@@ -278,13 +295,13 @@ async fn session_minted_via_oauth_callback_authenticates_protected_v2_route() {
     //    authorization URL.
     let login = app
         .clone()
-        .oneshot(
+        .oneshot(with_peer(
             Request::builder()
                 .method(Method::GET)
                 .uri("/auth/login/google?redirect_after=%2Fv2")
                 .body(Body::empty())
                 .expect("request"),
-        )
+        ))
         .await
         .expect("oneshot");
     assert_eq!(login.status(), StatusCode::TEMPORARY_REDIRECT);
@@ -301,7 +318,7 @@ async fn session_minted_via_oauth_callback_authenticates_protected_v2_route() {
     //    `#token=` fragment of the SPA-bound redirect.
     let callback = app
         .clone()
-        .oneshot(
+        .oneshot(with_peer(
             Request::builder()
                 .method(Method::GET)
                 .uri(format!(
@@ -310,7 +327,7 @@ async fn session_minted_via_oauth_callback_authenticates_protected_v2_route() {
                 ))
                 .body(Body::empty())
                 .expect("request"),
-        )
+        ))
         .await
         .expect("oneshot");
     assert_eq!(callback.status(), StatusCode::SEE_OTHER);
@@ -334,7 +351,7 @@ async fn session_minted_via_oauth_callback_authenticates_protected_v2_route() {
     //    middleware.
     let create = app
         .clone()
-        .oneshot(
+        .oneshot(with_peer(
             Request::builder()
                 .method(Method::POST)
                 .uri("/api/webchat/v2/threads")
@@ -342,7 +359,7 @@ async fn session_minted_via_oauth_callback_authenticates_protected_v2_route() {
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"client_action_id":"act-1"}"#))
                 .expect("request"),
-        )
+        ))
         .await
         .expect("oneshot");
     assert_eq!(
@@ -367,21 +384,21 @@ async fn session_minted_via_oauth_callback_authenticates_protected_v2_route() {
     //    API access with that session."
     let logout = app
         .clone()
-        .oneshot(
+        .oneshot(with_peer(
             Request::builder()
                 .method(Method::POST)
                 .uri("/auth/logout")
                 .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
                 .body(Body::empty())
                 .expect("request"),
-        )
+        ))
         .await
         .expect("oneshot");
     assert_eq!(logout.status(), StatusCode::NO_CONTENT);
     assert_eq!(session_store.len(), 0, "session must be revoked");
 
     let post_logout = app
-        .oneshot(
+        .oneshot(with_peer(
             Request::builder()
                 .method(Method::POST)
                 .uri("/api/webchat/v2/threads")
@@ -389,7 +406,7 @@ async fn session_minted_via_oauth_callback_authenticates_protected_v2_route() {
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"client_action_id":"act-2"}"#))
                 .expect("request"),
-        )
+        ))
         .await
         .expect("oneshot");
     assert_eq!(
