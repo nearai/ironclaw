@@ -8,6 +8,12 @@
 //! (session creation, redirect target, error code mapping) is
 //! end-of-pipeline; testing the Google provider's `exchange_code`
 //! alone wouldn't catch a wrapper that drops the verifier.
+//!
+//! Gated on `dev-in-memory-session` because the test wires
+//! `InMemorySessionStore` + `EmailUserDirectory`, both of which only
+//! exist behind that feature. Matches `session_round_trip.rs`.
+
+#![cfg(feature = "dev-in-memory-session")]
 
 use std::sync::Arc;
 
@@ -18,8 +24,8 @@ use chrono::Duration as ChronoDuration;
 use http_body_util::BodyExt;
 use ironclaw_host_api::TenantId;
 use ironclaw_reborn_webui_ingress::{
-    EmailUserDirectory, InMemorySessionStore, OAuthError, OAuthProvider, OAuthRouterConfig,
-    OAuthUserProfile, SessionStore, webui_v2_auth_router,
+    EmailUserDirectory, InMemorySessionStore, OAuthError, OAuthProvider, OAuthProviderName,
+    OAuthRouterConfig, OAuthUserProfile, SessionStore, webui_v2_auth_router,
 };
 use parking_lot::Mutex;
 use serde::Deserialize;
@@ -30,7 +36,7 @@ use tower::ServiceExt;
 /// test the route handlers without owning a mock Google token
 /// endpoint.
 struct StubProvider {
-    name: &'static str,
+    name: OAuthProviderName,
     auth_url_template: String,
     next_profile: Mutex<Option<Result<OAuthUserProfile, OAuthError>>>,
     captured: Mutex<Option<CapturedExchange>>,
@@ -44,18 +50,28 @@ struct CapturedExchange {
 }
 
 impl StubProvider {
-    fn google_with_profile(profile: OAuthUserProfile) -> Arc<Self> {
+    fn for_provider(name: &str, profile: OAuthUserProfile) -> Arc<Self> {
         Arc::new(Self {
-            name: "google",
+            name: OAuthProviderName::new(name).expect("name"),
+            // Use a single stable mock authorization host across
+            // every stub provider — the route-level tests assert
+            // against the fixed `accounts.google.test` prefix
+            // returned from `Location`, and varying the host per
+            // provider would mask a real change in the redirect
+            // construction.
             auth_url_template: "https://accounts.google.test/o/oauth2/v2/auth".to_string(),
             next_profile: Mutex::new(Some(Ok(profile))),
             captured: Mutex::new(None),
         })
     }
 
+    fn google_with_profile(profile: OAuthUserProfile) -> Arc<Self> {
+        Self::for_provider("google", profile)
+    }
+
     fn google_with_error(err: OAuthError) -> Arc<Self> {
         Arc::new(Self {
-            name: "google",
+            name: OAuthProviderName::new("google").expect("name"),
             auth_url_template: "https://accounts.google.test/o/oauth2/v2/auth".to_string(),
             next_profile: Mutex::new(Some(Err(err))),
             captured: Mutex::new(None),
@@ -65,8 +81,8 @@ impl StubProvider {
 
 #[async_trait]
 impl OAuthProvider for StubProvider {
-    fn name(&self) -> &'static str {
-        self.name
+    fn name(&self) -> &OAuthProviderName {
+        &self.name
     }
 
     fn authorization_url(&self, callback_url: &str, state: &str, code_challenge: &str) -> String {
@@ -699,4 +715,517 @@ async fn logout_without_bearer_returns_no_content() {
 fn state_extraction_handles_urlencoded_value() {
     let url = "https://accounts.google.test/x?state=foo%2Bbar&code_challenge=z";
     assert_eq!(state_from_location(url), "foo+bar");
+}
+
+// ─── callback error-path regression tests (reviewer-requested) ────────
+
+// Finding #5: the callback maps missing/empty `code` and `state`
+// to `?login_error=invalid_request`, but only the unknown-state
+// branch had test coverage. Lock both missing and empty shapes.
+#[tokio::test]
+async fn callback_missing_code_or_state_redirects_invalid_request() {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+    let provider = StubProvider::google_with_profile(alice_profile());
+    let router = build_router(vec![provider as Arc<dyn OAuthProvider>], store);
+
+    for uri in [
+        "/auth/callback/google",                 // both missing
+        "/auth/callback/google?code=&state=abc", // empty code
+        "/auth/callback/google?code=abc&state=", // empty state
+        "/auth/callback/google?state=abc",       // no code
+        "/auth/callback/google?code=abc",        // no state
+    ] {
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER, "uri={uri}");
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(location, "/v2?login_error=invalid_request", "uri={uri}");
+    }
+}
+
+// Finding #6 (High): cross-provider state replay. The callback
+// rejects when `flow.provider != provider_name`. Mint state for
+// `google` (login) then drive `/auth/callback/github` with that
+// state on the SAME router. Must redirect to
+// `?login_error=provider_mismatch` and NOT mint a session.
+#[tokio::test]
+async fn callback_with_state_for_different_provider_redirects_provider_mismatch() {
+    let store_inner: Arc<InMemorySessionStore> = Arc::new(InMemorySessionStore::new());
+    let session_store: Arc<dyn SessionStore> = store_inner.clone();
+    let google = StubProvider::for_provider("google", alice_profile());
+    let github = StubProvider::for_provider("github", alice_profile());
+    let router = build_router(
+        vec![
+            google as Arc<dyn OAuthProvider>,
+            github as Arc<dyn OAuthProvider>,
+        ],
+        session_store,
+    );
+
+    let login = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/auth/login/google")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    let state = state_from_location(
+        login
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+    );
+
+    // Cross-provider replay: same router, same state, different
+    // `{provider}` URL segment.
+    let replay = router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/auth/callback/github?code=c&state={}",
+                    urlencoding::encode(&state)
+                ))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(replay.status(), StatusCode::SEE_OTHER);
+    let location = replay
+        .headers()
+        .get(header::LOCATION)
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert_eq!(location, "/v2?login_error=provider_mismatch");
+    assert_eq!(
+        store_inner.len(),
+        0,
+        "cross-provider replay must NOT mint a session",
+    );
+}
+
+// Finding #7: provider exchange failures map to
+// `?login_error=exchange_failed`. Drive a provider whose
+// `exchange_code` returns `OAuthError::CodeExchange` (network
+// failure / non-2xx Google response shape) — distinct from the
+// `Denied` branch that already had coverage.
+#[tokio::test]
+async fn callback_when_provider_exchange_fails_redirects_exchange_failed() {
+    let store_inner: Arc<InMemorySessionStore> = Arc::new(InMemorySessionStore::new());
+    let session_store: Arc<dyn SessionStore> = store_inner.clone();
+    let provider = StubProvider::google_with_error(OAuthError::CodeExchange(
+        "simulated token-endpoint 500".into(),
+    ));
+    let router = build_router(vec![provider as Arc<dyn OAuthProvider>], session_store);
+
+    let login = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/auth/login/google")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    let state = state_from_location(
+        login
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+    );
+
+    let callback = router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/auth/callback/google?code=c&state={}",
+                    urlencoding::encode(&state)
+                ))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(callback.status(), StatusCode::SEE_OTHER);
+    let location = callback
+        .headers()
+        .get(header::LOCATION)
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert_eq!(location, "/v2?login_error=exchange_failed");
+    assert_eq!(store_inner.len(), 0);
+}
+
+// Same as above, but the provider returns `ProfileFetch` (the
+// other error variant that also maps to `exchange_failed`).
+#[tokio::test]
+async fn callback_when_profile_fetch_fails_redirects_exchange_failed() {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+    let provider = StubProvider::google_with_error(OAuthError::ProfileFetch(
+        "simulated malformed id_token".into(),
+    ));
+    let router = build_router(vec![provider as Arc<dyn OAuthProvider>], store);
+
+    let login = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/auth/login/google")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    let state = state_from_location(
+        login
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+    );
+
+    let callback = router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/auth/callback/google?code=c&state={}",
+                    urlencoding::encode(&state)
+                ))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(
+        callback
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "/v2?login_error=exchange_failed",
+    );
+}
+
+// Finding #8: `UserDirectory::resolve` distinguishes
+// `Unknown` -> `unauthorized` vs `Backend` -> `server_error`.
+// Drive a stub directory that returns each variant.
+mod user_directory_branches {
+    use super::*;
+    use async_trait::async_trait;
+    use ironclaw_host_api::UserId;
+    use ironclaw_reborn_webui_ingress::{UserDirectory, UserDirectoryError};
+
+    struct AlwaysUnknown;
+
+    #[async_trait]
+    impl UserDirectory for AlwaysUnknown {
+        async fn resolve(
+            &self,
+            _provider: &OAuthProviderName,
+            _profile: &OAuthUserProfile,
+        ) -> Result<UserId, UserDirectoryError> {
+            Err(UserDirectoryError::Unknown)
+        }
+    }
+
+    struct AlwaysBackendFail;
+
+    #[async_trait]
+    impl UserDirectory for AlwaysBackendFail {
+        async fn resolve(
+            &self,
+            _provider: &OAuthProviderName,
+            _profile: &OAuthUserProfile,
+        ) -> Result<UserId, UserDirectoryError> {
+            Err(UserDirectoryError::Backend("db unreachable".into()))
+        }
+    }
+
+    fn build_router_with_directory(
+        directory: Arc<dyn UserDirectory>,
+    ) -> (axum::Router, Arc<InMemorySessionStore>) {
+        let store_inner: Arc<InMemorySessionStore> = Arc::new(InMemorySessionStore::new());
+        let session_store: Arc<dyn SessionStore> = store_inner.clone();
+        let provider = StubProvider::google_with_profile(alice_profile());
+        let config = OAuthRouterConfig::new(
+            tenant(),
+            session_store,
+            directory,
+            vec![provider as Arc<dyn OAuthProvider>],
+            "https://gateway.example",
+        )
+        .with_session_lifetime(ChronoDuration::hours(1));
+        (webui_v2_auth_router(config).router, store_inner)
+    }
+
+    async fn drive_callback(router: axum::Router) -> String {
+        let login = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/auth/login/google")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        let state = state_from_location(
+            login
+                .headers()
+                .get(header::LOCATION)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+        );
+        let callback = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/auth/callback/google?code=c&state={}",
+                        urlencoding::encode(&state)
+                    ))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(callback.status(), StatusCode::SEE_OTHER);
+        callback
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn unknown_user_redirects_unauthorized() {
+        let (router, store) = build_router_with_directory(Arc::new(AlwaysUnknown));
+        let location = drive_callback(router).await;
+        assert_eq!(location, "/v2?login_error=unauthorized");
+        assert_eq!(store.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn backend_failure_redirects_server_error() {
+        let (router, store) = build_router_with_directory(Arc::new(AlwaysBackendFail));
+        let location = drive_callback(router).await;
+        assert_eq!(location, "/v2?login_error=server_error");
+        assert_eq!(store.len(), 0);
+    }
+}
+
+// Finding #9: `SessionStore::create_session` failures map to
+// `server_error`. Drive a stub store that always errors on
+// `create_session` (the in-memory store can't naturally fail).
+mod session_store_failure {
+    use super::*;
+    use async_trait::async_trait;
+    use chrono::Duration as ChronoDuration;
+    use ironclaw_host_api::{TenantId, UserId};
+    use ironclaw_reborn_webui_ingress::{
+        SessionRecord, SessionStore, SessionStoreError, UserDirectory,
+    };
+    use secrecy::SecretString;
+
+    struct AlwaysFailCreate;
+
+    #[async_trait]
+    impl SessionStore for AlwaysFailCreate {
+        async fn create_session(
+            &self,
+            _tenant_id: TenantId,
+            _user_id: UserId,
+            _lifetime: ChronoDuration,
+        ) -> Result<SecretString, SessionStoreError> {
+            Err(SessionStoreError::Backend("simulated outage".into()))
+        }
+        async fn lookup(
+            &self,
+            _candidate: &str,
+        ) -> Result<Option<SessionRecord>, SessionStoreError> {
+            Ok(None)
+        }
+    }
+
+    fn build_router_with_session_store(
+        store: Arc<dyn SessionStore>,
+        directory: Arc<dyn UserDirectory>,
+    ) -> axum::Router {
+        let provider = StubProvider::google_with_profile(alice_profile());
+        let config = OAuthRouterConfig::new(
+            tenant(),
+            store,
+            directory,
+            vec![provider as Arc<dyn OAuthProvider>],
+            "https://gateway.example",
+        )
+        .with_session_lifetime(ChronoDuration::hours(1));
+        webui_v2_auth_router(config).router
+    }
+
+    #[tokio::test]
+    async fn callback_when_session_store_create_fails_redirects_server_error() {
+        let router = build_router_with_session_store(
+            Arc::new(AlwaysFailCreate),
+            Arc::new(EmailUserDirectory),
+        );
+
+        let login = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/auth/login/google")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        let state = state_from_location(
+            login
+                .headers()
+                .get(header::LOCATION)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+        );
+        let callback = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/auth/callback/google?code=c&state={}",
+                        urlencoding::encode(&state)
+                    ))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(callback.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            callback
+                .headers()
+                .get(header::LOCATION)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "/v2?login_error=server_error",
+        );
+    }
+}
+
+// Reviewer finding #2: logout returns 500 when revoke fails. The
+// SPA still clears local state, but the response status now
+// truthfully reflects that the server-side bearer may live on.
+mod logout_revoke_failure {
+    use super::*;
+    use async_trait::async_trait;
+    use chrono::Duration as ChronoDuration;
+    use ironclaw_host_api::{TenantId, UserId};
+    use ironclaw_reborn_webui_ingress::{
+        SessionRecord, SessionStore, SessionStoreError, UserDirectory,
+    };
+    use secrecy::SecretString;
+
+    struct RevokeAlwaysFails;
+
+    #[async_trait]
+    impl SessionStore for RevokeAlwaysFails {
+        async fn create_session(
+            &self,
+            _tenant_id: TenantId,
+            _user_id: UserId,
+            _lifetime: ChronoDuration,
+        ) -> Result<SecretString, SessionStoreError> {
+            unreachable!("test does not drive create_session")
+        }
+        async fn lookup(
+            &self,
+            _candidate: &str,
+        ) -> Result<Option<SessionRecord>, SessionStoreError> {
+            Ok(None)
+        }
+        async fn revoke(&self, _candidate: &str) -> Result<(), SessionStoreError> {
+            Err(SessionStoreError::Backend("simulated outage".into()))
+        }
+    }
+
+    fn build_router_with_session_store(
+        store: Arc<dyn SessionStore>,
+        directory: Arc<dyn UserDirectory>,
+    ) -> axum::Router {
+        let provider = StubProvider::google_with_profile(alice_profile());
+        let config = OAuthRouterConfig::new(
+            tenant(),
+            store,
+            directory,
+            vec![provider as Arc<dyn OAuthProvider>],
+            "https://gateway.example",
+        )
+        .with_session_lifetime(ChronoDuration::hours(1));
+        webui_v2_auth_router(config).router
+    }
+
+    #[tokio::test]
+    async fn logout_returns_500_when_revoke_fails() {
+        let router = build_router_with_session_store(
+            Arc::new(RevokeAlwaysFails),
+            Arc::new(EmailUserDirectory),
+        );
+
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/auth/logout")
+                    .header(header::AUTHORIZATION, "Bearer some-token")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(
+            resp.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "logout MUST return 5xx when SessionStore::revoke fails — \
+             returning 204 would lie about the server-side state",
+        );
+    }
 }

@@ -477,6 +477,7 @@ mod tests {
             "js/main.js",
             "js/lib/api.js",
             "js/app/app.js",
+            "js/app/auth.js",
             "js/pages/chat/chat-page.js",
             "js/pages/extensions/extensions-page.js",
         ] {
@@ -485,5 +486,78 @@ mod tests {
                 "expected `{required}` in the embedded asset table",
             );
         }
+    }
+
+    // Locks the WebChat v2 SSO fragment-token contract documented
+    // in `app/auth.js` (issue #4116 review finding #11). The
+    // user-visible OAuth login path is "callback redirects to
+    // `/v2#token=<bearer>` → SPA consumes the fragment → stores
+    // bearer in sessionStorage → strips the token from the URL →
+    // refuses to overwrite an existing stored token".
+    //
+    // No JS test runner ships in this workspace and a real
+    // Playwright e2e for the OAuth flow requires Google
+    // credentials. This Rust assertion is the lightweight
+    // regression: it inspects the embedded asset bytes for the
+    // call shapes that implement each invariant. A refactor that
+    // drops any one of them fails loudly here; the deep semantics
+    // belong on a follow-up e2e once the SSO mount is wired into
+    // a real binary.
+    #[test]
+    fn auth_js_carries_fragment_token_contract() {
+        let asset =
+            assets::lookup("js/app/auth.js").expect("auth.js must be in the embedded asset table");
+        let source = std::str::from_utf8(asset.bytes).expect("auth.js is UTF-8");
+
+        // 1. Reads the fragment token via URLSearchParams keyed on
+        //    the `token` name — proves the OAuth callback's
+        //    `#token=...` transport is decoded.
+        assert!(
+            source.contains("readFragmentParam"),
+            "auth.js must expose a fragment reader; got:\n{source}",
+        );
+        assert!(
+            source.contains("new URLSearchParams"),
+            "fragment reader must parse via URLSearchParams",
+        );
+
+        // 2. Strips the consumed token from both the query and the
+        //    fragment via `history.replaceState`, so a copy-pasted
+        //    address bar does not leak the bearer.
+        assert!(
+            source.contains("history.replaceState"),
+            "auth.js must call history.replaceState to clean the URL",
+        );
+        assert!(
+            source.contains("stripFragmentParam"),
+            "auth.js must strip the token from the fragment too",
+        );
+
+        // 3. Refuses to overwrite an existing stored token —
+        //    `consumeTokenFromUrl` must early-return when
+        //    `readStoredToken()` is truthy. This guards against the
+        //    `/v2#token=BAD` lock-out scenario the doc-comment
+        //    calls out.
+        assert!(
+            source.contains("readStoredToken()"),
+            "auth.js must consult sessionStorage before storing a new token",
+        );
+
+        // 4. Logout calls the server-side revoke endpoint —
+        //    locks the regression where `signOut` drops the local
+        //    token without telling the server (which would let the
+        //    bearer roam in other tabs until natural expiry).
+        assert!(
+            source.contains("logoutRequest"),
+            "signOut must fire-and-forget the server-side revoke",
+        );
+
+        // 5. Surfaces the OAuth callback's `?login_error=<code>`
+        //    so users who deny consent or trip a hd / state guard
+        //    see an explanation instead of a blank login page.
+        assert!(
+            source.contains("login_error"),
+            "auth.js must consume the OAuth `?login_error=` redirect",
+        );
     }
 }

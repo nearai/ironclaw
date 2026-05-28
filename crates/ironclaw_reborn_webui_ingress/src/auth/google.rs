@@ -24,6 +24,7 @@ use super::config::GoogleOAuthConfig;
 use super::error::OAuthError;
 use super::profile::OAuthUserProfile;
 use super::provider::OAuthProvider;
+use super::provider_name::OAuthProviderName;
 
 const GOOGLE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
@@ -37,6 +38,11 @@ const GOOGLE_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Google OIDC provider.
 pub struct GoogleProvider {
+    /// Cached provider name. Constructed once at provider build time
+    /// so `OAuthProvider::name()` is allocation-free and returns the
+    /// same instance on every call (the URL `{provider}` segment
+    /// from the callback is compared against this exact value).
+    name: OAuthProviderName,
     client_id: String,
     client_secret: SecretString,
     allowed_hd: Option<String>,
@@ -84,6 +90,7 @@ impl GoogleProvider {
             // rather than a constructor panic.
             .unwrap_or_else(|_| reqwest::Client::new());
         Self {
+            name: OAuthProviderName::new("google").expect("\"google\" satisfies the grammar"), // safety: literal satisfies OAuthProviderName grammar (lowercase ascii, 6 chars); checked by `OAuthProviderName::accepts_lowercase_alphanumeric`
             client_id: config.client_id,
             client_secret: config.client_secret,
             allowed_hd: config.allowed_hd,
@@ -111,8 +118,8 @@ struct GoogleIdTokenClaims {
 
 #[async_trait]
 impl OAuthProvider for GoogleProvider {
-    fn name(&self) -> &'static str {
-        "google"
+    fn name(&self) -> &OAuthProviderName {
+        &self.name
     }
 
     fn authorization_url(&self, callback_url: &str, state: &str, code_challenge: &str) -> String {
@@ -384,6 +391,105 @@ mod tests {
         assert!(
             matches!(err, OAuthError::Denied(_)),
             "expected Denied, got {err:?}",
+        );
+    }
+
+    // ── token endpoint failure shapes (reviewer finding #10) ──────────
+    //
+    // Coverage was previously limited to the success path plus the
+    // hd-claim rejection. The reviewer flagged three uncovered
+    // branches in `exchange_code`: non-2xx HTTP, malformed token
+    // JSON, and a 200 response that lacks `id_token`. Each must
+    // return `OAuthError::CodeExchange`, not a panic or a silent
+    // bad-profile.
+
+    /// Spawn a mock token endpoint that always answers with the
+    /// supplied (status, body) pair. Used by the failure-shape
+    /// tests below to simulate Google misbehaving.
+    async fn spawn_token_endpoint_returning(
+        status: axum::http::StatusCode,
+        body: &'static str,
+        content_type: &'static str,
+    ) -> SocketAddr {
+        let router = axum::Router::new().route(
+            "/token",
+            post(
+                move |_: axum::extract::Form<std::collections::HashMap<String, String>>| async move {
+                    axum::response::Response::builder()
+                        .status(status)
+                        .header(axum::http::header::CONTENT_TYPE, content_type)
+                        .body(axum::body::Body::from(body))
+                        .expect("response")
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        addr
+    }
+
+    async fn run_exchange_against(endpoint: String) -> OAuthError {
+        let provider =
+            GoogleProvider::with_endpoints(cfg(None), "https://example.invalid/auth", endpoint);
+        provider
+            .exchange_code(
+                "fake-auth-code",
+                "https://example.com/auth/callback/google",
+                "fake-verifier",
+            )
+            .await
+            .expect_err("expected error from misbehaving token endpoint")
+    }
+
+    #[tokio::test]
+    async fn exchange_code_rejects_non_2xx_token_response() {
+        let addr = spawn_token_endpoint_returning(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            r#"{"error":"server_error"}"#,
+            "application/json",
+        )
+        .await;
+        let err = run_exchange_against(format!("http://{addr}/token")).await;
+        assert!(
+            matches!(err, OAuthError::CodeExchange(_)),
+            "expected CodeExchange for non-2xx response, got {err:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn exchange_code_rejects_malformed_token_json() {
+        let addr = spawn_token_endpoint_returning(
+            axum::http::StatusCode::OK,
+            "not actually json {{{",
+            "application/json",
+        )
+        .await;
+        let err = run_exchange_against(format!("http://{addr}/token")).await;
+        assert!(
+            matches!(err, OAuthError::CodeExchange(_)),
+            "expected CodeExchange for malformed JSON, got {err:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn exchange_code_rejects_response_without_id_token() {
+        // 200 + valid JSON but no `id_token` field. Code path is
+        // the `tokens.id_token.ok_or_else(...)` branch.
+        let addr = spawn_token_endpoint_returning(
+            axum::http::StatusCode::OK,
+            r#"{"access_token":"ya29.fake"}"#,
+            "application/json",
+        )
+        .await;
+        let err = run_exchange_against(format!("http://{addr}/token")).await;
+        assert!(
+            matches!(&err, OAuthError::CodeExchange(msg) if msg.contains("id_token")),
+            "expected CodeExchange referencing id_token, got {err:?}",
         );
     }
 }

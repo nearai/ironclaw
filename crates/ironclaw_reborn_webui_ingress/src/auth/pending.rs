@@ -30,6 +30,8 @@ use rand::rngs::OsRng;
 use secrecy::{ExposeSecret, SecretString};
 use sha2::{Digest, Sha256};
 
+use super::provider_name::OAuthProviderName;
+
 /// State entries older than this are evicted on every access.
 const STATE_TTL: Duration = Duration::from_secs(300);
 /// Hard cap on pending-flow entries to bound memory under flood.
@@ -44,8 +46,9 @@ const MAX_PENDING_STATES: usize = 1024;
 pub(super) struct PendingFlow {
     /// Provider name the login was initiated for. The callback
     /// rejects cross-provider state replay by comparing this against
-    /// the URL `{provider}` segment.
-    pub provider: String,
+    /// the [`OAuthProviderName`] parsed from the URL `{provider}`
+    /// segment.
+    pub provider: OAuthProviderName,
     /// PKCE code verifier — the original 32-byte random value
     /// (base64url-encoded), wrapped in `SecretString` for redacted
     /// `Debug`. The callback hands the raw value to the provider's
@@ -107,10 +110,9 @@ impl PendingFlowStore {
     /// browser will round-trip through the provider.
     pub(super) fn insert(
         &self,
-        provider: impl Into<String>,
+        provider: OAuthProviderName,
         redirect_after: Option<String>,
     ) -> (String, PendingFlow) {
-        let provider = provider.into();
         let mut guard = self.inner.lock();
 
         // Opportunistic GC on insert: if at capacity, sweep expired
@@ -216,13 +218,17 @@ mod tests {
         assert!(!a.is_empty());
     }
 
+    fn google() -> OAuthProviderName {
+        OAuthProviderName::new("google").unwrap()
+    }
+
     #[test]
     fn insert_then_take_returns_same_flow() {
         let store = PendingFlowStore::new();
-        let (state, flow) = store.insert("google", Some("/v2".to_string()));
+        let (state, flow) = store.insert(google(), Some("/v2".to_string()));
         assert!(!state.is_empty());
         let taken = store.take(&state).expect("flow present");
-        assert_eq!(taken.provider, "google");
+        assert_eq!(taken.provider, google());
         assert_eq!(
             taken.code_verifier.expose_secret(),
             flow.code_verifier.expose_secret()
@@ -239,7 +245,7 @@ mod tests {
     #[test]
     fn stored_challenge_matches_sha256_of_verifier() {
         let store = PendingFlowStore::new();
-        let (state, flow) = store.insert("google", None);
+        let (state, flow) = store.insert(google(), None);
         let recomputed = PendingFlowStore::code_challenge(flow.code_verifier.expose_secret());
         assert_eq!(flow.code_challenge, recomputed);
         let taken = store.take(&state).expect("flow");
@@ -249,9 +255,44 @@ mod tests {
     #[test]
     fn take_is_single_use() {
         let store = PendingFlowStore::new();
-        let (state, _) = store.insert("google", None);
+        let (state, _) = store.insert(google(), None);
         assert!(store.take(&state).is_some());
         assert!(store.take(&state).is_none(), "second take must be empty");
+    }
+
+    // Reviewer-requested regression (#4116 review, "Pending-flow
+    // capacity eviction is untested"): the store relies on the
+    // 1024-entry cap + oldest-evict tail as its flood bound, but
+    // until this test only single-entry behavior was covered. Fill
+    // past the cap and assert (a) the map stays bounded, (b) the
+    // oldest entry is the one evicted.
+    #[test]
+    fn pending_store_evicts_oldest_when_capacity_exceeded() {
+        let store = PendingFlowStore::new();
+        // Insert one extra entry past the documented cap.
+        let mut states = Vec::with_capacity(MAX_PENDING_STATES + 1);
+        for _ in 0..=MAX_PENDING_STATES {
+            let (state, _) = store.insert(google(), None);
+            states.push(state);
+        }
+        let guard = store.inner.lock();
+        assert!(
+            guard.len() <= MAX_PENDING_STATES,
+            "store must stay bounded; got {}",
+            guard.len(),
+        );
+        // The OLDEST state minted is gone.
+        let oldest = &states[0];
+        assert!(
+            !guard.contains_key(oldest),
+            "oldest entry must be evicted; map still has it",
+        );
+        // The NEWEST is still present.
+        let newest = states.last().unwrap();
+        assert!(
+            guard.contains_key(newest),
+            "newest entry must survive eviction",
+        );
     }
 
     #[test]

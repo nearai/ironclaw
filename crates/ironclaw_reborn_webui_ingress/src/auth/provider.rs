@@ -16,14 +16,16 @@ use async_trait::async_trait;
 
 use super::error::OAuthError;
 use super::profile::OAuthUserProfile;
+use super::provider_name::OAuthProviderName;
 
 /// Generic provider contract — see module docs.
 #[async_trait]
 pub trait OAuthProvider: Send + Sync + 'static {
     /// Stable provider identifier exposed on `/auth/providers` and
     /// matched against the `{provider}` path segment on login /
-    /// callback. Lowercase, ASCII.
-    fn name(&self) -> &'static str;
+    /// callback. Validated newtype so the URL-parsed segment, the
+    /// pending-flow record, and the provider-self-id cannot drift.
+    fn name(&self) -> &OAuthProviderName;
 
     /// Build the provider-side authorization URL the browser is
     /// redirected to. `callback_url` is the v2-owned

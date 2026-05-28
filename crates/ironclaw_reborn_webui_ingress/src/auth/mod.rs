@@ -23,6 +23,7 @@ mod google;
 mod pending;
 mod profile;
 mod provider;
+mod provider_name;
 mod routes;
 mod user_directory;
 
@@ -31,6 +32,7 @@ pub use error::OAuthError;
 pub use google::GoogleProvider;
 pub use profile::OAuthUserProfile;
 pub use provider::OAuthProvider;
+pub use provider_name::{OAuthProviderName, OAuthProviderNameError};
 pub use routes::{OAuthRouterConfig, PublicRouteMount, webui_v2_auth_router};
 #[cfg(any(test, feature = "dev-in-memory-session"))]
 pub use user_directory::EmailUserDirectory;

@@ -75,11 +75,38 @@ function consumeTokenFromUrl() {
   return token;
 }
 
+// Map opaque error codes the OAuth callback emits (`?login_error=...`)
+// to short user-facing messages. Keeps the SPA's surface in sync with
+// `error_code_for` in `crates/ironclaw_reborn_webui_ingress/src/auth/routes.rs`.
+// An unknown code falls back to a generic message so a future
+// backend addition does not render a blank banner.
+const LOGIN_ERROR_MESSAGES = {
+  denied: "Sign-in was cancelled.",
+  invalid_state: "Your sign-in session expired. Please try again.",
+  invalid_request: "Sign-in request was malformed. Please try again.",
+  provider_mismatch: "Sign-in provider mismatch. Please try again.",
+  unauthorized: "This account is not authorized.",
+  exchange_failed: "Could not complete sign-in with the provider.",
+  server_error: "Sign-in is temporarily unavailable.",
+};
+
+// Read `?login_error=<code>` from the URL once on mount and strip
+// it. Returns the localized banner text (empty string if no code or
+// the code is unknown).
+function consumeLoginErrorFromUrl() {
+  const url = new URL(window.location.href);
+  const code = (url.searchParams.get("login_error") || "").trim();
+  if (!code) return "";
+  url.searchParams.delete("login_error");
+  window.history.replaceState({}, "", url.pathname + url.search + url.hash);
+  return LOGIN_ERROR_MESSAGES[code] || "Could not complete sign-in. Please try again.";
+}
+
 export function useAuthSession() {
   const [token, setToken] = React.useState(
     () => consumeTokenFromUrl() || readStoredToken(),
   );
-  const [error, setError] = React.useState("");
+  const [error, setError] = React.useState(() => consumeLoginErrorFromUrl());
 
   const signIn = React.useCallback((nextToken) => {
     storeToken(nextToken);

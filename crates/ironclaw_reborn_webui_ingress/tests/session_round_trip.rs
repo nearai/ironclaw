@@ -45,8 +45,8 @@ use ironclaw_reborn_composition::{
     PublicRouteMount, RebornReadiness, RebornWebuiBundle, WebuiServeConfig, webui_v2_app,
 };
 use ironclaw_reborn_webui_ingress::{
-    EmailUserDirectory, InMemorySessionStore, OAuthProvider, OAuthRouterConfig, OAuthUserProfile,
-    SessionAuthenticator, SessionStore, webui_v2_auth_router,
+    EmailUserDirectory, InMemorySessionStore, OAuthProvider, OAuthProviderName, OAuthRouterConfig,
+    OAuthUserProfile, SessionAuthenticator, SessionStore, webui_v2_auth_router,
 };
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 use parking_lot::Mutex as PlMutex;
@@ -180,12 +180,14 @@ impl RebornServicesApi for StubServices {
 // ─── stub OAuth provider ──────────────────────────────────────────────
 
 struct StubProvider {
+    name: OAuthProviderName,
     profile: PlMutex<Option<OAuthUserProfile>>,
 }
 
 impl StubProvider {
     fn new(profile: OAuthUserProfile) -> Arc<Self> {
         Arc::new(Self {
+            name: OAuthProviderName::new("google").expect("name"),
             profile: PlMutex::new(Some(profile)),
         })
     }
@@ -193,8 +195,8 @@ impl StubProvider {
 
 #[async_trait]
 impl OAuthProvider for StubProvider {
-    fn name(&self) -> &'static str {
-        "google"
+    fn name(&self) -> &OAuthProviderName {
+        &self.name
     }
     fn authorization_url(&self, callback_url: &str, state: &str, _challenge: &str) -> String {
         format!(

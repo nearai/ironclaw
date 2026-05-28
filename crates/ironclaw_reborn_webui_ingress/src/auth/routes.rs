@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 use super::error::OAuthError;
 use super::pending::{PendingFlowStore, sanitize_redirect};
 use super::provider::OAuthProvider;
+use super::provider_name::OAuthProviderName;
 use super::user_directory::{UserDirectory, UserDirectoryError};
 use crate::session::SessionStore;
 
@@ -99,14 +100,14 @@ struct RouterState {
 }
 
 impl RouterState {
-    fn provider(&self, name: &str) -> Option<Arc<dyn OAuthProvider>> {
+    fn provider(&self, name: &OAuthProviderName) -> Option<Arc<dyn OAuthProvider>> {
         self.providers
             .iter()
             .find(|p| p.name() == name)
             .map(Arc::clone)
     }
 
-    fn callback_url(&self, provider_name: &str) -> String {
+    fn callback_url(&self, provider_name: &OAuthProviderName) -> String {
         format!("{}/auth/callback/{provider_name}", self.base_url)
     }
 }
@@ -128,24 +129,24 @@ const ROUTE_ID_LOGOUT: &str = "webui.sso.logout";
 /// Maximum logout body size. The handler doesn't read a body — the
 /// bearer comes from the `Authorization` header — but a tight cap
 /// still bounds an oversized POST before the handler runs.
-const LOGOUT_BODY_LIMIT_BYTES: NonZeroU64 = NonZeroU64::new(1024).expect("1024 != 0");
+const LOGOUT_BODY_LIMIT_BYTES: NonZeroU64 = NonZeroU64::new(1024).expect("1024 != 0"); // safety: const-evaluated, literal non-zero
 
 /// Per-IP rate-limit window shared across every public SSO route.
 /// 60-second sliding window mirrors the product-auth callback's
 /// shape; the per-route `max_requests` differs by intent.
-const SSO_RATE_WINDOW_SECONDS: NonZeroU32 = NonZeroU32::new(60).expect("60 != 0");
+const SSO_RATE_WINDOW_SECONDS: NonZeroU32 = NonZeroU32::new(60).expect("60 != 0"); // safety: const-evaluated, literal non-zero
 /// Discovery is cheap on the server side but the SPA hammers it on
 /// every login-page render. 120/min/IP is comfortable for legitimate
 /// browsers while blocking sustained floods.
-const SSO_PROVIDERS_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(120).expect("120 != 0");
+const SSO_PROVIDERS_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(120).expect("120 != 0"); // safety: const-evaluated, literal non-zero
 /// Login redirects insert into the pending-flow cache. 60/min/IP
 /// caps the attack surface for filling the cache.
-const SSO_LOGIN_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(60).expect("60 != 0");
+const SSO_LOGIN_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(60).expect("60 != 0"); // safety: const-evaluated, literal non-zero
 /// Callbacks consume cache entries. Same per-IP cap as login so a
 /// flood of fake callbacks cannot starve real ones.
-const SSO_CALLBACK_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(60).expect("60 != 0");
+const SSO_CALLBACK_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(60).expect("60 != 0"); // safety: const-evaluated, literal non-zero
 /// Logout. Per-IP, generous, because a sign-out blip should not 429.
-const SSO_LOGOUT_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(60).expect("60 != 0");
+const SSO_LOGOUT_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(60).expect("60 != 0"); // safety: const-evaluated, literal non-zero
 
 /// Bundle returned by [`webui_v2_auth_router`] — the host
 /// composition layer merges `router` and folds `descriptors` into the
@@ -292,7 +293,7 @@ fn sso_justification() -> IngressJustification {
 
 #[derive(Serialize)]
 struct ProvidersResponse {
-    providers: Vec<&'static str>,
+    providers: Vec<String>,
 }
 
 /// `GET /auth/providers` — list the providers configured at startup.
@@ -300,7 +301,11 @@ struct ProvidersResponse {
 /// against its supported set so a future backend that adds new
 /// providers without a matching SPA build still renders cleanly.
 async fn providers_handler(State(state): State<RouterStateHandle>) -> Json<ProvidersResponse> {
-    let mut providers: Vec<&'static str> = state.providers.iter().map(|p| p.name()).collect();
+    let mut providers: Vec<String> = state
+        .providers
+        .iter()
+        .map(|p| p.name().as_str().to_string())
+        .collect();
     providers.sort_unstable();
     Json(ProvidersResponse { providers })
 }
@@ -320,9 +325,19 @@ struct LoginParams {
 /// authorization URL.
 async fn login_handler(
     State(state): State<RouterStateHandle>,
-    Path(provider_name): Path<String>,
+    Path(raw_provider): Path<String>,
     Query(params): Query<LoginParams>,
 ) -> Response {
+    // Validate at the boundary: an ill-formed `{provider}` segment
+    // (path traversal, uppercase, oversized) fails closed before
+    // any state-store mutation.
+    let Ok(provider_name) = OAuthProviderName::new(raw_provider.clone()) else {
+        return (
+            StatusCode::NOT_FOUND,
+            format!("Unknown OAuth provider: {raw_provider}"),
+        )
+            .into_response();
+    };
     let Some(provider) = state.provider(&provider_name) else {
         return (
             StatusCode::NOT_FOUND,
@@ -332,7 +347,9 @@ async fn login_handler(
     };
 
     let redirect_after = sanitize_redirect(params.redirect_after);
-    let (csrf_state, flow) = state.pending.insert(provider.name(), redirect_after);
+    let (csrf_state, flow) = state
+        .pending
+        .insert(provider.name().clone(), redirect_after);
     let callback_url = state.callback_url(provider.name());
     // `flow.code_challenge` is the SHA-256 the pending store
     // pre-computed at mint time — no second hash per login redirect.
@@ -356,9 +373,18 @@ struct CallbackParams {
 /// back to the SPA with the session token in the URL fragment.
 async fn callback_handler(
     State(state): State<RouterStateHandle>,
-    Path(provider_name): Path<String>,
+    Path(raw_provider): Path<String>,
     Query(params): Query<CallbackParams>,
 ) -> Response {
+    // Validate the URL `{provider}` segment at the boundary. An
+    // ill-formed segment can never match a flow in the pending
+    // store, but typing the segment here keeps every downstream
+    // comparison a newtype `==` so a future refactor cannot
+    // re-introduce stringly-typed drift.
+    let Ok(provider_name) = OAuthProviderName::new(raw_provider) else {
+        return spa_error_redirect("invalid_request").into_response();
+    };
+
     // Provider-initiated denial (user clicked "cancel" on the consent
     // screen, account suspended, etc.). Surface a generic redirect
     // back to the SPA with `?login_error=denied` so the login page
@@ -466,26 +492,38 @@ async fn callback_handler(
 /// `POST /auth/logout` — revoke the bearer session and clear it from
 /// the durable session store. Honors `Authorization: Bearer <token>`
 /// only — query-token shim is reserved for the SSE route per the
-/// composition's `extract_bearer_token` policy. Returns `204` whether
-/// or not a token was present so the client UX is unconditional.
+/// composition's `extract_bearer_token` policy.
+///
+/// **Status contract:**
+/// - `204 No Content` when there is no bearer header (idempotent
+///   sign-out — the SPA clears local state unconditionally), OR
+///   when the session store confirms the revoke.
+/// - `500 Internal Server Error` when the session store backend
+///   fails to revoke. A success status in this case would lie to
+///   the caller: the bearer might still authenticate in another
+///   tab or another client until natural expiry, violating the
+///   PR's revoke contract. The SPA still clears its local copy
+///   regardless of the response status — losing the local token
+///   is strictly weaker than a stale bearer roaming the network.
 async fn logout_handler(
     State(state): State<RouterStateHandle>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    if let Some(token) = extract_bearer(&headers)
-        && let Err(err) = state.session_store.revoke(&token).await
-    {
-        // A revoke failure is operator-relevant (durable store may
-        // have disconnected) but the client UX is still "you are
-        // signed out locally" — return 204 so the SPA clears its
-        // sessionStorage either way.
-        tracing::warn!(
-            target = "ironclaw::reborn::webui_ingress::auth",
-            error = %err,
-            "session store revoke failed during logout",
-        );
+    let Some(token) = extract_bearer(&headers) else {
+        return StatusCode::NO_CONTENT.into_response();
+    };
+    match state.session_store.revoke(&token).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(err) => {
+            tracing::warn!(
+                target = "ironclaw::reborn::webui_ingress::auth",
+                error = %err,
+                "session store revoke failed during logout — returning 500 so the \
+                 client knows the server-side revocation did not complete",
+            );
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
     }
-    StatusCode::NO_CONTENT.into_response()
 }
 
 // ─── helpers ──────────────────────────────────────────────────────────
@@ -534,7 +572,7 @@ fn error_code_for(err: &OAuthError) -> &'static str {
     }
 }
 
-fn log_oauth_error(provider_name: &str, err: &OAuthError) {
+fn log_oauth_error(provider_name: &OAuthProviderName, err: &OAuthError) {
     // Provider error bodies and JWT decode details are operator-only
     // — never echoed back to the client. Logged at `warn!` so they
     // appear in production logs without spamming `info!` on every

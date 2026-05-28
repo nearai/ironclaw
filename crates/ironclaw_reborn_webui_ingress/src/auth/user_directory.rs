@@ -17,6 +17,7 @@ use ironclaw_host_api::UserId;
 use thiserror::Error;
 
 use super::profile::OAuthUserProfile;
+use super::provider_name::OAuthProviderName;
 
 /// Errors raised by a [`UserDirectory`] impl.
 #[derive(Debug, Error)]
@@ -43,7 +44,7 @@ pub trait UserDirectory: Send + Sync + 'static {
     /// login entirely.
     async fn resolve(
         &self,
-        provider: &str,
+        provider: &OAuthProviderName,
         profile: &OAuthUserProfile,
     ) -> Result<UserId, UserDirectoryError>;
 }
@@ -67,7 +68,7 @@ pub struct EmailUserDirectory;
 impl UserDirectory for EmailUserDirectory {
     async fn resolve(
         &self,
-        provider: &str,
+        provider: &OAuthProviderName,
         profile: &OAuthUserProfile,
     ) -> Result<UserId, UserDirectoryError> {
         let candidate = if profile.email_verified
@@ -94,11 +95,18 @@ mod tests {
         }
     }
 
+    fn google() -> OAuthProviderName {
+        OAuthProviderName::new("google").unwrap()
+    }
+
     #[tokio::test]
     async fn verified_email_becomes_user_id_lowercased() {
         let dir = EmailUserDirectory;
         let uid = dir
-            .resolve("google", &profile(Some("Alice@Example.com"), true, "g-123"))
+            .resolve(
+                &google(),
+                &profile(Some("Alice@Example.com"), true, "g-123"),
+            )
             .await
             .expect("resolve");
         assert_eq!(uid.as_str(), "alice@example.com");
@@ -109,7 +117,7 @@ mod tests {
         let dir = EmailUserDirectory;
         let uid = dir
             .resolve(
-                "google",
+                &google(),
                 &profile(Some("alice@example.com"), false, "g-123"),
             )
             .await

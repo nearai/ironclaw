@@ -18,9 +18,7 @@ default = []
 # would happily accept it, but sessions would vanish on every restart
 # and the O(n) constant-time lookup would scale poorly under real
 # user load. Local dev and tests opt in by enabling this feature.
-# The feature also pulls in `uuid`, the only consumer of which is
-# the in-memory store itself.
-dev-in-memory-session = ["dep:uuid"]
+dev-in-memory-session = []
 
 [dependencies]
 async-trait = "0.1"
@@ -44,11 +42,12 @@ tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "
 tracing = "0.1"
 url = "2"
 urlencoding = "2"
-# `uuid` is only consumed by the `dev-in-memory-session` impl
-# (session.rs::create_session). Make it optional and pulled in by
-# that feature so production builds don't link in a dep they never
-# touch.
-uuid = { version = "1", features = ["v4"], optional = true }
+# `uuid` is consumed by `InMemorySessionStore` (session.rs) and the
+# library's internal tests under `#[cfg(test)]`. The earlier attempt
+# to mark it `optional = true` broke `cargo test` because the
+# `cfg(test)` gate activated the `use uuid::Uuid;` import without
+# pulling in the optional crate.
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 axum = { version = "0.8", features = ["macros"] }
