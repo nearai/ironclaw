@@ -4,7 +4,17 @@ function ironhubInstallPanel() {
 
 function renderIronhubInstallState(html) {
   var panel = ironhubInstallPanel();
-  if (panel) panel.innerHTML = '<div class="ext-card ironhub-install-card">' + html + '</div>';
+  if (!panel) return;
+  panel.innerHTML = '<div class="ext-card ironhub-install-card">' + html + '</div>';
+  wireInstallActions();
+}
+
+function wireInstallActions() {
+  document.querySelectorAll('.ironhub-install-cancel').forEach(function(btn) {
+    btn.addEventListener('click', ironhubInstallCancel);
+  });
+  var ackCb = document.getElementById('ironhub-install-ack-cb');
+  if (ackCb) ackCb.addEventListener('change', ironhubAckChanged);
 }
 
 function ironhubInstallCancel() {
@@ -15,7 +25,7 @@ function renderIronhubInstallError(message) {
   renderIronhubInstallState(
     '<h2>' + escapeHtml(I18n.t('ironhub.install.unverifiedTitle')) + '</h2>' +
     '<p class="ironhub-install-error">' + escapeHtml(message) + '</p>' +
-    '<button class="btn-ext" onclick="ironhubInstallCancel()">' +
+    '<button class="btn-ext ironhub-install-cancel">' +
     escapeHtml(I18n.t('ironhub.install.close')) + '</button>'
   );
 }
@@ -63,7 +73,7 @@ function renderIronhubConfirm(signed, info) {
       escapeHtml(I18n.t('ironhub.install.communityWarning')) + '</p>';
     ackCheckbox =
       '<label class="ironhub-install-row"><input type="checkbox" ' +
-      'id="ironhub-install-ack-cb" onchange="ironhubAckChanged()" /> ' +
+      'id="ironhub-install-ack-cb" /> ' +
       escapeHtml(I18n.t('ironhub.install.ackUnverified')) + '</label>';
     confirmDisabled = ' disabled';
   }
@@ -78,7 +88,7 @@ function renderIronhubConfirm(signed, info) {
     '<div class="ironhub-install-actions">' +
     '<button class="btn-ext install" id="ironhub-install-confirm-btn"' + confirmDisabled + '>' +
     escapeHtml(I18n.t('ironhub.install.confirm')) + '</button>' +
-    '<button class="btn-ext" onclick="ironhubInstallCancel()">' +
+    '<button class="btn-ext ironhub-install-cancel">' +
     escapeHtml(I18n.t('ironhub.install.cancel')) + '</button>' +
     '</div>'
   );
@@ -126,7 +136,7 @@ function ironhubInstallConfirm(signed, requireAck) {
     renderIronhubInstallState(
       '<h2>' + escapeHtml(I18n.t('ironhub.install.doneTitle')) + '</h2>' +
       '<p>' + escapeHtml(I18n.t('ironhub.install.success', { name: name })) + '</p>' +
-      '<button class="btn-ext" onclick="ironhubInstallCancel()">' +
+      '<button class="btn-ext ironhub-install-cancel">' +
       escapeHtml(I18n.t('ironhub.install.close')) + '</button>'
     );
   }).catch(function(err) {

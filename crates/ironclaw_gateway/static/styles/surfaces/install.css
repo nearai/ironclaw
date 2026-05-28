@@ -1,6 +1,6 @@
 #tab-install {
-  display: flex;
   justify-content: center;
+  align-items: center;
   padding: 48px 16px;
 }
 

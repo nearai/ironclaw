@@ -235,6 +235,10 @@ function renderIronhubSigningKeyCard(rowHtml) {
     escapeHtml(I18n.t('ironhub.signingKey.title')) + '</div>' +
     rowHtml +
     '</div>';
+  var form = document.getElementById('ironhub-key-form');
+  if (form) form.addEventListener('submit', ironhubSaveSigningKey);
+  var revokeBtn = document.getElementById('ironhub-revoke-btn');
+  if (revokeBtn) revokeBtn.addEventListener('click', ironhubRevokeSigningKey);
 }
 
 function ironhubSigningKeyRowHtml(statusHtml, hasKey) {
@@ -242,7 +246,7 @@ function ironhubSigningKeyRowHtml(statusHtml, hasKey) {
     ? I18n.t('ironhub.signingKey.replace')
     : I18n.t('ironhub.signingKey.save');
   var revoke = hasKey
-    ? '<button class="btn-ext" type="button" onclick="ironhubRevokeSigningKey()">' +
+    ? '<button class="btn-ext" id="ironhub-revoke-btn" type="button">' +
       escapeHtml(I18n.t('ironhub.signingKey.revoke')) + '</button>'
     : '';
   return '' +
@@ -254,8 +258,7 @@ function ironhubSigningKeyRowHtml(statusHtml, hasKey) {
     escapeHtml(I18n.t('ironhub.signingKey.description')) + '</div>' +
     statusHtml +
     '</div>' +
-    '<form style="display:flex;align-items:center;gap:8px" ' +
-    'onsubmit="ironhubSaveSigningKey(event); return false;">' +
+    '<form id="ironhub-key-form" style="display:flex;align-items:center;gap:8px">' +
     '<input type="password" class="settings-input" id="ironhub-key-input" autocomplete="off" ' +
     'placeholder="' + escapeHtml(I18n.t('ironhub.signingKey.placeholder')) + '" />' +
     '<button class="btn-ext install" type="submit">' + escapeHtml(submitLabel) + '</button>' +
