@@ -4,8 +4,15 @@ mod tests {
 
     use super::super::*;
 
-    use ironclaw_host_api::{AgentId, MountPermissions, ProjectId, TenantId, ThreadId};
-    use ironclaw_host_runtime::SPAWN_SUBAGENT_CAPABILITY_ID;
+    use ironclaw_host_api::{
+        AgentId, EffectKind, MountPermissions, NetworkPolicy, ProjectId, TenantId, ThreadId,
+    };
+    use ironclaw_host_runtime::{
+        APPLY_PATCH_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID,
+        HTTP_SAVE_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID,
+        SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
+        SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
+    };
     use ironclaw_loop_support::HostManagedModelMessage;
     use ironclaw_product_workflow::{
         LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext,
@@ -22,6 +29,11 @@ mod tests {
             CapabilityInvocation, CapabilityOutcome, InMemoryLoopHostMilestoneSink,
             InMemoryRunProfileResolver, ModelProfileId, VisibleCapabilityRequest,
         },
+    };
+
+    use crate::extension_lifecycle_capabilities::{
+        EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID,
+        EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SEARCH_CAPABILITY_ID,
     };
 
     async fn run_context(label: &str) -> LoopRunContext {
@@ -317,7 +329,12 @@ mod tests {
 
     #[test]
     fn local_dev_builtin_surface_grants_capability_classes() {
-        let capability_ids = local_dev_builtin_capability_ids();
+        let policy = crate::local_dev_capability_policy::local_dev_capability_policy()
+            .expect("policy parses");
+        let capability_ids = policy
+            .capability_ids()
+            .map(|capability| capability.as_str())
+            .collect::<Vec<_>>();
 
         assert!(capability_ids.contains(&WRITE_FILE_CAPABILITY_ID));
         assert!(capability_ids.contains(&APPLY_PATCH_CAPABILITY_ID));
@@ -327,8 +344,15 @@ mod tests {
         assert!(capability_ids.contains(&SHELL_CAPABILITY_ID));
         assert!(capability_ids.contains(&HTTP_CAPABILITY_ID));
         assert!(capability_ids.contains(&HTTP_SAVE_CAPABILITY_ID));
+        let local_dev_allowed_effects = vec![
+            EffectKind::DispatchCapability,
+            EffectKind::ReadFilesystem,
+            EffectKind::WriteFilesystem,
+        ];
+        let local_dev_shell_network_policy =
+            crate::local_dev_capability_policy::local_dev_wildcard_network_policy();
         assert_eq!(
-            local_dev_allowed_effects(),
+            local_dev_allowed_effects,
             vec![
                 EffectKind::DispatchCapability,
                 EffectKind::ReadFilesystem,
@@ -336,7 +360,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            local_dev_provider_allowed_effects(),
+            policy.provider.authority_effects,
             vec![
                 EffectKind::DispatchCapability,
                 EffectKind::ReadFilesystem,
@@ -370,12 +394,11 @@ mod tests {
             mount_for("/system/skills").permissions,
             MountPermissions::read_only()
         );
-        let grants = local_dev_builtin_grants(
+        let grants = policy.builtin_grants(
             &ExtensionId::new("loop-driver").expect("valid extension id"),
             &workspace_mounts,
             &skill_mounts,
-        )
-        .expect("local-dev grants build");
+        );
         let grant_for = |capability_id: &str| {
             grants
                 .grants
@@ -399,7 +422,7 @@ mod tests {
         assert!(shell_grant.constraints.mounts.mounts.is_empty());
         assert_eq!(
             shell_grant.constraints.network,
-            local_dev_shell_network_policy()
+            local_dev_shell_network_policy
         );
 
         let http_grant = grant_for(HTTP_CAPABILITY_ID);
@@ -410,7 +433,7 @@ mod tests {
         assert!(http_grant.constraints.mounts.mounts.is_empty());
         assert_eq!(
             http_grant.constraints.network,
-            local_dev_shell_network_policy()
+            local_dev_shell_network_policy
         );
 
         let http_save_grant = grant_for(HTTP_SAVE_CAPABILITY_ID);
@@ -425,7 +448,7 @@ mod tests {
         assert_eq!(http_save_grant.constraints.mounts, workspace_mounts);
         assert_eq!(
             http_save_grant.constraints.network,
-            local_dev_shell_network_policy()
+            local_dev_shell_network_policy
         );
 
         let extension_search_grant = grant_for(EXTENSION_SEARCH_CAPABILITY_ID);
@@ -445,10 +468,7 @@ mod tests {
             EXTENSION_REMOVE_CAPABILITY_ID,
         ] {
             let grant = grant_for(capability_id);
-            assert_eq!(
-                grant.constraints.allowed_effects,
-                local_dev_allowed_effects()
-            );
+            assert_eq!(grant.constraints.allowed_effects, local_dev_allowed_effects);
             assert!(grant.constraints.mounts.mounts.is_empty());
             assert_eq!(grant.constraints.network, NetworkPolicy::default());
         }
@@ -456,7 +476,7 @@ mod tests {
         let read_file_grant = grant_for(READ_FILE_CAPABILITY_ID);
         assert_eq!(
             read_file_grant.constraints.allowed_effects,
-            local_dev_allowed_effects()
+            local_dev_allowed_effects
         );
         assert_eq!(read_file_grant.constraints.mounts, workspace_mounts);
         assert_eq!(
@@ -467,12 +487,17 @@ mod tests {
         let skill_install_grant = grant_for(SKILL_INSTALL_CAPABILITY_ID);
         assert_eq!(
             skill_install_grant.constraints.allowed_effects,
-            local_dev_skill_install_allowed_effects()
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+                EffectKind::Network
+            ]
         );
         assert_eq!(skill_install_grant.constraints.mounts, skill_mounts);
         assert_eq!(
             skill_install_grant.constraints.network,
-            local_dev_shell_network_policy()
+            local_dev_shell_network_policy
         );
     }
 
@@ -503,24 +528,30 @@ mod tests {
         .await
         .expect("local-dev-yolo services build"); // safety: test-only assertion in #[cfg(test)] module.
         let runtime = services.host_runtime.clone().expect("host runtime"); // safety: test-only assertion in #[cfg(test)] module.
-        let workspace_mounts = services
+        let local_runtime = services
             .local_runtime
             .as_ref()
-            .expect("local runtime substrate") // safety: test-only assertion in #[cfg(test)] module.
-            .workspace_mounts
-            .clone();
+            .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
+        let workspace_mounts = local_runtime.workspace_mounts.clone();
+        let skill_mounts = local_runtime.skill_mounts.clone();
+        let policy = Arc::new(
+            crate::local_dev_capability_policy::local_dev_capability_policy()
+                .expect("policy parses"),
+        );
         let capability_io = Arc::new(LocalDevCapabilityIo::default());
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
-        let factory = LocalDevLoopCapabilityPortFactory::new(
+        let factory = LocalDevLoopCapabilityPortFactory {
             runtime,
-            UserId::new("local-yolo-host-user").expect("user id"), // safety: literal test id is valid.
+            user_id: UserId::new("local-yolo-host-user").expect("user id"), // safety: literal test id is valid.
+            policy,
             workspace_mounts,
-            LocalDevExtensionSurfaceSource::default(),
+            skill_mounts,
+            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
             input_resolver,
             result_writer,
-            Arc::new(InMemoryLoopHostMilestoneSink::default()),
-        );
+            milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        };
         let run_context = run_context("host-mount-read").await;
         let port = factory
             .create_capability_port(&run_context)
@@ -666,24 +697,30 @@ mod tests {
         .await
         .expect("local-dev services build"); // safety: test-only assertion in #[cfg(test)] module.
         let runtime = services.host_runtime.clone().expect("host runtime"); // safety: test-only assertion in #[cfg(test)] module.
-        let workspace_mounts = services
+        let local_runtime = services
             .local_runtime
             .as_ref()
-            .expect("local runtime substrate") // safety: test-only assertion in #[cfg(test)] module.
-            .workspace_mounts
-            .clone();
+            .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
+        let workspace_mounts = local_runtime.workspace_mounts.clone();
+        let skill_mounts = local_runtime.skill_mounts.clone();
+        let policy = Arc::new(
+            crate::local_dev_capability_policy::local_dev_capability_policy()
+                .expect("policy parses"),
+        );
         let capability_io = Arc::new(LocalDevCapabilityIo::default());
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
-        let factory = LocalDevLoopCapabilityPortFactory::new(
+        let factory = LocalDevLoopCapabilityPortFactory {
             runtime,
-            UserId::new("local-dev-no-host-user").expect("user id"), // safety: literal test id is valid.
+            user_id: UserId::new("local-dev-no-host-user").expect("user id"), // safety: literal test id is valid.
+            policy,
             workspace_mounts,
-            LocalDevExtensionSurfaceSource::default(),
+            skill_mounts,
+            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
             input_resolver,
             result_writer,
-            Arc::new(InMemoryLoopHostMilestoneSink::default()),
-        );
+            milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        };
         let run_context = run_context("no-host-disclosure").await;
         let port = factory
             .create_capability_port(&run_context)
@@ -808,6 +845,10 @@ mod tests {
             Arc::new(InMemorySessionThreadService::default()),
             thread_scope,
             UserId::new("local-dev-github-user").expect("user id"),
+            Arc::new(
+                crate::local_dev_capability_policy::local_dev_capability_policy()
+                    .expect("policy parses"),
+            ),
             Arc::new(UnavailableModelGateway),
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
         )
@@ -838,6 +879,10 @@ mod tests {
             Arc::new(InMemorySessionThreadService::default()),
             thread_scope,
             UserId::new("local-dev-live-github-user").expect("user id"),
+            Arc::new(
+                crate::local_dev_capability_policy::local_dev_capability_policy()
+                    .expect("policy parses"),
+            ),
             Arc::new(UnavailableModelGateway),
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
         )
