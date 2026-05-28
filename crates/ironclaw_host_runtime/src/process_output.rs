@@ -5,10 +5,11 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use ironclaw_host_api::ResourceScope;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
-use crate::RuntimeProcessError;
+use crate::{RuntimeProcessError, sandbox_process::RebornSandboxScopeKey};
 
 /// Maximum model-facing process output preview before middle truncation.
 pub(crate) const COMMAND_MAX_OUTPUT_SIZE: usize = 64 * 1024;
@@ -17,6 +18,12 @@ const COMMAND_MAX_SAVED_STREAM_SIZE: usize = 16 * 1024 * 1024;
 const COMMAND_OUTPUT_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
 const COMMAND_OUTPUT_TEMP_PREFIX: &str = "ironclaw-command-output-";
 const COMMAND_OUTPUT_SCRATCH_PREFIX: &str = "ironclaw-command-output-scratch-";
+/// Root sub-directory under the OS temp dir that holds per-scope saved-output
+/// directories. Each principal gets its own immediate child directory (named
+/// by the [`RebornSandboxScopeKey`] digest) created with owner-only `0o700`
+/// permissions, so saved output files from different tenants/users/projects
+/// live in disjoint, non-enumerable directories.
+const COMMAND_OUTPUT_ROOT_DIRNAME: &str = "ironclaw-command-outputs";
 const COMMAND_OUTPUT_BLOCKED_MARKER: &str =
     "[Full command output blocked due to potential secret leakage]\n";
 const STREAM_READ_BUF_SIZE: usize = 16 * 1024;
@@ -136,6 +143,7 @@ impl PreviewBytes {
 }
 
 pub(crate) async fn read_stream_capped<R>(
+    scope: &ResourceScope,
     mut stream: R,
 ) -> Result<StreamCapture, RuntimeProcessError>
 where
@@ -164,8 +172,8 @@ where
         }
 
         if saved_file.is_none() {
-            cleanup_stale_command_outputs();
-            let (path, file) = create_private_temp_file(COMMAND_OUTPUT_SCRATCH_PREFIX)?;
+            cleanup_stale_command_outputs(scope);
+            let (path, file) = create_private_temp_file(scope, COMMAND_OUTPUT_SCRATCH_PREFIX)?;
             let mut file = tokio::fs::File::from_std(file);
             if let StreamStorage::Inline(output) = &capture.storage {
                 if let Err(error) = file
@@ -209,6 +217,7 @@ where
 }
 
 pub(crate) fn capture_command_output(
+    scope: &ResourceScope,
     stdout: StreamCapture,
     stderr: StreamCapture,
 ) -> Result<CapturedCommandOutput, RuntimeProcessError> {
@@ -222,8 +231,9 @@ pub(crate) fn capture_command_output(
 
     let mut preview = PreviewBytes::default();
     (|| {
-        let raw_path = materialize_combined_output(&stdout, &stderr, &mut preview)?;
+        let raw_path = materialize_combined_output(scope, &stdout, &stderr, &mut preview)?;
         match finalize_saved_output(
+            scope,
             raw_path.clone(),
             stdout.was_capped || stderr.was_capped,
             preview,
@@ -269,12 +279,13 @@ fn combined_inline_output_len(stdout: &StreamCapture, stderr: &StreamCapture) ->
 }
 
 fn materialize_combined_output(
+    scope: &ResourceScope,
     stdout: &StreamCapture,
     stderr: &StreamCapture,
     preview: &mut PreviewBytes,
 ) -> Result<PathBuf, RuntimeProcessError> {
-    cleanup_stale_command_outputs();
-    let (path, mut file) = create_private_temp_file(COMMAND_OUTPUT_SCRATCH_PREFIX)?;
+    cleanup_stale_command_outputs(scope);
+    let (path, mut file) = create_private_temp_file(scope, COMMAND_OUTPUT_SCRATCH_PREFIX)?;
     let result = (|| {
         append_stream(stdout, &mut file, preview)?;
         if stdout.has_output() && stderr.has_output() {
@@ -324,6 +335,7 @@ fn append_bytes(
 }
 
 fn finalize_saved_output(
+    scope: &ResourceScope,
     raw_path: PathBuf,
     stream_was_capped: bool,
     raw_preview: PreviewBytes,
@@ -332,9 +344,9 @@ fn finalize_saved_output(
         fs::read(&raw_path).map_err(file_error("read saved command output for sanitization"))?;
     let sanitized = sanitize_command_output_bytes(&content, raw_preview.render());
     let final_path = if let Some(saved_replacement) = sanitized.saved_replacement.as_deref() {
-        write_final_saved_output(saved_replacement.as_bytes())?
+        write_final_saved_output(scope, saved_replacement.as_bytes())?
     } else {
-        write_final_saved_output(&content)?
+        write_final_saved_output(scope, &content)?
     };
     let _ = fs::remove_file(raw_path);
     let saved_output = SavedCommandOutput {
@@ -347,8 +359,11 @@ fn finalize_saved_output(
     Ok((saved_output, sanitized.preview))
 }
 
-fn write_final_saved_output(content: &[u8]) -> Result<PathBuf, RuntimeProcessError> {
-    let (path, mut file) = create_private_temp_file(COMMAND_OUTPUT_TEMP_PREFIX)?;
+fn write_final_saved_output(
+    scope: &ResourceScope,
+    content: &[u8],
+) -> Result<PathBuf, RuntimeProcessError> {
+    let (path, mut file) = create_private_temp_file(scope, COMMAND_OUTPUT_TEMP_PREFIX)?;
     if let Err(error) = file.write_all(content) {
         let _ = fs::remove_file(&path);
         return Err(file_error("write sanitized command output")(error));
@@ -397,8 +412,15 @@ fn sanitize_command_output_bytes(content: &[u8], raw_preview: String) -> Sanitiz
     }
 }
 
-fn cleanup_stale_command_outputs() {
-    let Ok(entries) = fs::read_dir(std::env::temp_dir()) else {
+/// Walk only the current scope's saved-output directory and remove files older
+/// than [`COMMAND_OUTPUT_RETENTION`]. Scoping the scan to the per-tenant
+/// directory (created with owner-only `0o700`) means a command running under
+/// scope A cannot enumerate or unlink any file belonging to scope B, even on
+/// a shared temp-dir host — the cross-principal-delete surface closes by
+/// construction.
+fn cleanup_stale_command_outputs(scope: &ResourceScope) {
+    let scope_dir = scoped_output_dir_path(scope);
+    let Ok(entries) = fs::read_dir(&scope_dir) else {
         return;
     };
     let now = SystemTime::now();
@@ -427,8 +449,57 @@ fn cleanup_stale_command_outputs() {
     }
 }
 
-fn create_private_temp_file(prefix: &str) -> Result<(PathBuf, File), RuntimeProcessError> {
-    let path = std::env::temp_dir().join(format!("{prefix}{}.log", Uuid::new_v4()));
+/// Return the tenant/user/(agent)/project-scoped directory that holds this
+/// scope's saved-output files. The path layout — `<tempdir>/ironclaw-command-
+/// outputs/<scope_digest>/` — matches the [`RebornSandboxScopeKey`] convention
+/// already used by `RebornScopedSandboxCommandTransport::prepare_workspace`
+/// for sandbox workspaces (`<root>/scopes/<digest>`), so isolation guarantees
+/// for two distinct (tenant, user, agent, project) tuples are inherited from
+/// the SHA-256 digest's collision properties: distinct scope tuples produce
+/// distinct digests and therefore disjoint, non-overlapping directories.
+pub(crate) fn scoped_output_dir_path(scope: &ResourceScope) -> PathBuf {
+    let digest = RebornSandboxScopeKey::from_scope(scope).workspace_path(Path::new(""));
+    // `workspace_path` returns `scopes/<digest>`; the digest is the final
+    // component. Pull it out directly to avoid leaking the `scopes/` prefix
+    // into the unrelated saved-output namespace.
+    let digest_component = digest
+        .file_name()
+        .map(|name| name.to_owned())
+        .unwrap_or_else(|| std::ffi::OsString::from("unknown-scope"));
+    std::env::temp_dir()
+        .join(COMMAND_OUTPUT_ROOT_DIRNAME)
+        .join(digest_component)
+}
+
+/// Create the per-scope output directory if it does not yet exist and tighten
+/// permissions to owner-only on unix. The directory itself becomes the tenant
+/// isolation boundary: another principal on the same host cannot list, read,
+/// or unlink files inside it.
+fn ensure_scoped_output_dir(scope: &ResourceScope) -> Result<PathBuf, RuntimeProcessError> {
+    let dir = scoped_output_dir_path(scope);
+    fs::create_dir_all(&dir).map_err(file_error("create saved command output directory"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Best-effort tightening; if metadata/set_permissions fails the file
+        // open below still enforces 0o600 on the file itself.
+        if let Ok(metadata) = fs::metadata(&dir) {
+            let mut perms = metadata.permissions();
+            if perms.mode() & 0o777 != 0o700 {
+                perms.set_mode(0o700);
+                let _ = fs::set_permissions(&dir, perms);
+            }
+        }
+    }
+    Ok(dir)
+}
+
+fn create_private_temp_file(
+    scope: &ResourceScope,
+    prefix: &str,
+) -> Result<(PathBuf, File), RuntimeProcessError> {
+    let dir = ensure_scoped_output_dir(scope)?;
+    let path = dir.join(format!("{prefix}{}.log", Uuid::new_v4()));
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -483,6 +554,25 @@ fn floor_char_boundary(s: &str, pos: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
+
+    fn test_scope() -> ResourceScope {
+        ResourceScope::local_default(UserId::new("test-user").unwrap(), InvocationId::new())
+            .expect("local_default scope")
+    }
+
+    fn test_scope_with(tenant: &str, user: &str, project: Option<&str>) -> ResourceScope {
+        use ironclaw_host_api::{AgentId, ProjectId, TenantId};
+        ResourceScope {
+            tenant_id: TenantId::new(tenant).unwrap(),
+            user_id: UserId::new(user).unwrap(),
+            agent_id: Some(AgentId::new("agent").unwrap()),
+            project_id: project.map(|p| ProjectId::new(p).unwrap()),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        }
+    }
 
     #[test]
     fn truncate_output_preserves_exact_limit() {
@@ -512,7 +602,7 @@ mod tests {
     async fn read_stream_capped_keeps_large_output_out_of_inline_buffer() {
         let input = "x".repeat(COMMAND_MAX_OUTPUT_SIZE + 1);
 
-        let output = read_stream_capped(input.as_bytes())
+        let output = read_stream_capped(&test_scope(), input.as_bytes())
             .await
             .expect("stream capture succeeds");
         let saved_path = output
@@ -533,8 +623,8 @@ mod tests {
             storage: StreamStorage::Inline(b"small output".to_vec()),
             ..StreamCapture::default()
         };
-        let output =
-            capture_command_output(stdout, StreamCapture::default()).expect("capture succeeds");
+        let output = capture_command_output(&test_scope(), stdout, StreamCapture::default())
+            .expect("capture succeeds");
 
         assert_eq!(output.preview, "small output");
         assert_eq!(output.saved_output, None);
@@ -548,8 +638,8 @@ mod tests {
             ..StreamCapture::default()
         };
 
-        let output =
-            capture_command_output(stdout, StreamCapture::default()).expect("capture succeeds");
+        let output = capture_command_output(&test_scope(), stdout, StreamCapture::default())
+            .expect("capture succeeds");
 
         assert_eq!(output.preview, COMMAND_OUTPUT_BLOCKED_MARKER);
         assert_eq!(output.saved_output, None);
@@ -565,8 +655,8 @@ mod tests {
         );
         let stdout = saved_stream_capture(raw.as_bytes());
 
-        let output =
-            capture_command_output(stdout, StreamCapture::default()).expect("capture succeeds");
+        let output = capture_command_output(&test_scope(), stdout, StreamCapture::default())
+            .expect("capture succeeds");
         let saved_output = output.saved_output.expect("saved output metadata");
         let saved = fs::read_to_string(&saved_output.path).expect("saved output readable");
         let _ = fs::remove_file(&saved_output.path);
@@ -587,8 +677,8 @@ mod tests {
         let raw = format!("{}{}", "x".repeat(COMMAND_MAX_OUTPUT_SIZE + 1), secret);
         let stdout = saved_stream_capture(raw.as_bytes());
 
-        let output =
-            capture_command_output(stdout, StreamCapture::default()).expect("capture succeeds");
+        let output = capture_command_output(&test_scope(), stdout, StreamCapture::default())
+            .expect("capture succeeds");
         let saved_output = output.saved_output.expect("saved output metadata");
         let saved = fs::read_to_string(&saved_output.path).expect("saved output readable");
         let _ = fs::remove_file(&saved_output.path);
@@ -608,8 +698,8 @@ mod tests {
         raw.extend_from_slice(b" clean tail");
         let stdout = saved_stream_capture(&raw);
 
-        let output =
-            capture_command_output(stdout, StreamCapture::default()).expect("capture succeeds");
+        let output = capture_command_output(&test_scope(), stdout, StreamCapture::default())
+            .expect("capture succeeds");
         let saved_output = output.saved_output.expect("saved output metadata");
         let saved = fs::read(&saved_output.path).expect("saved output readable");
         let _ = fs::remove_file(&saved_output.path);
@@ -627,8 +717,8 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let stdout = saved_stream_capture(b"large clean output");
-        let output =
-            capture_command_output(stdout, StreamCapture::default()).expect("capture succeeds");
+        let output = capture_command_output(&test_scope(), stdout, StreamCapture::default())
+            .expect("capture succeeds");
         let saved_output = output.saved_output.expect("saved output metadata");
         let mode = fs::metadata(&saved_output.path)
             .expect("metadata")
@@ -642,11 +732,50 @@ mod tests {
 
     fn saved_stream_capture(bytes: &[u8]) -> StreamCapture {
         let (path, mut file) =
-            create_private_temp_file(COMMAND_OUTPUT_SCRATCH_PREFIX).expect("stream file");
+            create_private_temp_file(&test_scope(), COMMAND_OUTPUT_SCRATCH_PREFIX)
+                .expect("stream file");
         file.write_all(bytes).expect("write stream file");
         StreamCapture {
             storage: StreamStorage::Saved(ScratchOutputPath(path)),
             was_capped: false,
         }
+    }
+
+    #[test]
+    fn scoped_output_dir_isolates_distinct_user_project_tuples() {
+        // Tenant-isolation regression: two distinct (user, project) tuples
+        // (and any change to tenant or agent) must produce disjoint,
+        // non-overlapping save directories under the OS temp dir.
+        let a = scoped_output_dir_path(&test_scope_with("tenant", "alice", Some("proj-a")));
+        let b = scoped_output_dir_path(&test_scope_with("tenant", "bob", Some("proj-a")));
+        let c = scoped_output_dir_path(&test_scope_with("tenant", "alice", Some("proj-b")));
+        let d = scoped_output_dir_path(&test_scope_with("tenant-other", "alice", Some("proj-a")));
+
+        assert_ne!(a, b, "different users must not share a save dir");
+        assert_ne!(a, c, "different projects must not share a save dir");
+        assert_ne!(a, d, "different tenants must not share a save dir");
+        assert_ne!(b, c);
+        assert_ne!(b, d);
+        assert_ne!(c, d);
+
+        // And the path stays under the scoped root, never directly in temp.
+        let root = std::env::temp_dir().join(COMMAND_OUTPUT_ROOT_DIRNAME);
+        assert!(a.starts_with(&root));
+        assert!(b.starts_with(&root));
+        assert!(c.starts_with(&root));
+        assert!(d.starts_with(&root));
+        assert_ne!(a.parent(), Some(std::env::temp_dir().as_path()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_scoped_output_dir_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        // Use a unique scope so the directory is fresh.
+        let scope = test_scope_with("tenant-perm-test", "u-perm-test", Some("p-perm-test"));
+        let dir = ensure_scoped_output_dir(&scope).expect("ensure dir");
+        let mode = fs::metadata(&dir).expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "scoped save dir must be owner-only");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

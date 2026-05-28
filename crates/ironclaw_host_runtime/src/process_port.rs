@@ -216,6 +216,7 @@ impl RuntimeProcessPort for LocalHostProcessPort {
         }
         let start = std::time::Instant::now();
         let (output, exit_code) = execute_local_command(
+            &request.scope,
             &request.command,
             &cwd,
             timeout,
@@ -234,6 +235,7 @@ impl RuntimeProcessPort for LocalHostProcessPort {
 }
 
 async fn execute_local_command(
+    scope: &ResourceScope,
     cmd: &str,
     workdir: &PathBuf,
     timeout: Duration,
@@ -283,7 +285,7 @@ async fn execute_local_command(
     let result = tokio::time::timeout(timeout, async {
         let stdout_fut = async {
             if let Some(out) = stdout_handle {
-                read_stream_capped(out).await
+                read_stream_capped(scope, out).await
             } else {
                 Ok(StreamCapture::default())
             }
@@ -291,7 +293,7 @@ async fn execute_local_command(
 
         let stderr_fut = async {
             if let Some(err) = stderr_handle {
-                read_stream_capped(err).await
+                read_stream_capped(scope, err).await
             } else {
                 Ok(StreamCapture::default())
             }
@@ -306,7 +308,9 @@ async fn execute_local_command(
     .await;
 
     match result {
-        Ok(Ok((stdout, stderr, code))) => Ok((capture_command_output(stdout, stderr)?, code)),
+        Ok(Ok((stdout, stderr, code))) => {
+            Ok((capture_command_output(scope, stdout, stderr)?, code))
+        }
         Ok(Err(e)) => Err(e),
         Err(_) => {
             terminate_child_tree(&mut child).await;
@@ -511,6 +515,7 @@ mod tests {
         let middle = "MIDDLE-FROM-COMMAND";
 
         let (output, exit_code) = execute_local_command(
+            &ResourceScope::system(),
             "yes a | head -c 70000; printf 'MIDDLE-FROM-COMMAND'; yes z | head -c 70000",
             &workdir.path().to_path_buf(),
             Duration::from_secs(5),
@@ -538,6 +543,7 @@ mod tests {
         let workdir = tempfile::tempdir().expect("tempdir");
 
         let (output, exit_code) = execute_local_command(
+            &ResourceScope::system(),
             "printf '%s' \"$HOME\"",
             &workdir.path().to_path_buf(),
             Duration::from_secs(5),
@@ -559,6 +565,7 @@ mod tests {
         let home = std::env::var("HOME").expect("HOME set for inherited env test");
 
         let (output, exit_code) = execute_local_command(
+            &ResourceScope::system(),
             "printf '%s\\n%s' \"$HOME\" \"$IRONCLAW_REBORN_SENTINEL\"",
             &workdir.path().to_path_buf(),
             Duration::from_secs(5),
@@ -582,6 +589,7 @@ mod tests {
         let workdir = tempfile::tempdir().expect("tempdir");
 
         let (output, exit_code) = execute_local_command(
+            &ResourceScope::system(),
             "echo %HOME%",
             &workdir.path().to_path_buf(),
             Duration::from_secs(5),
