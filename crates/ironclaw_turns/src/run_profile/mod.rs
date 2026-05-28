@@ -8,22 +8,30 @@
 //! and rejects checkpoint-backed prompt state until a durable checkpoint prompt
 //! store is introduced.
 
+mod compaction;
 mod driver;
 mod host;
 mod instruction_bundle;
 mod memory_context;
 mod milestones;
 mod model;
+mod model_work;
 mod policy;
 mod prompt;
+mod prompt_text;
 mod refs;
 mod resolver;
 mod skill_context;
 mod snapshot;
 mod snippet_ref;
+mod system_inference;
 
 pub use crate::CapabilityActivityId;
 
+pub use compaction::{
+    CompactionInitiator, LoopCompactionError, LoopCompactionMode, LoopCompactionPort,
+    LoopCompactionRequest, LoopCompactionResponse, LoopSummaryArtifactId,
+};
 pub use driver::{
     AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverResumeRequest,
     AgentLoopDriverRunRequest,
@@ -35,22 +43,24 @@ pub use host::{
     CapabilityDeniedReasonKind, CapabilityDeniedReasonKindValue, CapabilityDescriptorView,
     CapabilityFailure, CapabilityFailureKind, CapabilityFailureKindValue, CapabilityInputRef,
     CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, CapabilitySurfaceVersion,
-    ConcurrencyHint, FinalizeAssistantMessage, LoadCheckpointPayloadRequest,
+    ConcurrencyHint, FinalizeAssistantMessage, LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES,
+    LOOP_CONTEXT_TOTAL_MODEL_CONTENT_MAX_BYTES, LoadCheckpointPayloadRequest,
     LoadedCheckpointPayload, LoopCancelReasonKind, LoopCancellationPort, LoopCancellationSignal,
     LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest,
-    LoopCheckpointStateRef, LoopContextBundle, LoopContextMessage, LoopContextPort,
-    LoopContextRequest, LoopContextSnippet, LoopContextSnippetMetadata, LoopDriverNoteKind,
-    LoopGateKind, LoopInlineMessage, LoopInlineMessageRole, LoopInput, LoopInputAck,
-    LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopInputPort,
-    LoopInterruptKind, LoopModelCapabilityView, LoopModelMessage, LoopModelPort, LoopModelRequest,
-    LoopModelResponse, LoopModelRouteSnapshot, LoopProcessRef, LoopProgressEvent, LoopProgressPort,
-    LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleGrant, LoopPromptBundleRef,
-    LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopRunInfoPort, LoopSafeSummary,
-    LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput, ProcessHandleSummary, PromptMode,
-    ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolCallReference,
-    ProviderToolCallReplay, ProviderToolDefinition, StageCheckpointPayloadRequest,
-    UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
-    sanitize_model_visible_text, validate_model_route_component_value,
+    LoopCheckpointStateRef, LoopContextBundle, LoopContextCompactionKind,
+    LoopContextCompactionMetadata, LoopContextMessage, LoopContextPort, LoopContextRequest,
+    LoopContextSnippet, LoopContextSnippetMetadata, LoopDriverNoteKind, LoopGateKind,
+    LoopInlineMessage, LoopInlineMessageRole, LoopInput, LoopInputAck, LoopInputAckToken,
+    LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopInputPort, LoopInterruptKind,
+    LoopModelCapabilityView, LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse,
+    LoopModelRouteSnapshot, LoopProcessRef, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
+    LoopPromptBundleAuthority, LoopPromptBundleGrant, LoopPromptBundleRef, LoopPromptBundleRequest,
+    LoopPromptPort, LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort,
+    ModelStreamChunk, ParentLoopOutput, ProcessHandleSummary, PromptMode, ProviderToolCall,
+    ProviderToolCallCapabilityIds, ProviderToolCallReference, ProviderToolCallReplay,
+    ProviderToolDefinition, StageCheckpointPayloadRequest, UpdateAssistantDraft,
+    VisibleCapabilityRequest, VisibleCapabilitySurface, sanitize_model_visible_text,
+    validate_model_route_component_value,
 };
 pub use instruction_bundle::{
     InMemoryInstructionMaterializationStore, InstructionBundle, InstructionBundleBuilder,
@@ -72,6 +82,7 @@ pub use model::{
     LoopModelGatewayRequest, LoopModelPolicyGuard, ModelCallOutcome, NoOpBudgetAccountant,
     NoOpPolicyGuard,
 };
+pub use model_work::{ModelWorkKind, ModelWorkOutcome, ModelWorkRequest, ModelWorkUsage};
 pub use policy::{
     CancellationPolicy, CheckpointPolicy, PersonalContextAuthority, PrivilegedRunProfileDimension,
     RedactedRunProfileProvenance, RedactedRunProfileSource, ResourceBudgetPolicy,
@@ -96,3 +107,8 @@ pub use skill_context::{
 };
 pub use snapshot::{PersonalContextPolicy, ResolvedRunProfile};
 pub use snippet_ref::memory_snippet_display_ref;
+pub use system_inference::{
+    SystemInferenceError, SystemInferenceIdentity, SystemInferencePort, SystemInferenceRequest,
+    SystemInferenceResponse, SystemInferenceTaskId, SystemPromptId, SystemPromptSource,
+    SystemTaskKind,
+};

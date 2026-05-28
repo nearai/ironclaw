@@ -347,6 +347,7 @@ where
                 network_policy: self.network_policy.clone(),
                 credential_injections,
                 response_body_limit: self.response_body_limit,
+                save_body_to: None,
                 timeout_ms: request.timeout_ms,
             })
             .map_err(wasm_http_error)?;

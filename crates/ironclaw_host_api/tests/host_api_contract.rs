@@ -991,6 +991,86 @@ fn privileged_runtime_and_trust_classes_cannot_be_self_asserted_from_json() {
 }
 
 #[test]
+fn runtime_http_egress_request_defaults_optional_body_controls() {
+    let mut value = serde_json::to_value(RuntimeHttpEgressRequest {
+        runtime: RuntimeKind::Wasm,
+        scope: sample_context().resource_scope,
+        capability_id: CapabilityId::new("http.fetch").unwrap(),
+        method: NetworkMethod::Get,
+        url: "https://api.example.test/v1/items".to_string(),
+        headers: vec![],
+        body: vec![],
+        network_policy: sample_network_policy(),
+        credential_injections: vec![],
+        response_body_limit: Some(4096),
+        save_body_to: Some(RuntimeHttpSaveTarget {
+            path: ScopedPath::new("/workspace/body.json").unwrap(),
+            mount_grant: None,
+        }),
+        timeout_ms: None,
+    })
+    .unwrap();
+
+    let fields = value.as_object_mut().unwrap();
+    fields.remove("response_body_limit");
+    fields.remove("save_body_to");
+
+    let request: RuntimeHttpEgressRequest = serde_json::from_value(value).unwrap();
+    assert_eq!(request.response_body_limit, None);
+    assert_eq!(request.save_body_to, None);
+}
+
+#[test]
+fn runtime_http_save_target_skips_mount_grant_on_wire() {
+    let mount_grant = MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/workspace").unwrap(),
+        MountPermissions::read_write(),
+    );
+    let target = RuntimeHttpSaveTarget {
+        path: ScopedPath::new("/workspace/body.json").unwrap(),
+        mount_grant: Some(mount_grant),
+    };
+
+    let value = serde_json::to_value(&target).unwrap();
+    assert_eq!(value, json!({ "path": "/workspace/body.json" }));
+
+    let decoded: RuntimeHttpSaveTarget = serde_json::from_value(json!({
+        "path": "/workspace/body.json",
+        "mount_grant": {
+            "alias": "/workspace",
+            "target": "/projects/workspace",
+            "permissions": { "read": true, "write": true }
+        }
+    }))
+    .unwrap();
+    assert_eq!(decoded.path.as_str(), "/workspace/body.json");
+    assert_eq!(decoded.mount_grant, None);
+}
+
+#[test]
+fn runtime_http_egress_response_defaults_optional_saved_body() {
+    let mut value = serde_json::to_value(RuntimeHttpEgressResponse {
+        status: 200,
+        headers: vec![],
+        body: b"ok".to_vec(),
+        saved_body: Some(RuntimeHttpSavedBody {
+            path: ScopedPath::new("/workspace/body.json").unwrap(),
+            bytes_written: 2,
+        }),
+        request_bytes: 0,
+        response_bytes: 2,
+        redaction_applied: false,
+    })
+    .unwrap();
+
+    value.as_object_mut().unwrap().remove("saved_body");
+
+    let response: RuntimeHttpEgressResponse = serde_json::from_value(value).unwrap();
+    assert_eq!(response.saved_body, None);
+}
+
+#[test]
 fn requested_trust_class_round_trips_all_variants() {
     // Requested trust is intentionally fully deserializable — it is *declared*
     // intent, not effective authority. Privileged-sounding variants only
@@ -1538,5 +1618,17 @@ fn sample_context() -> ExecutionContext {
             thread_id: None,
             invocation_id,
         },
+    }
+}
+
+fn sample_network_policy() -> NetworkPolicy {
+    NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: "api.example.test".to_string(),
+            port: None,
+        }],
+        deny_private_ip_ranges: true,
+        max_egress_bytes: Some(1024 * 1024),
     }
 }

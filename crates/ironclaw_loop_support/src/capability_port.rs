@@ -3375,6 +3375,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn non_sandbox_capability_invocation_still_uses_invoke_capability() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+            capability_id.clone(),
+            provider_id.clone(),
+        )]));
+        let port = runtime_capability_port(
+            &capability_id,
+            &provider_id,
+            runtime.clone(),
+            Arc::new(RecordingResultWriter::default()),
+            dummy_milestone_sink(),
+            "thread-non-sandbox-invoke-path",
+        )
+        .await;
+
+        let outcome = invoke_visible_runtime_capability(&port)
+            .await
+            .expect("non-sandbox capability invocation succeeds");
+
+        assert!(matches!(outcome, CapabilityOutcome::Completed(_)));
+        let requests = runtime.take_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].capability_id, capability_id);
+        assert!(
+            runtime.take_spawn_requests().is_empty(),
+            "non-sandbox capability must not use spawn dispatch"
+        );
+    }
+
+    #[tokio::test]
     async fn process_sandbox_capability_rejects_invalid_plan_before_runtime_spawn() {
         let capability_id =
             CapabilityId::new(ironclaw_process_sandbox::PROCESS_SANDBOX_CAPABILITY_ID)

@@ -386,6 +386,7 @@ a matching `CapabilityDescriptor`:
 |---|---|---|---|
 | shell / script execution | `Bundled` | `FirstParty` | `ExecuteCode`, `ReadFilesystem`, `WriteFilesystem` |
 | http / web_fetch | `Bundled` | `FirstParty` | `Network` |
+| http save-to-file | `Bundled` | `FirstParty` | `Network`, `WriteFilesystem` |
 | message (channel-bound) | `Bundled` | `System` | `ExternalWrite`, `Network` |
 | credential-backed (Gmail / GitHub / Slack) | `Bundled` | `FirstParty` | `Network`, `UseSecret` |
 | memory / workspace | `Bundled` | `FirstParty` | `ReadFilesystem`, `WriteFilesystem` |

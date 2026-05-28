@@ -3,6 +3,7 @@ use std::{
     sync::Arc,
 };
 
+use ironclaw_auth::AuthProviderClient;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_authorization::FilesystemCapabilityLeaseStore;
 use ironclaw_authorization::GrantAuthorizer;
@@ -14,8 +15,9 @@ use ironclaw_events::{DurableAuditLog, DurableEventLog};
 use ironclaw_events::{
     DurableAuditLog, DurableEventLog, InMemoryDurableAuditLog, InMemoryDurableEventLog,
 };
-use ironclaw_extensions::ExtensionRegistry;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_extensions::{
+    ExtensionInstallationStore, ExtensionLifecycleService, ExtensionRegistry,
+};
 use ironclaw_filesystem::RootFilesystem;
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::{
@@ -26,12 +28,14 @@ use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
 use ironclaw_host_api::runtime_policy::FilesystemBackendKind;
-use ironclaw_host_api::{HostPath, MountPermissions, MountView, UserId, VirtualPath};
+use ironclaw_host_api::{
+    EffectKind, ExtensionId, HostPath, MountPermissions, MountView, PackageId, UserId, VirtualPath,
+};
 #[cfg(feature = "libsql")]
 use ironclaw_host_api::{MountAlias, MountGrant};
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostRuntimeServices,
-    builtin_first_party_handlers, builtin_first_party_package,
+    ProductAuthProviderRuntimePorts, builtin_first_party_handlers, builtin_first_party_package,
 };
 #[cfg(feature = "libsql")]
 use ironclaw_loop_support::FilesystemCheckpointStateStore;
@@ -46,6 +50,7 @@ use ironclaw_run_state::{FilesystemApprovalRequestStore, FilesystemRunStateStore
 use ironclaw_run_state::{InMemoryApprovalRequestStore, InMemoryRunStateStore};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_secrets::FilesystemSecretStore;
+use ironclaw_secrets::SecretStore;
 #[cfg(feature = "libsql")]
 use ironclaw_threads::FilesystemSessionThreadService;
 #[cfg(not(feature = "libsql"))]
@@ -62,17 +67,32 @@ use ironclaw_turns::{
     InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore, InMemoryTurnStateStore,
 };
 
+use crate::RebornProductAuthServicePorts;
 use crate::default_system_prompt::seed_default_system_prompt;
+use crate::google_oauth::google_provider_client;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use crate::input::OAuthClientConfig;
 use crate::input::{RebornRuntimeProcessBinding, RebornStorageInput};
-use crate::lifecycle::RebornLocalSkillManagementPort;
+use crate::lifecycle::{RebornLocalSkillManagementPort, build_local_skill_management_port};
 use crate::local_dev_capability_policy::local_dev_capability_policy;
-use crate::local_dev_mounts::{
-    skill_context_mount_view, skill_management_mount_view, workspace_mount_view,
-};
+use crate::local_dev_mounts::{skill_context_mount_view, workspace_mount_view};
 use crate::{
     RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
-    RebornFacadeReadiness, RebornProductAuthServicePorts, RebornProductAuthServices,
-    RebornReadiness, RebornReadinessState,
+    RebornFacadeReadiness, RebornProductAuthServices, RebornReadiness, RebornReadinessState,
+};
+use crate::{
+    available_extensions::{
+        AvailableExtensionCatalog, gmail_manifest_digest, google_calendar_manifest_digest,
+    },
+    extension_installation_store::FilesystemExtensionInstallationStore,
+    extension_lifecycle::{
+        ActiveExtensionPublisher, RebornLocalExtensionManagementPort,
+        restore_extension_lifecycle_state,
+    },
+    extension_lifecycle_capabilities::{
+        extend_builtin_first_party_package, insert_handlers as insert_extension_lifecycle_handlers,
+    },
+    gsuite::register_bundled_gsuite_first_party_handlers,
 };
 
 #[cfg(feature = "libsql")]
@@ -145,6 +165,22 @@ where
     }
 }
 
+fn require_product_auth_runtime_ports<F, G, S, R>(
+    services: &HostRuntimeServices<F, G, S, R>,
+) -> Result<ProductAuthProviderRuntimePorts, RebornBuildError>
+where
+    F: ironclaw_filesystem::RootFilesystem + 'static,
+    G: ironclaw_resources::ResourceGovernor + 'static,
+    S: ironclaw_processes::ProcessStore + 'static,
+    R: ironclaw_processes::ProcessResultStore + 'static,
+{
+    services
+        .product_auth_provider_runtime_ports()
+        .ok_or_else(|| RebornBuildError::InvalidConfig {
+            reason: "Google OAuth provider backend requires host runtime HTTP egress".to_string(),
+        })
+}
+
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) fn apply_production_runtime_process_binding<F, G, S, R>(
     services: HostRuntimeServices<F, G, S, R>,
@@ -180,6 +216,10 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) skill_management: Arc<RebornLocalSkillManagementPort>,
+    // LocalSingleUser-only for now. Production and multi-tenant lifecycle
+    // wiring need scoped storage/registry ownership before this is reused
+    // outside local-dev composition. Tracked in #4091.
+    pub(crate) extension_management: Option<Arc<RebornLocalExtensionManagementPort>>,
     pub(crate) skill_mounts: MountView,
     pub(crate) skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     pub(crate) workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
@@ -255,7 +295,12 @@ fn auth_continuation_dispatcher(
 fn compose_product_auth_services(
     ports: RebornProductAuthServicePorts,
     turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
+    provider_client: Option<Arc<dyn AuthProviderClient>>,
 ) -> Arc<RebornProductAuthServices> {
+    let ports = match provider_client {
+        Some(provider_client) => ports.with_provider_client(provider_client),
+        None => ports,
+    };
     Arc::new(ports.into_services(auth_continuation_dispatcher(turn_coordinator)))
 }
 
@@ -282,6 +327,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         runtime_policy,
         runtime_process_binding,
         product_auth_ports,
+        google_oauth_config,
         owner_id,
         ..
     } = input;
@@ -297,6 +343,11 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     };
     std::fs::create_dir_all(&root).map_err(|_| RebornBuildError::InvalidConfig {
         reason: "local-dev storage root could not be initialized".to_string(),
+    })?;
+    std::fs::create_dir_all(root.join("system/extensions")).map_err(|_| {
+        RebornBuildError::InvalidConfig {
+            reason: "local-dev system extensions root could not be initialized".to_string(),
+        }
     })?;
     let workspace_root = workspace_root.unwrap_or_else(|| root.join("workspace"));
     std::fs::create_dir_all(&workspace_root).map_err(|_| RebornBuildError::InvalidConfig {
@@ -334,14 +385,19 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
             reason: error.to_string(),
         }
     })?;
+    crate::bundled_skills::ensure_bundled_reborn_skills_installed(&root).await?;
     let filesystem =
         build_local_dev_root_filesystem(&root, &workspace_root, host_home_root.as_ref()).await?;
     let (skill_filesystem, workspace_filesystem, runtime_workspace_mounts) =
         build_workspace_filesystems(Arc::clone(&filesystem), host_home_root.as_ref())?;
+    let http_body_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(&filesystem),
+        runtime_workspace_mounts.clone(),
+    ));
     let owner_user_id = UserId::new(owner_id).map_err(|error| RebornBuildError::InvalidConfig {
         reason: error.to_string(),
     })?;
-    let store_graph = build_local_dev_store_graph(
+    let mut store_graph = build_local_dev_store_graph(
         Arc::clone(&filesystem),
         owner_user_id,
         skill_filesystem,
@@ -351,20 +407,30 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         default_system_prompt_path,
     )?;
 
+    let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> = Arc::new(
+        DefaultTurnCoordinator::new(Arc::clone(&store_graph.turn_state)),
+    );
+    let secret_store: Arc<dyn SecretStore> = Arc::new(ironclaw_secrets::InMemorySecretStore::new());
+    let mut first_party_registry = builtin_first_party_registry()?;
+
+    let local_dev_trust_policy = Arc::new(local_dev_first_party_trust_policy()?);
+    let local_dev_trust_invalidation_bus = Arc::new(ironclaw_trust::InvalidationBus::new());
     let mut services = HostRuntimeServices::new(
-        Arc::new(builtin_extension_registry()?),
-        filesystem,
+        Arc::new(local_dev_builtin_extension_registry()?),
+        Arc::clone(&filesystem),
         Arc::clone(&store_graph.resource_governor),
         Arc::new(GrantAuthorizer::new()),
         store_graph.process_services.clone(),
         CapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
-    .with_first_party_capabilities(Arc::new(builtin_first_party_registry()?))
-    .with_trust_policy(Arc::new(local_dev_first_party_trust_policy()?))
-    .with_secret_store(Arc::new(ironclaw_secrets::InMemorySecretStore::new()))
-    .try_with_host_http_egress(ironclaw_network::PolicyNetworkHttpEgress::new(
-        ironclaw_network::ReqwestNetworkTransport::default(),
-    ))?
+    .with_trust_policy(Arc::clone(&local_dev_trust_policy))
+    .with_secret_store_dyn(Arc::clone(&secret_store))
+    .try_with_host_http_egress_with_body_store(
+        ironclaw_network::PolicyNetworkHttpEgress::new(
+            ironclaw_network::ReqwestNetworkTransport::default(),
+        ),
+        http_body_filesystem,
+    )?
     .with_run_state(Arc::clone(&store_graph.run_state))
     .with_approval_requests(Arc::clone(&store_graph.approval_requests))
     .with_capability_leases(Arc::clone(&store_graph.capability_leases))
@@ -373,27 +439,108 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         services = services.with_runtime_policy(runtime_policy);
     }
     services = apply_runtime_process_binding(services, runtime_process_binding);
+    let google_provider_client = google_oauth_config
+        .map(|config| {
+            let runtime_ports = require_product_auth_runtime_ports(&services)?;
+            google_provider_client(config, Arc::clone(&secret_store), runtime_ports)
+        })
+        .transpose()?;
+    let product_auth = match product_auth_ports {
+        Some(ports) => {
+            compose_product_auth_services(ports, turn_coordinator.clone(), google_provider_client)
+        }
+        None => {
+            let services = RebornProductAuthServices::local_dev_in_memory(
+                auth_continuation_dispatcher(turn_coordinator.clone()),
+            );
+            Arc::new(match google_provider_client {
+                Some(provider_client) => services.with_provider_client(provider_client),
+                None => services,
+            })
+        }
+    };
+    register_bundled_gsuite_first_party_handlers(
+        &mut first_party_registry,
+        product_auth.credential_account_service(),
+    )
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("GSuite first-party handlers are invalid: {error}"),
+    })?;
+    let mut available_extensions = AvailableExtensionCatalog::from_filesystem_root(
+        filesystem.as_ref(),
+        &VirtualPath::new("/system/extensions")?,
+    )
+    .await
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("available extension catalog could not be loaded: {error}"),
+    })?;
+    available_extensions.extend(
+        AvailableExtensionCatalog::from_first_party_assets().map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: format!("first-party extension catalog could not be loaded: {error}"),
+            }
+        })?,
+    );
+    let extension_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
+    let extension_installation_store: Arc<dyn ExtensionInstallationStore> = Arc::new(
+        FilesystemExtensionInstallationStore::load(extension_filesystem.clone())
+            .await
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("extension installation state could not be loaded: {error}"),
+            })?,
+    );
+    let extension_lifecycle_service = Arc::new(tokio::sync::Mutex::new(
+        ExtensionLifecycleService::new(services.shared_extension_registry().snapshot_owned()),
+    ));
+    let active_registry = services.shared_extension_registry();
+    let active_extensions = ActiveExtensionPublisher::new(
+        active_registry,
+        local_dev_trust_policy,
+        local_dev_trust_invalidation_bus,
+    );
+    restore_extension_lifecycle_state(
+        &available_extensions,
+        &extension_installation_store,
+        &extension_lifecycle_service,
+        &active_extensions,
+    )
+    .await
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("extension lifecycle state could not be restored: {error}"),
+    })?;
+    let extension_management = Arc::new(RebornLocalExtensionManagementPort::new(
+        extension_filesystem,
+        available_extensions,
+        extension_installation_store,
+        extension_lifecycle_service,
+        active_extensions,
+    ));
+    insert_extension_lifecycle_handlers(
+        &mut first_party_registry,
+        Arc::clone(&extension_management),
+    )
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("local-dev extension lifecycle handlers are invalid: {error}"),
+    })?;
+    services = services.with_first_party_capabilities(Arc::new(first_party_registry));
+    if let Some(local_runtime) = Arc::get_mut(&mut store_graph.local_runtime) {
+        local_runtime.extension_management = Some(extension_management);
+    } else {
+        return Err(RebornBuildError::InvalidConfig {
+            reason: "local-dev extension lifecycle facade could not be attached".to_string(),
+        });
+    }
 
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
         Arc::new(services.host_runtime_for_local_testing());
-    let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> = Arc::new(
-        DefaultTurnCoordinator::new(Arc::clone(&store_graph.turn_state)),
-    );
-    let product_auth = Some(match product_auth_ports {
-        Some(ports) => compose_product_auth_services(ports, turn_coordinator.clone()),
-        None => Arc::new(RebornProductAuthServices::local_dev_in_memory(
-            auth_continuation_dispatcher(turn_coordinator.clone()),
-        )),
-    });
-    let product_auth_ready = product_auth.is_some();
 
     Ok(RebornServices {
         host_runtime: Some(host_runtime),
         turn_coordinator: Some(turn_coordinator),
         // Local-dev always composes a safe in-memory product-auth boundary when
         // the caller does not inject one; readiness tracks the assembled facade.
-        product_auth,
-        readiness: readiness_for(profile, true, true, product_auth_ready),
+        product_auth: Some(product_auth),
+        readiness: readiness_for(profile, true, true, true),
         local_runtime: Some(store_graph.local_runtime),
     })
 }
@@ -432,15 +579,7 @@ fn build_local_dev_store_graph(
         skill_context_mount_view().map_err(|error| RebornBuildError::InvalidConfig {
             reason: error.to_string(),
         })?;
-    let skill_management_mounts =
-        skill_management_mount_view().map_err(|error| RebornBuildError::InvalidConfig {
-            reason: error.to_string(),
-        })?;
-    let skill_management = Arc::new(RebornLocalSkillManagementPort::new(
-        owner_user_id,
-        filesystem,
-        skill_management_mounts,
-    ));
+    let skill_management = build_local_skill_management_port(owner_user_id, filesystem)?;
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
@@ -449,6 +588,7 @@ fn build_local_dev_store_graph(
         loop_checkpoint_store,
         thread_service,
         skill_management,
+        extension_management: None,
         skill_mounts,
         skill_filesystem,
         workspace_filesystem,
@@ -504,15 +644,7 @@ fn build_local_dev_store_graph(
         skill_context_mount_view().map_err(|error| RebornBuildError::InvalidConfig {
             reason: error.to_string(),
         })?;
-    let skill_management_mounts =
-        skill_management_mount_view().map_err(|error| RebornBuildError::InvalidConfig {
-            reason: error.to_string(),
-        })?;
-    let skill_management = Arc::new(RebornLocalSkillManagementPort::new(
-        owner_user_id,
-        filesystem,
-        skill_management_mounts,
-    ));
+    let skill_management = build_local_skill_management_port(owner_user_id, filesystem)?;
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
@@ -521,6 +653,7 @@ fn build_local_dev_store_graph(
         loop_checkpoint_store,
         thread_service,
         skill_management,
+        extension_management: None,
         skill_mounts,
         skill_filesystem,
         workspace_filesystem,
@@ -605,7 +738,19 @@ async fn build_local_dev_root_filesystem(
             IndexPolicy::NotIndexed,
             local_dev_bytes_capabilities(),
         )?,
-        local,
+        Arc::clone(&local),
+    )?;
+    root.mount(
+        local_dev_mount_descriptor(
+            "/system/extensions",
+            "local-dev-system-extensions",
+            BackendKind::LocalFilesystem,
+            StorageClass::FileContent,
+            ContentKind::ExtensionPackage,
+            IndexPolicy::NotIndexed,
+            local_dev_bytes_capabilities(),
+        )?,
+        Arc::clone(&local),
     )?;
     Ok(Arc::new(root))
 }
@@ -636,6 +781,10 @@ fn local_dev_project_filesystem(
     filesystem.mount_local(
         VirtualPath::new("/projects/workspace")?,
         HostPath::from_path_buf(workspace_root.to_path_buf()),
+    )?;
+    filesystem.mount_local(
+        VirtualPath::new("/system/extensions")?,
+        HostPath::from_path_buf(root.join("system/extensions")),
     )?;
     if let Some(host_home_root) = host_home_root {
         filesystem.mount_local(
@@ -827,6 +976,7 @@ fn validate_local_dev_workspace_skill_isolation(
             storage_root.join("tenant-shared/skills"),
         ),
         ("/system/skills", storage_root.join("system/skills")),
+        ("/system/extensions", storage_root.join("system/extensions")),
     ] {
         if paths_overlap(workspace_root, &skill_root) {
             return Err(RebornBuildError::InvalidConfig {
@@ -869,6 +1019,30 @@ fn builtin_first_party_registry() -> Result<FirstPartyCapabilityRegistry, Reborn
     })
 }
 
+fn local_dev_builtin_extension_registry() -> Result<ExtensionRegistry, RebornBuildError> {
+    let mut registry = builtin_extension_registry()?;
+    let builtin_id =
+        ExtensionId::new("builtin").map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("built-in first-party package id is invalid: {error}"),
+        })?;
+    let package = registry
+        .remove(&builtin_id)
+        .ok_or_else(|| RebornBuildError::InvalidConfig {
+            reason: "built-in first-party package is missing".to_string(),
+        })?;
+    let package = extend_builtin_first_party_package(package).map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("local-dev extension lifecycle package is invalid: {error}"),
+        }
+    })?;
+    registry
+        .insert(package)
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("local-dev built-in first-party registry is invalid: {error}"),
+        })?;
+    Ok(registry)
+}
+
 fn local_dev_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuildError> {
     let policy =
         local_dev_capability_policy().map_err(|error| RebornBuildError::InvalidConfig {
@@ -883,10 +1057,39 @@ fn local_dev_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuildEr
             policy.provider.authority_effects,
             None,
         ),
+        AdminEntry::for_local_manifest(
+            PackageId::new("google-calendar").map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("Google Calendar first-party package id is invalid: {error}"),
+            })?,
+            "/system/extensions/google-calendar/manifest.toml".to_string(),
+            Some(google_calendar_manifest_digest()),
+            HostTrustAssignment::first_party(),
+            gsuite_allowed_effects(),
+            None,
+        ),
+        AdminEntry::for_local_manifest(
+            PackageId::new("gmail").map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("Gmail first-party package id is invalid: {error}"),
+            })?,
+            "/system/extensions/gmail/manifest.toml".to_string(),
+            Some(gmail_manifest_digest()),
+            HostTrustAssignment::first_party(),
+            gsuite_allowed_effects(),
+            None,
+        ),
     ]))])
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("built-in first-party trust policy is invalid: {error}"),
     })
+}
+
+fn gsuite_allowed_effects() -> Vec<EffectKind> {
+    vec![
+        EffectKind::DispatchCapability,
+        EffectKind::Network,
+        EffectKind::UseSecret,
+        EffectKind::ExternalWrite,
+    ]
 }
 
 async fn build_production_shaped(
@@ -904,6 +1107,7 @@ async fn build_production_shaped(
         require_runtime_http_egress,
         require_wasm_credentials,
         product_auth_ports,
+        google_oauth_config,
     } = input;
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     let wiring_config = production_config(
@@ -911,6 +1115,11 @@ async fn build_production_shaped(
         require_runtime_http_egress,
         require_wasm_credentials,
     );
+    if google_oauth_config.is_some() && product_auth_ports.is_none() {
+        return Err(RebornBuildError::InvalidConfig {
+            reason: "Google OAuth backend config requires product-auth ports".to_string(),
+        });
+    }
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     let _ = (
         production_trust_policy,
@@ -921,6 +1130,7 @@ async fn build_production_shaped(
         require_runtime_http_egress,
         require_wasm_credentials,
         product_auth_ports,
+        google_oauth_config,
     );
 
     match storage {
@@ -951,6 +1161,7 @@ async fn build_production_shaped(
                 wiring_config,
                 production_wiring,
                 product_auth_ports,
+                google_oauth_config,
             };
             build_libsql_production(context, db, path_or_url, auth_token, secret_master_key).await
         }
@@ -972,6 +1183,7 @@ async fn build_production_shaped(
                 wiring_config,
                 production_wiring,
                 product_auth_ports,
+                google_oauth_config,
             };
             build_postgres_production(context, pool, url, secret_master_key).await
         }
@@ -1007,6 +1219,7 @@ struct RebornProductionBuildContext {
     wiring_config: ironclaw_host_runtime::ProductionWiringConfig,
     production_wiring: RebornProductionWiring,
     product_auth_ports: Option<RebornProductAuthServicePorts>,
+    google_oauth_config: Option<OAuthClientConfig>,
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -1110,7 +1323,9 @@ where
         wiring_config,
         production_wiring,
         product_auth_ports,
+        google_oauth_config,
     } = context;
+    let secret_store: Arc<dyn SecretStore> = stores.secret_store.clone();
     let services = HostRuntimeServices::new(
         Arc::new(builtin_extension_registry()?),
         Arc::clone(&stores.filesystem),
@@ -1124,9 +1339,12 @@ where
     .with_first_party_capabilities(Arc::new(builtin_first_party_registry()?))
     .with_capability_leases(stores.leases)
     .with_secret_store(stores.secret_store)
-    .try_with_host_http_egress(ironclaw_network::PolicyNetworkHttpEgress::new(
-        ironclaw_network::ReqwestNetworkTransport::default(),
-    ))?
+    .try_with_host_http_egress_with_body_store(
+        ironclaw_network::PolicyNetworkHttpEgress::new(
+            ironclaw_network::ReqwestNetworkTransport::default(),
+        ),
+        Arc::clone(&stores.scoped_filesystem),
+    )?
     .with_filesystem_resource_governor(Arc::clone(&stores.scoped_filesystem))
     .with_reborn_event_store_config(profile.to_event_store_profile(), stores.event_store)
     .await?
@@ -1134,6 +1352,12 @@ where
     .with_filesystem_turn_state_store(stores.scoped_filesystem)
     .with_run_profile_resolver(planned_run_profile_resolver()?)
     .with_turn_run_wake_notifier(production_wiring.turn_run_wake_notifier);
+    let google_provider_client = google_oauth_config
+        .map(|config| {
+            let runtime_ports = require_product_auth_runtime_ports(&services)?;
+            google_provider_client(config, secret_store, runtime_ports)
+        })
+        .transpose()?;
     let services = apply_production_runtime_process_binding(
         services,
         production_wiring.runtime_process_binding,
@@ -1143,8 +1367,9 @@ where
         Arc::new(services.turn_coordinator_for_production()?);
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
         Arc::new(services.host_runtime_for_production(&wiring_config)?);
-    let product_auth = product_auth_ports
-        .map(|ports| compose_product_auth_services(ports, turn_coordinator.clone()));
+    let product_auth = product_auth_ports.map(|ports| {
+        compose_product_auth_services(ports, turn_coordinator.clone(), google_provider_client)
+    });
     let product_auth_ready = product_auth.is_some();
 
     Ok(RebornServices {
@@ -1228,17 +1453,23 @@ fn readiness_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_auth::{
+        AuthProductScope, AuthSurface, CredentialAccountLabel, CredentialAccountStatus,
+        CredentialOwnership, GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_GMAIL_SEND_SCOPE,
+        NewCredentialAccount, ProviderScope,
+    };
     use ironclaw_filesystem::FilesystemError;
     use ironclaw_host_api::{
         CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
         ExecutionContext, ExtensionId, GrantConstraints, InvocationId, MountAlias, MountGrant,
-        NetworkPolicy, Principal, ResourceEstimate, ResourceScope, RuntimeKind, ScopedPath,
-        TrustClass, UserId, VirtualPath,
+        NetworkPolicy, NetworkTargetPattern, Principal, ResourceEstimate, ResourceScope,
+        RuntimeKind, ScopedPath, SecretHandle, TrustClass, UserId, VirtualPath,
     };
     use ironclaw_host_runtime::{
         RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind,
         SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
     };
+    use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef};
     use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 
     #[tokio::test]
@@ -1255,7 +1486,129 @@ mod tests {
         assert!(services.turn_coordinator.is_some());
         assert!(services.product_auth.is_some());
         assert!(services.local_runtime.is_some());
+        assert!(
+            services
+                .local_runtime
+                .as_ref()
+                .expect("local runtime")
+                .extension_management
+                .is_some()
+        );
         assert_eq!(services.readiness.state, RebornReadinessState::DevOnly);
+    }
+
+    #[tokio::test]
+    async fn local_dev_gsuite_installs_activates_and_dispatches_through_host_runtime() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = build_reborn_services(RebornBuildInput::local_dev(
+            "local-dev-gsuite-owner",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+        let local_runtime = services.local_runtime.as_ref().expect("local runtime");
+        let extension_management = local_runtime
+            .extension_management
+            .as_ref()
+            .expect("extension management");
+        let gmail_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "gmail").expect("valid ref");
+        let calendar_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "google-calendar")
+                .expect("valid ref");
+
+        extension_management
+            .install(gmail_ref.clone())
+            .await
+            .expect("install Gmail");
+        extension_management
+            .activate(gmail_ref)
+            .await
+            .expect("activate Gmail");
+        extension_management
+            .install(calendar_ref.clone())
+            .await
+            .expect("install Google Calendar");
+        extension_management
+            .activate(calendar_ref)
+            .await
+            .expect("activate Google Calendar");
+
+        let gmail_context = gsuite_context("gmail.send_message");
+        let auth_scope =
+            AuthProductScope::new(gmail_context.resource_scope.clone(), AuthSurface::Api);
+        services
+            .product_auth
+            .as_ref()
+            .expect("product auth")
+            .credential_account_service()
+            .create_account(NewCredentialAccount {
+                scope: auth_scope,
+                provider: ironclaw_first_party_extensions::google_provider_id()
+                    .expect("Google provider id"),
+                label: CredentialAccountLabel::new("work google").expect("valid label"),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(SecretHandle::new("missing-google-access-token").unwrap()),
+                refresh_secret: None,
+                scopes: vec![
+                    ProviderScope::new(GOOGLE_GMAIL_SEND_SCOPE).unwrap(),
+                    ProviderScope::new(GOOGLE_CALENDAR_EVENTS_SCOPE).unwrap(),
+                ],
+            })
+            .await
+            .expect("create Google account");
+
+        let outcome = services
+            .host_runtime
+            .as_ref()
+            .expect("host runtime")
+            .invoke_capability(RuntimeCapabilityRequest::new(
+                gmail_context,
+                CapabilityId::new("gmail.send_message").unwrap(),
+                ResourceEstimate::default(),
+                serde_json::json!({ "message": { "raw": "base64url-rfc822" } }),
+                trust_decision(),
+            ))
+            .await
+            .expect("runtime invocation completes");
+
+        let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
+            panic!("expected fail-closed handler outcome, got {outcome:?}");
+        };
+        assert_eq!(failure.capability_id.as_str(), "gmail.send_message");
+        assert_ne!(failure.kind, RuntimeFailureKind::Authorization);
+        assert_ne!(failure.kind, RuntimeFailureKind::MissingRuntime);
+
+        let calendar_context = gsuite_context("google-calendar.create_event");
+        let outcome = services
+            .host_runtime
+            .as_ref()
+            .expect("host runtime")
+            .invoke_capability(RuntimeCapabilityRequest::new(
+                calendar_context,
+                CapabilityId::new("google-calendar.create_event").unwrap(),
+                ResourceEstimate::default(),
+                serde_json::json!({
+                    "calendar_id": "primary",
+                    "event": { "summary": "Review" }
+                }),
+                trust_decision(),
+            ))
+            .await
+            .expect("runtime invocation completes");
+
+        let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
+            panic!("expected fail-closed handler outcome, got {outcome:?}");
+        };
+        assert_eq!(
+            failure.capability_id.as_str(),
+            "google-calendar.create_event"
+        );
+        assert_ne!(failure.kind, RuntimeFailureKind::Authorization);
+        assert_ne!(failure.kind, RuntimeFailureKind::MissingRuntime);
     }
 
     #[cfg(feature = "libsql")]
@@ -1558,6 +1911,35 @@ mod tests {
         execution_context(capability_id, workspace_mounts())
     }
 
+    fn gsuite_context(capability_id: &str) -> ExecutionContext {
+        let extension_id = ExtensionId::new("caller").expect("valid extension id");
+        ExecutionContext::local_default(
+            UserId::new("local-dev-test-user").expect("valid user id"),
+            extension_id.clone(),
+            RuntimeKind::FirstParty,
+            TrustClass::FirstParty,
+            CapabilitySet {
+                grants: vec![CapabilityGrant {
+                    id: CapabilityGrantId::new(),
+                    capability: CapabilityId::new(capability_id).expect("valid capability id"),
+                    grantee: Principal::Extension(extension_id),
+                    issued_by: Principal::HostRuntime,
+                    constraints: GrantConstraints {
+                        allowed_effects: gsuite_allowed_effects(),
+                        mounts: MountView::new(Vec::new()).expect("valid empty mount view"),
+                        network: NetworkPolicy::default(),
+                        secrets: vec![SecretHandle::new("missing-google-access-token").unwrap()],
+                        resource_ceiling: None,
+                        expires_at: None,
+                        max_invocations: None,
+                    },
+                }],
+            },
+            MountView::new(Vec::new()).expect("valid empty mount view"),
+        )
+        .expect("valid execution context")
+    }
+
     fn execution_context(capability_id: &str, mounts: MountView) -> ExecutionContext {
         let extension_id = ExtensionId::new("caller").expect("valid extension id");
         ExecutionContext::local_default(
@@ -1590,7 +1972,7 @@ mod tests {
             constraints: GrantConstraints {
                 allowed_effects: allowed_effects(),
                 mounts,
-                network: NetworkPolicy::default(),
+                network: network_policy(),
                 secrets: Vec::new(),
                 resource_ceiling: None,
                 expires_at: None,
@@ -1629,7 +2011,20 @@ mod tests {
             EffectKind::DispatchCapability,
             EffectKind::ReadFilesystem,
             EffectKind::WriteFilesystem,
+            EffectKind::Network,
         ]
+    }
+
+    fn network_policy() -> NetworkPolicy {
+        NetworkPolicy {
+            allowed_targets: vec![NetworkTargetPattern {
+                scheme: None,
+                host_pattern: "*".to_string(),
+                port: None,
+            }],
+            deny_private_ip_ranges: true,
+            max_egress_bytes: None,
+        }
     }
 
     fn trust_decision() -> TrustDecision {

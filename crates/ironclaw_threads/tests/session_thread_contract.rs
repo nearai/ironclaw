@@ -1,12 +1,19 @@
+use chrono::Utc;
 use futures::future::join_all;
-use ironclaw_host_api::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{
+    AgentId, CapabilityId, InvocationId, ProjectId, TenantId, ThreadId, UserId,
+};
 use ironclaw_threads::{
-    AcceptInboundMessageRequest, AppendAssistantDraftRequest, AppendToolResultReferenceRequest,
-    CreateSummaryArtifactRequest, EnsureThreadRequest, InMemorySessionThreadService,
-    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
-    MessageStatus, ProviderToolCallReferenceEnvelope, RedactMessageRequest, SessionThreadError,
-    SessionThreadService, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
-    ToolResultSafeSummary, UpdateAssistantDraftRequest,
+    AcceptInboundMessageRequest, AppendAssistantDraftRequest,
+    AppendCapabilityDisplayPreviewRequest, AppendToolResultReferenceRequest,
+    CapabilityDisplayPreviewEnvelope, CapabilityDisplayPreviewEnvelopeInput,
+    CapabilityDisplayPreviewStatus, CreateSummaryArtifactRequest, EnsureThreadRequest,
+    InMemorySessionThreadService, ListThreadsForScopeRequest, LoadContextMessagesRequest,
+    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
+    ProviderToolCallReferenceEnvelope, RedactMessageRequest, SessionThreadError,
+    SessionThreadService, SummaryKind, SummaryModelContextPolicy, ThreadHistoryRequest,
+    ThreadMessageId, ThreadMessageRangeRequest, ThreadScope, ToolResultSafeSummary,
+    UpdateAssistantDraftRequest,
 };
 
 fn scope(label: &str) -> ThreadScope {
@@ -36,6 +43,25 @@ fn provider_call_reference() -> ProviderToolCallReferenceEnvelope {
         reasoning: Some("provider call reasoning".to_string()),
         signature: Some("sig-1".to_string()),
     }
+}
+
+fn preview_envelope(invocation_id: InvocationId) -> CapabilityDisplayPreviewEnvelope {
+    CapabilityDisplayPreviewEnvelope::new(CapabilityDisplayPreviewEnvelopeInput {
+        invocation_id,
+        capability_id: CapabilityId::new("demo.echo").unwrap(),
+        status: CapabilityDisplayPreviewStatus::Completed,
+        title: "echo".to_string(),
+        subtitle: None,
+        input_summary: Some("{\"message\":\"hello\"}".to_string()),
+        output_summary: Some("text output".to_string()),
+        output_preview: Some("hello".to_string()),
+        output_kind: Some("text".to_string()),
+        output_bytes: Some(5),
+        result_ref: Some("result:demo-preview".to_string()),
+        truncated: false,
+        updated_at: Utc::now(),
+    })
+    .unwrap()
 }
 
 fn same_tenant_scope(agent_label: &str) -> ThreadScope {
@@ -99,6 +125,160 @@ async fn append_tool_result_reference_is_finalized_and_idempotent_per_run_result
         .await
         .unwrap();
     assert_eq!(history.messages.len(), 1);
+}
+
+#[tokio::test]
+async fn message_range_read_returns_only_requested_sequences() {
+    let service = InMemorySessionThreadService::default();
+    let scope = scope("range-read");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-range-read").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    for index in 1..=4 {
+        service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: scope.clone(),
+                thread_id: thread.thread_id.clone(),
+                actor_id: "actor-a".into(),
+                source_binding_id: None,
+                reply_target_binding_id: None,
+                external_event_id: Some(format!("event-{index}")),
+                content: user_message(&format!("message {index}")),
+            })
+            .await
+            .unwrap();
+    }
+
+    let range = service
+        .list_thread_messages_range(ThreadMessageRangeRequest {
+            scope,
+            thread_id: thread.thread_id,
+            after_sequence: 1,
+            through_sequence: 3,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        range
+            .messages
+            .iter()
+            .map(|message| message.sequence)
+            .collect::<Vec<_>>(),
+        vec![2, 3]
+    );
+    assert_eq!(range.messages[0].content.as_deref(), Some("message 2"));
+    assert_eq!(range.messages[1].content.as_deref(), Some("message 3"));
+}
+
+#[tokio::test]
+async fn append_capability_display_preview_is_history_visible_and_model_hidden() {
+    let service = InMemorySessionThreadService::default();
+    let scope = scope("display-preview");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-display-preview").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("run a tool"),
+        })
+        .await
+        .unwrap();
+
+    let invocation_id = InvocationId::new();
+    let first = service
+        .append_capability_display_preview(AppendCapabilityDisplayPreviewRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            preview: preview_envelope(invocation_id),
+        })
+        .await
+        .unwrap();
+    let duplicate = service
+        .append_capability_display_preview(AppendCapabilityDisplayPreviewRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            preview: preview_envelope(invocation_id),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(first.message_id, duplicate.message_id);
+    assert_eq!(first.kind, MessageKind::CapabilityDisplayPreview);
+    assert_eq!(first.status, MessageStatus::Finalized);
+    assert_eq!(first.sequence, 2);
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        history
+            .messages
+            .iter()
+            .map(|message| message.kind)
+            .collect::<Vec<_>>(),
+        vec![MessageKind::User, MessageKind::CapabilityDisplayPreview]
+    );
+    service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            start_sequence: 1,
+            end_sequence: 2,
+            summary_kind: SummaryKind::Compaction,
+            content: MessageContent::text("summary must not replace preview range"),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+        })
+        .await
+        .unwrap();
+
+    let context = service
+        .load_context_window(LoadContextWindowRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            max_messages: 10,
+        })
+        .await
+        .unwrap();
+    assert_eq!(context.messages.len(), 1);
+    assert_eq!(context.messages[0].kind, MessageKind::User);
+
+    let direct_context = service
+        .load_context_messages(LoadContextMessagesRequest {
+            scope,
+            thread_id: thread.thread_id,
+            message_ids: vec![first.message_id],
+        })
+        .await
+        .unwrap();
+    assert!(direct_context.messages.is_empty());
 }
 
 #[tokio::test]
@@ -815,9 +995,9 @@ async fn summaries_are_range_artifacts_and_policy_filtered_context_replacements(
             thread_id: thread.thread_id.clone(),
             start_sequence: 1,
             end_sequence: 2,
-            summary_kind: "model_context".into(),
+            summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("one and two summarized"),
-            model_context_policy: Some("replace_range_when_selected".into()),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
         })
         .await
         .unwrap();
@@ -892,9 +1072,9 @@ async fn summary_covering_redacted_message_is_not_loaded_into_model_context() {
             thread_id: thread.thread_id.clone(),
             start_sequence: 1,
             end_sequence: 2,
-            summary_kind: "model_context".into(),
+            summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("summary mentions secret token"),
-            model_context_policy: Some("replace_range_when_selected".into()),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
         })
         .await
         .unwrap();
@@ -1152,9 +1332,9 @@ async fn summary_covering_draft_message_is_not_loaded_into_model_context() {
             thread_id: thread.thread_id.clone(),
             start_sequence: 1,
             end_sequence: 2,
-            summary_kind: "model_context".into(),
+            summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("summary leaks draft secret"),
-            model_context_policy: Some("replace_range_when_selected".into()),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
         })
         .await
         .unwrap();
@@ -1296,9 +1476,9 @@ async fn overlapping_replacement_summaries_are_rejected() {
             thread_id: thread.thread_id.clone(),
             start_sequence: 1,
             end_sequence: 2,
-            summary_kind: "model_context".into(),
+            summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("one and two summarized"),
-            model_context_policy: Some("replace_range_when_selected".into()),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
         })
         .await
         .unwrap();
@@ -1309,9 +1489,9 @@ async fn overlapping_replacement_summaries_are_rejected() {
             thread_id: thread.thread_id,
             start_sequence: 2,
             end_sequence: 3,
-            summary_kind: "model_context".into(),
+            summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("two and three summarized"),
-            model_context_policy: Some("replace_range_when_selected".into()),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
         })
         .await;
 
@@ -1370,9 +1550,9 @@ async fn summary_replacement_still_applies_when_range_starts_with_redacted_messa
             thread_id: thread.thread_id.clone(),
             start_sequence: 1,
             end_sequence: 2,
-            summary_kind: "model_context".into(),
+            summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("redacted range summary"),
-            model_context_policy: Some("replace_range_when_selected".into()),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
         })
         .await
         .unwrap();
@@ -1480,4 +1660,119 @@ async fn read_thread_rejects_cross_scope_lookup_with_unknown_thread() {
 fn message_ids_are_stable_values() {
     let id = ThreadMessageId::new();
     assert_eq!(ThreadMessageId::parse(&id.to_string()).unwrap(), id);
+}
+
+#[tokio::test]
+async fn list_threads_for_scope_is_scope_filtered_and_paginated() {
+    let service = InMemorySessionThreadService::default();
+    let scope_a = scope("a");
+    let scope_b = scope("b");
+
+    // Empty store → empty list, no cursor.
+    let initial = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope_a.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    assert!(initial.threads.is_empty(), "fresh store must be empty");
+    assert!(initial.next_cursor.is_none());
+
+    // Seed: 3 threads in scope A with deterministic ids so the
+    // pagination assertion is stable. 1 thread in scope B that the
+    // scope-A enumeration must not see.
+    for id in ["t-a-001", "t-a-002", "t-a-003"] {
+        service
+            .ensure_thread(EnsureThreadRequest {
+                scope: scope_a.clone(),
+                thread_id: Some(ThreadId::new(id).unwrap()),
+                created_by_actor_id: "actor-a".into(),
+                title: Some(id.into()),
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+    }
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope_b.clone(),
+            thread_id: Some(ThreadId::new("t-b-001").unwrap()),
+            created_by_actor_id: "actor-b".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    // Scope filter: A sees only A's threads, sorted deterministically.
+    let scope_a_all = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope_a.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let ids: Vec<&str> = scope_a_all
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(ids, ["t-a-001", "t-a-002", "t-a-003"]);
+    assert!(
+        scope_a_all.next_cursor.is_none(),
+        "no more pages when page size > total",
+    );
+
+    // Pagination: limit=2 → first page is [001, 002] with cursor=002.
+    let page_1 = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope_a.clone(),
+            limit: Some(2),
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let page_1_ids: Vec<&str> = page_1
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(page_1_ids, ["t-a-001", "t-a-002"]);
+    assert_eq!(page_1.next_cursor.as_deref(), Some("t-a-002"));
+
+    // Follow-up: cursor=002 → next page is [003] with no further cursor.
+    let page_2 = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope_a.clone(),
+            limit: Some(2),
+            cursor: page_1.next_cursor.clone(),
+        })
+        .await
+        .unwrap();
+    let page_2_ids: Vec<&str> = page_2
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(page_2_ids, ["t-a-003"]);
+    assert!(page_2.next_cursor.is_none());
+
+    // Cross-scope safety: scope B sees only its own thread, never A's.
+    let scope_b_all = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope_b,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let ids_b: Vec<&str> = scope_b_all
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(ids_b, ["t-b-001"]);
 }

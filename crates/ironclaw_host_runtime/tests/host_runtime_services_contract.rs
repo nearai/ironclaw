@@ -2567,6 +2567,86 @@ async fn host_runtime_services_resumes_approved_capability_and_consumes_lease_on
 }
 
 #[tokio::test]
+async fn host_runtime_services_resume_missing_runtime_secret_returns_auth_gate() {
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_handle = SecretHandle::new("approval_resume_token").unwrap();
+    let script_runtime = Arc::new(RecordingScriptExecutor::default());
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ApprovalThenSecretObligationAuthorizer {
+            handle: secret_handle,
+        }),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability],
+    )))
+    .with_run_state(Arc::clone(&run_state))
+    .with_approval_requests(Arc::clone(&approval_requests))
+    .with_capability_leases(Arc::clone(&capability_leases))
+    .with_secret_store(Arc::clone(&secret_store))
+    .with_script_runtime(Arc::clone(&script_runtime));
+    let runtime = services.host_runtime_for_local_testing();
+    let context = execution_context_without_grants();
+    let scope = context.resource_scope.clone();
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "approval then auth"});
+
+    let gate = block_for_approval(&runtime, context.clone(), estimate.clone(), input.clone()).await;
+    let lease =
+        approve_dispatch_for_services(&services, &scope, gate.approval_request_id, None).await;
+
+    let resumed = runtime
+        .resume_capability(RuntimeCapabilityResumeRequest::new(
+            context,
+            gate.approval_request_id,
+            script_capability_id(),
+            estimate,
+            input,
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    match resumed {
+        RuntimeCapabilityOutcome::AuthRequired(auth_gate) => {
+            assert_eq!(auth_gate.capability_id, script_capability_id());
+            assert!(
+                auth_gate.required_secrets.is_empty(),
+                "secret handles are not product-visible until auth recovery projections carry them"
+            );
+        }
+        other => panic!("expected auth-required resume outcome, got {other:?}"),
+    }
+    let run = run_state
+        .get(&scope, scope.invocation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.status, RunStatus::BlockedAuth);
+    assert_eq!(run.error_kind.as_deref(), Some("AuthRequired"));
+    assert_eq!(
+        capability_leases
+            .get(&scope, lease.grant.id)
+            .await
+            .unwrap()
+            .status,
+        CapabilityLeaseStatus::Revoked
+    );
+    assert!(
+        script_runtime.recorded_mounts().is_empty(),
+        "missing credential must block before dispatch"
+    );
+}
+
+#[tokio::test]
 async fn host_runtime_services_resume_changed_input_fails_before_lease_claim_or_dispatch() {
     let fixture = approval_resume_fixture();
     let runtime = fixture.services.host_runtime_for_local_testing();
@@ -3087,6 +3167,40 @@ async fn host_runtime_spawn_process_sandbox_runtime_policy_denial_fails_before_e
 }
 
 #[tokio::test]
+async fn host_runtime_spawn_process_sandbox_host_failure_fails_after_preflight() {
+    let sandbox_executor = Arc::new(RecordingSandboxProcessExecutor::default());
+    let runtime = HostRuntimeServices::new(
+        Arc::new(registry_with_host_bundled_manifest(
+            PROCESS_SANDBOX_MANIFEST,
+        )),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "system.process_sandbox",
+        process_sandbox_authority_effects(),
+    )))
+    .with_process_sandbox_executor(Arc::clone(&sandbox_executor))
+    .host_runtime_for_local_testing()
+    .with_process_manager(Arc::new(FailingSpawnManager));
+    let scope = sample_scope(InvocationId::new());
+
+    let outcome = runtime
+        .spawn_capability(process_sandbox_runtime_request_for_scope(scope))
+        .await
+        .unwrap();
+
+    assert_failed_outcome(outcome, RuntimeFailureKind::Backend);
+    assert!(
+        sandbox_executor.requests().is_empty(),
+        "host spawn failure must not reach the process sandbox executor"
+    );
+}
+
+#[tokio::test]
 async fn host_runtime_spawn_process_sandbox_blocks_for_approval_before_executor() {
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
@@ -3314,6 +3428,74 @@ async fn host_runtime_spawn_process_sandbox_resume_invalid_plan_fails_before_exe
             .status,
         CapabilityLeaseStatus::Active,
         "invalid resume input must fail before lease claim/consume"
+    );
+}
+
+#[tokio::test]
+async fn host_runtime_spawn_process_sandbox_resume_host_failure_fails_after_approval() {
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let sandbox_executor = Arc::new(RecordingSandboxProcessExecutor::default());
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_host_bundled_manifest(
+            PROCESS_SANDBOX_MANIFEST,
+        )),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ApprovalThenGrantAuthorizer),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "system.process_sandbox",
+        process_sandbox_authority_effects(),
+    )))
+    .with_run_state(Arc::clone(&run_state))
+    .with_approval_requests(Arc::clone(&approval_requests))
+    .with_capability_leases(Arc::clone(&capability_leases))
+    .with_process_sandbox_executor(Arc::clone(&sandbox_executor));
+    let runtime = services
+        .host_runtime_for_local_testing()
+        .with_process_manager(Arc::new(FailingSpawnManager));
+    let scope = sample_scope(InvocationId::new());
+    let context = execution_context_without_grants_for_scope(scope.clone());
+    let input = process_sandbox_input();
+    let estimate = process_sandbox_estimate();
+
+    let blocked = runtime
+        .spawn_capability(RuntimeCapabilityRequest::new(
+            context.clone(),
+            process_sandbox_capability_id(),
+            estimate.clone(),
+            input.clone(),
+            process_sandbox_trust_decision(),
+        ))
+        .await
+        .unwrap();
+
+    let approval_request_id = match blocked {
+        RuntimeCapabilityOutcome::ApprovalRequired(gate) => gate.approval_request_id,
+        other => panic!("expected approval gate, got {other:?}"),
+    };
+    approve_spawn_for_services(&services, &scope, approval_request_id, None).await;
+
+    let outcome = runtime
+        .resume_spawn_capability(RuntimeCapabilityResumeRequest::new(
+            context,
+            approval_request_id,
+            process_sandbox_capability_id(),
+            estimate,
+            input,
+            process_sandbox_trust_decision(),
+        ))
+        .await
+        .unwrap();
+
+    assert_failed_outcome(outcome, RuntimeFailureKind::Backend);
+    assert!(
+        sandbox_executor.requests().is_empty(),
+        "host resume-spawn failure must not reach the process sandbox executor"
     );
 }
 
@@ -5637,6 +5819,45 @@ impl TrustAwareCapabilityDispatchAuthorizer for ApprovalThenGrantAuthorizer {
     }
 }
 
+struct ApprovalThenSecretObligationAuthorizer {
+    handle: SecretHandle,
+}
+
+#[async_trait]
+impl TrustAwareCapabilityDispatchAuthorizer for ApprovalThenSecretObligationAuthorizer {
+    async fn authorize_dispatch_with_trust(
+        &self,
+        context: &ExecutionContext,
+        descriptor: &CapabilityDescriptor,
+        estimate: &ResourceEstimate,
+        _trust_decision: &TrustDecision,
+    ) -> Decision {
+        if context.grants.grants.is_empty() {
+            Decision::RequireApproval {
+                request: ApprovalRequest {
+                    id: ApprovalRequestId::new(),
+                    correlation_id: context.correlation_id,
+                    requested_by: Principal::Extension(context.extension_id.clone()),
+                    action: Box::new(Action::Dispatch {
+                        capability: descriptor.id.clone(),
+                        estimated_resources: estimate.clone(),
+                    }),
+                    invocation_fingerprint: None,
+                    reason: "approval required".to_string(),
+                    reusable_scope: None,
+                },
+            }
+        } else {
+            Decision::Allow {
+                obligations: Obligations::new(vec![Obligation::InjectSecretOnce {
+                    handle: self.handle.clone(),
+                }])
+                .unwrap(),
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 struct RecordingScriptExecutor {
     mounts: std::sync::Mutex<Vec<Option<MountView>>>,
@@ -5874,6 +6095,7 @@ impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
             status: self.response_status,
             headers: Vec::new(),
             body: Vec::new(),
+            saved_body: None,
             request_bytes: request.body.len() as u64,
             response_bytes: 0,
             redaction_applied: false,

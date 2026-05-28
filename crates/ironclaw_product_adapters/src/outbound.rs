@@ -21,7 +21,6 @@ const CAPABILITY_ACTIVITY_ERROR_KIND_SEGMENT_MAX_BYTES: usize = 24;
 const CAPABILITY_ACTIVITY_UNCLASSIFIED_ERROR_KIND: &str = "Unclassified";
 pub const CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES: usize = 2 * 1024;
 pub const CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES: usize = 16 * 1024;
-pub const CAPABILITY_DISPLAY_PREVIEW_MAX_LINES: usize = 120;
 pub const CAPABILITY_DISPLAY_KIND_MAX_BYTES: usize = 32;
 pub const CAPABILITY_DISPLAY_RESULT_REF_MAX_BYTES: usize = 256;
 
@@ -112,18 +111,7 @@ fn validate_display_preview(value: Option<&str>) -> Result<(), ProductAdapterErr
         "capability_display_output_preview",
         value,
         CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES,
-    )?;
-    if value
-        .lines()
-        .nth(CAPABILITY_DISPLAY_PREVIEW_MAX_LINES)
-        .is_some()
-    {
-        return Err(invalid(
-            "capability_display_output_preview",
-            format!("must be at most {CAPABILITY_DISPLAY_PREVIEW_MAX_LINES} lines"),
-        ));
-    }
-    Ok(())
+    )
 }
 
 fn validate_display_kind(value: Option<&str>) -> Result<(), ProductAdapterError> {
@@ -334,6 +322,7 @@ pub enum CapabilityActivityStatusView {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityDisplayPreviewView {
+    pub timeline_message_id: Option<String>,
     pub invocation_id: InvocationId,
     pub thread_id: Option<ThreadId>,
     pub capability_id: CapabilityId,
@@ -353,6 +342,7 @@ pub struct CapabilityDisplayPreviewView {
 impl CapabilityDisplayPreviewView {
     pub fn new(input: CapabilityDisplayPreviewViewInput) -> Result<Self, ProductAdapterError> {
         let value = Self {
+            timeline_message_id: input.timeline_message_id,
             invocation_id: input.invocation_id,
             thread_id: input.thread_id,
             capability_id: input.capability_id,
@@ -396,6 +386,11 @@ impl CapabilityDisplayPreviewView {
         validate_display_preview(self.output_preview.as_deref())?;
         validate_display_kind(self.output_kind.as_deref())?;
         validate_optional_display_text(
+            "capability_display_timeline_message_id",
+            self.timeline_message_id.as_deref(),
+            PROJECTION_ITEM_ID_MAX_BYTES,
+        )?;
+        validate_optional_display_text(
             "capability_display_result_ref",
             self.result_ref.as_deref(),
             CAPABILITY_DISPLAY_RESULT_REF_MAX_BYTES,
@@ -413,6 +408,7 @@ impl Serialize for CapabilityDisplayPreviewView {
 
         #[derive(Serialize)]
         struct Wire<'a> {
+            timeline_message_id: &'a Option<String>,
             invocation_id: &'a InvocationId,
             thread_id: &'a Option<ThreadId>,
             capability_id: &'a CapabilityId,
@@ -430,6 +426,7 @@ impl Serialize for CapabilityDisplayPreviewView {
         }
 
         Wire {
+            timeline_message_id: &self.timeline_message_id,
             invocation_id: &self.invocation_id,
             thread_id: &self.thread_id,
             capability_id: &self.capability_id,
@@ -451,6 +448,7 @@ impl Serialize for CapabilityDisplayPreviewView {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityDisplayPreviewViewInput {
+    pub timeline_message_id: Option<String>,
     pub invocation_id: InvocationId,
     pub thread_id: Option<ThreadId>,
     pub capability_id: CapabilityId,
@@ -474,6 +472,8 @@ impl<'de> Deserialize<'de> for CapabilityDisplayPreviewView {
     {
         #[derive(Deserialize)]
         struct Wire {
+            #[serde(default)]
+            timeline_message_id: Option<String>,
             invocation_id: InvocationId,
             thread_id: Option<ThreadId>,
             capability_id: CapabilityId,
@@ -491,6 +491,7 @@ impl<'de> Deserialize<'de> for CapabilityDisplayPreviewView {
         }
         let wire = Wire::deserialize(deserializer)?;
         Self::new(CapabilityDisplayPreviewViewInput {
+            timeline_message_id: wire.timeline_message_id,
             invocation_id: wire.invocation_id,
             thread_id: wire.thread_id,
             capability_id: wire.capability_id,
@@ -805,6 +806,7 @@ mod tests {
     #[test]
     fn capability_display_preview_view_allows_bounded_display_material() {
         let view = CapabilityDisplayPreviewView::new(CapabilityDisplayPreviewViewInput {
+            timeline_message_id: Some("timeline-message-1".to_string()),
             invocation_id: InvocationId::new(),
             thread_id: Some(ThreadId::new("thread-tool-preview").expect("thread id")),
             capability_id: CapabilityId::new("builtin.read_file").expect("capability id"),
@@ -829,7 +831,30 @@ mod tests {
     }
 
     #[test]
-    fn capability_display_preview_view_rejects_unbounded_preview() {
+    fn capability_display_preview_view_rejects_unbounded_timeline_message_id() {
+        let json = serde_json::json!({
+            "timeline_message_id": "x".repeat(PROJECTION_ITEM_ID_MAX_BYTES + 1),
+            "invocation_id": InvocationId::new(),
+            "thread_id": "thread-tool-preview",
+            "capability_id": "builtin.read_file",
+            "status": "completed",
+            "title": "read_file",
+            "subtitle": "src/main.rs",
+            "input_summary": "path: src/main.rs",
+            "output_summary": "read file",
+            "output_preview": "fn main() {}",
+            "output_kind": "text",
+            "output_bytes": 12,
+            "result_ref": "result:tool-output",
+            "truncated": false,
+            "updated_at": Utc::now(),
+        });
+
+        assert!(serde_json::from_value::<CapabilityDisplayPreviewView>(json).is_err());
+    }
+
+    #[test]
+    fn capability_display_preview_view_deserializes_without_timeline_message_id() {
         let json = serde_json::json!({
             "invocation_id": InvocationId::new(),
             "thread_id": "thread-tool-preview",
@@ -839,7 +864,59 @@ mod tests {
             "subtitle": "src/main.rs",
             "input_summary": "path: src/main.rs",
             "output_summary": "read file",
-            "output_preview": (0..=CAPABILITY_DISPLAY_PREVIEW_MAX_LINES).map(|_| "line").collect::<Vec<_>>().join("\n"),
+            "output_preview": "fn main() {}",
+            "output_kind": "text",
+            "output_bytes": 12,
+            "result_ref": "result:tool-output",
+            "truncated": false,
+            "updated_at": Utc::now(),
+        });
+
+        let view = serde_json::from_value::<CapabilityDisplayPreviewView>(json)
+            .expect("old preview payload deserializes");
+        assert!(view.timeline_message_id.is_none());
+    }
+
+    #[test]
+    fn capability_display_preview_view_accepts_many_preview_lines() {
+        let json = serde_json::json!({
+            "invocation_id": InvocationId::new(),
+            "thread_id": "thread-tool-preview",
+            "capability_id": "builtin.read_file",
+            "status": "completed",
+            "title": "read_file",
+            "subtitle": "src/main.rs",
+            "input_summary": "path: src/main.rs",
+            "output_summary": "read file",
+            "output_preview": (0..=240).map(|_| "line").collect::<Vec<_>>().join("\n"),
+            "output_kind": "text",
+            "output_bytes": 12,
+            "result_ref": "result:tool-output",
+            "truncated": true,
+            "updated_at": Utc::now(),
+        });
+
+        let view =
+            serde_json::from_value::<CapabilityDisplayPreviewView>(json).expect("preview is valid");
+        assert!(
+            view.output_preview
+                .as_deref()
+                .is_some_and(|preview| { preview.lines().count() == 241 })
+        );
+    }
+
+    #[test]
+    fn capability_display_preview_view_rejects_preview_over_byte_cap() {
+        let json = serde_json::json!({
+            "invocation_id": InvocationId::new(),
+            "thread_id": "thread-tool-preview",
+            "capability_id": "builtin.read_file",
+            "status": "completed",
+            "title": "read_file",
+            "subtitle": "src/main.rs",
+            "input_summary": "path: src/main.rs",
+            "output_summary": "read file",
+            "output_preview": "x".repeat(CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES + 1),
             "output_kind": "text",
             "output_bytes": 12,
             "result_ref": "result:tool-output",

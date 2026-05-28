@@ -61,6 +61,7 @@ impl RecordingEgress {
             request_bytes: 123,
             response_bytes: body.len() as u64,
             body,
+            saved_body: None,
             redaction_applied: true,
         }
     }
@@ -70,6 +71,7 @@ impl RecordingEgress {
             status,
             headers: Vec::new(),
             body: Vec::new(),
+            saved_body: None,
             request_bytes: 123,
             response_bytes: 0,
             redaction_applied: true,
@@ -87,6 +89,7 @@ impl RecordingEgress {
             request_bytes,
             response_bytes: body.len() as u64,
             body,
+            saved_body: None,
             redaction_applied: true,
         }
     }
@@ -98,6 +101,7 @@ impl RecordingEgress {
             request_bytes: 123,
             response_bytes: 1,
             body: b"{".to_vec(),
+            saved_body: None,
             redaction_applied: true,
         }
     }
@@ -131,7 +135,7 @@ pub(crate) fn scope() -> ResourceScope {
     ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap()
 }
 
-fn auth_scope(scope: &ResourceScope) -> AuthProductScope {
+pub(crate) fn auth_scope(scope: &ResourceScope) -> AuthProductScope {
     AuthProductScope::new(scope.clone(), AuthSurface::Api)
 }
 

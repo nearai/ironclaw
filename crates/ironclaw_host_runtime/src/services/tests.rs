@@ -31,6 +31,39 @@ use super::{
 use crate::CommandExecutionRequest;
 
 #[test]
+fn shared_extension_registry_returns_same_instance() {
+    let services = test_services();
+    let left = services.shared_extension_registry();
+    let right = services.shared_extension_registry();
+
+    assert_eq!(Arc::as_ptr(&left), Arc::as_ptr(&right)); // safety: test assertion only; verifies both accessors expose the same shared registry.
+}
+
+#[test]
+fn product_auth_provider_runtime_ports_returns_none_without_egress() {
+    let services = test_services();
+
+    assert!(services.product_auth_provider_runtime_ports().is_none());
+}
+
+#[test]
+fn product_auth_provider_runtime_ports_returns_configured_egress_and_obligation_handler() {
+    let services = test_services()
+        .with_secret_store(Arc::new(InMemorySecretStore::new()))
+        .try_with_host_http_egress(RecordingNetwork::ok())
+        .expect("host HTTP egress should wire with graph secret store");
+
+    let ports = services
+        .product_auth_provider_runtime_ports()
+        .expect("runtime ports should be configured");
+    assert!(Arc::ptr_eq(
+        &ports.runtime_http_egress(),
+        &configured_egress(&services)
+    ));
+    let _handler = ports.obligation_handler();
+}
+
+#[test]
 fn host_http_egress_borrows_staged_policy_for_repeated_invocation_requests() {
     let network = RecordingNetwork::ok();
     let recorded_requests = Arc::clone(&network.requests);
@@ -684,6 +717,7 @@ fn request_without_credentials(
         network_policy: caller_policy(),
         credential_injections: vec![],
         response_body_limit: Some(4096),
+        save_body_to: None,
         timeout_ms: None,
     }
 }

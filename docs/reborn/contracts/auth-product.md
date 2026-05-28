@@ -1,7 +1,7 @@
 # Reborn Product Auth Contract
 
 - **Status:** contract and composition seam
-- **Issue:** #3289 / #3810 / #3811 / #3812 / #3882 / #3883
+- **Issue:** #3289 / #3810 / #3811 / #3812 / #3881 / #3882 / #3883 / #3884
 - **Crate:** `crates/ironclaw_auth`
 - **Composition:** `ironclaw_reborn_composition::RebornProductAuthServices`
 
@@ -16,10 +16,13 @@ login flows.
 
 This slice is contract-first. It defines Reborn-native vocabulary and fake
 services, #3811 adds a Reborn composition seam, #3812 adds callback completion
-handling for host-mounted Reborn OAuth callback routes, and #3882 adds the
-composition-facing manual-token secure-submit entrypoint. It does not migrate
-production extension setup routes, CLI/setup flows, durable secret storage,
-token refresh execution, or runtime credential injection.
+handling, #3881 mounts the first Reborn-native OAuth start/callback HTTP routes
+through `ironclaw_reborn_composition`, #3882 adds the composition-facing
+manual-token secure-submit entrypoint, #3883 adds recovery/selection facade
+coverage, and #3884 adds refresh/cleanup lifecycle contracts. It does not
+migrate production extension setup routes, CLI/setup flows, durable secret
+storage, a production refresh scheduler/HTTP provider implementation, or runtime
+credential injection.
 
 Behavior may remain compatible with legacy UX. Code paths must not mingle V1
 components with Reborn components: V1 route handlers, pending maps, extension
@@ -49,8 +52,8 @@ stores, provider clients, or cleanup services locally.
 
 Host-owned OAuth callback routes should parse and validate their HTTP input,
 derive hashes for opaque state/code/verifier values, then call
-`RebornProductAuthServices::handle_oauth_callback`. The handler claims the flow
-through `AuthFlowManager`, performs provider exchange through
+`RebornProductAuthServices` for flow preflight/callback handling. The handler
+claims the flow through `AuthFlowManager`, performs provider exchange through
 `AuthProviderClient`, completes the auth flow through `AuthFlowManager`, and
 dispatches an `AuthContinuationEvent` to the injected continuation dispatcher.
 If continuation dispatch fails, the handler returns a sanitized retryable error
@@ -58,6 +61,13 @@ instead of reporting callback success; retrying an already-completed callback
 may re-dispatch the typed continuation without re-exchanging provider code.
 Callback route code must not activate extensions, resume turns, replay prompts,
 or dispatch runtime work directly.
+
+The first WebUI-mounted OAuth start route accepts only a provider authorization
+endpoint shape, not a precomposed browser-owned provider URL. Host composition
+must create the flow first, then return a sanitized authorization URL carrying
+flow/callback metadata; raw state and PKCE verifier material stay hashed or
+process-local and must not be serialized. Callback query parsing is bounded and
+malformed fields fail closed before provider exchange.
 
 `ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher` is the
 product-workflow bridge for `AuthContinuationRef::TurnGateResume`. It converts
@@ -68,11 +78,23 @@ continuation dispatch. Setup-only, lifecycle-activation, and product-action
 continuations remain explicit non-turn cases for their owning handlers and must
 not be performed inline by the OAuth callback route.
 
-The blocked-run interaction loop is separate: #3094 owns listing/rendering
-approval/auth gates from blocked run-state and routing user decisions back into
-the trusted resume path. That issue should consume the auth-flow boundary here
-for auth gates; it must not create a second credential-account or OAuth-flow
-model.
+`ironclaw_product_workflow::AuthInteractionService` owns the product/WebUI
+blocked-auth interaction loop from #3094. It reads auth-required gates from
+scoped blocked run-state plus auth-flow records, returns redacted
+adapter/UI-safe DTOs, and routes credential/callback/cancel decisions back
+through `AuthFlowManager` and `TurnCoordinator` with the `BlockedAuthGate`
+precondition. It consumes the auth-flow boundary here for auth gates; it must
+not create a second credential-account or OAuth-flow model.
+Only non-terminal auth-flow states are listed as pending interactions. Terminal
+states such as `failed`, `completed`, `expired`, and `canceled` must not be
+rendered as actionable auth gates.
+
+Legacy web/CLI/channel auth UX may remain behavior-compatible during
+migration, but Reborn paths should enter through `ProductWorkflow` or the
+WebUI-facing `RebornServicesApi` facade. They must not call V1 pending maps,
+V1 OAuth routes, extension-manager authority, or route-local credential state.
+Dedicated HTTP route mounting for manual-token and OAuth callback transports
+remains a host-composition concern around `RebornProductAuthServices`.
 
 ---
 
@@ -110,10 +132,20 @@ AuthContinuationRef::{setup_only, lifecycle_activation, turn_gate_resume,
 Rules:
 
 - OAuth redirect challenges carry a validated HTTPS `OAuthAuthorizationUrl`.
+- Browser-facing OAuth start routes must derive scope from authenticated
+  host context and trusted installation defaults. They must not accept
+  caller-supplied `AuthFlowKind` or `AuthContinuationRef`; route-specific
+  code chooses the allowed flow kind and continuation.
 - Durable records may store state/verifier/code hashes, ids, handles, and
   redacted metadata only.
 - Raw OAuth state, authorization code, PKCE verifier, access token, refresh
   token, and provider response bodies must not be serialized or projected.
+- The first mounted WebUI OAuth route keeps the raw PKCE verifier in a bounded,
+  expiring process-local cache keyed by `AuthFlowId`, while the durable flow
+  record stores only the verifier hash. This is a single-instance first-slice
+  constraint: multi-replica or restart-surviving deployments must introduce a
+  host-owned encrypted verifier store or equivalent sticky callback mechanism
+  before treating the route as HA-safe.
 - Public callbacks must validate and claim the scoped flow/state/provider/PKCE
   hash before exchanging raw code/verifier through non-serializable one-shot
   provider inputs and completing the flow.
@@ -184,6 +216,16 @@ Rules:
   completion.
 - Account listing uses explicit limit/cursor pagination and returns only
   authorized redacted projections.
+- Credential refresh must go through `CredentialAccountService::refresh_account`
+  or `RebornProductAuthServices::refresh_credential_account`. Refresh requests
+  revalidate scope, provider, account status, ownership, and requester grants;
+  a refreshable account id is never authority by itself.
+- Refresh is allowed only for recoverable/configured accounts that still carry
+  refresh authority. Revoked, inactive, pending-setup, missing, cross-scope, or
+  unauthorized accounts fail closed even if a stale refresh handle still exists.
+- Refresh results project only redacted account metadata and stable recovery
+  state. They must not expose raw provider error text, response bodies, host
+  paths, access-token handles, refresh-token handles, or secret values.
 
 ---
 
@@ -234,14 +276,33 @@ OAuthProviderCallbackRequest {
   account_label,
   ProviderScope[]
 }
+
+OAuthProviderRefreshRequest {
+  provider,
+  account_id,
+  refresh_secret,
+  ProviderScope[]
+}
 ```
 
-The request is intentionally not serializable. The exchange result is safe to
-store because it contains only hashes, handles, ids, scopes, and redacted
-metadata.
+The request types are intentionally not serializable. Exchange/refresh results
+are safe to store because they contain only hashes, handles, ids, scopes, and
+redacted metadata.
 
-Future production implementations must route provider HTTP through Reborn
-network/egress policy and return sanitized errors.
+Production implementations must route provider HTTP through Reborn
+network/egress policy, use bounded retry/backoff and per-account/provider rate
+limits, and return sanitized errors. Refresh implementations must never log raw
+refresh tokens, access tokens, provider response bodies, authorization codes,
+PKCE verifiers, or backend secret handles; provider diagnostics must be mapped
+to stable categories before they reach route responses, projections, traces, or
+audit logs.
+
+Refresh writes must be stale-safe. A production account store should use an
+optimistic version, token generation, refresh-handle equality check, or an
+equivalent compare-and-swap guard so a late refresh response cannot overwrite
+newer credentials. Similarly, a failed refresh should mark an account
+`refresh_failed` only if the account is still in the same pre-refresh
+generation that initiated the provider call.
 
 The composition root may expose an in-memory product-auth bundle only for
 local-dev/testing. Production profiles must receive durable Reborn-native auth
@@ -259,8 +320,11 @@ Cleanup is ownership-aware:
 | `deactivate` | retain account metadata, remove active visibility/grants | remove extension grant/visibility only |
 | `uninstall` | revoke/delete/tombstone owned account and grants | keep account, remove extension grant/visibility |
 
-Reports contain account ids only, never secret handles or backend detail
-strings.
+Reports contain account ids and stable quarantine categories only, never secret
+handles or backend detail strings. If a revoke, grant removal, tombstone, or
+backend cleanup step cannot be completed safely, the report must quarantine the
+affected account id and leave account metadata/grants unchanged rather than
+pretending cleanup succeeded.
 
 ---
 
@@ -268,8 +332,8 @@ strings.
 
 | Product behavior | V1 evidence path | Reborn owner | First-slice status |
 | --- | --- | --- | --- |
-| Extension/provider OAuth start | `src/extensions/manager.rs`, `src/auth/mod.rs` | `AuthFlowManager`, `CredentialSetupService`, `AuthProviderClient` | Contracted; production migration deferred |
-| Hosted OAuth callback | `src/channels/web/features/oauth/mod.rs` | `RebornProductAuthServices::handle_oauth_callback`, `ProductAuthTurnGateResumeDispatcher` for turn-gate resume continuations | Reborn handler seam ready; HTTP route mounting deferred |
+| Extension/provider OAuth start | `src/extensions/manager.rs`, `src/auth/mod.rs` | `AuthFlowManager`, `CredentialSetupService`, `AuthProviderClient` | Reborn-native route mounted in composition; production provider wiring deferred |
+| Hosted OAuth callback | `src/channels/web/features/oauth/mod.rs` | `RebornProductAuthServices::handle_oauth_callback`, `ProductAuthTurnGateResumeDispatcher` for turn-gate resume continuations | Reborn-native route mounted in composition; production provider wiring deferred |
 | Local OAuth callback | `src/extensions/manager.rs`, `src/auth/oauth.rs` | `AuthFlowManager`, `AuthProviderClient` | Inventory only |
 | Manual token entry from chat | `src/agent/agent_loop.rs`, `src/agent/thread_ops.rs` | `AuthInteractionService` secure submit via `RebornProductAuthServices::{request_manual_token_setup,submit_manual_token}` | Reborn facade ready; route migration deferred |
 | Engine/gate auth credential submit | `src/bridge/router.rs` | `AuthInteractionService`, `CredentialSetupService`, typed continuation | Contracted; migration deferred |
@@ -301,6 +365,9 @@ strings.
   expired, refresh-failed, revoked, ambiguous, and hidden unauthorized accounts;
 - explicit account-choice validation plus lookup, listing, extension-owned, and
   shared-admin grant filtering;
-- extension-owned owner validation and deactivate/uninstall cleanup behavior;
+- refresh success/failure, terminal-status rejection, stale concurrent refresh
+  guards, request redaction, and scope/provider/grant revalidation;
+- extension-owned owner validation, deactivate/uninstall cleanup behavior, and
+  cleanup quarantine reporting;
 - serde validation for newtypes and snake_case wire enums;
 - serialization checks proving raw code/verifier/token material is absent.

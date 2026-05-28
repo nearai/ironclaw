@@ -17,17 +17,21 @@ use ironclaw_host_runtime::{
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
-    HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
-    loop_driver_execution_extension_id,
+    HostManagedToolResultContent, HostRuntimeLoopCapabilityPortFactory,
+    LoopCapabilityInputResolver, LoopCapabilityResultWriter, loop_driver_execution_extension_id,
 };
 use ironclaw_reborn::loop_driver_host::LoopCapabilityPortFactory;
-use ironclaw_threads::{ToolResultReferenceEnvelope, ToolResultSafeSummary};
+use ironclaw_threads::{
+    AppendCapabilityDisplayPreviewRequest, CapabilityDisplayPreviewEnvelope,
+    CapabilityDisplayPreviewEnvelopeInput, CapabilityDisplayPreviewStatus, SessionThreadService,
+    ThreadScope,
+};
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use ironclaw_turns::{
     LoopResultRef,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, LoopCapabilityPort,
-        LoopHostMilestoneSink, LoopRunContext, ProviderToolCall,
+        LoopHostMilestoneSink, LoopRunContext, ProviderToolCall, sanitize_model_visible_text,
     },
 };
 
@@ -36,6 +40,12 @@ use crate::{
     RebornServices,
     projection::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore},
 };
+
+mod extension_surface;
+mod surface_disclosure;
+
+use extension_surface::{LocalDevExtensionSurface, LocalDevExtensionSurfaceSource};
+use surface_disclosure::wrap_local_dev_surface_disclosure;
 
 pub(super) struct LocalDevCapabilityWiring {
     pub(super) capability_factory: Arc<dyn LoopCapabilityPortFactory>,
@@ -47,22 +57,25 @@ pub(super) struct LocalDevCapabilityWiring {
 
 pub(super) fn capability_wiring(
     services: &RebornServices,
+    thread_service: Arc<dyn SessionThreadService>,
+    thread_scope: ThreadScope,
     user_id: UserId,
     policy: Arc<LocalDevCapabilityPolicy>,
     model_gateway: Arc<dyn HostManagedModelGateway>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
 ) -> Option<LocalDevCapabilityWiring> {
     let runtime = services.host_runtime.clone()?;
-    let workspace_mounts = services
-        .local_runtime
-        .as_ref()
-        .map(|runtime| runtime.workspace_mounts.clone())?;
-    let skill_mounts = services
-        .local_runtime
-        .as_ref()
-        .map(|runtime| runtime.skill_mounts.clone())?;
+    let local_runtime = services.local_runtime.as_ref()?;
+    let workspace_mounts = local_runtime.workspace_mounts.clone();
+    let skill_mounts = local_runtime.skill_mounts.clone();
+    let extension_surface_source =
+        LocalDevExtensionSurfaceSource::new(local_runtime.extension_management.clone());
     let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
-    let capability_io = Arc::new(LocalDevCapabilityIo::new(Arc::clone(&display_previews)));
+    let capability_io = Arc::new(LocalDevCapabilityIo::new_with_durable_previews(
+        Arc::clone(&display_previews),
+        thread_service,
+        thread_scope,
+    ));
     let capability_input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
     let capability_result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
     let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
@@ -72,6 +85,7 @@ pub(super) fn capability_wiring(
             policy,
             workspace_mounts,
             skill_mounts,
+            extension_surface_source,
             input_resolver: Arc::clone(&capability_input_resolver),
             result_writer: Arc::clone(&capability_result_writer),
             milestone_sink,
@@ -96,6 +110,7 @@ struct LocalDevLoopCapabilityPortFactory {
     policy: Arc<LocalDevCapabilityPolicy>,
     workspace_mounts: MountView,
     skill_mounts: MountView,
+    extension_surface_source: LocalDevExtensionSurfaceSource,
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
@@ -109,13 +124,20 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
         let workspace_mounts = self.workspace_mounts.clone();
         let skill_mounts = self.skill_mounts.clone();
+        let extension_surface = self
+            .extension_surface_source
+            .snapshot()
+            .await
+            .map_err(host_api_agent_loop_error)?;
         let visible_request = local_dev_visible_capability_request(
             run_context,
             self.user_id.clone(),
             workspace_mounts.clone(),
             skill_mounts.clone(),
             &self.policy,
+            &extension_surface,
         )?;
+        let disclosure_mounts = workspace_mounts.clone();
         let mut factory = HostRuntimeLoopCapabilityPortFactory::new(
             Arc::clone(&self.runtime),
             visible_request,
@@ -128,18 +150,28 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
             factory = factory
                 .with_capability_execution_mount(capability_id.clone(), skill_mounts.clone());
         }
-        Ok(factory.for_run_context(run_context.clone()))
+        let port = factory.for_run_context(run_context.clone());
+        Ok(wrap_local_dev_surface_disclosure(port, &disclosure_mounts))
     }
 }
 
 const LOCAL_DEV_CAPABILITY_IO_MAX_STAGED_REFS: usize = 1024;
 const LOCAL_DEV_CAPABILITY_IO_MAX_STAGED_BYTES: usize = 4 * 1024 * 1024;
-const MODEL_VISIBLE_TOOL_OUTPUT_MAX_BYTES: usize = 480;
+// Replay payload cap for provider calls. This is a model-window guard, not a
+// safe-summary formatter; the staged result remains available for follow-up.
+const LOCAL_DEV_MODEL_VISIBLE_TOOL_RESULT_MAX_BYTES: usize = 100_000;
 
 struct LocalDevCapabilityIo {
     inputs: StdMutex<StagedValueStore>,
     results: StdMutex<StagedValueStore>,
     display_previews: Arc<CapabilityDisplayPreviewStore>,
+    durable_previews: Option<DurableCapabilityDisplayPreviewSink>,
+}
+
+#[derive(Clone)]
+struct DurableCapabilityDisplayPreviewSink {
+    thread_service: Arc<dyn SessionThreadService>,
+    thread_scope: ThreadScope,
 }
 
 impl Default for LocalDevCapabilityIo {
@@ -154,8 +186,26 @@ impl LocalDevCapabilityIo {
             inputs: StdMutex::new(StagedValueStore::default()),
             results: StdMutex::new(StagedValueStore::default()),
             display_previews,
+            durable_previews: None,
         }
     }
+
+    fn new_with_durable_previews(
+        display_previews: Arc<CapabilityDisplayPreviewStore>,
+        thread_service: Arc<dyn SessionThreadService>,
+        thread_scope: ThreadScope,
+    ) -> Self {
+        Self {
+            inputs: StdMutex::new(StagedValueStore::default()),
+            results: StdMutex::new(StagedValueStore::default()),
+            display_previews,
+            durable_previews: Some(DurableCapabilityDisplayPreviewSink {
+                thread_service,
+                thread_scope,
+            }),
+        }
+    }
+
     fn result_output(
         &self,
         result_ref: &str,
@@ -164,6 +214,73 @@ impl LocalDevCapabilityIo {
             .lock()
             .map_err(|_| capability_io_error())
             .map(|results| results.get(result_ref).cloned())
+    }
+
+    async fn append_durable_display_preview(
+        &self,
+        run_context: &LoopRunContext,
+        invocation_id: InvocationId,
+        capability_id: &CapabilityId,
+    ) -> Result<(), AgentLoopHostError> {
+        let Some(durable_previews) = &self.durable_previews else {
+            return Ok(());
+        };
+        let Some(record) = self.display_previews.record_for_invocation(invocation_id) else {
+            tracing::debug!(
+                invocation_id = %invocation_id,
+                capability_id = capability_id.as_str(),
+                "capability display preview record missing after result staging"
+            );
+            return Ok(());
+        };
+        let preview =
+            match CapabilityDisplayPreviewEnvelope::new(CapabilityDisplayPreviewEnvelopeInput {
+                invocation_id,
+                capability_id: capability_id.clone(),
+                status: CapabilityDisplayPreviewStatus::Completed,
+                title: record.title,
+                subtitle: record.subtitle,
+                input_summary: record.input_summary,
+                output_summary: record.output_summary,
+                output_preview: record.output_preview,
+                output_kind: record.output_kind,
+                output_bytes: record.output_bytes,
+                result_ref: record.result_ref,
+                truncated: record.truncated,
+                updated_at: Utc::now(),
+            }) {
+                Ok(preview) => preview,
+                Err(error) => {
+                    tracing::debug!(
+                        invocation_id = %invocation_id,
+                        capability_id = capability_id.as_str(),
+                        error,
+                        "capability display preview envelope validation failed"
+                    );
+                    return Err(capability_io_error());
+                }
+            };
+        let message = durable_previews
+            .thread_service
+            .append_capability_display_preview(AppendCapabilityDisplayPreviewRequest {
+                scope: durable_previews.thread_scope.clone(),
+                thread_id: run_context.thread_id.clone(),
+                turn_run_id: run_context.run_id.to_string(),
+                preview,
+            })
+            .await
+            .map_err(|error| {
+                tracing::debug!(
+                    invocation_id = %invocation_id,
+                    capability_id = capability_id.as_str(),
+                    error = %error,
+                    "capability display preview durable append failed"
+                );
+                capability_io_error()
+            })?;
+        self.display_previews
+            .attach_timeline_message_id(invocation_id, message.message_id);
+        Ok(())
     }
 }
 
@@ -328,8 +445,10 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
                     )
                 })?;
         let output_bytes = staged_value_bytes(&output)?.try_into().unwrap_or(u64::MAX);
-        let mut results = self.results.lock().map_err(|_| capability_io_error())?;
-        results.insert_with_oldest_eviction(result_ref.as_str().to_string(), output.clone())?;
+        {
+            let mut results = self.results.lock().map_err(|_| capability_io_error())?;
+            results.insert_with_oldest_eviction(result_ref.as_str().to_string(), output.clone())?;
+        }
         self.display_previews
             .record_result(CapabilityDisplayPreviewResult {
                 run_id: &run_context.run_id.to_string(),
@@ -340,6 +459,8 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
                 output: &output,
                 output_bytes,
             });
+        self.append_durable_display_preview(run_context, invocation_id, _capability_id)
+            .await?;
         Ok(result_ref)
     }
 
@@ -448,63 +569,53 @@ fn hydrate_tool_result_messages(
         if message.role != HostManagedModelMessageRole::ToolResult {
             continue;
         }
-        let mut envelope: ToolResultReferenceEnvelope = serde_json::from_str(&message.content)
-            .map_err(|error| {
-                ironclaw_loop_support::raw_host_managed_model_error(
-                    "local_dev_model_replay",
-                    "decode_tool_result_envelope",
+        let envelope = match message.tool_result_content.as_ref() {
+            Some(HostManagedToolResultContent::Reference { envelope }) => envelope,
+            Some(HostManagedToolResultContent::Resolved { .. }) => continue,
+            None => {
+                return Err(HostManagedModelError::safe(
                     HostManagedModelErrorKind::InvalidRequest,
-                    "tool result reference transcript content is invalid",
-                    error,
-                )
-            })?;
+                    "tool result replay content is missing",
+                ));
+            }
+        };
         let output = capability_io
             .result_output(&envelope.result_ref)
             .map_err(model_capability_io_error)?;
         let Some(output) = output else {
             continue;
         };
-        envelope.safe_summary = ToolResultSafeSummary::new(model_visible_tool_output(&output))
-            .map_err(|error| {
-                ironclaw_loop_support::raw_host_managed_model_error(
-                    "local_dev_model_replay",
-                    "sanitize_tool_result",
-                    HostManagedModelErrorKind::InvalidRequest,
-                    "tool result output could not be represented safely for model replay",
-                    error,
-                )
-            })?;
-        message.content = serde_json::to_string(&envelope).map_err(|error| {
-            let safe_summary = error.to_string();
-            ironclaw_loop_support::raw_host_managed_model_error(
-                "local_dev_model_replay",
-                "encode_tool_result_envelope",
-                HostManagedModelErrorKind::InvalidRequest,
-                safe_summary,
-                error,
-            )
-        })?;
+        message.content = model_visible_tool_result_content(&output)?;
+        message.tool_result_content = Some(HostManagedToolResultContent::Resolved {
+            safe_summary: envelope.safe_summary.clone(),
+        });
     }
     Ok(request)
 }
 
-/// Convert local-dev tool output into a `ToolResultSafeSummary`-compatible replay string.
-/// This is not product-live canonical result storage; it is a bounded local-dev bridge so provider
-/// follow-up calls receive useful output while preserving the transcript safe-summary contract.
-fn model_visible_tool_output(output: &serde_json::Value) -> String {
-    let mut sanitized = String::from("tool output");
-    append_model_visible_value(output, &mut sanitized);
-    let sanitized = sanitized.split_whitespace().collect::<Vec<_>>().join(" ");
-    if ToolResultSafeSummary::new(sanitized.clone()).is_ok() {
-        sanitized
-    } else {
-        "tool output available".to_string()
+fn model_visible_tool_result_content(
+    output: &serde_json::Value,
+) -> Result<String, HostManagedModelError> {
+    let mut content =
+        String::with_capacity(LOCAL_DEV_MODEL_VISIBLE_TOOL_RESULT_MAX_BYTES.min(4096));
+    let truncated = append_model_visible_value(output, &mut content);
+    if content.is_empty() {
+        return Err(HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidRequest,
+            "tool result output could not be represented for model replay",
+        ));
     }
+    if truncated {
+        content.push_str("\n\n[... truncated: showing first ");
+        content.push_str(&LOCAL_DEV_MODEL_VISIBLE_TOOL_RESULT_MAX_BYTES.to_string());
+        content.push_str(" bytes. Use a follow-up tool call to inspect the full result.]");
+    }
+    Ok(content)
 }
 
-fn append_model_visible_value(value: &serde_json::Value, output: &mut String) {
-    if output.len() >= MODEL_VISIBLE_TOOL_OUTPUT_MAX_BYTES {
-        return;
+fn append_model_visible_value(value: &serde_json::Value, output: &mut String) -> bool {
+    if output.len() >= LOCAL_DEV_MODEL_VISIBLE_TOOL_RESULT_MAX_BYTES {
+        return true;
     }
     match value {
         serde_json::Value::Null => append_sanitized_capped(" null", output),
@@ -512,29 +623,37 @@ fn append_model_visible_value(value: &serde_json::Value, output: &mut String) {
         serde_json::Value::Number(value) => append_sanitized_capped(&format!(" {value}"), output),
         serde_json::Value::String(value) => append_sanitized_capped(&format!(" {value}"), output),
         serde_json::Value::Array(values) => {
+            if append_sanitized_capped(" array", output) {
+                return true;
+            }
             for value in values {
-                append_model_visible_value(value, output);
-                if output.len() >= MODEL_VISIBLE_TOOL_OUTPUT_MAX_BYTES {
-                    break;
+                if append_model_visible_value(value, output) {
+                    return true;
                 }
             }
+            false
         }
         serde_json::Value::Object(values) => {
+            if append_sanitized_capped(" object", output) {
+                return true;
+            }
             for (key, value) in values {
-                append_sanitized_capped(&format!(" {key}"), output);
-                append_model_visible_value(value, output);
-                if output.len() >= MODEL_VISIBLE_TOOL_OUTPUT_MAX_BYTES {
-                    break;
+                if append_sanitized_capped(&format!(" {key}"), output)
+                    || append_model_visible_value(value, output)
+                {
+                    return true;
                 }
             }
+            false
         }
     }
 }
 
-fn append_sanitized_capped(value: &str, output: &mut String) {
+fn append_sanitized_capped(value: &str, output: &mut String) -> bool {
+    let value = sanitize_model_visible_text(value.to_string());
     for character in value.chars() {
-        if output.len() >= MODEL_VISIBLE_TOOL_OUTPUT_MAX_BYTES {
-            break;
+        if output.len() >= LOCAL_DEV_MODEL_VISIBLE_TOOL_RESULT_MAX_BYTES {
+            return true;
         }
         let character = if character.is_control()
             || matches!(
@@ -545,11 +664,12 @@ fn append_sanitized_capped(value: &str, output: &mut String) {
         } else {
             character
         };
-        if output.len() + character.len_utf8() > MODEL_VISIBLE_TOOL_OUTPUT_MAX_BYTES {
-            break;
+        if output.len() + character.len_utf8() > LOCAL_DEV_MODEL_VISIBLE_TOOL_RESULT_MAX_BYTES {
+            return true;
         }
         output.push(character);
     }
+    false
 }
 
 fn model_capability_io_error(error: AgentLoopHostError) -> HostManagedModelError {
@@ -562,9 +682,13 @@ fn local_dev_visible_capability_request(
     workspace_mounts: MountView,
     skill_mounts: MountView,
     policy: &LocalDevCapabilityPolicy,
+    extension_surface: &LocalDevExtensionSurface,
 ) -> Result<HostVisibleCapabilityRequest, AgentLoopHostError> {
     let extension_id = loop_driver_execution_extension_id(run_context)?;
-    let grants = policy.builtin_grants(&extension_id, &workspace_mounts, &skill_mounts);
+    let mut grants = policy.builtin_grants(&extension_id, &workspace_mounts, &skill_mounts);
+    grants
+        .grants
+        .extend(extension_surface.grants(&extension_id));
     let mut context = ExecutionContext::local_default(
         user_id,
         extension_id,
@@ -599,6 +723,7 @@ fn local_dev_visible_capability_request(
             evaluated_at: Utc::now(),
         },
     );
+    provider_trust.extend(extension_surface.provider_trust());
 
     Ok(HostVisibleCapabilityRequest::new(
         context,

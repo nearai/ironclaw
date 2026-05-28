@@ -27,6 +27,7 @@
 mod action;
 mod approval_interaction;
 mod auth_continuation;
+mod auth_interaction;
 mod binding;
 mod binding_ref;
 mod command_dispatch;
@@ -61,6 +62,14 @@ pub use approval_interaction::{
 /// Concrete turn-gate resume dispatcher used by the Reborn composition crate to
 /// bridge product-auth continuations into the workflow-owned turn boundary.
 pub use auth_continuation::ProductAuthTurnGateResumeDispatcher;
+pub use auth_interaction::{
+    AuthCredentialAccountChoiceView, AuthGateRecord, AuthInteractionChallengeView,
+    AuthInteractionDecision, AuthInteractionReadModel, AuthInteractionRejectionKind,
+    AuthInteractionScope, AuthInteractionService, AuthInteractionStatus,
+    DefaultAuthInteractionService, ListPendingAuthInteractionsRequest,
+    ListPendingAuthInteractionsResponse, PendingAuthInteractionView, ResolveAuthInteractionRequest,
+    ResolveAuthInteractionResponse, is_auth_gate_ref,
+};
 pub use binding::{
     ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
     ResolvedBinding,
@@ -89,11 +98,12 @@ pub use inbound_turn::{
 };
 pub use ledger::{IdempotencyDecision, IdempotencyLedger};
 pub use lifecycle::{
-    LifecycleBlockerRef, LifecycleCommandKind, LifecyclePackageId, LifecyclePackageKind,
-    LifecyclePackageRef, LifecyclePhase, LifecycleProductAction, LifecycleProductContext,
-    LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
-    LifecycleProductSurfaceContext, LifecycleReadinessBlocker, LifecycleSkillSource,
-    LifecycleSkillSummary, UnsupportedLifecycleProductFacade,
+    LifecycleBlockerRef, LifecycleCommandKind, LifecycleExtensionSource, LifecycleExtensionSummary,
+    LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
+    LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
+    LifecycleProductPayload, LifecycleProductResponse, LifecycleProductSurfaceContext,
+    LifecycleReadinessBlocker, LifecycleSkillSource, LifecycleSkillSummary,
+    UnsupportedLifecycleProductFacade,
 };
 pub use policy::{
     BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,

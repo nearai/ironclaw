@@ -48,7 +48,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Tailscale integration | ✅ | ❌ | |
 | Health check endpoints | ✅ | ✅ | /api/health + /api/gateway/status + /healthz + /readyz, with channel-backed readiness probes |
 | `doctor` diagnostics | ✅ | 🚧 | 16 checks: settings, LLM, DB, embeddings, routines, gateway, MCP, skills, secrets, service, Docker daemon, tunnel binaries |
-| Agent event broadcast | ✅ | 🚧 | SSE broadcast manager exists (SseManager). Reborn has a transport-neutral projection EventStreamManager with access/admission/rebase/lag/redaction contracts, product-safe capability activity events plus bounded display-preview events, live thinking projection updates, and the local-dev WebUI serve path now wires it into `/events` and `/ws` through the WebUI product facade; production durable/live fanout remains follow-up work. |
+| Agent event broadcast | ✅ | 🚧 | SSE broadcast manager exists (SseManager). Reborn has a transport-neutral projection EventStreamManager with access/admission/rebase/lag/redaction contracts, product-safe capability activity events plus bounded display-preview events, live thinking projection updates, and the local-dev WebUI serve path now wires it into `/events` and `/ws` through the WebUI product facade; local-dev WebUI also persists terminal tool previews as ordered transcript items and includes their timeline message ids on live preview events. Production durable/live fanout remains follow-up work. |
 | Channel health monitor | ✅ | ❌ | Auto-restart with configurable interval |
 | Presence system | ✅ | ❌ | Beacons on connect, system presence for agents |
 | Trusted-proxy auth mode | ✅ | ❌ | Header-based auth for reverse proxies; `trustedProxy.allowLoopback` for same-host reverse proxies |
@@ -341,7 +341,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | Tool inventory cache | ✅ | ❌ | Coalesced effective-tool inventory cache with channel-registry invalidation |
 | Pending exec approval `errorMessage` cleanup | ✅ | ❌ | Failed restart-interrupted approval-pending sessions instead of replaying stale ids |
 | Elevated mode | ✅ | ❌ | Privileged execution |
-| Subagent support | ✅ | ✅ | Task framework; spawn-by-account-aware bindings, model overrides preserved |
+| Subagent support | ✅ | ✅ | Task framework; spawn-by-account-aware bindings, model overrides preserved; Reborn `spawn_subagent` is blocking-only while background delivery is deferred (#4147) |
 | `/subagents spawn` command | ✅ | ❌ | Spawn from chat |
 | Auth profiles | ✅ | ❌ | Multiple auth strategies; replaceDefaultModels migration semantics |
 | Generic API key rotation | ✅ | ❌ | Rotate keys across providers |

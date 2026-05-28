@@ -1910,6 +1910,7 @@ impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
             status: 200,
             headers: vec![("content-type".to_string(), "application/json".to_string())],
             body: self.body.clone(),
+            saved_body: None,
             request_bytes: request.body.len() as u64,
             response_bytes: self.body.len() as u64,
             redaction_applied: false,
@@ -2157,9 +2158,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
                     "properties": {
                         "flavor_id": {"type": "string"},
                         "task": {"type": "string"},
-                        "handoff": {"type": "string"},
-                        "mode": {"type": "string", "enum": ["blocking", "background"]},
-                        "run_in_background": {"type": "boolean"}
+                        "handoff": {"type": "string"}
                     },
                     "required": ["flavor_id", "task"]
                 }),

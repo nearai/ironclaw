@@ -22,7 +22,7 @@ use ironclaw_capabilities::{
     CapabilityInvocationResult, CapabilityObligationHandler, CapabilityResumeRequest,
     CapabilitySpawnRequest, CapabilitySpawnResult,
 };
-use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry};
+use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_host_api::{
     ApprovalRequestId, CapabilityDispatcher, CapabilityId, DispatchFailureKind, InvocationId,
     PackageSource, ResourceScope, RuntimeDispatchErrorKind, RuntimeKind,
@@ -43,17 +43,17 @@ use ironclaw_trust::{HostTrustPolicy, TrustDecision, TrustError, TrustPolicy, Tr
 use crate::{
     BuiltinObligationHandler, BuiltinObligationServices, CancelRuntimeWorkOutcome,
     CancelRuntimeWorkRequest, CapabilitySurfaceVersion, HostRuntime, HostRuntimeError,
-    HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalGate, RuntimeBackendHealth,
-    RuntimeBlockedReason, RuntimeCapabilityCompleted, RuntimeCapabilityFailure,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
-    RuntimeFailureKind, RuntimeStatusRequest, RuntimeWorkId, RuntimeWorkSummary,
-    VisibleCapabilityRequest, VisibleCapabilitySurface, plan_capability,
-    surface::CapabilityCatalog,
+    HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalGate, RuntimeAuthGate,
+    RuntimeBackendHealth, RuntimeBlockedReason, RuntimeCapabilityCompleted,
+    RuntimeCapabilityFailure, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
+    RuntimeCapabilityResumeRequest, RuntimeFailureKind, RuntimeGateId, RuntimeStatusRequest,
+    RuntimeWorkId, RuntimeWorkSummary, VisibleCapabilityRequest, VisibleCapabilitySurface,
+    plan_capability, surface::CapabilityCatalog,
 };
 
 /// Default production wiring for [`HostRuntime`].
 pub struct DefaultHostRuntime {
-    registry: Arc<ExtensionRegistry>,
+    registry: Arc<SharedExtensionRegistry>,
     dispatcher: Arc<dyn CapabilityDispatcher>,
     authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer>,
     trust_policy: Arc<dyn TrustPolicy>,
@@ -74,6 +74,10 @@ pub struct DefaultHostRuntime {
 impl DefaultHostRuntime {
     /// Constructs a default host runtime over the supplied kernel services.
     ///
+    /// This constructor snapshots the supplied registry into an internal
+    /// [`SharedExtensionRegistry`]. Use [`Self::from_shared_registry`] when
+    /// callers need subsequent registry mutations to be shared with the runtime.
+    ///
     /// The runtime starts with an explicit fail-closed host trust policy, so
     /// capability dispatch is denied until composition attaches a concrete
     /// policy with [`Self::with_trust_policy`] or [`Self::with_trust_policy_dyn`].
@@ -90,6 +94,22 @@ impl DefaultHostRuntime {
     /// review.
     pub fn new(
         registry: Arc<ExtensionRegistry>,
+        dispatcher: Arc<dyn CapabilityDispatcher>,
+        authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer>,
+        surface_version: CapabilitySurfaceVersion,
+        runtime_policy: EffectiveRuntimePolicy,
+    ) -> Self {
+        Self::from_shared_registry(
+            Arc::new(SharedExtensionRegistry::new((*registry).clone())),
+            dispatcher,
+            authorizer,
+            surface_version,
+            runtime_policy,
+        )
+    }
+
+    pub fn from_shared_registry(
+        registry: Arc<SharedExtensionRegistry>,
         dispatcher: Arc<dyn CapabilityDispatcher>,
         authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer>,
         surface_version: CapabilitySurfaceVersion,
@@ -321,7 +341,8 @@ impl HostRuntime for DefaultHostRuntime {
         };
         context.trust = trust_decision.effective_trust.class();
 
-        let host = self.capability_host();
+        let registry = self.registry.snapshot();
+        let host = self.capability_host(&registry);
 
         let invocation = CapabilityInvocationRequest {
             context,
@@ -394,7 +415,8 @@ impl HostRuntime for DefaultHostRuntime {
         };
         context.trust = trust_decision.effective_trust.class();
 
-        let host = self.capability_host();
+        let registry = self.registry.snapshot();
+        let host = self.capability_host(&registry);
         let spawn = CapabilitySpawnRequest {
             context,
             capability_id: capability_id.clone(),
@@ -479,7 +501,8 @@ impl HostRuntime for DefaultHostRuntime {
         };
         context.trust = trust_decision.effective_trust.class();
 
-        let host = self.capability_host();
+        let registry = self.registry.snapshot();
+        let host = self.capability_host(&registry);
         let resume = CapabilityResumeRequest {
             context,
             approval_request_id,
@@ -503,10 +526,15 @@ impl HostRuntime for DefaultHostRuntime {
                     idempotency_key = idempotency_key.as_deref().unwrap_or(""),
                     "capability resume failed"
                 );
-                Ok(RuntimeCapabilityOutcome::Failed(failure_from(
-                    error,
-                    capability_id,
-                )))
+                match error {
+                    CapabilityInvocationError::AuthorizationRequiresAuth { capability } => {
+                        Ok(auth_required_outcome(capability))
+                    }
+                    other => Ok(RuntimeCapabilityOutcome::Failed(failure_from(
+                        other,
+                        capability_id,
+                    ))),
+                }
             }
         }
     }
@@ -571,7 +599,8 @@ impl HostRuntime for DefaultHostRuntime {
         };
         context.trust = trust_decision.effective_trust.class();
 
-        let host = self.capability_host();
+        let registry = self.registry.snapshot();
+        let host = self.capability_host(&registry);
         let resume = CapabilityResumeRequest {
             context,
             approval_request_id,
@@ -604,8 +633,9 @@ impl HostRuntime for DefaultHostRuntime {
         &self,
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, HostRuntimeError> {
+        let registry = self.registry.snapshot();
         CapabilityCatalog::new(
-            self.registry.as_ref(),
+            &registry,
             self.authorizer.as_ref(),
             &self.surface_version,
             &self.runtime_policy,
@@ -693,6 +723,7 @@ impl HostRuntime for DefaultHostRuntime {
         request: RuntimeStatusRequest,
     ) -> Result<HostRuntimeStatus, HostRuntimeError> {
         let mut active_work = Vec::new();
+        let registry = self.registry.snapshot();
 
         if let Some(run_state) = &self.run_state {
             let records = run_state
@@ -705,8 +736,7 @@ impl HostRuntime for DefaultHostRuntime {
                     .into_iter()
                     .filter(|record| record.status == RunStatus::Running)
                     .map(|record| {
-                        let runtime = self
-                            .registry
+                        let runtime = registry
                             .get_capability(&record.capability_id)
                             .map(|descriptor| descriptor.runtime);
                         RuntimeWorkSummary {
@@ -752,7 +782,8 @@ impl HostRuntime for DefaultHostRuntime {
 
     /// Returns readiness for runtime backends required by registered capabilities.
     async fn health(&self) -> Result<HostRuntimeHealth, HostRuntimeError> {
-        let required = required_runtime_backends(&self.registry);
+        let registry = self.registry.snapshot();
+        let required = required_runtime_backends(&registry);
         if required.is_empty() {
             return Ok(HostRuntimeHealth {
                 ready: true,
@@ -774,12 +805,12 @@ impl HostRuntime for DefaultHostRuntime {
 }
 
 impl DefaultHostRuntime {
-    fn capability_host(&self) -> CapabilityHost<'_, dyn CapabilityDispatcher> {
-        let mut host = CapabilityHost::new(
-            self.registry.as_ref(),
-            self.dispatcher.as_ref(),
-            self.authorizer.as_ref(),
-        );
+    fn capability_host<'a>(
+        &'a self,
+        registry: &'a ExtensionRegistry,
+    ) -> CapabilityHost<'a, dyn CapabilityDispatcher> {
+        let mut host =
+            CapabilityHost::new(registry, self.dispatcher.as_ref(), self.authorizer.as_ref());
         if let Some(run_state_approval_store) = &self.run_state_approval_store {
             host = host.with_run_state_approval_store(run_state_approval_store.as_ref());
         } else {
@@ -808,12 +839,11 @@ impl DefaultHostRuntime {
     ) -> Result<TrustDecision, TrustEvaluationError> {
         let policy = self.trust_policy.as_ref();
 
-        let descriptor = self
-            .registry
+        let registry = self.registry.snapshot();
+        let descriptor = registry
             .get_capability(capability_id)
             .ok_or(TrustEvaluationError::UnknownCapability)?;
-        let package = self
-            .registry
+        let package = registry
             .get_extension(&descriptor.provider)
             .ok_or(TrustEvaluationError::MissingPackage)?;
         let package_descriptor = package
@@ -845,8 +875,8 @@ impl DefaultHostRuntime {
         &self,
         capability_id: &CapabilityId,
     ) -> Result<(), RuntimePolicyEvaluationError> {
-        let descriptor = self
-            .registry
+        let registry = self.registry.snapshot();
+        let descriptor = registry
             .get_capability(capability_id)
             .ok_or(RuntimePolicyEvaluationError::UnknownCapability)?;
         let plan = plan_capability(descriptor, &self.runtime_policy)
@@ -953,6 +983,9 @@ impl DefaultHostRuntime {
                     }
                 }
             }
+            CapabilityInvocationError::AuthorizationRequiresAuth { capability } => {
+                Ok(auth_required_outcome(capability))
+            }
             other => Ok(RuntimeCapabilityOutcome::Failed(failure_from(
                 other,
                 capability_id,
@@ -1045,7 +1078,11 @@ fn trust_policy_input_for_local_manifest(
     package: &ExtensionPackage,
 ) -> Result<ironclaw_trust::TrustPolicyInput, TrustEvaluationError> {
     package
-        .trust_policy_input(local_manifest_source(package), None, None)
+        .trust_policy_input(
+            local_manifest_source(package),
+            package.manifest_digest(),
+            None,
+        )
         .map_err(|_| TrustEvaluationError::TrustInput)
 }
 
@@ -1219,6 +1256,15 @@ fn completed_outcome_from(
     }
 }
 
+fn auth_required_outcome(capability_id: CapabilityId) -> RuntimeCapabilityOutcome {
+    RuntimeCapabilityOutcome::AuthRequired(RuntimeAuthGate {
+        gate_id: RuntimeGateId::new(),
+        capability_id,
+        reason: RuntimeBlockedReason::AuthRequired,
+        required_secrets: Vec::new(),
+    })
+}
+
 fn spawned_process_outcome_from(
     result: CapabilitySpawnResult,
     capability_id: CapabilityId,
@@ -1275,6 +1321,7 @@ fn sanitized_failure_message(error: &CapabilityInvocationError) -> Option<String
         | AuthorizationDenied { .. }
         | UnsupportedObligations { .. }
         | ObligationFailed { .. }
+        | AuthorizationRequiresAuth { .. }
         | AuthorizationRequiresApproval { .. }
         | ApprovalRequestMismatch { .. }
         | ApprovalFingerprintMismatch { .. }
@@ -1296,6 +1343,9 @@ fn sanitized_failure_message(error: &CapabilityInvocationError) -> Option<String
 pub(crate) fn failure_kind_from(error: &CapabilityInvocationError) -> RuntimeFailureKind {
     match error {
         CapabilityInvocationError::UnknownCapability { .. } => RuntimeFailureKind::MissingRuntime,
+        CapabilityInvocationError::AuthorizationRequiresAuth { .. } => {
+            RuntimeFailureKind::Authorization
+        }
         CapabilityInvocationError::AuthorizationDenied { .. }
         | CapabilityInvocationError::UnsupportedObligations { .. }
         | CapabilityInvocationError::AuthorizationRequiresApproval { .. }
@@ -1410,9 +1460,11 @@ mod tests {
 
     use super::*;
     use ironclaw_capabilities::CapabilityInvocationError;
+    use ironclaw_extensions::{ExtensionManifest, ManifestSource};
     use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
     use ironclaw_host_api::{
-        CapabilityId, DispatchFailureKind, RuntimeDispatchErrorKind, VirtualPath,
+        CapabilityId, DispatchFailureKind, HostPortCatalog, PackageSource,
+        RuntimeDispatchErrorKind, VirtualPath, sha256_digest_token,
     };
 
     fn cap() -> CapabilityId {
@@ -1421,6 +1473,58 @@ mod tests {
 
     fn dispatch(kind: DispatchFailureKind) -> CapabilityInvocationError {
         CapabilityInvocationError::Dispatch { kind }
+    }
+
+    #[test]
+    fn local_manifest_trust_input_includes_manifest_digest() {
+        const MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "test"
+name = "Test"
+version = "0.1.0"
+description = "test extension"
+trust = "third_party"
+
+[runtime]
+kind = "script"
+runner = "sandboxed_process"
+command = "echo"
+
+[[capabilities]]
+id = "test.cap"
+description = "Test capability"
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/test.input.json"
+output_schema_ref = "schemas/test.output.json"
+"#;
+        let manifest = ExtensionManifest::parse(
+            MANIFEST,
+            ManifestSource::HostBundled,
+            &HostPortCatalog::empty(),
+        )
+        .unwrap();
+        let package = ExtensionPackage::from_manifest_toml(
+            manifest,
+            VirtualPath::new("/system/extensions/test").unwrap(),
+            MANIFEST,
+        )
+        .unwrap();
+
+        let input = trust_policy_input_for_local_manifest(&package).unwrap();
+
+        assert_eq!(
+            input.identity.source,
+            PackageSource::LocalManifest {
+                path: "/system/extensions/test/manifest.toml".to_string()
+            }
+        );
+        let expected_digest = sha256_digest_token(MANIFEST.as_bytes());
+        assert_eq!(
+            input.identity.digest.as_deref(),
+            Some(expected_digest.as_str())
+        );
     }
 
     #[test]
@@ -1561,6 +1665,21 @@ mod tests {
             failure_kind_from(&error),
             RuntimeFailureKind::MissingRuntime
         );
+    }
+
+    #[test]
+    fn host_runtime_spawn_input_for_capability_passthrough_for_non_sandbox() {
+        let input = serde_json::json!({
+            "run": {
+                "command": "",
+            },
+            "other": ["unchanged"],
+        });
+
+        let output = host_runtime_spawn_input_for_capability(&cap(), input.clone())
+            .expect("non-sandbox capability input should pass through");
+
+        assert_eq!(output, input);
     }
 
     #[test]

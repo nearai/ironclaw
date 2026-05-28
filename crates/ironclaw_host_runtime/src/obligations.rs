@@ -1084,7 +1084,7 @@ impl BuiltinObligationHandler {
                 .map_err(|_| secret_obligation_failed())?
                 .is_some();
             if !exists {
-                return Err(secret_obligation_failed());
+                return Err(CapabilityObligationError::AuthRequired);
             }
         }
         Ok(())

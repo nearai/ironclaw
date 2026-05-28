@@ -1,5 +1,6 @@
 use std::{
     io::Write,
+    path::Path,
     process::{Command, Stdio},
 };
 
@@ -7,6 +8,24 @@ const INVALID_PROFILE_MESSAGE: &str = "IRONCLAW_REBORN_PROFILE must be one of";
 
 fn reborn_bin() -> &'static str {
     env!("CARGO_BIN_EXE_ironclaw-reborn")
+}
+
+fn isolated_no_llm_command(workspace: &Path, reborn_home: &Path) -> Command {
+    let mut command = Command::new(reborn_bin());
+    command
+        .current_dir(workspace)
+        .env_clear()
+        .env("HOME", workspace.join("isolated-home"))
+        .env("LLM_USE_CODEX_AUTH", "false")
+        .env("LLM_BACKEND", "")
+        .env("LLM_MODEL", "")
+        .env("OPENAI_MODEL", "")
+        .env("OPENAI_CODEX_MODEL", "")
+        .env("OPENAI_API_KEY", "")
+        .env("ANTHROPIC_API_KEY", "")
+        .env("OLLAMA_BASE_URL", "")
+        .env("IRONCLAW_REBORN_HOME", reborn_home);
+    command
 }
 
 #[test]
@@ -30,6 +49,7 @@ fn help_mentions_reborn_commands() {
     assert!(stdout.contains("completion"), "stdout: {stdout}");
     assert!(stdout.contains("config"), "stdout: {stdout}");
     assert!(stdout.contains("doctor"), "stdout: {stdout}");
+    assert!(stdout.contains("extension"), "stdout: {stdout}");
     assert!(stdout.contains("hooks"), "stdout: {stdout}");
     assert!(stdout.contains("logs"), "stdout: {stdout}");
     assert!(stdout.contains("models"), "stdout: {stdout}");
@@ -172,31 +192,169 @@ fn hooks_list_json_verbose_includes_status_details() {
 }
 
 #[test]
-fn skills_list_reports_unwired_empty_surface_without_reborn_home() {
-    assert_empty_not_wired_surface(
-        &["skills", "list"],
-        "IronClaw Reborn skills",
-        "skills",
-        "configured",
+fn skills_list_reports_reborn_skill_data() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let v1_home = temp.path().join("v1-home");
+    write_reborn_skill(&reborn_home, "catalog-helper", "catalog helper");
+
+    let output = Command::new(reborn_bin())
+        .arg("skills")
+        .arg("list")
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("IRONCLAW_BASE_DIR", &v1_home)
+        .output()
+        .expect("ironclaw-reborn skills list should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("IronClaw Reborn skills"),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("configured:"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("source: reborn-local-dev"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("- code-review (system)"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("- catalog-helper (user)"),
+        "stdout: {stdout}"
+    );
+    assert!(!stdout.contains("not-wired"), "stdout: {stdout}");
+    assert!(!stdout.contains("v1_state"), "stdout: {stdout}");
+    assert!(
+        !reborn_home
+            .join("local-dev/system/skills/code-review/SKILL.md")
+            .exists(),
+        "skills list should report bundled skills without installing them"
+    );
+    assert!(
+        !v1_home.exists(),
+        "skills list must not create or read v1 state"
     );
 }
 
 #[test]
-fn skills_list_verbose_explains_missing_reborn_catalog() {
-    assert_verbose_detail(
-        &["skills", "list", "--verbose"],
-        "Reborn skill catalog is not wired yet",
+fn skills_list_verbose_reports_reborn_skill_details() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    write_verbose_reborn_skill(&reborn_home, "verbose-helper", "verbose helper");
+
+    let output = Command::new(reborn_bin())
+        .arg("skills")
+        .arg("list")
+        .arg("--verbose")
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn skills list --verbose should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("profile: local-dev"), "stdout: {stdout}");
+    assert!(stdout.contains("reborn_home:"), "stdout: {stdout}");
+    assert!(stdout.contains("local_dev_root:"), "stdout: {stdout}");
+    assert!(stdout.contains("owner_id: reborn-cli"), "stdout: {stdout}");
+    assert!(stdout.contains("version: 1.2.3"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("keywords: catalog, helper"),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("tags: local-dev"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("requires_skills: companion-helper"),
+        "stdout: {stdout}"
     );
 }
 
 #[test]
-fn skills_list_json_verbose_includes_status_details() {
-    assert_json_verbose_detail(
-        &["skills", "list", "--json", "--verbose"],
-        "skills",
-        "configured",
-        "Reborn skill catalog is not wired yet",
+fn skills_list_json_reports_reborn_skill_data() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    write_reborn_skill(&reborn_home, "json-helper", "json helper");
+
+    let output = Command::new(reborn_bin())
+        .arg("skills")
+        .arg("list")
+        .arg("--json")
+        .arg("--verbose")
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn skills list --json should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    assert!(
+        json["configured"].as_u64().expect("configured count") > 1,
+        "json: {json}"
+    );
+    assert_eq!(json["source"], "reborn-local-dev");
+    assert_skill_source(&json, "code-review", "system");
+    assert_skill_source(&json, "json-helper", "user");
+    assert_eq!(json["details"]["profile"], "local-dev");
+    assert_eq!(json["details"]["owner_id"], "reborn-cli");
+    assert!(json.get("limit").is_none(), "json: {json}");
+    assert!(json.get("truncated").is_none(), "json: {json}");
+    assert!(json.get("status").is_none(), "json: {json}");
+    assert!(json.get("v1_state").is_none(), "json: {json}");
+}
+
+fn assert_skill_source(json: &serde_json::Value, name: &str, source: &str) {
+    let skills = json["skills"].as_array().expect("skills array");
+    let skill = skills
+        .iter()
+        .find(|skill| skill["name"] == name)
+        .unwrap_or_else(|| panic!("missing skill {name}: {json}"));
+    assert_eq!(skill["source"], source);
+}
+
+#[test]
+fn skills_list_rejects_unsupported_profiles() {
+    for profile in ["production", "migration-dry-run"] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let output = Command::new(reborn_bin())
+            .arg("skills")
+            .arg("list")
+            .env_clear()
+            .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
+            .env("IRONCLAW_REBORN_PROFILE", profile)
+            .output()
+            .expect("ironclaw-reborn skills list should run");
+
+        assert!(
+            !output.status.success(),
+            "skills list should reject profile={profile}"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("ironclaw-reborn skills currently supports profile=local-dev"),
+            "stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains(&format!("profile={profile}")),
+            "stderr: {stderr}"
+        );
+    }
 }
 
 #[test]
@@ -320,6 +478,39 @@ fn assert_empty_not_wired_surface(
     );
     assert_eq!(json["status"], "not-wired");
     assert_eq!(json["v1_state"], "not-used");
+}
+
+fn write_reborn_skill(reborn_home: &std::path::Path, name: &str, description: &str) {
+    let skill_dir = reborn_home.join("local-dev/skills").join(name);
+    std::fs::create_dir_all(&skill_dir).expect("skill dir");
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: {description}\n---\nUse {name}.\n"),
+    )
+    .expect("skill file");
+}
+
+fn write_verbose_reborn_skill(reborn_home: &std::path::Path, name: &str, description: &str) {
+    let skill_dir = reborn_home.join("local-dev/skills").join(name);
+    std::fs::create_dir_all(&skill_dir).expect("skill dir");
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        format!(
+            r#"---
+name: {name}
+version: "1.2.3"
+description: {description}
+activation:
+  keywords: ["catalog", "helper"]
+  tags: ["local-dev"]
+requires:
+  skills: ["companion-helper"]
+---
+Use {name}.
+"#
+        ),
+    )
+    .expect("skill file");
 }
 
 fn assert_verbose_detail(args: &[&str], expected_detail: &str) {
@@ -1532,13 +1723,8 @@ api_key_env = "sk-proj-1234567890abcdef12345678"
 "#;
     std::fs::write(reborn_home.join("config.toml"), bad_config).expect("write bad config");
 
-    let output = Command::new(reborn_bin())
+    let output = isolated_no_llm_command(temp.path(), &reborn_home)
         .args(["run", "-m", "ping"])
-        .env_remove("USERPROFILE")
-        .env_remove("OPENAI_API_KEY")
-        .env_remove("ANTHROPIC_API_KEY")
-        .env_remove("OLLAMA_BASE_URL")
-        .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
         .expect("ironclaw-reborn run should not crash");
     assert!(
@@ -1558,21 +1744,24 @@ api_key_env = "sk-proj-1234567890abcdef12345678"
 fn run_warns_when_falling_back_to_stub_gateway() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace dir");
     std::fs::create_dir_all(&reborn_home).expect("mkdir");
 
-    let output = Command::new(reborn_bin())
+    let output = isolated_no_llm_command(&workspace, &reborn_home)
         .args(["run", "-m", "ping"])
-        .env_remove("USERPROFILE")
-        .env_remove("OPENAI_API_KEY")
-        .env_remove("ANTHROPIC_API_KEY")
-        .env_remove("OLLAMA_BASE_URL")
-        .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
         .expect("ironclaw-reborn run should not crash");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("no LLM selection configured") && stderr.contains("Runs will fail"),
         "stderr should warn about degraded stub-gateway boot; got: {stderr}"
+    );
+    assert!(
+        reborn_home
+            .join("local-dev/system/skills/code-review/SKILL.md")
+            .is_file(),
+        "runtime bootstrap should install bundled Reborn skills"
     );
 }
 
@@ -1845,10 +2034,8 @@ provider_id = " {secret} "
     )
     .expect("write config");
 
-    let output = Command::new(reborn_bin())
+    let output = isolated_no_llm_command(temp.path(), &reborn_home)
         .args(["run", "-m", "ping"])
-        .env_remove("USERPROFILE")
-        .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
         .expect("ironclaw-reborn run should not crash");
     assert!(!output.status.success(), "inline secret must fail");
@@ -1867,6 +2054,8 @@ provider_id = " {secret} "
 fn run_accepts_configured_cli_tenant_and_agent_identity() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace dir");
     std::fs::create_dir_all(&reborn_home).expect("mkdir");
     std::fs::write(
         reborn_home.join("config.toml"),
@@ -1879,10 +2068,8 @@ default_owner = "operator"
     )
     .expect("write config");
 
-    let output = Command::new(reborn_bin())
+    let output = isolated_no_llm_command(&workspace, &reborn_home)
         .args(["run", "-m", "ping"])
-        .env_remove("USERPROFILE")
-        .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
         .expect("ironclaw-reborn run should not crash");
     assert!(

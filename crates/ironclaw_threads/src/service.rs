@@ -3,13 +3,15 @@ use ironclaw_host_api::ThreadId;
 
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
-    AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextMessages, ContextWindow,
-    CreateSummaryArtifactRequest, EnsureThreadRequest, LatestThreadMessageRequest,
-    ListThreadsForScopeRequest, ListThreadsForScopeResponse, LoadContextMessagesRequest,
-    LoadContextWindowRequest, MessageContent, RedactMessageRequest,
-    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord, SummaryArtifact,
-    ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
-    UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
+    AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
+    AppendToolResultReferenceRequest, ContextMessages, ContextWindow, CreateSummaryArtifactRequest,
+    EnsureThreadRequest, LatestThreadMessageRequest, ListThreadsForScopeRequest,
+    ListThreadsForScopeResponse, LoadContextMessagesRequest, LoadContextWindowRequest,
+    MessageContent, RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
+    SessionThreadRecord, SummaryArtifact, ThreadGoal, ThreadHistory, ThreadHistoryRequest,
+    ThreadMessageId, ThreadMessageRange, ThreadMessageRangeRequest, ThreadMessageRecord,
+    ThreadScope, UpdateAssistantDraftRequest, UpdateThreadGoalRequest,
+    UpdateToolResultReferenceRequest,
 };
 
 /// Canonical Reborn session thread and transcript boundary.
@@ -56,6 +58,11 @@ pub trait SessionThreadService: Send + Sync {
         request: AppendToolResultReferenceRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError>;
 
+    async fn append_capability_display_preview(
+        &self,
+        request: AppendCapabilityDisplayPreviewRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError>;
+
     async fn update_tool_result_reference(
         &self,
         request: UpdateToolResultReferenceRequest,
@@ -93,6 +100,29 @@ pub trait SessionThreadService: Send + Sync {
         &self,
         request: ThreadHistoryRequest,
     ) -> Result<ThreadHistory, SessionThreadError>;
+
+    async fn list_thread_messages_range(
+        &self,
+        request: ThreadMessageRangeRequest,
+    ) -> Result<ThreadMessageRange, SessionThreadError> {
+        let history = self
+            .list_thread_history(ThreadHistoryRequest {
+                scope: request.scope,
+                thread_id: request.thread_id,
+            })
+            .await?;
+        Ok(ThreadMessageRange {
+            thread: history.thread,
+            messages: history
+                .messages
+                .into_iter()
+                .filter(|message| {
+                    message.sequence > request.after_sequence
+                        && message.sequence <= request.through_sequence
+                })
+                .collect(),
+        })
+    }
 
     async fn latest_thread_message(
         &self,
@@ -143,6 +173,41 @@ pub trait SessionThreadService: Send + Sync {
         &self,
         request: CreateSummaryArtifactRequest,
     ) -> Result<SummaryArtifact, SessionThreadError>;
+
+    /// Returns `true` when `resolve_scope` is a backend-supported operation.
+    ///
+    /// Callers use this to decide whether they should probe the backend for
+    /// the thread's scope or fall back to the already trusted expected scope.
+    /// Backends that cannot resolve scope directly should leave the default
+    /// `false` in place.
+    fn supports_resolve_scope(&self) -> bool {
+        false
+    }
+
+    async fn resolve_scope(&self, _thread_id: ThreadId) -> Result<ThreadScope, SessionThreadError> {
+        Err(SessionThreadError::Backend(
+            "resolve_scope is not implemented by this SessionThreadService backend".to_string(),
+        ))
+    }
+
+    async fn update_thread_goal(
+        &self,
+        _request: UpdateThreadGoalRequest,
+    ) -> Result<ThreadGoal, SessionThreadError> {
+        Err(SessionThreadError::Backend(
+            "update_thread_goal is not implemented by this SessionThreadService backend"
+                .to_string(),
+        ))
+    }
+
+    async fn read_thread_by_id(
+        &self,
+        _thread_id: ThreadId,
+    ) -> Result<SessionThreadRecord, SessionThreadError> {
+        Err(SessionThreadError::Backend(
+            "read_thread_by_id is not implemented by this SessionThreadService backend".to_string(),
+        ))
+    }
 
     /// List threads scoped to the supplied `ThreadScope`. The default
     /// impl fails closed (`SessionThreadError::Backend`) so backends
