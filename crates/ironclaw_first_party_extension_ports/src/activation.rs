@@ -344,19 +344,19 @@ where
                     },
                 );
         }
-        if !plan.selection.activations.is_empty() || !plan.selection.feedback.is_empty() {
-            if let Some(observer) = self
-                .activation_observer
-                .lock()
-                .map_err(|_| SkillActivationSelectionError::Internal)?
-                .clone()
-            {
-                observer.observe_skill_activation(SkillActivationObservedEvent {
-                    run_context: run_context.clone(),
-                    activations: plan.selection.activations.clone(),
-                    feedback: plan.selection.feedback.clone(),
-                });
-            }
+        let has_activation_event =
+            !plan.selection.activations.is_empty() || !plan.selection.feedback.is_empty();
+        let activation_observer = self
+            .activation_observer
+            .lock()
+            .map_err(|_| SkillActivationSelectionError::Internal)?
+            .clone();
+        if let (true, Some(observer)) = (has_activation_event, activation_observer) {
+            observer.observe_skill_activation(SkillActivationObservedEvent {
+                run_context: run_context.clone(),
+                activations: plan.selection.activations.clone(),
+                feedback: plan.selection.feedback.clone(),
+            });
         }
         if plan.selection.activations.is_empty() {
             return Ok(Vec::new());

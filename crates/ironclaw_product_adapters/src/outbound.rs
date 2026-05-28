@@ -17,9 +17,12 @@ const PROJECTION_THREAD_ID_MAX_BYTES: usize = 512;
 const PROJECTION_ITEM_ID_MAX_BYTES: usize = 512;
 const PROJECTION_TEXT_MAX_BYTES: usize = 128 * 1024;
 const PROJECTION_WORK_SUMMARY_MAX_BYTES: usize = 1024;
-const PROJECTION_SKILL_NAME_MAX_BYTES: usize = 128;
-const PROJECTION_SKILL_FEEDBACK_MAX_BYTES: usize = 1024;
-const PROJECTION_SKILL_ACTIVATION_MAX_ITEMS: usize = 16;
+/// Maximum byte length for a projected skill activation name.
+pub const PROJECTION_SKILL_NAME_MAX_BYTES: usize = 128;
+/// Maximum byte length for a projected skill activation feedback note.
+pub const PROJECTION_SKILL_FEEDBACK_MAX_BYTES: usize = 1024;
+/// Maximum number of skill activation names or feedback notes per projection item.
+pub const PROJECTION_SKILL_ACTIVATION_MAX_ITEMS: usize = 16;
 const CAPABILITY_ACTIVITY_ERROR_KIND_MAX_BYTES: usize = 64;
 const CAPABILITY_ACTIVITY_ERROR_KIND_SEGMENT_MAX_BYTES: usize = 24;
 const CAPABILITY_ACTIVITY_UNCLASSIFIED_ERROR_KIND: &str = "Unclassified";

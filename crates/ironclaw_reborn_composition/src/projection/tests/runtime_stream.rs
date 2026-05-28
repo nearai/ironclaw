@@ -2,7 +2,10 @@ use super::*;
 use ironclaw_first_party_extension_ports::{
     SkillActivationMode, SkillActivationObservedEvent, SkillActivationRequest,
 };
-use ironclaw_product_adapters::ProductWorkSummaryPhase;
+use ironclaw_product_adapters::{
+    PROJECTION_SKILL_ACTIVATION_MAX_ITEMS, PROJECTION_SKILL_FEEDBACK_MAX_BYTES,
+    PROJECTION_SKILL_NAME_MAX_BYTES, ProductWorkSummaryPhase,
+};
 use ironclaw_turns::{
     TurnId,
     run_profile::{
@@ -523,6 +526,91 @@ async fn webui_event_stream_drains_skill_activation_projection_from_observer() {
                     ))
         )
     }));
+}
+
+#[tokio::test]
+async fn webui_event_stream_bounds_skill_activation_projection_from_observer() {
+    let tenant_id = TenantId::new("webui-skill-bounds-tenant").unwrap();
+    let user_id = UserId::new("webui-skill-bounds-user").unwrap();
+    let agent_id = AgentId::new("webui-skill-bounds-agent").unwrap();
+    let thread_id = ThreadId::new("webui-skill-bounds-thread").unwrap();
+    let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let services = build_reborn_projection_services(
+        event_log,
+        ReplyTargetBindingRef::new("webui-skill-bounds-reply").unwrap(),
+    );
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+    let run_id = TurnRunId::new();
+    let observer =
+        services.skill_activation_observer(services.live_projection_publisher(user_id.clone()));
+    let mut activations = (0..=PROJECTION_SKILL_ACTIVATION_MAX_ITEMS)
+        .map(|index| SkillActivationRequest {
+            name: format!("skill-{index}"),
+            source: None,
+            bundle_id: None,
+            mode: SkillActivationMode::ExplicitMention,
+        })
+        .collect::<Vec<_>>();
+    activations[0].name = format!("skill-{}", "🚀".repeat(80));
+    let mut feedback = (0..=PROJECTION_SKILL_ACTIVATION_MAX_ITEMS)
+        .map(|index| format!("feedback-{index}"))
+        .collect::<Vec<_>>();
+    feedback[0] = format!("feedback-{}", "🚀".repeat(300));
+
+    observer.observe_skill_activation(SkillActivationObservedEvent {
+        run_context: LoopRunContext::new(
+            scope.clone(),
+            TurnId::new(),
+            run_id,
+            InMemoryRunProfileResolver::default()
+                .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+                .await
+                .unwrap(),
+        ),
+        activations,
+        feedback,
+    });
+
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id),
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    let item = events
+        .iter()
+        .find_map(|event| match event.payload() {
+            ProductOutboundPayload::ProjectionUpdate { state } => {
+                state.items.iter().find_map(|item| match item {
+                    ProductProjectionItem::SkillActivation {
+                        skill_names,
+                        feedback,
+                        ..
+                    } => Some((skill_names, feedback)),
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .expect("skill activation projection update");
+
+    assert_eq!(item.0.len(), PROJECTION_SKILL_ACTIVATION_MAX_ITEMS);
+    assert_eq!(item.1.len(), PROJECTION_SKILL_ACTIVATION_MAX_ITEMS);
+    assert!(item.0[0].len() <= PROJECTION_SKILL_NAME_MAX_BYTES);
+    assert!(item.1[0].len() <= PROJECTION_SKILL_FEEDBACK_MAX_BYTES);
+    assert!(item.0[0].is_char_boundary(item.0[0].len()));
+    assert!(item.1[0].is_char_boundary(item.1[0].len()));
+    assert!(!item.0.iter().any(|name| name == "skill-16"));
+    assert!(!item.1.iter().any(|note| note == "feedback-16"));
 }
 
 #[tokio::test]

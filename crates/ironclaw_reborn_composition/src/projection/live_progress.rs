@@ -14,7 +14,10 @@ use ironclaw_event_streams::{
 use ironclaw_events::{EventCursor, EventStreamKey, ReadScope};
 use ironclaw_first_party_extension_ports::{SkillActivationObservedEvent, SkillActivationObserver};
 use ironclaw_host_api::UserId;
-use ironclaw_product_adapters::{ProductProjectionItem, ProductWorkSummaryPhase};
+use ironclaw_product_adapters::{
+    PROJECTION_SKILL_ACTIVATION_MAX_ITEMS, PROJECTION_SKILL_FEEDBACK_MAX_BYTES,
+    PROJECTION_SKILL_NAME_MAX_BYTES, ProductProjectionItem, ProductWorkSummaryPhase,
+};
 use ironclaw_turns::{
     TurnRunId, TurnScope,
     run_profile::{
@@ -233,17 +236,22 @@ impl SkillActivationObserver for LiveSkillActivationObserver {
             .activations
             .iter()
             .map(|activation| {
-                sanitize_model_visible_text(&activation.name)
-                    .trim()
-                    .to_string()
+                sanitize_bounded_model_visible_text(
+                    &activation.name,
+                    PROJECTION_SKILL_NAME_MAX_BYTES,
+                )
             })
             .filter(|name| !name.is_empty())
+            .take(PROJECTION_SKILL_ACTIVATION_MAX_ITEMS)
             .collect::<Vec<_>>();
         let feedback = event
             .feedback
             .iter()
-            .map(|note| sanitize_model_visible_text(note).trim().to_string())
+            .map(|note| {
+                sanitize_bounded_model_visible_text(note, PROJECTION_SKILL_FEEDBACK_MAX_BYTES)
+            })
             .filter(|note| !note.is_empty())
+            .take(PROJECTION_SKILL_ACTIVATION_MAX_ITEMS)
             .collect::<Vec<_>>();
         if skill_names.is_empty() && feedback.is_empty() {
             return;
@@ -292,6 +300,19 @@ fn work_summary_id(run_id: TurnRunId, sequence: u64) -> String {
 
 fn skill_activation_id(run_id: TurnRunId, sequence: u64) -> String {
     format!("skill-activation:{run_id}:{sequence}")
+}
+
+fn sanitize_bounded_model_visible_text(value: &str, max_bytes: usize) -> String {
+    let sanitized = sanitize_model_visible_text(value);
+    let trimmed = sanitized.trim();
+    if trimmed.len() <= max_bytes {
+        return trimmed.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !trimmed.is_char_boundary(end) {
+        end -= 1;
+    }
+    trimmed[..end].trim_end().to_string()
 }
 
 fn driver_note_kind_to_live_work_summary_phase(
