@@ -142,6 +142,13 @@ pub struct RebornRuntimeInput {
     /// a resolved value to avoid the runtime reading process env
     /// (review feedback Thermo-Nuclear #1).
     pub budget_defaults: Option<BudgetDefaults>,
+    /// Observer that receives every `BudgetEvent` emitted by the model
+    /// budget accountant / resource governor. When unset, the runtime
+    /// installs [`TracingBudgetEventObserver`](crate::TracingBudgetEventObserver)
+    /// so events still reach the tracing pipeline; production owners
+    /// supply their own observer (SSE projection, WS fan-out,
+    /// telemetry export) here.
+    pub budget_event_observer: Option<Arc<dyn crate::BudgetEventObserver>>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) model_gateway_override: Option<Arc<dyn HostManagedModelGateway>>,
     /// Cost table to pair with the model-gateway override. Without this,
@@ -168,6 +175,7 @@ impl RebornRuntimeInput {
             identity: RebornRuntimeIdentity::default(),
             skill_context_source: None,
             budget_defaults: None,
+            budget_event_observer: None,
             #[cfg(any(test, feature = "test-support"))]
             model_gateway_override: None,
             #[cfg(any(test, feature = "test-support"))]
@@ -184,6 +192,18 @@ impl RebornRuntimeInput {
     /// root, not a wiring helper).
     pub fn with_budget_defaults(mut self, defaults: BudgetDefaults) -> Self {
         self.budget_defaults = Some(defaults);
+        self
+    }
+
+    /// Install a custom observer for the model budget event stream.
+    /// Production callers wire this to project events onto SSE / WS /
+    /// telemetry; without it, the runtime installs the tracing-only
+    /// observer so events still surface in structured logs.
+    pub fn with_budget_event_observer(
+        mut self,
+        observer: Arc<dyn crate::BudgetEventObserver>,
+    ) -> Self {
+        self.budget_event_observer = Some(observer);
         self
     }
 

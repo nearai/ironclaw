@@ -933,16 +933,14 @@ async fn tool_response_to_host(
                 content_bytes = content.len(),
                 "reborn model gateway classified tool-capable provider response as assistant reply"
             );
-            Ok(
-                HostManagedModelResponse::assistant_reply_with_reasoning(
-                    content,
-                    response.reasoning,
-                )
-                .with_usage(LoopModelUsage {
-                    input_tokens: response.input_tokens,
-                    output_tokens: response.output_tokens,
-                }),
+            Ok(HostManagedModelResponse::assistant_reply_with_reasoning(
+                content,
+                response.reasoning,
             )
+            .with_usage(LoopModelUsage {
+                input_tokens: response.input_tokens,
+                output_tokens: response.output_tokens,
+            }))
         }
         FinishReason::Length => Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::BudgetExceeded,

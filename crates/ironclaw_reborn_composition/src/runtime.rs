@@ -188,6 +188,7 @@ pub struct RebornRuntime {
     thread_scope: ThreadScope,
     worker_handle: JoinHandle<()>,
     worker_cancel: CancellationToken,
+    budget_event_projection: Option<crate::budget_events::BudgetEventProjection>,
     poll_settings: PollSettings,
     actor_user_id: UserId,
     source_binding_ref: SourceBindingRef,
@@ -411,14 +412,18 @@ impl RebornRuntime {
             .map(|rt| Arc::clone(&rt.in_memory_budget_event_sink))
     }
 
-    /// Broadcast sink the binary will subscribe against once a real
-    /// projection caller lands. Production composition will call
-    /// `subscribe()` on this and spawn a projection task with shutdown
-    /// cancellation in the startup owner. The previous half-wired
-    /// `spawn_budget_event_projection` helper plus `AppEvent::Budget`
-    /// variant were removed (review feedback Thermo-Nuclear #3).
-    /// Exposed unconditionally so future production composition can
-    /// still wire the projection without rebuilding the runtime.
+    /// Broadcast sink that fans every emitted `BudgetEvent` to any
+    /// subscriber. The runtime always spawns its own subscriber — the
+    /// [`crate::budget_events::BudgetEventProjection`] task wired by
+    /// `build_reborn_runtime` and shut down via [`Self::shutdown`] —
+    /// so this sink is never a no-op even when the caller does not
+    /// install a custom observer (review feedback Thermo-Nuclear #3
+    /// / follow-up A2). Callers that need a richer projection
+    /// (multi-channel fan-out, telemetry exporters) should pass an
+    /// observer through
+    /// [`crate::RebornRuntimeInput::with_budget_event_observer`]
+    /// rather than re-subscribing here; spawning a second long-lived
+    /// receiver risks one of them lagging while the other drains.
     pub fn broadcast_budget_event_sink(
         &self,
     ) -> Option<Arc<ironclaw_resources::BroadcastBudgetEventSink>> {
@@ -722,10 +727,14 @@ impl RebornRuntime {
             .map_err(skill_asset_error)
     }
 
-    /// Stop the turn-runner worker. Awaits the worker task to finish before
-    /// returning.
+    /// Stop the turn-runner worker and the budget-event projection.
+    /// Awaits both tasks before returning so background state is fully
+    /// drained when the runtime drops.
     pub async fn shutdown(self) -> Result<(), RebornRuntimeError> {
         self.worker_cancel.cancel();
+        if let Some(projection) = self.budget_event_projection {
+            projection.shutdown().await;
+        }
         if let Err(error) = self.worker_handle.await {
             if error.is_panic() {
                 tracing::error!(%error, "reborn worker task panicked during shutdown");
@@ -945,6 +954,7 @@ pub async fn build_reborn_runtime(
         identity,
         skill_context_source: configured_skill_context_source,
         budget_defaults,
+        budget_event_observer,
         #[cfg(any(test, feature = "test-support"))]
         model_gateway_override,
         #[cfg(any(test, feature = "test-support"))]
@@ -1288,6 +1298,24 @@ pub async fn build_reborn_runtime(
     let turn_coordinator = planned_turn_coordinator;
     let wake_sender = composition.wake_sender;
 
+    // Spawn the budget-event projection task as the production owner
+    // of the broadcast sink — review feedback Thermo-Nuclear #3
+    // (#3841 follow-up A2). The runtime's `broadcast_budget_event_sink`
+    // accessor used to expose a sink that no one subscribed to; with
+    // this projection the runtime always has at least the tracing
+    // observer attached, and callers can install a richer observer
+    // (SSE projection, telemetry export) through
+    // `RebornRuntimeInput::with_budget_event_observer`.
+    let budget_event_projection = services.local_runtime.as_ref().map(|local_runtime| {
+        let observer = budget_event_observer.unwrap_or_else(|| {
+            Arc::new(crate::TracingBudgetEventObserver) as Arc<dyn crate::BudgetEventObserver>
+        });
+        crate::budget_events::BudgetEventProjection::spawn(
+            local_runtime.broadcast_budget_event_sink.as_ref(),
+            observer,
+        )
+    });
+
     Ok(RebornRuntime {
         services,
         turn_coordinator,
@@ -1295,6 +1323,7 @@ pub async fn build_reborn_runtime(
         thread_scope,
         worker_handle,
         worker_cancel,
+        budget_event_projection,
         poll_settings: poll,
         actor_user_id,
         source_binding_ref: validated_identity.source_binding_ref,

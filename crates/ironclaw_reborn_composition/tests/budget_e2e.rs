@@ -42,7 +42,8 @@ use ironclaw_host_api::runtime_policy::{
 use ironclaw_loop_support::{ModelCost, ModelCostTable, StaticModelCostTable};
 use ironclaw_reborn_composition::test_support::{BudgetTestGateway, ScriptedReply};
 use ironclaw_reborn_composition::{
-    PollSettings, RebornBuildInput, RebornRuntimeIdentity, RebornRuntimeInput, build_reborn_runtime,
+    BudgetEventObserver, PollSettings, RebornBuildInput, RebornRuntimeIdentity, RebornRuntimeInput,
+    build_reborn_runtime,
 };
 use ironclaw_resources::{
     BudgetEvent, BudgetPeriod, BudgetThresholds, ResourceAccount, ResourceLimits,
@@ -624,10 +625,9 @@ async fn d1_agent_deny_preserves_user_warn_event() {
 }
 
 /// A2 projection: the broadcast sink emits every BudgetEvent published
-/// by the governor. Subscribers (a future production projection task in
-/// the startup owner — the previous `src/bridge/budget_events.rs`
-/// helper was removed pending a real caller, review feedback
-/// Thermo-Nuclear #3) receive Warned / Reserved / Reconciled events
+/// by the governor. Subscribers (the production projection task wired
+/// by `build_reborn_runtime`, plus any additional consumer that
+/// subscribes directly) receive Warned / Reserved / Reconciled events
 /// without polling.
 #[tokio::test]
 async fn broadcast_sink_publishes_events_to_subscribers() {
@@ -643,15 +643,24 @@ async fn broadcast_sink_publishes_events_to_subscribers() {
     .await
     .expect("runtime builds");
 
-    // Subscribe BEFORE the model call so we don't miss the events.
+    // The runtime always spawns its own projection task, which holds
+    // one receiver. Subscribe BEFORE the model call so we don't miss
+    // the events and confirm the test subscriber is additive to the
+    // production projection (count goes 1 -> 2).
     let broadcast = runtime
         .broadcast_budget_event_sink()
         .expect("broadcast sink");
+    let baseline_subscribers = broadcast.subscriber_count();
     let mut subscriber = broadcast.subscribe();
     assert_eq!(
         broadcast.subscriber_count(),
-        1,
+        baseline_subscribers + 1,
         "subscribe must register exactly one receiver"
+    );
+    assert!(
+        baseline_subscribers >= 1,
+        "the runtime's own projection task must already be subscribed before the test \
+         subscriber attaches — got baseline={baseline_subscribers}"
     );
 
     let conversation = runtime.new_conversation().await.expect("conversation");
@@ -752,4 +761,97 @@ async fn budget_test_gateway_scripted_replies_drive_per_turn_costs() {
     assert_eq!(usage.output_tokens, 14);
 
     runtime.shutdown().await.expect("shutdown");
+}
+
+/// Regression for #3841 A2 / Thermo-Nuclear #3 (now wired): the
+/// runtime's budget-event broadcast sink must actually deliver events
+/// to a [`BudgetEventObserver`] installed through
+/// [`RebornRuntimeInput::with_budget_event_observer`]. The earlier fix
+/// removed the half-wired bridge; this test goes through the full
+/// runtime caller (build → send → shutdown) and asserts the observer
+/// sees the same `Reserved` / `Reconciled` shape the in-memory sink
+/// already records. Tests the call site rather than the
+/// `BudgetEventProjection` helper alone (per the testing rule).
+#[tokio::test]
+async fn projection_delivers_budget_events_to_installed_observer() {
+    use std::sync::Mutex;
+
+    #[derive(Debug, Default)]
+    struct CapturingObserver {
+        events: Mutex<Vec<BudgetEvent>>,
+    }
+
+    impl BudgetEventObserver for CapturingObserver {
+        fn observe(&self, event: BudgetEvent) {
+            self.events.lock().unwrap().push(event);
+        }
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let gateway = Arc::new(BudgetTestGateway::with_constant("ok", 3, 7));
+    let cost_table = interactive_cost_table(dec!(0.001), dec!(0.001));
+    let observer = Arc::new(CapturingObserver::default());
+
+    let input = build_input(
+        "proj",
+        root.path().to_path_buf(),
+        gateway.clone(),
+        cost_table,
+    )
+    .with_budget_event_observer(Arc::clone(&observer) as Arc<dyn BudgetEventObserver>);
+
+    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+    let conversation = runtime.new_conversation().await.expect("conversation");
+    let _ = tokio::time::timeout(
+        Duration::from_secs(3),
+        runtime.send_user_message(&conversation, "ping"),
+    )
+    .await
+    .expect("send finishes")
+    .expect("send succeeds");
+
+    // Give the projection task a small window to drain. The broadcast
+    // is non-blocking on emit; the projection task observes on its own
+    // tokio task and may not have run yet when send_user_message
+    // returns.
+    let saw_reconciled = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let reconciled = {
+                let events = observer.events.lock().unwrap();
+                events
+                    .iter()
+                    .any(|event| matches!(event, BudgetEvent::Reconciled { .. }))
+            };
+            if reconciled {
+                return true;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or(false);
+    assert!(
+        saw_reconciled,
+        "observer must receive Reconciled after a successful turn"
+    );
+
+    runtime.shutdown().await.expect("shutdown");
+
+    // After shutdown the observer must have seen at minimum the
+    // turn's Reserved + Reconciled pair from the model call. Any
+    // additional events (Warned at low-default threshold, etc.) are
+    // tolerated — the contract is "no events get silently dropped".
+    let events = observer.events.lock().unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, BudgetEvent::Reserved { .. })),
+        "observer must receive Reserved — got {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, BudgetEvent::Reconciled { .. })),
+        "observer must receive Reconciled — got {events:?}"
+    );
 }
