@@ -41,6 +41,7 @@ pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
             vec![
                 EffectKind::ReadFilesystem,
                 EffectKind::WriteFilesystem,
+                EffectKind::DeleteFilesystem,
                 EffectKind::Network,
             ],
             PermissionMode::Ask,
@@ -49,7 +50,11 @@ pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
         first_party_capability_manifest(
             SKILL_REMOVE_CAPABILITY_ID,
             "Remove a user-installed Reborn filesystem skill",
-            vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
+            vec![
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+                EffectKind::DeleteFilesystem,
+            ],
             PermissionMode::Ask,
             resource_profile(),
         )?,

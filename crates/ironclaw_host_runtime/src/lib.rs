@@ -55,6 +55,7 @@ mod invocation_services;
 pub mod memory_context;
 mod obligations;
 mod planner;
+mod process_aliases;
 mod process_port;
 mod production;
 mod sandbox_process;
@@ -726,14 +727,21 @@ fn bounded_runtime_failure_summary(summary: &str) -> String {
 
 /// Central disposition policy for runtime capability failures.
 ///
-/// Same-loop continuation is reserved for failures the runtime can summarize
-/// safely. Protocol, cancellation, and unknown failures end the current run
-/// even if they have a displayable message, so the next turn can receive
-/// recovery context without corrupting the assistant/tool-result transcript.
+/// Same-loop continuation is reserved for model-correctable failures. Most of
+/// those require a safe runtime summary; malformed caller input remains
+/// model-visible even when only the failure kind is available, so the loop can
+/// return a normal tool error and let the model repair the arguments. Protocol,
+/// cancellation, and unknown failures end the current run even if they have a
+/// displayable message, so the next turn can receive recovery context without
+/// corrupting the assistant/tool-result transcript.
 pub const fn capability_failure_disposition(
     kind: RuntimeFailureKind,
     has_safe_summary: bool,
 ) -> CapabilityFailureDisposition {
+    if matches!(kind, RuntimeFailureKind::InvalidInput) {
+        return CapabilityFailureDisposition::ModelVisibleToolError;
+    }
+
     if runtime_failure_requires_run_recovery(kind) {
         return CapabilityFailureDisposition::RecoverableRunFailure;
     }

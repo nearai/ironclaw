@@ -377,8 +377,219 @@ fn logs_json_verbose_includes_status_details() {
     );
 }
 
+#[cfg(feature = "root-llm-provider")]
 #[test]
-fn models_list_reports_reborn_slots_without_reborn_home() {
+fn models_list_reports_reborn_provider_catalog_without_v1_state() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let output = Command::new(reborn_bin())
+        .arg("models")
+        .arg("list")
+        .env_clear()
+        .env("HOME", temp.path())
+        .output()
+        .expect("ironclaw-reborn models list should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("IronClaw Reborn LLM providers"),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("providers_file:"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("active: not-configured"),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("openai"), "stdout: {stdout}");
+    assert!(stdout.contains("v1_state: not-used"), "stdout: {stdout}");
+}
+
+#[cfg(feature = "root-llm-provider")]
+#[test]
+fn models_status_json_reports_routes_not_configured_without_v1_state() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let output = Command::new(reborn_bin())
+        .arg("models")
+        .arg("status")
+        .arg("--json")
+        .env_clear()
+        .env("HOME", temp.path())
+        .output()
+        .expect("ironclaw-reborn models status --json should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    assert_eq!(json["routes"], "not-configured");
+    assert_eq!(json["default"], serde_json::Value::Null);
+    assert_eq!(json["v1_state"], "not-used");
+}
+
+#[cfg(feature = "root-llm-provider")]
+#[test]
+fn models_status_reads_reborn_default_llm_slot() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    std::fs::create_dir_all(&reborn_home).expect("mkdir");
+    std::fs::write(
+        reborn_home.join("config.toml"),
+        r#"
+[llm.default]
+provider_id = "openai"
+model = "gpt-5-mini"
+api_key_env = "OPENAI_API_KEY"
+"#,
+    )
+    .expect("write config");
+
+    let output = Command::new(reborn_bin())
+        .arg("models")
+        .arg("status")
+        .arg("--json")
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn models status --json should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    assert_eq!(json["routes"], "configured");
+    assert_eq!(json["default"]["provider_id"], "openai");
+    assert_eq!(json["default"]["provider_known"], true);
+    assert_eq!(json["default"]["model"], "gpt-5-mini");
+    assert_eq!(json["default"]["api_key_env"], "OPENAI_API_KEY");
+    assert_eq!(json["v1_state"], "not-used");
+}
+
+#[cfg(feature = "root-llm-provider")]
+#[test]
+fn models_set_provider_writes_reborn_config_without_v1_state() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let output = Command::new(reborn_bin())
+        .arg("models")
+        .arg("set-provider")
+        .arg("openai")
+        .arg("--model")
+        .arg("gpt-5-mini")
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn models set-provider should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Provider set to `openai`"),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("v1_state: not-used"), "stdout: {stdout}");
+
+    let config = std::fs::read_to_string(reborn_home.join("config.toml")).expect("read config");
+    assert!(config.contains("[llm.default]"), "config: {config}");
+    assert!(
+        config.contains("provider_id = \"openai\""),
+        "config: {config}"
+    );
+    assert!(
+        config.contains("model = \"gpt-5-mini\""),
+        "config: {config}"
+    );
+    assert!(
+        config.contains("api_key_env = \"OPENAI_API_KEY\""),
+        "config: {config}"
+    );
+    assert!(
+        !temp.path().join(".ironclaw").join(".env").exists(),
+        "Reborn models set-provider must not write v1 bootstrap .env"
+    );
+}
+
+#[cfg(feature = "root-llm-provider")]
+#[test]
+fn models_set_updates_reborn_default_model() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    std::fs::create_dir_all(&reborn_home).expect("mkdir");
+    std::fs::write(
+        reborn_home.join("config.toml"),
+        r#"
+[llm.default]
+provider_id = "openai"
+model = "gpt-5-mini"
+api_key_env = "OPENAI_API_KEY"
+"#,
+    )
+    .expect("write config");
+
+    let output = Command::new(reborn_bin())
+        .arg("models")
+        .arg("set")
+        .arg("gpt-5.3-codex")
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn models set should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let config = std::fs::read_to_string(reborn_home.join("config.toml")).expect("read config");
+    assert!(
+        config.contains("provider_id = \"openai\""),
+        "config: {config}"
+    );
+    assert!(
+        config.contains("model = \"gpt-5.3-codex\""),
+        "config: {config}"
+    );
+}
+
+#[cfg(feature = "root-llm-provider")]
+#[test]
+fn models_set_without_provider_fails_without_panicking() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let output = Command::new(reborn_bin())
+        .arg("models")
+        .arg("set")
+        .arg("gpt-5.3-codex")
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn models set should run");
+
+    assert!(!output.status.success(), "models set should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no default Reborn provider is configured"),
+        "stderr: {stderr}"
+    );
+    assert!(!stderr.contains("panicked"), "stderr: {stderr}");
+}
+
+#[cfg(not(feature = "root-llm-provider"))]
+#[test]
+fn models_list_no_default_features_does_not_resolve_reborn_home() {
     let output = Command::new(reborn_bin())
         .arg("models")
         .arg("list")
@@ -396,24 +607,19 @@ fn models_list_reports_reborn_slots_without_reborn_home() {
         stdout.contains("IronClaw Reborn model slots"),
         "stdout: {stdout}"
     );
-    assert!(stdout.contains("- default"), "stdout: {stdout}");
-    assert!(stdout.contains("- mission"), "stdout: {stdout}");
-    assert!(
-        stdout.contains("routes: not-configured"),
-        "stdout: {stdout}"
-    );
     assert!(stdout.contains("v1_state: not-used"), "stdout: {stdout}");
 }
 
+#[cfg(not(feature = "root-llm-provider"))]
 #[test]
-fn models_status_json_reports_routes_not_configured() {
+fn models_status_no_default_features_does_not_resolve_reborn_home() {
     let output = Command::new(reborn_bin())
         .arg("models")
         .arg("status")
         .arg("--json")
         .env_clear()
         .output()
-        .expect("ironclaw-reborn models status --json should run");
+        .expect("ironclaw-reborn models status should run");
 
     assert!(
         output.status.success(),
@@ -423,9 +629,34 @@ fn models_status_json_reports_routes_not_configured() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
     assert_eq!(json["routes"], "not-configured");
-    assert_eq!(json["slots"]["default"], "not-configured");
-    assert_eq!(json["slots"]["mission"], "not-configured");
     assert_eq!(json["v1_state"], "not-used");
+}
+
+#[cfg(not(feature = "root-llm-provider"))]
+#[test]
+fn models_write_commands_report_root_llm_provider_required_without_default_features() {
+    for args in [
+        &["models", "set", "gpt-5.3-codex"][..],
+        &["models", "set-provider", "openai"][..],
+    ] {
+        let output = Command::new(reborn_bin())
+            .args(args)
+            .env_clear()
+            .output()
+            .expect("ironclaw-reborn models write command should run");
+
+        assert!(!output.status.success(), "command should fail: {args:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("requires the root-llm-provider feature"),
+            "stderr: {stderr}"
+        );
+        assert!(stderr.contains("v1_state: not-used"), "stderr: {stderr}");
+        assert!(
+            !stderr.contains("HOME or USERPROFILE"),
+            "must not resolve Reborn home before feature error: {stderr}"
+        );
+    }
 }
 
 fn assert_empty_not_wired_surface(

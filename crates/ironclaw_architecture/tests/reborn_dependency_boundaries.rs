@@ -165,7 +165,7 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
             "ironclaw_reborn_traces",
             "ironclaw_reborn_webui_ingress",
         ],
-        "ironclaw_reborn_cli should enter Reborn through ironclaw_reborn_composition (assembled-runtime facade), ironclaw_reborn_config (boot-config contract), ironclaw_reborn_traces (contributor-side TraceCommons client extracted from the legacy monolith), and ironclaw_reborn_webui_ingress (host-owned WebUI serve lifecycle) only. Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
+        "ironclaw_reborn_cli should enter Reborn through ironclaw_reborn_composition (assembled-runtime and provider-admin facade), ironclaw_reborn_config (boot-config contract), ironclaw_reborn_traces (contributor-side TraceCommons client extracted from the legacy monolith), and ironclaw_reborn_webui_ingress (host-owned WebUI serve lifecycle) only. Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
     );
     assert_workspace_deps_exactly(
         &dependencies_all_kinds,
@@ -1530,12 +1530,13 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             ],
         },
         BoundaryRule {
-            // The standalone CLI must reach the assembled runtime only
-            // through `ironclaw_reborn_composition`. Adding any of the
-            // forbidden deps here re-opens "speculative public API" access
-            // to internal Reborn types (turn coordinator, session thread
-            // service, loop drivers, LLM provider, etc.) and re-introduces
-            // the narrow-surface regression this rule exists to prevent.
+            // The standalone CLI reaches runtime and provider/admin UX through
+            // `ironclaw_reborn_composition` facades. Adding any of the
+            // forbidden deps here re-opens "speculative public API" access to
+            // internal Reborn types (turn coordinator, session thread service,
+            // loop drivers, LLM registry/auth internals, etc.) and
+            // re-introduces the narrow-surface regression this rule exists to
+            // prevent.
             crate_name: "ironclaw_reborn_cli",
             forbidden: vec![
                 "ironclaw",

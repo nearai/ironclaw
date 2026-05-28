@@ -77,6 +77,12 @@ DTOs. Resume/cancel decisions must go through `AuthFlowManager` and
 auth-flow records directly, or resume blocked auth gates without the
 `BlockedAuthGate` precondition.
 
+WebUI gate resolution routing should use current run-state first: a
+`BlockedApproval` run enters `ApprovalInteractionService`, a `BlockedAuth` run
+enters `AuthInteractionService`, and generic fallback is only for non-typed
+blocked gates or legacy/replay shapes. Do not let generic WebUI gate handling
+resume/cancel auth-blocked runs.
+
 WebUI-facing facade methods must bind browser thread ids through
 `SessionThreadService` using a `ThreadScope` derived from the authenticated
 caller before accepting messages, streaming events, canceling runs, or resolving

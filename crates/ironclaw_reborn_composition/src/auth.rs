@@ -4,16 +4,16 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_auth::{
     AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthErrorCode, AuthFlowId,
-    AuthFlowKind, AuthFlowManager, AuthFlowRecord, AuthFlowStatus, AuthInteractionId,
-    AuthInteractionService, AuthProductError, AuthProductScope, AuthProviderClient, AuthProviderId,
-    CredentialAccountId, CredentialAccountLabel, CredentialAccountService, CredentialAccountStatus,
-    CredentialAccountUpdateBinding, CredentialRefreshReport, CredentialRefreshRequest,
-    CredentialSetupService, InMemoryAuthProductServices, ManualTokenSetupRequest, NewAuthFlow,
-    OAuthAuthorizationUrl, OAuthCallbackClaimRequest, OAuthCallbackFailureInput,
-    OAuthCallbackInput, OAuthProviderCallbackRequest, OAuthProviderExchangeContext,
-    OpaqueStateHash, PkceVerifierHash, ProviderBackedCredentialAccountService,
-    ProviderCallbackOutcome, SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
-    SecretSubmitRequest, Timestamp,
+    AuthFlowKind, AuthFlowManager, AuthFlowRecord, AuthFlowRecordSource, AuthFlowStatus,
+    AuthInteractionId, AuthInteractionService, AuthProductError, AuthProductScope,
+    AuthProviderClient, AuthProviderId, CredentialAccountId, CredentialAccountLabel,
+    CredentialAccountService, CredentialAccountStatus, CredentialAccountUpdateBinding,
+    CredentialRefreshReport, CredentialRefreshRequest, CredentialSetupService,
+    InMemoryAuthProductServices, ManualTokenSetupRequest, NewAuthFlow, OAuthAuthorizationUrl,
+    OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
+    OAuthProviderCallbackRequest, OAuthProviderExchangeContext, OpaqueStateHash, PkceVerifierHash,
+    ProviderBackedCredentialAccountService, ProviderCallbackOutcome, SecretCleanupReport,
+    SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest, Timestamp,
 };
 use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
 use secrecy::SecretString;
@@ -40,10 +40,6 @@ impl RebornAuthContinuationDispatcher for NoopAuthContinuationDispatcher {
     ) -> Result<(), AuthProductError> {
         Ok(())
     }
-}
-
-pub(crate) trait RebornAuthFlowRecordSource: Send + Sync {
-    fn flow_records_snapshot(&self) -> Vec<AuthFlowRecord>;
 }
 
 #[async_trait]
@@ -352,7 +348,7 @@ pub struct RebornProductAuthServices {
     provider_client: Arc<dyn AuthProviderClient>,
     cleanup_service: Arc<dyn SecretCleanupService>,
     continuation_dispatcher: Arc<dyn RebornAuthContinuationDispatcher>,
-    flow_record_source: Option<Arc<dyn RebornAuthFlowRecordSource>>,
+    flow_record_source: Option<Arc<dyn AuthFlowRecordSource>>,
 }
 
 impl std::fmt::Debug for RebornProductAuthServices {
@@ -457,7 +453,7 @@ impl RebornProductAuthServices {
         self.flow_manager.clone()
     }
 
-    pub(crate) fn flow_record_source(&self) -> Option<Arc<dyn RebornAuthFlowRecordSource>> {
+    pub(crate) fn flow_record_source(&self) -> Option<Arc<dyn AuthFlowRecordSource>> {
         self.flow_record_source.clone()
     }
 
@@ -499,10 +495,7 @@ impl RebornProductAuthServices {
         self
     }
 
-    pub(crate) fn with_flow_record_source(
-        mut self,
-        source: Arc<dyn RebornAuthFlowRecordSource>,
-    ) -> Self {
+    pub(crate) fn with_flow_record_source(mut self, source: Arc<dyn AuthFlowRecordSource>) -> Self {
         self.flow_record_source = Some(source);
         self
     }
@@ -793,23 +786,7 @@ impl RebornProductAuthServices {
         let services = Arc::new(InMemoryAuthProductServices::new());
         RebornProductAuthServicePorts::from_shared(services.clone())
             .into_services(continuation_dispatcher)
-            .with_flow_record_source(Arc::new(InMemoryAuthFlowRecordSource::new(services)))
-    }
-}
-
-struct InMemoryAuthFlowRecordSource {
-    services: Arc<InMemoryAuthProductServices>,
-}
-
-impl InMemoryAuthFlowRecordSource {
-    fn new(services: Arc<InMemoryAuthProductServices>) -> Self {
-        Self { services }
-    }
-}
-
-impl RebornAuthFlowRecordSource for InMemoryAuthFlowRecordSource {
-    fn flow_records_snapshot(&self) -> Vec<AuthFlowRecord> {
-        self.services.flow_records_snapshot()
+            .with_flow_record_source(services)
     }
 }
 

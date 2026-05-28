@@ -177,18 +177,14 @@ async fn thread_context_port_builds_skill_instruction_snippets_from_real_skill_m
         .unwrap();
 
     assert_eq!(bundle.instruction_snippets.len(), 1);
-    assert_eq!(bundle.instruction_snippets[0].snippet_ref, "skill:alpha");
-    assert!(
-        bundle.instruction_snippets[0]
-            .safe_summary
-            .contains("safe alpha description")
-    );
-    assert!(
-        bundle.instruction_snippets[0]
-            .safe_summary
-            .contains("Use alpha prompt content.")
-    );
-    assert!(!bundle.instruction_snippets[0].safe_summary.contains("/tmp"));
+    let snippet = &bundle.instruction_snippets[0];
+    assert_eq!(snippet.snippet_ref, "skill:alpha");
+    assert!(snippet.safe_summary.contains("safe alpha description"));
+    assert!(!snippet.safe_summary.contains("Use alpha prompt content."));
+    assert!(snippet.model_content.contains("safe alpha description"));
+    assert!(snippet.model_content.contains("Use alpha prompt content."));
+    assert!(!snippet.safe_summary.contains("/tmp"));
+    assert!(!snippet.model_content.contains("/tmp"));
 }
 
 #[tokio::test]
@@ -262,8 +258,18 @@ async fn thread_context_port_builds_skill_instruction_snippets_from_skill_bundle
             .contains("safe alpha description")
     );
     assert!(
-        bundle.instruction_snippets[0]
+        !bundle.instruction_snippets[0]
             .safe_summary
+            .contains("Use trusted alpha prompt content.")
+    );
+    assert!(
+        bundle.instruction_snippets[0]
+            .model_content
+            .contains("safe alpha description")
+    );
+    assert!(
+        bundle.instruction_snippets[0]
+            .model_content
             .contains("Use trusted alpha prompt content.")
     );
     assert!(
@@ -274,6 +280,11 @@ async fn thread_context_port_builds_skill_instruction_snippets_from_skill_bundle
     assert!(
         !bundle.instruction_snippets[1]
             .safe_summary
+            .contains("RAW_INSTALLED_PROMPT_SENTINEL")
+    );
+    assert!(
+        !bundle.instruction_snippets[1]
+            .model_content
             .contains("RAW_INSTALLED_PROMPT_SENTINEL")
     );
     assert_eq!(
@@ -1110,12 +1121,12 @@ async fn thread_context_port_ignores_malformed_hidden_skill_content() {
         .unwrap();
 
     assert_eq!(bundle.instruction_snippets.len(), 1);
-    assert_eq!(bundle.instruction_snippets[0].snippet_ref, "skill:alpha");
-    assert!(
-        bundle.instruction_snippets[0]
-            .safe_summary
-            .contains("visible prompt")
-    );
+    let snippet = &bundle.instruction_snippets[0];
+    assert_eq!(snippet.snippet_ref, "skill:alpha");
+    assert!(snippet.safe_summary.contains("visible description"));
+    assert!(!snippet.safe_summary.contains("visible prompt"));
+    assert!(snippet.model_content.contains("visible description"));
+    assert!(snippet.model_content.contains("visible prompt"));
 }
 
 #[tokio::test]

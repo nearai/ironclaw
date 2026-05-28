@@ -1790,7 +1790,7 @@ output_schema_ref = "schemas/test.output.json"
         assert!(blank.safe_summary().is_none());
         assert_eq!(
             blank.disposition(),
-            crate::CapabilityFailureDisposition::RecoverableRunFailure
+            crate::CapabilityFailureDisposition::ModelVisibleToolError
         );
 
         let long = RuntimeCapabilityFailure::new(
