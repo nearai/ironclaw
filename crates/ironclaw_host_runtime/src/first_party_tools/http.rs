@@ -487,6 +487,10 @@ fn log_raw_http_input_error_for_local_diagnostics(
     validation_stage: &'static str,
     error: FirstPartyCapabilityError,
 ) -> FirstPartyCapabilityError {
+    tracing::debug!(
+        validation_stage,
+        "first-party HTTP tool input validation failed"
+    );
     if crate::unsafe_raw_http_diagnostics_enabled(unsafe_raw_diagnostics_allowed) {
         tracing::warn!(
             validation_stage,
