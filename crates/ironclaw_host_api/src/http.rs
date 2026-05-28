@@ -152,11 +152,7 @@ impl RuntimeCredentialTarget {
                 )?;
             }
             Self::PathPlaceholder { placeholder } => {
-                validate_runtime_credential_fragment_non_empty_no_control(
-                    "path_placeholder",
-                    placeholder,
-                    "must not be empty or contain NUL/control characters",
-                )?;
+                validate_runtime_credential_path_placeholder(placeholder)?;
             }
         }
         Ok(())
@@ -168,6 +164,22 @@ fn validate_runtime_credential_header_name(name: &str) -> Result<(), HostApiErro
         return Err(HostApiError::invalid_runtime_credential_target(
             "header_name",
             "must be an ASCII HTTP field-name token",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_runtime_credential_path_placeholder(placeholder: &str) -> Result<(), HostApiError> {
+    if placeholder.is_empty()
+        || placeholder == "."
+        || placeholder == ".."
+        || !placeholder
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~'))
+    {
+        return Err(HostApiError::invalid_runtime_credential_target(
+            "path_placeholder",
+            "must be a non-empty unreserved path segment other than . or ..",
         ));
     }
     Ok(())

@@ -1494,21 +1494,18 @@ fn apply_credential_injection(
                     });
                 }
             }
-            let mut path_segments =
-                url.path_segments_mut()
-                    .map_err(|_| RuntimeHttpEgressError::Credential {
-                        reason: "credential injection target URL cannot be rewritten".to_string(),
-                    })?;
-            path_segments.clear();
-            for segment in path.split('/') {
-                let rewritten = if segment == placeholder {
-                    value
+            let mut rewritten_path = String::with_capacity(path.len() + value.len());
+            for (index, segment) in path.split('/').enumerate() {
+                if index > 0 {
+                    rewritten_path.push('/');
+                }
+                if segment == placeholder {
+                    rewritten_path.push_str(value);
                 } else {
-                    segment
-                };
-                path_segments.push(rewritten);
+                    rewritten_path.push_str(segment);
+                }
             }
-            drop(path_segments);
+            url.set_path(&rewritten_path);
             request.url = url.to_string();
         }
     }

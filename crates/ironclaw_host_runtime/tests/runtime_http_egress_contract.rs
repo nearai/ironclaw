@@ -456,6 +456,23 @@ fn host_http_egress_rejects_multiple_path_placeholder_occurrences_before_transpo
 }
 
 #[test]
+fn host_http_egress_preserves_existing_path_encoding_when_rewriting_placeholder() {
+    let (_response, network_recorder) = execute_path_placeholder_egress(
+        "https://api.example.test/v1/foo%20bar/__credential__/run%2Ftail",
+        "__credential__",
+        "sk-staged-secret",
+    )
+    .expect("path placeholder rewrite should preserve existing encoded segments");
+
+    let requests = network_recorder.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].url,
+        "https://api.example.test/v1/foo%20bar/sk-staged-secret/run%2Ftail"
+    );
+}
+
+#[test]
 fn host_http_egress_rejects_path_placeholder_target_url_errors_before_transport() {
     for (url, expected_reason) in [
         ("not a url", "credential injection target URL is invalid"),

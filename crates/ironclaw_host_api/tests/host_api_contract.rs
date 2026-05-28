@@ -44,6 +44,23 @@ fn runtime_credential_targets_validate_declaration_shape() {
         .validate_declaration()
         .is_err()
     );
+    assert!(
+        RuntimeCredentialTarget::PathPlaceholder {
+            placeholder: "__credential__".to_string(),
+        }
+        .validate_declaration()
+        .is_ok()
+    );
+    for invalid in ["", ".", "..", "bad/placeholder", "bad\nplaceholder"] {
+        assert!(
+            RuntimeCredentialTarget::PathPlaceholder {
+                placeholder: invalid.to_string(),
+            }
+            .validate_declaration()
+            .is_err(),
+            "{invalid:?} should be rejected"
+        );
+    }
 }
 
 #[test]
