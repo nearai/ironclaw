@@ -4,13 +4,14 @@
 //! Feishu/Lark Bot channel for IronClaw.
 //!
 //! This WASM component implements the channel interface for handling Feishu
-//! webhooks (Event Subscription v2.0) and sending messages back via the
-//! Feishu/Lark Bot API. IronClaw currently does not connect to Feishu's
-//! long-connection websocket subscription mode; use Event Subscription
-//! webhooks for this channel.
+//! Event Subscription v2.0 deliveries and sending messages back via the
+//! Feishu/Lark Bot API. Inbound delivery supports Feishu's long-connection
+//! websocket mode through IronClaw's host-managed websocket runtime, with
+//! webhook delivery retained as a fallback.
 //!
 //! # Features
 //!
+//! - Long-connection websocket message receiving
 //! - Webhook-based message receiving (Event Subscription v2.0)
 //! - URL verification challenge handling
 //! - Private chat (DM) support
@@ -55,6 +56,8 @@ const APP_SECRET_PATH: &str = "app_secret";
 const VERIFICATION_TOKEN_PATH: &str = "verification_token";
 const TOKEN_PATH: &str = "tenant_access_token";
 const TOKEN_EXPIRY_PATH: &str = "token_expiry";
+const CONNECTION_MODE_PATH: &str = "connection_mode";
+const WEBSOCKET_EVENT_QUEUE_PATH: &str = "state/gateway_event_queue_processing";
 
 // ============================================================================
 // Feishu API Types
@@ -261,6 +264,10 @@ struct FeishuConfig {
     /// Feishu Event Subscription verification token.
     verification_token: Option<String>,
 
+    /// Inbound delivery mode: "websocket" (default) or "webhook".
+    #[serde(default = "default_connection_mode")]
+    connection_mode: String,
+
     /// API base URL. Defaults to "https://open.feishu.cn" (use
     /// "https://open.larksuite.com" for Lark international).
     #[serde(default = "default_api_base")]
@@ -282,6 +289,10 @@ fn default_api_base() -> String {
     "https://open.feishu.cn".to_string()
 }
 
+fn default_connection_mode() -> String {
+    "websocket".to_string()
+}
+
 // ============================================================================
 // Channel Implementation
 // ============================================================================
@@ -300,6 +311,13 @@ impl Guest for FeishuChannel {
         // Persist config for cross-callback access.
         let api_base = config.api_base.trim_end_matches('/').to_string();
         let _ = channel_host::workspace_write(API_BASE_PATH, &api_base);
+        let connection_mode = config.connection_mode.trim().to_ascii_lowercase();
+        let connection_mode = if connection_mode == "webhook" {
+            "webhook"
+        } else {
+            "websocket"
+        };
+        let _ = channel_host::workspace_write(CONNECTION_MODE_PATH, connection_mode);
 
         // Persist app credentials for token exchange in later callbacks.
         // These are injected by the host from the secrets store into the
@@ -439,7 +457,7 @@ impl Guest for FeishuChannel {
     }
 
     fn on_poll() {
-        // Feishu uses webhooks, not polling.
+        process_websocket_event_queue();
     }
 
     fn on_respond(response: AgentResponse) -> Result<(), String> {
@@ -466,6 +484,98 @@ impl Guest for FeishuChannel {
 // ============================================================================
 // Message Handling
 // ============================================================================
+
+/// Process events queued by the host-managed Feishu websocket runtime.
+fn process_websocket_event_queue() {
+    let queue_json = channel_host::workspace_read(WEBSOCKET_EVENT_QUEUE_PATH).unwrap_or_default();
+    if queue_json.trim().is_empty() {
+        return;
+    }
+
+    let frames: Vec<String> = match serde_json::from_str(&queue_json) {
+        Ok(frames) => frames,
+        Err(error) => {
+            channel_host::log(
+                channel_host::LogLevel::Warn,
+                &format!("Failed to deserialize Feishu websocket queue: {error}"),
+            );
+            let _ = channel_host::workspace_write(WEBSOCKET_EVENT_QUEUE_PATH, "[]");
+            return;
+        }
+    };
+
+    let _ = channel_host::workspace_write(WEBSOCKET_EVENT_QUEUE_PATH, "[]");
+
+    for frame in frames {
+        process_feishu_event_payload(&frame, false);
+    }
+}
+
+fn process_feishu_event_payload(body_str: &str, require_webhook_auth: bool) {
+    let event: FeishuEvent = match serde_json::from_str(body_str) {
+        Ok(e) => e,
+        Err(e) => {
+            channel_host::log(
+                channel_host::LogLevel::Error,
+                &format!("Failed to parse Feishu event: {}", e),
+            );
+            return;
+        }
+    };
+
+    let configured_token =
+        channel_host::workspace_read(VERIFICATION_TOKEN_PATH).filter(|token| !token.is_empty());
+    if require_webhook_auth
+        && !is_authenticated_webhook(
+            false,
+            configured_token.as_deref(),
+            request_verification_token(&event),
+        )
+    {
+        channel_host::log(
+            channel_host::LogLevel::Warn,
+            "Rejecting unauthenticated Feishu webhook request",
+        );
+        return;
+    }
+
+    if !require_webhook_auth {
+        if let (Some(expected), Some(provided)) = (
+            configured_token.as_deref(),
+            request_verification_token(&event),
+        ) {
+            if !bool::from(expected.as_bytes().ct_eq(provided.as_bytes())) {
+                channel_host::log(
+                    channel_host::LogLevel::Warn,
+                    "Ignoring Feishu websocket event with mismatched verification token",
+                );
+                return;
+            }
+        }
+    }
+
+    // Handle URL verification challenge (initial webhook setup).
+    if event.event_type.as_deref() == Some("url_verification") {
+        return;
+    }
+
+    // Handle v2.0 events.
+    if let Some(header) = &event.header {
+        match header.event_type.as_str() {
+            "im.message.receive_v1" => {
+                if let Some(event_data) = &event.event {
+                    handle_message_event(event_data);
+                }
+            }
+            other => {
+                channel_host::log(
+                    channel_host::LogLevel::Debug,
+                    &format!("Ignoring event type: {}", other),
+                );
+            }
+        }
+    }
+}
 
 /// Handle an im.message.receive_v1 event.
 fn handle_message_event(event_data: &serde_json::Value) {
