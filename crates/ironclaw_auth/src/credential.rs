@@ -521,6 +521,8 @@ pub trait CredentialSetupService: Send + Sync {
     ) -> Result<CredentialAccount, AuthProductError>;
 }
 
+/// Credential account service that refreshes through the provider client and
+/// persists account mutations through the backing account/setup services.
 pub struct ProviderBackedCredentialAccountService {
     accounts: Arc<dyn CredentialAccountService>,
     setup: Arc<dyn CredentialSetupService>,
@@ -555,6 +557,30 @@ impl ProviderBackedCredentialAccountService {
 
     async fn acquire_refresh_lock(&self, account_id: CredentialAccountId) -> OwnedMutexGuard<()> {
         self.refresh_lock(account_id).lock_owned().await
+    }
+
+    fn release_refresh_lock(&self, account_id: CredentialAccountId) {
+        let mut refresh_locks = self
+            .refresh_locks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if refresh_locks
+            .get(&account_id)
+            .is_some_and(|lock| Arc::strong_count(lock) == 1)
+        {
+            refresh_locks.remove(&account_id);
+        }
+    }
+
+    fn refresh_lookup_request(
+        request: &CredentialRefreshRequest,
+    ) -> CredentialAccountLookupRequest {
+        let mut lookup =
+            CredentialAccountLookupRequest::new(request.scope.clone(), request.account_id);
+        if let Some(requester_extension) = request.requester_extension.clone() {
+            lookup = lookup.for_extension(requester_extension);
+        }
+        lookup
     }
 
     fn validate_refresh_target(
@@ -606,14 +632,19 @@ impl ProviderBackedCredentialAccountService {
     async fn report_for(
         &self,
         account: &CredentialAccount,
+        requester_extension: Option<&ExtensionId>,
         refreshed: bool,
     ) -> Result<CredentialRefreshReport, AuthProductError> {
+        let recovery_request =
+            CredentialRecoveryRequest::new(account.scope.clone(), account.provider.clone());
         let recovery = self
             .accounts
-            .project_credential_recovery(CredentialRecoveryRequest::new(
-                account.scope.clone(),
-                account.provider.clone(),
-            ))
+            .project_credential_recovery(match requester_extension {
+                Some(requester_extension) => {
+                    recovery_request.for_extension(requester_extension.clone())
+                }
+                None => recovery_request,
+            })
             // silent-ok: refresh reporting is allowed to degrade to the
             // single-account projection when the broader recovery projection
             // lookup fails; the refresh mutation has already been applied and
@@ -687,104 +718,112 @@ impl CredentialAccountService for ProviderBackedCredentialAccountService {
         &self,
         request: CredentialRefreshRequest,
     ) -> Result<CredentialRefreshReport, AuthProductError> {
+        let lookup_request = Self::refresh_lookup_request(&request);
         let initial_account = self
             .accounts
-            .get_account(CredentialAccountLookupRequest::new(
-                request.scope.clone(),
-                request.account_id,
-            ))
+            .get_account(lookup_request.clone())
             .await?
             .ok_or(AuthProductError::CredentialMissing)?;
         Self::validate_refresh_target(&initial_account, &request)?;
-        let _refresh_lock = self.acquire_refresh_lock(initial_account.id).await;
-
-        let account = self
-            .accounts
-            .get_account(CredentialAccountLookupRequest::new(
-                request.scope.clone(),
-                request.account_id,
-            ))
-            .await?
-            .ok_or(AuthProductError::CredentialMissing)?;
-        if account != initial_account {
-            return self.report_for(&account, false).await;
-        }
-
-        let Some(refresh_secret) = account.refresh_secret.clone() else {
-            let updated = self
+        let refresh_lock = self.acquire_refresh_lock(initial_account.id).await;
+        let result = async {
+            let account = self
                 .accounts
-                .update_status(
-                    &request.scope,
-                    request.account_id,
-                    CredentialAccountStatus::RefreshFailed,
-                )
-                .await?;
-            return self.report_for(&updated, false).await;
-        };
+                .get_account(lookup_request.clone())
+                .await?
+                .ok_or(AuthProductError::CredentialMissing)?;
+            if account != initial_account {
+                return self
+                    .report_for(&account, request.requester_extension.as_ref(), false)
+                    .await;
+            }
 
-        let provider_request = OAuthProviderRefreshRequest {
-            provider: account.provider.clone(),
-            scope: account.scope.clone(),
-            account_id: account.id,
-            refresh_secret: refresh_secret.clone(),
-            scopes: account.scopes.clone(),
-        };
-
-        match self.provider.refresh_token(provider_request).await {
-            Ok(refresh) => {
-                let current = self
-                    .accounts
-                    .get_account(CredentialAccountLookupRequest::new(
-                        request.scope.clone(),
-                        request.account_id,
-                    ))
-                    .await?
-                    .ok_or(AuthProductError::CredentialMissing)?;
-                if current != account {
-                    return self.report_for(&current, false).await;
-                }
-                if refresh.provider != current.provider {
-                    return Err(AuthProductError::CrossScopeDenied);
-                }
-                let refresh_secret = refresh
-                    .refresh_secret
-                    .or_else(|| current.refresh_secret.clone());
+            let Some(refresh_secret) = account.refresh_secret.clone() else {
                 let updated = self
                     .setup
                     .create_or_update_account(Self::account_update(
-                        &current,
-                        Some(refresh.access_secret),
-                        refresh_secret,
-                        CredentialAccountStatus::Configured,
-                        refresh.scopes,
-                    ))
-                    .await?;
-                self.report_for(&updated, true).await
-            }
-            Err(AuthProductError::RefreshFailed | AuthProductError::TokenExchangeFailed) => {
-                let current = self
-                    .accounts
-                    .get_account(CredentialAccountLookupRequest::new(
-                        request.scope.clone(),
-                        request.account_id,
-                    ))
-                    .await?
-                    .ok_or(AuthProductError::CredentialMissing)?;
-                if current != account {
-                    return self.report_for(&current, false).await;
-                }
-                let updated = self
-                    .accounts
-                    .update_status(
-                        &request.scope,
-                        request.account_id,
+                        &account,
+                        account.access_secret.clone(),
+                        account.refresh_secret.clone(),
                         CredentialAccountStatus::RefreshFailed,
-                    )
+                        account.scopes.clone(),
+                    ))
                     .await?;
-                return self.report_for(&updated, false).await;
+                return self
+                    .report_for(&updated, request.requester_extension.as_ref(), false)
+                    .await;
+            };
+
+            let provider_request = OAuthProviderRefreshRequest {
+                provider: account.provider.clone(),
+                scope: account.scope.clone(),
+                account_id: account.id,
+                refresh_secret: refresh_secret.clone(),
+                scopes: account.scopes.clone(),
+            };
+
+            match self.provider.refresh_token(provider_request).await {
+                Ok(refresh) => {
+                    let current = self
+                        .accounts
+                        .get_account(lookup_request.clone())
+                        .await?
+                        .ok_or(AuthProductError::CredentialMissing)?;
+                    if current != account {
+                        return self
+                            .report_for(&current, request.requester_extension.as_ref(), false)
+                            .await;
+                    }
+                    if refresh.provider != current.provider {
+                        return Err(AuthProductError::CrossScopeDenied);
+                    }
+                    let refresh_secret = refresh
+                        .refresh_secret
+                        .or_else(|| current.refresh_secret.clone());
+                    let updated = self
+                        .setup
+                        .create_or_update_account(Self::account_update(
+                            &current,
+                            Some(refresh.access_secret),
+                            refresh_secret,
+                            CredentialAccountStatus::Configured,
+                            refresh.scopes,
+                        ))
+                        .await?;
+                    self.report_for(&updated, request.requester_extension.as_ref(), true)
+                        .await
+                }
+                Err(AuthProductError::RefreshFailed | AuthProductError::TokenExchangeFailed) => {
+                    let current = self
+                        .accounts
+                        .get_account(lookup_request.clone())
+                        .await?
+                        .ok_or(AuthProductError::CredentialMissing)?;
+                    if current != account {
+                        return self
+                            .report_for(&current, request.requester_extension.as_ref(), false)
+                            .await;
+                    }
+                    let updated = self
+                        .setup
+                        .create_or_update_account(Self::account_update(
+                            &current,
+                            current.access_secret.clone(),
+                            current.refresh_secret.clone(),
+                            CredentialAccountStatus::RefreshFailed,
+                            current.scopes.clone(),
+                        ))
+                        .await?;
+                    self.report_for(&updated, request.requester_extension.as_ref(), false)
+                        .await
+                }
+                Err(error) => Err(error),
             }
-            Err(error) => Err(error),
         }
+        .await;
+        drop(refresh_lock);
+        self.release_refresh_lock(initial_account.id);
+        result
     }
 }
 

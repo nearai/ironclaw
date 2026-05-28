@@ -144,6 +144,45 @@ async fn secret_store_isolates_same_handle_between_tenants() {
 }
 
 #[tokio::test]
+async fn secret_store_delete_is_idempotent_and_scope_isolated() {
+    let store = InMemorySecretStore::new();
+    let owner = sample_scope("tenant-a", "user-a");
+    let other = sample_scope("tenant-a", "user-b");
+    let handle = SecretHandle::new("shared_name").unwrap();
+    store
+        .put(
+            owner.clone(),
+            handle.clone(),
+            SecretMaterial::from("owner-secret"),
+        )
+        .await
+        .unwrap();
+    store
+        .put(
+            other.clone(),
+            handle.clone(),
+            SecretMaterial::from("other-secret"),
+        )
+        .await
+        .unwrap();
+
+    assert!(store.delete(&owner, &handle).await.unwrap());
+    assert!(!store.delete(&owner, &handle).await.unwrap());
+    assert!(store.metadata(&owner, &handle).await.unwrap().is_none());
+    assert!(store.metadata(&other, &handle).await.unwrap().is_some());
+
+    let other_lease = store.lease_once(&other, &handle).await.unwrap();
+    assert_eq!(
+        store
+            .consume(&other, other_lease.id)
+            .await
+            .unwrap()
+            .expose_secret(),
+        "other-secret"
+    );
+}
+
+#[tokio::test]
 async fn secret_store_isolates_same_handle_between_users_and_projects() {
     let store = InMemorySecretStore::new();
     let user_a = sample_scope("tenant-a", "user-a");

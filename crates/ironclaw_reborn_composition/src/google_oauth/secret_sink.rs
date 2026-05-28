@@ -183,7 +183,6 @@ impl GoogleProviderTokenSink for SecretStoreGoogleTokenSink {
                     .put(scope.clone(), handle.clone(), refresh_token)
                     .await
                 {
-                    let _ = self.store.delete(&scope, &access_secret).await;
                     return Err(map_secret_store_error(error));
                 }
                 Some(handle)
@@ -316,6 +315,7 @@ mod tests {
     }
 
     struct RecordingSecretStore {
+        puts: Mutex<Vec<String>>,
         deleted: Mutex<Vec<String>>,
         failing_handles: HashSet<String>,
     }
@@ -323,9 +323,14 @@ mod tests {
     impl RecordingSecretStore {
         fn new(failing_handles: impl IntoIterator<Item = impl Into<String>>) -> Self {
             Self {
+                puts: Mutex::new(Vec::new()),
                 deleted: Mutex::new(Vec::new()),
                 failing_handles: failing_handles.into_iter().map(Into::into).collect(),
             }
+        }
+
+        fn put_handles(&self) -> Vec<String> {
+            self.puts.lock().unwrap().clone()
         }
 
         fn deleted_handles(&self) -> Vec<String> {
@@ -337,11 +342,18 @@ mod tests {
     impl SecretStore for RecordingSecretStore {
         async fn put(
             &self,
-            _scope: ResourceScope,
-            _handle: SecretHandle,
+            scope: ResourceScope,
+            handle: SecretHandle,
             _material: SecretMaterial,
         ) -> Result<SecretMetadata, ironclaw_secrets::SecretStoreError> {
-            unreachable!("not used in tests")
+            self.puts.lock().unwrap().push(handle.as_str().to_string());
+            if self.failing_handles.contains(handle.as_str()) {
+                Err(ironclaw_secrets::SecretStoreError::BackendMisconfigured {
+                    reason: format!("failed to write {}", handle.as_str()),
+                })
+            } else {
+                Ok(SecretMetadata { scope, handle })
+            }
         }
 
         async fn metadata(
@@ -441,5 +453,37 @@ mod tests {
                 "third".to_string()
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn store_refreshed_tokens_keeps_access_secret_when_refresh_write_fails() {
+        let account_id = ironclaw_auth::CredentialAccountId::new();
+        let scope = sample_scope(InvocationId::new());
+        let request = GoogleProviderRefreshTokenStorageRequest {
+            scope: scope.clone(),
+            account_id,
+            tokens: GoogleProviderTokenSet {
+                access_token: SecretString::new("access".into()),
+                refresh_token: Some(SecretString::new("refresh".into())),
+            },
+        };
+        let access_handle = google_refresh_token_handle(&request, "access").unwrap();
+        let refresh_handle = google_refresh_token_handle(&request, "refresh").unwrap();
+        let store = Arc::new(RecordingSecretStore::new([refresh_handle.as_str()]));
+        let sink = SecretStoreGoogleTokenSink {
+            store: store.clone(),
+        };
+
+        let error = sink.store_refreshed_tokens(request).await.unwrap_err();
+
+        assert_eq!(error, ironclaw_auth::AuthProductError::BackendUnavailable);
+        assert_eq!(
+            store.put_handles(),
+            vec![
+                access_handle.as_str().to_string(),
+                refresh_handle.as_str().to_string()
+            ]
+        );
+        assert!(store.deleted_handles().is_empty());
     }
 }

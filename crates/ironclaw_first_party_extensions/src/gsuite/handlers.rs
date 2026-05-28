@@ -298,9 +298,6 @@ fn response_body_json(
 fn is_google_auth_expired_response(
     response: &ironclaw_host_api::RuntimeHttpEgressResponse,
 ) -> bool {
-    if (200..300).contains(&response.status) {
-        return false;
-    }
     response.status == 401
 }
 
@@ -1051,6 +1048,31 @@ mod tests {
                 expected_request_bytes
             );
         }
+    }
+
+    #[test]
+    fn is_google_auth_expired_response_only_matches_401() {
+        let response = RuntimeHttpEgressResponse {
+            status: 401,
+            headers: Vec::new(),
+            body: Vec::new(),
+            saved_body: None,
+            request_bytes: 0,
+            response_bytes: 0,
+            redaction_applied: false,
+        };
+        assert!(is_google_auth_expired_response(&response));
+
+        let response = RuntimeHttpEgressResponse {
+            status: 403,
+            headers: Vec::new(),
+            body: Vec::new(),
+            saved_body: None,
+            request_bytes: 0,
+            response_bytes: 0,
+            redaction_applied: false,
+        };
+        assert!(!is_google_auth_expired_response(&response));
     }
 
     #[test]

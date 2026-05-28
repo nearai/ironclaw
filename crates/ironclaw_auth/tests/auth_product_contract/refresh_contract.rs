@@ -41,6 +41,16 @@ impl BlockingRefreshProvider {
     }
 }
 
+fn provider_backed_auth(
+    services: Arc<InMemoryAuthProductServices>,
+) -> Arc<ProviderBackedCredentialAccountService> {
+    Arc::new(ProviderBackedCredentialAccountService::new(
+        services.clone(),
+        services.clone(),
+        services,
+    ))
+}
+
 #[async_trait]
 impl AuthProviderClient for BlockingRefreshProvider {
     async fn exchange_callback(
@@ -126,9 +136,10 @@ async fn credential_refresh_updates_account_through_provider_boundary() {
 
 #[tokio::test]
 async fn credential_refresh_failure_becomes_recoverable_status() {
-    let services = InMemoryAuthProductServices::new();
+    let services = Arc::new(InMemoryAuthProductServices::new());
+    let auth = provider_backed_auth(services.clone());
     let owner = scope("alice");
-    let account = services
+    let account = auth
         .create_account(NewCredentialAccount {
             scope: owner.clone(),
             provider: provider(),
@@ -145,7 +156,7 @@ async fn credential_refresh_failure_becomes_recoverable_status() {
         .expect("configured account");
     services.fail_next_refresh_for_tests(account.id);
 
-    let report = services
+    let report = auth
         .refresh_account(CredentialRefreshRequest::new(
             owner.clone(),
             provider(),
@@ -374,9 +385,10 @@ async fn stale_refresh_failure_does_not_mark_concurrent_refresh_failed() {
 
 #[tokio::test]
 async fn credential_refresh_without_refresh_secret_becomes_recoverable_status() {
-    let services = InMemoryAuthProductServices::new();
+    let services = Arc::new(InMemoryAuthProductServices::new());
+    let auth = provider_backed_auth(services.clone());
     let owner = scope("alice");
-    let account = services
+    let account = auth
         .create_account(NewCredentialAccount {
             scope: owner.clone(),
             provider: provider(),
@@ -392,7 +404,7 @@ async fn credential_refresh_without_refresh_secret_becomes_recoverable_status() 
         .await
         .expect("expired account");
 
-    let report = services
+    let report = auth
         .refresh_account(CredentialRefreshRequest::new(
             owner.clone(),
             provider(),
@@ -424,6 +436,95 @@ async fn credential_refresh_without_refresh_secret_becomes_recoverable_status() 
         .expect("lookup")
         .expect("failed account");
     assert_eq!(failed.status, CredentialAccountStatus::RefreshFailed);
+}
+
+#[tokio::test]
+async fn provider_backed_refresh_preserves_requester_for_authorized_extensions() {
+    let services = Arc::new(InMemoryAuthProductServices::new());
+    let auth = provider_backed_auth(services.clone());
+    let owner = scope("alice");
+    let extension_owned = ExtensionId::new("github-extension-owned").unwrap();
+    let shared_admin = ExtensionId::new("github-shared-admin").unwrap();
+
+    let extension_account = auth
+        .create_account(NewCredentialAccount {
+            scope: owner.clone(),
+            provider: provider(),
+            label: label("extension owned"),
+            status: CredentialAccountStatus::Expired,
+            ownership: CredentialOwnership::ExtensionOwned,
+            owner_extension: Some(extension_owned.clone()),
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("github-extension-owned-access").unwrap()),
+            refresh_secret: Some(SecretHandle::new("github-extension-owned-refresh").unwrap()),
+            scopes: provider_scopes(&["repo"]),
+        })
+        .await
+        .expect("extension-owned account");
+
+    let extension_report = auth
+        .refresh_account(
+            CredentialRefreshRequest::new(owner.clone(), provider(), extension_account.id)
+                .for_extension(extension_owned.clone()),
+        )
+        .await
+        .expect("extension-owned refresh");
+    assert!(extension_report.refreshed);
+    assert_eq!(
+        extension_report.account.status,
+        CredentialAccountStatus::Configured
+    );
+    assert_eq!(
+        extension_report.recovery.kind(),
+        CredentialRecoveryKind::Configured
+    );
+    assert_eq!(
+        extension_report
+            .recovery
+            .selected_account()
+            .map(|account| account.id),
+        Some(extension_account.id)
+    );
+
+    let shared_account = auth
+        .create_account(NewCredentialAccount {
+            scope: owner.clone(),
+            provider: provider(),
+            label: label("shared admin"),
+            status: CredentialAccountStatus::Expired,
+            ownership: CredentialOwnership::SharedAdminManaged,
+            owner_extension: None,
+            granted_extensions: vec![shared_admin.clone()],
+            access_secret: Some(SecretHandle::new("github-shared-admin-access").unwrap()),
+            refresh_secret: Some(SecretHandle::new("github-shared-admin-refresh").unwrap()),
+            scopes: provider_scopes(&["repo"]),
+        })
+        .await
+        .expect("shared-admin account");
+
+    let shared_report = auth
+        .refresh_account(
+            CredentialRefreshRequest::new(owner, provider(), shared_account.id)
+                .for_extension(shared_admin),
+        )
+        .await
+        .expect("shared-admin refresh");
+    assert!(shared_report.refreshed);
+    assert_eq!(
+        shared_report.account.status,
+        CredentialAccountStatus::Configured
+    );
+    assert_eq!(
+        shared_report.recovery.kind(),
+        CredentialRecoveryKind::Configured
+    );
+    assert_eq!(
+        shared_report
+            .recovery
+            .selected_account()
+            .map(|account| account.id),
+        Some(shared_account.id)
+    );
 }
 
 #[tokio::test]
