@@ -151,6 +151,14 @@ export function useChat(threadId) {
           threadId: sendThreadId,
           content,
         });
+        // The server has accepted the message; the confirmed row
+        // will arrive via /timeline. Drop the optimistic from the
+        // pending ref now so a `loadHistory` triggered before the
+        // run terminates doesn't merge both the server row AND the
+        // pending into the list. Pending ids are `pending-N` while
+        // server ids are `msg-<uuid>`, so the id-based dedup in
+        // `messagesFromTimeline` would otherwise miss the collision.
+        removePending(pendingMessagesRef.current, pendingKey, optimisticId);
         // Refresh the sidebar so the backend-seeded title (from the
         // first user message), turn_count, and updated_at appear
         // without waiting for the next manual reload.

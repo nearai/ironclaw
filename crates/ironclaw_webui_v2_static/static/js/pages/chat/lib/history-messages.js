@@ -48,25 +48,13 @@ export function messagesFromTimeline(records, pendingMessages = []) {
     });
   }
 
-  // Dedup optimistic pendings against server-confirmed user messages.
-  // Pending ids are client-generated (`pending-N`) so they never
-  // collide with server ids (`msg-<uuid>`); without a content-level
-  // check both render when loadHistory runs while a send is still in
-  // flight (landing → new thread → server-accepted, run not yet
-  // completed). Multiset matching handles rapid same-content sends:
-  // each pending only consumes one server message.
-  const unmatchedServerUserContent = messages
-    .filter((m) => m.role === "user")
-    .map((m) => m.content);
+  // Pending rows are dropped from the ref by the caller as soon as
+  // `sendMessage` returns (server has accepted the message and the
+  // confirmed row will arrive via timeline). The id-based guard
+  // remains as defense-in-depth in case a caller passes a pending
+  // that was already merged into the timeline.
   for (const pending of pendingMessages) {
     if (seen.has(pending.id)) continue;
-    if (pending.role === "user") {
-      const idx = unmatchedServerUserContent.indexOf(pending.content);
-      if (idx >= 0) {
-        unmatchedServerUserContent.splice(idx, 1);
-        continue;
-      }
-    }
     messages.push(pending);
   }
 
