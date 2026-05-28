@@ -164,6 +164,7 @@ struct FakeTurnCoordinator {
     submit_error: Mutex<Option<TurnError>>,
     run_state_error: Mutex<Option<TurnError>>,
     run_state_actor: Mutex<Option<TurnActor>>,
+    explicit_run_status: Mutex<Option<TurnStatus>>,
     parked_gate_ref: Mutex<Option<GateRef>>,
     parked_auth_gate: Mutex<bool>,
     parked_approval_gate: Mutex<bool>,
@@ -179,6 +180,7 @@ impl Default for FakeTurnCoordinator {
             submit_error: Mutex::default(),
             run_state_error: Mutex::default(),
             run_state_actor: Mutex::new(Some(turn_actor_for_user("user-alpha"))),
+            explicit_run_status: Mutex::default(),
             parked_gate_ref: Mutex::default(),
             parked_auth_gate: Mutex::default(),
             parked_approval_gate: Mutex::default(),
@@ -225,6 +227,10 @@ impl FakeTurnCoordinator {
 
     fn set_run_state_actor(&self, actor: Option<TurnActor>) {
         *self.run_state_actor.lock().expect("lock") = actor;
+    }
+
+    fn set_run_state_status(&self, status: TurnStatus) {
+        *self.explicit_run_status.lock().expect("lock") = Some(status);
     }
 
     fn submission_count(&self) -> usize {
@@ -324,13 +330,19 @@ impl TurnCoordinator for FakeTurnCoordinator {
         }
         let actor = self.run_state_actor.lock().expect("lock").clone();
         let gate_ref = self.parked_gate_ref.lock().expect("lock").clone();
-        let status = if *self.parked_auth_gate.lock().expect("lock") {
-            TurnStatus::BlockedAuth
-        } else if *self.parked_approval_gate.lock().expect("lock") {
-            TurnStatus::BlockedApproval
-        } else {
-            TurnStatus::Queued
-        };
+        let status = self
+            .explicit_run_status
+            .lock()
+            .expect("lock")
+            .unwrap_or_else(|| {
+                if *self.parked_auth_gate.lock().expect("lock") {
+                    TurnStatus::BlockedAuth
+                } else if *self.parked_approval_gate.lock().expect("lock") {
+                    TurnStatus::BlockedApproval
+                } else {
+                    TurnStatus::Queued
+                }
+            });
         let scope = request.scope.clone();
         let run_id = request.run_id;
         self.run_state_requests.lock().expect("lock").push(request);
@@ -2542,6 +2554,41 @@ async fn blocked_auth_run_routes_non_prefixed_gate_to_auth_interaction_service()
 }
 
 #[tokio::test]
+async fn blocked_auth_run_with_stale_gate_ref_returns_conflict() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let auth_interactions = Arc::new(RecordingAuthInteractionService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    )
+    .with_auth_interactions(auth_interactions.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+    coordinator.set_parked_auth_gate(GateRef::new("gate-current").expect("gate"));
+
+    let err = services
+        .resolve_gate(
+            caller(),
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "gate-auth-stale",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string(),
+                "gate_ref": "gate-stale",
+                "resolution": "approved"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("stale auth gate_ref must produce Conflict");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Conflict);
+    assert_eq!(err.kind, RebornServicesErrorKind::BlockedAuthentication);
+    assert_eq!(err.status_code, 409);
+    assert_eq!(coordinator.resumption_count(), 0);
+    assert_eq!(coordinator.cancellation_count(), 0);
+    assert_eq!(auth_interactions.resolution_count(), 0);
+}
+
+#[tokio::test]
 async fn blocked_approval_run_routes_non_prefixed_gate_to_approval_interaction_service() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let approval_interactions = Arc::new(RecordingApprovalInteractionService::default());
@@ -2577,6 +2624,77 @@ async fn blocked_approval_run_routes_non_prefixed_gate_to_approval_interaction_s
         ApprovalInteractionDecision::ApproveOnce
     );
     assert_eq!(coordinator.resumption_count(), 0);
+}
+
+#[tokio::test]
+async fn blocked_approval_run_with_stale_gate_ref_returns_conflict() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let approval_interactions = Arc::new(RecordingApprovalInteractionService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    )
+    .with_approval_interactions(approval_interactions.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+    coordinator.set_parked_approval_gate(GateRef::new("gate-current").expect("gate"));
+
+    let err = services
+        .resolve_gate(
+            caller(),
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "gate-approval-stale",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string(),
+                "gate_ref": "gate-stale",
+                "resolution": "denied"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("stale approval gate_ref must produce Conflict");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Conflict);
+    assert_eq!(err.kind, RebornServicesErrorKind::BlockedApproval);
+    assert_eq!(err.status_code, 409);
+    assert_eq!(coordinator.resumption_count(), 0);
+    assert_eq!(coordinator.cancellation_count(), 0);
+    assert_eq!(approval_interactions.resolution_count(), 0);
+}
+
+#[tokio::test]
+async fn terminal_run_state_rejects_gate_resolution_before_shape_fallback() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let approval_interactions = Arc::new(RecordingApprovalInteractionService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    )
+    .with_approval_interactions(approval_interactions.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+    coordinator.set_run_state_status(TurnStatus::Completed);
+    let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
+
+    let err = services
+        .resolve_gate(
+            caller(),
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "gate-terminal",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string(),
+                "gate_ref": gate_ref.as_str(),
+                "resolution": "approved"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("terminal run must fail closed before shape fallback");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Conflict);
+    assert_eq!(err.kind, RebornServicesErrorKind::Conflict);
+    assert_eq!(err.status_code, 409);
+    assert_eq!(coordinator.resumption_count(), 0);
+    assert_eq!(coordinator.cancellation_count(), 0);
+    assert_eq!(approval_interactions.resolution_count(), 0);
 }
 
 #[tokio::test]

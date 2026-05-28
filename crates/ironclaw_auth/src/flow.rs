@@ -239,6 +239,11 @@ pub trait AuthFlowManager: Send + Sync {
 /// sanitized flow records for scoped read-model composition, but cannot mutate
 /// auth-flow state or bypass manager validation.
 pub trait AuthFlowRecordSource: Send + Sync {
+    /// Returns a durable snapshot of auth-flow records.
+    ///
+    /// Implementations may return a broader snapshot than the caller's
+    /// current scope. Any consumer that projects these records into
+    /// product/user-facing views must scope-filter before exposing them.
     fn flow_records_snapshot(&self) -> Vec<AuthFlowRecord>;
 }
 

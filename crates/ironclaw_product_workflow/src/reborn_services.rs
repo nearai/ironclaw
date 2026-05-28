@@ -94,6 +94,12 @@ impl GateResolutionRoute {
                 )?;
                 Ok(Self::Auth)
             }
+            status if status.is_terminal() => Err(RebornServicesError::from_status_kind(
+                RebornServicesErrorCode::Conflict,
+                RebornServicesErrorKind::Conflict,
+                409,
+                false,
+            )),
             _ => Ok(Self::from_gate_shape(requested_gate_ref, resolution)),
         }
     }
@@ -1192,6 +1198,9 @@ async fn assert_generic_run_parked_on_gate(
     if state.status == TurnStatus::BlockedAuth {
         return Err(blocked_authentication_unavailable());
     }
+    if state.status == TurnStatus::BlockedApproval {
+        return Err(blocked_approval_unavailable());
+    }
     match state.gate_ref.as_ref() {
         Some(parked) if parked == expected_gate_ref => Ok(()),
         _ => Err(RebornServicesError::from_status_kind(
@@ -1221,6 +1230,9 @@ async fn reject_generic_auth_gate_resolution(
         .map_err(map_turn_error)?;
     if state.status == TurnStatus::BlockedAuth {
         return Err(blocked_authentication_unavailable());
+    }
+    if state.status == TurnStatus::BlockedApproval {
+        return Err(blocked_approval_unavailable());
     }
     Ok(())
 }
@@ -1493,6 +1505,10 @@ fn persistent_approval_unavailable() -> RebornServicesError {
         503,
         false,
     )
+}
+
+fn blocked_approval_unavailable() -> RebornServicesError {
+    persistent_approval_unavailable()
 }
 
 fn blocked_authentication_unavailable() -> RebornServicesError {

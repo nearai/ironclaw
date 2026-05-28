@@ -17,6 +17,7 @@ pub(crate) enum BlockedGateStateError {
     ActorMismatch,
 }
 
+/// Checks the parked run by actor first, then matches status and gate.
 pub(crate) async fn blocked_gate_state(
     turn_coordinator: &dyn TurnCoordinator,
     scope: &TurnScope,
