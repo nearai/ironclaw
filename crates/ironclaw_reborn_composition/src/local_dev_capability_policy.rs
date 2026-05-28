@@ -124,12 +124,18 @@ impl LocalDevCapabilityPolicy {
                         skill_mounts,
                         Some(EffectKind::SpawnProcess),
                     ),
-                    Err(LocalDevCapabilityPolicyError::MissingGrant { .. }) => constraint_terms(
-                        &self.approval_defaults.spawn_capability,
-                        workspace_mounts,
-                        skill_mounts,
-                        None,
-                    ),
+                    Err(LocalDevCapabilityPolicyError::MissingGrant { .. }) => {
+                        tracing::debug!(
+                            %capability,
+                            "local-dev spawn capability approval is using default lease terms"
+                        );
+                        constraint_terms(
+                            &self.approval_defaults.spawn_capability,
+                            workspace_mounts,
+                            skill_mounts,
+                            None,
+                        )
+                    }
                     Err(error) => return Err(error),
                 }
             }
