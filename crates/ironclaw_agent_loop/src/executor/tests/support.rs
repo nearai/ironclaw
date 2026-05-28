@@ -14,14 +14,14 @@ use ironclaw_turns::{
         ContextProfileId, FinalizeAssistantMessage, LoopCancelReasonKind, LoopCancellationPort,
         LoopCancellationSignal, LoopCheckpointKind, LoopCheckpointRequest, LoopCheckpointStateRef,
         LoopCompactionError, LoopCompactionRequest, LoopCompactionResponse, LoopContextBundle,
-        LoopContextCompactionMetadata, LoopContextRequest, LoopDriverId, LoopInputAck,
-        LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopModelMessage,
-        LoopModelRequest, LoopModelResponse, LoopPromptBundle, LoopPromptBundleRef,
-        LoopPromptBundleRequest, LoopRunContext, ModelProfileId, ModelStreamChunk,
-        ParentLoopOutput, ProviderToolCallReplay, RedactedRunProfileProvenance, ResolvedRunProfile,
-        ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
-        RuntimeProfileConstraints, SchedulingClass, StageCheckpointPayloadRequest, SteeringPolicy,
-        VisibleCapabilityRequest, VisibleCapabilitySurface,
+        LoopContextRequest, LoopDriverId, LoopInputAck, LoopInputAckToken, LoopInputBatch,
+        LoopInputCursor, LoopInputCursorToken, LoopModelMessage, LoopModelRequest,
+        LoopModelResponse, LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest,
+        LoopRunContext, ModelProfileId, ModelStreamChunk, ParentLoopOutput, ProviderToolCallReplay,
+        RedactedRunProfileProvenance, ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier,
+        RunClassId, RunProfileFingerprint, RuntimeProfileConstraints, SchedulingClass,
+        StageCheckpointPayloadRequest, SteeringPolicy, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     },
 };
 
@@ -37,6 +37,10 @@ use crate::{
     },
 };
 
+mod compaction;
+
+use compaction::MockCompactionSupport;
+
 #[derive(Clone)]
 pub(super) struct MockHost {
     context: LoopRunContext,
@@ -44,7 +48,7 @@ pub(super) struct MockHost {
     model_errors: Arc<Mutex<VecDeque<AgentLoopHostError>>>,
     model_requests: Arc<Mutex<Vec<LoopModelRequest>>>,
     prompt_requests: Arc<Mutex<Vec<LoopPromptBundleRequest>>>,
-    prompt_compaction_indexes: Arc<Mutex<VecDeque<Vec<LoopContextCompactionMetadata>>>>,
+    compaction: MockCompactionSupport,
     input_batches: Arc<Mutex<VecDeque<LoopInputBatch>>>,
     acked_input_tokens: Arc<Mutex<Vec<LoopInputAckToken>>>,
     batch_outcomes: Arc<Mutex<VecDeque<ironclaw_turns::run_profile::CapabilityBatchOutcome>>>,
@@ -58,8 +62,6 @@ pub(super) struct MockHost {
     prompt_surface_version: Option<CapabilitySurfaceVersion>,
     visible_surface_version: CapabilitySurfaceVersion,
     progress_events: Arc<Mutex<Vec<ironclaw_turns::run_profile::LoopProgressEvent>>>,
-    compaction_result: Arc<Mutex<Result<LoopCompactionResponse, LoopCompactionError>>>,
-    compaction_delay: Arc<Mutex<Option<std::time::Duration>>>,
     fail_progress_port: bool,
     fail_append_result_ref: bool,
     cancellation: Arc<Mutex<Option<LoopCancellationSignal>>>,
@@ -81,7 +83,7 @@ impl MockHost {
             model_errors: Arc::new(Mutex::new(VecDeque::new())),
             model_requests: Arc::new(Mutex::new(Vec::new())),
             prompt_requests: Arc::new(Mutex::new(Vec::new())),
-            prompt_compaction_indexes: Arc::new(Mutex::new(VecDeque::new())),
+            compaction: MockCompactionSupport::new(),
             input_batches: Arc::new(Mutex::new(VecDeque::new())),
             acked_input_tokens: Arc::new(Mutex::new(Vec::new())),
             batch_outcomes: Arc::new(Mutex::new(VecDeque::new())),
@@ -95,8 +97,6 @@ impl MockHost {
             prompt_surface_version: Some(surface_version()),
             visible_surface_version: surface_version(),
             progress_events: Arc::new(Mutex::new(Vec::new())),
-            compaction_result: Arc::new(Mutex::new(Err(LoopCompactionError::InputTooLarge))),
-            compaction_delay: Arc::new(Mutex::new(None)),
             fail_progress_port: false,
             fail_append_result_ref: false,
             cancellation: Arc::new(Mutex::new(None)),
@@ -116,22 +116,6 @@ impl MockHost {
         version: Option<CapabilitySurfaceVersion>,
     ) -> Self {
         self.prompt_surface_version = version;
-        self
-    }
-
-    pub(super) fn with_prompt_compaction_index(
-        self,
-        index: Vec<LoopContextCompactionMetadata>,
-    ) -> Self {
-        *self.prompt_compaction_indexes.lock().expect("lock") = VecDeque::from([index]);
-        self
-    }
-
-    pub(super) fn with_prompt_compaction_indexes(
-        self,
-        indexes: Vec<Vec<LoopContextCompactionMetadata>>,
-    ) -> Self {
-        *self.prompt_compaction_indexes.lock().expect("lock") = indexes.into();
         self
     }
 
@@ -170,19 +154,6 @@ impl MockHost {
 
     pub(super) fn with_failing_prompt_bundle(mut self) -> Self {
         self.fail_prompt_bundle = true;
-        self
-    }
-
-    pub(super) fn with_compaction_result(
-        self,
-        result: Result<LoopCompactionResponse, LoopCompactionError>,
-    ) -> Self {
-        *self.compaction_result.lock().expect("lock") = result;
-        self
-    }
-
-    pub(super) fn with_compaction_delay(self, delay: std::time::Duration) -> Self {
-        *self.compaction_delay.lock().expect("lock") = Some(delay);
         self
     }
 
@@ -429,12 +400,7 @@ impl ironclaw_turns::run_profile::LoopPromptPort for MockHost {
                 content_ref: LoopMessageRef::new("msg:user").expect("valid"),
             }],
             surface_version: self.prompt_surface_version.clone(),
-            compaction_message_index: self
-                .prompt_compaction_indexes
-                .lock()
-                .expect("lock")
-                .pop_front()
-                .unwrap_or_default(),
+            compaction_message_index: self.compaction.next_prompt_index(),
             instruction_fingerprint: None,
             identity_message_count: 0,
             instruction_snippet_count: 0,
@@ -671,13 +637,9 @@ impl ironclaw_turns::run_profile::LoopProgressPort for MockHost {
 impl ironclaw_turns::run_profile::LoopCompactionPort for MockHost {
     async fn compact_loop_context(
         &self,
-        _request: LoopCompactionRequest,
+        request: LoopCompactionRequest,
     ) -> Result<LoopCompactionResponse, LoopCompactionError> {
-        let delay = *self.compaction_delay.lock().expect("lock");
-        if let Some(delay) = delay {
-            tokio::time::sleep(delay).await;
-        }
-        self.compaction_result.lock().expect("lock").clone()
+        self.compaction.compact_loop_context(request).await
     }
 }
 
