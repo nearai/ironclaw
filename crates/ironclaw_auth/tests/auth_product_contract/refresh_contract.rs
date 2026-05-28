@@ -1,4 +1,68 @@
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
+
 use crate::common::*;
+use async_trait::async_trait;
+use ironclaw_auth::{OAuthProviderRefresh, ProviderBackedCredentialAccountService};
+use tokio::sync::Notify;
+
+struct BlockingRefreshProvider {
+    inner: Arc<InMemoryAuthProductServices>,
+    refresh_calls: AtomicUsize,
+    refresh_started: Notify,
+    release_refresh: Notify,
+    refresh_released: AtomicBool,
+}
+
+impl BlockingRefreshProvider {
+    fn new(inner: Arc<InMemoryAuthProductServices>) -> Self {
+        Self {
+            inner,
+            refresh_calls: AtomicUsize::new(0),
+            refresh_started: Notify::new(),
+            release_refresh: Notify::new(),
+            refresh_released: AtomicBool::new(false),
+        }
+    }
+
+    fn refresh_call_count(&self) -> usize {
+        self.refresh_calls.load(Ordering::SeqCst)
+    }
+
+    async fn wait_for_first_refresh_start(&self) {
+        self.refresh_started.notified().await;
+    }
+
+    fn release_refresh(&self) {
+        self.refresh_released.store(true, Ordering::SeqCst);
+        self.release_refresh.notify_waiters();
+    }
+}
+
+#[async_trait]
+impl AuthProviderClient for BlockingRefreshProvider {
+    async fn exchange_callback(
+        &self,
+        context: ironclaw_auth::OAuthProviderExchangeContext,
+        request: ironclaw_auth::OAuthProviderCallbackRequest,
+    ) -> Result<ironclaw_auth::OAuthProviderExchange, AuthProductError> {
+        self.inner.exchange_callback(context, request).await
+    }
+
+    async fn refresh_token(
+        &self,
+        request: OAuthProviderRefreshRequest,
+    ) -> Result<OAuthProviderRefresh, AuthProductError> {
+        self.refresh_calls.fetch_add(1, Ordering::SeqCst);
+        self.refresh_started.notify_one();
+        while !self.refresh_released.load(Ordering::SeqCst) {
+            self.release_refresh.notified().await;
+        }
+        self.inner.refresh_token(request).await
+    }
+}
 
 #[tokio::test]
 async fn credential_refresh_updates_account_through_provider_boundary() {
@@ -121,6 +185,88 @@ async fn credential_refresh_failure_becomes_recoverable_status() {
     assert!(!serialized.contains("github-refresh-fail-refresh"));
     assert!(!serialized.contains("RAW_PROVIDER_ERROR_SENTINEL"));
     assert!(!serialized.contains("/host/path"));
+}
+
+#[tokio::test]
+async fn concurrent_refreshes_for_same_account_are_single_flight() {
+    let services = Arc::new(InMemoryAuthProductServices::new());
+    let provider_client = Arc::new(BlockingRefreshProvider::new(services.clone()));
+    let auth = Arc::new(ProviderBackedCredentialAccountService::new(
+        services.clone(),
+        services.clone(),
+        provider_client.clone(),
+    ));
+
+    let owner = scope("alice");
+    let account = auth
+        .create_account(NewCredentialAccount {
+            scope: owner.clone(),
+            provider: provider(),
+            label: label("work"),
+            status: CredentialAccountStatus::Expired,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("github-concurrent-access").unwrap()),
+            refresh_secret: Some(SecretHandle::new("github-concurrent-refresh").unwrap()),
+            scopes: provider_scopes(&["repo"]),
+        })
+        .await
+        .expect("expired account");
+
+    let first_refresh = {
+        let auth = auth.clone();
+        let owner = owner.clone();
+        tokio::spawn(async move {
+            auth.refresh_account(CredentialRefreshRequest::new(owner, provider(), account.id))
+                .await
+        })
+    };
+
+    provider_client.wait_for_first_refresh_start().await;
+
+    let second_refresh = {
+        let auth = auth.clone();
+        let owner = owner.clone();
+        tokio::spawn(async move {
+            auth.refresh_account(CredentialRefreshRequest::new(owner, provider(), account.id))
+                .await
+        })
+    };
+
+    for _ in 0..5 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(provider_client.refresh_call_count(), 1);
+
+    provider_client.release_refresh();
+
+    let first_report = first_refresh
+        .await
+        .expect("first refresh task")
+        .expect("first refresh");
+    let second_report = second_refresh
+        .await
+        .expect("second refresh task")
+        .expect("second refresh");
+
+    assert!(first_report.refreshed);
+    assert!(!second_report.refreshed);
+    assert_eq!(provider_client.refresh_call_count(), 1);
+
+    let stored = auth
+        .get_account(CredentialAccountLookupRequest::new(
+            owner.clone(),
+            account.id,
+        ))
+        .await
+        .expect("lookup")
+        .expect("refreshed account");
+    assert_eq!(stored.status, CredentialAccountStatus::Configured);
+    assert_eq!(
+        second_report.account.status,
+        CredentialAccountStatus::Configured
+    );
 }
 
 #[tokio::test]

@@ -65,11 +65,29 @@ impl GoogleCredentialResolver {
                 &provider,
             )
             .await?;
+        self.resolve_account(
+            scope,
+            requester_extension,
+            selected_account.id,
+            required_scopes,
+        )
+        .await
+    }
+
+    pub async fn resolve_account(
+        &self,
+        scope: &ResourceScope,
+        requester_extension: &ExtensionId,
+        account_id: CredentialAccountId,
+        required_scopes: &[ProviderScope],
+    ) -> Result<GoogleCredential, GoogleCredentialError> {
+        let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+        let provider = google_provider_id()?;
         let account = self
             .recoverable_lookup(
                 self.accounts
                     .get_account(
-                        CredentialAccountLookupRequest::new(auth_scope, selected_account.id)
+                        CredentialAccountLookupRequest::new(auth_scope, account_id)
                             .for_extension(requester_extension.clone()),
                     )
                     .await,

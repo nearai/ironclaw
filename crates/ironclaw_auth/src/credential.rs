@@ -1,9 +1,9 @@
-use std::fmt;
-use std::sync::Arc;
+use std::{collections::HashMap, fmt, sync::Arc, sync::Mutex};
 
 use async_trait::async_trait;
 use ironclaw_host_api::{ExtensionId, SecretHandle};
 use serde::{Deserialize, Serialize};
+use tokio::sync::OwnedMutexGuard;
 
 use crate::{
     AuthProductError, AuthProviderClient, CredentialAccountId, CredentialAccountLabel,
@@ -525,6 +525,7 @@ pub struct ProviderBackedCredentialAccountService {
     accounts: Arc<dyn CredentialAccountService>,
     setup: Arc<dyn CredentialSetupService>,
     provider: Arc<dyn AuthProviderClient>,
+    refresh_locks: Mutex<HashMap<CredentialAccountId, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl ProviderBackedCredentialAccountService {
@@ -537,7 +538,23 @@ impl ProviderBackedCredentialAccountService {
             accounts,
             setup,
             provider,
+            refresh_locks: Mutex::new(HashMap::new()),
         }
+    }
+
+    fn refresh_lock(&self, account_id: CredentialAccountId) -> Arc<tokio::sync::Mutex<()>> {
+        let mut refresh_locks = self
+            .refresh_locks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        refresh_locks
+            .entry(account_id)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    async fn acquire_refresh_lock(&self, account_id: CredentialAccountId) -> OwnedMutexGuard<()> {
+        self.refresh_lock(account_id).lock_owned().await
     }
 
     fn validate_refresh_target(
@@ -670,6 +687,17 @@ impl CredentialAccountService for ProviderBackedCredentialAccountService {
         &self,
         request: CredentialRefreshRequest,
     ) -> Result<CredentialRefreshReport, AuthProductError> {
+        let initial_account = self
+            .accounts
+            .get_account(CredentialAccountLookupRequest::new(
+                request.scope.clone(),
+                request.account_id,
+            ))
+            .await?
+            .ok_or(AuthProductError::CredentialMissing)?;
+        Self::validate_refresh_target(&initial_account, &request)?;
+        let _refresh_lock = self.acquire_refresh_lock(initial_account.id).await;
+
         let account = self
             .accounts
             .get_account(CredentialAccountLookupRequest::new(
@@ -678,7 +706,10 @@ impl CredentialAccountService for ProviderBackedCredentialAccountService {
             ))
             .await?
             .ok_or(AuthProductError::CredentialMissing)?;
-        Self::validate_refresh_target(&account, &request)?;
+        if account != initial_account {
+            return self.report_for(&account, false).await;
+        }
+
         let Some(refresh_secret) = account.refresh_secret.clone() else {
             let updated = self
                 .accounts
@@ -709,9 +740,8 @@ impl CredentialAccountService for ProviderBackedCredentialAccountService {
                     ))
                     .await?
                     .ok_or(AuthProductError::CredentialMissing)?;
-                Self::validate_refresh_target(&current, &request)?;
-                if current.refresh_secret.as_ref() != Some(&refresh_secret) {
-                    return Err(AuthProductError::RefreshFailed);
+                if current != account {
+                    return self.report_for(&current, false).await;
                 }
                 if refresh.provider != current.provider {
                     return Err(AuthProductError::CrossScopeDenied);
@@ -740,19 +770,18 @@ impl CredentialAccountService for ProviderBackedCredentialAccountService {
                     ))
                     .await?
                     .ok_or(AuthProductError::CredentialMissing)?;
-                Self::validate_refresh_target(&current, &request)?;
-                if current.refresh_secret.as_ref() == Some(&refresh_secret) {
-                    let updated = self
-                        .accounts
-                        .update_status(
-                            &request.scope,
-                            request.account_id,
-                            CredentialAccountStatus::RefreshFailed,
-                        )
-                        .await?;
-                    return self.report_for(&updated, false).await;
+                if current != account {
+                    return self.report_for(&current, false).await;
                 }
-                self.report_for(&current, false).await
+                let updated = self
+                    .accounts
+                    .update_status(
+                        &request.scope,
+                        request.account_id,
+                        CredentialAccountStatus::RefreshFailed,
+                    )
+                    .await?;
+                return self.report_for(&updated, false).await;
             }
             Err(error) => Err(error),
         }

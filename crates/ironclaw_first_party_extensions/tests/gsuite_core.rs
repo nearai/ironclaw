@@ -1,11 +1,17 @@
 mod support;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use ironclaw_auth::{
-    AuthProviderId, CredentialAccountLabel, CredentialAccountStatus, CredentialOwnership,
-    GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_GMAIL_MODIFY_SCOPE, GOOGLE_GMAIL_READONLY_SCOPE,
-    GOOGLE_GMAIL_SEND_SCOPE, InMemoryAuthProductServices, NewCredentialAccount,
+    AuthProductError, AuthProductScope, AuthProviderId, CredentialAccount,
+    CredentialAccountChoiceRequest, CredentialAccountLabel, CredentialAccountListPage,
+    CredentialAccountListRequest, CredentialAccountLookupRequest, CredentialAccountProjection,
+    CredentialAccountSelectionRequest, CredentialAccountStatus, CredentialOwnership,
+    CredentialRecoveryProjection, CredentialRecoveryRequest, CredentialRefreshReport,
+    CredentialRefreshRequest, GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_GMAIL_MODIFY_SCOPE,
+    GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE, InMemoryAuthProductServices,
+    NewCredentialAccount,
 };
 use ironclaw_first_party_extensions::{
     CALENDAR_ADD_ATTENDEES_CAPABILITY_ID, CALENDAR_CREATE_EVENT_CAPABILITY_ID,
@@ -180,6 +186,139 @@ async fn gsuite_handler_refreshes_expired_google_token_once_and_retries() {
 }
 
 #[tokio::test]
+async fn gsuite_handler_refresh_retries_with_the_same_account_after_account_selection_changes() {
+    let scope = scope();
+    let seed_auth = InMemoryAuthProductServices::new();
+    let initial_account = ironclaw_auth::CredentialAccountService::create_account(
+        &seed_auth,
+        NewCredentialAccount {
+            scope: auth_scope(&scope),
+            provider: google_provider_id().unwrap(),
+            label: CredentialAccountLabel::new("work google").unwrap(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("google-old-access").unwrap()),
+            refresh_secret: Some(SecretHandle::new("google-old-refresh").unwrap()),
+            scopes: vec![provider_scope(GOOGLE_GMAIL_SEND_SCOPE)],
+        },
+    )
+    .await
+    .unwrap();
+    let alternate_account = ironclaw_auth::CredentialAccountService::create_account(
+        &seed_auth,
+        NewCredentialAccount {
+            scope: auth_scope(&scope),
+            provider: google_provider_id().unwrap(),
+            label: CredentialAccountLabel::new("personal google").unwrap(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("google-other-access").unwrap()),
+            refresh_secret: Some(SecretHandle::new("google-other-refresh").unwrap()),
+            scopes: vec![provider_scope(GOOGLE_GMAIL_SEND_SCOPE)],
+        },
+    )
+    .await
+    .unwrap();
+    let auth = Arc::new(AccountSwitchingAuthService::new(
+        initial_account.clone(),
+        alternate_account.clone(),
+    ));
+    let egress = Arc::new(RecordingEgress::with_responses(vec![
+        RecordingEgress::json_status(
+            401,
+            json!({"error":{"status":"UNAUTHENTICATED","message":"expired"}}),
+        ),
+        RecordingEgress::json(json!({"id":"sent-after-refresh"})),
+    ]));
+    let capability_id = capability_id(GMAIL_SEND_MESSAGE_CAPABILITY_ID);
+
+    let output = GsuiteExecutor::new(auth.clone())
+        .dispatch(GsuiteDispatchRequest {
+            capability_id: &capability_id,
+            scope: &scope,
+            input: &json!({ "message": { "raw": "base64url-rfc822" } }),
+            runtime_http_egress: egress.clone(),
+        })
+        .await
+        .unwrap()
+        .output;
+
+    assert_eq!(output["status"], 200);
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0].credential_injections[0].handle,
+        SecretHandle::new("google-old-access").unwrap()
+    );
+    assert_eq!(
+        requests[1].credential_injections[0].handle,
+        SecretHandle::new("google-refreshed-access").unwrap()
+    );
+    let state = auth.state.lock().expect("auth state");
+    assert_eq!(state.select_unique_calls, 1);
+    assert_eq!(state.refresh_calls, 1);
+    assert_eq!(state.initial_account.id, initial_account.id);
+    assert_eq!(state.alternate_account.id, alternate_account.id);
+}
+
+#[tokio::test]
+async fn gsuite_handler_does_not_refresh_on_non_401_unauthenticated_response() {
+    let scope = scope();
+    let auth = Arc::new(InMemoryAuthProductServices::new());
+    ironclaw_auth::CredentialAccountService::create_account(
+        auth.as_ref(),
+        NewCredentialAccount {
+            scope: auth_scope(&scope),
+            provider: google_provider_id().unwrap(),
+            label: CredentialAccountLabel::new("work google").unwrap(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("google-old-access").unwrap()),
+            refresh_secret: Some(SecretHandle::new("google-old-refresh").unwrap()),
+            scopes: vec![provider_scope(GOOGLE_GMAIL_SEND_SCOPE)],
+        },
+    )
+    .await
+    .unwrap();
+    let egress = Arc::new(RecordingEgress::with_responses(vec![
+        RecordingEgress::json_status(
+            403,
+            json!({"error":{"status":"UNAUTHENTICATED","message":"expired"}}),
+        ),
+    ]));
+
+    let output = dispatch_ok(
+        auth.clone(),
+        scope.clone(),
+        GMAIL_SEND_MESSAGE_CAPABILITY_ID,
+        json!({ "message": { "raw": "base64url-rfc822" } }),
+        egress.clone(),
+    )
+    .await;
+
+    assert_eq!(output["status"], 403);
+    assert_eq!(output["body"]["error"]["status"], "UNAUTHENTICATED");
+    assert_eq!(egress.requests().len(), 1);
+    let account = ironclaw_auth::CredentialAccountService::select_unique_configured_account(
+        auth.as_ref(),
+        ironclaw_auth::CredentialAccountSelectionRequest::new(
+            auth_scope(&scope),
+            google_provider_id().unwrap(),
+        )
+        .for_extension(ExtensionId::new("gmail").unwrap()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(account.status, CredentialAccountStatus::Configured);
+}
+
+#[tokio::test]
 async fn gsuite_handler_errors_when_refresh_retry_is_still_auth_expired() {
     let scope = scope();
     let auth = Arc::new(InMemoryAuthProductServices::new());
@@ -232,6 +371,139 @@ async fn gsuite_handler_errors_when_refresh_retry_is_still_auth_expired() {
         error.usage().map(|usage| usage.network_egress_bytes),
         Some(246)
     );
+}
+
+struct AccountSwitchingAuthService {
+    state: Mutex<AccountSwitchingAuthState>,
+}
+
+struct AccountSwitchingAuthState {
+    initial_account: CredentialAccount,
+    alternate_account: CredentialAccount,
+    select_unique_calls: usize,
+    refresh_calls: usize,
+}
+
+impl AccountSwitchingAuthService {
+    fn new(initial_account: CredentialAccount, alternate_account: CredentialAccount) -> Self {
+        Self {
+            state: Mutex::new(AccountSwitchingAuthState {
+                initial_account,
+                alternate_account,
+                select_unique_calls: 0,
+                refresh_calls: 0,
+            }),
+        }
+    }
+}
+
+#[async_trait]
+impl ironclaw_auth::CredentialAccountService for AccountSwitchingAuthService {
+    async fn create_account(
+        &self,
+        _request: NewCredentialAccount,
+    ) -> Result<CredentialAccount, AuthProductError> {
+        Err(AuthProductError::BackendUnavailable)
+    }
+
+    async fn get_account(
+        &self,
+        request: CredentialAccountLookupRequest,
+    ) -> Result<Option<CredentialAccount>, AuthProductError> {
+        let state = self.state.lock().expect("auth state");
+        Ok(if request.account_id == state.initial_account.id {
+            Some(state.initial_account.clone())
+        } else if request.account_id == state.alternate_account.id {
+            Some(state.alternate_account.clone())
+        } else {
+            None
+        })
+    }
+
+    async fn list_accounts(
+        &self,
+        _request: CredentialAccountListRequest,
+    ) -> Result<CredentialAccountListPage, AuthProductError> {
+        let state = self.state.lock().expect("auth state");
+        Ok(CredentialAccountListPage {
+            accounts: vec![
+                state.initial_account.projection(),
+                state.alternate_account.projection(),
+            ],
+            next_cursor: None,
+        })
+    }
+
+    async fn update_status(
+        &self,
+        _scope: &AuthProductScope,
+        account_id: ironclaw_auth::CredentialAccountId,
+        status: CredentialAccountStatus,
+    ) -> Result<CredentialAccount, AuthProductError> {
+        let mut state = self.state.lock().expect("auth state");
+        let account = if account_id == state.initial_account.id {
+            &mut state.initial_account
+        } else if account_id == state.alternate_account.id {
+            &mut state.alternate_account
+        } else {
+            return Err(AuthProductError::CredentialMissing);
+        };
+        account.status = status;
+        Ok(account.clone())
+    }
+
+    async fn select_unique_configured_account(
+        &self,
+        _request: CredentialAccountSelectionRequest,
+    ) -> Result<CredentialAccountProjection, AuthProductError> {
+        let mut state = self.state.lock().expect("auth state");
+        state.select_unique_calls += 1;
+        Ok(if state.select_unique_calls == 1 {
+            state.initial_account.projection()
+        } else {
+            state.alternate_account.projection()
+        })
+    }
+
+    async fn project_credential_recovery(
+        &self,
+        _request: CredentialRecoveryRequest,
+    ) -> Result<CredentialRecoveryProjection, AuthProductError> {
+        let state = self.state.lock().expect("auth state");
+        Ok(CredentialRecoveryProjection::configured(
+            google_provider_id().unwrap(),
+            state.initial_account.projection(),
+        ))
+    }
+
+    async fn select_configured_account(
+        &self,
+        _request: CredentialAccountChoiceRequest,
+    ) -> Result<CredentialAccountProjection, AuthProductError> {
+        Err(AuthProductError::BackendUnavailable)
+    }
+
+    async fn refresh_account(
+        &self,
+        request: CredentialRefreshRequest,
+    ) -> Result<CredentialRefreshReport, AuthProductError> {
+        let mut state = self.state.lock().expect("auth state");
+        state.refresh_calls += 1;
+        if request.account_id != state.initial_account.id {
+            return Err(AuthProductError::CredentialMissing);
+        }
+        state.initial_account.access_secret =
+            Some(SecretHandle::new("google-refreshed-access").unwrap());
+        let account = state.initial_account.clone();
+        Ok(CredentialRefreshReport {
+            account: account.projection(),
+            recovery: CredentialRecoveryProjection::configured(
+                google_provider_id().unwrap(),
+                account.projection(),
+            ),
+            refreshed: true,
+        })
+    }
 }
 
 #[tokio::test]

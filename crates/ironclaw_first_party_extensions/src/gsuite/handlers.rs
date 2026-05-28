@@ -87,7 +87,7 @@ impl GsuiteExecutor {
                 })?;
             let refreshed = self
                 .resolver
-                .resolve(request.scope, &extension, &scopes)
+                .resolve_account(request.scope, &extension, credential.account_id, &scopes)
                 .await
                 .map_err(|error| {
                     add_network_usage(map_credential_error(error), network_egress_bytes)
@@ -301,15 +301,7 @@ fn is_google_auth_expired_response(
     if (200..300).contains(&response.status) {
         return false;
     }
-    if response.status == 401 {
-        return true;
-    }
-    let Ok(body) = response_body_json(response) else {
-        return false;
-    };
-    body.pointer("/error/status")
-        .and_then(Value::as_str)
-        .is_some_and(|status| status == "UNAUTHENTICATED")
+    response.status == 401
 }
 
 fn required_provider_scopes(
