@@ -335,26 +335,14 @@ fn output_preview_from_display(value: &CapabilityDisplayOutputPreview) -> Output
         .output_summary
         .as_deref()
         .map(|summary| bounded_display_text(summary, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES));
+    let summary_truncated = summary.as_ref().is_some_and(|summary| summary.truncated);
     let preview = bounded_preview_text(&value.output_preview);
     OutputPreview {
         summary: summary.and_then(|summary| non_empty(summary.text)),
         preview: non_empty(preview.text),
-        kind: safe_output_kind(&value.output_kind).unwrap_or_else(|| "text".to_string()),
-        truncated: value.truncated || preview.truncated,
+        kind: value.output_kind.as_str().to_string(),
+        truncated: value.truncated || summary_truncated || preview.truncated,
     }
-}
-
-fn safe_output_kind(kind: &str) -> Option<String> {
-    if kind.is_empty()
-        || kind.len() > ironclaw_product_adapters::CAPABILITY_DISPLAY_KIND_MAX_BYTES
-        || !kind.as_bytes()[0].is_ascii_lowercase()
-        || kind
-            .bytes()
-            .any(|byte| !byte.is_ascii_lowercase() && !byte.is_ascii_digit() && byte != b'_')
-    {
-        return None;
-    }
-    Some(kind.to_string())
 }
 
 #[derive(Debug, Clone)]

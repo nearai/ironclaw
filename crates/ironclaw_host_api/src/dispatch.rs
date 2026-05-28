@@ -14,6 +14,64 @@ use crate::{
 };
 
 pub const CAPABILITY_DISPLAY_OUTPUT_PREVIEW_MAX_BYTES: usize = 16 * 1024;
+pub const CAPABILITY_DISPLAY_OUTPUT_KIND_MAX_BYTES: usize = 32;
+
+/// Renderer-oriented output preview kind.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CapabilityDisplayOutputKind(String);
+
+impl CapabilityDisplayOutputKind {
+    pub fn new(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        if !is_valid_display_output_kind(&value) {
+            return Err(value);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn text() -> Self {
+        Self("text".to_string())
+    }
+
+    pub fn unified_diff() -> Self {
+        Self("unified_diff".to_string())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for CapabilityDisplayOutputKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl TryFrom<String> for CapabilityDisplayOutputKind {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<&str> for CapabilityDisplayOutputKind {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+fn is_valid_display_output_kind(kind: &str) -> bool {
+    !kind.is_empty()
+        && kind.len() <= CAPABILITY_DISPLAY_OUTPUT_KIND_MAX_BYTES
+        && kind.as_bytes()[0].is_ascii_lowercase()
+        && kind
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
 
 /// Request for one already-authorized declared capability dispatch.
 #[derive(Debug, Clone, PartialEq)]
@@ -34,7 +92,7 @@ pub struct CapabilityDispatchRequest {
 pub struct CapabilityDisplayOutputPreview {
     pub output_summary: Option<String>,
     pub output_preview: String,
-    pub output_kind: String,
+    pub output_kind: CapabilityDisplayOutputKind,
     pub subtitle: Option<String>,
     pub truncated: bool,
 }
@@ -232,4 +290,22 @@ pub trait CapabilityDispatcher: Send + Sync {
         &self,
         request: CapabilityDispatchRequest,
     ) -> Result<CapabilityDispatchResult, DispatchError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CapabilityDisplayOutputKind;
+
+    #[test]
+    fn display_output_kind_accepts_renderer_tokens() {
+        let kind = CapabilityDisplayOutputKind::new("unified_diff").unwrap();
+        assert_eq!(kind.as_str(), "unified_diff");
+    }
+
+    #[test]
+    fn display_output_kind_rejects_invalid_tokens() {
+        for value in ["", "bad/kind", "BadKind", "_kind", "x-y"] {
+            assert!(CapabilityDisplayOutputKind::new(value).is_err());
+        }
+    }
 }

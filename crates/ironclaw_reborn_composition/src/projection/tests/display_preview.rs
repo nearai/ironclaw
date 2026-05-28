@@ -1,5 +1,6 @@
 use super::*;
-use ironclaw_host_api::CapabilityDisplayOutputPreview;
+use ironclaw_host_api::{CapabilityDisplayOutputKind, CapabilityDisplayOutputPreview};
+use ironclaw_product_adapters::CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES;
 use ironclaw_turns::run_profile::CapabilityInputRef;
 
 fn preview_input_ref(label: &str) -> CapabilityInputRef {
@@ -581,10 +582,10 @@ async fn capability_display_preview_store_preserves_long_line_counts() {
 }
 
 #[tokio::test]
-async fn capability_display_preview_store_normalizes_invalid_side_channel_kind() {
+async fn capability_display_preview_store_marks_truncated_side_channel_summary() {
     let run_id = TurnRunId::new();
     let capability = CapabilityId::new("builtin.write_file").unwrap();
-    let input_ref = preview_input_ref("invalid-kind-preview-input");
+    let input_ref = preview_input_ref("long-summary-preview-input");
     let invocation_id = InvocationId::new();
     let store = CapabilityDisplayPreviewStore::default();
     store.record_result_with_preview(
@@ -593,14 +594,14 @@ async fn capability_display_preview_store_normalizes_invalid_side_channel_kind()
             input_ref: &input_ref,
             invocation_id,
             capability_id: &capability,
-            result_ref: "result:invalid-kind-preview",
+            result_ref: "result:long-summary-preview",
             output: &serde_json::json!({"success": true}),
             output_bytes: 32,
         },
         Some(&CapabilityDisplayOutputPreview {
-            output_summary: Some("Edited 1 file: +1/-1".to_string()),
+            output_summary: Some("x".repeat(CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES + 1)),
             output_preview: "--- a/workspace/main.rs\n+++ b/workspace/main.rs\n".to_string(),
-            output_kind: "bad/kind".to_string(),
+            output_kind: CapabilityDisplayOutputKind::unified_diff(),
             subtitle: Some("/workspace/main.rs".to_string()),
             truncated: false,
         }),
@@ -625,8 +626,9 @@ async fn capability_display_preview_store_normalizes_invalid_side_channel_kind()
         .unwrap()
         .unwrap();
 
-    assert_eq!(preview.output_kind.as_deref(), Some("text"));
+    assert_eq!(preview.output_kind.as_deref(), Some("unified_diff"));
     assert_eq!(preview.subtitle.as_deref(), Some("/workspace/main.rs"));
+    assert!(preview.truncated);
 }
 
 #[tokio::test]

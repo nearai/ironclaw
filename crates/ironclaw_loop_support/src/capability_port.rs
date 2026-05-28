@@ -4305,11 +4305,19 @@ mod tests {
     #[derive(Default)]
     struct RecordingResultWriter {
         records: Mutex<Vec<(CapabilityId, serde_json::Value)>>,
+        display_previews: Mutex<Vec<Option<CapabilityDisplayOutputPreview>>>,
     }
 
     impl RecordingResultWriter {
         fn records(&self) -> Vec<(CapabilityId, serde_json::Value)> {
             self.records.lock().expect("records lock").clone()
+        }
+
+        fn display_previews(&self) -> Vec<Option<CapabilityDisplayOutputPreview>> {
+            self.display_previews
+                .lock()
+                .expect("display previews lock")
+                .clone()
         }
     }
 
@@ -4323,6 +4331,10 @@ mod tests {
                 .lock()
                 .expect("records lock")
                 .push((write.capability_id.clone(), write.output));
+            self.display_previews
+                .lock()
+                .expect("display previews lock")
+                .push(write.display_preview);
             LoopResultRef::new("result:capability-info").map_err(|_| {
                 AgentLoopHostError::new(
                     AgentLoopHostErrorKind::Internal,

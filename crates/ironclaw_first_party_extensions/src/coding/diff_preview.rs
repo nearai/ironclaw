@@ -1,24 +1,43 @@
 use ironclaw_host_api::{
-    CAPABILITY_DISPLAY_OUTPUT_PREVIEW_MAX_BYTES, CapabilityDisplayOutputPreview,
+    CAPABILITY_DISPLAY_OUTPUT_PREVIEW_MAX_BYTES, CapabilityDisplayOutputKind,
+    CapabilityDisplayOutputPreview,
 };
 use similar::{ChangeTag, TextDiff};
 
 const DIFF_CONTEXT_LINES: usize = 3;
+const DIFF_PREVIEW_DETAILED_INPUT_MAX_BYTES: usize = 256 * 1024;
 
 pub(super) fn file_diff_preview(
     path: &str,
     old_content: &str,
     new_content: &str,
 ) -> CapabilityDisplayOutputPreview {
-    let diff = TextDiff::from_lines(old_content, new_content);
     let diff_path = path.trim_start_matches('/');
+    if old_content.len().saturating_add(new_content.len()) > DIFF_PREVIEW_DETAILED_INPUT_MAX_BYTES {
+        return large_diff_preview(path, diff_path);
+    }
+
+    let diff = TextDiff::from_lines(old_content, new_content);
     let mut output = String::new();
     output.push_str(&format!("--- a/{diff_path}\n"));
     output.push_str(&format!("+++ b/{diff_path}\n"));
 
     let mut additions = 0usize;
     let mut deletions = 0usize;
+    for change in diff.iter_all_changes() {
+        match change.tag() {
+            ChangeTag::Delete => deletions += 1,
+            ChangeTag::Insert => additions += 1,
+            ChangeTag::Equal => {}
+        }
+    }
+
+    let mut truncated = false;
     for group in diff.grouped_ops(DIFF_CONTEXT_LINES) {
+        if output.len() >= CAPABILITY_DISPLAY_OUTPUT_PREVIEW_MAX_BYTES {
+            truncated = true;
+            break;
+        }
         let Some(first_op) = group.first() else {
             continue;
         };
@@ -36,17 +55,18 @@ pub(super) fn file_diff_preview(
         for op in group {
             for change in diff.iter_changes(&op) {
                 let prefix = match change.tag() {
-                    ChangeTag::Delete => {
-                        deletions += 1;
-                        '-'
-                    }
-                    ChangeTag::Insert => {
-                        additions += 1;
-                        '+'
-                    }
+                    ChangeTag::Delete => '-',
+                    ChangeTag::Insert => '+',
                     ChangeTag::Equal => ' ',
                 };
                 push_diff_line(&mut output, prefix, change.value());
+                if output.len() >= CAPABILITY_DISPLAY_OUTPUT_PREVIEW_MAX_BYTES {
+                    truncated = true;
+                    break;
+                }
+            }
+            if truncated {
+                break;
             }
         }
     }
@@ -55,9 +75,21 @@ pub(super) fn file_diff_preview(
     CapabilityDisplayOutputPreview {
         output_summary: Some(format!("Edited 1 file: +{additions}/-{deletions}")),
         output_preview: bounded.text,
-        output_kind: "unified_diff".to_string(),
+        output_kind: CapabilityDisplayOutputKind::unified_diff(),
         subtitle: Some(path.to_string()),
-        truncated: bounded.truncated,
+        truncated: truncated || bounded.truncated,
+    }
+}
+
+fn large_diff_preview(path: &str, diff_path: &str) -> CapabilityDisplayOutputPreview {
+    CapabilityDisplayOutputPreview {
+        output_summary: Some("Edited 1 file (large diff preview omitted)".to_string()),
+        output_preview: format!(
+            "--- a/{diff_path}\n+++ b/{diff_path}\n@@ large diff preview omitted @@\n"
+        ),
+        output_kind: CapabilityDisplayOutputKind::unified_diff(),
+        subtitle: Some(path.to_string()),
+        truncated: true,
     }
 }
 
@@ -108,7 +140,7 @@ mod tests {
             "fn main() {\n    new();\n}\n",
         );
 
-        assert_eq!(preview.output_kind, "unified_diff");
+        assert_eq!(preview.output_kind.as_str(), "unified_diff");
         assert_eq!(
             preview.output_summary.as_deref(),
             Some("Edited 1 file: +1/-1")
@@ -139,6 +171,48 @@ mod tests {
             !preview
                 .output_preview
                 .contains("-three\n-four\n-five\n-six")
+        );
+    }
+
+    #[test]
+    fn file_diff_preview_truncates_on_utf8_boundary() {
+        let old_content = (0..2000)
+            .map(|index| format!("old-{index}-é\n"))
+            .collect::<String>();
+        let new_content = (0..2000)
+            .map(|index| format!("new-{index}-é\n"))
+            .collect::<String>();
+
+        let preview = file_diff_preview("src/main.rs", &old_content, &new_content);
+
+        assert!(preview.truncated);
+        assert!(
+            preview
+                .output_preview
+                .is_char_boundary(preview.output_preview.len())
+        );
+        assert!(
+            preview.output_preview.len()
+                <= ironclaw_host_api::CAPABILITY_DISPLAY_OUTPUT_PREVIEW_MAX_BYTES
+        );
+    }
+
+    #[test]
+    fn file_diff_preview_omits_detailed_diff_for_large_inputs() {
+        let old_content = "old\n".repeat(80 * 1024);
+        let new_content = "new\n".repeat(80 * 1024);
+
+        let preview = file_diff_preview("src/main.rs", &old_content, &new_content);
+
+        assert!(preview.truncated);
+        assert_eq!(
+            preview.output_summary.as_deref(),
+            Some("Edited 1 file (large diff preview omitted)")
+        );
+        assert!(
+            preview
+                .output_preview
+                .contains("large diff preview omitted")
         );
     }
 }

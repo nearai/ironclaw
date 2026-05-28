@@ -277,11 +277,48 @@ async fn builtin_write_file_returns_unified_diff_display_preview() {
     let preview = completed
         .display_preview
         .expect("write_file should attach display preview");
-    assert_eq!(preview.output_kind, "unified_diff");
+    assert_eq!(preview.output_kind.as_str(), "unified_diff");
     assert_eq!(preview.subtitle.as_deref(), Some("/workspace/main.rs"));
     assert!(preview.output_preview.contains("--- a/workspace/main.rs"));
     assert!(preview.output_preview.contains("-    old();"));
     assert!(preview.output_preview.contains("+    new();"));
+}
+
+#[tokio::test]
+async fn builtin_write_file_does_not_read_existing_content_for_write_only_mount() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("main.rs"), "secret-old-content\n").unwrap();
+
+    let permissions = MountPermissions {
+        read: false,
+        write: true,
+        delete: false,
+        list: false,
+        execute: false,
+    };
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), permissions);
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+
+    let completed = invoke_completed_with_context(
+        &runtime,
+        WRITE_FILE_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/main.rs",
+            "content": "replacement\n"
+        }),
+        context,
+    )
+    .await;
+
+    assert!(
+        completed.display_preview.is_none(),
+        "write-only authority must not expose old file contents through a diff preview"
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("main.rs")).unwrap(),
+        "replacement\n"
+    );
 }
 
 #[tokio::test]
@@ -317,7 +354,7 @@ async fn builtin_apply_patch_returns_unified_diff_display_preview() {
     let preview = completed
         .display_preview
         .expect("apply_patch should attach display preview");
-    assert_eq!(preview.output_kind, "unified_diff");
+    assert_eq!(preview.output_kind.as_str(), "unified_diff");
     assert_eq!(
         preview.output_summary.as_deref(),
         Some("Edited 1 file: +1/-1")

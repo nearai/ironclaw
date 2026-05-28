@@ -5,7 +5,8 @@ mod tests {
     use super::super::*;
 
     use ironclaw_host_api::{
-        AgentId, CapabilityDisplayOutputPreview, MountPermissions, ProjectId, TenantId, ThreadId,
+        AgentId, CapabilityDisplayOutputKind, CapabilityDisplayOutputPreview, MountPermissions,
+        ProjectId, TenantId, ThreadId,
     };
     use ironclaw_host_runtime::SPAWN_SUBAGENT_CAPABILITY_ID;
     use ironclaw_loop_support::HostManagedModelMessage;
@@ -249,7 +250,7 @@ mod tests {
                     output_preview:
                         "--- a/workspace/main.rs\n+++ b/workspace/main.rs\n@@ -1,1 +1,1 @@\n-old\n+new\n"
                             .to_string(),
-                    output_kind: "unified_diff".to_string(),
+                    output_kind: CapabilityDisplayOutputKind::unified_diff(),
                     subtitle: Some("/workspace/main.rs".to_string()),
                     truncated: false,
                 }),

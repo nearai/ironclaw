@@ -1912,9 +1912,10 @@ mod tests {
 
     use ironclaw_events::InMemoryAuditSink;
     use ironclaw_host_api::{
-        AgentId, CapabilitySet, CorrelationId, ExecutionContext, ExtensionId, InvocationId,
-        NetworkScheme, NetworkTargetPattern, ProjectId, ResourceReservationId, RuntimeKind,
-        TenantId, TrustClass, UserId,
+        AgentId, CapabilityDisplayOutputKind, CapabilityDisplayOutputPreview, CapabilitySet,
+        CorrelationId, ExecutionContext, ExtensionId, InvocationId, NetworkScheme,
+        NetworkTargetPattern, ProjectId, ResourceReservationId, RuntimeKind, TenantId, TrustClass,
+        UserId,
     };
     use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount};
     use ironclaw_secrets::InMemorySecretStore;
@@ -2054,6 +2055,60 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn redact_output_clears_display_preview_side_channel() {
+        use ironclaw_host_api::{ReservationStatus, ResourceReceipt, ResourceUsage, RuntimeKind};
+
+        let services = BuiltinObligationServices::with_handoff_stores(
+            Arc::new(InMemoryAuditSink::new()),
+            Arc::new(NetworkObligationPolicyStore::new()),
+            Arc::new(InMemorySecretStore::new()),
+            Arc::new(RuntimeSecretInjectionStore::new()),
+            Arc::new(InMemoryResourceGovernor::new()),
+        );
+        let handler = services.obligation_handler();
+        let context = execution_context();
+        let capability_id = capability_id();
+        let estimate = ResourceEstimate::default();
+        let obligations = vec![Obligation::RedactOutput];
+        let dispatch = CapabilityDispatchResult {
+            capability_id: capability_id.clone(),
+            provider: context.extension_id.clone(),
+            runtime: RuntimeKind::Wasm,
+            output: serde_json::json!({"secret": "sk-secret", "safe": "ok"}),
+            display_preview: Some(CapabilityDisplayOutputPreview {
+                output_summary: Some("contains secret".to_string()),
+                output_preview: "sk-secret".to_string(),
+                output_kind: CapabilityDisplayOutputKind::text(),
+                subtitle: None,
+                truncated: false,
+            }),
+            usage: ResourceUsage::default(),
+            receipt: ResourceReceipt {
+                id: ResourceReservationId::new(),
+                scope: context.resource_scope.clone(),
+                status: ReservationStatus::Released,
+                estimate: ResourceEstimate::default(),
+                actual: None,
+            },
+        };
+
+        let completed = handler
+            .complete_dispatch(CapabilityObligationCompletionRequest {
+                phase: CapabilityObligationPhase::Invoke,
+                context: &context,
+                capability_id: &capability_id,
+                estimate: &estimate,
+                obligations: &obligations,
+                dispatch: &dispatch,
+            })
+            .await
+            .expect("redacted dispatch completes");
+
+        assert!(completed.display_preview.is_none());
+        assert_eq!(completed.output["safe"], serde_json::json!("ok"));
     }
 
     #[tokio::test]

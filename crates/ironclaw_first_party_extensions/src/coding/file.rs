@@ -120,7 +120,12 @@ pub(super) async fn write_file(
             RuntimeDispatchErrorKind::FilesystemDenied,
         ));
     }
-    let old_content = existing_text_for_preview(request, &resolved, existing_stat.as_ref()).await;
+    let old_content =
+        if operation_allowed(&resolved.grant.permissions, FilesystemOperation::ReadFile) {
+            existing_text_for_preview(request, &resolved, existing_stat.as_ref()).await
+        } else {
+            None
+        };
     create_parent_dir_unless_sensitive(request, &resolved.virtual_path).await?;
     request
         .filesystem
@@ -370,6 +375,7 @@ async fn existing_text_for_preview(
         .filesystem
         .read_file(&resolved.virtual_path)
         .await
+        // silent-ok: write_file display preview is best-effort; the write result is canonical.
         .ok()?;
     reject_binary_probe(&bytes).ok()?;
     let (content, _encoding, _line_ending) = decode_text(&bytes).ok()?;

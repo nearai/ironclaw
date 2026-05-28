@@ -836,7 +836,10 @@ pub fn capability_allowlist(ids: impl IntoIterator<Item = CapabilityId>) -> Capa
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::{AgentId, InvocationId, TenantId, ThreadId};
+    use ironclaw_host_api::{
+        AgentId, CapabilityDisplayOutputKind, CapabilityDisplayOutputPreview, InvocationId,
+        TenantId, ThreadId,
+    };
     use ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver;
     use ironclaw_turns::{
         RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
@@ -890,6 +893,55 @@ mod tests {
         assert_eq!(record.output_kind.as_deref(), Some("text"));
         let rendered = serde_json::to_string(&record.input_summary).unwrap();
         assert!(!rendered.contains("sk-secret"));
+    }
+
+    #[tokio::test]
+    async fn capability_io_records_typed_display_preview_side_channel() {
+        let io = ProductLiveCapabilityIo::default();
+        let run_context = loop_run_context().await;
+        let input_ref = io
+            .stage_input(
+                &run_context,
+                serde_json::json!({"path": "/workspace/main.rs"}),
+            )
+            .expect("input staged");
+        let invocation_id = InvocationId::new();
+        let capability_id = CapabilityId::new("builtin.write_file").unwrap();
+        io.write_capability_result(CapabilityResultWrite {
+            run_context: &run_context,
+            input_ref: &input_ref,
+            invocation_id,
+            capability_id: &capability_id,
+            output: serde_json::json!({"success": true}),
+            display_preview: Some(CapabilityDisplayOutputPreview {
+                output_summary: Some("Edited 1 file: +1/-1".to_string()),
+                output_preview:
+                    "--- a/workspace/main.rs\n+++ b/workspace/main.rs\n@@ -1,1 +1,1 @@\n-old\n+new\n"
+                        .to_string(),
+                output_kind: CapabilityDisplayOutputKind::unified_diff(),
+                subtitle: Some("/workspace/main.rs".to_string()),
+                truncated: false,
+            }),
+        })
+        .await
+        .expect("result staged");
+
+        let record = io
+            .display_previews
+            .record_for_invocation(invocation_id)
+            .expect("preview recorded");
+        assert_eq!(record.output_kind.as_deref(), Some("unified_diff"));
+        assert_eq!(
+            record.output_summary.as_deref(),
+            Some("Edited 1 file: +1/-1")
+        );
+        assert!(
+            record
+                .output_preview
+                .as_deref()
+                .is_some_and(|preview| preview.contains("+new"))
+        );
+        assert_eq!(record.subtitle.as_deref(), Some("/workspace/main.rs"));
     }
 
     #[tokio::test]
