@@ -622,7 +622,7 @@ impl RebornProductAuthServices {
                                 )
                                 .await
                             {
-                                tracing::debug!(
+                                tracing::warn!(
                                     flow_id = %request.flow_id,
                                     completion_error_code = ?error.code(),
                                     cleanup_error_code = ?cleanup_error.code(),
