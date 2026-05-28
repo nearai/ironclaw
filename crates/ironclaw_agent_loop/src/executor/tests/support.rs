@@ -332,15 +332,21 @@ pub(super) struct NoInlineContextStrategy;
 
 #[async_trait]
 impl ContextStrategy for NoInlineContextStrategy {
-    async fn plan_context_request(&self, _state: &LoopExecutionState) -> LoopPromptBundleRequest {
-        LoopPromptBundleRequest {
-            mode: PromptMode::TextOnly,
-            context_cursor: None,
-            surface_version: None,
-            checkpoint_state_ref: None,
-            max_messages: Some(16),
-            inline_messages: Vec::new(),
-            capability_view: None,
+    async fn plan_context_request(
+        &self,
+        _state: &LoopExecutionState,
+    ) -> crate::strategies::ContextPlan {
+        crate::strategies::ContextPlan {
+            request: LoopPromptBundleRequest {
+                mode: PromptMode::TextOnly,
+                context_cursor: None,
+                surface_version: None,
+                checkpoint_state_ref: None,
+                max_messages: Some(16),
+                inline_messages: Vec::new(),
+                capability_view: None,
+            },
+            emitted_admission_control: false,
         }
     }
 }

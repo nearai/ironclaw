@@ -36,9 +36,7 @@ pub(crate) use batch::{
 pub(crate) use budget::{BudgetStrategy, DefaultBudgetStrategy};
 pub(crate) use capability::{CapabilityFilter, CapabilityStrategy, DefaultCapabilityStrategy};
 pub(crate) use compaction::{CompactionDecision, CompactionStrategy, DefaultCompactionStrategy};
-pub(crate) use context::{
-    ContextStrategy, DefaultContextStrategy, contains_reply_admission_control_message,
-};
+pub(crate) use context::{ContextPlan, ContextStrategy, DefaultContextStrategy};
 pub(crate) use drain::{DefaultInputDrainStrategy, InputDrainStrategy};
 pub(crate) use gate::{
     DefaultGateHandlingStrategy, GateHandlingStrategy, GateKind, GateOutcome, GateSummary,

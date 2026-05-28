@@ -2,9 +2,14 @@
 
 use async_trait::async_trait;
 use ironclaw_common::provider_transcript::is_only_provider_transcript_artifact_lines;
-use ironclaw_turns::run_profile::AssistantReply;
+use ironclaw_turns::run_profile::{
+    AssistantReply, LoopInlineMessage, LoopInlineMessageRole, LoopSafeSummary,
+};
 
 use crate::state::{LoopExecutionState, ReplyAdmissionRejection};
+
+pub(crate) const REPLY_ADMISSION_STOP_CONDITION_CONTROL_TEXT: &str =
+    "loop control reply rejected stop condition not met continue";
 
 /// Classifies model replies before they are finalized into the transcript.
 ///
@@ -55,6 +60,24 @@ impl ReplyAdmissionStrategy for DefaultReplyAdmissionStrategy {
 
 fn is_non_final_reply_artifact(content: &str) -> bool {
     content.trim().is_empty() || is_only_provider_transcript_artifact_lines(content)
+}
+
+pub(crate) fn reply_admission_control_message(
+    rejection: &ReplyAdmissionRejection,
+) -> LoopInlineMessage {
+    LoopInlineMessage {
+        role: LoopInlineMessageRole::System,
+        safe_body: LoopSafeSummary::new(reply_admission_control_text(rejection))
+            .expect("static loop-control text is non-empty and safe"),
+    }
+}
+
+fn reply_admission_control_text(rejection: &ReplyAdmissionRejection) -> &'static str {
+    match rejection.reason_code {
+        crate::state::ReplyAdmissionRejectionReason::StopConditionNotMet => {
+            REPLY_ADMISSION_STOP_CONDITION_CONTROL_TEXT
+        }
+    }
 }
 
 #[cfg(test)]
@@ -120,6 +143,21 @@ mod tests {
         let state = LoopExecutionState::initial_for_run(&context);
         let reply = AssistantReply {
             content: "I checked the prior tool result and the task is done.".to_string(),
+        };
+
+        let outcome = DefaultReplyAdmissionStrategy
+            .admit_reply(&state, &reply)
+            .await;
+
+        assert_eq!(outcome, ReplyAdmissionOutcome::AcceptFinal);
+    }
+
+    #[tokio::test]
+    async fn default_reply_admission_accepts_natural_language_tool_result_sentence() {
+        let context = test_run_context("default-reply-admission-tool-result-sentence");
+        let state = LoopExecutionState::initial_for_run(&context);
+        let reply = AssistantReply {
+            content: "Tool result from my_tool: success".to_string(),
         };
 
         let outcome = DefaultReplyAdmissionStrategy

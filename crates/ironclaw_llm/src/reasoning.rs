@@ -3114,6 +3114,12 @@ That's my plan."#;
         assert_eq!(clean_response(input), "");
     }
 
+    #[test]
+    fn test_clean_response_strips_multiline_replay_only_flattened_tool_history_to_empty() {
+        let input = "Previous tool event: demo__echo was invoked.\nTool result from demo__echo: ok";
+        assert_eq!(clean_response(input), "");
+    }
+
     // ---- merge_system_messages: duplicate system message regression (Bug #597) ----
 
     #[test]

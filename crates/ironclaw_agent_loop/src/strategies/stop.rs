@@ -212,6 +212,8 @@ impl StopConditionStrategy for DefaultStopConditionStrategy {
 
         // (e) rejected-reply escape — repeated rejected final-answer
         // candidates are invalid model output, not generic no-progress.
+        // This threshold permits extra model calls after each rejection; keep
+        // deployments with tight LLM budgets on a low value.
         if state.stop_state.trailing_rejected_replies as usize >= self.failure_run_threshold {
             return StopOutcome::Stop {
                 kind: StopKind::Aborted(LoopFailureKind::InvalidModelOutput),
@@ -509,6 +511,18 @@ mod tests {
                 }
                 other => panic!("expected Stop GracefulStop, got {other:?}"),
             }
+        }
+
+        #[tokio::test]
+        async fn non_rejected_turn_resets_trailing_rejected_replies() {
+            let strategy = DefaultStopConditionStrategy::default();
+            let mut state = LoopExecutionState::initial_for_run(&test_run_context());
+            state.stop_state.trailing_rejected_replies = 2;
+
+            let (state, outcome) = observe_and_decide(&strategy, state, after_batch()).await;
+
+            assert_eq!(state.stop_state.trailing_rejected_replies, 0);
+            assert!(matches!(outcome, StopOutcome::Continue { .. }));
         }
 
         #[tokio::test]

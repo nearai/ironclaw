@@ -132,6 +132,35 @@ mod tests {
     }
 
     #[test]
+    fn flatten_applies_to_assistant_tool_calls_without_tool_result_messages() {
+        let messages = vec![
+            ChatCompletionMessage {
+                role: "user".to_string(),
+                content: Some(MessageContent::Text("test".to_string())),
+                tool_call_id: None,
+                name: None,
+                tool_calls: None,
+            },
+            ChatCompletionMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_call_id: None,
+                name: None,
+                tool_calls: Some(vec![tool_call(
+                    "call_1",
+                    "demo__echo",
+                    r#"{"message":"hi"}"#,
+                )]),
+            },
+        ];
+
+        let result = flatten_tool_messages(messages);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].role, "user");
+    }
+
+    #[test]
     fn flatten_preserves_assistant_text_with_tool_calls() {
         let messages = vec![
             ChatCompletionMessage {

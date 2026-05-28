@@ -45,17 +45,27 @@ fn is_tool_result_line(line: &str, prefix: &str) -> bool {
 }
 
 fn is_transcript_tool_name(name: &str) -> bool {
-    !name.is_empty()
+    name.contains("__")
         && name
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
 }
 
 pub fn strip_provider_transcript_artifact_lines(text: &str) -> String {
-    text.lines()
+    if !text.lines().any(is_provider_transcript_artifact_line) {
+        return text.to_string();
+    }
+
+    let had_trailing_newline = text.ends_with('\n');
+    let mut stripped = text
+        .lines()
         .filter(|line| !is_provider_transcript_artifact_line(line))
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+    if had_trailing_newline && !stripped.is_empty() {
+        stripped.push('\n');
+    }
+    stripped
 }
 
 pub fn is_only_provider_transcript_artifact_lines(text: &str) -> bool {
@@ -96,11 +106,26 @@ mod tests {
     }
 
     #[test]
+    fn strip_preserves_non_artifact_text_verbatim() {
+        let text = "Done.\n";
+
+        assert_eq!(strip_provider_transcript_artifact_lines(text), text);
+    }
+
+    #[test]
+    fn strip_preserves_trailing_newline_after_removing_artifacts() {
+        let text = "Done.\nTool result from demo__echo: hi\n";
+
+        assert_eq!(strip_provider_transcript_artifact_lines(text), "Done.\n");
+    }
+
+    #[test]
     fn detects_replay_only_artifacts() {
         assert!(is_only_provider_transcript_artifact_lines(
             "\nTool result from demo__echo: hi\n"
         ));
         assert!(!is_only_provider_transcript_artifact_lines(""));
+        assert!(!is_only_provider_transcript_artifact_lines(" \n\t\n"));
         assert!(!is_only_provider_transcript_artifact_lines(
             "Done.\nTool result from demo__echo: hi"
         ));
@@ -116,6 +141,15 @@ mod tests {
         ));
         assert!(!is_provider_transcript_artifact_line(
             "Previous tool result from the benchmark: passed"
+        ));
+        assert!(!is_provider_transcript_artifact_line(
+            "Tool result from my_tool: success"
+        ));
+        assert!(!is_provider_transcript_artifact_line(
+            "Previous tool event: cleanup was invoked."
+        ));
+        assert!(!is_provider_transcript_artifact_line(
+            "Tool result from http: success"
         ));
     }
 }

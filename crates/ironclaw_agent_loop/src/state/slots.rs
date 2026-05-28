@@ -206,7 +206,7 @@ pub struct ReplyAdmissionStrategyState {
 pub struct ReplyAdmissionRejection {
     pub reason_code: ReplyAdmissionRejectionReason,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub unmet_obligation_refs: Vec<String>,
+    pub unmet_obligation_refs: Vec<ObligationRef>,
 }
 
 impl ReplyAdmissionRejection {
@@ -215,6 +215,24 @@ impl ReplyAdmissionRejection {
             reason_code: ReplyAdmissionRejectionReason::StopConditionNotMet,
             unmet_obligation_refs: Vec::new(),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ObligationRef(String);
+
+impl ObligationRef {
+    pub fn new(value: impl Into<String>) -> Option<Self> {
+        let value = value.into();
+        if value.is_empty() {
+            None
+        } else {
+            Some(Self(value))
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 

@@ -16,7 +16,7 @@ use crate::state::{
     CheckpointKind, CompactionPromptSnapshot, IndexedMessageKind, LoopExecutionState,
     MessageIndexEntry,
 };
-use crate::strategies::{CompactionDecision, contains_reply_admission_control_message};
+use crate::strategies::CompactionDecision;
 
 use super::{
     AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, HostStage,
@@ -501,12 +501,12 @@ pub(super) async fn build_prompt_bundle_for_surface(
     surface_version: CapabilitySurfaceVersion,
     capability_view: LoopModelCapabilityView,
 ) -> Result<BuiltPromptBundle, AgentLoopExecutorError> {
-    let mut context_request = ctx.planner.context().plan_context_request(state).await;
+    let context_plan = ctx.planner.context().plan_context_request(state).await;
+    let mut context_request = context_plan.request;
     context_request.surface_version = Some(surface_version);
     context_request.capability_view = Some(capability_view);
     let prompt_mode = context_request.mode;
-    let rendered_reply_admission_control =
-        contains_reply_admission_control_message(&context_request.inline_messages);
+    let rendered_reply_admission_control = context_plan.emitted_admission_control;
     let prompt_bundle = ctx
         .host
         .build_prompt_bundle(context_request)
