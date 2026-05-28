@@ -193,11 +193,7 @@ impl LocalDevSyntheticCapabilityPort {
     ) -> Option<(&CapabilityId, &LocalDevSyntheticCapability)> {
         self.capability_ids_by_provider_tool_name
             .get(&tool_call.name)
-            .and_then(|capability_id| {
-                self.capabilities_by_id
-                    .get_key_value(capability_id)
-                    .map(|(capability_id, capability)| (capability_id, capability))
-            })
+            .and_then(|capability_id| self.capabilities_by_id.get_key_value(capability_id))
     }
 }
 

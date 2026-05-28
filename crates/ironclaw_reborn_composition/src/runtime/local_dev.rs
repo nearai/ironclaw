@@ -94,17 +94,18 @@ pub(super) fn capability_wiring(
     ));
     let capability_input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
     let capability_result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
-    let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
-        Arc::new(LocalDevLoopCapabilityPortFactory::new(
+    let capability_factory: Arc<dyn LoopCapabilityPortFactory> = Arc::new(
+        LocalDevLoopCapabilityPortFactory::new(LocalDevLoopCapabilityPortFactoryInput {
             runtime,
             user_id,
             workspace_mounts,
             extension_surface_source,
-            Arc::clone(&capability_input_resolver),
-            Arc::clone(&capability_result_writer),
+            input_resolver: Arc::clone(&capability_input_resolver),
+            result_writer: Arc::clone(&capability_result_writer),
             milestone_sink,
             skill_activation_source,
-        ));
+        }),
+    );
     let model_gateway: Arc<dyn HostManagedModelGateway> = Arc::new(
         LocalDevResultHydratingModelGateway::new(model_gateway, capability_io),
     );
@@ -130,26 +131,28 @@ struct LocalDevLoopCapabilityPortFactory {
     skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
 }
 
+struct LocalDevLoopCapabilityPortFactoryInput {
+    runtime: Arc<dyn HostRuntime>,
+    user_id: UserId,
+    workspace_mounts: MountView,
+    extension_surface_source: LocalDevExtensionSurfaceSource,
+    input_resolver: Arc<dyn LoopCapabilityInputResolver>,
+    result_writer: Arc<dyn LoopCapabilityResultWriter>,
+    milestone_sink: Arc<dyn LoopHostMilestoneSink>,
+    skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
+}
+
 impl LocalDevLoopCapabilityPortFactory {
-    fn new(
-        runtime: Arc<dyn HostRuntime>,
-        user_id: UserId,
-        workspace_mounts: MountView,
-        extension_surface_source: LocalDevExtensionSurfaceSource,
-        input_resolver: Arc<dyn LoopCapabilityInputResolver>,
-        result_writer: Arc<dyn LoopCapabilityResultWriter>,
-        milestone_sink: Arc<dyn LoopHostMilestoneSink>,
-        skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
-    ) -> Self {
+    fn new(input: LocalDevLoopCapabilityPortFactoryInput) -> Self {
         Self {
-            runtime,
-            user_id,
-            workspace_mounts,
-            extension_surface_source,
-            input_resolver,
-            result_writer,
-            milestone_sink,
-            skill_activation_source,
+            runtime: input.runtime,
+            user_id: input.user_id,
+            workspace_mounts: input.workspace_mounts,
+            extension_surface_source: input.extension_surface_source,
+            input_resolver: input.input_resolver,
+            result_writer: input.result_writer,
+            milestone_sink: input.milestone_sink,
+            skill_activation_source: input.skill_activation_source,
         }
     }
 }
@@ -790,6 +793,9 @@ fn local_dev_builtin_grants(
     skill_mounts: &MountView,
 ) -> Result<CapabilitySet, AgentLoopHostError> {
     let mut grants = Vec::new();
+    // Local-dev synthetic capabilities are added by the loop port wrapper after
+    // the host-runtime surface is built. They do not receive host-runtime grants
+    // because they are not dispatched through the builtin first-party package.
     for capability_id in local_dev_runtime_capability_ids() {
         grants.push(CapabilityGrant {
             id: CapabilityGrantId::new(),

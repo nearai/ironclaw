@@ -19,6 +19,7 @@ pub(crate) const SKILL_ACTIVATE_CAPABILITY_ID: &str = "builtin.skill_activate";
 const SKILL_ACTIVATE_PROVIDER_TOOL_NAME: &str = "builtin__skill_activate";
 const SKILL_ACTIVATE_DESCRIPTION: &str =
     "Activate one or more listed Reborn skills for the current loop run";
+const MAX_SKILL_ACTIVATE_NAMES: usize = 16;
 
 pub(super) fn skill_activation_capability(
     skill_activation_source: Arc<LocalDevSelectableSkillContextSource>,
@@ -101,6 +102,7 @@ fn skill_activate_input_schema() -> serde_json::Value {
                 "type": "array",
                 "items": { "type": "string" },
                 "minItems": 1,
+                "maxItems": MAX_SKILL_ACTIVATE_NAMES,
                 "description": "Skill names from skill_list to activate for this run"
             }
         },
@@ -142,17 +144,81 @@ fn parse_skill_activate_names(
             "skill_activate requires at least one skill name",
         ));
     }
+    if parsed.len() > MAX_SKILL_ACTIVATE_NAMES {
+        return Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "skill_activate accepts at most 16 skill names",
+        ));
+    }
     Ok(parsed)
 }
 
 fn skill_activation_host_error(
     error: ironclaw_first_party_extension_ports::SkillActivationSelectionError,
 ) -> AgentLoopHostError {
+    let kind = match error {
+        ironclaw_first_party_extension_ports::SkillActivationSelectionError::AmbiguousSkill {
+            ..
+        }
+        | ironclaw_first_party_extension_ports::SkillActivationSelectionError::ParseFailed
+        | ironclaw_first_party_extension_ports::SkillActivationSelectionError::TrustDataMissing
+        | ironclaw_first_party_extension_ports::SkillActivationSelectionError::VisibilityDataMissing => {
+            AgentLoopHostErrorKind::InvalidInvocation
+        }
+        ironclaw_first_party_extension_ports::SkillActivationSelectionError::ContextBudgetExceeded => {
+            AgentLoopHostErrorKind::BudgetExceeded
+        }
+        ironclaw_first_party_extension_ports::SkillActivationSelectionError::SourceUnavailable => {
+            AgentLoopHostErrorKind::Unavailable
+        }
+        ironclaw_first_party_extension_ports::SkillActivationSelectionError::Internal => {
+            AgentLoopHostErrorKind::Internal
+        }
+    };
     ironclaw_loop_support::raw_agent_loop_host_error(
         "local_dev_skill_activate",
         "activate",
-        AgentLoopHostErrorKind::InvalidInvocation,
+        kind,
         "skill activation failed",
         error,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_skill_activate_names_rejects_missing_names_field() {
+        let error = parse_skill_activate_names(&serde_json::json!({}))
+            .expect_err("missing names field should fail");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    }
+
+    #[test]
+    fn parse_skill_activate_names_rejects_empty_or_whitespace_names() {
+        let error = parse_skill_activate_names(&serde_json::json!({"names": ["  "]}))
+            .expect_err("empty names should fail");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    }
+
+    #[test]
+    fn parse_skill_activate_names_rejects_empty_array() {
+        let error = parse_skill_activate_names(&serde_json::json!({"names": []}))
+            .expect_err("empty array should fail");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    }
+
+    #[test]
+    fn parse_skill_activate_names_rejects_too_many_names() {
+        let error = parse_skill_activate_names(&serde_json::json!({
+            "names": vec!["skill"; MAX_SKILL_ACTIVATE_NAMES + 1]
+        }))
+        .expect_err("oversized names list should fail");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    }
 }

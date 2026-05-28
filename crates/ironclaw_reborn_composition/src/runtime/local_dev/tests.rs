@@ -507,16 +507,17 @@ mod tests {
         let capability_io = Arc::new(LocalDevCapabilityIo::default());
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
-        let factory = LocalDevLoopCapabilityPortFactory::new(
-            runtime,
-            UserId::new("skill-activate-user").expect("user id"),
-            local_runtime.workspace_mounts.clone(),
-            LocalDevExtensionSurfaceSource::default(),
-            input_resolver,
-            result_writer,
-            Arc::new(InMemoryLoopHostMilestoneSink::default()),
-            Some(Arc::clone(&activation_source)),
-        );
+        let factory =
+            LocalDevLoopCapabilityPortFactory::new(LocalDevLoopCapabilityPortFactoryInput {
+                runtime,
+                user_id: UserId::new("skill-activate-user").expect("user id"),
+                workspace_mounts: local_runtime.workspace_mounts.clone(),
+                extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+                input_resolver,
+                result_writer,
+                milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
+                skill_activation_source: Some(Arc::clone(&activation_source)),
+            });
         let port = factory
             .create_capability_port(&run_context)
             .await
@@ -588,6 +589,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn capability_wiring_with_skill_activation_source_exposes_skill_activate_capability() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+            "local-dev-skill-activate-wiring-owner",
+            storage_root.clone(),
+        ))
+        .await
+        .expect("local-dev services build");
+        let local_runtime = services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime substrate");
+        let run_context = run_context("skill-activate-wiring").await;
+        let thread_scope = ThreadScope {
+            tenant_id: run_context.scope.tenant_id.clone(),
+            agent_id: run_context.scope.agent_id.clone().expect("agent id"),
+            project_id: run_context.scope.project_id.clone(),
+            owner_user_id: None,
+            mission_id: None,
+        };
+        let skill_context = local_dev_filesystem_skill_context_source(
+            local_runtime,
+            &run_context.scope.tenant_id,
+            false,
+        )
+        .expect("skill context source");
+        let wiring = capability_wiring(
+            &services,
+            Arc::new(InMemorySessionThreadService::default()),
+            thread_scope,
+            UserId::new("skill-activate-wiring-user").expect("user id"),
+            Arc::new(UnavailableModelGateway),
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            Some(skill_context.activation_source),
+        )
+        .expect("capability wiring");
+        let port = wiring
+            .capability_factory
+            .create_capability_port(&run_context)
+            .await
+            .expect("capability port");
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible surface");
+
+        assert!(
+            surface
+                .descriptors
+                .iter()
+                .any(|descriptor| descriptor.capability_id.as_str() == SKILL_ACTIVATE_CAPABILITY_ID)
+        );
+    }
+
+    #[tokio::test]
     async fn local_yolo_capability_port_reads_confirmed_host_mount() {
         let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only setup in #[cfg(test)] module.
         let storage_root = dir.path().join("local-dev");
@@ -623,16 +680,17 @@ mod tests {
         let capability_io = Arc::new(LocalDevCapabilityIo::default());
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
-        let factory = LocalDevLoopCapabilityPortFactory::new(
-            runtime,
-            UserId::new("local-yolo-host-user").expect("user id"), // safety: literal test id is valid.
-            workspace_mounts,
-            LocalDevExtensionSurfaceSource::default(),
-            input_resolver,
-            result_writer,
-            Arc::new(InMemoryLoopHostMilestoneSink::default()),
-            None,
-        );
+        let factory =
+            LocalDevLoopCapabilityPortFactory::new(LocalDevLoopCapabilityPortFactoryInput {
+                runtime,
+                user_id: UserId::new("local-yolo-host-user").expect("user id"), // safety: literal test id is valid.
+                workspace_mounts,
+                extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+                input_resolver,
+                result_writer,
+                milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
+                skill_activation_source: None,
+            });
         let run_context = run_context("host-mount-read").await;
         let port = factory
             .create_capability_port(&run_context)
@@ -787,16 +845,17 @@ mod tests {
         let capability_io = Arc::new(LocalDevCapabilityIo::default());
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
-        let factory = LocalDevLoopCapabilityPortFactory::new(
-            runtime,
-            UserId::new("local-dev-no-host-user").expect("user id"), // safety: literal test id is valid.
-            workspace_mounts,
-            LocalDevExtensionSurfaceSource::default(),
-            input_resolver,
-            result_writer,
-            Arc::new(InMemoryLoopHostMilestoneSink::default()),
-            None,
-        );
+        let factory =
+            LocalDevLoopCapabilityPortFactory::new(LocalDevLoopCapabilityPortFactoryInput {
+                runtime,
+                user_id: UserId::new("local-dev-no-host-user").expect("user id"), // safety: literal test id is valid.
+                workspace_mounts,
+                extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+                input_resolver,
+                result_writer,
+                milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
+                skill_activation_source: None,
+            });
         let run_context = run_context("no-host-disclosure").await;
         let port = factory
             .create_capability_port(&run_context)
