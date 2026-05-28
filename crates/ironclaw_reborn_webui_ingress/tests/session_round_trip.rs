@@ -42,7 +42,7 @@ use ironclaw_product_workflow::{
     WebUiSetupExtensionRequest,
 };
 use ironclaw_reborn_composition::{
-    PublicRouteMount, RebornReadiness, RebornWebuiBundle, WebuiServeConfig, webui_v2_app,
+    RebornReadiness, RebornWebuiBundle, WebuiServeConfig, webui_v2_app,
 };
 use ironclaw_reborn_webui_ingress::{
     EmailUserDirectory, InMemorySessionStore, OAuthProvider, OAuthProviderName, OAuthRouterConfig,
@@ -268,10 +268,7 @@ fn build_app() -> (axum::Router, Arc<StubServices>, Arc<InMemorySessionStore>) {
     )
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
     .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-    .with_public_route_mount(PublicRouteMount {
-        router: oauth_mount.router,
-        descriptors: oauth_mount.descriptors,
-    });
+    .with_public_route_mount(oauth_mount);
     let app = webui_v2_app(bundle, config).expect("webui v2 app");
     (app, services, session_store)
 }

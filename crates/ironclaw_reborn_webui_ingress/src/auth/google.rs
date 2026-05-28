@@ -15,6 +15,7 @@
 //!   the URL hint is a UX nudge, not a security boundary.
 
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use secrecy::{ExposeSecret, SecretString};
@@ -107,11 +108,17 @@ struct GoogleTokenResponse {
 }
 
 #[derive(Deserialize)]
+struct GoogleTokenErrorResponse {
+    error: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct GoogleIdTokenClaims {
     sub: String,
     email: Option<String>,
     email_verified: Option<bool>,
     name: Option<String>,
+    exp: i64,
     /// Google Workspace hosted domain claim (e.g. `company.com`).
     hd: Option<String>,
 }
@@ -160,12 +167,23 @@ impl OAuthProvider for GoogleProvider {
             .map_err(|err| OAuthError::CodeExchange(err.to_string()))?;
 
         if !resp.status().is_success() {
-            // Body is logged at the route handler via tracing; never
-            // echoed back to the browser.
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default(); // silent-ok: error already non-success, body only used for the operator tracing line
+            let body = resp.text().await.unwrap_or_default();
+            let error_code = serde_json::from_str::<GoogleTokenErrorResponse>(&body)
+                .ok()
+                .and_then(|error| error.error);
+            if let Some(error_code) = error_code {
+                return Err(OAuthError::CodeExchange(format!(
+                    "Google token endpoint returned {status} ({error_code})"
+                )));
+            }
+            tracing::debug!(
+                %status,
+                body = %body,
+                "google token endpoint returned non-success response"
+            );
             return Err(OAuthError::CodeExchange(format!(
-                "Google token endpoint returned {status}: {body}"
+                "Google token endpoint returned {status}"
             )));
         }
 
@@ -179,12 +197,14 @@ impl OAuthProvider for GoogleProvider {
 
         // Skip signature verification — token was received over TLS
         // directly from Google. Validate `aud` (prevents another
-        // Google client substituting tokens) and `iss` (defense in
-        // depth against a forged TLS termination).
+        // Google client substituting tokens), `iss` (defense in
+        // depth against a forged TLS termination), and `exp` so
+        // expired tokens still fail closed.
         let mut validation = jsonwebtoken::Validation::default();
         validation.insecure_disable_signature_validation();
         validation.set_audience(&[&self.client_id]);
         validation.set_issuer(&[GOOGLE_ISSUER, "accounts.google.com"]);
+        validation.validate_exp = true;
 
         let token_data = jsonwebtoken::decode::<GoogleIdTokenClaims>(
             &id_token,
@@ -193,6 +213,16 @@ impl OAuthProvider for GoogleProvider {
         )
         .map_err(|err| OAuthError::ProfileFetch(format!("decode id_token: {err}")))?;
         let claims = token_data.claims;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|err| OAuthError::ProfileFetch(format!("decode id_token: {err}")))?
+            .as_secs() as i64;
+        if claims.exp <= now {
+            return Err(OAuthError::ProfileFetch(format!(
+                "decode id_token: token expired at {}",
+                claims.exp
+            )));
+        }
 
         // Server-side hosted-domain check. The URL `hd=` parameter
         // is only a UX hint — the user can bypass it by editing the
@@ -285,7 +315,7 @@ mod tests {
         hd: Option<&'static str>,
     }
 
-    fn make_id_token(client_id: &'static str, hd: Option<&'static str>) -> String {
+    fn make_id_token(client_id: &'static str, hd: Option<&'static str>, exp: i64) -> String {
         // Sign with HS256 + a dummy secret — `GoogleProvider` disables
         // signature verification, so any well-formed JWT decodes
         // successfully as long as the claims pass audience+issuer
@@ -299,7 +329,7 @@ mod tests {
             aud: client_id,
             iss: "https://accounts.google.com",
             iat: now,
-            exp: now + 600,
+            exp,
             hd,
         };
         encode(
@@ -347,7 +377,7 @@ mod tests {
     #[tokio::test]
     async fn exchange_code_decodes_id_token_into_profile() {
         let client_id: &'static str = "client-id-123";
-        let id_token = make_id_token(client_id, None);
+        let id_token = make_id_token(client_id, None, chrono::Utc::now().timestamp() + 600);
         let addr = spawn_mock_token_endpoint(id_token).await;
         let endpoint = format!("http://{addr}/token");
 
@@ -371,7 +401,11 @@ mod tests {
     #[tokio::test]
     async fn exchange_code_rejects_mismatched_hosted_domain() {
         let client_id: &'static str = "client-id-123";
-        let id_token = make_id_token(client_id, Some("attacker.example"));
+        let id_token = make_id_token(
+            client_id,
+            Some("attacker.example"),
+            chrono::Utc::now().timestamp() + 600,
+        );
         let addr = spawn_mock_token_endpoint(id_token).await;
         let endpoint = format!("http://{addr}/token");
 
@@ -450,14 +484,18 @@ mod tests {
     async fn exchange_code_rejects_non_2xx_token_response() {
         let addr = spawn_token_endpoint_returning(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            r#"{"error":"server_error"}"#,
+            r#"{"error":"server_error","error_description":"should not leak"}"#,
             "application/json",
         )
         .await;
         let err = run_exchange_against(format!("http://{addr}/token")).await;
         assert!(
-            matches!(err, OAuthError::CodeExchange(_)),
-            "expected CodeExchange for non-2xx response, got {err:?}",
+            matches!(&err, OAuthError::CodeExchange(msg) if msg.contains("500") && msg.contains("server_error")),
+            "expected sanitized CodeExchange for non-2xx response, got {err:?}",
+        );
+        assert!(
+            !format!("{err:?}").contains("should not leak"),
+            "raw token error body leaked into error: {err:?}",
         );
     }
 
@@ -477,6 +515,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exchange_code_falls_back_to_status_only_for_non_json_error_body() {
+        let addr = spawn_token_endpoint_returning(
+            axum::http::StatusCode::BAD_GATEWAY,
+            "<html>bad gateway</html>",
+            "text/html",
+        )
+        .await;
+        let err = run_exchange_against(format!("http://{addr}/token")).await;
+        assert!(
+            matches!(&err, OAuthError::CodeExchange(msg) if msg.contains("502")),
+            "expected status-only CodeExchange for non-JSON error body, got {err:?}",
+        );
+    }
+
+    #[tokio::test]
     async fn exchange_code_rejects_response_without_id_token() {
         // 200 + valid JSON but no `id_token` field. Code path is
         // the `tokens.id_token.ok_or_else(...)` branch.
@@ -490,6 +543,29 @@ mod tests {
         assert!(
             matches!(&err, OAuthError::CodeExchange(msg) if msg.contains("id_token")),
             "expected CodeExchange referencing id_token, got {err:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn exchange_code_rejects_expired_id_token_even_without_signature_validation() {
+        let client_id: &'static str = "client-id-123";
+        let id_token = make_id_token(client_id, None, chrono::Utc::now().timestamp() - 60);
+        let addr = spawn_mock_token_endpoint(id_token).await;
+        let endpoint = format!("http://{addr}/token");
+
+        let provider =
+            GoogleProvider::with_endpoints(cfg(None), "https://example.invalid/auth", endpoint);
+        let err = provider
+            .exchange_code(
+                "fake-auth-code",
+                "https://example.com/auth/callback/google",
+                "fake-verifier",
+            )
+            .await
+            .expect_err("expired id_token must be rejected");
+        assert!(
+            matches!(&err, OAuthError::ProfileFetch(_)),
+            "expected ProfileFetch for expired token, got {err:?}",
         );
     }
 }

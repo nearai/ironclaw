@@ -28,6 +28,7 @@ use ironclaw_host_api::ingress::{
     IngressJustification, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor, ListenerClass,
     RateLimitPolicy, RateLimitScope, StreamingMode, WebSocketOriginPolicy,
 };
+use ironclaw_reborn_composition::PublicRouteMount;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 
@@ -147,16 +148,6 @@ const SSO_LOGIN_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(60).expect("60 != 0")
 const SSO_CALLBACK_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(60).expect("60 != 0"); // safety: const-evaluated, literal non-zero
 /// Logout. Per-IP, generous, because a sign-out blip should not 429.
 const SSO_LOGOUT_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(60).expect("60 != 0"); // safety: const-evaluated, literal non-zero
-
-/// Bundle returned by [`webui_v2_auth_router`] — the host
-/// composition layer merges `router` and folds `descriptors` into the
-/// descriptor-driven per-route rate-limit / body-limit middlewares
-/// so the SSO routes ride on the same policy stack as the rest of
-/// the WebChat v2 surface (no side door).
-pub struct PublicRouteMount {
-    pub router: axum::Router,
-    pub descriptors: Vec<IngressRouteDescriptor>,
-}
 
 /// Build the unauthenticated axum sub-router that mounts the OAuth
 /// login endpoints plus the route descriptors composition needs to
@@ -391,7 +382,7 @@ async fn callback_handler(
     // can render an error banner without exposing the provider's
     // description verbatim.
     if let Some(error) = params.error {
-        tracing::info!(
+        tracing::debug!(
             target = "ironclaw::reborn::webui_ingress::auth",
             provider = %provider_name,
             error = %error,
@@ -443,7 +434,7 @@ async fn callback_handler(
     {
         Ok(uid) => uid,
         Err(UserDirectoryError::Unknown) => {
-            tracing::info!(
+            tracing::debug!(
                 target = "ironclaw::reborn::webui_ingress::auth",
                 provider = %provider_name,
                 email = ?profile.email,

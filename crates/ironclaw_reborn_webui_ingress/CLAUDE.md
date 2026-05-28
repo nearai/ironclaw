@@ -58,8 +58,9 @@ Routes mounted by `webui_v2_auth_router`:
   mint via `SessionStore`, and redirect to
   `{redirect_after}#token=<bearer>` (default `/v2`).
 - `POST /auth/logout` — bearer-protected; calls
-  `SessionStore::revoke` and returns `204` regardless of header
-  presence so the SPA's local clear is unconditional.
+  `SessionStore::revoke` and returns `204` on success or when no
+  bearer is present, `500` if revocation fails, so the SPA's local
+  clear stays unconditional without lying about server-side state.
 
 ### Provider trait
 
@@ -68,7 +69,7 @@ Routes mounted by `webui_v2_auth_router`:
 ```rust
 #[async_trait]
 pub trait OAuthProvider: Send + Sync + 'static {
-    fn name(&self) -> &'static str;
+    fn name(&self) -> &OAuthProviderName;
     fn authorization_url(&self, callback_url: &str, state: &str, code_challenge: &str) -> String;
     async fn exchange_code(&self, code: &str, callback_url: &str, code_verifier: &str)
         -> Result<OAuthUserProfile, OAuthError>;

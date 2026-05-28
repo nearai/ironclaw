@@ -113,6 +113,17 @@ impl PendingFlowStore {
         provider: OAuthProviderName,
         redirect_after: Option<String>,
     ) -> (String, PendingFlow) {
+        let verifier_raw = Self::generate_code_verifier();
+        let challenge = Self::code_challenge(&verifier_raw);
+        let flow = PendingFlow {
+            provider,
+            code_verifier: SecretString::from(verifier_raw),
+            code_challenge: challenge,
+            redirect_after,
+            created_at: Instant::now(),
+        };
+        let state = mint_state_token();
+
         let mut guard = self.inner.lock();
 
         // Opportunistic GC on insert: if at capacity, sweep expired
@@ -131,16 +142,6 @@ impl PendingFlowStore {
             guard.remove(&oldest);
         }
 
-        let verifier_raw = Self::generate_code_verifier();
-        let challenge = Self::code_challenge(&verifier_raw);
-        let flow = PendingFlow {
-            provider,
-            code_verifier: SecretString::from(verifier_raw),
-            code_challenge: challenge,
-            redirect_after,
-            created_at: Instant::now(),
-        };
-        let state = mint_state_token();
         guard.insert(state.clone(), flow.clone());
         (state, flow)
     }
@@ -260,6 +261,31 @@ mod tests {
         assert!(store.take(&state).is_none(), "second take must be empty");
     }
 
+    #[test]
+    fn take_removes_expired_entry_from_store() {
+        let store = PendingFlowStore::new();
+        let state = "expired-state".to_string();
+        {
+            let mut guard = store.inner.lock();
+            guard.insert(
+                state.clone(),
+                PendingFlow {
+                    provider: google(),
+                    code_verifier: SecretString::from("expired-verifier".to_string()),
+                    code_challenge: "expired-challenge".to_string(),
+                    redirect_after: Some("/v2".to_string()),
+                    created_at: Instant::now() - STATE_TTL - Duration::from_secs(1),
+                },
+            );
+        }
+
+        assert!(store.take(&state).is_none());
+        assert!(
+            !store.inner.lock().contains_key(&state),
+            "expired entry must be removed after take",
+        );
+    }
+
     // Reviewer-requested regression (#4116 review, "Pending-flow
     // capacity eviction is untested"): the store relies on the
     // 1024-entry cap + oldest-evict tail as its flood bound, but
@@ -319,6 +345,11 @@ mod tests {
         assert!(!is_safe_redirect("/%2f%2fevil.example"));
         // Percent-encoded backslash: %5c → \
         assert!(!is_safe_redirect("/%5cevil.example"));
+    }
+
+    #[test]
+    fn percent_encoded_crlf_redirect_is_blocked() {
+        assert!(!is_safe_redirect("/%0d%0aLocation:%20https://evil.example"));
     }
 
     // Regression: `#` in the caller-supplied redirect would collide

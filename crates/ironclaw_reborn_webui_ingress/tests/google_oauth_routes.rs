@@ -260,6 +260,26 @@ async fn login_unknown_provider_returns_404() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
+#[tokio::test]
+async fn login_invalid_provider_slug_returns_404() {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+    let router = build_router(
+        vec![StubProvider::google_with_profile(alice_profile()) as Arc<dyn OAuthProvider>],
+        store,
+    );
+    let resp = router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/auth/login/Google")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
 // ─── callback success ─────────────────────────────────────────────────
 
 /// Extract the CSRF state token from a Location URL returned by

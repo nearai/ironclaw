@@ -30,10 +30,11 @@ mod user_directory;
 pub use config::GoogleOAuthConfig;
 pub use error::OAuthError;
 pub use google::GoogleProvider;
+pub use ironclaw_reborn_composition::PublicRouteMount;
 pub use profile::OAuthUserProfile;
 pub use provider::OAuthProvider;
 pub use provider_name::{OAuthProviderName, OAuthProviderNameError};
-pub use routes::{OAuthRouterConfig, PublicRouteMount, webui_v2_auth_router};
+pub use routes::{OAuthRouterConfig, webui_v2_auth_router};
 #[cfg(any(test, feature = "dev-in-memory-session"))]
 pub use user_directory::EmailUserDirectory;
 pub use user_directory::{UserDirectory, UserDirectoryError};

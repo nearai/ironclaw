@@ -36,6 +36,14 @@ pub enum UserDirectoryError {
 
 /// Trait host composition implements to map an OAuth provider's
 /// normalized profile to a [`UserId`].
+///
+/// # Security
+///
+/// Production implementations must require
+/// `profile.email_verified == true` before matching or linking an
+/// account by email. Do not treat an unverified email claim as an
+/// authoritative account identifier; fall back to a provider-unique
+/// identifier or reject the login instead.
 #[async_trait]
 pub trait UserDirectory: Send + Sync + 'static {
     /// Resolve a `(provider, profile)` pair to the user id the
