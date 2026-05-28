@@ -5,8 +5,9 @@ use ironclaw_auth::{
     AuthContinuationEvent, AuthProductError, AuthProductScope, AuthProviderId, AuthSessionId,
     AuthSurface, CredentialAccountLookupRequest, CredentialAccountService, CredentialAccountStatus,
     CredentialOwnership, CredentialRefreshRequest, InMemoryAuthProductServices,
-    NewCredentialAccount, ProviderScope, SecretCleanupAction, SecretCleanupQuarantineReason,
-    SecretCleanupRequest,
+    NewCredentialAccount, OAuthProviderCallbackRequest, OAuthProviderExchange,
+    OAuthProviderExchangeContext, OAuthProviderRefresh, OAuthProviderRefreshRequest, ProviderScope,
+    SecretCleanupAction, SecretCleanupQuarantineReason, SecretCleanupRequest,
 };
 use ironclaw_host_api::{ExtensionId, InvocationId, ResourceScope, SecretHandle, UserId};
 use ironclaw_reborn_composition::{RebornAuthContinuationDispatcher, RebornProductAuthServices};
@@ -21,6 +22,31 @@ impl RebornAuthContinuationDispatcher for NoopContinuationDispatcher {
         _event: AuthContinuationEvent,
     ) -> Result<(), AuthProductError> {
         Ok(())
+    }
+}
+
+struct AccessOnlyRefreshProvider;
+
+#[async_trait]
+impl ironclaw_auth::AuthProviderClient for AccessOnlyRefreshProvider {
+    async fn exchange_callback(
+        &self,
+        _context: OAuthProviderExchangeContext,
+        _request: OAuthProviderCallbackRequest,
+    ) -> Result<OAuthProviderExchange, AuthProductError> {
+        Err(AuthProductError::TokenExchangeFailed)
+    }
+
+    async fn refresh_token(
+        &self,
+        request: OAuthProviderRefreshRequest,
+    ) -> Result<OAuthProviderRefresh, AuthProductError> {
+        Ok(OAuthProviderRefresh {
+            provider: request.provider,
+            access_secret: SecretHandle::new("google-new-access").unwrap(),
+            refresh_secret: None,
+            scopes: request.scopes,
+        })
     }
 }
 
@@ -128,6 +154,52 @@ async fn refresh_credential_account_maps_facade_errors_to_stable_codes() {
     let serialized = serde_json::to_string(&error).unwrap();
     assert!(!serialized.contains("github-shared-access"));
     assert!(!serialized.contains("github-shared-refresh"));
+}
+
+#[tokio::test]
+async fn refresh_credential_account_with_provider_keeps_existing_refresh_handle_when_omitted() {
+    let auth = Arc::new(InMemoryAuthProductServices::new());
+    let owner = scope("alice");
+    let old_refresh = SecretHandle::new("google-existing-refresh").unwrap();
+    let account = auth
+        .create_account(NewCredentialAccount {
+            scope: owner.clone(),
+            provider: provider(),
+            label: ironclaw_auth::CredentialAccountLabel::new("work").unwrap(),
+            status: CredentialAccountStatus::Expired,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("google-old-access").unwrap()),
+            refresh_secret: Some(old_refresh.clone()),
+            scopes: vec![provider_scope("repo")],
+        })
+        .await
+        .unwrap();
+    let services =
+        auth_services(Arc::clone(&auth)).with_provider_client(Arc::new(AccessOnlyRefreshProvider));
+
+    let report = services
+        .refresh_credential_account(CredentialRefreshRequest::new(
+            owner.clone(),
+            provider(),
+            account.id,
+        ))
+        .await
+        .unwrap();
+
+    assert!(report.refreshed);
+    assert_eq!(report.account.status, CredentialAccountStatus::Configured);
+    let stored = auth
+        .get_account(CredentialAccountLookupRequest::new(owner, account.id))
+        .await
+        .unwrap()
+        .expect("refreshed account");
+    assert_eq!(
+        stored.access_secret,
+        Some(SecretHandle::new("google-new-access").unwrap())
+    );
+    assert_eq!(stored.refresh_secret, Some(old_refresh));
 }
 
 #[tokio::test]

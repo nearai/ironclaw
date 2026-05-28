@@ -3,7 +3,8 @@ use std::sync::Arc;
 use ironclaw_auth::{
     AuthProductError, AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountId,
     CredentialAccountLookupRequest, CredentialAccountSelectionRequest, CredentialAccountService,
-    CredentialAccountStatus, CredentialRecoveryProjection, GOOGLE_PROVIDER_ID, ProviderScope,
+    CredentialAccountStatus, CredentialRecoveryProjection, CredentialRefreshRequest,
+    GOOGLE_PROVIDER_ID, ProviderScope,
 };
 use ironclaw_host_api::{ExtensionId, ResourceScope, SecretHandle};
 use thiserror::Error;
@@ -100,6 +101,29 @@ impl GoogleCredentialResolver {
             granted_scopes: account.scopes,
             missing_scopes,
         })
+    }
+
+    pub async fn refresh(
+        &self,
+        scope: &ResourceScope,
+        requester_extension: &ExtensionId,
+        account_id: CredentialAccountId,
+    ) -> Result<(), GoogleCredentialError> {
+        let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+        let provider = google_provider_id()?;
+        self.recoverable_result(
+            self.accounts
+                .refresh_account(
+                    CredentialRefreshRequest::new(auth_scope, provider.clone(), account_id)
+                        .for_extension(requester_extension.clone()),
+                )
+                .await,
+            scope,
+            requester_extension,
+            &provider,
+        )
+        .await
+        .map(|_| ())
     }
 
     async fn recovery_required(

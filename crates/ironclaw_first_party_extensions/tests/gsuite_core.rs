@@ -127,6 +127,59 @@ async fn calendar_create_event_does_not_forward_list_query_fields() {
 }
 
 #[tokio::test]
+async fn gsuite_handler_refreshes_expired_google_token_once_and_retries() {
+    let scope = scope();
+    let auth = Arc::new(InMemoryAuthProductServices::new());
+    ironclaw_auth::CredentialAccountService::create_account(
+        auth.as_ref(),
+        NewCredentialAccount {
+            scope: auth_scope(&scope),
+            provider: google_provider_id().unwrap(),
+            label: CredentialAccountLabel::new("work google").unwrap(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("google-old-access").unwrap()),
+            refresh_secret: Some(SecretHandle::new("google-old-refresh").unwrap()),
+            scopes: vec![provider_scope(GOOGLE_GMAIL_SEND_SCOPE)],
+        },
+    )
+    .await
+    .unwrap();
+    let egress = Arc::new(RecordingEgress::with_responses(vec![
+        RecordingEgress::json_status(
+            401,
+            json!({"error":{"status":"UNAUTHENTICATED","message":"expired"}}),
+        ),
+        RecordingEgress::json(json!({"id":"sent-after-refresh"})),
+    ]));
+
+    let output = dispatch_ok(
+        auth.clone(),
+        scope.clone(),
+        GMAIL_SEND_MESSAGE_CAPABILITY_ID,
+        json!({ "message": { "raw": "base64url-rfc822" } }),
+        egress.clone(),
+    )
+    .await;
+
+    assert_eq!(output["status"], 200);
+    assert_eq!(egress.requests().len(), 2);
+    let refreshed = ironclaw_auth::CredentialAccountService::select_unique_configured_account(
+        auth.as_ref(),
+        ironclaw_auth::CredentialAccountSelectionRequest::new(
+            auth_scope(&scope),
+            google_provider_id().unwrap(),
+        )
+        .for_extension(ExtensionId::new("gmail").unwrap()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(refreshed.status, CredentialAccountStatus::Configured);
+}
+
+#[tokio::test]
 async fn gsuite_handler_rejects_oversized_request_body_before_egress() {
     let scope = scope();
     let auth = auth_with_google_account(

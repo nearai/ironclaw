@@ -619,6 +619,7 @@ impl CredentialAccountService for InMemoryAuthProductServices {
             };
             OAuthProviderRefreshRequest {
                 provider: account.provider.clone(),
+                scope: account.scope.clone(),
                 account_id: account.id,
                 refresh_secret,
                 scopes: account.scopes.clone(),

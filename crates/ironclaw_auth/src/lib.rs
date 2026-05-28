@@ -31,7 +31,7 @@ pub use credential::{
     CredentialAccountStatus, CredentialAccountUpdate, CredentialOwnership, CredentialRecoveryKind,
     CredentialRecoveryProjection, CredentialRecoveryReason, CredentialRecoveryRequest,
     CredentialRecoveryState, CredentialRefreshReport, CredentialRefreshRequest,
-    CredentialSetupService, NewCredentialAccount,
+    CredentialSetupService, NewCredentialAccount, ProviderBackedCredentialAccountService,
 };
 pub use error::{AuthErrorCode, AuthProductError};
 pub use fakes::InMemoryAuthProductServices;

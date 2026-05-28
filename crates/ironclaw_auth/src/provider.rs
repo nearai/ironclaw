@@ -107,6 +107,7 @@ pub struct OAuthProviderExchange {
 #[derive(Clone, PartialEq, Eq)]
 pub struct OAuthProviderRefreshRequest {
     pub provider: AuthProviderId,
+    pub scope: AuthProductScope,
     pub account_id: CredentialAccountId,
     pub refresh_secret: SecretHandle,
     pub scopes: Vec<ProviderScope>,
@@ -117,6 +118,7 @@ impl fmt::Debug for OAuthProviderRefreshRequest {
         formatter
             .debug_struct("OAuthProviderRefreshRequest")
             .field("provider", &self.provider)
+            .field("scope", &self.scope)
             .field("account_id", &self.account_id)
             .field("refresh_secret", &"[REDACTED]")
             .field("scopes", &self.scopes)
@@ -145,6 +147,14 @@ pub trait AuthProviderClient: Send + Sync {
         &self,
         request: OAuthProviderRefreshRequest,
     ) -> Result<OAuthProviderRefresh, AuthProductError>;
+
+    async fn cleanup_exchange(
+        &self,
+        _context: OAuthProviderExchangeContext,
+        _exchange: &OAuthProviderExchange,
+    ) -> Result<(), AuthProductError> {
+        Ok(())
+    }
 }
 
 pub fn validate_provider_callback_request(

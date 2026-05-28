@@ -421,6 +421,7 @@ async fn credential_refresh_revalidates_scope_provider_and_grants() {
 fn provider_refresh_request_debug_redacts_secret_handle() {
     let request = OAuthProviderRefreshRequest {
         provider: provider(),
+        scope: scope("alice"),
         account_id: ironclaw_auth::CredentialAccountId::new(),
         refresh_secret: SecretHandle::new("github-debug-refresh-secret").unwrap(),
         scopes: provider_scopes(&["repo"]),

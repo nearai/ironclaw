@@ -56,3 +56,14 @@ pub(super) fn scopes_for_exchange(
         Err(AuthProductError::TokenExchangeFailed)
     }
 }
+
+pub(super) fn scopes_for_refresh(
+    token_response: &ParsedGoogleTokenResponse,
+    existing_scopes: &[ProviderScope],
+) -> Vec<ProviderScope> {
+    if token_response.scope_was_present {
+        token_response.response.scopes.clone()
+    } else {
+        existing_scopes.to_vec()
+    }
+}

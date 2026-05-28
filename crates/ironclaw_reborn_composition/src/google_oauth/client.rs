@@ -11,16 +11,21 @@ use ironclaw_host_api::{
     CapabilityId, NetworkMethod, RuntimeCredentialInjection, RuntimeHttpEgress,
     RuntimeHttpEgressRequest, RuntimeKind,
 };
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 
 use crate::google_oauth::policy_authorizer::{
     GoogleProviderEgressPolicyAuthorizer, google_token_network_policy,
 };
 use crate::google_oauth::secret_sink::{
-    GoogleProviderTokenSet, GoogleProviderTokenSink, GoogleProviderTokenStorageRequest,
+    GoogleProviderRefreshTokenStorageRequest, GoogleProviderTokenSet, GoogleProviderTokenSink,
+    GoogleProviderTokenStorageRequest,
 };
-use crate::google_oauth::token_request::serialize_token_request;
-use crate::google_oauth::token_response::{parse_token_response, scopes_for_exchange};
+use crate::google_oauth::token_request::{
+    serialize_authorization_code_token_request, serialize_refresh_token_request,
+};
+use crate::google_oauth::token_response::{
+    parse_token_response, scopes_for_exchange, scopes_for_refresh,
+};
 
 const GOOGLE_OAUTH_CAPABILITY: &str = "ironclaw_auth.google_oauth";
 const DEFAULT_TIMEOUT_MS: u32 = 30_000;
@@ -131,7 +136,7 @@ impl AuthProviderClient for GoogleProviderClient {
             return Err(AuthProductError::CrossScopeDenied);
         }
 
-        let body = serialize_token_request(
+        let body = serialize_authorization_code_token_request(
             self.client_id.as_str(),
             self.redirect_uri.as_str(),
             self.client_secret.as_ref(),
@@ -201,8 +206,94 @@ impl AuthProviderClient for GoogleProviderClient {
 
     async fn refresh_token(
         &self,
-        _request: OAuthProviderRefreshRequest,
+        request: OAuthProviderRefreshRequest,
     ) -> Result<OAuthProviderRefresh, AuthProductError> {
-        Err(AuthProductError::RefreshFailed)
+        if request.provider.as_str() != GOOGLE_PROVIDER_ID {
+            return Err(AuthProductError::RefreshFailed);
+        }
+        let refresh_scope = request.scope.resource.clone();
+        if refresh_scope.is_system() {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        let refresh_token = self
+            .token_sink
+            .load_refresh_token(&refresh_scope, &request.refresh_secret)
+            .await?;
+        let body = serialize_refresh_token_request(
+            self.client_id.as_str(),
+            self.client_secret.as_ref(),
+            refresh_token.expose_secret(),
+        );
+        let network_policy = google_token_network_policy(self.response_body_limit);
+        self.egress_policy_authorizer
+            .authorize_google_token_exchange(&refresh_scope, &self.capability_id, &network_policy)
+            .await?;
+
+        let egress = Arc::clone(&self.egress);
+        let egress_request = RuntimeHttpEgressRequest {
+            runtime: self.runtime,
+            scope: refresh_scope.clone(),
+            capability_id: self.capability_id.clone(),
+            method: NetworkMethod::Post,
+            url: GOOGLE_TOKEN_ENDPOINT.to_string(),
+            headers: vec![
+                (
+                    "content-type".to_string(),
+                    "application/x-www-form-urlencoded".to_string(),
+                ),
+                ("accept".to_string(), "application/json".to_string()),
+            ],
+            body,
+            network_policy,
+            credential_injections: Vec::<RuntimeCredentialInjection>::new(),
+            response_body_limit: Some(self.response_body_limit),
+            save_body_to: None,
+            timeout_ms: Some(self.timeout_ms),
+        };
+        let response = tokio::task::spawn_blocking(move || egress.execute(egress_request))
+            .await
+            .map_err(|_| AuthProductError::BackendUnavailable)?;
+        let response = response.map_err(|_| AuthProductError::BackendUnavailable)?;
+
+        if !(200..300).contains(&response.status) {
+            return Err(AuthProductError::RefreshFailed);
+        }
+
+        let token_response =
+            parse_token_response(&response.body).map_err(|_| AuthProductError::RefreshFailed)?;
+        let scopes = scopes_for_refresh(&token_response, &request.scopes);
+        let stored_tokens = self
+            .token_sink
+            .store_refreshed_tokens(GoogleProviderRefreshTokenStorageRequest {
+                scope: refresh_scope,
+                account_id: request.account_id,
+                tokens: GoogleProviderTokenSet {
+                    access_token: token_response.response.access_token,
+                    refresh_token: token_response.response.refresh_token,
+                },
+            })
+            .await?;
+
+        Ok(OAuthProviderRefresh {
+            provider: request.provider,
+            access_secret: stored_tokens.access_secret,
+            refresh_secret: stored_tokens.refresh_secret,
+            scopes,
+        })
+    }
+
+    async fn cleanup_exchange(
+        &self,
+        context: OAuthProviderExchangeContext,
+        exchange: &OAuthProviderExchange,
+    ) -> Result<(), AuthProductError> {
+        if exchange.provider.as_str() != GOOGLE_PROVIDER_ID {
+            return Ok(());
+        }
+        let mut handles = vec![exchange.access_secret.clone()];
+        handles.extend(exchange.refresh_secret.clone());
+        self.token_sink
+            .delete_tokens(&context.scope.resource, &handles)
+            .await
     }
 }

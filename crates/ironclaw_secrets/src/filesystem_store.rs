@@ -366,6 +366,22 @@ where
             }))
     }
 
+    async fn delete(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<bool, SecretStoreError> {
+        if self.read_secret(scope, handle).await?.is_none() {
+            return Ok(false);
+        }
+        let path = secret_path(scope, handle)?;
+        match self.filesystem.delete(scope, &path).await {
+            Ok(()) => Ok(true),
+            Err(error) if is_not_found(&error) => Ok(false),
+            Err(error) => Err(fs_to_secret_store_error(error)),
+        }
+    }
+
     async fn lease_once(
         &self,
         scope: &ResourceScope,

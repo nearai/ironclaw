@@ -11,8 +11,9 @@ use ironclaw_auth::{
     CredentialSetupService, InMemoryAuthProductServices, ManualTokenSetupRequest, NewAuthFlow,
     OAuthAuthorizationUrl, OAuthCallbackClaimRequest, OAuthCallbackFailureInput,
     OAuthCallbackInput, OAuthProviderCallbackRequest, OAuthProviderExchangeContext,
-    OpaqueStateHash, PkceVerifierHash, ProviderCallbackOutcome, SecretCleanupReport,
-    SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest, Timestamp,
+    OpaqueStateHash, PkceVerifierHash, ProviderBackedCredentialAccountService,
+    ProviderCallbackOutcome, SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
+    SecretSubmitRequest, Timestamp,
 };
 use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
 use secrecy::SecretString;
@@ -325,6 +326,11 @@ impl RebornProductAuthServicePorts {
     }
 
     pub fn with_provider_client(mut self, provider_client: Arc<dyn AuthProviderClient>) -> Self {
+        self.credential_account_service = Arc::new(ProviderBackedCredentialAccountService::new(
+            self.credential_account_service,
+            self.credential_setup_service.clone(),
+            provider_client.clone(),
+        ));
         self.provider_client = provider_client;
         self
     }
@@ -476,6 +482,11 @@ impl RebornProductAuthServices {
     }
 
     pub fn with_provider_client(mut self, provider_client: Arc<dyn AuthProviderClient>) -> Self {
+        self.credential_account_service = Arc::new(ProviderBackedCredentialAccountService::new(
+            self.credential_account_service,
+            self.credential_setup_service.clone(),
+            provider_client.clone(),
+        ));
         self.provider_client = provider_client;
         self
     }
@@ -585,17 +596,42 @@ impl RebornProductAuthServices {
                             return Err(error.into());
                         }
                     };
-                    self.flow_manager
+                    let exchange_for_cleanup = exchange.clone();
+                    match self
+                        .flow_manager
                         .complete_oauth_callback(
                             &request.scope,
                             OAuthCallbackInput {
                                 flow_id: request.flow_id,
-                                opaque_state_hash: request.opaque_state_hash,
+                                opaque_state_hash: request.opaque_state_hash.clone(),
                                 outcome: ProviderCallbackOutcome::Authorized { exchange },
                             },
                         )
                         .await
-                        .map_err(RebornOAuthCallbackError::from)?
+                    {
+                        Ok(completed) => completed,
+                        Err(error) => {
+                            if let Err(cleanup_error) = self
+                                .provider_client
+                                .cleanup_exchange(
+                                    OAuthProviderExchangeContext {
+                                        scope: request.scope.clone(),
+                                        flow_id: request.flow_id,
+                                    },
+                                    &exchange_for_cleanup,
+                                )
+                                .await
+                            {
+                                tracing::debug!(
+                                    flow_id = %request.flow_id,
+                                    completion_error_code = ?error.code(),
+                                    cleanup_error_code = ?cleanup_error.code(),
+                                    "reborn auth callback completion failed and token cleanup failed"
+                                );
+                            }
+                            return Err(error.into());
+                        }
+                    }
                 }
             }
             RebornOAuthCallbackOutcome::ProviderDenied => self
