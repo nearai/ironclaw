@@ -20,13 +20,13 @@ async fn run_context(label: &str) -> LoopRunContext {
     let resolved = InMemoryRunProfileResolver::default()
         .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
         .await
-        .expect("profile resolves");
+        .expect("profile resolves"); // safety: test-only assertion in #[cfg(test)] module.
     LoopRunContext::new(
         TurnScope::new(
-            TenantId::new(format!("tenant-{label}")).expect("tenant id"),
-            Some(AgentId::new(format!("agent-{label}")).expect("agent id")),
-            Some(ProjectId::new(format!("project-{label}")).expect("project id")),
-            ThreadId::new(format!("thread-{label}")).expect("thread id"),
+            TenantId::new(format!("tenant-{label}")).expect("tenant id"), // safety: test-only assertion in #[cfg(test)] module.
+            Some(AgentId::new(format!("agent-{label}")).expect("agent id")), // safety: test-only assertion in #[cfg(test)] module.
+            Some(ProjectId::new(format!("project-{label}")).expect("project id")), // safety: test-only assertion in #[cfg(test)] module.
+            ThreadId::new(format!("thread-{label}")).expect("thread id"), // safety: test-only assertion in #[cfg(test)] module.
         ),
         TurnId::new(),
         TurnRunId::new(),
@@ -79,18 +79,29 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
         .expect("local runtime substrate")
         .workspace_mounts
         .clone();
+    let skill_mounts = services
+        .local_runtime
+        .as_ref()
+        .expect("local runtime substrate")
+        .skill_mounts
+        .clone();
+    let policy = Arc::new(
+        crate::local_dev_capability_policy::local_dev_capability_policy().expect("policy parses"),
+    );
     let capability_io = Arc::new(LocalDevCapabilityIo::default());
     let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
     let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
-    let factory = LocalDevLoopCapabilityPortFactory::new(
+    let factory = LocalDevLoopCapabilityPortFactory {
         runtime,
-        UserId::new("local-dev-shell-user").expect("user id"),
+        user_id: UserId::new("local-dev-shell-user").expect("user id"),
+        policy,
         workspace_mounts,
-        LocalDevExtensionSurfaceSource::default(),
+        skill_mounts,
+        extension_surface_source: LocalDevExtensionSurfaceSource::default(),
         input_resolver,
         result_writer,
-        Arc::new(InMemoryLoopHostMilestoneSink::default()),
-    );
+        milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
+    };
     let run_context = run_context("shell-workdir").await;
     let port = factory
         .create_capability_port(&run_context)

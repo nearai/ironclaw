@@ -192,8 +192,7 @@ fn local_dev_process_port_for_policy(
                     continue;
                 }
             };
-            process_port =
-                process_port.with_workdir_alias(alias_str, alias.to_path_buf());
+            process_port = process_port.with_workdir_alias(alias_str, alias.to_path_buf());
         }
     }
     Some(process_port)

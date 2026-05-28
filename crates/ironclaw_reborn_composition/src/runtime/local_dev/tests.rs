@@ -602,8 +602,13 @@ mod tests {
             .find(|descriptor| descriptor.capability_id.as_str() == SHELL_CAPABILITY_ID)
             .expect("shell descriptor visible");
         assert!(
-            !shell_descriptor.safe_description.contains("/host"),
-            "shell does not receive scoped filesystem disclosure"
+            shell_descriptor.safe_description.contains("/host"),
+            "shell should disclose confirmed host alias: {}",
+            shell_descriptor.safe_description
+        );
+        assert!(
+            !shell_descriptor.safe_description.contains(&raw_host_home),
+            "shell description must not disclose raw host home path"
         );
         assert!(
             shell_descriptor.safe_description.contains("local host")
@@ -648,6 +653,15 @@ mod tests {
             .iter()
             .find(|definition| definition.capability_id.as_str() == SHELL_CAPABILITY_ID)
             .expect("shell tool definition visible");
+        assert!(
+            shell_tool.description.contains("/host"),
+            "provider tool shell description should disclose confirmed host alias: {}",
+            shell_tool.description
+        );
+        assert!(
+            !shell_tool.description.contains(&raw_host_home),
+            "provider tool shell description must not disclose raw host home path"
+        );
         assert!(
             shell_tool.description.contains("local host")
                 && shell_tool

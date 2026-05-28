@@ -21,10 +21,7 @@ impl LocalHostWorkdirAlias {
         if !host_path.is_absolute() {
             return Err("local host workdir alias host_path must be absolute".to_string());
         }
-        Ok(Self {
-            alias,
-            host_path,
-        })
+        Ok(Self { alias, host_path })
     }
 
     fn resolve(&self, workdir: &str) -> Option<PathBuf> {
@@ -73,10 +70,9 @@ pub(crate) fn rewrite_local_host_command_aliases(
     let mut in_double_quote = false;
     let mut escaped = false;
     while index < command.len() {
-        let current = command[index..]
-            .chars()
-            .next()
-            .expect("valid char boundary");
+        let Some(current) = command[index..].chars().next() else {
+            break;
+        };
         let current_len = current.len_utf8();
         if !escaped && let Some(alias) = longest_matching_command_alias(command, index, aliases) {
             push_rewritten_alias(&mut rewritten, alias, in_single_quote, in_double_quote);

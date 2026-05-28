@@ -42,6 +42,8 @@ use crate::{
 };
 
 mod extension_surface;
+#[cfg(test)]
+mod shell_tests;
 mod surface_disclosure;
 
 use extension_surface::{LocalDevExtensionSurface, LocalDevExtensionSurfaceSource};
