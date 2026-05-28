@@ -16,6 +16,7 @@ const PROJECTION_CURSOR_MAX_BYTES: usize = 1024;
 const PROJECTION_THREAD_ID_MAX_BYTES: usize = 512;
 const PROJECTION_ITEM_ID_MAX_BYTES: usize = 512;
 const PROJECTION_TEXT_MAX_BYTES: usize = 128 * 1024;
+const PROJECTION_WORK_SUMMARY_MAX_BYTES: usize = 1024;
 const CAPABILITY_ACTIVITY_ERROR_KIND_MAX_BYTES: usize = 64;
 const CAPABILITY_ACTIVITY_ERROR_KIND_SEGMENT_MAX_BYTES: usize = 24;
 const CAPABILITY_ACTIVITY_UNCLASSIFIED_ERROR_KIND: &str = "Unclassified";
@@ -188,7 +189,6 @@ pub enum ProgressKind {
 #[serde(rename_all = "snake_case")]
 pub enum ProductWorkSummaryPhase {
     Planning,
-    Working,
     Waiting,
     Retrying,
     Context,
@@ -567,11 +567,17 @@ pub enum ProductProjectionItem {
 impl ProductProjectionItem {
     fn validate(&self) -> Result<(), ProductAdapterError> {
         match self {
-            Self::Text { id, body }
-            | Self::Thinking { id, body }
-            | Self::WorkSummary { id, body, .. } => {
+            Self::Text { id, body } | Self::Thinking { id, body } => {
                 validate_bounded_text("projection_item_id", id, PROJECTION_ITEM_ID_MAX_BYTES)?;
                 validate_bounded_text("projection_text", body, PROJECTION_TEXT_MAX_BYTES)
+            }
+            Self::WorkSummary { id, body, .. } => {
+                validate_bounded_text("projection_item_id", id, PROJECTION_ITEM_ID_MAX_BYTES)?;
+                validate_bounded_text(
+                    "projection_work_summary",
+                    body,
+                    PROJECTION_WORK_SUMMARY_MAX_BYTES,
+                )
             }
             Self::RunStatus { status, .. } => validate_bounded_text(
                 "projection_run_status",
@@ -838,6 +844,23 @@ mod tests {
         let decoded: ProductProjectionState =
             serde_json::from_value(value).expect("deserialize work summary projection");
         assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn projection_state_rejects_oversized_work_summary_body() {
+        let json = serde_json::json!({
+            "thread_id": "thread-1",
+            "items": [{
+                "work_summary": {
+                    "id": "work-summary:run:1",
+                    "run_id": TurnRunId::new(),
+                    "phase": "planning",
+                    "body": "x".repeat(PROJECTION_WORK_SUMMARY_MAX_BYTES + 1),
+                }
+            }]
+        });
+
+        assert!(serde_json::from_value::<ProductProjectionState>(json).is_err());
     }
 
     #[test]

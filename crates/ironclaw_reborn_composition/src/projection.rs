@@ -554,7 +554,7 @@ fn live_update_payloads(
             } => ProductProjectionItem::WorkSummary {
                 id: id.clone(),
                 run_id: *run_id,
-                phase: work_summary_phase(*phase),
+                phase: live_work_summary_phase_to_product_phase(*phase),
                 body: body.clone(),
             },
         })
@@ -572,10 +572,11 @@ fn live_update_payloads(
     }))
 }
 
-fn work_summary_phase(phase: ThreadLiveWorkSummaryPhase) -> ProductWorkSummaryPhase {
+fn live_work_summary_phase_to_product_phase(
+    phase: ThreadLiveWorkSummaryPhase,
+) -> ProductWorkSummaryPhase {
     match phase {
         ThreadLiveWorkSummaryPhase::Planning => ProductWorkSummaryPhase::Planning,
-        ThreadLiveWorkSummaryPhase::Working => ProductWorkSummaryPhase::Working,
         ThreadLiveWorkSummaryPhase::Waiting => ProductWorkSummaryPhase::Waiting,
         ThreadLiveWorkSummaryPhase::Retrying => ProductWorkSummaryPhase::Retrying,
         ThreadLiveWorkSummaryPhase::Context => ProductWorkSummaryPhase::Context,

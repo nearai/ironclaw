@@ -513,6 +513,127 @@ async fn webui_event_stream_drains_work_summary_projection_from_driver_note() {
 }
 
 #[tokio::test]
+async fn webui_event_stream_maps_subscription_terminated_work_summary_to_context() {
+    let tenant_id = TenantId::new("webui-terminated-summary-tenant").unwrap();
+    let user_id = UserId::new("webui-terminated-summary-user").unwrap();
+    let agent_id = AgentId::new("webui-terminated-summary-agent").unwrap();
+    let thread_id = ThreadId::new("webui-terminated-summary-thread").unwrap();
+    let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let services = build_reborn_projection_services(
+        event_log,
+        ReplyTargetBindingRef::new("webui-terminated-summary-reply").unwrap(),
+    );
+    let sink = services.with_live_progress_milestone_sink(
+        Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        user_id.clone(),
+    );
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+    let run_id = TurnRunId::new();
+
+    sink.publish_loop_milestone(LoopHostMilestone {
+        scope: scope.clone(),
+        turn_id: TurnId::new(),
+        run_id,
+        loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
+        kind: LoopHostMilestoneKind::DriverNote {
+            kind: LoopDriverNoteKind::EventSubscriptionTerminated,
+            safe_summary: LoopSafeSummary::new("event subscription terminated").unwrap(),
+        },
+    })
+    .await
+    .unwrap();
+
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id),
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(events.iter().any(|event| {
+        matches!(
+            event.payload(),
+            ProductOutboundPayload::ProjectionUpdate { state }
+                if state.thread_id == thread_id.to_string()
+                    && state.items.iter().any(|item| matches!(
+                        item,
+                        ProductProjectionItem::WorkSummary {
+                            run_id: observed_run_id,
+                            phase: ProductWorkSummaryPhase::Context,
+                            body,
+                            ..
+                        } if *observed_run_id == run_id && body == "event subscription terminated"
+                    ))
+        )
+    }));
+}
+
+#[tokio::test]
+async fn webui_event_stream_skips_empty_work_summary_body() {
+    let tenant_id = TenantId::new("webui-empty-summary-tenant").unwrap();
+    let user_id = UserId::new("webui-empty-summary-user").unwrap();
+    let agent_id = AgentId::new("webui-empty-summary-agent").unwrap();
+    let thread_id = ThreadId::new("webui-empty-summary-thread").unwrap();
+    let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let services = build_reborn_projection_services(
+        event_log,
+        ReplyTargetBindingRef::new("webui-empty-summary-reply").unwrap(),
+    );
+    let sink = services.with_live_progress_milestone_sink(
+        Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        user_id.clone(),
+    );
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+
+    sink.publish_loop_milestone(LoopHostMilestone {
+        scope: scope.clone(),
+        turn_id: TurnId::new(),
+        run_id: TurnRunId::new(),
+        loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
+        kind: LoopHostMilestoneKind::DriverNote {
+            kind: LoopDriverNoteKind::Planning,
+            safe_summary: LoopSafeSummary::new("   ").unwrap(),
+        },
+    })
+    .await
+    .unwrap();
+
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id),
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(events.iter().all(|event| {
+        !matches!(
+            event.payload(),
+            ProductOutboundPayload::ProjectionUpdate { state }
+                if state.items.iter().any(|item| matches!(
+                    item,
+                    ProductProjectionItem::WorkSummary { .. }
+                ))
+        )
+    }));
+}
+
+#[tokio::test]
 async fn webui_event_stream_resumes_inside_multi_payload_runtime_projection_item() {
     let tenant_id = TenantId::new("webui-activity-resume-tenant").unwrap();
     let user_id = UserId::new("webui-activity-resume-user").unwrap();

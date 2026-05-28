@@ -17,7 +17,7 @@ use ironclaw_turns::{
     TurnRunId,
     run_profile::{
         AgentLoopHostError, LoopDriverNoteKind, LoopHostMilestone, LoopHostMilestoneKind,
-        LoopHostMilestoneSink, sanitize_model_visible_text,
+        LoopHostMilestoneSink, LoopSafeSummary, sanitize_model_visible_text,
     },
 };
 
@@ -105,10 +105,21 @@ impl LiveProgressMilestoneSink {
         kind: LoopDriverNoteKind,
         safe_summary: &str,
     ) {
-        let body = sanitize_model_visible_text(safe_summary);
+        let body = sanitize_model_visible_text(safe_summary).trim().to_string();
         if body.is_empty() {
             return;
         }
+        let body = match LoopSafeSummary::new(body) {
+            Ok(summary) => summary.to_string(),
+            Err(reason) => {
+                tracing::debug!(
+                    reason = %reason,
+                    run_id = %milestone.run_id,
+                    "live progress work summary rejected by boundary validation"
+                );
+                return;
+            }
+        };
         let sequence = self.next_live_sequence();
         self.publish_live_item(
             milestone,
@@ -116,7 +127,7 @@ impl LiveProgressMilestoneSink {
             ThreadLiveProjectionItem::WorkSummary {
                 id: work_summary_id(milestone.run_id, sequence),
                 run_id: milestone.run_id,
-                phase: work_summary_phase(kind),
+                phase: driver_note_kind_to_live_work_summary_phase(kind),
                 body,
             },
         );
@@ -167,7 +178,9 @@ fn work_summary_id(run_id: TurnRunId, sequence: u64) -> String {
     format!("work-summary:{run_id}:{sequence}")
 }
 
-fn work_summary_phase(kind: LoopDriverNoteKind) -> ThreadLiveWorkSummaryPhase {
+fn driver_note_kind_to_live_work_summary_phase(
+    kind: LoopDriverNoteKind,
+) -> ThreadLiveWorkSummaryPhase {
     match kind {
         LoopDriverNoteKind::Planning => ThreadLiveWorkSummaryPhase::Planning,
         LoopDriverNoteKind::Waiting => ThreadLiveWorkSummaryPhase::Waiting,

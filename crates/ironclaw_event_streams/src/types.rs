@@ -184,7 +184,6 @@ pub enum ThreadLiveProjectionItem {
 #[serde(rename_all = "snake_case")]
 pub enum ThreadLiveWorkSummaryPhase {
     Planning,
-    Working,
     Waiting,
     Retrying,
     Context,
