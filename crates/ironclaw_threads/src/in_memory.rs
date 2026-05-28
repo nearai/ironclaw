@@ -20,6 +20,7 @@ use crate::{
     SessionThreadRecord, SessionThreadService, SummaryArtifact, ThreadHistory,
     ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
     ToolResultReferenceEnvelope, UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
+    derive_title_from_message,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -99,20 +100,6 @@ impl SessionThreadService for InMemorySessionThreadService {
             },
         );
         Ok(record)
-    }
-
-    async fn set_thread_title_if_unset(
-        &self,
-        scope: &ThreadScope,
-        thread_id: &ThreadId,
-        title: String,
-    ) -> Result<SessionThreadRecord, SessionThreadError> {
-        let mut state = self.state.lock().await;
-        let thread = get_thread_mut(&mut state, scope, thread_id)?;
-        if thread.record.title.is_none() {
-            thread.record.title = Some(title);
-        }
-        Ok(thread.record.clone())
     }
 
     async fn accept_inbound_message(
@@ -626,11 +613,29 @@ impl SessionThreadService for InMemorySessionThreadService {
         // scan is still acceptable here; a scope-indexed secondary
         // map would help with very large stores but local-dev never
         // gets close to that scale.
+        //
+        // Derive a sidebar-friendly title from the first user message
+        // when the record itself has none. Matches v1's libSQL list
+        // semantics: titles aren't stored, they're computed on read
+        // from the first user message in the transcript. The
+        // filesystem backend does the same thing via
+        // `list_thread_messages` + `derive_title_from_message`.
         let mut matching: Vec<SessionThreadRecord> = state
             .threads
             .values()
             .filter(|stored| stored.record.scope == request.scope)
-            .map(|stored| stored.record.clone())
+            .map(|stored| {
+                let mut record = stored.record.clone();
+                if record.title.is_none()
+                    && let Some(first_user) =
+                        stored.messages.iter().find(|m| m.kind == MessageKind::User)
+                    && let Some(content) = first_user.content.as_deref()
+                    && let Some(title) = derive_title_from_message(content)
+                {
+                    record.title = Some(title);
+                }
+                record
+            })
             .collect();
         // Stable order so opaque cursor → resumption is deterministic.
         matching.sort_by(|a, b| a.thread_id.as_str().cmp(b.thread_id.as_str()));

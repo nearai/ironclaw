@@ -1725,60 +1725,113 @@ async fn list_threads_for_scope_is_scope_filtered_and_paginated() {
 }
 
 #[tokio::test]
-async fn set_thread_title_if_unset_writes_when_title_is_none_and_is_a_noop_otherwise() {
+async fn list_threads_for_scope_derives_title_from_first_user_message() {
     let service = InMemorySessionThreadService::default();
-    let scope = scope("title");
-    let thread_id = ThreadId::new("thread-title").unwrap();
+    let scope = scope("title-derive");
 
+    // Thread with title=None and a multi-line first user message.
+    // The list should trim and truncate to the first non-empty line.
+    let derived_id = ThreadId::new("thread-derived").unwrap();
     service
         .ensure_thread(EnsureThreadRequest {
             scope: scope.clone(),
-            thread_id: Some(thread_id.clone()),
-            created_by_actor_id: "user-title".to_string(),
+            thread_id: Some(derived_id.clone()),
+            created_by_actor_id: "user-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: derived_id.clone(),
+            actor_id: "user-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("  ok echo  \nsecond line"),
+        })
+        .await
+        .unwrap();
+    // A second user message must not replace the derived title.
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: derived_id.clone(),
+            actor_id: "user-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("a later message"),
+        })
+        .await
+        .unwrap();
+
+    // Thread with an explicit creator-supplied title must keep it.
+    let explicit_id = ThreadId::new("thread-explicit").unwrap();
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(explicit_id.clone()),
+            created_by_actor_id: "user-a".into(),
+            title: Some("hand-picked".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: explicit_id.clone(),
+            actor_id: "user-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("would have derived another title"),
+        })
+        .await
+        .unwrap();
+
+    // Thread with no messages at all stays `title: None`.
+    let empty_id = ThreadId::new("thread-empty").unwrap();
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(empty_id.clone()),
+            created_by_actor_id: "user-a".into(),
             title: None,
             metadata_json: None,
         })
         .await
         .unwrap();
 
-    let after_first = service
-        .set_thread_title_if_unset(&scope, &thread_id, "first attempt".to_string())
-        .await
-        .unwrap();
-    assert_eq!(after_first.title.as_deref(), Some("first attempt"));
-
-    let after_second = service
-        .set_thread_title_if_unset(&scope, &thread_id, "second attempt".to_string())
-        .await
-        .unwrap();
-    assert_eq!(
-        after_second.title.as_deref(),
-        Some("first attempt"),
-        "subsequent calls must be a no-op once a title is set",
-    );
-
-    let history = service
-        .list_thread_history(ThreadHistoryRequest {
+    let response = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
             scope: scope.clone(),
-            thread_id: thread_id.clone(),
+            limit: None,
+            cursor: None,
         })
         .await
         .unwrap();
-    assert_eq!(history.thread.title.as_deref(), Some("first attempt"));
-}
-
-#[tokio::test]
-async fn set_thread_title_if_unset_returns_unknown_thread_for_missing_id() {
-    let service = InMemorySessionThreadService::default();
-    let scope = scope("unknown-title");
-    let thread_id = ThreadId::new("does-not-exist").unwrap();
-
-    let err = service
-        .set_thread_title_if_unset(&scope, &thread_id, "hello".to_string())
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(err, SessionThreadError::UnknownThread { .. }),
-        "expected UnknownThread, got {err:?}"
+    let by_id: std::collections::HashMap<&str, Option<&str>> = response
+        .threads
+        .iter()
+        .map(|r| (r.thread_id.as_str(), r.title.as_deref()))
+        .collect();
+    assert_eq!(
+        by_id.get("thread-derived").copied().flatten(),
+        Some("ok echo"),
+        "derived title should be first non-empty line of first user message",
+    );
+    assert_eq!(
+        by_id.get("thread-explicit").copied().flatten(),
+        Some("hand-picked"),
+        "explicit creator title must survive derivation",
+    );
+    assert_eq!(
+        by_id.get("thread-empty").copied().flatten(),
+        None,
+        "thread with no user messages must keep `title: None`",
     );
 }

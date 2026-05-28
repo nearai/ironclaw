@@ -59,7 +59,7 @@ use crate::{
     ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
     SessionThreadService, SummaryArtifact, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
     ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
-    UpdateToolResultReferenceRequest,
+    UpdateToolResultReferenceRequest, derive_title_from_message,
 };
 
 /// Bound on the CAS retry loop. Mirrors the run-state / authorization
@@ -496,52 +496,6 @@ where
             }
             Err(PutError::Other(error)) => Err(error),
         }
-    }
-
-    async fn set_thread_title_if_unset(
-        &self,
-        scope: &ThreadScope,
-        thread_id: &ThreadId,
-        title: String,
-    ) -> Result<SessionThreadRecord, SessionThreadError> {
-        let path = thread_record_path(scope, thread_id)?;
-        // Byte-only backends (LocalFilesystem) fall through `put_with_cas`
-        // to `CasExpectation::Any`, which writes blind. The per-path
-        // lock is the process-local serialization that fills in for CAS
-        // there, so the entire read-modify-write must run under it —
-        // matching `ensure_thread` above.
-        let record_lock = filesystem_record_lock(&path);
-        let _guard = record_lock.lock().await;
-        for _ in 0..FILESYSTEM_CAS_RETRIES {
-            let (mut stored, version) = self
-                .read_thread_versioned(scope, thread_id)
-                .await?
-                .ok_or_else(|| SessionThreadError::UnknownThread {
-                    thread_id: thread_id.clone(),
-                })?;
-            if stored.record.title.is_some() {
-                return Ok(stored.record);
-            }
-            stored.record.title = Some(title.clone());
-            let entry = Self::thread_entry(&stored)?;
-            match put_with_cas(
-                self.filesystem.as_ref(),
-                &scope.to_resource_scope(),
-                &path,
-                entry,
-                CasExpectation::Version(version),
-            )
-            .await
-            {
-                Ok(()) => return Ok(stored.record),
-                Err(PutError::VersionMismatch) => continue,
-                Err(PutError::Other(error)) => return Err(error),
-            }
-        }
-        Err(SessionThreadError::Backend(format!(
-            "filesystem CAS retries exhausted setting thread title at {}",
-            path.as_str()
-        )))
     }
 
     async fn accept_inbound_message(
@@ -1340,10 +1294,21 @@ where
         let results: Vec<Result<Option<(StoredThreadRecord, RecordVersion)>, SessionThreadError>> =
             futures::future::join_all(reads).await;
         let mut page: Vec<SessionThreadRecord> = Vec::with_capacity(thread_ids_page.len());
+        // Records whose `title` is `None` need a sidebar-friendly
+        // label derived from their first user message. We collect
+        // their page indices here and fan-out the message reads
+        // below so we don't serialize N message-dir scans behind the
+        // thread-record fan-out.
+        let mut needs_title: Vec<(usize, &ThreadId)> = Vec::new();
         for (thread_id, result) in thread_ids_page.iter().zip(results) {
             match result {
                 Ok(Some((stored, _))) if stored.record.scope == request.scope => {
+                    let needs_derive = stored.record.title.is_none();
+                    let idx = page.len();
                     page.push(stored.record);
+                    if needs_derive {
+                        needs_title.push((idx, thread_id));
+                    }
                 }
                 Ok(_) => {
                     // Absent record or scope-mismatched payload (e.g.
@@ -1362,6 +1327,41 @@ where
                         ?error,
                         "skipping unreadable thread record during list_threads_for_scope",
                     );
+                }
+            }
+        }
+        // Derive titles in parallel from each thread's first user
+        // message. v1's libSQL list path did the same thing in SQL
+        // (`SELECT substr(content, 1, 100) FROM conversation_messages
+        // WHERE role='user' ORDER BY created_at LIMIT 1`); Reborn's
+        // filesystem layout reads via `RootFilesystem` instead. Errors
+        // are silent-ok — the sidebar entry simply falls back to its
+        // thread-id label, matching the WebUI fallback path.
+        if !needs_title.is_empty() {
+            let title_reads = needs_title
+                .iter()
+                .map(|(_, tid)| self.list_thread_messages(&request.scope, tid));
+            let title_results: Vec<Result<Vec<ThreadMessageRecord>, SessionThreadError>> =
+                futures::future::join_all(title_reads).await;
+            for ((idx, thread_id), msgs_result) in needs_title.into_iter().zip(title_results) {
+                match msgs_result {
+                    Ok(messages) => {
+                        if let Some(first_user) =
+                            messages.iter().find(|m| m.kind == MessageKind::User)
+                            && let Some(content) = first_user.content.as_deref()
+                            && let Some(title) = derive_title_from_message(content)
+                        {
+                            page[idx].title = Some(title);
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            thread_id = %thread_id.as_str(),
+                            scope = ?request.scope,
+                            ?error,
+                            "skipping thread-title derivation during list_threads_for_scope",
+                        );
+                    }
                 }
             }
         }

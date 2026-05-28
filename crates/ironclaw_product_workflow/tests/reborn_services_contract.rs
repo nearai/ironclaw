@@ -1088,69 +1088,6 @@ async fn submit_turn_uses_facade_and_thread_history_without_route_store_access()
 }
 
 #[tokio::test]
-async fn submit_turn_seeds_thread_title_from_first_user_message() {
-    let threads = Arc::new(InMemorySessionThreadService::default());
-    let threads_handle: Arc<dyn SessionThreadService> = threads.clone();
-    let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(threads_handle, coordinator.clone());
-    create_thread_for(&services, caller(), "thread-titled").await;
-
-    services
-        .submit_turn(
-            caller(),
-            serde_json::from_value::<WebUiSendMessageRequest>(json!({
-                "client_action_id": "send-titled-1",
-                "thread_id": "thread-titled",
-                "content": "  ok echo  \nsecond line"
-            }))
-            .expect("request"),
-        )
-        .await
-        .expect("submit succeeds");
-
-    let scope = thread_scope_for(&caller());
-    let history = threads
-        .list_thread_history(ThreadHistoryRequest {
-            scope,
-            thread_id: ThreadId::from_trusted("thread-titled".to_string()),
-        })
-        .await
-        .expect("read thread");
-    assert_eq!(
-        history.thread.title.as_deref(),
-        Some("ok echo"),
-        "first inbound message should seed a trimmed first-line title",
-    );
-
-    services
-        .submit_turn(
-            caller(),
-            serde_json::from_value::<WebUiSendMessageRequest>(json!({
-                "client_action_id": "send-titled-2",
-                "thread_id": "thread-titled",
-                "content": "a different follow-up"
-            }))
-            .expect("request"),
-        )
-        .await
-        .expect("follow-up submit succeeds");
-
-    let scope = thread_scope_for(&caller());
-    let history = threads
-        .list_thread_history(ThreadHistoryRequest {
-            scope,
-            thread_id: ThreadId::from_trusted("thread-titled".to_string()),
-        })
-        .await
-        .expect("read thread");
-    assert_eq!(
-        history.thread.title.as_deref(),
-        Some("ok echo"),
-        "subsequent messages must not overwrite the seeded title",
-    );
-}
-
-#[tokio::test]
 async fn submit_turn_records_skill_activation_message_before_turn_wake() {
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(FakeTurnCoordinator::default());
