@@ -30,6 +30,10 @@ struct StaticSpawnInputCodec {
     args: SpawnSubagentArgs,
 }
 
+struct RejectingSpawnInputCodec {
+    error: AgentLoopHostError,
+}
+
 struct StaticDefinitionResolver {
     resolved: Option<SubagentDefinition>,
     parent: Option<SubagentDefinition>,
@@ -119,6 +123,17 @@ impl SpawnSubagentInputCodec for StaticSpawnInputCodec {
         _input_ref: &CapabilityInputRef,
     ) -> Result<SpawnSubagentArgs, AgentLoopHostError> {
         Ok(self.args.clone())
+    }
+}
+
+#[async_trait]
+impl SpawnSubagentInputCodec for RejectingSpawnInputCodec {
+    async fn decode(
+        &self,
+        _run_context: &LoopRunContext,
+        _input_ref: &CapabilityInputRef,
+    ) -> Result<SpawnSubagentArgs, AgentLoopHostError> {
+        Err(self.error.clone())
     }
 }
 
@@ -626,7 +641,6 @@ fn default_spawn_args() -> SpawnSubagentArgs {
         subagent_kind: SubagentKindId::new("general").unwrap(),
         task: "task".to_string(),
         handoff: None,
-        mode: SpawnSubagentMode::Blocking,
     }
 }
 
@@ -704,6 +718,56 @@ async fn spawn_test_port(
     port
 }
 
+struct SpawnPortWithRecorders {
+    port: SubagentSpawnCapabilityPort,
+    child_runs: Arc<RecordingChildRuns>,
+    goal_store: Arc<RecordingGoalStore>,
+    gate_store: Arc<InMemorySubagentGateResolutionStore>,
+}
+
+fn spawn_test_port_with_codec_and_recorders(
+    run_context: LoopRunContext,
+    codec: Arc<dyn SpawnSubagentInputCodec>,
+) -> SpawnPortWithRecorders {
+    let child_runs = Arc::new(RecordingChildRuns::default());
+    let goal_store = Arc::new(RecordingGoalStore::default());
+    let gate_store = Arc::new(InMemorySubagentGateResolutionStore::default());
+    let deps = Arc::new(SubagentSpawnDeps {
+        coordinator: Arc::new(StaticCoordinator),
+        child_runs: child_runs.clone(),
+        turn_state_store: Arc::new(StaticTurnStateStore::new(Some(turn_record(
+            &run_context,
+            0,
+        )))),
+        thread_service: Arc::new(InMemorySessionThreadService::default()),
+        goal_store: goal_store.clone(),
+        gate_store: gate_store.clone(),
+        definition_resolver: Arc::new(StaticDefinitionResolver {
+            resolved: Some(subagent_definition(false)),
+            parent: None,
+        }),
+        spawn_input_codec: codec,
+        result_writer: Arc::new(NoopResultWriter),
+    });
+    let port = SubagentSpawnCapabilityPort::new(
+        Arc::new(AuthPassPort),
+        run_context,
+        CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+        SubagentSpawnLimits::default(),
+        deps,
+    );
+    port.auth_input_refs
+        .lock()
+        .unwrap()
+        .insert(input_ref(), CapabilityInputRef::new("input:auth").unwrap());
+    SpawnPortWithRecorders {
+        port,
+        child_runs,
+        goal_store,
+        gate_store,
+    }
+}
+
 async fn invoke_spawn(port: &SubagentSpawnCapabilityPort) -> CapabilityOutcome {
     port.invoke_capability(CapabilityInvocation {
         surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
@@ -730,14 +794,15 @@ fn denied_reason(outcome: CapabilityOutcome) -> String {
 }
 
 #[test]
-fn spawn_args_store_normalized_mode() {
+fn spawn_args_hold_blocking_runtime_request() {
     let args = SpawnSubagentArgs {
         subagent_kind: SubagentKindId::new("general").unwrap(),
         task: "task".to_string(),
         handoff: None,
-        mode: SpawnSubagentMode::Blocking,
     };
-    assert_eq!(args.spawn_mode(), SpawnSubagentMode::Blocking);
+    assert_eq!(args.subagent_kind.as_str(), "general");
+    assert_eq!(args.task, "task");
+    assert_eq!(args.handoff, None);
 }
 
 #[tokio::test]
@@ -887,7 +952,6 @@ async fn invoke_spawn_submits_child_run_through_spawn_tree_port() {
                 subagent_kind: SubagentKindId::new("general").unwrap(),
                 task: "inspect the logs".to_string(),
                 handoff: Some("return concise notes".to_string()),
-                mode: SpawnSubagentMode::Blocking,
             },
         }),
         result_writer: Arc::new(NoopResultWriter),
@@ -1167,7 +1231,7 @@ async fn invoke_spawn_rejects_subagent_parent_without_resolved_parent_flavor() {
 }
 
 #[tokio::test]
-async fn json_spawn_input_codec_decodes_legacy_background_flag() {
+async fn json_spawn_input_codec_rejects_legacy_background_flag() {
     let codec = JsonSpawnSubagentInputCodec::new(Arc::new(StaticInputResolver {
         value: Ok(json!({
             "flavor_id": "general",
@@ -1177,11 +1241,163 @@ async fn json_spawn_input_codec_decodes_legacy_background_flag() {
     }));
     let context = test_run_context("spawn-codec").await;
 
+    let error = codec.decode(&context, &input_ref()).await.unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    assert!(
+        error
+            .safe_summary
+            .contains("background subagents are disabled")
+    );
+}
+
+#[tokio::test]
+async fn json_spawn_input_codec_rejects_legacy_background_flag_even_with_blocking_mode() {
+    let codec = JsonSpawnSubagentInputCodec::new(Arc::new(StaticInputResolver {
+        value: Ok(json!({
+            "flavor_id": "general",
+            "task": "investigate",
+            "mode": "blocking",
+            "run_in_background": true
+        })),
+    }));
+    let context = test_run_context("spawn-codec-background-conflict").await;
+
+    let error = codec.decode(&context, &input_ref()).await.unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    assert!(
+        error
+            .safe_summary
+            .contains("background subagents are disabled")
+    );
+}
+
+#[tokio::test]
+async fn json_spawn_input_codec_rejects_background_mode() {
+    let codec = JsonSpawnSubagentInputCodec::new(Arc::new(StaticInputResolver {
+        value: Ok(json!({
+            "flavor_id": "general",
+            "task": "investigate",
+            "mode": "background"
+        })),
+    }));
+    let context = test_run_context("spawn-codec-background").await;
+
+    let error = codec.decode(&context, &input_ref()).await.unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    assert!(
+        error
+            .safe_summary
+            .contains("background subagents are disabled")
+    );
+}
+
+#[tokio::test]
+async fn json_spawn_input_codec_defaults_to_blocking_when_mode_is_absent() {
+    let codec = JsonSpawnSubagentInputCodec::new(Arc::new(StaticInputResolver {
+        value: Ok(json!({
+            "flavor_id": "general",
+            "task": "investigate"
+        })),
+    }));
+    let context = test_run_context("spawn-codec-default").await;
+
     let args = codec.decode(&context, &input_ref()).await.unwrap();
 
     assert_eq!(args.subagent_kind.as_str(), "general");
     assert_eq!(args.task, "investigate");
-    assert_eq!(args.spawn_mode(), SpawnSubagentMode::Background);
+}
+
+#[tokio::test]
+async fn json_spawn_input_codec_accepts_legacy_blocking_inputs() {
+    for value in [
+        json!({
+            "flavor_id": "general",
+            "task": "investigate",
+            "mode": "blocking"
+        }),
+        json!({
+            "flavor_id": "general",
+            "task": "investigate",
+            "run_in_background": false
+        }),
+    ] {
+        let codec =
+            JsonSpawnSubagentInputCodec::new(Arc::new(StaticInputResolver { value: Ok(value) }));
+        let context = test_run_context("spawn-codec-legacy-blocking").await;
+
+        let args = codec.decode(&context, &input_ref()).await.unwrap();
+
+        assert_eq!(args.subagent_kind.as_str(), "general");
+        assert_eq!(args.task, "investigate");
+    }
+}
+
+#[tokio::test]
+async fn invoke_spawn_propagates_decode_rejection_before_side_effects() {
+    let context = test_run_context_with_agent_actor("spawn-background-disabled").await;
+    let harness = spawn_test_port_with_codec_and_recorders(
+        context,
+        Arc::new(RejectingSpawnInputCodec {
+            error: background_subagents_disabled(),
+        }),
+    );
+
+    let error = harness
+        .port
+        .invoke_capability(CapabilityInvocation {
+            surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
+            capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+            input_ref: input_ref(),
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    assert!(
+        error
+            .safe_summary
+            .contains("background subagents are disabled")
+    );
+    assert!(harness.child_runs.requests().is_empty());
+    assert!(harness.goal_store.puts().is_empty());
+    assert!(harness.gate_store.records().is_empty());
+}
+
+#[tokio::test]
+async fn invoke_spawn_batch_propagates_decode_rejection_before_side_effects() {
+    let context = test_run_context_with_agent_actor("spawn-background-disabled-batch").await;
+    let harness = spawn_test_port_with_codec_and_recorders(
+        context,
+        Arc::new(RejectingSpawnInputCodec {
+            error: background_subagents_disabled(),
+        }),
+    );
+
+    let error = harness
+        .port
+        .invoke_capability_batch(CapabilityBatchInvocation {
+            invocations: vec![CapabilityInvocation {
+                surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
+                capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+                input_ref: input_ref(),
+            }],
+            stop_on_first_suspension: true,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    assert!(
+        error
+            .safe_summary
+            .contains("background subagents are disabled")
+    );
+    assert!(harness.child_runs.requests().is_empty());
+    assert!(harness.goal_store.puts().is_empty());
+    assert!(harness.gate_store.records().is_empty());
 }
 
 #[tokio::test]
@@ -1274,7 +1490,6 @@ async fn invoke_batch_coalesces_blocking_spawns_under_single_gate() {
                 subagent_kind: SubagentKindId::new("general").unwrap(),
                 task: "shared task".to_string(),
                 handoff: None,
-                mode: SpawnSubagentMode::Blocking,
             },
         }),
         result_writer: Arc::new(NoopResultWriter),
@@ -1365,7 +1580,6 @@ async fn invoke_batch_mixed_spawn_and_non_spawn_capabilities() {
                 subagent_kind: SubagentKindId::new("general").unwrap(),
                 task: "shared task".to_string(),
                 handoff: None,
-                mode: SpawnSubagentMode::Blocking,
             },
         }),
         result_writer: Arc::new(NoopResultWriter),
@@ -1471,7 +1685,6 @@ async fn invoke_batch_skips_shared_gate_for_single_blocking_spawn() {
                 subagent_kind: SubagentKindId::new("general").unwrap(),
                 task: "task".to_string(),
                 handoff: None,
-                mode: SpawnSubagentMode::Blocking,
             },
         }),
         result_writer: Arc::new(NoopResultWriter),

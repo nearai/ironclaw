@@ -5,6 +5,8 @@ use crate::capability_display_preview::CapabilityDisplayPreviewEnvelope;
 use crate::identifiers::{SummaryArtifactId, ThreadMessageId};
 use crate::tool_result_reference::{ProviderToolCallReferenceEnvelope, ToolResultSafeSummary};
 
+pub const GOAL_STATEMENT_MAX_CHARS: usize = 4000;
+
 /// Canonical scope carried by a Reborn session thread.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ThreadScope {
@@ -100,6 +102,8 @@ pub struct SessionThreadRecord {
     pub created_by_actor_id: String,
     pub title: Option<String>,
     pub metadata_json: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<ThreadGoal>,
 }
 
 /// Transcript message snapshot for UI/projection reads.
@@ -132,9 +136,69 @@ pub struct SummaryArtifact {
     pub thread_id: ThreadId,
     pub start_sequence: u64,
     pub end_sequence: u64,
-    pub summary_kind: String,
+    pub summary_kind: SummaryKind,
     pub content: String,
-    pub model_context_policy: Option<String>,
+    pub model_context_policy: Option<SummaryModelContextPolicy>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct GoalStatement(String);
+
+impl GoalStatement {
+    pub fn new(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return Err("goal statement must not be empty".to_string());
+        }
+        if trimmed.chars().count() > GOAL_STATEMENT_MAX_CHARS {
+            return Err(format!(
+                "goal statement must be at most {GOAL_STATEMENT_MAX_CHARS} chars"
+            ));
+        }
+        Ok(Self(trimmed.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for GoalStatement {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<GoalStatement> for String {
+    fn from(value: GoalStatement) -> Self {
+        value.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadGoal {
+    pub statement: GoalStatement,
+    pub refined_at_sequence: u64,
+    pub refinement_count: u32,
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SummaryKind {
+    #[serde(alias = "model_context")]
+    Compaction,
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SummaryModelContextPolicy {
+    ReplaceRangeWhenSelected,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -244,6 +308,14 @@ pub struct ThreadHistoryRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadMessageRangeRequest {
+    pub scope: ThreadScope,
+    pub thread_id: ThreadId,
+    pub after_sequence: u64,
+    pub through_sequence: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LatestThreadMessageRequest {
     pub scope: ThreadScope,
     pub thread_id: ThreadId,
@@ -275,6 +347,12 @@ pub struct ThreadHistory {
     pub thread: SessionThreadRecord,
     pub messages: Vec<ThreadMessageRecord>,
     pub summary_artifacts: Vec<SummaryArtifact>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadMessageRange {
+    pub thread: SessionThreadRecord,
+    pub messages: Vec<ThreadMessageRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -319,7 +397,13 @@ pub struct CreateSummaryArtifactRequest {
     pub thread_id: ThreadId,
     pub start_sequence: u64,
     pub end_sequence: u64,
-    pub summary_kind: String,
+    pub summary_kind: SummaryKind,
     pub content: MessageContent,
-    pub model_context_policy: Option<String>,
+    pub model_context_policy: Option<SummaryModelContextPolicy>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateThreadGoalRequest {
+    pub thread_id: ThreadId,
+    pub goal: ThreadGoal,
 }

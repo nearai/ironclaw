@@ -357,6 +357,32 @@ impl LoopProgressPort for HostManagedLoopProgressPort {
             // `CheckpointWritten` carries only the checkpoint kind/iteration,
             // so emitting it here would either duplicate or weaken that record.
             LoopProgressEvent::CheckpointWritten { .. } => Ok(()),
+            LoopProgressEvent::CompactionStarted { task_id, initiator } => {
+                emitter.compaction_started(task_id, initiator).await
+            }
+            LoopProgressEvent::CompactionCompleted {
+                task_id,
+                compression_ratio_ppm,
+            } => {
+                emitter
+                    .compaction_completed(task_id, compression_ratio_ppm)
+                    .await
+            }
+            LoopProgressEvent::CompactionFailed {
+                task_id,
+                reason_kind,
+            } => emitter.compaction_failed(task_id, reason_kind).await,
+            LoopProgressEvent::CompactionLeakDetected {
+                task_id,
+                reason_kind,
+            } => emitter.compaction_leak_detected(task_id, reason_kind).await,
+            // Goal refresh has event types reserved in the run-profile surface,
+            // but no producer path in the current loop.
+            LoopProgressEvent::GoalRefreshStarted { .. }
+            | LoopProgressEvent::GoalRefreshCompleted { .. }
+            | LoopProgressEvent::GoalRefreshFailed { .. }
+            | LoopProgressEvent::GoalRefreshLeakDetected { .. } => Ok(()),
+            _ => Ok(()),
         }
     }
 }

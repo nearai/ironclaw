@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use ironclaw_auth::{OAuthClientId, OAuthRedirectUri};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::runtime_policy::ProcessBackendKind;
 use ironclaw_host_api::runtime_policy::{
@@ -8,8 +9,34 @@ use ironclaw_host_api::runtime_policy::{
 };
 use ironclaw_host_runtime::{SchedulerTurnRunWakeNotifier, TenantSandboxProcessPort};
 use ironclaw_trust::HostTrustPolicy;
+use secrecy::SecretString;
 
 use crate::{RebornCompositionProfile, RebornProductAuthServicePorts};
+
+/// Composition-time Google OAuth client metadata.
+///
+/// `RebornBuildInput` owns this seam for product/bootstrap-provided values
+/// until a settings-backed source exists.
+#[derive(Clone)]
+pub struct OAuthClientConfig {
+    pub client_id: OAuthClientId,
+    pub client_secret: Option<SecretString>,
+    pub redirect_uri: OAuthRedirectUri,
+}
+
+impl std::fmt::Debug for OAuthClientConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OAuthClientConfig")
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("redirect_uri", &self.redirect_uri)
+            .finish()
+    }
+}
 
 #[derive(Clone, Debug, Default)]
 pub enum RebornRuntimeProcessBinding {
@@ -86,6 +113,7 @@ pub struct RebornBuildInput {
     pub(crate) require_runtime_http_egress: bool,
     pub(crate) require_wasm_credentials: bool,
     pub(crate) product_auth_ports: Option<RebornProductAuthServicePorts>,
+    pub(crate) google_oauth_config: Option<OAuthClientConfig>,
 }
 
 pub(crate) enum RebornStorageInput {
@@ -324,6 +352,15 @@ impl RebornBuildInput {
         self
     }
 
+    /// Record product/bootstrap-provided Google OAuth metadata on the build input.
+    ///
+    /// `RebornBuildInput` owns this composition seam until a settings-backed
+    /// source exists.
+    pub fn with_google_oauth_backend(mut self, config: OAuthClientConfig) -> Self {
+        self.google_oauth_config = Some(config);
+        self
+    }
+
     fn new(
         profile: RebornCompositionProfile,
         owner_id: impl Into<String>,
@@ -341,6 +378,7 @@ impl RebornBuildInput {
             require_runtime_http_egress: false,
             require_wasm_credentials: false,
             product_auth_ports: None,
+            google_oauth_config: None,
         }
     }
 }

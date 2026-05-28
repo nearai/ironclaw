@@ -30,6 +30,7 @@ mod extension_lifecycle;
 mod extension_lifecycle_capabilities;
 mod extension_lifecycle_command;
 mod factory;
+mod google_oauth;
 mod gsuite;
 mod input;
 mod lifecycle;
@@ -74,7 +75,7 @@ pub use extension_lifecycle_command::{
 };
 pub use factory::{RebornServices, build_reborn_services};
 pub use gsuite::{bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers};
-pub use input::{RebornBuildInput, RebornRuntimeProcessBinding};
+pub use input::{OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding};
 pub use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePhase, LifecycleProductPayload,
     LifecycleProductResponse,

@@ -23,7 +23,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use ironclaw_loop_support::HostManagedModelGateway;
 use ironclaw_loop_support::HostSkillContextSource;
 
@@ -132,7 +132,7 @@ pub struct RebornRuntimeInput {
     pub poll: PollSettings,
     pub identity: RebornRuntimeIdentity,
     pub skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) model_gateway_override: Option<Arc<dyn HostManagedModelGateway>>,
 }
 
@@ -150,7 +150,7 @@ impl RebornRuntimeInput {
             poll: PollSettings::default(),
             identity: RebornRuntimeIdentity::default(),
             skill_context_source: None,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             model_gateway_override: None,
         }
     }
@@ -187,8 +187,13 @@ impl RebornRuntimeInput {
             .is_some_and(|services| services.grants_trusted_laptop_access())
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_model_gateway_override(
+    /// Inject a custom `HostManagedModelGateway` in place of whatever the
+    /// build flow would otherwise derive from `[llm]` config. Exposed for
+    /// the crate's own tests plus downstream integration tests that need
+    /// to drive `build_reborn_runtime` against a recording / replay gateway
+    /// without standing up a live provider.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_model_gateway_override(
         mut self,
         gateway: Arc<dyn HostManagedModelGateway>,
     ) -> Self {

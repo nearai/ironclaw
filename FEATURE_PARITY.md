@@ -341,7 +341,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | Tool inventory cache | ✅ | ❌ | Coalesced effective-tool inventory cache with channel-registry invalidation |
 | Pending exec approval `errorMessage` cleanup | ✅ | ❌ | Failed restart-interrupted approval-pending sessions instead of replaying stale ids |
 | Elevated mode | ✅ | ❌ | Privileged execution |
-| Subagent support | ✅ | ✅ | Task framework; spawn-by-account-aware bindings, model overrides preserved |
+| Subagent support | ✅ | ✅ | Task framework; spawn-by-account-aware bindings, model overrides preserved; Reborn `spawn_subagent` is blocking-only while background delivery is deferred (#4147) |
 | `/subagents spawn` command | ✅ | ❌ | Spawn from chat |
 | Auth profiles | ✅ | ❌ | Multiple auth strategies; replaceDefaultModels migration semantics |
 | Generic API key rotation | ✅ | ❌ | Rotate keys across providers |

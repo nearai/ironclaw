@@ -331,6 +331,10 @@ impl DurableLoopHostMilestoneSink {
             | LoopHostMilestoneKind::CapabilityBatchCompleted { .. }
             | LoopHostMilestoneKind::GateBlocked { .. }
             | LoopHostMilestoneKind::CheckpointCreated { .. }
+            | LoopHostMilestoneKind::CompactionStarted { .. }
+            | LoopHostMilestoneKind::CompactionCompleted { .. }
+            | LoopHostMilestoneKind::CompactionFailed { .. }
+            | LoopHostMilestoneKind::CompactionLeakDetected { .. }
             | LoopHostMilestoneKind::Blocked { .. }
             | LoopHostMilestoneKind::DriverNote { .. } => return Ok(None),
         };
