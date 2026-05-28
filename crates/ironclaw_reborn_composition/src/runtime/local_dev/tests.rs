@@ -4,8 +4,15 @@ mod tests {
 
     use super::super::*;
 
-    use ironclaw_host_api::{AgentId, MountPermissions, ProjectId, TenantId, ThreadId};
-    use ironclaw_host_runtime::SPAWN_SUBAGENT_CAPABILITY_ID;
+    use ironclaw_host_api::{
+        AgentId, EffectKind, MountPermissions, NetworkPolicy, ProjectId, TenantId, ThreadId,
+    };
+    use ironclaw_host_runtime::{
+        APPLY_PATCH_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID,
+        HTTP_SAVE_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID,
+        SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
+        SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
+    };
     use ironclaw_loop_support::HostManagedModelMessage;
     use ironclaw_product_workflow::{
         LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext,
@@ -19,9 +26,15 @@ mod tests {
         LoopMessageRef, RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId,
         TurnScope,
         run_profile::{
-            CapabilityInvocation, CapabilityOutcome, InMemoryLoopHostMilestoneSink,
-            InMemoryRunProfileResolver, ModelProfileId, VisibleCapabilityRequest,
+            CapabilityFailureKind, CapabilityInvocation, CapabilityOutcome,
+            InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, ModelProfileId,
+            VisibleCapabilityRequest,
         },
+    };
+
+    use crate::extension_lifecycle_capabilities::{
+        EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID,
+        EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SEARCH_CAPABILITY_ID,
     };
 
     async fn run_context(label: &str) -> LoopRunContext {
@@ -317,7 +330,12 @@ mod tests {
 
     #[test]
     fn local_dev_builtin_surface_grants_capability_classes() {
-        let capability_ids = local_dev_builtin_capability_ids();
+        let policy = crate::local_dev_capability_policy::local_dev_capability_policy()
+            .expect("policy parses");
+        let capability_ids = policy
+            .capability_ids()
+            .map(|capability| capability.as_str())
+            .collect::<Vec<_>>();
 
         assert!(capability_ids.contains(&WRITE_FILE_CAPABILITY_ID));
         assert!(capability_ids.contains(&APPLY_PATCH_CAPABILITY_ID));
@@ -327,8 +345,15 @@ mod tests {
         assert!(capability_ids.contains(&SHELL_CAPABILITY_ID));
         assert!(capability_ids.contains(&HTTP_CAPABILITY_ID));
         assert!(capability_ids.contains(&HTTP_SAVE_CAPABILITY_ID));
+        let local_dev_allowed_effects = vec![
+            EffectKind::DispatchCapability,
+            EffectKind::ReadFilesystem,
+            EffectKind::WriteFilesystem,
+        ];
+        let local_dev_shell_network_policy =
+            crate::local_dev_capability_policy::local_dev_wildcard_network_policy();
         assert_eq!(
-            local_dev_allowed_effects(),
+            local_dev_allowed_effects,
             vec![
                 EffectKind::DispatchCapability,
                 EffectKind::ReadFilesystem,
@@ -336,11 +361,12 @@ mod tests {
             ]
         );
         assert_eq!(
-            local_dev_provider_allowed_effects(),
+            policy.provider.authority_effects,
             vec![
                 EffectKind::DispatchCapability,
                 EffectKind::ReadFilesystem,
                 EffectKind::WriteFilesystem,
+                EffectKind::DeleteFilesystem,
                 EffectKind::SpawnProcess,
                 EffectKind::ExecuteCode,
                 EffectKind::Network
@@ -370,12 +396,11 @@ mod tests {
             mount_for("/system/skills").permissions,
             MountPermissions::read_only()
         );
-        let grants = local_dev_builtin_grants(
+        let grants = policy.builtin_grants(
             &ExtensionId::new("loop-driver").expect("valid extension id"),
             &workspace_mounts,
             &skill_mounts,
-        )
-        .expect("local-dev grants build");
+        );
         let grant_for = |capability_id: &str| {
             grants
                 .grants
@@ -399,7 +424,7 @@ mod tests {
         assert!(shell_grant.constraints.mounts.mounts.is_empty());
         assert_eq!(
             shell_grant.constraints.network,
-            local_dev_shell_network_policy()
+            local_dev_shell_network_policy
         );
 
         let http_grant = grant_for(HTTP_CAPABILITY_ID);
@@ -410,7 +435,7 @@ mod tests {
         assert!(http_grant.constraints.mounts.mounts.is_empty());
         assert_eq!(
             http_grant.constraints.network,
-            local_dev_shell_network_policy()
+            local_dev_shell_network_policy
         );
 
         let http_save_grant = grant_for(HTTP_SAVE_CAPABILITY_ID);
@@ -425,7 +450,7 @@ mod tests {
         assert_eq!(http_save_grant.constraints.mounts, workspace_mounts);
         assert_eq!(
             http_save_grant.constraints.network,
-            local_dev_shell_network_policy()
+            local_dev_shell_network_policy
         );
 
         let extension_search_grant = grant_for(EXTENSION_SEARCH_CAPABILITY_ID);
@@ -445,10 +470,7 @@ mod tests {
             EXTENSION_REMOVE_CAPABILITY_ID,
         ] {
             let grant = grant_for(capability_id);
-            assert_eq!(
-                grant.constraints.allowed_effects,
-                local_dev_allowed_effects()
-            );
+            assert_eq!(grant.constraints.allowed_effects, local_dev_allowed_effects);
             assert!(grant.constraints.mounts.mounts.is_empty());
             assert_eq!(grant.constraints.network, NetworkPolicy::default());
         }
@@ -456,7 +478,7 @@ mod tests {
         let read_file_grant = grant_for(READ_FILE_CAPABILITY_ID);
         assert_eq!(
             read_file_grant.constraints.allowed_effects,
-            local_dev_allowed_effects()
+            local_dev_allowed_effects
         );
         assert_eq!(read_file_grant.constraints.mounts, workspace_mounts);
         assert_eq!(
@@ -467,12 +489,34 @@ mod tests {
         let skill_install_grant = grant_for(SKILL_INSTALL_CAPABILITY_ID);
         assert_eq!(
             skill_install_grant.constraints.allowed_effects,
-            local_dev_skill_install_allowed_effects()
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+                EffectKind::DeleteFilesystem,
+                EffectKind::Network
+            ]
         );
         assert_eq!(skill_install_grant.constraints.mounts, skill_mounts);
         assert_eq!(
             skill_install_grant.constraints.network,
-            local_dev_shell_network_policy()
+            local_dev_shell_network_policy
+        );
+
+        let skill_remove_grant = grant_for(SKILL_REMOVE_CAPABILITY_ID);
+        assert_eq!(
+            skill_remove_grant.constraints.allowed_effects,
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+                EffectKind::DeleteFilesystem
+            ]
+        );
+        assert_eq!(skill_remove_grant.constraints.mounts, skill_mounts);
+        assert_eq!(
+            skill_remove_grant.constraints.network,
+            NetworkPolicy::default()
         );
     }
 
@@ -480,9 +524,18 @@ mod tests {
     async fn local_yolo_capability_port_reads_confirmed_host_mount() {
         let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only setup in #[cfg(test)] module.
         let storage_root = dir.path().join("local-dev");
+        let workspace_root = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace_root).expect("workspace root"); // safety: test-only setup in #[cfg(test)] module.
+        std::fs::write(workspace_root.join("note.txt"), "safe workspace file\n")
+            .expect("workspace file"); // safety: test-only setup in #[cfg(test)] module.
         let host_home = dir.path().join("home");
         std::fs::create_dir_all(&host_home).expect("host home"); // safety: test-only setup in #[cfg(test)] module.
         std::fs::write(host_home.join("safe.txt"), "safe host file\n").expect("host file"); // safety: test-only setup in #[cfg(test)] module.
+        let raw_workspace = workspace_root
+            .canonicalize()
+            .expect("canonical workspace root")
+            .to_string_lossy()
+            .into_owned();
         let raw_host_home = host_home
             .canonicalize()
             .expect("canonical host home")
@@ -498,29 +551,36 @@ mod tests {
             .with_runtime_policy(
                 crate::local_dev_yolo_runtime_policy(true).expect("local-yolo policy resolves"), // safety: test-only helper in #[cfg(test)] module.
             )
+            .with_local_dev_workspace_root(workspace_root.clone())
             .with_local_dev_confirmed_host_home_root(host_home.clone()),
         )
         .await
         .expect("local-dev-yolo services build"); // safety: test-only assertion in #[cfg(test)] module.
         let runtime = services.host_runtime.clone().expect("host runtime"); // safety: test-only assertion in #[cfg(test)] module.
-        let workspace_mounts = services
+        let local_runtime = services
             .local_runtime
             .as_ref()
-            .expect("local runtime substrate") // safety: test-only assertion in #[cfg(test)] module.
-            .workspace_mounts
-            .clone();
+            .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
+        let workspace_mounts = local_runtime.workspace_mounts.clone();
+        let skill_mounts = local_runtime.skill_mounts.clone();
+        let policy = Arc::new(
+            crate::local_dev_capability_policy::local_dev_capability_policy()
+                .expect("policy parses"),
+        );
         let capability_io = Arc::new(LocalDevCapabilityIo::default());
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
-        let factory = LocalDevLoopCapabilityPortFactory::new(
+        let factory = LocalDevLoopCapabilityPortFactory {
             runtime,
-            UserId::new("local-yolo-host-user").expect("user id"), // safety: literal test id is valid.
+            user_id: UserId::new("local-yolo-host-user").expect("user id"), // safety: literal test id is valid.
+            policy,
             workspace_mounts,
-            LocalDevExtensionSurfaceSource::default(),
+            skill_mounts,
+            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
             input_resolver,
             result_writer,
-            Arc::new(InMemoryLoopHostMilestoneSink::default()),
-        );
+            milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        };
         let run_context = run_context("host-mount-read").await;
         let port = factory
             .create_capability_port(&run_context)
@@ -571,8 +631,13 @@ mod tests {
             .find(|descriptor| descriptor.capability_id.as_str() == SHELL_CAPABILITY_ID)
             .expect("shell descriptor visible");
         assert!(
-            !shell_descriptor.safe_description.contains("/host"),
-            "shell does not receive scoped filesystem disclosure"
+            shell_descriptor.safe_description.contains("/host"),
+            "shell should disclose confirmed host alias: {}",
+            shell_descriptor.safe_description
+        );
+        assert!(
+            !shell_descriptor.safe_description.contains(&raw_host_home),
+            "shell description must not disclose raw host home path"
         );
         assert!(
             shell_descriptor.safe_description.contains("local host")
@@ -618,6 +683,15 @@ mod tests {
             .find(|definition| definition.capability_id.as_str() == SHELL_CAPABILITY_ID)
             .expect("shell tool definition visible");
         assert!(
+            shell_tool.description.contains("/host"),
+            "provider tool shell description should disclose confirmed host alias: {}",
+            shell_tool.description
+        );
+        assert!(
+            !shell_tool.description.contains(&raw_host_home),
+            "provider tool shell description must not disclose raw host home path"
+        );
+        assert!(
             shell_tool.description.contains("local host")
                 && shell_tool
                     .description
@@ -635,7 +709,7 @@ mod tests {
 
         let outcome = port
             .invoke_capability(CapabilityInvocation {
-                surface_version: surface.version,
+                surface_version: surface.version.clone(),
                 capability_id: CapabilityId::new(READ_FILE_CAPABILITY_ID)
                     .expect("read_file capability id"), // safety: built-in capability id is a valid literal.
                 input_ref,
@@ -653,37 +727,83 @@ mod tests {
             output["content"],
             serde_json::json!("     1│ safe host file")
         );
+
+        let input_ref = capability_io
+            .register_provider_tool_call_input(
+                &run_context,
+                &provider_tool_call(
+                    serde_json::json!({"path": format!("{raw_workspace}/note.txt")}),
+                ),
+            )
+            .await
+            .expect("input ref"); // safety: test-only assertion in #[cfg(test)] module.
+
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: surface.version,
+                capability_id: CapabilityId::new(READ_FILE_CAPABILITY_ID)
+                    .expect("read_file capability id"), // safety: built-in capability id is a valid literal.
+                input_ref,
+            })
+            .await
+            .expect("raw workspace read_file invocation"); // safety: test-only assertion in #[cfg(test)] module.
+        let CapabilityOutcome::Completed(completed) = outcome else {
+            panic!("expected completed read_file invocation");
+        };
+        let output = capability_io
+            .result_output(completed.result_ref.as_str())
+            .expect("result output lookup") // safety: test-only assertion in #[cfg(test)] module.
+            .expect("result output"); // safety: test-only assertion in #[cfg(test)] module.
+        assert_eq!(
+            output["content"],
+            serde_json::json!("     1│ safe workspace file")
+        );
     }
 
     #[tokio::test]
     async fn local_dev_capability_port_omits_host_disclosure_without_confirmed_host_mount() {
         let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only setup in #[cfg(test)] module.
         let storage_root = dir.path().join("local-dev");
-        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
-            "local-dev-no-host-owner",
-            storage_root,
-        ))
+        let workspace_root = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace_root).expect("workspace root"); // safety: test-only setup in #[cfg(test)] module.
+        std::fs::write(workspace_root.join("note.txt"), "hidden workspace file\n")
+            .expect("workspace file"); // safety: test-only setup in #[cfg(test)] module.
+        let raw_workspace = workspace_root
+            .canonicalize()
+            .expect("canonical workspace root")
+            .to_string_lossy()
+            .into_owned();
+        let services = crate::build_reborn_services(
+            crate::RebornBuildInput::local_dev("local-dev-no-host-owner", storage_root)
+                .with_local_dev_workspace_root(workspace_root.clone()),
+        )
         .await
         .expect("local-dev services build"); // safety: test-only assertion in #[cfg(test)] module.
         let runtime = services.host_runtime.clone().expect("host runtime"); // safety: test-only assertion in #[cfg(test)] module.
-        let workspace_mounts = services
+        let local_runtime = services
             .local_runtime
             .as_ref()
-            .expect("local runtime substrate") // safety: test-only assertion in #[cfg(test)] module.
-            .workspace_mounts
-            .clone();
+            .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
+        let workspace_mounts = local_runtime.workspace_mounts.clone();
+        let skill_mounts = local_runtime.skill_mounts.clone();
+        let policy = Arc::new(
+            crate::local_dev_capability_policy::local_dev_capability_policy()
+                .expect("policy parses"),
+        );
         let capability_io = Arc::new(LocalDevCapabilityIo::default());
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
-        let factory = LocalDevLoopCapabilityPortFactory::new(
+        let factory = LocalDevLoopCapabilityPortFactory {
             runtime,
-            UserId::new("local-dev-no-host-user").expect("user id"), // safety: literal test id is valid.
+            user_id: UserId::new("local-dev-no-host-user").expect("user id"), // safety: literal test id is valid.
+            policy,
             workspace_mounts,
-            LocalDevExtensionSurfaceSource::default(),
+            skill_mounts,
+            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
             input_resolver,
             result_writer,
-            Arc::new(InMemoryLoopHostMilestoneSink::default()),
-        );
+            milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        };
         let run_context = run_context("no-host-disclosure").await;
         let port = factory
             .create_capability_port(&run_context)
@@ -742,6 +862,31 @@ mod tests {
             "normal local-dev shell provider tool should not receive yolo disclosure: {}",
             shell_tool.description
         );
+
+        let input_ref = capability_io
+            .register_provider_tool_call_input(
+                &run_context,
+                &provider_tool_call(
+                    serde_json::json!({"path": format!("{raw_workspace}/note.txt")}),
+                ),
+            )
+            .await
+            .expect("input ref"); // safety: test-only assertion in #[cfg(test)] module.
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: surface.version,
+                capability_id: CapabilityId::new(READ_FILE_CAPABILITY_ID)
+                    .expect("read_file capability id"), // safety: built-in capability id is a valid literal.
+                input_ref,
+            })
+            .await
+            .expect("raw workspace read_file invocation"); // safety: test-only assertion in #[cfg(test)] module.
+        match outcome {
+            CapabilityOutcome::Failed(failure) => {
+                assert_eq!(failure.error_kind, CapabilityFailureKind::InvalidInput);
+            }
+            other => panic!("expected raw workspace read to be denied, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -808,6 +953,10 @@ mod tests {
             Arc::new(InMemorySessionThreadService::default()),
             thread_scope,
             UserId::new("local-dev-github-user").expect("user id"),
+            Arc::new(
+                crate::local_dev_capability_policy::local_dev_capability_policy()
+                    .expect("policy parses"),
+            ),
             Arc::new(UnavailableModelGateway),
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
         )
@@ -838,6 +987,10 @@ mod tests {
             Arc::new(InMemorySessionThreadService::default()),
             thread_scope,
             UserId::new("local-dev-live-github-user").expect("user id"),
+            Arc::new(
+                crate::local_dev_capability_policy::local_dev_capability_policy()
+                    .expect("policy parses"),
+            ),
             Arc::new(UnavailableModelGateway),
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
         )

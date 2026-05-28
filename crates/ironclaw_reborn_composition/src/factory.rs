@@ -27,7 +27,7 @@ use ironclaw_filesystem::{
 use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
-use ironclaw_host_api::runtime_policy::FilesystemBackendKind;
+use ironclaw_host_api::runtime_policy::{FilesystemBackendKind, ProcessBackendKind, SecretMode};
 use ironclaw_host_api::{
     EffectKind, ExtensionId, HostPath, MountPermissions, MountView, PackageId, UserId, VirtualPath,
 };
@@ -35,7 +35,8 @@ use ironclaw_host_api::{
 use ironclaw_host_api::{MountAlias, MountGrant};
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostRuntimeServices,
-    ProductAuthProviderRuntimePorts, builtin_first_party_handlers, builtin_first_party_package,
+    LocalHostProcessPort, ProductAuthProviderRuntimePorts, builtin_first_party_handlers,
+    builtin_first_party_package,
 };
 #[cfg(feature = "libsql")]
 use ironclaw_loop_support::FilesystemCheckpointStateStore;
@@ -74,7 +75,10 @@ use crate::google_oauth::google_provider_client;
 use crate::input::OAuthClientConfig;
 use crate::input::{RebornRuntimeProcessBinding, RebornStorageInput};
 use crate::lifecycle::{RebornLocalSkillManagementPort, build_local_skill_management_port};
-use crate::local_dev_mounts::{skill_context_mount_view, workspace_mount_view};
+use crate::local_dev_capability_policy::local_dev_capability_policy;
+use crate::local_dev_mounts::{
+    ambient_workspace_mount_view, skill_context_mount_view, workspace_mount_view,
+};
 use crate::{
     RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
     RebornFacadeReadiness, RebornProductAuthServices, RebornReadiness, RebornReadinessState,
@@ -162,6 +166,38 @@ where
             services.with_tenant_sandbox_process_port(process_port)
         }
     }
+}
+
+fn local_dev_process_port_for_policy(
+    runtime_policy: &Option<ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy>,
+    workspace_root: &Path,
+    host_home_root: Option<&LocalDevHostHomeRoot>,
+) -> Option<LocalHostProcessPort> {
+    let runtime_policy = runtime_policy.as_ref()?;
+    if runtime_policy.process_backend != ProcessBackendKind::LocalHost {
+        return None;
+    }
+    let mut process_port = if runtime_policy.secret_mode == SecretMode::InheritedEnv {
+        LocalHostProcessPort::new_inherited_env()
+    } else {
+        LocalHostProcessPort::new()
+    }
+    .with_workdir_alias("/workspace", workspace_root);
+    if let Some(host_home_root) = host_home_root {
+        process_port =
+            process_port.with_workdir_alias("/host", host_home_root.canonical_root.clone());
+        for alias in host_home_root.aliases() {
+            let alias_str = match alias.to_str() {
+                Some(s) => s,
+                None => {
+                    tracing::debug!(alias = ?alias, "skipping non-UTF-8 host home alias");
+                    continue;
+                }
+            };
+            process_port = process_port.with_workdir_alias(alias_str, alias.to_path_buf());
+        }
+    }
+    Some(process_port)
 }
 
 fn require_product_auth_runtime_ports<F, G, S, R>(
@@ -378,6 +414,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         (false, None) => None,
     };
     validate_local_dev_workspace_skill_isolation(&root, &workspace_root)?;
+    validate_local_dev_workspace_host_home_isolation(&workspace_root, host_home_root.as_ref())?;
     let default_system_prompt_path = local_dev_default_system_prompt_path(&root);
     seed_default_system_prompt(&root, &default_system_prompt_path).map_err(|error| {
         RebornBuildError::InvalidConfig {
@@ -388,7 +425,11 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     let filesystem =
         build_local_dev_root_filesystem(&root, &workspace_root, host_home_root.as_ref()).await?;
     let (skill_filesystem, workspace_filesystem, runtime_workspace_mounts) =
-        build_workspace_filesystems(Arc::clone(&filesystem), host_home_root.as_ref())?;
+        build_workspace_filesystems(
+            Arc::clone(&filesystem),
+            &workspace_root,
+            host_home_root.as_ref(),
+        )?;
     let http_body_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
         Arc::clone(&filesystem),
         runtime_workspace_mounts.clone(),
@@ -434,8 +475,16 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     .with_approval_requests(Arc::clone(&store_graph.approval_requests))
     .with_capability_leases(Arc::clone(&store_graph.capability_leases))
     .with_turn_state_and_transition_port(Arc::clone(&store_graph.turn_state));
+    let local_dev_process_port = local_dev_process_port_for_policy(
+        &runtime_policy,
+        &workspace_root,
+        host_home_root.as_ref(),
+    );
     if let Some(runtime_policy) = runtime_policy {
         services = services.with_runtime_policy(runtime_policy);
+    }
+    if let Some(process_port) = local_dev_process_port {
+        services = services.with_runtime_process_port(Arc::new(process_port));
     }
     services = apply_runtime_process_binding(services, runtime_process_binding);
     let google_provider_client = google_oauth_config
@@ -901,10 +950,13 @@ impl LocalDevHostHomeRoot {
 /// Build the two ScopedFilesystem views used by local-dev: a read-only workspace view
 /// for skill context, and a read-write workspace view for runtime operations.
 ///
-/// When `host_home_root` is present, the runtime view also grants raw host-home aliases
-/// so `/Users/alice`-style paths resolve through the `/host` mount.
+/// When `host_home_root` is present, the runtime view is the local-dev-yolo
+/// ambient coding-tool view: it grants raw workspace and host-home aliases so
+/// real local paths resolve through the same virtual roots as `/workspace` and
+/// `/host`.
 fn build_workspace_filesystems(
     filesystem: Arc<LocalDevRootFilesystem>,
+    workspace_root: &Path,
     host_home_root: Option<&LocalDevHostHomeRoot>,
 ) -> Result<LocalDevWorkspaceFilesystems, RebornBuildError> {
     let read_only_workspace_mounts = workspace_mount_view(MountPermissions::read_only(), &[])
@@ -914,12 +966,19 @@ fn build_workspace_filesystems(
     let host_home_aliases = host_home_root
         .map(|root| root.aliases())
         .unwrap_or_default();
-    let runtime_workspace_mounts =
-        workspace_mount_view(MountPermissions::read_write(), &host_home_aliases).map_err(
-            |error| RebornBuildError::InvalidConfig {
-                reason: error.to_string(),
-            },
-        )?;
+    let workspace_aliases = if host_home_root.is_some() {
+        vec![workspace_root]
+    } else {
+        Vec::new()
+    };
+    let runtime_workspace_mounts = ambient_workspace_mount_view(
+        MountPermissions::read_write(),
+        &workspace_aliases,
+        &host_home_aliases,
+    )
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: error.to_string(),
+    })?;
     let skill_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
         Arc::clone(&filesystem),
         skill_context_mount_view().map_err(|error| RebornBuildError::InvalidConfig {
@@ -988,6 +1047,34 @@ fn validate_local_dev_workspace_skill_isolation(
     Ok(())
 }
 
+fn validate_local_dev_workspace_host_home_isolation(
+    workspace_root: &Path,
+    host_home_root: Option<&LocalDevHostHomeRoot>,
+) -> Result<(), RebornBuildError> {
+    let Some(host_home_root) = host_home_root else {
+        return Ok(());
+    };
+
+    for (label, host_path) in [
+        (
+            "confirmed host home root",
+            host_home_root.canonical_root.as_path(),
+        ),
+        (
+            "confirmed host home raw alias",
+            host_home_root.raw_alias.as_path(),
+        ),
+    ] {
+        if paths_overlap(workspace_root, host_path) {
+            return Err(RebornBuildError::InvalidConfig {
+                reason: format!("local-dev workspace root must not overlap {label}"),
+            });
+        }
+    }
+
+    Ok(())
+}
+
 fn local_dev_default_system_prompt_path(storage_root: &Path) -> PathBuf {
     storage_root.join(LOCAL_DEV_DEFAULT_SYSTEM_PROMPT_PATH)
 }
@@ -1043,22 +1130,17 @@ fn local_dev_builtin_extension_registry() -> Result<ExtensionRegistry, RebornBui
 }
 
 fn local_dev_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuildError> {
+    let policy =
+        local_dev_capability_policy().map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("local-dev capability policy is invalid: {error}"),
+        })?;
     HostTrustPolicy::new(vec![Box::new(AdminConfig::with_entries(vec![
         AdminEntry::for_local_manifest(
-            PackageId::new("builtin").map_err(|error| RebornBuildError::InvalidConfig {
-                reason: format!("built-in first-party package id is invalid: {error}"),
-            })?,
-            "/system/extensions/builtin/manifest.toml".to_string(),
+            policy.provider.id,
+            policy.provider.manifest_path,
             None,
             HostTrustAssignment::first_party(),
-            vec![
-                EffectKind::DispatchCapability,
-                EffectKind::ReadFilesystem,
-                EffectKind::WriteFilesystem,
-                EffectKind::Network,
-                EffectKind::SpawnProcess,
-                EffectKind::ExecuteCode,
-            ],
+            policy.provider.authority_effects,
             None,
         ),
         AdminEntry::for_local_manifest(
@@ -1838,6 +1920,44 @@ mod tests {
     }
 
     #[test]
+    fn local_dev_workspace_root_overlapping_host_home_root_is_rejected() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let host_home = dir.path().join("home");
+        let workspace = host_home.join("workspace");
+        let host_home_root = LocalDevHostHomeRoot {
+            canonical_root: host_home.clone(),
+            raw_alias: dir.path().join("home-link"),
+        };
+
+        let error =
+            validate_local_dev_workspace_host_home_isolation(&workspace, Some(&host_home_root))
+                .expect_err("workspace nested under host home should be rejected");
+        assert!(
+            matches!(error, RebornBuildError::InvalidConfig { .. }),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn local_dev_workspace_root_overlapping_host_home_raw_alias_is_rejected() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let raw_alias = dir.path().join("home-link");
+        let workspace = raw_alias.join("workspace");
+        let host_home_root = LocalDevHostHomeRoot {
+            canonical_root: dir.path().join("home"),
+            raw_alias,
+        };
+
+        let error =
+            validate_local_dev_workspace_host_home_isolation(&workspace, Some(&host_home_root))
+                .expect_err("workspace nested under raw host-home alias should be rejected");
+        assert!(
+            matches!(error, RebornBuildError::InvalidConfig { .. }),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
     fn builtin_first_party_package_declares_skill_management_tools() {
         let package = builtin_first_party_package().expect("built-in package builds");
         let ids = package
@@ -2015,6 +2135,7 @@ mod tests {
             EffectKind::DispatchCapability,
             EffectKind::ReadFilesystem,
             EffectKind::WriteFilesystem,
+            EffectKind::DeleteFilesystem,
             EffectKind::Network,
         ]
     }

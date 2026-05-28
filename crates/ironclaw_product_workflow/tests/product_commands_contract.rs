@@ -25,6 +25,61 @@ fn command_payload_maps_to_typed_model_command_without_v1_parser() {
 }
 
 #[test]
+fn model_command_maps_provider_selection_without_cli_shelling_contract() {
+    let payload = InboundCommandPayload::new(
+        "model",
+        "set-provider openai --model gpt-5-mini",
+        ProductTriggerReason::BotCommand,
+    )
+    .expect("valid command");
+
+    assert_eq!(
+        ProductCommand::from_payload(&payload).expect("parse model provider command"),
+        ProductCommand::Model {
+            action: ProductModelCommand::SetProvider {
+                provider: "openai".to_string(),
+                model: Some("gpt-5-mini".to_string()),
+            }
+        }
+    );
+}
+
+#[test]
+fn model_provider_command_rejects_missing_provider() {
+    let payload =
+        InboundCommandPayload::new("model", "set-provider", ProductTriggerReason::BotCommand)
+            .expect("valid command");
+
+    let rejection = ProductCommand::from_payload(&payload).expect_err("missing provider");
+
+    assert_eq!(rejection.kind, ProductRejectionKind::InvalidRequest);
+}
+
+#[test]
+fn model_provider_command_rejects_unsupported_option() {
+    let payload = InboundCommandPayload::new(
+        "model",
+        "set-provider openai --foo bar",
+        ProductTriggerReason::BotCommand,
+    )
+    .expect("valid command");
+
+    let rejection = ProductCommand::from_payload(&payload).expect_err("unsupported option");
+
+    assert_eq!(rejection.kind, ProductRejectionKind::InvalidRequest);
+}
+
+#[test]
+fn model_command_rejects_flag_shaped_model_name() {
+    let payload = InboundCommandPayload::new("model", "--json", ProductTriggerReason::BotCommand)
+        .expect("valid command");
+
+    let rejection = ProductCommand::from_payload(&payload).expect_err("flag-shaped model");
+
+    assert_eq!(rejection.kind, ProductRejectionKind::InvalidRequest);
+}
+
+#[test]
 fn command_payload_maps_all_declared_commands_and_unknown_fallback() {
     let cases = [
         (

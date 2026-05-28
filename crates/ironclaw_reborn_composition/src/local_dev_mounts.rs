@@ -13,31 +13,40 @@ pub(crate) fn workspace_mount_view(
     permissions: MountPermissions,
     host_home_aliases: &[&Path],
 ) -> Result<MountView, HostApiError> {
+    ambient_workspace_mount_view(permissions, &[], host_home_aliases)
+}
+
+/// Build the workspace mount view used by local-dev capability grants.
+///
+/// `workspace_aliases` is load-bearing for local-dev-yolo ambient coding tools:
+/// callers must pass it only under a yolo runtime policy. Non-yolo local-dev
+/// must pass an empty slice so raw host workspace paths stay denied.
+pub(crate) fn ambient_workspace_mount_view(
+    permissions: MountPermissions,
+    workspace_aliases: &[&Path],
+    host_home_aliases: &[&Path],
+) -> Result<MountView, HostApiError> {
     let mut mounts = vec![grant(
         WORKSPACE_ALIAS,
         WORKSPACE_TARGET,
         permissions.clone(),
     )?];
+    push_raw_alias_mounts(
+        &mut mounts,
+        workspace_aliases,
+        WORKSPACE_TARGET,
+        permissions.clone(),
+        "workspace alias",
+    )?;
     if !host_home_aliases.is_empty() {
         mounts.push(grant(HOST_ALIAS, HOST_TARGET, permissions.clone())?);
-        let mut seen_aliases = HashSet::new();
-        for host_home_alias in host_home_aliases {
-            let Some(host_home_alias) = host_home_alias.to_str() else {
-                return Err(HostApiError::InvalidPath {
-                    value: "<non-utf8-host-home-alias>".to_string(),
-                    reason: "confirmed host-home alias must be valid UTF-8".to_string(),
-                });
-            };
-            let raw_host_home_alias = MountAlias::new(host_home_alias.to_string())?;
-            if !seen_aliases.insert(raw_host_home_alias.as_str().to_string()) {
-                continue;
-            }
-            mounts.push(MountGrant::new(
-                raw_host_home_alias,
-                VirtualPath::new(HOST_TARGET)?,
-                permissions.clone(),
-            ));
-        }
+        push_raw_alias_mounts(
+            &mut mounts,
+            host_home_aliases,
+            HOST_TARGET,
+            permissions.clone(),
+            "confirmed host-home alias",
+        )?;
     }
     MountView::new(mounts)
 }
@@ -85,9 +94,55 @@ fn grant(
     ))
 }
 
+fn push_raw_alias_mounts(
+    mounts: &mut Vec<MountGrant>,
+    aliases: &[&Path],
+    target: &str,
+    permissions: MountPermissions,
+    label: &str,
+) -> Result<(), HostApiError> {
+    let mut seen_aliases = mounts
+        .iter()
+        .map(|mount| mount.alias.as_str().to_string())
+        .collect::<HashSet<_>>();
+    for alias in aliases {
+        let Some(alias) = alias.to_str() else {
+            return Err(HostApiError::InvalidPath {
+                value: format!("<non-utf8-{label}>"),
+                reason: format!("{label} must be valid UTF-8"),
+            });
+        };
+        let raw_alias = MountAlias::new(alias.to_string())?;
+        if !seen_aliases.insert(raw_alias.as_str().to_string()) {
+            continue;
+        }
+        mounts.push(MountGrant::new(
+            raw_alias,
+            VirtualPath::new(target)?,
+            permissions.clone(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ambient_workspace_mount_rejects_invalid_workspace_alias() {
+        let err = ambient_workspace_mount_view(
+            MountPermissions::read_write(),
+            &[Path::new(r"C:\Users\alice\project")],
+            &[],
+        )
+        .expect_err("invalid workspace alias should fail loudly");
+
+        assert!(
+            err.to_string().contains("backslashes are not allowed"),
+            "unexpected error: {err}"
+        );
+    }
 
     #[test]
     fn workspace_mount_rejects_host_home_alias_that_is_not_mount_shaped() {
@@ -100,6 +155,25 @@ mod tests {
         assert!(
             err.to_string().contains("backslashes are not allowed"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn ambient_workspace_mount_deduplicates_workspace_alias_against_canonical_workspace() {
+        let mounts = ambient_workspace_mount_view(
+            MountPermissions::read_write(),
+            &[Path::new(WORKSPACE_ALIAS)],
+            &[],
+        )
+        .expect("mount view builds");
+
+        assert_eq!(
+            mounts
+                .mounts
+                .iter()
+                .filter(|mount| mount.alias.as_str() == WORKSPACE_ALIAS)
+                .count(),
+            1
         );
     }
 
@@ -123,5 +197,28 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn ambient_workspace_mount_includes_raw_workspace_alias() {
+        let mounts = ambient_workspace_mount_view(
+            MountPermissions::read_write(),
+            &[Path::new("/Users/alice/project")],
+            &[Path::new("/Users/alice")],
+        )
+        .expect("mount view builds");
+
+        let mount_for = |alias: &str| {
+            mounts
+                .mounts
+                .iter()
+                .find(|mount| mount.alias.as_str() == alias)
+                .unwrap_or_else(|| panic!("missing mount alias {alias}"))
+        };
+        assert_eq!(
+            mount_for("/Users/alice/project").target.as_str(),
+            WORKSPACE_TARGET
+        );
+        assert_eq!(mount_for("/Users/alice").target.as_str(), HOST_TARGET);
     }
 }

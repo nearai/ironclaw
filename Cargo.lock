@@ -4914,6 +4914,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.29.0",
  "tokio-util",
+ "toml 0.8.23",
  "tower 0.5.3",
  "tower-http 0.6.11",
  "tracing",
@@ -4925,10 +4926,12 @@ dependencies = [
 name = "ironclaw_reborn_config"
 version = "0.1.0"
 dependencies = [
+ "fs4",
  "serde",
  "tempfile",
  "thiserror 2.0.18",
  "toml 0.8.23",
+ "toml_edit 0.22.27",
 ]
 
 [[package]]

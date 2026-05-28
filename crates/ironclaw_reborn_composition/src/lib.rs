@@ -36,6 +36,7 @@ mod input;
 mod lifecycle;
 #[cfg(feature = "root-llm-provider")]
 mod llm_catalog;
+mod local_dev_capability_policy;
 mod local_dev_mounts;
 mod local_runtime_profile;
 #[cfg(feature = "webui-v2-beta")]
@@ -45,6 +46,10 @@ mod product_live_adapters;
 mod production_runtime_policy;
 mod profile;
 mod projection;
+#[cfg(feature = "root-llm-provider")]
+mod provider_admin;
+#[cfg(feature = "root-llm-provider")]
+mod provider_admin_product_command;
 mod readiness;
 mod runtime;
 mod runtime_input;
@@ -103,6 +108,14 @@ pub use product_live_adapters::{
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use production_runtime_policy::RebornProductionRuntimePolicy;
 pub use profile::{RebornCompositionProfile, RebornCompositionProfileParseError};
+#[cfg(feature = "root-llm-provider")]
+pub use provider_admin::{
+    RebornModelRoutesState, RebornProviderAdmin, RebornProviderAdminError, RebornProviderInfo,
+    RebornProviderList, RebornProviderMetadata, RebornProviderSelection, RebornProviderStatus,
+    RebornProviderWriteOutcome, RebornV1State,
+};
+#[cfg(feature = "root-llm-provider")]
+pub use provider_admin_product_command::RebornProviderAdminProductCommandService;
 pub use readiness::{RebornFacadeReadiness, RebornReadiness, RebornReadinessState};
 pub use runtime::{
     AssistantReply, ConversationId, RebornRuntime, RebornRuntimeError, RebornSkillActivation,

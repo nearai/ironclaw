@@ -80,7 +80,13 @@ pub enum ProductCommand {
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum ProductModelCommand {
     Status,
-    Set { model: String },
+    Set {
+        model: String,
+    },
+    SetProvider {
+        provider: String,
+        model: Option<String>,
+    },
 }
 
 impl ProductCommand {
@@ -120,21 +126,67 @@ fn command_spec_for_name(name: &str) -> Option<&'static ProductCommandSpec> {
 }
 
 fn parse_model_command(payload: &InboundCommandPayload) -> ProductCommandParseResult {
-    let model = payload.arguments.split_whitespace().next();
-    Ok(match model {
-        Some(model) => ProductCommand::Model {
+    let mut args = payload.arguments.split_whitespace();
+    let Some(first) = args.next() else {
+        return Ok(ProductCommand::Model {
+            action: ProductModelCommand::Status,
+        });
+    };
+    match ModelCommandHead::parse(first)? {
+        ModelCommandHead::SetProvider => {
+            let Some(provider) = args.next() else {
+                return invalid_lifecycle_command("model set-provider requires a provider id");
+            };
+            let remaining = args.collect::<Vec<_>>();
+            let model = parse_model_option(&remaining)?;
+            Ok(ProductCommand::Model {
+                action: ProductModelCommand::SetProvider {
+                    provider: provider.to_string(),
+                    model,
+                },
+            })
+        }
+        ModelCommandHead::SetModel(model) => Ok(ProductCommand::Model {
             action: ProductModelCommand::Set {
                 model: model.to_string(),
             },
-        },
-        None => ProductCommand::Model {
-            action: ProductModelCommand::Status,
-        },
-    })
+        }),
+    }
+}
+
+enum ModelCommandHead<'a> {
+    SetProvider,
+    SetModel(&'a str),
+}
+
+impl<'a> ModelCommandHead<'a> {
+    fn parse(value: &'a str) -> Result<Self, ProductRejection> {
+        match value {
+            "set-provider" | "provider" => Ok(Self::SetProvider),
+            flag if flag.starts_with('-') => Err(ProductRejection::permanent(
+                ProductRejectionKind::InvalidRequest,
+                "model set requires a model name; flags are only valid after `set-provider`",
+            )),
+            model => Ok(Self::SetModel(model)),
+        }
+    }
 }
 
 fn parse_status_command(_payload: &InboundCommandPayload) -> ProductCommandParseResult {
     Ok(ProductCommand::Status)
+}
+
+fn parse_model_option(args: &[&str]) -> Result<Option<String>, ProductRejection> {
+    if args.is_empty() {
+        return Ok(None);
+    }
+    if args.len() == 2 && args[0] == "--model" {
+        return Ok(Some(args[1].to_string()));
+    }
+    Err(ProductRejection::permanent(
+        ProductRejectionKind::InvalidRequest,
+        "model set-provider accepts only `--model <model>` after provider",
+    ))
 }
 
 pub struct LifecycleProductCommandService {

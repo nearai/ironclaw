@@ -86,7 +86,21 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
         vec![
             EffectKind::ReadFilesystem,
             EffectKind::WriteFilesystem,
+            EffectKind::DeleteFilesystem,
             EffectKind::Network
+        ]
+    );
+    let skill_remove = package
+        .capabilities
+        .iter()
+        .find(|descriptor| descriptor.id.as_str() == SKILL_REMOVE_CAPABILITY_ID)
+        .expect("skill_remove manifest");
+    assert_eq!(
+        skill_remove.effects,
+        vec![
+            EffectKind::ReadFilesystem,
+            EffectKind::WriteFilesystem,
+            EffectKind::DeleteFilesystem
         ]
     );
     let http = package
@@ -306,6 +320,69 @@ async fn builtin_echo_preserves_null_string_in_required_field() {
         .await
         .unwrap();
     assert_eq!(output, Value::String("null".to_string()));
+}
+
+#[tokio::test]
+async fn builtin_coding_tools_tolerate_null_sentinels_in_optional_fields() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("qa-builtins.md"), "Alpha\nBeta\nGamma\n").unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(
+        [
+            LIST_DIR_CAPABILITY_ID,
+            GLOB_CAPABILITY_ID,
+            GREP_CAPABILITY_ID,
+        ],
+        mounts,
+    );
+
+    let listed = invoke_with_context(
+        &runtime,
+        LIST_DIR_CAPABILITY_ID,
+        json!({
+            "path": "/workspace",
+            "recursive": "null",
+            "max_depth": "null"
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(listed["entries"], json!(["qa-builtins.md (17B)"]));
+
+    let globbed = invoke_with_context(
+        &runtime,
+        GLOB_CAPABILITY_ID,
+        json!({
+            "path": "/workspace",
+            "pattern": "qa-*.md",
+            "max_results": "null"
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(globbed["files"], json!(["qa-builtins.md"]));
+
+    let grepped = invoke_with_context(
+        &runtime,
+        GREP_CAPABILITY_ID,
+        json!({
+            "path": "/workspace",
+            "pattern": "Beta",
+            "context": "null",
+            "before_context": "null",
+            "after_context": "null",
+            "head_limit": "null",
+            "offset": "null"
+        }),
+        context,
+    )
+    .await
+    .unwrap();
+    assert_eq!(grepped["files"], json!(["qa-builtins.md"]));
 }
 
 #[tokio::test]
@@ -4552,6 +4629,7 @@ fn builtin_effects() -> Vec<EffectKind> {
         EffectKind::DispatchCapability,
         EffectKind::ReadFilesystem,
         EffectKind::WriteFilesystem,
+        EffectKind::DeleteFilesystem,
         EffectKind::Network,
         EffectKind::SpawnProcess,
         EffectKind::ExecuteCode,
