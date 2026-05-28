@@ -75,6 +75,16 @@ const FILESYSTEM_CAS_RETRIES: usize = 8;
 /// Conservative fan-out for indexed range materialization.
 const INDEXED_RANGE_MESSAGE_READ_CONCURRENCY: usize = 8;
 
+#[derive(Debug, Clone, Copy)]
+enum MessageRangeFallbackPolicy {
+    FullScan,
+}
+
+struct MaterializedMessageRange {
+    thread: StoredThreadRecord,
+    messages: Vec<ThreadMessageRecord>,
+}
+
 /// On-disk thread state record. The transcript boundary's
 /// [`SessionThreadRecord`] is the user-visible shape; this struct adds
 /// `next_sequence` so the per-thread monotonic counter is durable.
@@ -321,6 +331,41 @@ where
         }
         messages.sort_by_key(|message| message.sequence);
         Ok(Some(messages))
+    }
+
+    async fn materialize_message_range(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        after_sequence: u64,
+        through_sequence: u64,
+        fallback_policy: MessageRangeFallbackPolicy,
+    ) -> Result<MaterializedMessageRange, SessionThreadError> {
+        let thread = self
+            .read_thread_versioned(scope, thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: thread_id.clone(),
+            })?
+            .0;
+        let through_sequence = through_sequence.min(thread.next_sequence.saturating_sub(1));
+        let messages = match self
+            .list_thread_messages_range_indexed(scope, thread_id, after_sequence, through_sequence)
+            .await?
+        {
+            Some(messages) => messages,
+            None => match fallback_policy {
+                MessageRangeFallbackPolicy::FullScan => self
+                    .list_thread_messages(scope, thread_id)
+                    .await?
+                    .into_iter()
+                    .filter(|message| {
+                        message.sequence > after_sequence && message.sequence <= through_sequence
+                    })
+                    .collect(),
+            },
+        };
+        Ok(MaterializedMessageRange { thread, messages })
     }
 
     async fn find_capability_display_preview_message(
@@ -1173,39 +1218,18 @@ where
         &self,
         request: ThreadMessageRangeRequest,
     ) -> Result<ThreadMessageRange, SessionThreadError> {
-        let thread = self
-            .read_thread_versioned(&request.scope, &request.thread_id)
-            .await?
-            .ok_or_else(|| SessionThreadError::UnknownThread {
-                thread_id: request.thread_id.clone(),
-            })?
-            .0;
-        let through_sequence = request
-            .through_sequence
-            .min(thread.next_sequence.saturating_sub(1));
-        let messages = match self
-            .list_thread_messages_range_indexed(
+        let range = self
+            .materialize_message_range(
                 &request.scope,
                 &request.thread_id,
                 request.after_sequence,
-                through_sequence,
+                request.through_sequence,
+                MessageRangeFallbackPolicy::FullScan,
             )
-            .await?
-        {
-            Some(messages) => messages,
-            None => self
-                .list_thread_messages(&request.scope, &request.thread_id)
-                .await?
-                .into_iter()
-                .filter(|message| {
-                    message.sequence > request.after_sequence
-                        && message.sequence <= through_sequence
-                })
-                .collect(),
-        };
+            .await?;
         Ok(ThreadMessageRange {
-            thread: thread.record,
-            messages: messages.iter().map(history_message).collect(),
+            thread: range.thread.record,
+            messages: range.messages.iter().map(history_message).collect(),
         })
     }
 
@@ -1254,24 +1278,21 @@ where
                 end_sequence: request.end_sequence,
             });
         }
-        self.read_thread_versioned(&request.scope, &request.thread_id)
-            .await?
-            .ok_or_else(|| SessionThreadError::UnknownThread {
-                thread_id: request.thread_id.clone(),
-            })?;
-        let range = self
-            .list_thread_messages_range(ThreadMessageRangeRequest {
-                scope: request.scope.clone(),
-                thread_id: request.thread_id.clone(),
-                after_sequence: request.start_sequence.saturating_sub(1),
-                through_sequence: request.end_sequence,
-            })
+        let range_messages = self
+            .materialize_message_range(
+                &request.scope,
+                &request.thread_id,
+                request.start_sequence.saturating_sub(1),
+                request.end_sequence,
+                MessageRangeFallbackPolicy::FullScan,
+            )
             .await?;
-        let range_messages = range.messages;
         if !range_messages
+            .messages
             .iter()
             .any(|message| message.sequence == request.start_sequence)
             || !range_messages
+                .messages
                 .iter()
                 .any(|message| message.sequence == request.end_sequence)
         {
