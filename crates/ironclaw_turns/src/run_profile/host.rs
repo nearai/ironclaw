@@ -16,9 +16,11 @@ use crate::{
 };
 
 use super::{
+    compaction::{CompactionInitiator, LoopCompactionPort},
     instruction_bundle::InstructionBundleFingerprint,
     refs::{CheckpointSchemaId, LoopDriverId, ModelProfileId},
     snapshot::ResolvedRunProfile,
+    system_inference::SystemInferenceTaskId,
 };
 
 const FORBIDDEN_MODEL_ROUTE_MARKERS: &[&str] = &[
@@ -706,6 +708,24 @@ pub struct LoopContextMessage {
     pub message_ref: Option<LoopMessageRef>,
     pub role: String,
     pub safe_summary: String,
+    pub compaction: Option<LoopContextCompactionMetadata>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoopContextCompactionMetadata {
+    pub sequence: u64,
+    pub kind: LoopContextCompactionKind,
+    pub estimated_tokens: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopContextCompactionKind {
+    User,
+    Assistant,
+    System,
+    Summary,
+    Other,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -954,6 +974,8 @@ pub struct LoopPromptBundle {
     pub bundle_ref: LoopPromptBundleRef,
     pub messages: Vec<LoopModelMessage>,
     pub surface_version: Option<CapabilitySurfaceVersion>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compaction_message_index: Vec<LoopContextCompactionMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruction_fingerprint: Option<InstructionBundleFingerprint>,
     #[serde(default)]
@@ -1786,6 +1808,7 @@ pub trait LoopCheckpointPort: Send + Sync {
     }
 }
 
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LoopProgressEvent {
@@ -1825,6 +1848,36 @@ pub enum LoopProgressEvent {
         iteration: u32,
         kind: LoopCheckpointKind,
     },
+    CompactionStarted {
+        task_id: SystemInferenceTaskId,
+        initiator: CompactionInitiator,
+    },
+    CompactionCompleted {
+        task_id: SystemInferenceTaskId,
+        compression_ratio_ppm: u32,
+    },
+    CompactionFailed {
+        task_id: SystemInferenceTaskId,
+        reason_kind: LoopSafeSummary,
+    },
+    CompactionLeakDetected {
+        task_id: SystemInferenceTaskId,
+        reason_kind: LoopSafeSummary,
+    },
+    GoalRefreshStarted {
+        task_id: SystemInferenceTaskId,
+    },
+    GoalRefreshCompleted {
+        task_id: SystemInferenceTaskId,
+    },
+    GoalRefreshFailed {
+        task_id: SystemInferenceTaskId,
+        reason_kind: LoopSafeSummary,
+    },
+    GoalRefreshLeakDetected {
+        task_id: SystemInferenceTaskId,
+        reason_kind: LoopSafeSummary,
+    },
 }
 
 impl LoopProgressEvent {
@@ -1847,6 +1900,14 @@ impl LoopProgressEvent {
             Self::CapabilityBatchCompleted { .. } => "capability_batch_completed",
             Self::GateBlocked { .. } => "gate_blocked",
             Self::CheckpointWritten { .. } => "checkpoint_written",
+            Self::CompactionStarted { .. } => "compaction_started",
+            Self::CompactionCompleted { .. } => "compaction_completed",
+            Self::CompactionFailed { .. } => "compaction_failed",
+            Self::CompactionLeakDetected { .. } => "compaction_leak_detected",
+            Self::GoalRefreshStarted { .. } => "goal_refresh_started",
+            Self::GoalRefreshCompleted { .. } => "goal_refresh_completed",
+            Self::GoalRefreshFailed { .. } => "goal_refresh_failed",
+            Self::GoalRefreshLeakDetected { .. } => "goal_refresh_leak_detected",
         }
     }
 }
@@ -1933,6 +1994,7 @@ pub trait AgentLoopDriverHost:
     + LoopTranscriptPort
     + LoopCheckpointPort
     + LoopProgressPort
+    + LoopCompactionPort
     + LoopCancellationPort
     + Send
     + Sync
@@ -1949,6 +2011,7 @@ impl<T> AgentLoopDriverHost for T where
         + LoopTranscriptPort
         + LoopCheckpointPort
         + LoopProgressPort
+        + LoopCompactionPort
         + LoopCancellationPort
         + Send
         + Sync

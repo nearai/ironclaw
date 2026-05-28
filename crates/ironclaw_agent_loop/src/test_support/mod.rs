@@ -22,15 +22,17 @@ use ironclaw_turns::{
         CapabilityResultMessage, CapabilitySurfaceProfileId, CapabilitySurfaceVersion,
         CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass, ConcurrencyHint, ContextProfileId,
         FinalizeAssistantMessage, LoopCancellationPort, LoopCancellationSignal, LoopCheckpointKind,
-        LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextBundle, LoopContextRequest,
-        LoopDriverId, LoopInput, LoopInputAck, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
-        LoopInputCursorToken, LoopModelMessage, LoopModelRequest, LoopModelResponse,
-        LoopProgressEvent, LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest,
-        LoopRunContext, LoopRunInfoPort, ModelProfileId, ModelStreamChunk, ParentLoopOutput,
-        ProviderToolCallReference, RedactedRunProfileProvenance, ResolvedRunProfile,
-        ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
-        RuntimeProfileConstraints, SchedulingClass, StageCheckpointPayloadRequest, SteeringPolicy,
-        VisibleCapabilityRequest, VisibleCapabilitySurface,
+        LoopCheckpointRequest, LoopCheckpointStateRef, LoopCompactionError, LoopCompactionRequest,
+        LoopCompactionResponse, LoopContextBundle, LoopContextCompactionMetadata,
+        LoopContextRequest, LoopDriverId, LoopInput, LoopInputAck, LoopInputAckToken,
+        LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopModelMessage, LoopModelRequest,
+        LoopModelResponse, LoopProgressEvent, LoopPromptBundle, LoopPromptBundleRef,
+        LoopPromptBundleRequest, LoopRunContext, LoopRunInfoPort, ModelProfileId, ModelStreamChunk,
+        ParentLoopOutput, ProviderToolCallReference, RedactedRunProfileProvenance,
+        ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier, RunClassId,
+        RunProfileFingerprint, RuntimeProfileConstraints, SchedulingClass,
+        StageCheckpointPayloadRequest, SteeringPolicy, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     },
 };
 
@@ -50,9 +52,12 @@ pub struct MockAgentLoopDriverHost {
     call_log: Mutex<Vec<MockHostCall>>,
     checkpoints: Arc<CheckpointRecorder>,
     visible_capabilities: Vec<CapabilityDescriptorView>,
+    prompt_compaction_indexes: Mutex<VecDeque<Vec<LoopContextCompactionMetadata>>>,
     staged_iterations: Mutex<VecDeque<u32>>,
     fail_prompt_with: Mutex<Option<AgentLoopHostErrorKind>>,
     fail_model_with: Mutex<Option<AgentLoopHostErrorKind>>,
+    compaction_result: Mutex<Result<LoopCompactionResponse, LoopCompactionError>>,
+    progress_events: Mutex<Vec<LoopProgressEvent>>,
     acked_tokens: Mutex<Vec<LoopInputAckToken>>,
     cancellation: Mutex<Option<LoopCancellationSignal>>,
 }
@@ -81,6 +86,11 @@ impl MockAgentLoopDriverHost {
         lock_or_panic(&self.acked_tokens).clone()
     }
 
+    /// Returns loop progress events emitted through the host progress port.
+    pub fn progress_events(&self) -> Vec<LoopProgressEvent> {
+        clone_mutex_vec(&self.progress_events)
+    }
+
     fn record_call(&self, call: MockHostCall) {
         lock_or_panic(&self.call_log).push(call);
     }
@@ -91,8 +101,10 @@ pub struct MockAgentLoopDriverHostBuilder {
     run_context: LoopRunContext,
     script: ScenarioScript,
     visible_capabilities: Vec<CapabilityDescriptorView>,
+    prompt_compaction_indexes: VecDeque<Vec<LoopContextCompactionMetadata>>,
     fail_prompt_with: Option<AgentLoopHostErrorKind>,
     fail_model_with: Option<AgentLoopHostErrorKind>,
+    compaction_result: Result<LoopCompactionResponse, LoopCompactionError>,
     cancellation: Option<LoopCancellationSignal>,
 }
 
@@ -106,8 +118,10 @@ impl MockAgentLoopDriverHostBuilder {
                 capability_id("demo.echo"),
                 ConcurrencyHint::SafeForParallel,
             )],
+            prompt_compaction_indexes: VecDeque::new(),
             fail_prompt_with: None,
             fail_model_with: None,
+            compaction_result: Err(LoopCompactionError::InputTooLarge),
             cancellation: None,
         }
     }
@@ -130,6 +144,21 @@ impl MockAgentLoopDriverHostBuilder {
         self
     }
 
+    /// Sets the compaction metadata returned by prompt bundle construction.
+    pub fn prompt_compaction_index(mut self, index: Vec<LoopContextCompactionMetadata>) -> Self {
+        self.prompt_compaction_indexes = VecDeque::from([index]);
+        self
+    }
+
+    /// Sets the compaction metadata returned by successive prompt bundle builds.
+    pub fn prompt_compaction_indexes(
+        mut self,
+        indexes: Vec<Vec<LoopContextCompactionMetadata>>,
+    ) -> Self {
+        self.prompt_compaction_indexes = indexes.into();
+        self
+    }
+
     /// Forces every model call to fail with the selected host error kind.
     pub fn fail_model_with(mut self, kind: AgentLoopHostErrorKind) -> Self {
         self.fail_model_with = Some(kind);
@@ -139,6 +168,15 @@ impl MockAgentLoopDriverHostBuilder {
     /// Forces every prompt-build call to fail with the selected host error kind.
     pub fn fail_prompt_with(mut self, kind: AgentLoopHostErrorKind) -> Self {
         self.fail_prompt_with = Some(kind);
+        self
+    }
+
+    /// Sets the response returned by the host compaction port.
+    pub fn compaction_result(
+        mut self,
+        result: Result<LoopCompactionResponse, LoopCompactionError>,
+    ) -> Self {
+        self.compaction_result = result;
         self
     }
 
@@ -158,9 +196,12 @@ impl MockAgentLoopDriverHostBuilder {
                 call_log: Mutex::new(Vec::new()),
                 checkpoints: checkpoints.clone(),
                 visible_capabilities: self.visible_capabilities,
+                prompt_compaction_indexes: Mutex::new(self.prompt_compaction_indexes),
                 staged_iterations: Mutex::new(VecDeque::new()),
                 fail_prompt_with: Mutex::new(self.fail_prompt_with),
                 fail_model_with: Mutex::new(self.fail_model_with),
+                compaction_result: Mutex::new(self.compaction_result),
+                progress_events: Mutex::new(Vec::new()),
                 acked_tokens: Mutex::new(Vec::new()),
                 cancellation: Mutex::new(self.cancellation),
             },
@@ -570,6 +611,9 @@ impl ironclaw_turns::run_profile::LoopPromptPort for MockAgentLoopDriverHost {
                 content_ref: loop_message_ref("msg:user"),
             }],
             surface_version: Some(surface_version()),
+            compaction_message_index: lock_or_panic(&self.prompt_compaction_indexes)
+                .pop_front()
+                .unwrap_or_default(),
             instruction_fingerprint: None,
             identity_message_count: 0,
             instruction_snippet_count: 0,
@@ -753,11 +797,19 @@ impl ironclaw_turns::run_profile::LoopCheckpointPort for MockAgentLoopDriverHost
 
 #[async_trait]
 impl ironclaw_turns::run_profile::LoopProgressPort for MockAgentLoopDriverHost {
-    async fn emit_loop_progress(
-        &self,
-        _event: LoopProgressEvent,
-    ) -> Result<(), AgentLoopHostError> {
+    async fn emit_loop_progress(&self, event: LoopProgressEvent) -> Result<(), AgentLoopHostError> {
+        lock_or_panic(&self.progress_events).push(event);
         Ok(())
+    }
+}
+
+#[async_trait]
+impl ironclaw_turns::run_profile::LoopCompactionPort for MockAgentLoopDriverHost {
+    async fn compact_loop_context(
+        &self,
+        _request: LoopCompactionRequest,
+    ) -> Result<LoopCompactionResponse, LoopCompactionError> {
+        lock_or_panic(&self.compaction_result).clone()
     }
 }
 

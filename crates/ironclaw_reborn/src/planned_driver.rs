@@ -328,7 +328,8 @@ mod tests {
             CapabilityInvocation, CapabilityOutcome, CheckpointSchemaId, FinalizeAssistantMessage,
             LoadCheckpointPayloadRequest, LoadedCheckpointPayload, LoopCancellationPort,
             LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointPort, LoopCheckpointRequest,
-            LoopCheckpointStateRef, LoopContextBundle, LoopContextPort, LoopContextRequest,
+            LoopCheckpointStateRef, LoopCompactionError, LoopCompactionPort, LoopCompactionRequest,
+            LoopCompactionResponse, LoopContextBundle, LoopContextPort, LoopContextRequest,
             LoopDriverId, LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputPort,
             LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent,
             LoopProgressPort, LoopPromptBundle, LoopPromptBundleRequest, LoopPromptPort,
@@ -788,6 +789,16 @@ mod tests {
             request: LoopModelRequest,
         ) -> Result<LoopModelResponse, AgentLoopHostError> {
             self.inner.stream_model(request).await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LoopCompactionPort for ResumePayloadHost {
+        async fn compact_loop_context(
+            &self,
+            request: LoopCompactionRequest,
+        ) -> Result<LoopCompactionResponse, LoopCompactionError> {
+            self.inner.compact_loop_context(request).await
         }
     }
 

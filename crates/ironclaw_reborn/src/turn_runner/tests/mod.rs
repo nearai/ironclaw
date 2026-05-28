@@ -497,6 +497,19 @@ impl ironclaw_turns::run_profile::LoopModelPort for StubHost {
 }
 
 #[async_trait]
+impl ironclaw_turns::run_profile::LoopCompactionPort for StubHost {
+    async fn compact_loop_context(
+        &self,
+        _request: ironclaw_turns::run_profile::LoopCompactionRequest,
+    ) -> Result<
+        ironclaw_turns::run_profile::LoopCompactionResponse,
+        ironclaw_turns::run_profile::LoopCompactionError,
+    > {
+        unimplemented!("stub host: never called by mock driver")
+    }
+}
+
+#[async_trait]
 impl ironclaw_turns::run_profile::LoopCapabilityPort for StubHost {
     async fn visible_capabilities(
         &self,

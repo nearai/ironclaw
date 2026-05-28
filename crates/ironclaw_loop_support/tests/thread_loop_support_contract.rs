@@ -27,10 +27,10 @@ use ironclaw_threads::{
     CreateSummaryArtifactRequest, EnsureThreadRequest, InMemorySessionThreadService,
     LoadContextMessagesRequest, MessageContent, MessageKind, MessageStatus,
     ProviderToolCallReferenceEnvelope, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
-    SessionThreadError, SessionThreadRecord, SessionThreadService, SummaryArtifact, ThreadHistory,
-    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
-    ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
-    UpdateToolResultReferenceRequest,
+    SessionThreadError, SessionThreadRecord, SessionThreadService, SummaryArtifact,
+    SummaryModelContextPolicy, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
+    ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope, ToolResultSafeSummary,
+    UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
 };
 use ironclaw_turns::{
     LoopMessageRef, LoopResultRef, RunProfileResolutionRequest, RunProfileResolver, TurnActor,
@@ -41,15 +41,15 @@ use ironclaw_turns::{
         CapabilityDeniedReasonKind, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
         CapabilitySurfaceVersion, FinalizeAssistantMessage, HostManagedLoopPromptPort,
         InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
-        InMemoryRunProfileResolver, LoopCapabilityPort, LoopContextBundle, LoopContextMessage,
-        LoopContextPort, LoopContextRequest, LoopContextSnippet, LoopDriverNoteKind,
-        LoopHostMilestoneKind, LoopHostMilestoneSink, LoopInputCursor, LoopInputCursorToken,
-        LoopModelCapabilityView, LoopModelMessage, LoopModelPort, LoopModelRequest,
-        LoopModelRouteSnapshot, LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRef,
-        LoopPromptPort, LoopRunContext, LoopTranscriptPort, ParentLoopOutput,
-        PersonalContextPolicy, PromptMode, PromptSkillContextMetadata, ProviderToolCallReference,
-        ProviderToolDefinition, SkillVisibility, UpdateAssistantDraft, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        InMemoryRunProfileResolver, LoopCapabilityPort, LoopContextBundle,
+        LoopContextCompactionKind, LoopContextMessage, LoopContextPort, LoopContextRequest,
+        LoopContextSnippet, LoopDriverNoteKind, LoopHostMilestoneKind, LoopHostMilestoneSink,
+        LoopInputCursor, LoopInputCursorToken, LoopModelCapabilityView, LoopModelMessage,
+        LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot, LoopPromptBundle,
+        LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptPort, LoopRunContext,
+        LoopTranscriptPort, ParentLoopOutput, PersonalContextPolicy, PromptMode,
+        PromptSkillContextMetadata, ProviderToolCallReference, ProviderToolDefinition,
+        SkillVisibility, UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 use tracing_test::traced_test;
@@ -85,6 +85,13 @@ async fn thread_context_port_loads_policy_filtered_transcript_messages() {
             .as_str(),
         format!("msg:{}", fixture.user_message_id).as_str()
     );
+    let compaction = bundle.messages[0]
+        .compaction
+        .as_ref()
+        .expect("model-visible transcript message should carry compaction metadata");
+    assert_eq!(compaction.sequence, 1);
+    assert_eq!(compaction.kind, LoopContextCompactionKind::User);
+    assert!(compaction.estimated_tokens > 0);
     assert!(bundle.memory_snippets.is_empty());
 }
 
@@ -98,9 +105,9 @@ async fn thread_context_port_preserves_summary_replacements_as_system_messages()
             thread_id: fixture.thread_id.clone(),
             start_sequence: 1,
             end_sequence: 1,
-            summary_kind: "model_context".to_string(),
+            summary_kind: ironclaw_threads::SummaryKind::Compaction,
             content: MessageContent::text("summarized hello"),
-            model_context_policy: Some("replace_range_when_selected".to_string()),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
         })
         .await
         .unwrap();
@@ -1365,6 +1372,7 @@ async fn prompt_and_model_ports_resolve_instruction_memory_and_identity_refs() {
                 message_ref: Some(LoopMessageRef::new("msg:identity-policy").unwrap()),
                 role: "system".to_string(),
                 safe_summary: "identity policy summary".to_string(),
+                compaction: None,
             }],
             messages: vec![LoopContextMessage {
                 message_ref: Some(
@@ -1372,6 +1380,7 @@ async fn prompt_and_model_ports_resolve_instruction_memory_and_identity_refs() {
                 ),
                 role: "user".to_string(),
                 safe_summary: "user message available".to_string(),
+                compaction: None,
             }],
             instruction_snippets: vec![LoopContextSnippet {
                 snippet_ref: "instruction:project".to_string(),
@@ -3268,6 +3277,7 @@ fn issue_prompt_grant(context: &LoopRunContext, messages: &[LoopModelMessage]) {
         bundle_ref: LoopPromptBundleRef::for_run(context, "test-bundle").unwrap(),
         messages: messages.to_vec(),
         surface_version: None,
+        compaction_message_index: Vec::new(),
         instruction_fingerprint: None,
         identity_message_count: 0,
         instruction_snippet_count: 0,
