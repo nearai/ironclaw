@@ -1002,7 +1002,7 @@ impl RebornServices {
             }
             Err(error) => return Err(map_turn_error(error)),
         };
-        if state.actor.as_ref().is_some_and(|parked| parked != actor) {
+        if state.actor.as_ref() != Some(actor) {
             return Err(participant_denied());
         }
         GateResolutionRoute::from_run_state(

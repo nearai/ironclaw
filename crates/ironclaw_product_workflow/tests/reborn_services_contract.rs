@@ -41,8 +41,8 @@ use ironclaw_turns::{
     CancelRunResponse, DefaultTurnCoordinator, EventCursor, GateRef, GetRunStateRequest,
     InMemoryTurnStateStore, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
     ResumeTurnResponse, RunProfileId, RunProfileVersion, SourceBindingRef, SubmitTurnRequest,
-    SubmitTurnResponse, TurnCapacityResource, TurnCoordinator, TurnError, TurnId, TurnRunId,
-    TurnRunState, TurnScope, TurnStatus,
+    SubmitTurnResponse, TurnActor, TurnCapacityResource, TurnCoordinator, TurnError, TurnId,
+    TurnRunId, TurnRunState, TurnScope, TurnStatus,
 };
 use serde_json::json;
 
@@ -52,6 +52,10 @@ fn caller() -> WebUiAuthenticatedCaller {
 
 fn caller_for_user(user_id: &str) -> WebUiAuthenticatedCaller {
     caller_for_user_with_project(user_id, Some("project-alpha"))
+}
+
+fn turn_actor_for_user(user_id: &str) -> TurnActor {
+    TurnActor::new(UserId::new(user_id).expect("valid user"))
 }
 
 fn caller_with_project(project_id: Option<&str>) -> WebUiAuthenticatedCaller {
@@ -152,7 +156,6 @@ async fn setup_owned_thread(
     create_thread_for(services, owner, thread_id).await;
 }
 
-#[derive(Default)]
 struct FakeTurnCoordinator {
     submissions: Mutex<Vec<SubmitTurnRequest>>,
     cancellations: Mutex<Vec<CancelRunRequest>>,
@@ -160,9 +163,27 @@ struct FakeTurnCoordinator {
     run_state_requests: Mutex<Vec<GetRunStateRequest>>,
     submit_error: Mutex<Option<TurnError>>,
     run_state_error: Mutex<Option<TurnError>>,
+    run_state_actor: Mutex<Option<TurnActor>>,
     parked_gate_ref: Mutex<Option<GateRef>>,
     parked_auth_gate: Mutex<bool>,
     parked_approval_gate: Mutex<bool>,
+}
+
+impl Default for FakeTurnCoordinator {
+    fn default() -> Self {
+        Self {
+            submissions: Mutex::default(),
+            cancellations: Mutex::default(),
+            resumptions: Mutex::default(),
+            run_state_requests: Mutex::default(),
+            submit_error: Mutex::default(),
+            run_state_error: Mutex::default(),
+            run_state_actor: Mutex::new(Some(turn_actor_for_user("user-alpha"))),
+            parked_gate_ref: Mutex::default(),
+            parked_auth_gate: Mutex::default(),
+            parked_approval_gate: Mutex::default(),
+        }
+    }
 }
 
 impl FakeTurnCoordinator {
@@ -200,6 +221,10 @@ impl FakeTurnCoordinator {
         *self.parked_gate_ref.lock().expect("lock") = Some(gate_ref);
         *self.parked_auth_gate.lock().expect("lock") = false;
         *self.parked_approval_gate.lock().expect("lock") = true;
+    }
+
+    fn set_run_state_actor(&self, actor: Option<TurnActor>) {
+        *self.run_state_actor.lock().expect("lock") = actor;
     }
 
     fn submission_count(&self) -> usize {
@@ -297,6 +322,7 @@ impl TurnCoordinator for FakeTurnCoordinator {
         if let Some(error) = self.run_state_error.lock().expect("lock").take() {
             return Err(error);
         }
+        let actor = self.run_state_actor.lock().expect("lock").clone();
         let gate_ref = self.parked_gate_ref.lock().expect("lock").clone();
         let status = if *self.parked_auth_gate.lock().expect("lock") {
             TurnStatus::BlockedAuth
@@ -310,7 +336,7 @@ impl TurnCoordinator for FakeTurnCoordinator {
         self.run_state_requests.lock().expect("lock").push(request);
         Ok(TurnRunState {
             scope,
-            actor: None,
+            actor,
             turn_id: TurnId::new(),
             run_id,
             status,
@@ -2384,6 +2410,70 @@ async fn approved_gate_resolution_resumes_turn() {
             .expect("resume source binding")
             .contains("gate-alpha")
     );
+}
+
+#[tokio::test]
+async fn resolve_gate_rejects_missing_run_state_actor() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    );
+    create_thread_for(&services, caller(), "thread-alpha").await;
+    coordinator.set_parked_gate(GateRef::new("gate-alpha").expect("gate"));
+    coordinator.set_run_state_actor(None);
+
+    let err = services
+        .resolve_gate(
+            caller(),
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "gate-missing-actor",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string(),
+                "gate_ref": "gate-alpha",
+                "resolution": "denied"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("missing run-state actor must fail closed");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Forbidden);
+    assert_eq!(err.kind, RebornServicesErrorKind::ParticipantDenied);
+    assert_eq!(err.status_code, 403);
+    assert_eq!(coordinator.cancellation_count(), 0);
+}
+
+#[tokio::test]
+async fn resolve_gate_rejects_mismatched_run_state_actor() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    );
+    create_thread_for(&services, caller(), "thread-alpha").await;
+    coordinator.set_parked_gate(GateRef::new("gate-alpha").expect("gate"));
+    coordinator.set_run_state_actor(Some(turn_actor_for_user("user-beta")));
+
+    let err = services
+        .resolve_gate(
+            caller(),
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "gate-mismatched-actor",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string(),
+                "gate_ref": "gate-alpha",
+                "resolution": "denied"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("mismatched run-state actor must be rejected");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Forbidden);
+    assert_eq!(err.kind, RebornServicesErrorKind::ParticipantDenied);
+    assert_eq!(err.status_code, 403);
+    assert_eq!(coordinator.cancellation_count(), 0);
 }
 
 #[tokio::test]
