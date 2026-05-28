@@ -3312,6 +3312,29 @@ mod tests {
             .save_pending(resource_scope.clone(), approval)
             .await
             .expect("save approval");
+        let streamed = bundle
+            .api
+            .stream_events(
+                caller.clone(),
+                RebornStreamEventsRequest {
+                    thread_id: scope.thread_id.to_string(),
+                    after_cursor: None,
+                },
+            )
+            .await
+            .expect("approval gate event stream");
+        assert!(
+            streamed.events.iter().any(|event| {
+                matches!(
+                    event.payload(),
+                    ProductOutboundPayload::GatePrompt(prompt)
+                        if prompt.turn_run_id == run_id
+                            && prompt.gate_ref == gate_ref.as_str()
+                            && prompt.headline == "Approval required"
+                )
+            }),
+            "blocked approval run should be visible as a gate prompt on the product event stream"
+        );
 
         bundle
             .api

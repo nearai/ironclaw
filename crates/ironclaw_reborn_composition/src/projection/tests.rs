@@ -7,8 +7,8 @@ use ironclaw_event_projections::{
 };
 use ironclaw_events::{InMemoryDurableEventLog, RuntimeEvent};
 use ironclaw_host_api::{
-    AgentId, CapabilityId, ExtensionId, InvocationId, ResourceScope, RuntimeKind, TenantId,
-    ThreadId, UserId,
+    AgentId, ApprovalRequestId, CapabilityId, ExtensionId, InvocationId, ResourceScope,
+    RuntimeKind, TenantId, ThreadId, UserId,
 };
 use ironclaw_product_adapters::{
     CapabilityActivityStatusView, ProductOutboundEnvelope, ProductOutboundPayload,

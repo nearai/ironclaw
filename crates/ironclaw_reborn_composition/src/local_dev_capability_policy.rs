@@ -7,7 +7,7 @@ use ironclaw_approvals::LeaseApproval;
 use ironclaw_host_api::{
     Action, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
     ExtensionId, GrantConstraints, MountView, NetworkPolicy, NetworkTargetPattern, PackageId,
-    Principal,
+    Principal, runtime_policy::ApprovalPolicy,
 };
 use serde::Deserialize;
 use thiserror::Error;
@@ -42,6 +42,7 @@ pub(crate) enum LocalDevCapabilityPolicyError {
 #[serde(deny_unknown_fields)]
 pub(crate) struct LocalDevCapabilityPolicy {
     pub(crate) provider: LocalDevProviderPolicy,
+    pub(crate) approval_gates: LocalDevApprovalGatePolicy,
     pub(crate) approval_defaults: LocalDevApprovalDefaultsPolicy,
     pub(crate) grants: Vec<LocalDevCapabilityGrantPolicy>,
 }
@@ -151,6 +152,26 @@ impl LocalDevCapabilityPolicy {
             max_invocations: Some(1),
         })
     }
+
+    pub(crate) fn effects_require_approval(
+        &self,
+        approval_policy: ApprovalPolicy,
+        effects: &[EffectKind],
+    ) -> bool {
+        match approval_policy {
+            ApprovalPolicy::Minimal => false,
+            ApprovalPolicy::AskAlways => !effects.is_empty(),
+            ApprovalPolicy::AskWrites => effects
+                .iter()
+                .any(|effect| self.approval_gates.ask_writes.contains(effect)),
+            ApprovalPolicy::AskDestructive => effects
+                .iter()
+                .any(|effect| self.approval_gates.ask_destructive.contains(effect)),
+            // Effective local policies should be concrete by the time they
+            // reach composition. If they are not, fail toward prompting.
+            ApprovalPolicy::OrgPolicy | _ => !effects.is_empty(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -159,6 +180,13 @@ pub(crate) struct LocalDevProviderPolicy {
     pub(crate) id: PackageId,
     pub(crate) manifest_path: String,
     pub(crate) authority_effects: Vec<EffectKind>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LocalDevApprovalGatePolicy {
+    pub(crate) ask_writes: Vec<EffectKind>,
+    pub(crate) ask_destructive: Vec<EffectKind>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -284,6 +312,14 @@ fn validate_policy(policy: &LocalDevCapabilityPolicy) -> Result<(), LocalDevCapa
         &policy.provider.authority_effects,
     )?;
     validate_effects(
+        "approval_gates.ask_writes",
+        &policy.approval_gates.ask_writes,
+    )?;
+    validate_effects(
+        "approval_gates.ask_destructive",
+        &policy.approval_gates.ask_destructive,
+    )?;
+    validate_effects(
         "approval_defaults.spawn_capability effects",
         &policy.approval_defaults.spawn_capability.effects,
     )?;
@@ -394,6 +430,15 @@ mod tests {
                 EffectKind::ExecuteCode,
                 EffectKind::Network,
             ]
+        );
+        assert!(
+            policy.effects_require_approval(
+                ApprovalPolicy::AskDestructive,
+                &[EffectKind::SpawnProcess]
+            )
+        );
+        assert!(
+            !policy.effects_require_approval(ApprovalPolicy::Minimal, &[EffectKind::SpawnProcess])
         );
         assert!(
             policy

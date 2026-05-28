@@ -210,16 +210,16 @@ mod tests {
     use ironclaw_host_api::{
         CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, CapabilitySet, ExecutionContext,
         ExtensionId, GrantConstraints, MountView, NetworkPolicy, NetworkTargetPattern,
-        PermissionMode, Principal, ResourceEstimate, RuntimeKind, TrustClass, UserId,
+        PermissionMode, Principal, RuntimeKind, TrustClass, UserId,
     };
     use ironclaw_host_runtime::{
-        CapabilitySurfacePolicy, HostRuntime, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-        RuntimeFailureKind, SurfaceKind, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        CapabilitySurfacePolicy, RuntimeFailureKind, SurfaceKind, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     };
     use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 
     use super::*;
-    use crate::{RebornBuildInput, build_reborn_services};
+    use crate::{RebornBuildInput, RebornServices, build_reborn_services};
 
     #[tokio::test]
     async fn local_dev_agent_surface_exposes_extension_lifecycle_tools() {
@@ -230,7 +230,10 @@ mod tests {
         ))
         .await
         .expect("local-dev services build");
-        let runtime = services.host_runtime.expect("host runtime composed");
+        let runtime = services
+            .host_runtime
+            .as_ref()
+            .expect("host runtime composed");
 
         let surface = runtime
             .visible_capabilities(visible_request(EXTENSION_LIFECYCLE_CAPABILITY_IDS))
@@ -276,10 +279,8 @@ mod tests {
             .as_ref()
             .expect("extension management")
             .clone();
-        let runtime = services.host_runtime.expect("host runtime composed");
-
         let search = invoke_json(
-            runtime.as_ref(),
+            &services,
             EXTENSION_SEARCH_CAPABILITY_ID,
             serde_json::json!({"query": "github"}),
         )
@@ -289,7 +290,7 @@ mod tests {
         assert_eq!(search["payload"]["count"], 1);
 
         let install = invoke_json(
-            runtime.as_ref(),
+            &services,
             EXTENSION_INSTALL_CAPABILITY_ID,
             serde_json::json!({"extension_id": "github"}),
         )
@@ -310,7 +311,7 @@ mod tests {
         );
 
         let activate = invoke_json(
-            runtime.as_ref(),
+            &services,
             EXTENSION_ACTIVATE_CAPABILITY_ID,
             serde_json::json!({"extension_id": "github"}),
         )
@@ -323,7 +324,7 @@ mod tests {
         assert!(after_activate.iter().any(|id| id == "github.get_issue"));
 
         let remove = invoke_json(
-            runtime.as_ref(),
+            &services,
             EXTENSION_REMOVE_CAPABILITY_ID,
             serde_json::json!({"extension_id": "github"}),
         )
@@ -345,11 +346,9 @@ mod tests {
         ))
         .await
         .expect("local-dev services build");
-        let runtime = services.host_runtime.expect("host runtime composed");
-
         assert_eq!(
             invoke_json(
-                runtime.as_ref(),
+                &services,
                 EXTENSION_SEARCH_CAPABILITY_ID,
                 serde_json::json!({})
             )
@@ -358,7 +357,7 @@ mod tests {
         );
         assert_eq!(
             invoke_json(
-                runtime.as_ref(),
+                &services,
                 EXTENSION_INSTALL_CAPABILITY_ID,
                 serde_json::json!({})
             )
@@ -367,7 +366,7 @@ mod tests {
         );
         assert_eq!(
             invoke_json(
-                runtime.as_ref(),
+                &services,
                 EXTENSION_INSTALL_CAPABILITY_ID,
                 serde_json::json!({"extension_id": "unknown-extension"})
             )
@@ -377,25 +376,18 @@ mod tests {
     }
 
     async fn invoke_json(
-        runtime: &dyn HostRuntime,
+        services: &RebornServices,
         capability_id: &str,
         input: serde_json::Value,
     ) -> Result<serde_json::Value, RuntimeFailureKind> {
-        let outcome = runtime
-            .invoke_capability(RuntimeCapabilityRequest::new(
-                execution_context([capability_id]),
-                CapabilityId::new(capability_id).expect("valid capability id"),
-                ResourceEstimate::default(),
-                input,
-                trust_decision(),
-            ))
-            .await
-            .expect("runtime invocation completes");
-        match outcome {
-            RuntimeCapabilityOutcome::Completed(completed) => Ok(completed.output),
-            RuntimeCapabilityOutcome::Failed(failure) => Err(failure.kind),
-            other => panic!("unexpected runtime outcome: {other:?}"),
-        }
+        crate::approval_test_support::invoke_json_with_local_dev_approval(
+            services,
+            capability_id,
+            execution_context([capability_id]),
+            input,
+            trust_decision(),
+        )
+        .await
     }
 
     async fn active_extension_capability_ids(

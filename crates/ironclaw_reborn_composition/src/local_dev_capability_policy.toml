@@ -11,6 +11,34 @@ authority_effects = [
     "network",
 ]
 
+[approval_gates]
+ask_writes = [
+    "write_filesystem",
+    "delete_filesystem",
+    "spawn_process",
+    "execute_code",
+    "network",
+    "use_secret",
+    "modify_extension",
+    "modify_approval",
+    "modify_budget",
+    "external_write",
+    "financial",
+]
+ask_destructive = [
+    "write_filesystem",
+    "delete_filesystem",
+    "spawn_process",
+    "execute_code",
+    "network",
+    "use_secret",
+    "modify_extension",
+    "modify_approval",
+    "modify_budget",
+    "external_write",
+    "financial",
+]
+
 [approval_defaults.spawn_capability]
 effects = [
     "dispatch_capability",

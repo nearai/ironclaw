@@ -1,0 +1,109 @@
+use ironclaw_approvals::{ApprovalResolver, LeaseApproval};
+use ironclaw_host_api::{Action, CapabilityId, ExecutionContext, Principal, ResourceEstimate};
+use ironclaw_host_runtime::{
+    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
+    RuntimeFailureKind,
+};
+use ironclaw_run_state::ApprovalRequestStore;
+use ironclaw_trust::TrustDecision;
+
+use crate::RebornServices;
+
+pub(crate) async fn invoke_json_with_local_dev_approval(
+    services: &RebornServices,
+    capability_id: &str,
+    context: ExecutionContext,
+    input: serde_json::Value,
+    trust_decision: TrustDecision,
+) -> Result<serde_json::Value, RuntimeFailureKind> {
+    let runtime = services
+        .host_runtime
+        .as_ref()
+        .expect("host runtime composed");
+    let local_runtime = services
+        .local_runtime
+        .as_ref()
+        .expect("local-dev runtime substrate");
+    let capability = CapabilityId::new(capability_id).expect("valid capability id");
+    let estimate = ResourceEstimate::default();
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context.clone(),
+            capability.clone(),
+            estimate.clone(),
+            input.clone(),
+            trust_decision.clone(),
+        ))
+        .await
+        .expect("runtime invocation completes");
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => Ok(completed.output),
+        RuntimeCapabilityOutcome::Failed(failure) => Err(failure.kind),
+        RuntimeCapabilityOutcome::ApprovalRequired(gate) => {
+            let approval_record = local_runtime
+                .approval_requests
+                .get(&context.resource_scope, gate.approval_request_id)
+                .await
+                .expect("local-dev approval record read")
+                .expect("local-dev approval request persisted");
+            let approval = lease_approval_from_context(&context, &capability);
+            let resolver = ApprovalResolver::new(
+                local_runtime.approval_requests.as_ref(),
+                local_runtime.capability_leases.as_ref(),
+            );
+            match approval_record.request.action.as_ref() {
+                Action::Dispatch { .. } => resolver
+                    .approve_dispatch(&context.resource_scope, gate.approval_request_id, approval)
+                    .await
+                    .expect("local-dev approval issues dispatch resume lease"),
+                Action::SpawnCapability { .. } => resolver
+                    .approve_spawn(&context.resource_scope, gate.approval_request_id, approval)
+                    .await
+                    .expect("local-dev approval issues spawn resume lease"),
+                other => panic!("unexpected local-dev approval action: {other:?}"),
+            };
+
+            let resumed = runtime
+                .resume_capability(RuntimeCapabilityResumeRequest::new(
+                    context,
+                    gate.approval_request_id,
+                    capability,
+                    estimate,
+                    input,
+                    trust_decision,
+                ))
+                .await
+                .expect("approved runtime invocation resumes");
+            match resumed {
+                RuntimeCapabilityOutcome::Completed(completed) => Ok(completed.output),
+                RuntimeCapabilityOutcome::Failed(failure) => Err(failure.kind),
+                other => panic!("unexpected resumed runtime outcome: {other:?}"),
+            }
+        }
+        other => panic!("unexpected runtime outcome: {other:?}"),
+    }
+}
+
+fn lease_approval_from_context(
+    context: &ExecutionContext,
+    capability: &CapabilityId,
+) -> LeaseApproval {
+    let constraints = context
+        .grants
+        .grants
+        .iter()
+        .find(|grant| &grant.capability == capability)
+        .expect("matching test capability grant")
+        .constraints
+        .clone();
+    LeaseApproval {
+        issued_by: Principal::HostRuntime,
+        allowed_effects: constraints.allowed_effects,
+        mounts: constraints.mounts,
+        network: constraints.network,
+        secrets: constraints.secrets,
+        resource_ceiling: constraints.resource_ceiling,
+        expires_at: constraints.expires_at,
+        max_invocations: Some(1),
+    }
+}

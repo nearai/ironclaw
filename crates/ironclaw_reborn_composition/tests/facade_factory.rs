@@ -93,9 +93,6 @@ impl Drop for EnvVarGuard {
     }
 }
 
-#[path = "facade_factory/sandbox_process_ports.rs"]
-mod sandbox_process_ports;
-
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 fn test_master_key() -> SecretMaterial {
     SecretMaterial::from("01234567890123456789012345678901")

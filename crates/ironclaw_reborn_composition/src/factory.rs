@@ -6,7 +6,6 @@ use std::{
 use ironclaw_auth::AuthProviderClient;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_authorization::FilesystemCapabilityLeaseStore;
-use ironclaw_authorization::GrantAuthorizer;
 #[cfg(not(feature = "libsql"))]
 use ironclaw_authorization::InMemoryCapabilityLeaseStore;
 #[cfg(feature = "libsql")]
@@ -75,6 +74,7 @@ use crate::google_oauth::google_provider_client;
 use crate::input::OAuthClientConfig;
 use crate::input::{RebornRuntimeProcessBinding, RebornStorageInput};
 use crate::lifecycle::{RebornLocalSkillManagementPort, build_local_skill_management_port};
+use crate::local_dev_authorization::local_dev_authorizer;
 use crate::local_dev_capability_policy::local_dev_capability_policy;
 use crate::local_dev_mounts::{
     ambient_workspace_mount_view, skill_context_mount_view, workspace_mount_view,
@@ -452,14 +452,20 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     );
     let secret_store: Arc<dyn SecretStore> = Arc::new(ironclaw_secrets::InMemorySecretStore::new());
     let mut first_party_registry = builtin_first_party_registry()?;
+    let local_dev_capability_policy = Arc::new(local_dev_capability_policy().map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("local-dev capability policy is invalid: {error}"),
+        }
+    })?);
 
     let local_dev_trust_policy = Arc::new(local_dev_first_party_trust_policy()?);
     let local_dev_trust_invalidation_bus = Arc::new(ironclaw_trust::InvalidationBus::new());
+    let authorizer = local_dev_authorizer(runtime_policy.as_ref(), local_dev_capability_policy);
     let mut services = HostRuntimeServices::new(
         Arc::new(local_dev_builtin_extension_registry()?),
         Arc::clone(&filesystem),
         Arc::clone(&store_graph.resource_governor),
-        Arc::new(GrantAuthorizer::new()),
+        authorizer,
         store_graph.process_services.clone(),
         CapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
@@ -1416,7 +1422,7 @@ where
         Arc::new(builtin_extension_registry()?),
         Arc::clone(&stores.filesystem),
         Arc::new(InMemoryResourceGovernor::new()),
-        Arc::new(GrantAuthorizer::new()),
+        Arc::new(ironclaw_authorization::GrantAuthorizer::new()),
         ProcessServices::filesystem(Arc::clone(&stores.scoped_filesystem)),
         CapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
@@ -1548,12 +1554,12 @@ mod tests {
     use ironclaw_host_api::{
         CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
         ExecutionContext, ExtensionId, GrantConstraints, InvocationId, MountAlias, MountGrant,
-        NetworkPolicy, NetworkTargetPattern, Principal, ResourceEstimate, ResourceScope,
-        RuntimeKind, ScopedPath, SecretHandle, TrustClass, UserId, VirtualPath,
+        NetworkPolicy, NetworkTargetPattern, Principal, ResourceScope, RuntimeKind, ScopedPath,
+        SecretHandle, TrustClass, UserId, VirtualPath,
     };
     use ironclaw_host_runtime::{
-        RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind,
-        SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
+        RuntimeFailureKind, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
+        SKILL_REMOVE_CAPABILITY_ID,
     };
     use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef};
     use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
@@ -1647,54 +1653,31 @@ mod tests {
             .await
             .expect("create Google account");
 
-        let outcome = services
-            .host_runtime
-            .as_ref()
-            .expect("host runtime")
-            .invoke_capability(RuntimeCapabilityRequest::new(
-                gmail_context,
-                CapabilityId::new("gmail.send_message").unwrap(),
-                ResourceEstimate::default(),
-                serde_json::json!({ "message": { "raw": "base64url-rfc822" } }),
-                trust_decision(),
-            ))
-            .await
-            .expect("runtime invocation completes");
-
-        let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
-            panic!("expected fail-closed handler outcome, got {outcome:?}");
-        };
-        assert_eq!(failure.capability_id.as_str(), "gmail.send_message");
-        assert_ne!(failure.kind, RuntimeFailureKind::Authorization);
-        assert_ne!(failure.kind, RuntimeFailureKind::MissingRuntime);
+        let failure = invoke_json(
+            &services,
+            "gmail.send_message",
+            gmail_context,
+            serde_json::json!({ "message": { "raw": "base64url-rfc822" } }),
+        )
+        .await
+        .expect_err("missing token should fail after approval resume");
+        assert_ne!(failure, RuntimeFailureKind::Authorization);
+        assert_ne!(failure, RuntimeFailureKind::MissingRuntime);
 
         let calendar_context = gsuite_context("google-calendar.create_event");
-        let outcome = services
-            .host_runtime
-            .as_ref()
-            .expect("host runtime")
-            .invoke_capability(RuntimeCapabilityRequest::new(
-                calendar_context,
-                CapabilityId::new("google-calendar.create_event").unwrap(),
-                ResourceEstimate::default(),
-                serde_json::json!({
-                    "calendar_id": "primary",
-                    "event": { "summary": "Review" }
-                }),
-                trust_decision(),
-            ))
-            .await
-            .expect("runtime invocation completes");
-
-        let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
-            panic!("expected fail-closed handler outcome, got {outcome:?}");
-        };
-        assert_eq!(
-            failure.capability_id.as_str(),
-            "google-calendar.create_event"
-        );
-        assert_ne!(failure.kind, RuntimeFailureKind::Authorization);
-        assert_ne!(failure.kind, RuntimeFailureKind::MissingRuntime);
+        let failure = invoke_json(
+            &services,
+            "google-calendar.create_event",
+            calendar_context,
+            serde_json::json!({
+                "calendar_id": "primary",
+                "event": { "summary": "Review" }
+            }),
+        )
+        .await
+        .expect_err("missing token should fail after approval resume");
+        assert_ne!(failure, RuntimeFailureKind::Authorization);
+        assert_ne!(failure, RuntimeFailureKind::MissingRuntime);
     }
 
     #[cfg(feature = "libsql")]
@@ -1810,10 +1793,9 @@ mod tests {
         ))
         .await
         .expect("local-dev services build");
-        let runtime = services.host_runtime.expect("host runtime composed");
 
         let install_output = invoke_json(
-            runtime.as_ref(),
+            &services,
             SKILL_INSTALL_CAPABILITY_ID,
             skill_context(SKILL_INSTALL_CAPABILITY_ID),
             serde_json::json!({
@@ -1831,7 +1813,7 @@ mod tests {
         );
 
         let list_output = invoke_json(
-            runtime.as_ref(),
+            &services,
             SKILL_LIST_CAPABILITY_ID,
             skill_context(SKILL_LIST_CAPABILITY_ID),
             serde_json::json!({}),
@@ -1847,7 +1829,7 @@ mod tests {
         );
 
         let remove_output = invoke_json(
-            runtime.as_ref(),
+            &services,
             SKILL_REMOVE_CAPABILITY_ID,
             skill_context(SKILL_REMOVE_CAPABILITY_ID),
             serde_json::json!({"name": "runtime-sentinel"}),
@@ -1872,10 +1854,9 @@ mod tests {
         ))
         .await
         .expect("local-dev services build");
-        let runtime = services.host_runtime.expect("host runtime composed");
 
         let failure = invoke_json(
-            runtime.as_ref(),
+            &services,
             "builtin.write_file",
             workspace_context("builtin.write_file"),
             serde_json::json!({
@@ -2005,26 +1986,19 @@ mod tests {
     }
 
     async fn invoke_json(
-        runtime: &dyn ironclaw_host_runtime::HostRuntime,
+        services: &RebornServices,
         capability_id: &str,
         context: ExecutionContext,
         input: serde_json::Value,
     ) -> Result<serde_json::Value, RuntimeFailureKind> {
-        let outcome = runtime
-            .invoke_capability(RuntimeCapabilityRequest::new(
-                context,
-                CapabilityId::new(capability_id).expect("valid capability id"),
-                ResourceEstimate::default(),
-                input,
-                trust_decision(),
-            ))
-            .await
-            .expect("runtime invocation completes");
-        match outcome {
-            RuntimeCapabilityOutcome::Completed(completed) => Ok(completed.output),
-            RuntimeCapabilityOutcome::Failed(failure) => Err(failure.kind),
-            other => panic!("unexpected runtime outcome: {other:?}"),
-        }
+        crate::approval_test_support::invoke_json_with_local_dev_approval(
+            services,
+            capability_id,
+            context,
+            input,
+            trust_decision(),
+        )
+        .await
     }
 
     fn skill_context(capability_id: &str) -> ExecutionContext {

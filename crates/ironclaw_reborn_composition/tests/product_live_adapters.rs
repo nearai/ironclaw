@@ -535,19 +535,15 @@ async fn local_dev_adapter_invokes_builtin_shell_through_product_live_surface() 
         })
         .await
         .unwrap();
-    let CapabilityOutcome::Completed(completed) = outcome else {
-        panic!("expected completed builtin shell outcome, got {outcome:?}");
+    let CapabilityOutcome::ApprovalRequired {
+        gate_ref,
+        safe_summary,
+    } = outcome
+    else {
+        panic!("expected approval gate for builtin shell outcome, got {outcome:?}");
     };
-    let result = io
-        .result_for_ref(&run_context, &completed.result_ref)
-        .unwrap();
-    assert_eq!(result["exit_code"], serde_json::json!(0));
-    assert!(
-        result["output"]
-            .as_str()
-            .expect("shell output must be text")
-            .contains("hello product shell")
-    );
+    assert!(gate_ref.as_str().starts_with("gate:approval-"));
+    assert_eq!(safe_summary, "capability requires approval");
 }
 
 #[tokio::test]

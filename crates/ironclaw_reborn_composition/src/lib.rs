@@ -20,6 +20,8 @@
 
 use std::sync::Arc;
 
+#[cfg(test)]
+mod approval_test_support;
 mod auth;
 mod available_extensions;
 mod bundled_skills;
@@ -36,6 +38,7 @@ mod input;
 mod lifecycle;
 #[cfg(feature = "root-llm-provider")]
 mod llm_catalog;
+mod local_dev_authorization;
 mod local_dev_capability_policy;
 mod local_dev_mounts;
 mod local_runtime_profile;
