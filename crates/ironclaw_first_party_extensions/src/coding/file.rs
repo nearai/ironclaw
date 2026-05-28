@@ -123,7 +123,10 @@ pub(super) async fn write_file(
         .write_file(&resolved.virtual_path, content.as_bytes())
         .await
         .map_err(filesystem_error)?;
-    if stat_optional(request, &resolved.virtual_path).await?.is_some() {
+    if stat_optional(request, &resolved.virtual_path)
+        .await?
+        .is_some()
+    {
         read_state.write().await.update_after_write(
             &scope,
             resolved.virtual_path.as_str(),
@@ -321,7 +324,10 @@ pub(super) async fn apply_patch(
         .write_file(&resolved.virtual_path, &output)
         .await
         .map_err(filesystem_error)?;
-    if stat_optional(request, &resolved.virtual_path).await?.is_some() {
+    if stat_optional(request, &resolved.virtual_path)
+        .await?
+        .is_some()
+    {
         read_state.write().await.update_after_write(
             &scope,
             resolved.virtual_path.as_str(),

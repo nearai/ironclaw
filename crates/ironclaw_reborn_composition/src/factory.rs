@@ -77,7 +77,8 @@ use crate::input::{RebornRuntimeProcessBinding, RebornStorageInput};
 use crate::lifecycle::{RebornLocalSkillManagementPort, build_local_skill_management_port};
 use crate::local_dev_capability_policy::local_dev_capability_policy;
 use crate::local_dev_mounts::{
-    ambient_workspace_mount_view, skill_context_mount_view, workspace_mount_view,
+    ambient_workspace_mount_view, skill_context_mount_view, skill_management_mount_view,
+    workspace_mount_view,
 };
 use crate::{
     RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
@@ -623,7 +624,7 @@ fn build_local_dev_store_graph(
         FilesystemSessionThreadService::new(Arc::clone(&scoped_filesystem)),
     );
     let skill_mounts =
-        skill_context_mount_view().map_err(|error| RebornBuildError::InvalidConfig {
+        skill_management_mount_view().map_err(|error| RebornBuildError::InvalidConfig {
             reason: error.to_string(),
         })?;
     let skill_management = build_local_skill_management_port(owner_user_id, filesystem)?;
@@ -688,7 +689,7 @@ fn build_local_dev_store_graph(
     let thread_service: Arc<dyn SessionThreadService> =
         Arc::new(InMemorySessionThreadService::default());
     let skill_mounts =
-        skill_context_mount_view().map_err(|error| RebornBuildError::InvalidConfig {
+        skill_management_mount_view().map_err(|error| RebornBuildError::InvalidConfig {
             reason: error.to_string(),
         })?;
     let skill_management = build_local_skill_management_port(owner_user_id, filesystem)?;
