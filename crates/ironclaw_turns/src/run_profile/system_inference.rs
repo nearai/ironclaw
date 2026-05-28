@@ -49,6 +49,58 @@ impl<'de> Deserialize<'de> for SystemInferenceTaskId {
     }
 }
 
+/// Stable identifier for an embedded system prompt source.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct SystemPromptId(String);
+
+impl SystemPromptId {
+    pub fn new(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err("system prompt id must not be empty".to_string());
+        }
+        if value.len() > 128 {
+            return Err("system prompt id is too long".to_string());
+        }
+        if !value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            return Err("system prompt id must be snake_case".to_string());
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for SystemPromptId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl TryFrom<String> for SystemPromptId {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl<'de> Deserialize<'de> for SystemPromptId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
 /// System-owned inference job class.
 ///
 /// These tasks run through a host-owned internal model path, are not assistant
@@ -63,9 +115,10 @@ pub enum SystemTaskKind {
 
 /// Origin metadata for the system prompt used by a system inference task.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "source")]
 pub enum SystemPromptSource {
     /// Static prompt embedded in the host binary or support crate.
-    Static { prompt_id: String },
+    Static { prompt_id: SystemPromptId },
 }
 
 /// Auditable identity for a host-owned inference call.

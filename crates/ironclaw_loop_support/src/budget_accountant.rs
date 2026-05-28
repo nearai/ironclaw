@@ -2,9 +2,9 @@
 //!
 //! [`GovernorBackedAccountant`] is the concrete
 //! [`LoopModelBudgetAccountant`] used by production composition. It estimates
-//! USD cost per model call from a [`ModelCostTable`] (provider-supplied
+//! USD cost per model-backed work item from a [`ModelCostTable`] (provider-supplied
 //! cost-per-token × model max-output × overestimate factor), reserves against
-//! a [`ResourceGovernor`], and reconciles or releases on `post_model_call`.
+//! a [`ResourceGovernor`], and reconciles or releases on `post_model_work`.
 //!
 //! It is *not* the gate handler — when reservation returns
 //! [`ResourceError::RequiresApproval`], the accountant surfaces a sanitized
@@ -25,8 +25,8 @@ use ironclaw_resources::{
 };
 use ironclaw_turns::TurnRunId;
 use ironclaw_turns::run_profile::{
-    AgentLoopHostErrorKind, LoopModelBudgetAccountant, LoopModelGatewayError, LoopModelRequest,
-    LoopModelResponse, LoopRunContext, ModelCallOutcome, ModelProfileId,
+    AgentLoopHostErrorKind, LoopModelBudgetAccountant, LoopModelGatewayError, LoopRunContext,
+    ModelProfileId, ModelWorkOutcome, ModelWorkRequest,
 };
 use rust_decimal::Decimal;
 use rust_decimal::prelude::FromPrimitive;
@@ -118,16 +118,16 @@ impl BudgetSeedingPolicy {
 
 /// Production budget accountant.
 ///
-/// Wraps any [`ResourceGovernor`] with a model-call hook: `pre_model_call`
-/// reserves an estimated worst-case cost, `post_model_call` reconciles
+/// Wraps any [`ResourceGovernor`] with model-work hooks: `pre_model_work`
+/// reserves an estimated worst-case cost, `post_model_work` reconciles
 /// (success) or releases (failure). The token estimate is approximated from
-/// the request message count; refining it is a follow-up enhancement (it does
-/// not change correctness because reconcile uses actual usage).
+/// the neutral work request; refining it is a follow-up enhancement (it does
+/// not change correctness because reconcile can consume actual usage).
 pub struct GovernorBackedAccountant {
     governor: Arc<dyn ResourceGovernor>,
     cost_table: Arc<dyn ModelCostTable>,
     overestimate_factor: Decimal,
-    /// Tracks in-flight reservations per run so `post_model_call` can
+    /// Tracks in-flight reservations per run so `post_model_work` can
     /// reconcile/release the matching reservation without the caller
     /// threading state through the loop port. Stores the original estimate
     /// alongside the id so reconcile can fall back to the estimated USD
@@ -141,7 +141,7 @@ pub struct GovernorBackedAccountant {
     seeded: Arc<DashSet<ResourceAccount>>,
 }
 
-/// Per-run reservation bookkeeping. Held until `post_model_call` reconciles
+/// Per-run reservation bookkeeping. Held until `post_model_work` reconciles
 /// or releases against the governor.
 #[derive(Debug, Clone)]
 struct InFlightReservation {
@@ -236,36 +236,23 @@ impl GovernorBackedAccountant {
         }
     }
 
-    fn estimate_for(
-        &self,
-        context: &LoopRunContext,
-        request: &LoopModelRequest,
-    ) -> ResourceEstimate {
-        let model_id = request
-            .model_preference
-            .as_ref()
-            .unwrap_or(&context.resolved_run_profile.model_profile_id);
-        let cost = self.cost_table.cost_for(model_id).unwrap_or(ModelCost {
-            input_per_token: Decimal::ZERO,
-            output_per_token: Decimal::ZERO,
-            max_output_tokens: 0,
-        });
-        // Rough token estimate: 4 chars/token is the conservative standard.
-        // Production reconciliation in `post_model_call` uses actual usage,
-        // so this is purely for the upfront hold.
-        let approx_input_tokens = request
-            .messages
-            .iter()
-            .map(|m| m.content_ref.as_str().len() as u64 / 4)
-            .sum::<u64>()
-            .max(64);
+    fn estimate_for(&self, request: &ModelWorkRequest) -> ResourceEstimate {
+        let cost = self
+            .cost_table
+            .cost_for(&request.model_profile_id)
+            .unwrap_or(ModelCost {
+                input_per_token: Decimal::ZERO,
+                output_per_token: Decimal::ZERO,
+                max_output_tokens: 0,
+            });
         let max_output_tokens = if cost.max_output_tokens == 0 {
             <dyn ModelCostTable>::DEFAULT_MAX_OUTPUT_TOKENS
         } else {
             cost.max_output_tokens
         };
-        let input_usd = Decimal::from(approx_input_tokens) * cost.input_per_token;
-        let output_usd = Decimal::from(max_output_tokens) * cost.output_per_token;
+        let output_tokens = request.estimated_output_tokens.unwrap_or(max_output_tokens);
+        let input_usd = Decimal::from(request.estimated_input_tokens) * cost.input_per_token;
+        let output_usd = Decimal::from(output_tokens) * cost.output_per_token;
         let raw_usd = input_usd + output_usd;
         let estimated_usd = raw_usd * self.overestimate_factor;
         ResourceEstimate {
@@ -274,41 +261,21 @@ impl GovernorBackedAccountant {
             } else {
                 None
             },
-            input_tokens: Some(approx_input_tokens),
-            output_tokens: Some(max_output_tokens),
+            input_tokens: Some(request.estimated_input_tokens),
+            output_tokens: Some(output_tokens),
             ..ResourceEstimate::default()
         }
     }
 
-    fn resource_scope(&self, context: &LoopRunContext) -> ResourceScope {
-        let user_id = context
-            .actor
-            .as_ref()
-            .map(|actor| actor.user_id.clone())
-            .unwrap_or_else(|| UserId::from_trusted(SYSTEM_RESERVED_ID.to_string()));
-        ResourceScope {
-            tenant_id: context.scope.tenant_id.clone(),
-            user_id,
-            agent_id: context.scope.agent_id.clone(),
-            project_id: context.scope.project_id.clone(),
-            mission_id: None,
-            thread_id: Some(context.scope.thread_id.clone()),
-            invocation_id: InvocationId::new(),
-        }
-    }
-}
-
-#[async_trait]
-impl LoopModelBudgetAccountant for GovernorBackedAccountant {
-    async fn pre_model_call(
+    fn reserve_estimate(
         &self,
         context: &LoopRunContext,
-        request: &LoopModelRequest,
+        estimate: ResourceEstimate,
     ) -> Result<(), LoopModelGatewayError> {
         // Reject a second concurrent reservation for the same run: the loop
-        // calls `stream_model` serially per run, so overlap means a prior
-        // post-call leaked. Hold one reservation only — release the new
-        // hold immediately rather than overwriting and leaking the old one.
+        // calls model work serially per run, so overlap means a prior post-call
+        // leaked. Hold one reservation only — release the new hold immediately
+        // rather than overwriting and leaking the old one.
         if self.in_flight.contains_key(&context.run_id) {
             return Err(LoopModelGatewayError::new(
                 AgentLoopHostErrorKind::BudgetAccountingFailed,
@@ -317,7 +284,6 @@ impl LoopModelBudgetAccountant for GovernorBackedAccountant {
             .map_err(internal_summary_error)?);
         }
 
-        let estimate = self.estimate_for(context, request);
         let scope = self.resource_scope(context);
         self.seed_if_missing(&scope);
         let reservation_id = ResourceReservationId::new();
@@ -380,11 +346,39 @@ impl LoopModelBudgetAccountant for GovernorBackedAccountant {
         }
     }
 
-    async fn post_model_call(
+    fn resource_scope(&self, context: &LoopRunContext) -> ResourceScope {
+        let user_id = context
+            .actor
+            .as_ref()
+            .map(|actor| actor.user_id.clone())
+            .unwrap_or_else(|| UserId::from_trusted(SYSTEM_RESERVED_ID.to_string()));
+        ResourceScope {
+            tenant_id: context.scope.tenant_id.clone(),
+            user_id,
+            agent_id: context.scope.agent_id.clone(),
+            project_id: context.scope.project_id.clone(),
+            mission_id: None,
+            thread_id: Some(context.scope.thread_id.clone()),
+            invocation_id: InvocationId::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl LoopModelBudgetAccountant for GovernorBackedAccountant {
+    async fn pre_model_work(
         &self,
         context: &LoopRunContext,
-        _request: &LoopModelRequest,
-        outcome: ModelCallOutcome<'_>,
+        request: &ModelWorkRequest,
+    ) -> Result<(), LoopModelGatewayError> {
+        self.reserve_estimate(context, self.estimate_for(request))
+    }
+
+    async fn post_model_work(
+        &self,
+        context: &LoopRunContext,
+        _request: &ModelWorkRequest,
+        outcome: ModelWorkOutcome,
     ) -> Result<(), LoopModelGatewayError> {
         // Peek without removing — only clear the in-flight entry after the
         // governor confirms the reconcile/release succeeded. Otherwise a
@@ -393,18 +387,18 @@ impl LoopModelBudgetAccountant for GovernorBackedAccountant {
         let entry = match self.in_flight.get(&context.run_id) {
             Some(e) => e.clone(),
             None => {
-                // No reservation registered — pre_model_call must have
+                // No reservation registered — pre_model_work must have
                 // failed before reservation succeeded.
                 return Ok(());
             }
         };
         let reservation_id = entry.id;
         let result = match outcome {
-            ModelCallOutcome::Success(response) => {
-                let usage = usage_for_response(response, &entry.estimate);
+            ModelWorkOutcome::Success(usage) => {
+                let usage = usage_for_model_work(usage, &entry.estimate);
                 self.governor.reconcile(reservation_id, usage).map(|_| ())
             }
-            ModelCallOutcome::Failure(_) => self.governor.release(reservation_id).map(|_| ()),
+            ModelWorkOutcome::Failure(_) => self.governor.release(reservation_id).map(|_| ()),
         };
         match result {
             Ok(()) => {
@@ -429,26 +423,22 @@ impl LoopModelBudgetAccountant for GovernorBackedAccountant {
     }
 }
 
-fn usage_for_response(response: &LoopModelResponse, estimate: &ResourceEstimate) -> ResourceUsage {
-    // Provider-supplied token counts and USD have not yet been threaded
-    // into `LoopModelResponse`. Until they are, reconcile the original
-    // reservation estimate as the recorded USD spend: this is conservative
-    // (the estimate already includes the overestimate factor) but ensures
-    // daily USD budgets actually deplete, which is the security invariant
-    // the cascade depends on. Once provider usage threads through the
-    // loop layer this falls back to those numbers; today the estimate is
-    // the only honest signal.
-    let chunks = response.chunks.len() as u64;
+fn usage_for_model_work(
+    usage: ironclaw_turns::run_profile::ModelWorkUsage,
+    estimate: &ResourceEstimate,
+) -> ResourceUsage {
+    // Provider-supplied token counts and USD have not yet been threaded into
+    // loop model responses or system inference responses. Until they are,
+    // reconcile the original reservation estimate as the recorded USD spend:
+    // this is conservative and ensures daily USD budgets actually deplete.
     ResourceUsage {
         usd: estimate.usd.unwrap_or(Decimal::ZERO),
         input_tokens: estimate.input_tokens.unwrap_or(0),
-        output_tokens: chunks,
-        wall_clock_ms: 0,
-        output_bytes: response
-            .chunks
-            .iter()
-            .map(|c| c.safe_text_delta.len() as u64)
-            .sum(),
+        output_tokens: usage
+            .output_tokens
+            .unwrap_or_else(|| estimate.output_tokens.unwrap_or(0)),
+        wall_clock_ms: usage.wall_clock_ms,
+        output_bytes: usage.output_bytes,
         network_egress_bytes: 0,
         process_count: 0,
     }
@@ -478,10 +468,11 @@ mod tests {
         TurnScope,
         run_profile::{
             CancellationPolicy, CapabilitySurfaceProfileId, CheckpointPolicy, CheckpointSchemaId,
-            ConcurrencyClass, ContextProfileId, LoopDriverId, LoopRunContext, ModelProfileId,
-            PersonalContextPolicy, RedactedRunProfileProvenance, ResolvedRunProfile,
-            ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
-            RuntimeProfileConstraints, SchedulingClass, SteeringPolicy,
+            ConcurrencyClass, ContextProfileId, LoopDriverId, LoopModelRequest, LoopModelResponse,
+            LoopRunContext, ModelCallOutcome, ModelProfileId, PersonalContextPolicy,
+            RedactedRunProfileProvenance, ResolvedRunProfile, ResourceBudgetPolicy,
+            ResourceBudgetTier, RunClassId, RunProfileFingerprint, RuntimeProfileConstraints,
+            SchedulingClass, SteeringPolicy,
         },
     };
     use rust_decimal::Decimal;
@@ -730,7 +721,8 @@ mod tests {
         let accountant = GovernorBackedAccountant::new(governor, Arc::new(ZeroCostTable));
         let context = run_context();
         let request = sample_request();
-        let estimate = accountant.estimate_for(&context, &request);
+        let estimate =
+            accountant.estimate_for(&ModelWorkRequest::for_assistant(&context, &request));
         assert_eq!(estimate.usd, None);
         assert!(estimate.input_tokens.is_some());
     }

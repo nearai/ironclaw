@@ -1180,12 +1180,15 @@ where
                 thread_id: request.thread_id.clone(),
             })?
             .0;
+        let through_sequence = request
+            .through_sequence
+            .min(thread.next_sequence.saturating_sub(1));
         let messages = match self
             .list_thread_messages_range_indexed(
                 &request.scope,
                 &request.thread_id,
                 request.after_sequence,
-                request.through_sequence,
+                through_sequence,
             )
             .await?
         {
@@ -1196,7 +1199,7 @@ where
                 .into_iter()
                 .filter(|message| {
                     message.sequence > request.after_sequence
-                        && message.sequence <= request.through_sequence
+                        && message.sequence <= through_sequence
                 })
                 .collect(),
         };
@@ -1256,18 +1259,15 @@ where
             .ok_or_else(|| SessionThreadError::UnknownThread {
                 thread_id: request.thread_id.clone(),
             })?;
-        let range_messages = self
-            .list_thread_messages_range_indexed(
-                &request.scope,
-                &request.thread_id,
-                request.start_sequence.saturating_sub(1),
-                request.end_sequence,
-            )
-            .await?
-            .ok_or(SessionThreadError::InvalidSummaryRange {
-                start_sequence: request.start_sequence,
-                end_sequence: request.end_sequence,
-            })?;
+        let range = self
+            .list_thread_messages_range(ThreadMessageRangeRequest {
+                scope: request.scope.clone(),
+                thread_id: request.thread_id.clone(),
+                after_sequence: request.start_sequence.saturating_sub(1),
+                through_sequence: request.end_sequence,
+            })
+            .await?;
+        let range_messages = range.messages;
         if !range_messages
             .iter()
             .any(|message| message.sequence == request.start_sequence)

@@ -7,7 +7,8 @@ use ironclaw_turns::{
         LoopCheckpointKind, LoopCompactionError, LoopCompactionResponse, LoopContextCompactionKind,
         LoopContextCompactionMetadata, LoopInput, LoopInputAckToken, LoopInputBatch,
         LoopInputCursor, LoopInterruptKind, LoopProcessRef, LoopRunInfoPort, LoopSafeSummary,
-        ParentLoopOutput, ProcessHandleSummary, ProviderToolCallReplay, VisibleCapabilityRequest,
+        LoopSummaryArtifactId, ParentLoopOutput, ProcessHandleSummary, ProviderToolCallReplay,
+        VisibleCapabilityRequest,
     },
 };
 
@@ -235,7 +236,7 @@ async fn prompt_stage_compacts_candidate_prompt_then_rebuilds_final_bundle() {
             )],
         ])
         .with_compaction_result(Ok(LoopCompactionResponse {
-            summary_artifact_id: "summary-1".to_string(),
+            summary_artifact_id: LoopSummaryArtifactId::new("summary-1").unwrap(),
             compression_ratio_ppm: 250_000,
         }));
     let family = family_with_compaction_strategy(DefaultCompactionStrategy {
@@ -397,7 +398,7 @@ async fn prompt_stage_compaction_timeout_returns_failed_exit() {
             10,
         )])
         .with_compaction_result(Ok(LoopCompactionResponse {
-            summary_artifact_id: "summary-1".to_string(),
+            summary_artifact_id: LoopSummaryArtifactId::new("summary-1").unwrap(),
             compression_ratio_ppm: 250_000,
         }))
         .with_compaction_delay(std::time::Duration::from_millis(25));
@@ -543,7 +544,7 @@ async fn prompt_stage_cancellation_during_compaction_aborts_prompt_planning() {
             10,
         )])
         .with_compaction_result(Ok(LoopCompactionResponse {
-            summary_artifact_id: "summary-1".to_string(),
+            summary_artifact_id: LoopSummaryArtifactId::new("summary-1").unwrap(),
             compression_ratio_ppm: 250_000,
         }))
         .with_compaction_delay(std::time::Duration::from_millis(50));

@@ -3,8 +3,9 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use ironclaw_turns::run_profile::{
-    LoopRunContext, LoopSafeSummary, ParentLoopOutput, SystemInferenceError, SystemInferencePort,
-    SystemInferenceRequest, SystemInferenceResponse,
+    AgentLoopHostErrorKind, LoopModelBudgetAccountant, LoopModelGatewayError, LoopModelPolicyGuard,
+    LoopRunContext, LoopSafeSummary, ModelWorkOutcome, ModelWorkRequest, ParentLoopOutput,
+    SystemInferenceError, SystemInferencePort, SystemInferenceRequest, SystemInferenceResponse,
 };
 
 use crate::{
@@ -31,6 +32,81 @@ where
             gateway,
             run_context,
         }
+    }
+}
+
+#[derive(Clone)]
+pub struct GuardedSystemInferencePort {
+    inner: Arc<dyn SystemInferencePort>,
+    run_context: LoopRunContext,
+    accountant: Arc<dyn LoopModelBudgetAccountant>,
+    policy_guard: Arc<dyn LoopModelPolicyGuard>,
+}
+
+impl GuardedSystemInferencePort {
+    pub fn new(
+        inner: Arc<dyn SystemInferencePort>,
+        run_context: LoopRunContext,
+        accountant: Arc<dyn LoopModelBudgetAccountant>,
+        policy_guard: Arc<dyn LoopModelPolicyGuard>,
+    ) -> Self {
+        Self {
+            inner,
+            run_context,
+            accountant,
+            policy_guard,
+        }
+    }
+}
+
+#[async_trait]
+impl SystemInferencePort for GuardedSystemInferencePort {
+    async fn call_system_inference(
+        &self,
+        request: SystemInferenceRequest,
+    ) -> Result<SystemInferenceResponse, SystemInferenceError> {
+        let work_request = ModelWorkRequest::for_system_inference(&self.run_context, &request);
+        if let Err(error) = self
+            .policy_guard
+            .check_model_work_policy(&self.run_context, &work_request)
+            .await
+        {
+            return Err(map_gateway_error(error));
+        }
+
+        if let Err(error) = self
+            .accountant
+            .pre_model_work(&self.run_context, &work_request)
+            .await
+        {
+            return Err(map_gateway_error(error));
+        }
+
+        let inner = Arc::clone(&self.inner);
+        let accountant = Arc::clone(&self.accountant);
+        let run_context = self.run_context.clone();
+        let worker_request = work_request.clone();
+        tokio::spawn(async move {
+            let result = inner.call_system_inference(request).await;
+            let outcome = ModelWorkOutcome::from_system_inference_result(&result);
+            if let Err(error) = accountant
+                .post_model_work(&run_context, &worker_request, outcome)
+                .await
+            {
+                return Err(map_gateway_error(error));
+            }
+            result
+        })
+        .await
+        .map_err(|error| {
+            tracing::warn!(
+                error = %error,
+                "system inference worker failed before post-model accounting completed"
+            );
+            SystemInferenceError::Failed {
+                safe_summary: safe("system inference task failed"),
+            }
+        })?
     }
 }
 
@@ -120,6 +196,29 @@ fn map_model_error(kind: HostManagedModelErrorKind) -> SystemInferenceError {
     }
 }
 
+fn map_gateway_error(error: LoopModelGatewayError) -> SystemInferenceError {
+    match error.kind {
+        AgentLoopHostErrorKind::Cancelled => SystemInferenceError::Cancelled,
+        AgentLoopHostErrorKind::BudgetExceeded | AgentLoopHostErrorKind::BudgetApprovalRequired => {
+            SystemInferenceError::Failed {
+                safe_summary: safe("system inference budget exceeded"),
+            }
+        }
+        AgentLoopHostErrorKind::PolicyDenied => SystemInferenceError::Failed {
+            safe_summary: safe("system inference policy denied"),
+        },
+        AgentLoopHostErrorKind::CredentialUnavailable => SystemInferenceError::Failed {
+            safe_summary: safe("system inference credential unavailable"),
+        },
+        AgentLoopHostErrorKind::Unavailable => SystemInferenceError::Failed {
+            safe_summary: safe("system inference unavailable"),
+        },
+        _ => SystemInferenceError::Failed {
+            safe_summary: error.safe_summary,
+        },
+    }
+}
+
 fn safe(value: &'static str) -> LoopSafeSummary {
     LoopSafeSummary::new(value).unwrap_or_else(|_| LoopSafeSummary::model_gateway_failed())
 }
@@ -142,11 +241,14 @@ mod tests {
     use ironclaw_turns::{
         RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
         run_profile::{
-            InMemoryRunProfileResolver, SystemInferenceIdentity, SystemInferenceTaskId,
+            AgentLoopHostErrorKind, InMemoryRunProfileResolver, LoopModelBudgetAccountant,
+            LoopModelGatewayError, LoopModelPolicyGuard, ModelWorkOutcome, ModelWorkRequest,
+            NoOpBudgetAccountant, NoOpPolicyGuard, SystemInferenceIdentity, SystemInferenceTaskId,
             SystemPromptSource, SystemTaskKind,
         },
     };
     use std::sync::Mutex;
+    use tokio::sync::Notify;
 
     struct RecordingGateway {
         request: Mutex<Option<HostManagedModelRequest>>,
@@ -173,6 +275,10 @@ mod tests {
                 .expect("lock")
                 .clone()
                 .expect("request recorded")
+        }
+
+        fn request_was_recorded(&self) -> bool {
+            self.request.lock().expect("lock").is_some()
         }
     }
 
@@ -214,6 +320,126 @@ mod tests {
         }
     }
 
+    struct DelayedInferencePort {
+        started: Arc<Notify>,
+        delay: std::time::Duration,
+    }
+
+    #[async_trait]
+    impl SystemInferencePort for DelayedInferencePort {
+        async fn call_system_inference(
+            &self,
+            _request: SystemInferenceRequest,
+        ) -> Result<SystemInferenceResponse, SystemInferenceError> {
+            self.started.notify_one();
+            tokio::time::sleep(self.delay).await;
+            Err(SystemInferenceError::Timeout)
+        }
+    }
+
+    struct DenySystemInferencePolicyGuard;
+
+    #[async_trait]
+    impl LoopModelPolicyGuard for DenySystemInferencePolicyGuard {
+        async fn check_model_work_policy(
+            &self,
+            _context: &LoopRunContext,
+            request: &ModelWorkRequest,
+        ) -> Result<(), LoopModelGatewayError> {
+            assert!(matches!(
+                request.kind,
+                ironclaw_turns::run_profile::ModelWorkKind::SystemInference { .. }
+            ));
+            Err(LoopModelGatewayError::new(
+                AgentLoopHostErrorKind::PolicyDenied,
+                "system inference denied",
+            )
+            .expect("safe summary is valid"))
+        }
+    }
+
+    struct RejectingBudgetAccountant;
+
+    #[async_trait]
+    impl LoopModelBudgetAccountant for RejectingBudgetAccountant {
+        async fn pre_model_work(
+            &self,
+            _context: &LoopRunContext,
+            request: &ModelWorkRequest,
+        ) -> Result<(), LoopModelGatewayError> {
+            assert!(matches!(
+                request.kind,
+                ironclaw_turns::run_profile::ModelWorkKind::SystemInference { .. }
+            ));
+            Err(LoopModelGatewayError::new(
+                AgentLoopHostErrorKind::BudgetExceeded,
+                "system inference budget exceeded",
+            )
+            .expect("safe summary is valid"))
+        }
+
+        async fn post_model_work(
+            &self,
+            _context: &LoopRunContext,
+            _request: &ModelWorkRequest,
+            _outcome: ModelWorkOutcome,
+        ) -> Result<(), LoopModelGatewayError> {
+            panic!("post_model_work must not run when pre_model_work rejects")
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingBudgetAccountant {
+        pre_called: Mutex<bool>,
+        post_outcomes: Mutex<Vec<ModelWorkOutcome>>,
+    }
+
+    #[async_trait]
+    impl LoopModelBudgetAccountant for RecordingBudgetAccountant {
+        async fn pre_model_work(
+            &self,
+            _context: &LoopRunContext,
+            request: &ModelWorkRequest,
+        ) -> Result<(), LoopModelGatewayError> {
+            assert!(matches!(
+                request.kind,
+                ironclaw_turns::run_profile::ModelWorkKind::SystemInference { .. }
+            ));
+            *self.pre_called.lock().expect("lock") = true;
+            Ok(())
+        }
+
+        async fn post_model_work(
+            &self,
+            _context: &LoopRunContext,
+            request: &ModelWorkRequest,
+            outcome: ModelWorkOutcome,
+        ) -> Result<(), LoopModelGatewayError> {
+            assert!(matches!(
+                request.kind,
+                ironclaw_turns::run_profile::ModelWorkKind::SystemInference { .. }
+            ));
+            self.post_outcomes.lock().expect("lock").push(outcome);
+            Ok(())
+        }
+    }
+
+    fn system_request(input_text: &str) -> SystemInferenceRequest {
+        SystemInferenceRequest {
+            task_id: SystemInferenceTaskId::new(),
+            identity: SystemInferenceIdentity {
+                task_kind: SystemTaskKind::Compaction,
+                prompt_source: SystemPromptSource::Static {
+                    prompt_id: "test".to_string().try_into().unwrap(),
+                },
+                system_prompt: "summarize".to_string(),
+            },
+            input_text: input_text.to_string(),
+            max_input_tokens: 100,
+            deadline_ms: 100,
+        }
+    }
+
     #[tokio::test]
     async fn dispatches_direct_gateway_request_without_prompt_materialization() {
         let context = test_run_context("system-inference-direct").await;
@@ -229,7 +455,7 @@ mod tests {
                 identity: SystemInferenceIdentity {
                     task_kind: SystemTaskKind::Compaction,
                     prompt_source: SystemPromptSource::Static {
-                        prompt_id: "test".to_string(),
+                        prompt_id: "test".to_string().try_into().unwrap(),
                     },
                     system_prompt: "summarize".to_string(),
                 },
@@ -273,6 +499,120 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn guarded_system_inference_policy_denial_skips_gateway_dispatch() {
+        let context = test_run_context("system-inference-policy-denied").await;
+        let direct: Arc<dyn SystemInferencePort> = Arc::new(
+            ModelGatewayBackedSystemInferencePort::new(Arc::new(PanicGateway), context.clone()),
+        );
+        let port = GuardedSystemInferencePort::new(
+            direct,
+            context,
+            Arc::new(NoOpBudgetAccountant),
+            Arc::new(DenySystemInferencePolicyGuard),
+        );
+
+        let error = port
+            .call_system_inference(system_request("transcript"))
+            .await
+            .expect_err("policy denial should reject system inference");
+
+        assert!(matches!(error, SystemInferenceError::Failed { .. }));
+    }
+
+    #[tokio::test]
+    async fn guarded_system_inference_budget_denial_skips_gateway_dispatch() {
+        let context = test_run_context("system-inference-budget-denied").await;
+        let direct: Arc<dyn SystemInferencePort> = Arc::new(
+            ModelGatewayBackedSystemInferencePort::new(Arc::new(PanicGateway), context.clone()),
+        );
+        let port = GuardedSystemInferencePort::new(
+            direct,
+            context,
+            Arc::new(RejectingBudgetAccountant),
+            Arc::new(NoOpPolicyGuard),
+        );
+
+        let error = port
+            .call_system_inference(system_request("transcript"))
+            .await
+            .expect_err("budget denial should reject system inference");
+
+        assert!(matches!(error, SystemInferenceError::Failed { .. }));
+    }
+
+    #[tokio::test]
+    async fn guarded_system_inference_records_budget_around_gateway_dispatch() {
+        let context = test_run_context("system-inference-budget-recorded").await;
+        let gateway = Arc::new(RecordingGateway::new(
+            crate::HostManagedModelResponse::assistant_reply("summary"),
+        ));
+        let direct: Arc<dyn SystemInferencePort> = Arc::new(
+            ModelGatewayBackedSystemInferencePort::new(gateway.clone(), context.clone()),
+        );
+        let accountant = Arc::new(RecordingBudgetAccountant::default());
+        let port = GuardedSystemInferencePort::new(
+            direct,
+            context,
+            accountant.clone(),
+            Arc::new(NoOpPolicyGuard),
+        );
+
+        let response = port
+            .call_system_inference(system_request("transcript"))
+            .await
+            .expect("system inference succeeds");
+
+        assert_eq!(response.output_text, "summary");
+        assert!(gateway.request_was_recorded());
+        assert!(*accountant.pre_called.lock().expect("lock"));
+        let outcomes = accountant.post_outcomes.lock().expect("lock");
+        assert_eq!(outcomes.len(), 1);
+        assert!(matches!(outcomes[0], ModelWorkOutcome::Success(_)));
+    }
+
+    #[tokio::test]
+    async fn guarded_system_inference_reconciles_when_outer_future_is_cancelled() {
+        let context = test_run_context("system-inference-outer-cancel").await;
+        let started = Arc::new(Notify::new());
+        let direct: Arc<dyn SystemInferencePort> = Arc::new(DelayedInferencePort {
+            started: Arc::clone(&started),
+            delay: std::time::Duration::from_millis(25),
+        });
+        let accountant = Arc::new(RecordingBudgetAccountant::default());
+        let port = Arc::new(GuardedSystemInferencePort::new(
+            direct,
+            context,
+            accountant.clone(),
+            Arc::new(NoOpPolicyGuard),
+        ));
+        let task = tokio::spawn({
+            let port = Arc::clone(&port);
+            async move {
+                port.call_system_inference(system_request("transcript"))
+                    .await
+            }
+        });
+
+        started.notified().await;
+        task.abort();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if !accountant.post_outcomes.lock().expect("lock").is_empty() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("worker should reconcile after outer future cancellation");
+
+        let outcomes = accountant.post_outcomes.lock().expect("lock");
+        assert_eq!(outcomes.len(), 1);
+        assert!(matches!(outcomes[0], ModelWorkOutcome::Failure(_)));
+    }
+
+    #[tokio::test]
     async fn rejects_gateway_capability_calls() {
         let context = test_run_context("system-inference-capability-calls").await;
         let gateway = Arc::new(RecordingGateway::new(
@@ -286,7 +626,7 @@ mod tests {
                 identity: SystemInferenceIdentity {
                     task_kind: SystemTaskKind::Compaction,
                     prompt_source: SystemPromptSource::Static {
-                        prompt_id: "test".to_string(),
+                        prompt_id: "test".to_string().try_into().unwrap(),
                     },
                     system_prompt: "summarize".to_string(),
                 },
@@ -311,7 +651,7 @@ mod tests {
                 identity: SystemInferenceIdentity {
                     task_kind: SystemTaskKind::Compaction,
                     prompt_source: SystemPromptSource::Static {
-                        prompt_id: "test".to_string(),
+                        prompt_id: "test".to_string().try_into().unwrap(),
                     },
                     system_prompt: "summarize".to_string(),
                 },
@@ -341,7 +681,7 @@ mod tests {
                 identity: SystemInferenceIdentity {
                     task_kind: SystemTaskKind::Compaction,
                     prompt_source: SystemPromptSource::Static {
-                        prompt_id: "test".to_string(),
+                        prompt_id: "test".to_string().try_into().unwrap(),
                     },
                     system_prompt: "summarize".to_string(),
                 },
@@ -372,7 +712,7 @@ mod tests {
                 identity: SystemInferenceIdentity {
                     task_kind: SystemTaskKind::Compaction,
                     prompt_source: SystemPromptSource::Static {
-                        prompt_id: "test".to_string(),
+                        prompt_id: "test".to_string().try_into().unwrap(),
                     },
                     system_prompt: "summarize".to_string(),
                 },

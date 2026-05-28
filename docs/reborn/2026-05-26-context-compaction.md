@@ -146,10 +146,13 @@ crates/ironclaw_threads/src/contract.rs
 
 crates/ironclaw_loop_support/src/system_inference.rs                       NEW
   ModelGatewayBackedSystemInferencePort
-    fields: Arc<dyn LoopModelPort>,
+    fields: Arc<dyn HostManagedModelGateway>,
+            LoopRunContext
+  GuardedSystemInferencePort
+    fields: Arc<dyn SystemInferencePort>,
+            LoopRunContext,
             Arc<dyn LoopModelBudgetAccountant>,
-            Arc<dyn LoopProgressPort>,
-            Arc<dyn LoopCancellationPort>
+            Arc<dyn LoopModelPolicyGuard>
   behavior:
     1. Validate identity (system prompt loaded from file at adapter init,
        never received raw from caller path).
@@ -159,13 +162,19 @@ crates/ironclaw_loop_support/src/system_inference.rs                       NEW
        no flag involved). InjectionScanner runs on each RAW message body
        in step 4 of CompactionTask BEFORE structural XML serialization —
        NOT here on already-composed input_text.
-    4. Apply request.deadline as wall-clock tokio::time::timeout around
+    4. GuardedSystemInferencePort applies LoopModelPolicyGuard +
+       LoopModelBudgetAccountant to a neutral ModelWorkRequest::SystemInference
+       before the direct gateway port dispatches. This keeps compaction out of
+       the assistant LoopModelPort/prompt-bundle/capability path while still
+       sharing host model policy and spend accounting.
+    5. Apply request.deadline as wall-clock tokio::time::timeout around
        stream_model. On timeout: return SystemInferenceError::Timeout.
-    5. Account cost via LoopModelBudgetAccountant::post_model_call (the
-       accountant already receives usage internally via ModelCallOutcome;
-       no usage exposed on the response surface for v1).
-    6. Emit LoopProgressEvent on entry and exit.
-    7. Return SystemInferenceResponse with task_id + text + timing
+    6. Account cost via LoopModelBudgetAccountant::post_model_work using
+       ModelWorkOutcome. Guarded dispatch owns post-call reconciliation even
+       when an outer compaction future is cancelled.
+    7. Do not emit raw system-inference progress; caller-level compaction
+       strategy progress owns public lifecycle events.
+    8. Return SystemInferenceResponse with task_id + text + timing
        (no usage field — see §13 calibration scope).
 
 crates/ironclaw_loop_support/src/compaction_task.rs                        NEW
@@ -545,7 +554,8 @@ SystemInferenceResponse
   started_at: SystemTime
   completed_at: SystemTime
   // NOTE: no usage field on the response surface. Cost accounting is
-  // already handled internally via LoopModelBudgetAccountant; usage is
+  // already handled internally via the ModelWork policy/accounting envelope;
+  // usage is
   // not currently exposed on LoopModelResponse either. Calibration is
   // deferred until LoopModelResponse surfaces prompt_tokens in a
   // separate contract change.

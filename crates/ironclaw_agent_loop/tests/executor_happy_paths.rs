@@ -13,7 +13,7 @@ use ironclaw_turns::{
     LoopBlockedKind, LoopExit, LoopFailureKind, TurnRunId,
     run_profile::{
         ConcurrencyHint, LoopCompactionResponse, LoopContextCompactionKind,
-        LoopContextCompactionMetadata, LoopProgressEvent, LoopRunInfoPort,
+        LoopContextCompactionMetadata, LoopProgressEvent, LoopRunInfoPort, LoopSummaryArtifactId,
     },
 };
 
@@ -94,7 +94,7 @@ async fn compaction_success_updates_state_and_emits_progress() {
             )],
         ])
         .compaction_result(Ok(LoopCompactionResponse {
-            summary_artifact_id: "summary-1".to_string(),
+            summary_artifact_id: LoopSummaryArtifactId::new("summary-1").unwrap(),
             compression_ratio_ppm: 250_000,
         }))
         .build();

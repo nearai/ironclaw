@@ -230,6 +230,58 @@ async fn filesystem_store_range_read_falls_back_when_sequence_index_has_gap() {
 }
 
 #[tokio::test]
+async fn filesystem_store_range_read_clamps_to_thread_sequence_ceiling() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-range-ceiling", "alice");
+    let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let scope = scope("fs-range-ceiling");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-fs-range-ceiling").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    for index in 1..=4 {
+        service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: scope.clone(),
+                thread_id: thread.thread_id.clone(),
+                actor_id: "actor-a".into(),
+                source_binding_id: None,
+                reply_target_binding_id: None,
+                external_event_id: Some(format!("ceiling-event-{index}")),
+                content: user_message(&format!("message {index}")),
+            })
+            .await
+            .unwrap();
+    }
+
+    let range = service
+        .list_thread_messages_range(ThreadMessageRangeRequest {
+            scope,
+            thread_id: thread.thread_id,
+            after_sequence: 0,
+            through_sequence: u64::MAX,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        range
+            .messages
+            .iter()
+            .map(|message| message.sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3, 4]
+    );
+}
+
+#[tokio::test]
 async fn filesystem_store_range_read_errors_when_indexed_message_is_missing() {
     let backend = Arc::new(InMemoryBackend::new());
     let scoped = scoped_threads_fs_at(backend, "tenant-range-missing", "alice");
@@ -348,6 +400,66 @@ async fn filesystem_store_summary_creation_uses_indexed_range_validation() {
         })
         .await
         .expect("summary creation should not scan malformed out-of-range messages");
+
+    assert_eq!(summary.start_sequence, 2);
+    assert_eq!(summary.end_sequence, 3);
+}
+
+#[tokio::test]
+async fn filesystem_store_summary_creation_falls_back_when_sequence_index_has_gap() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-summary-range-gap", "alice");
+    let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let scope = scope("fs-summary-range-gap");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-fs-summary-range-gap").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    for index in 1..=4 {
+        service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: scope.clone(),
+                thread_id: thread.thread_id.clone(),
+                actor_id: "actor-a".into(),
+                source_binding_id: None,
+                reply_target_binding_id: None,
+                external_event_id: Some(format!("summary-gap-event-{index}")),
+                content: user_message(&format!("message {index}")),
+            })
+            .await
+            .unwrap();
+    }
+
+    scoped
+        .delete(
+            &scope.to_resource_scope(),
+            &ScopedPath::new(
+                "/threads/agents/agent-fs-summary-range-gap/projects/project-fs-summary-range-gap/owners/user-fs-summary-range-gap/threads/thread-fs-summary-range-gap/messages_by_sequence/00000000000000000002.json",
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let summary = service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope,
+            thread_id: thread.thread_id,
+            start_sequence: 2,
+            end_sequence: 3,
+            summary_kind: SummaryKind::Compaction,
+            content: MessageContent::text("summary"),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+        })
+        .await
+        .expect("summary creation should use the range reader fallback");
 
     assert_eq!(summary.start_sequence, 2);
     assert_eq!(summary.end_sequence, 3);

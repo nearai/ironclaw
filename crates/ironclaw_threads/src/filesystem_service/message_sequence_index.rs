@@ -11,6 +11,12 @@ use super::{
 
 /// Conservative fan-out for indexed sequence reads.
 const MESSAGE_SEQUENCE_INDEX_READ_CONCURRENCY: usize = 8;
+/// Upper bound before falling back to message-directory scanning.
+///
+/// The index path is optimized for compact prompt-window reads. For very broad
+/// or sparse ranges, probing one sequence file per possible number is worse
+/// than materializing existing messages and filtering them.
+const MESSAGE_SEQUENCE_INDEX_MAX_RANGE_SPAN: u64 = 10_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct MessageSequenceIndexRecord {
@@ -71,7 +77,16 @@ where
         let start = after_sequence.checked_add(1).ok_or_else(|| {
             SessionThreadError::Backend("message sequence range overflowed".to_string())
         })?;
-        let mut records = Vec::with_capacity((through_sequence - start + 1) as usize);
+        let span = through_sequence
+            .checked_sub(start)
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| {
+                SessionThreadError::Backend("message sequence range overflowed".to_string())
+            })?;
+        if span > MESSAGE_SEQUENCE_INDEX_MAX_RANGE_SPAN {
+            return Ok(None);
+        }
+        let mut records = Vec::with_capacity(span as usize);
         for chunk_start in
             (start..=through_sequence).step_by(MESSAGE_SEQUENCE_INDEX_READ_CONCURRENCY)
         {

@@ -42,11 +42,63 @@ pub struct LoopCompactionRequest {
     pub deadline_ms: u64,
 }
 
+/// Opaque reference to a durable summary artifact produced by compaction.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct LoopSummaryArtifactId(String);
+
+impl LoopSummaryArtifactId {
+    pub fn new(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err("summary artifact id must not be empty".to_string());
+        }
+        if value.len() > 256 {
+            return Err("summary artifact id is too long".to_string());
+        }
+        if !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'.' | b'_' | b'-'))
+        {
+            return Err("summary artifact id contains unsupported characters".to_string());
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for LoopSummaryArtifactId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl TryFrom<String> for LoopSummaryArtifactId {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl<'de> Deserialize<'de> for LoopSummaryArtifactId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Durable artifact produced by host-managed compaction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopCompactionResponse {
     /// Summary artifact id persisted by the thread service.
-    pub summary_artifact_id: String,
+    pub summary_artifact_id: LoopSummaryArtifactId,
     /// Output bytes divided by input bytes, scaled by 1,000,000.
     pub compression_ratio_ppm: u32,
 }

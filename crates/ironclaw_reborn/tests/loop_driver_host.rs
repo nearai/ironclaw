@@ -29,11 +29,12 @@ use ironclaw_loop_support::{
     EmptyLoopCapabilityPort, HostIdentityContextBuildError, HostIdentityContextCandidate,
     HostIdentityContextSource, HostIdentityMessageContent, HostInputBatch, HostInputEnvelope,
     HostInputQueue, HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind,
-    HostManagedModelGateway, HostManagedModelRequest, HostManagedModelResponse,
-    HostRuntimeLoopCapabilityPort, HostSkillContextBuildError, HostSkillContextCandidate,
-    HostSkillContextSource, IdentityApplicability, IdentityFileName, JsonSpawnSubagentInputCodec,
-    LoopCapabilityInputResolver, LoopCapabilityResultWriter, ProductLiveCancellationProbe,
-    RunCancellationFactory, RunCancellationHandle, identity_message_ref,
+    HostManagedModelGateway, HostManagedModelMessageRole, HostManagedModelRequest,
+    HostManagedModelResponse, HostRuntimeLoopCapabilityPort, HostSkillContextBuildError,
+    HostSkillContextCandidate, HostSkillContextSource, IdentityApplicability, IdentityFileName,
+    JsonSpawnSubagentInputCodec, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
+    ProductLiveCancellationProbe, RunCancellationFactory, RunCancellationHandle,
+    identity_message_ref,
 };
 use ironclaw_processes::ProcessServices;
 use ironclaw_reborn::driver_registry::{
@@ -74,8 +75,8 @@ use ironclaw_scripts::{
 use ironclaw_skills::SkillTrust;
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, InMemorySessionThreadService, MessageContent,
-    MessageKind, MessageStatus, SessionThreadService, ThreadHistoryRequest, ThreadMessageId,
-    ThreadScope,
+    MessageKind, MessageStatus, SessionThreadService, SummaryModelContextPolicy,
+    ThreadHistoryRequest, ThreadMessageId, ThreadScope,
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
@@ -102,15 +103,17 @@ use ironclaw_turns::{
         CapabilitySurfaceVersion, CompactionInitiator, FinalizeAssistantMessage,
         InMemoryLoopHostMilestoneSink, InstructionSafetyContext, LoopCancelReasonKind,
         LoopCancellationPort, LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort,
-        LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextRequest, LoopDriverId,
+        LoopCheckpointRequest, LoopCheckpointStateRef, LoopCompactionError, LoopCompactionMode,
+        LoopCompactionPort, LoopCompactionRequest, LoopContextRequest, LoopDriverId,
         LoopDriverNoteKind, LoopGateKind, LoopHostMilestone, LoopHostMilestoneKind,
         LoopInlineMessage, LoopInlineMessageRole, LoopInput, LoopInputAckToken, LoopInputCursor,
         LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant, LoopModelGatewayError,
         LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot, LoopProgressEvent,
-        LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopSafeSummary, ModelCallOutcome,
-        NoOpBudgetAccountant, NoOpPolicyGuard, ParentLoopOutput, PersonalContextPolicy, PromptMode,
-        SkillVisibility, StageCheckpointPayloadRequest, SystemInferenceTaskId,
-        VisibleCapabilityRequest, VisibleCapabilitySurface,
+        LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopSafeSummary, ModelWorkKind,
+        ModelWorkOutcome, ModelWorkRequest, NoOpBudgetAccountant, NoOpPolicyGuard,
+        ParentLoopOutput, PersonalContextPolicy, PromptMode, SkillVisibility,
+        StageCheckpointPayloadRequest, SystemInferenceTaskId, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     },
     runner::{ClaimRunRequest, ClaimedTurnRun, TurnRunTransitionPort},
 };
@@ -377,6 +380,119 @@ async fn text_only_host_factory_invokes_model_budget_accountant() {
     assert!(accountant.was_post_called());
     assert!(!accountant.post_saw_failure());
     assert_eq!(fixture.gateway.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn compaction_system_inference_budget_denial_skips_model_gateway_dispatch() {
+    let fixture = HostFixture::new("thread-host-compaction-accounting", "hello compaction").await;
+    let accountant = Arc::new(RejectingSystemInferenceBudgetAccountant::default());
+    let factory = fixture
+        .factory()
+        .with_model_budget_accountant(accountant.clone());
+    let host = factory
+        .build_text_only_host(RebornLoopDriverHostRequest {
+            claimed_run: fixture.claimed.clone(),
+            loop_run_context: fixture.context.clone(),
+        })
+        .await
+        .unwrap();
+
+    let error = host
+        .compact_loop_context(LoopCompactionRequest {
+            task_id: SystemInferenceTaskId::new(),
+            thread_id: fixture.thread_id.clone(),
+            last_compacted_through_seq: None,
+            drop_through_seq: 1,
+            preserve_tail_tokens: 8_000,
+            mode: LoopCompactionMode::Fresh,
+            deadline_ms: 1_000,
+        })
+        .await
+        .expect_err("budget denial should reject compaction inference");
+
+    assert!(matches!(error, LoopCompactionError::InferenceFailed { .. }));
+    assert!(accountant.was_pre_called());
+    assert!(
+        fixture.gateway.requests().is_empty(),
+        "system inference budget denial must happen before provider dispatch"
+    );
+}
+
+#[tokio::test]
+async fn compact_loop_context_dispatches_system_inference_and_persists_summary() {
+    let fixture = HostFixture::new(
+        "thread-host-compaction-success",
+        "visible text for compaction",
+    )
+    .await;
+    fixture
+        .gateway
+        .set_response(Ok(HostManagedModelResponse::assistant_reply(
+            "<compact & keep>",
+        )));
+    let host = fixture.build_host().await;
+
+    let response = host
+        .compact_loop_context(LoopCompactionRequest {
+            task_id: SystemInferenceTaskId::new(),
+            thread_id: fixture.thread_id.clone(),
+            last_compacted_through_seq: None,
+            drop_through_seq: 1,
+            preserve_tail_tokens: 8_000,
+            mode: LoopCompactionMode::Fresh,
+            deadline_ms: 1_000,
+        })
+        .await
+        .expect("host compaction should succeed through the gateway-backed inference path");
+
+    let requests = fixture.gateway.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].messages.len(), 2);
+    assert_eq!(
+        requests[0].messages[0].role,
+        HostManagedModelMessageRole::System
+    );
+    assert_eq!(
+        requests[0].messages[1].role,
+        HostManagedModelMessageRole::User
+    );
+    assert!(requests[0].surface_version.is_none());
+    assert!(
+        requests[0].messages[1]
+            .content
+            .contains("visible text for compaction")
+    );
+
+    let history = fixture
+        .thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    let summary = history
+        .summary_artifacts
+        .first()
+        .expect("host compaction should persist a summary artifact");
+    assert_eq!(
+        response.summary_artifact_id.as_str(),
+        summary.summary_id.to_string()
+    );
+    assert!(
+        summary
+            .content
+            .starts_with("This message is a generated session summary.")
+    );
+    assert!(
+        summary
+            .content
+            .contains("<summary>&lt;compact &amp; keep&gt;</summary>")
+    );
+    assert_eq!(
+        summary.model_context_policy,
+        Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
+    );
 }
 
 #[tokio::test]
@@ -6851,25 +6967,65 @@ impl RecordingBudgetAccountant {
 
 #[async_trait]
 impl LoopModelBudgetAccountant for RecordingBudgetAccountant {
-    async fn pre_model_call(
+    async fn pre_model_work(
         &self,
         _context: &LoopRunContext,
-        _request: &LoopModelRequest,
+        _request: &ModelWorkRequest,
     ) -> Result<(), LoopModelGatewayError> {
         *self.pre_calls.lock().unwrap() += 1;
         Ok(())
     }
 
-    async fn post_model_call(
+    async fn post_model_work(
         &self,
         _context: &LoopRunContext,
-        _request: &LoopModelRequest,
-        outcome: ModelCallOutcome<'_>,
+        _request: &ModelWorkRequest,
+        outcome: ModelWorkOutcome,
     ) -> Result<(), LoopModelGatewayError> {
         self.post_calls
             .lock()
             .unwrap()
-            .push(matches!(outcome, ModelCallOutcome::Failure(_)));
+            .push(matches!(outcome, ModelWorkOutcome::Failure(_)));
         Ok(())
+    }
+}
+
+#[derive(Default)]
+struct RejectingSystemInferenceBudgetAccountant {
+    pre_calls: Mutex<usize>,
+}
+
+impl RejectingSystemInferenceBudgetAccountant {
+    fn was_pre_called(&self) -> bool {
+        *self.pre_calls.lock().unwrap() > 0
+    }
+}
+
+#[async_trait]
+impl LoopModelBudgetAccountant for RejectingSystemInferenceBudgetAccountant {
+    async fn pre_model_work(
+        &self,
+        _context: &LoopRunContext,
+        request: &ModelWorkRequest,
+    ) -> Result<(), LoopModelGatewayError> {
+        assert!(matches!(
+            request.kind,
+            ModelWorkKind::SystemInference { .. }
+        ));
+        *self.pre_calls.lock().unwrap() += 1;
+        Err(LoopModelGatewayError::new(
+            AgentLoopHostErrorKind::BudgetExceeded,
+            "system inference budget exceeded",
+        )
+        .expect("safe summary is valid"))
+    }
+
+    async fn post_model_work(
+        &self,
+        _context: &LoopRunContext,
+        _request: &ModelWorkRequest,
+        _outcome: ModelWorkOutcome,
+    ) -> Result<(), LoopModelGatewayError> {
+        panic!("post_model_work must not run when pre_model_work rejects")
     }
 }

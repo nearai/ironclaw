@@ -35,8 +35,8 @@ use ironclaw_turns::{
         LoopModelMessage, LoopModelPolicyGuard, LoopModelPort, LoopModelRequest, LoopModelResponse,
         LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority,
         LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
-        LoopRunInfoPort, LoopTranscriptPort, ModelCallOutcome, ParentLoopOutput, PromptMode,
-        PromptSkillContextMetadata, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        LoopRunInfoPort, LoopTranscriptPort, ModelWorkOutcome, ModelWorkRequest, ParentLoopOutput,
+        PromptMode, PromptSkillContextMetadata, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
     runner::{ClaimRunRequest, TurnRunTransitionPort},
 };
@@ -2601,10 +2601,10 @@ struct DenyAllPolicyGuard;
 
 #[async_trait]
 impl LoopModelPolicyGuard for DenyAllPolicyGuard {
-    async fn check_model_policy(
+    async fn check_model_work_policy(
         &self,
         _context: &LoopRunContext,
-        _request: &LoopModelRequest,
+        _request: &ModelWorkRequest,
     ) -> Result<(), LoopModelGatewayError> {
         Err(LoopModelGatewayError::new(
             AgentLoopHostErrorKind::PolicyDenied,
@@ -2662,10 +2662,10 @@ impl RecordingBudgetAccountant {
 
 #[async_trait]
 impl LoopModelBudgetAccountant for RecordingBudgetAccountant {
-    async fn pre_model_call(
+    async fn pre_model_work(
         &self,
         _context: &LoopRunContext,
-        _request: &LoopModelRequest,
+        _request: &ModelWorkRequest,
     ) -> Result<(), LoopModelGatewayError> {
         self.pre_called.store(true, Ordering::SeqCst);
         if self.reject_pre.load(Ordering::SeqCst) {
@@ -2678,14 +2678,14 @@ impl LoopModelBudgetAccountant for RecordingBudgetAccountant {
         Ok(())
     }
 
-    async fn post_model_call(
+    async fn post_model_work(
         &self,
         _context: &LoopRunContext,
-        _request: &LoopModelRequest,
-        outcome: ModelCallOutcome<'_>,
+        _request: &ModelWorkRequest,
+        outcome: ModelWorkOutcome,
     ) -> Result<(), LoopModelGatewayError> {
         self.post_called.store(true, Ordering::SeqCst);
-        if matches!(outcome, ModelCallOutcome::Failure(_)) {
+        if matches!(outcome, ModelWorkOutcome::Failure(_)) {
             self.post_saw_failure.store(true, Ordering::SeqCst);
         }
         if self.reject_post.load(Ordering::SeqCst) {

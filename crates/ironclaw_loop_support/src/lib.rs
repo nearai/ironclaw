@@ -56,7 +56,6 @@ pub use capability_surface_filter::{
     CapabilitySurfaceProfileFilter, CapabilitySurfaceVisibleFilter,
 };
 pub use compaction_task::{
-    ANTI_INJECTION_PREFIX, CompactionError, CompactionTask, CompactionTaskRequest,
     HostManagedLoopCompactionPort, default_host_managed_loop_compaction_port,
 };
 pub use filesystem_checkpoint_state::FilesystemCheckpointStateStore;
@@ -94,7 +93,7 @@ pub use subagent_spawn_port::{
     SubagentSpawnDeps, SubagentSpawnGoalStore, SubagentSpawnLimits, SubagentThreadKind,
     SubagentThreadMetadata,
 };
-pub use system_inference::ModelGatewayBackedSystemInferencePort;
+pub use system_inference::{GuardedSystemInferencePort, ModelGatewayBackedSystemInferencePort};
 pub use token_estimator::{
     CHARS_PER_TOKEN_DEFAULT, EstimatedTokenCount, estimate_tokens_from_chars,
 };

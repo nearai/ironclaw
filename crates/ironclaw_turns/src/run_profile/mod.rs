@@ -15,6 +15,7 @@ mod instruction_bundle;
 mod memory_context;
 mod milestones;
 mod model;
+mod model_work;
 mod policy;
 mod prompt;
 mod refs;
@@ -28,7 +29,7 @@ pub use crate::CapabilityActivityId;
 
 pub use compaction::{
     CompactionInitiator, LoopCompactionError, LoopCompactionMode, LoopCompactionPort,
-    LoopCompactionRequest, LoopCompactionResponse,
+    LoopCompactionRequest, LoopCompactionResponse, LoopSummaryArtifactId,
 };
 pub use driver::{
     AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverResumeRequest,
@@ -80,6 +81,7 @@ pub use model::{
     LoopModelGatewayRequest, LoopModelPolicyGuard, ModelCallOutcome, NoOpBudgetAccountant,
     NoOpPolicyGuard,
 };
+pub use model_work::{ModelWorkKind, ModelWorkOutcome, ModelWorkRequest, ModelWorkUsage};
 pub use policy::{
     CancellationPolicy, CheckpointPolicy, PersonalContextAuthority, PrivilegedRunProfileDimension,
     RedactedRunProfileProvenance, RedactedRunProfileSource, ResourceBudgetPolicy,
@@ -106,5 +108,6 @@ pub use snapshot::{PersonalContextPolicy, ResolvedRunProfile};
 pub use snippet_ref::memory_snippet_display_ref;
 pub use system_inference::{
     SystemInferenceError, SystemInferenceIdentity, SystemInferencePort, SystemInferenceRequest,
-    SystemInferenceResponse, SystemInferenceTaskId, SystemPromptSource, SystemTaskKind,
+    SystemInferenceResponse, SystemInferenceTaskId, SystemPromptId, SystemPromptSource,
+    SystemTaskKind,
 };

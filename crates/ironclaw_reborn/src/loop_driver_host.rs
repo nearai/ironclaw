@@ -18,12 +18,12 @@ use ironclaw_hooks::middleware::{
 use ironclaw_host_api::ExtensionId;
 use ironclaw_loop_support::{
     CapabilityResolveError, CapabilitySurfaceProfileFilter, CapabilitySurfaceProfileResolver,
-    EmptyLoopCapabilityPort, HostIdentityContextSource, HostInputQueue, HostManagedModelGateway,
-    HostQueueLoopInputPort, HostSkillContextSource, LoopCapabilityInputResolver,
-    ModelGatewayBackedSystemInferencePort, RunCancellationFactory, RunCancellationObservationKind,
-    RunStateLoopCancellationPort, SubagentLoopPromptPort, SubagentPromptComposer,
-    ThreadBackedLoopContextPort, ThreadBackedLoopTranscriptPort, TurnStateRunCancellationFactory,
-    default_host_managed_loop_compaction_port,
+    EmptyLoopCapabilityPort, GuardedSystemInferencePort, HostIdentityContextSource, HostInputQueue,
+    HostManagedModelGateway, HostQueueLoopInputPort, HostSkillContextSource,
+    LoopCapabilityInputResolver, ModelGatewayBackedSystemInferencePort, RunCancellationFactory,
+    RunCancellationObservationKind, RunStateLoopCancellationPort, SubagentLoopPromptPort,
+    SubagentPromptComposer, ThreadBackedLoopContextPort, ThreadBackedLoopTranscriptPort,
+    TurnStateRunCancellationFactory, default_host_managed_loop_compaction_port,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 
@@ -882,10 +882,17 @@ where
     }
 
     fn build_compaction_ports(&self, run_context: &LoopRunContext) -> Arc<dyn LoopCompactionPort> {
-        let system_inference: Arc<dyn SystemInferencePort> =
+        let direct_system_inference: Arc<dyn SystemInferencePort> =
             Arc::new(ModelGatewayBackedSystemInferencePort::new(
                 Arc::clone(&self.model_gateway),
                 run_context.clone(),
+            ));
+        let system_inference: Arc<dyn SystemInferencePort> =
+            Arc::new(GuardedSystemInferencePort::new(
+                direct_system_inference,
+                run_context.clone(),
+                Arc::clone(&self.model_accountant),
+                Arc::clone(&self.model_policy_guard),
             ));
         default_host_managed_loop_compaction_port(
             system_inference,
