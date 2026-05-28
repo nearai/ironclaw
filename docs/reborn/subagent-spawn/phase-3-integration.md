@@ -9,6 +9,12 @@
 DB-backed store construction, root-provided projection sink wiring, and
 background task spawning.
 
+> **Current implementation note.** Background subagents are disabled pending the
+> durable completion delivery design in
+> [#4147](https://github.com/nearai/ironclaw/issues/4147). The active public
+> `spawn_subagent` surface is blocking-only; background integration and E2E
+> items below are deferred design context, not active behavior.
+
 This is the wiring-and-verification phase. Phases 1 and 2 produce the
 *components* — contracts, the `subagent` `LoopFamily`, the `subagent`
 `PlannedDriver`, the spawn-handling capability port, the prompt composition,

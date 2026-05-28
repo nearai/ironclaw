@@ -245,7 +245,10 @@ async fn manual_token_submit_can_update_bound_account() {
     assert_eq!(result.account_id, account.id);
     assert_eq!(result.status, CredentialAccountStatus::Configured);
     let updated = services
-        .get_account(&owner, account.id)
+        .get_account(CredentialAccountLookupRequest::new(
+            owner.clone(),
+            account.id,
+        ))
         .await
         .expect("account lookup")
         .expect("updated account");

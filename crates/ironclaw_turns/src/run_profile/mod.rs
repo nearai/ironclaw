@@ -16,6 +16,7 @@ mod milestones;
 mod model;
 mod policy;
 mod prompt;
+mod prompt_text;
 mod refs;
 mod resolver;
 mod skill_context;
@@ -35,7 +36,8 @@ pub use host::{
     CapabilityDeniedReasonKind, CapabilityDeniedReasonKindValue, CapabilityDescriptorView,
     CapabilityFailure, CapabilityFailureKind, CapabilityFailureKindValue, CapabilityInputRef,
     CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, CapabilitySurfaceVersion,
-    ConcurrencyHint, FinalizeAssistantMessage, LoadCheckpointPayloadRequest,
+    ConcurrencyHint, FinalizeAssistantMessage, LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES,
+    LOOP_CONTEXT_TOTAL_MODEL_CONTENT_MAX_BYTES, LoadCheckpointPayloadRequest,
     LoadedCheckpointPayload, LoopCancelReasonKind, LoopCancellationPort, LoopCancellationSignal,
     LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest,
     LoopCheckpointStateRef, LoopContextBundle, LoopContextMessage, LoopContextPort,

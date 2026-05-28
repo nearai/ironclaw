@@ -1,8 +1,9 @@
 //! Product-facing authentication contracts for IronClaw Reborn.
 //!
-//! This crate is the contract-first slice for #3289 / #3810. It defines the
-//! typed auth-flow, secure interaction, credential-account, provider exchange,
-//! continuation, and cleanup boundaries used by Reborn product surfaces.
+//! This crate is the contract-first slice for #3289 / #3810 / #3883. It
+//! defines the typed auth-flow, secure interaction, credential-account,
+//! recovery/account-selection, provider exchange, continuation, and cleanup
+//! boundaries used by Reborn product surfaces.
 //!
 //! Behavior may remain compatible with legacy product UX, but code paths must
 //! stay Reborn-native: this crate does not depend on V1 route handlers, V1
@@ -13,6 +14,7 @@ mod credential;
 mod error;
 mod fakes;
 mod flow;
+mod google_provider;
 mod ids;
 mod interaction;
 mod oauth;
@@ -20,21 +22,29 @@ mod provider;
 mod scope;
 
 pub use cleanup::{
-    SecretCleanupAction, SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
+    SecretCleanupAction, SecretCleanupQuarantine, SecretCleanupQuarantineReason,
+    SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
 };
 pub use credential::{
-    CredentialAccount, CredentialAccountListPage, CredentialAccountListRequest,
-    CredentialAccountMutation, CredentialAccountProjection, CredentialAccountSelectionRequest,
-    CredentialAccountService, CredentialAccountStatus, CredentialAccountUpdate,
-    CredentialOwnership, CredentialSetupService, NewCredentialAccount,
+    CredentialAccount, CredentialAccountChoiceRequest, CredentialAccountListPage,
+    CredentialAccountListRequest, CredentialAccountLookupRequest, CredentialAccountMutation,
+    CredentialAccountProjection, CredentialAccountSelectionRequest, CredentialAccountService,
+    CredentialAccountStatus, CredentialAccountUpdate, CredentialOwnership, CredentialRecoveryKind,
+    CredentialRecoveryProjection, CredentialRecoveryReason, CredentialRecoveryRequest,
+    CredentialRecoveryState, CredentialRefreshReport, CredentialRefreshRequest,
+    CredentialSetupService, NewCredentialAccount,
 };
 pub use error::{AuthErrorCode, AuthProductError};
 pub use fakes::InMemoryAuthProductServices;
 pub use flow::{
     AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthFlowKind, AuthFlowManager,
-    AuthFlowRecord, AuthFlowStatus, CredentialAccountUpdateBinding, NewAuthFlow,
-    OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
+    AuthFlowRecord, AuthFlowStatus, CredentialAccountUpdateBinding, CredentialSelectionInput,
+    NewAuthFlow, OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
     ProviderCallbackOutcome,
+};
+pub use google_provider::{
+    GoogleProviderEgressPolicyAuthorizer, GoogleProviderStoredTokens, GoogleProviderTokenSet,
+    GoogleProviderTokenSink, GoogleProviderTokenStorageRequest,
 };
 pub use ids::{
     AuthFlowId, AuthGateRef, AuthInteractionId, AuthProviderId, AuthSessionId,
@@ -56,7 +66,8 @@ pub use oauth::{
 };
 pub use provider::{
     AuthProviderClient, OAuthAuthorizationCode, OAuthProviderCallbackRequest,
-    OAuthProviderExchange, PkceVerifierSecret,
+    OAuthProviderExchange, OAuthProviderExchangeContext, OAuthProviderRefresh,
+    OAuthProviderRefreshRequest, PkceVerifierSecret, validate_provider_callback_request,
 };
 pub use scope::{AuthProductScope, AuthSurface};
 

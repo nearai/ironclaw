@@ -42,38 +42,8 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["operation", "data"],
             "additionalProperties": false
         }),
-        "schemas/builtin/http.input.v1.json" => json!({
-            "type": "object",
-            "properties": {
-                "url": { "type": "string", "description": "Absolute HTTP or HTTPS URL" },
-                "method": {
-                    "type": "string",
-                    "enum": ["get", "post", "put", "patch", "delete", "head"],
-                    "description": "HTTP method. Defaults to get."
-                },
-                "headers": {
-                    "description": "HTTP headers as an object or array of {name,value} entries"
-                },
-                "body": { "description": "String or JSON request body" },
-                "body_base64": { "type": "string", "description": "Base64-encoded request body" },
-                "response_body_limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 10485760,
-                    "default": 10485760,
-                    "description": "Maximum response body bytes. Defaults to 10 MiB; smaller values are raised to 10 MiB."
-                },
-                "timeout_ms": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 30000,
-                    "default": 10000,
-                    "description": "Request timeout in milliseconds. Defaults to 10s and is capped at 30s."
-                }
-            },
-            "required": ["url"],
-            "additionalProperties": false
-        }),
+        "schemas/builtin/http.input.v1.json" => http_schema(false),
+        "schemas/builtin/http-save.input.v1.json" => http_schema(true),
         "schemas/builtin/shell.input.v1.json" => json!({
             "type": "object",
             "properties": {
@@ -89,7 +59,8 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "properties": {
                 "flavor_id": {
                     "type": "string",
-                    "description": "Subagent kind to spawn"
+                    "enum": ["general", "researcher", "coder", "explorer"],
+                    "description": "Subagent flavor. general: read/search only, bounded task. researcher: + web search, prefer evidence over mutation. coder: read/write/shell, file-focused execution. explorer: read/search, deep analysis, no writes."
                 },
                 "task": {
                     "type": "string",
@@ -98,15 +69,6 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 "handoff": {
                     "type": "string",
                     "description": "Optional context to pass to the child subagent"
-                },
-                "mode": {
-                    "type": "string",
-                    "enum": ["blocking", "background"],
-                    "description": "Whether the parent waits for completion"
-                },
-                "run_in_background": {
-                    "type": "boolean",
-                    "description": "Legacy background-mode flag"
                 }
             },
             "required": ["flavor_id", "task"],
@@ -184,6 +146,24 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["path", "old_string", "new_string"],
             "additionalProperties": false
         }),
+        "schemas/builtin/extension_search.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "Search query for locally available Reborn extensions" }
+            },
+            "required": ["query"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/extension_install.input.v1.json"
+        | "schemas/builtin/extension_activate.input.v1.json"
+        | "schemas/builtin/extension_remove.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "extension_id": { "type": "string", "description": "Extension id from extension_search results" }
+            },
+            "required": ["extension_id"],
+            "additionalProperties": false
+        }),
         "schemas/builtin/skill_list.input.v1.json" => json!({
             "type": "object",
             "properties": {},
@@ -198,25 +178,17 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 },
                 "content": {
                     "type": "string",
-                    "description": "Raw SKILL.md content to install"
-                }
-            },
-            "required": ["content"],
-            "additionalProperties": false
-        }),
-        "schemas/builtin/skill_install_url.input.v1.json" => json!({
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "description": "Optional skill name to use for the installed SKILL.md document"
+                    "description": "Raw SKILL.md content to install, or plain Markdown when name is provided"
                 },
                 "url": {
                     "type": "string",
                     "description": "HTTPS URL to a SKILL.md document, ZIP bundle, or GitHub skill repository/tree to fetch and install"
                 }
             },
-            "required": ["url"],
+            "oneOf": [
+                { "required": ["content"] },
+                { "required": ["url"] }
+            ],
             "additionalProperties": false
         }),
         "schemas/builtin/skill_remove.input.v1.json" => json!({
@@ -228,5 +200,50 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "additionalProperties": false
         }),
         _ => return None,
+    })
+}
+
+fn http_schema(require_save_to: bool) -> Value {
+    let mut properties = json!({
+        "url": { "type": "string", "description": "Absolute HTTP or HTTPS URL" },
+        "method": {
+            "type": "string",
+            "enum": ["get", "post", "put", "patch", "delete", "head"],
+            "description": "HTTP method. Defaults to get."
+        },
+        "headers": {
+            "description": "HTTP headers as an object or array of {name,value} entries"
+        },
+        "body": { "description": "String or JSON request body" },
+        "body_base64": { "type": "string", "description": "Base64-encoded request body" },
+        "response_body_limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10485760,
+            "default": 10485760,
+            "description": "Maximum response body bytes. Defaults to 10 MiB; smaller values are raised to 10 MiB."
+        },
+        "timeout_ms": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 30000,
+            "default": 10000,
+            "description": "Request timeout in milliseconds. Defaults to 10s and is capped at 30s."
+        }
+    });
+    let mut required = vec!["url"];
+    if require_save_to {
+        properties["save_to"] = json!({
+            "type": "string",
+            "description": "Scoped path to save the sanitized response body, e.g. /workspace/response.json"
+        });
+        required.push("save_to");
+    }
+
+    json!({
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": false
     })
 }

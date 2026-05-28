@@ -809,6 +809,7 @@ mod tests {
         accountant.pre_model_call(&context, &request).await.unwrap();
         let response = LoopModelResponse {
             chunks: vec![],
+            safe_reasoning_deltas: Vec::new(),
             output: ironclaw_turns::run_profile::ParentLoopOutput::AssistantReply(
                 ironclaw_turns::run_profile::AssistantReply {
                     content: "ok".to_string(),
@@ -957,6 +958,7 @@ mod tests {
         accountant.pre_model_call(&context, &request).await.unwrap();
         let response = LoopModelResponse {
             chunks: vec![],
+            safe_reasoning_deltas: Vec::new(),
             output: ironclaw_turns::run_profile::ParentLoopOutput::AssistantReply(
                 ironclaw_turns::run_profile::AssistantReply {
                     content: "ok".to_string(),
@@ -1010,6 +1012,7 @@ mod tests {
         accountant.pre_model_call(&context, &request).await.unwrap();
         let response = LoopModelResponse {
             chunks: vec![],
+            safe_reasoning_deltas: Vec::new(),
             output: ironclaw_turns::run_profile::ParentLoopOutput::AssistantReply(
                 ironclaw_turns::run_profile::AssistantReply {
                     content: "ok".to_string(),

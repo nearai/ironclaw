@@ -12,7 +12,7 @@ use crate::state::LoopExecutionState;
 
 use super::{
     AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, HostStage,
-    PendingInputAck, StageContext, apply_capability_filter,
+    PendingInputAck, StageContext, apply_capability_filter, debug_host_unavailable,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -134,8 +134,11 @@ pub(super) async fn build_prompt_bundle_for_surface(
         .host
         .build_prompt_bundle(context_request)
         .await
-        .map_err(|_| AgentLoopExecutorError::HostUnavailable {
-            stage: HostStage::Prompt,
+        .map_err(|error| {
+            debug_host_unavailable(HostStage::Prompt, &error);
+            AgentLoopExecutorError::HostUnavailable {
+                stage: HostStage::Prompt,
+            }
         })?;
     CheckpointStage
         .emit_progress(

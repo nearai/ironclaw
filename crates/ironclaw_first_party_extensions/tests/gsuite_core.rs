@@ -3,9 +3,9 @@ mod support;
 use std::sync::Arc;
 
 use ironclaw_auth::{
-    AuthProviderId, CredentialAccountStatus, GOOGLE_CALENDAR_READONLY_SCOPE,
-    GOOGLE_GMAIL_MODIFY_SCOPE, GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE,
-    InMemoryAuthProductServices,
+    AuthProviderId, CredentialAccountLabel, CredentialAccountStatus, CredentialOwnership,
+    GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_GMAIL_MODIFY_SCOPE, GOOGLE_GMAIL_READONLY_SCOPE,
+    GOOGLE_GMAIL_SEND_SCOPE, InMemoryAuthProductServices, NewCredentialAccount,
 };
 use ironclaw_first_party_extensions::{
     CALENDAR_ADD_ATTENDEES_CAPABILITY_ID, CALENDAR_CREATE_EVENT_CAPABILITY_ID,
@@ -15,12 +15,12 @@ use ironclaw_first_party_extensions::{
     CALENDAR_UPDATE_EVENT_CAPABILITY_ID, GMAIL_CREATE_DRAFT_CAPABILITY_ID,
     GMAIL_GET_MESSAGE_CAPABILITY_ID, GMAIL_LIST_MESSAGES_CAPABILITY_ID,
     GMAIL_REPLY_TO_MESSAGE_CAPABILITY_ID, GMAIL_SEND_MESSAGE_CAPABILITY_ID,
-    GMAIL_TRASH_MESSAGE_CAPABILITY_ID, GSUITE_OUTPUT_BYTES_LIMIT, GSUITE_RESPONSE_BODY_LIMIT,
-    GsuiteDispatchRequest, GsuiteExecutor, google_provider_id, gsuite_package_specs,
-    gsuite_resource_profile,
+    GMAIL_TRASH_MESSAGE_CAPABILITY_ID, GSUITE_OUTPUT_BYTES_LIMIT, GSUITE_REQUEST_BODY_LIMIT,
+    GSUITE_RESPONSE_BODY_LIMIT, GsuiteCredentialDispatchReason, GsuiteDispatchRequest,
+    GsuiteExecutor, google_provider_id, gsuite_package_specs, gsuite_resource_profile,
 };
 use ironclaw_host_api::{
-    NetworkMethod, NetworkScheme, RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED,
+    ExtensionId, NetworkMethod, NetworkScheme, RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED,
     RuntimeDispatchErrorKind, RuntimeHttpEgressError, SecretHandle,
 };
 use serde_json::json;
@@ -83,10 +83,75 @@ async fn calendar_handler_integration_tests() {
     assert!(requests[0].url.contains("/calendars/primary/events"));
     assert_eq!(requests[1].method, NetworkMethod::Post);
     assert!(requests[1].url.contains("/calendars/primary/events"));
+    assert!(!requests[1].url.contains("timeMin"));
+    assert!(!requests[1].url.contains("pageToken"));
+    assert!(!requests[1].url.contains("maxResults"));
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&requests[1].body).unwrap()["summary"],
         "Review"
     );
+}
+
+#[tokio::test]
+async fn calendar_create_event_does_not_forward_list_query_fields() {
+    let scope = scope();
+    let auth = auth_with_google_account(
+        &scope,
+        vec![provider_scope(ironclaw_auth::GOOGLE_CALENDAR_EVENTS_SCOPE)],
+    )
+    .await;
+    let egress = Arc::new(RecordingEgress::permissive_success());
+
+    dispatch_ok(
+        auth,
+        scope,
+        CALENDAR_CREATE_EVENT_CAPABILITY_ID,
+        json!({
+            "calendar_id": "primary",
+            "time_min": "2026-05-21T00:00:00Z",
+            "time_max": "2026-05-22T00:00:00Z",
+            "page_token": "next",
+            "max_results": 2500,
+            "event": { "summary": "Review" }
+        }),
+        egress.clone(),
+    )
+    .await;
+
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].url,
+        "https://www.googleapis.com/calendar/v3/calendars/primary/events"
+    );
+}
+
+#[tokio::test]
+async fn gsuite_handler_rejects_oversized_request_body_before_egress() {
+    let scope = scope();
+    let auth = auth_with_google_account(
+        &scope,
+        vec![provider_scope(ironclaw_auth::GOOGLE_CALENDAR_EVENTS_SCOPE)],
+    )
+    .await;
+    let egress = Arc::new(RecordingEgress::permissive_success());
+
+    let error = dispatch_error(
+        auth,
+        scope,
+        CALENDAR_CREATE_EVENT_CAPABILITY_ID,
+        json!({
+            "event": {
+                "summary": "Review",
+                "description": "x".repeat(GSUITE_REQUEST_BODY_LIMIT + 1)
+            }
+        }),
+        egress.clone(),
+    )
+    .await;
+
+    assert_eq!(error.kind(), RuntimeDispatchErrorKind::InputEncode);
+    assert!(egress.requests().is_empty());
 }
 
 #[tokio::test]
@@ -336,6 +401,10 @@ async fn gsuite_handler_fails_before_egress_when_access_secret_is_missing() {
         error.kind(),
         ironclaw_host_api::RuntimeDispatchErrorKind::Client
     );
+    assert_eq!(
+        error.reason(),
+        Some(&GsuiteCredentialDispatchReason::MissingAccessSecret)
+    );
     assert!(egress.requests().is_empty());
 }
 
@@ -489,6 +558,36 @@ async fn gsuite_handler_fails_before_egress_when_google_account_is_missing_or_am
     assert_eq!(error.kind(), RuntimeDispatchErrorKind::Client);
     assert!(egress.requests().is_empty());
 
+    ironclaw_auth::CredentialAccountService::create_account(
+        auth.as_ref(),
+        NewCredentialAccount {
+            scope: auth_scope(&scope),
+            provider: google_provider_id().unwrap(),
+            label: CredentialAccountLabel::new("hidden google").unwrap(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::ExtensionOwned,
+            owner_extension: Some(ExtensionId::new("other-extension").unwrap()),
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("hidden-access").unwrap()),
+            refresh_secret: None,
+            scopes: vec![provider_scope(GOOGLE_GMAIL_SEND_SCOPE)],
+        },
+    )
+    .await
+    .unwrap();
+
+    let error = dispatch_error(
+        auth.clone(),
+        scope.clone(),
+        GMAIL_SEND_MESSAGE_CAPABILITY_ID,
+        json!({ "message": { "raw": "base64url-rfc822" } }),
+        egress.clone(),
+    )
+    .await;
+
+    assert_eq!(error.kind(), RuntimeDispatchErrorKind::Client);
+    assert!(egress.requests().is_empty());
+
     add_google_account(
         &auth,
         &scope,
@@ -517,6 +616,64 @@ async fn gsuite_handler_fails_before_egress_when_google_account_is_missing_or_am
     .await;
 
     assert_eq!(error.kind(), RuntimeDispatchErrorKind::Client);
+    assert!(egress.requests().is_empty());
+}
+
+#[tokio::test]
+async fn gsuite_handler_fails_before_egress_for_non_configured_account_states() {
+    let scope = scope();
+    let egress = Arc::new(RecordingEgress::permissive_success());
+    let cases = [
+        CredentialAccountStatus::Inactive,
+        CredentialAccountStatus::Expired,
+        CredentialAccountStatus::RefreshFailed,
+        CredentialAccountStatus::Revoked,
+    ];
+
+    for status in cases {
+        let auth = auth_with_google_account_status(
+            &scope,
+            vec![provider_scope(GOOGLE_GMAIL_SEND_SCOPE)],
+            status,
+            true,
+        )
+        .await;
+        let error = dispatch_error(
+            auth,
+            scope.clone(),
+            GMAIL_SEND_MESSAGE_CAPABILITY_ID,
+            json!({ "message": { "raw": "base64url-rfc822" } }),
+            egress.clone(),
+        )
+        .await;
+
+        assert_eq!(error.kind(), RuntimeDispatchErrorKind::Client);
+        assert!(egress.requests().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn gsuite_handler_fails_before_egress_when_missing_scopes() {
+    let scope = scope();
+    let auth =
+        auth_with_google_account(&scope, vec![provider_scope(GOOGLE_GMAIL_SEND_SCOPE)]).await;
+    let egress = Arc::new(RecordingEgress::permissive_success());
+
+    let error = dispatch_error(
+        auth,
+        scope,
+        GMAIL_TRASH_MESSAGE_CAPABILITY_ID,
+        json!({ "message_id": "msg-1" }),
+        egress.clone(),
+    )
+    .await;
+
+    assert_eq!(error.kind(), RuntimeDispatchErrorKind::Client);
+    assert!(matches!(
+        error.reason(),
+        Some(GsuiteCredentialDispatchReason::MissingScopes { missing_scopes })
+            if missing_scopes.as_slice() == [provider_scope(GOOGLE_GMAIL_MODIFY_SCOPE)]
+    ));
     assert!(egress.requests().is_empty());
 }
 
@@ -732,4 +889,44 @@ async fn add_attendees_reports_both_google_api_requests() {
 
     assert_eq!(egress.requests().len(), 2);
     assert_eq!(result.usage.network_egress_bytes, 312);
+}
+
+#[tokio::test]
+async fn add_attendees_reports_failed_initial_get_network_usage() {
+    let scope = scope();
+    let auth = auth_with_google_account(
+        &scope,
+        vec![provider_scope(ironclaw_auth::GOOGLE_CALENDAR_EVENTS_SCOPE)],
+    )
+    .await;
+    let executor = GsuiteExecutor::new(auth);
+    let capability_id = capability_id(CALENDAR_ADD_ATTENDEES_CAPABILITY_ID);
+    let egress = Arc::new(RecordingEgress::with_errors(vec![
+        RuntimeHttpEgressError::Network {
+            reason: "calendar offline".to_string(),
+            request_bytes: 101,
+            response_bytes: 0,
+        },
+    ]));
+
+    let error = executor
+        .dispatch(GsuiteDispatchRequest {
+            capability_id: &capability_id,
+            scope: &scope,
+            input: &json!({
+                "calendar_id": "primary",
+                "event_id": "evt-1",
+                "attendees": [{"email": "new@example.com"}]
+            }),
+            runtime_http_egress: egress.clone(),
+        })
+        .await
+        .expect_err("initial GET failure should report egress usage");
+
+    assert_eq!(egress.requests().len(), 1);
+    assert_eq!(error.kind(), RuntimeDispatchErrorKind::NetworkDenied);
+    assert_eq!(
+        error.usage().map(|usage| usage.network_egress_bytes),
+        Some(101)
+    );
 }

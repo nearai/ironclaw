@@ -5,6 +5,13 @@
 **Parent doc:** [`README.md`](./README.md) — read §5, §6, §8, §9, §11 first.
 **Depends on:** Phase 1 ([`phase-1-contracts.md`](./phase-1-contracts.md)).
 
+> **Current implementation note.** Background subagents are disabled pending the
+> durable completion delivery design in
+> [#4147](https://github.com/nearai/ironclaw/issues/4147). The active public
+> `spawn_subagent` schema exposes `flavor_id`, `task`, and optional `handoff`;
+> omitted mode defaults to blocking. Background-related mechanisms below are
+> historical design context, not active behavior.
+
 Phase 2 builds the four *mechanisms* of subagent spawn on top of the Phase 1
 contracts. The four workstreams are independently reviewable PRs and run in
 parallel after Phase 1 lands:

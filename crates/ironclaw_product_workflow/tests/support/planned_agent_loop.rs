@@ -145,6 +145,7 @@ pub fn capability_call_response(
 ) -> HostManagedModelResponse {
     HostManagedModelResponse {
         safe_text_deltas: Vec::new(),
+        safe_reasoning_deltas: Vec::new(),
         usage: None,
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
             surface_version: harness_surface_version(),
@@ -547,6 +548,7 @@ impl ScriptedHostRuntimeToolCall {
         };
         Ok(Some(HostManagedModelResponse {
             safe_text_deltas: Vec::new(),
+            safe_reasoning_deltas: Vec::new(),
             usage: None,
             output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
                 surface_version,

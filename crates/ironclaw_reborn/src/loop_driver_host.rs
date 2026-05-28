@@ -138,7 +138,7 @@ impl HookPromptMaterializationSink for InstructionStoreBackedHookSink {
             vec![InstructionBundleMaterializedMessage {
                 role: role.to_string(),
                 content_ref: content_ref.clone(),
-                safe_content,
+                model_content: safe_content,
             }],
         )
     }
@@ -827,6 +827,7 @@ where
     S: SessionThreadService + ?Sized + Send + Sync + 'static,
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
 {
+    // arch-exempt: too_many_args, needs LoopHostDependencies aggregation, plan #4088
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         thread_service: Arc<S>,

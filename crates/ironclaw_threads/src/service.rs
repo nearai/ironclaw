@@ -3,13 +3,14 @@ use ironclaw_host_api::ThreadId;
 
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
-    AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextMessages, ContextWindow,
-    CreateSummaryArtifactRequest, EnsureThreadRequest, LatestThreadMessageRequest,
-    ListThreadsForScopeRequest, ListThreadsForScopeResponse, LoadContextMessagesRequest,
-    LoadContextWindowRequest, MessageContent, RedactMessageRequest,
-    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord, SummaryArtifact,
-    ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
-    UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
+    AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
+    AppendToolResultReferenceRequest, ContextMessages, ContextWindow, CreateSummaryArtifactRequest,
+    EnsureThreadRequest, LatestThreadMessageRequest, ListThreadsForScopeRequest,
+    ListThreadsForScopeResponse, LoadContextMessagesRequest, LoadContextWindowRequest,
+    MessageContent, RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
+    SessionThreadRecord, SummaryArtifact, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
+    ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
+    UpdateToolResultReferenceRequest,
 };
 
 /// Canonical Reborn session thread and transcript boundary.
@@ -54,6 +55,11 @@ pub trait SessionThreadService: Send + Sync {
     async fn append_tool_result_reference(
         &self,
         request: AppendToolResultReferenceRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError>;
+
+    async fn append_capability_display_preview(
+        &self,
+        request: AppendCapabilityDisplayPreviewRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError>;
 
     async fn update_tool_result_reference(

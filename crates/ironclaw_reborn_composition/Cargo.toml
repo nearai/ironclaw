@@ -36,6 +36,8 @@ test-support = []
 webui-v2-beta = [
     "dep:ironclaw_webui_v2",
     "ironclaw_webui_v2/webui-v2-beta",
+    "dep:ironclaw_webui_v2_static",
+    "ironclaw_webui_v2_static/webui-v2-beta",
     "libsql",
     "dep:axum",
     "dep:tower",
@@ -67,6 +69,7 @@ chrono = "0.4"
 deadpool-postgres = { version = "0.14", optional = true }
 futures = "0.3"
 ironclaw_auth = { path = "../ironclaw_auth" }
+ironclaw_capabilities = { path = "../ironclaw_capabilities" }
 ironclaw_approvals = { path = "../ironclaw_approvals" }
 ironclaw_authorization = { path = "../ironclaw_authorization" }
 ironclaw_event_projections = { path = "../ironclaw_event_projections" }
@@ -98,6 +101,8 @@ ironclaw_trust = { path = "../ironclaw_trust" }
 ironclaw_turns = { path = "../ironclaw_turns" }
 # WebUI v2 route surface — feature-gated; only used by `webui_serve`.
 ironclaw_webui_v2 = { path = "../ironclaw_webui_v2", optional = true }
+# WebUI v2 static SPA bundle — feature-gated; mounted under `/v2`.
+ironclaw_webui_v2_static = { path = "../ironclaw_webui_v2_static", optional = true }
 libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
 # axum + tower middleware stack used by the `webui_serve` module. Each
 # entry is feature-gated so non-beta builds carry no HTTP surface code.
@@ -113,12 +118,14 @@ thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
+url = "2"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 async-trait = "0.1"
 http = "1"
 http-body-util = "0.1"
+ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime", features = ["test-support"] }
 ironclaw_reborn_composition = { path = ".", features = ["test-support"] }
@@ -138,6 +145,10 @@ tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "
 # proper WS client.
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }
 tower = { version = "0.5", features = ["util"] }
+
+[build-dependencies]
+ironclaw_skills = { path = "../ironclaw_skills" }
+serde_json = "1"
 
 [lints]
 workspace = true

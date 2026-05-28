@@ -1,6 +1,13 @@
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap,
+    io::{self, Write},
+    sync::Arc,
+    time::Instant,
+};
 
-use ironclaw_auth::{CredentialAccountService, ProviderScope};
+use ironclaw_auth::{
+    CredentialAccountService, CredentialRecoveryKind, CredentialRecoveryProjection, ProviderScope,
+};
 use ironclaw_host_api::{
     CapabilityId, ExtensionId, NetworkMethod, ResourceScope, ResourceUsage,
     RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
@@ -12,8 +19,8 @@ use serde_json::{Value, json};
 use crate::gsuite::{
     credential::{GoogleCredentialError, GoogleCredentialResolver},
     manifest::{
-        GSUITE_RESPONSE_BODY_LIMIT, GSUITE_TIMEOUT_MS, GsuiteCapabilityOperation,
-        GsuiteCapabilitySpec, find_gsuite_capability,
+        GSUITE_REQUEST_BODY_LIMIT, GSUITE_RESPONSE_BODY_LIMIT, GSUITE_TIMEOUT_MS,
+        GsuiteCapabilityOperation, GsuiteCapabilitySpec, find_gsuite_capability,
     },
     network::google_api_network_policy,
 };
@@ -101,16 +108,34 @@ pub struct GsuiteDispatchResult {
     pub usage: ResourceUsage,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GsuiteCredentialDispatchReason {
+    MissingScopes { missing_scopes: Vec<ProviderScope> },
+    MissingAccessSecret,
+    BackendAuth,
+    HostApi,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("GSuite capability dispatch failed: {kind}")]
 pub struct GsuiteDispatchError {
     kind: RuntimeDispatchErrorKind,
+    reason: Option<GsuiteCredentialDispatchReason>,
     usage: Option<ResourceUsage>,
 }
 
 impl GsuiteDispatchError {
     pub fn new(kind: RuntimeDispatchErrorKind) -> Self {
-        Self { kind, usage: None }
+        Self {
+            kind,
+            reason: None,
+            usage: None,
+        }
+    }
+
+    pub fn with_reason(mut self, reason: GsuiteCredentialDispatchReason) -> Self {
+        self.reason = Some(reason);
+        self
     }
 
     pub fn with_usage(mut self, usage: ResourceUsage) -> Self {
@@ -120,6 +145,10 @@ impl GsuiteDispatchError {
 
     pub fn kind(&self) -> RuntimeDispatchErrorKind {
         self.kind
+    }
+
+    pub fn reason(&self) -> Option<&GsuiteCredentialDispatchReason> {
+        self.reason.as_ref()
     }
 
     pub fn usage(&self) -> Option<&ResourceUsage> {
@@ -410,7 +439,15 @@ fn calendar_find_free_slots_request(
 fn calendar_create_event_request(
     input: &Value,
 ) -> Result<(NetworkMethod, String, Vec<u8>), GsuiteDispatchError> {
-    let query = CalendarEventsQuery::parse(input)?;
+    let query = CalendarEventsQuery {
+        calendar_id: optional_str(input, "calendar_id")?
+            .unwrap_or("primary")
+            .to_string(),
+        time_min: None,
+        time_max: None,
+        page_token: None,
+        max_results: None,
+    };
     Ok((
         NetworkMethod::Post,
         calendar_events_url(&query, None),
@@ -542,22 +579,33 @@ fn runtime_request(
             required: true,
         }],
         response_body_limit: Some(GSUITE_RESPONSE_BODY_LIMIT),
+        save_body_to: None,
         timeout_ms: Some(GSUITE_TIMEOUT_MS),
     }
 }
 
 fn map_credential_error(error: GoogleCredentialError) -> GsuiteDispatchError {
-    let kind = match error {
-        GoogleCredentialError::Missing
-        | GoogleCredentialError::AccountSelectionRequired
-        | GoogleCredentialError::NotConfigured
-        | GoogleCredentialError::MissingAccessSecret
-        | GoogleCredentialError::MissingScopes => RuntimeDispatchErrorKind::Client,
-        GoogleCredentialError::Auth(_) | GoogleCredentialError::HostApi(_) => {
-            RuntimeDispatchErrorKind::Backend
+    match error {
+        GoogleCredentialError::Recovery(recovery) => {
+            GsuiteDispatchError::new(map_recovery_kind(&recovery))
         }
-    };
-    GsuiteDispatchError::new(kind)
+        GoogleCredentialError::MissingScopes { missing_scopes } => {
+            GsuiteDispatchError::new(RuntimeDispatchErrorKind::Client)
+                .with_reason(GsuiteCredentialDispatchReason::MissingScopes { missing_scopes })
+        }
+        GoogleCredentialError::MissingAccessSecret => {
+            GsuiteDispatchError::new(RuntimeDispatchErrorKind::Client)
+                .with_reason(GsuiteCredentialDispatchReason::MissingAccessSecret)
+        }
+        GoogleCredentialError::Auth(_) => {
+            GsuiteDispatchError::new(RuntimeDispatchErrorKind::Backend)
+                .with_reason(GsuiteCredentialDispatchReason::BackendAuth)
+        }
+        GoogleCredentialError::HostApi(_) => {
+            GsuiteDispatchError::new(RuntimeDispatchErrorKind::Backend)
+                .with_reason(GsuiteCredentialDispatchReason::HostApi)
+        }
+    }
 }
 
 fn map_egress_error(error: RuntimeHttpEgressError) -> GsuiteDispatchError {
@@ -575,6 +623,15 @@ fn map_egress_error(error: RuntimeHttpEgressError) -> GsuiteDispatchError {
         network_egress_bytes: error.request_bytes(),
         ..ResourceUsage::default()
     })
+}
+
+fn map_recovery_kind(recovery: &CredentialRecoveryProjection) -> RuntimeDispatchErrorKind {
+    match recovery.kind() {
+        CredentialRecoveryKind::Configured => RuntimeDispatchErrorKind::Backend,
+        CredentialRecoveryKind::SetupRequired
+        | CredentialRecoveryKind::ReauthorizeRequired
+        | CredentialRecoveryKind::AccountSelectionRequired => RuntimeDispatchErrorKind::Client,
+    }
 }
 
 fn add_network_usage(error: GsuiteDispatchError, network_egress_bytes: u64) -> GsuiteDispatchError {
@@ -685,7 +742,44 @@ fn required_array<'a>(input: &'a Value, key: &str) -> Result<&'a Value, GsuiteDi
 }
 
 fn json_body(value: &Value) -> Result<Vec<u8>, GsuiteDispatchError> {
-    serde_json::to_vec(value).map_err(|_| input_error())
+    let mut writer = BoundedJsonBody::new(GSUITE_REQUEST_BODY_LIMIT);
+    serde_json::to_writer(&mut writer, value).map_err(|_| input_error())?;
+    Ok(writer.into_inner())
+}
+
+struct BoundedJsonBody {
+    bytes: Vec<u8>,
+    limit: usize,
+}
+
+impl BoundedJsonBody {
+    fn new(limit: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            limit,
+        }
+    }
+
+    fn into_inner(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+impl Write for BoundedJsonBody {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.bytes.len().saturating_add(buf.len()) > self.limit {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "JSON request body exceeds GSuite request body limit",
+            ));
+        }
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 fn merge_attendees(mut existing: Vec<Value>, additions: Vec<Value>) -> Vec<Value> {
@@ -755,39 +849,93 @@ fn encode_percent(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::HostApiError;
+    use ironclaw_host_api::{HostApiError, RuntimeHttpEgressResponse};
 
     use super::*;
 
     #[test]
     fn map_credential_error_tests() {
-        for error in [
-            GoogleCredentialError::Missing,
-            GoogleCredentialError::AccountSelectionRequired,
-            GoogleCredentialError::NotConfigured,
-            GoogleCredentialError::MissingAccessSecret,
-            GoogleCredentialError::MissingScopes,
-        ] {
-            assert_eq!(
-                map_credential_error(error).kind(),
-                RuntimeDispatchErrorKind::Client
-            );
-        }
-
         assert_eq!(
-            map_credential_error(GoogleCredentialError::Auth(
-                ironclaw_auth::AuthProductError::BackendUnavailable,
+            map_credential_error(GoogleCredentialError::Recovery(
+                ironclaw_auth::CredentialRecoveryProjection::setup_required(
+                    ironclaw_auth::AuthProviderId::new("google").unwrap(),
+                    ironclaw_auth::CredentialRecoveryReason::NoAccount,
+                    Vec::new(),
+                ),
             ))
             .kind(),
-            RuntimeDispatchErrorKind::Backend
+            RuntimeDispatchErrorKind::Client
         );
         assert_eq!(
-            map_credential_error(GoogleCredentialError::HostApi(
-                HostApiError::InvariantViolation {
-                    reason: "bad contract".to_string(),
-                },
+            map_credential_error(GoogleCredentialError::Recovery(
+                ironclaw_auth::CredentialRecoveryProjection::account_selection_required(
+                    ironclaw_auth::AuthProviderId::new("google").unwrap(),
+                    Vec::new(),
+                ),
             ))
             .kind(),
+            RuntimeDispatchErrorKind::Client
+        );
+        assert_eq!(
+            map_credential_error(GoogleCredentialError::MissingAccessSecret).kind(),
+            RuntimeDispatchErrorKind::Client
+        );
+        assert_eq!(
+            map_credential_error(GoogleCredentialError::MissingAccessSecret).reason(),
+            Some(&GsuiteCredentialDispatchReason::MissingAccessSecret)
+        );
+        let missing_scope =
+            ProviderScope::new("https://www.googleapis.com/auth/gmail.modify").expect("scope");
+        let missing_scopes_error = map_credential_error(GoogleCredentialError::MissingScopes {
+            missing_scopes: vec![missing_scope.clone()],
+        });
+        assert_eq!(
+            missing_scopes_error.kind(),
+            RuntimeDispatchErrorKind::Client
+        );
+        assert_eq!(
+            missing_scopes_error.reason(),
+            Some(&GsuiteCredentialDispatchReason::MissingScopes {
+                missing_scopes: vec![missing_scope],
+            })
+        );
+
+        let backend_error = map_credential_error(GoogleCredentialError::Auth(
+            ironclaw_auth::AuthProductError::BackendUnavailable,
+        ));
+        assert_eq!(backend_error.kind(), RuntimeDispatchErrorKind::Backend);
+        assert_eq!(
+            backend_error.reason(),
+            Some(&GsuiteCredentialDispatchReason::BackendAuth)
+        );
+        let host_api_error = map_credential_error(GoogleCredentialError::HostApi(
+            HostApiError::InvariantViolation {
+                reason: "bad contract".to_string(),
+            },
+        ));
+        assert_eq!(host_api_error.kind(), RuntimeDispatchErrorKind::Backend);
+        assert_eq!(
+            host_api_error.reason(),
+            Some(&GsuiteCredentialDispatchReason::HostApi)
+        );
+
+        let configured_recovery = map_credential_error(GoogleCredentialError::Recovery(
+            ironclaw_auth::CredentialRecoveryProjection::configured(
+                ironclaw_auth::AuthProviderId::new("google").unwrap(),
+                ironclaw_auth::CredentialAccountProjection {
+                    id: ironclaw_auth::CredentialAccountId::new(),
+                    provider: ironclaw_auth::AuthProviderId::new("google").unwrap(),
+                    label: ironclaw_auth::CredentialAccountLabel::new("Google").unwrap(),
+                    status: ironclaw_auth::CredentialAccountStatus::Configured,
+                    ownership: ironclaw_auth::CredentialOwnership::UserReusable,
+                    owner_extension: None,
+                    granted_extensions: Vec::new(),
+                    secret_handle_count: 1,
+                },
+            ),
+        ));
+        assert_eq!(
+            configured_recovery.kind(),
             RuntimeDispatchErrorKind::Backend
         );
     }
@@ -922,5 +1070,56 @@ mod tests {
         assert!(gmail_messages.contains("q=is%3Aunread%20from%3Aada"));
         assert!(gmail_messages.contains("labelIds=INBOX"));
         assert!(gmail_messages.contains("labelIds=Team%20Label"));
+    }
+
+    #[test]
+    fn merge_attendees_deduplicates_email_case_insensitively() {
+        let merged = merge_attendees(
+            vec![
+                serde_json::json!({"email": "Alice@Example.com", "name": "old"}),
+                serde_json::json!({"email": "bob@example.com"}),
+            ],
+            vec![
+                serde_json::json!({"email": "alice@example.com", "name": "new"}),
+                serde_json::json!({"email": "carol@example.com"}),
+            ],
+        );
+
+        assert_eq!(merged.len(), 3);
+        assert_eq!(merged[0]["name"], "new");
+        assert_eq!(merged[2]["email"], "carol@example.com");
+    }
+
+    #[test]
+    fn response_etag_reads_case_insensitive_header_body_fallback_and_absent_case() {
+        let response = RuntimeHttpEgressResponse {
+            status: 200,
+            headers: vec![("ETag".to_string(), "header-etag".to_string())],
+            body: Vec::new(),
+            saved_body: None,
+            request_bytes: 0,
+            response_bytes: 0,
+            redaction_applied: false,
+        };
+        assert_eq!(
+            response_etag(&response, &serde_json::json!({"etag": "body-etag"})),
+            Some("header-etag".to_string())
+        );
+
+        let response_without_header = RuntimeHttpEgressResponse {
+            headers: Vec::new(),
+            ..response
+        };
+        assert_eq!(
+            response_etag(
+                &response_without_header,
+                &serde_json::json!({"etag": "body-etag"})
+            ),
+            Some("body-etag".to_string())
+        );
+        assert_eq!(
+            response_etag(&response_without_header, &serde_json::json!({})),
+            None
+        );
     }
 }

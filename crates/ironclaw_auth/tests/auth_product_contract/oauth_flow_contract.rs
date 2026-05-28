@@ -22,7 +22,13 @@ async fn oauth_callback_exchanges_provider_code_then_completes_once() {
     assert!(!debug.contains("raw-pkce-verifier"));
 
     let exchange = services
-        .exchange_callback(request)
+        .exchange_callback(
+            OAuthProviderExchangeContext {
+                scope: owner.clone(),
+                flow_id: flow.id,
+            },
+            request,
+        )
         .await
         .expect("provider exchange");
     let completed = services
@@ -54,6 +60,139 @@ async fn oauth_callback_exchanges_provider_code_then_completes_once() {
         .expect_err("terminal flow rejects callback replay");
     assert_eq!(replay, AuthProductError::FlowAlreadyTerminal);
     assert_eq!(services.continuations().len(), 1);
+}
+
+#[tokio::test]
+async fn credential_selection_completes_account_selection_flow_once() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+    let account = services
+        .create_account(NewCredentialAccount {
+            scope: owner.clone(),
+            provider: provider(),
+            label: label("work github"),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("github-work-secret").unwrap()),
+            refresh_secret: None,
+            scopes: provider_scopes(&["repo"]),
+        })
+        .await
+        .expect("account");
+    let flow = services
+        .create_flow(NewAuthFlow {
+            scope: owner.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: provider(),
+            challenge: AuthChallenge::AccountSelectionRequired {
+                provider: provider(),
+                accounts: vec![account.projection()],
+            },
+            continuation: AuthContinuationRef::LifecycleActivation {
+                package_ref: LifecyclePackageRef::new("github-extension").expect("valid package"),
+            },
+            update_binding: None,
+            opaque_state_hash: None,
+            pkce_verifier_hash: None,
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .expect("flow");
+
+    let completed = services
+        .complete_credential_selection(
+            &owner,
+            CredentialSelectionInput {
+                flow_id: flow.id,
+                credential_account_id: account.id,
+            },
+        )
+        .await
+        .expect("credential selection completes");
+
+    assert_eq!(completed.status, AuthFlowStatus::Completed);
+    assert_eq!(completed.credential_account_id, Some(account.id));
+    assert_eq!(services.continuations().len(), 1);
+
+    let replay = services
+        .complete_credential_selection(
+            &owner,
+            CredentialSelectionInput {
+                flow_id: flow.id,
+                credential_account_id: account.id,
+            },
+        )
+        .await
+        .expect("matching completed selection is idempotent");
+    assert_eq!(replay.credential_account_id, Some(account.id));
+    assert_eq!(services.continuations().len(), 1);
+}
+
+#[tokio::test]
+async fn credential_selection_rejects_unlisted_or_cross_scope_account() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+    let account = services
+        .create_account(NewCredentialAccount {
+            scope: owner.clone(),
+            provider: provider(),
+            label: label("work github"),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("github-work-secret").unwrap()),
+            refresh_secret: None,
+            scopes: provider_scopes(&["repo"]),
+        })
+        .await
+        .expect("account");
+    let flow = services
+        .create_flow(NewAuthFlow {
+            scope: owner.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: provider(),
+            challenge: AuthChallenge::AccountSelectionRequired {
+                provider: provider(),
+                accounts: vec![account.projection()],
+            },
+            continuation: AuthContinuationRef::LifecycleActivation {
+                package_ref: LifecyclePackageRef::new("github-extension").expect("valid package"),
+            },
+            update_binding: None,
+            opaque_state_hash: None,
+            pkce_verifier_hash: None,
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .expect("flow");
+
+    let unlisted = services
+        .complete_credential_selection(
+            &owner,
+            CredentialSelectionInput {
+                flow_id: flow.id,
+                credential_account_id: CredentialAccountId::new(),
+            },
+        )
+        .await
+        .expect_err("unlisted account rejected");
+    assert_eq!(unlisted, AuthProductError::CredentialMissing);
+
+    let cross_scope = services
+        .complete_credential_selection(
+            &scope("bob"),
+            CredentialSelectionInput {
+                flow_id: flow.id,
+                credential_account_id: account.id,
+            },
+        )
+        .await
+        .expect_err("cross-scope selection rejected");
+    assert_eq!(cross_scope, AuthProductError::CrossScopeDenied);
+    assert!(services.continuations().is_empty());
 }
 
 #[tokio::test]
@@ -104,7 +243,10 @@ async fn oauth_callback_updates_existing_account_from_provider_exchange() {
 
     assert_eq!(completed.credential_account_id, Some(existing.id));
     let updated = services
-        .get_account(&owner, existing.id)
+        .get_account(CredentialAccountLookupRequest::new(
+            owner.clone(),
+            existing.id,
+        ))
         .await
         .expect("lookup")
         .expect("updated account");

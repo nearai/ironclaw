@@ -42,6 +42,7 @@ impl RuntimeHttpEgress for RecordingEgress {
             status: 200,
             headers: Vec::new(),
             body: br#"{"id":"sent-message"}"#.to_vec(),
+            saved_body: None,
             request_bytes: 123,
             response_bytes: 21,
             redaction_applied: true,
@@ -61,6 +62,40 @@ fn cap_id(value: &str) -> CapabilityId {
     CapabilityId::new(value).unwrap()
 }
 
+fn asset_manifest(extension_id: &str) -> ironclaw_extensions::ExtensionManifest {
+    let manifest_toml = match extension_id {
+        "google-calendar" => {
+            include_str!(
+                "../../ironclaw_first_party_extensions/assets/google-calendar/manifest.toml"
+            )
+        }
+        "gmail" => include_str!("../../ironclaw_first_party_extensions/assets/gmail/manifest.toml"),
+        other => panic!("unknown GSuite asset manifest {other}"),
+    };
+    ironclaw_extensions::ExtensionManifest::parse(
+        manifest_toml,
+        ManifestSource::HostBundled,
+        &ironclaw_host_api::HostPortCatalog::empty(),
+    )
+    .unwrap()
+}
+
+fn asset_schema(path: &str) -> serde_json::Value {
+    let schema_json = match path {
+        "google-calendar/create_event.input.v1.json" => include_str!(
+            "../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/create_event.input.v1.json"
+        ),
+        "google-calendar/list_events.input.v1.json" => include_str!(
+            "../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/list_events.input.v1.json"
+        ),
+        "gmail/list_messages.input.v1.json" => include_str!(
+            "../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/list_messages.input.v1.json"
+        ),
+        other => panic!("unknown GSuite asset schema {other}"),
+    };
+    serde_json::from_str(schema_json).unwrap()
+}
+
 async fn auth_with_google_account(scope: &ResourceScope) -> Arc<InMemoryAuthProductServices> {
     let auth = Arc::new(InMemoryAuthProductServices::new());
     auth.create_account(NewCredentialAccount {
@@ -78,6 +113,33 @@ async fn auth_with_google_account(scope: &ResourceScope) -> Arc<InMemoryAuthProd
     .await
     .unwrap();
     auth
+}
+
+#[test]
+fn bundled_gsuite_input_schemas_reject_reviewed_shape_regressions() {
+    let create_event = asset_schema("google-calendar/create_event.input.v1.json");
+    let create_event_properties = create_event["properties"].as_object().unwrap();
+    assert!(create_event_properties.contains_key("calendar_id"));
+    assert!(create_event_properties.contains_key("event"));
+    assert!(
+        !create_event_properties.contains_key("time_min"),
+        "create_event schema must not accept list_events query parameters"
+    );
+    assert!(!create_event_properties.contains_key("time_max"));
+    assert!(!create_event_properties.contains_key("page_token"));
+    assert!(!create_event_properties.contains_key("max_results"));
+
+    let list_events = asset_schema("google-calendar/list_events.input.v1.json");
+    assert_eq!(
+        list_events["properties"]["max_results"]["oneOf"][1]["pattern"],
+        "^(?:[1-9][0-9]{0,2}|[12][0-9]{3}|2[0-4][0-9]{2}|2500)$"
+    );
+
+    let list_messages = asset_schema("gmail/list_messages.input.v1.json");
+    assert_eq!(
+        list_messages["properties"]["max_results"]["oneOf"][1]["pattern"],
+        "^(?:[1-9][0-9]{0,1}|[1-4][0-9]{2}|500)$"
+    );
 }
 
 #[test]
@@ -103,6 +165,61 @@ fn bundled_gsuite_packages_are_host_bundled_but_not_registered_by_default() {
         .map(|package| package.capabilities.len())
         .sum::<usize>();
     assert_eq!(capability_count, 15);
+}
+
+#[test]
+fn bundled_gsuite_asset_manifests_match_package_specs() {
+    for spec in gsuite_package_specs() {
+        let manifest = asset_manifest(spec.extension_id);
+
+        assert_eq!(manifest.id.as_str(), spec.extension_id);
+        assert!(matches!(
+            manifest.runtime,
+            ExtensionRuntime::FirstParty { ref service } if service == spec.service
+        ));
+        let actual = manifest
+            .capabilities
+            .iter()
+            .map(|capability| {
+                (
+                    capability.id.as_str().to_string(),
+                    capability.effects.clone(),
+                    capability.default_permission,
+                    capability.input_schema_ref.as_str().to_string(),
+                    capability.output_schema_ref.as_str().to_string(),
+                    capability
+                        .prompt_doc_ref
+                        .as_ref()
+                        .map(|prompt| prompt.as_str().to_string()),
+                )
+            })
+            .collect::<Vec<_>>();
+        let expected = spec
+            .capabilities
+            .iter()
+            .map(|capability| {
+                (
+                    capability.id.to_string(),
+                    capability.effects.to_vec(),
+                    capability.default_permission,
+                    format!(
+                        "schemas/{}/{}.input.v1.json",
+                        spec.schema_prefix, capability.short_name
+                    ),
+                    format!(
+                        "schemas/{}/{}.output.v1.json",
+                        spec.schema_prefix, capability.short_name
+                    ),
+                    Some(format!(
+                        "prompts/{}/{}.md",
+                        spec.schema_prefix, capability.short_name
+                    )),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(actual, expected);
+    }
 }
 
 #[tokio::test]

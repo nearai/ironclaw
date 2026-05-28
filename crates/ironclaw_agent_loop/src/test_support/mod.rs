@@ -898,6 +898,7 @@ fn scripted_model_response(
         chunks: vec![ModelStreamChunk {
             safe_text_delta: String::new(),
         }],
+        safe_reasoning_deltas: Vec::new(),
         output,
         effective_model_profile_id: ModelProfileId::new("model")
             .unwrap_or_else(|error| panic!("test model id should be valid: {error}")),

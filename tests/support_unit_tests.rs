@@ -371,6 +371,7 @@ mod reborn_support_tests {
     use ironclaw_loop_support::{
         HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessage,
         HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
+        HostManagedToolResultContent,
     };
     use ironclaw_network::{
         NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse,
@@ -390,10 +391,10 @@ mod reborn_support_tests {
         InboundTurnService, ProductActionId, ProductConversationRouteKind, ProductWorkflowError,
         ResolveBindingRequest, SourceBindingKey,
     };
-    use ironclaw_threads::ProviderToolCallReferenceEnvelope;
     use ironclaw_threads::{
         AcceptInboundMessageRequest, AppendAssistantDraftRequest, EnsureThreadRequest,
-        MessageContent, SessionThreadService, ThreadScope,
+        MessageContent, ProviderToolCallReferenceEnvelope, SessionThreadService, ThreadScope,
+        ToolResultSafeSummary,
     };
     use ironclaw_turns::{
         CancelRunRequest, CancelRunResponse, GetRunStateRequest, LoopMessageRef,
@@ -604,7 +605,11 @@ mod reborn_support_tests {
             .stream_model(model_request(Vec::new()))
             .await
             .expect_err("empty trace should fail");
-        assert!(error.safe_summary.contains("exhausted"));
+        assert!(
+            error.safe_summary.contains("no matching step"),
+            "unexpected error summary: {}",
+            error.safe_summary
+        );
     }
 
     #[tokio::test]
@@ -2113,6 +2118,9 @@ mod reborn_support_tests {
                 response_reasoning: None,
                 reasoning: None,
                 signature: None,
+            }),
+            tool_result_content: Some(HostManagedToolResultContent::Resolved {
+                safe_summary: ToolResultSafeSummary::new("tool completed").expect("safe summary"),
             }),
         }
     }
