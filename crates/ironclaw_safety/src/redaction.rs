@@ -3,15 +3,16 @@
 /// Values are applied longest-first so encoded variants such as
 /// `token%20value` are redacted before shorter raw substrings like `token`.
 pub fn redact_exact_values(mut text: String, values: &[String]) -> String {
+    if values.is_empty() {
+        return text;
+    }
     let mut values = values
         .iter()
         .filter(|value| !value.is_empty())
         .collect::<Vec<_>>();
     values.sort_by_key(|value| std::cmp::Reverse(value.len()));
     for value in values {
-        if !value.is_empty() {
-            text = text.replace(value, "[REDACTED]");
-        }
+        text = text.replace(value, "[REDACTED]");
     }
     text
 }
@@ -22,6 +23,9 @@ pub fn redact_exact_values(mut text: String, values: &[String]) -> String {
 /// `%20` and `+` spaces, including lowercase percent-escape variants, so
 /// callers can redact echoed query/path credentials before runtime visibility.
 pub fn redaction_values_for_secret(value: &str) -> Vec<String> {
+    if value.is_empty() {
+        return Vec::new();
+    }
     let mut values = Vec::new();
     push_redaction_value(&mut values, value.to_string());
     let encoded = percent_encode_url_component(value.as_bytes(), SpaceEncoding::Percent20);
@@ -41,7 +45,7 @@ enum SpaceEncoding {
 
 fn percent_encode_url_component(bytes: &[u8], space_encoding: SpaceEncoding) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let mut output = String::new();
+    let mut output = String::with_capacity(bytes.len());
     for &byte in bytes {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
             output.push(byte as char);

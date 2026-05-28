@@ -229,7 +229,7 @@ fn lease_secret_for_injection<S>(
 where
     S: SecretStore,
 {
-    block_on_secret_store(async {
+    match block_on_secret_store(async {
         let metadata = secrets.metadata(&request.scope, &injection.handle).await?;
         if metadata.is_none() {
             return Ok(None);
@@ -238,16 +238,21 @@ where
             .lease_once(&request.scope, &injection.handle)
             .await?;
         secrets.consume(&request.scope, lease.id).await.map(Some)
-    })?
-    .map_or_else(
-        || missing_runtime_credential(injection.required),
-        |material| Ok(Some(material)),
-    )
+    }) {
+        Ok(Some(material)) => Ok(Some(material)),
+        Ok(None) => missing_runtime_credential(injection.required),
+        Err(SecretStoreError::UnknownSecret { .. }) => {
+            missing_runtime_credential(injection.required)
+        }
+        Err(error) => Err(RuntimeHttpEgressError::Credential {
+            reason: sanitized_secret_error(&error),
+        }),
+    }
 }
 
 fn block_on_secret_store<T>(
     future: impl std::future::Future<Output = Result<T, SecretStoreError>> + Send,
-) -> Result<T, RuntimeHttpEgressError>
+) -> Result<T, SecretStoreError>
 where
     T: Send,
 {
@@ -257,19 +262,15 @@ where
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
-                    .map_err(|_| RuntimeHttpEgressError::Credential {
+                    .map_err(|_| SecretStoreError::StoreUnavailable {
                         reason: "secret store runtime unavailable".to_string(),
                     })?;
-                runtime
-                    .block_on(future)
-                    .map_err(|error| RuntimeHttpEgressError::Credential {
-                        reason: sanitized_secret_error(&error),
-                    })
+                runtime.block_on(future)
             })
             .join()
     });
     joined.unwrap_or_else(|_| {
-        Err(RuntimeHttpEgressError::Credential {
+        Err(SecretStoreError::StoreUnavailable {
             reason: "secret store worker panicked".to_string(),
         })
     })

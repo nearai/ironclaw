@@ -910,6 +910,63 @@ fn host_http_egress_rejects_header_injection_prefix_control_chars() {
 }
 
 #[test]
+fn host_http_egress_rejects_header_injection_value_control_chars() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{"ok":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let secrets = InMemorySecretStore::new();
+    let scope = sample_scope();
+    let handle = SecretHandle::new("api-token").unwrap();
+    block_on_test(secrets.put(
+        scope.clone(),
+        handle.clone(),
+        SecretMaterial::from("sk-test-secret\r\nx-evil: injected"),
+    ))
+    .unwrap();
+    let service = HostHttpEgressService::new_with_request_policy_for_tests(network, secrets);
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope,
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle,
+                source: RuntimeCredentialSource::SecretStoreLease,
+                target: RuntimeCredentialTarget::Header {
+                    name: "authorization".to_string(),
+                    prefix: None,
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            save_body_to: None,
+            timeout_ms: None,
+        })
+        .expect_err("header injection values with control characters must be rejected");
+
+    assert_eq!(
+        credential_reason(&error),
+        "credential injection header value is invalid"
+    );
+    assert!(!error.to_string().contains("sk-test-secret"));
+    assert!(network_recorder.lock().unwrap().is_empty());
+}
+
+#[test]
 fn host_http_egress_injects_leased_credentials_and_redacts_errors() {
     let network = RecordingNetwork::err(NetworkHttpError::Transport {
         reason: "upstream rejected token sk-test-secret".to_string(),
@@ -1082,6 +1139,127 @@ fn host_http_egress_requires_available_required_credentials_before_network() {
         ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
     ));
     assert!(network_recorder.lock().unwrap().is_empty());
+}
+
+#[test]
+fn host_http_egress_required_credential_still_fails_after_optional_negative_cache() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{"ok":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let handle = SecretHandle::new("missing-token").unwrap();
+    let service = HostHttpEgressService::new_with_request_policy_for_tests(
+        network,
+        InMemorySecretStore::new(),
+    );
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope: sample_scope(),
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![
+                RuntimeCredentialInjection {
+                    handle: handle.clone(),
+                    source: RuntimeCredentialSource::SecretStoreLease,
+                    target: RuntimeCredentialTarget::Header {
+                        name: "x-optional-token".to_string(),
+                        prefix: Some("Bearer ".to_string()),
+                    },
+                    required: false,
+                },
+                RuntimeCredentialInjection {
+                    handle,
+                    source: RuntimeCredentialSource::SecretStoreLease,
+                    target: RuntimeCredentialTarget::Header {
+                        name: "authorization".to_string(),
+                        prefix: Some("Bearer ".to_string()),
+                    },
+                    required: true,
+                },
+            ],
+            response_body_limit: Some(4096),
+            save_body_to: None,
+            timeout_ms: None,
+        })
+        .expect_err("required reuse of a negatively cached credential must fail closed");
+
+    assert_eq!(
+        credential_reason(&error),
+        "required credential is unavailable"
+    );
+    assert!(network_recorder.lock().unwrap().is_empty());
+}
+
+#[test]
+fn host_http_egress_maps_secret_store_errors_to_sanitized_credential_reasons() {
+    let scope = sample_scope();
+    let handle = SecretHandle::new("api-token").unwrap();
+    let lease_id = SecretLeaseId::new();
+    let cases = vec![
+        (
+            SecretStoreError::UnknownSecret {
+                scope: Box::new(scope.clone()),
+                handle: handle.clone(),
+            },
+            "required credential is unavailable",
+        ),
+        (
+            SecretStoreError::UnknownLease {
+                scope: Box::new(scope.clone()),
+                lease_id,
+            },
+            "credential lease is unavailable",
+        ),
+        (
+            SecretStoreError::LeaseConsumed { lease_id },
+            "credential lease was already used",
+        ),
+        (
+            SecretStoreError::LeaseRevoked { lease_id },
+            "credential lease was revoked",
+        ),
+        (
+            SecretStoreError::LeaseExpired { lease_id },
+            "credential expired",
+        ),
+        (SecretStoreError::SecretExpired, "credential expired"),
+        (
+            SecretStoreError::BackendMisconfigured {
+                reason: "raw backend detail".to_string(),
+            },
+            "credential store is misconfigured",
+        ),
+        (
+            SecretStoreError::StoreUnavailable {
+                reason: "raw store detail".to_string(),
+            },
+            "credential store unavailable",
+        ),
+    ];
+
+    for (store_error, expected_reason) in cases {
+        let (error, network_recorder) =
+            execute_with_failing_secret_store(scope.clone(), handle.clone(), store_error);
+
+        assert_eq!(credential_reason(&error), expected_reason);
+        assert!(
+            network_recorder.lock().unwrap().is_empty(),
+            "secret store error {expected_reason:?} must fail before network dispatch"
+        );
+    }
 }
 
 #[test]
@@ -3490,6 +3668,134 @@ fn execute_path_placeholder_egress(
     response
         .map(|response| (response, network_recorder.clone()))
         .map_err(|error| (error, network_recorder))
+}
+
+fn execute_with_failing_secret_store(
+    scope: ResourceScope,
+    handle: SecretHandle,
+    store_error: SecretStoreError,
+) -> (RuntimeHttpEgressError, RecordedRequests) {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{"ok":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let service = HostHttpEgressService::new_with_request_policy_for_tests(
+        network,
+        FailingLeaseSecretStore {
+            scope: scope.clone(),
+            handle: handle.clone(),
+            error: store_error,
+        },
+    );
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope,
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle,
+                source: RuntimeCredentialSource::SecretStoreLease,
+                target: RuntimeCredentialTarget::Header {
+                    name: "authorization".to_string(),
+                    prefix: Some("Bearer ".to_string()),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            save_body_to: None,
+            timeout_ms: None,
+        })
+        .expect_err("failing secret store should reject egress before network dispatch");
+
+    (error, network_recorder)
+}
+
+fn credential_reason(error: &RuntimeHttpEgressError) -> &str {
+    match error {
+        RuntimeHttpEgressError::Credential { reason } => reason,
+        other => panic!("expected credential error, got {other:?}"),
+    }
+}
+
+struct FailingLeaseSecretStore {
+    scope: ResourceScope,
+    handle: SecretHandle,
+    error: SecretStoreError,
+}
+
+#[async_trait::async_trait]
+impl SecretStore for FailingLeaseSecretStore {
+    async fn put(
+        &self,
+        scope: ResourceScope,
+        handle: SecretHandle,
+        _material: SecretMaterial,
+    ) -> Result<SecretMetadata, SecretStoreError> {
+        Ok(SecretMetadata { scope, handle })
+    }
+
+    async fn metadata(
+        &self,
+        _scope: &ResourceScope,
+        _handle: &SecretHandle,
+    ) -> Result<Option<SecretMetadata>, SecretStoreError> {
+        Ok(Some(SecretMetadata {
+            scope: self.scope.clone(),
+            handle: self.handle.clone(),
+        }))
+    }
+
+    async fn delete(
+        &self,
+        _scope: &ResourceScope,
+        _handle: &SecretHandle,
+    ) -> Result<bool, SecretStoreError> {
+        Ok(false)
+    }
+
+    async fn lease_once(
+        &self,
+        _scope: &ResourceScope,
+        _handle: &SecretHandle,
+    ) -> Result<SecretLease, SecretStoreError> {
+        Err(self.error.clone())
+    }
+
+    async fn consume(
+        &self,
+        _scope: &ResourceScope,
+        _lease_id: SecretLeaseId,
+    ) -> Result<SecretMaterial, SecretStoreError> {
+        Err(self.error.clone())
+    }
+
+    async fn revoke(
+        &self,
+        _scope: &ResourceScope,
+        _lease_id: SecretLeaseId,
+    ) -> Result<SecretLease, SecretStoreError> {
+        Err(self.error.clone())
+    }
+
+    async fn leases_for_scope(
+        &self,
+        _scope: &ResourceScope,
+    ) -> Result<Vec<SecretLease>, SecretStoreError> {
+        Ok(Vec::new())
+    }
 }
 
 struct TokioBackedSecretStore {

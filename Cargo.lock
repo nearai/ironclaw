@@ -4497,6 +4497,7 @@ dependencies = [
  "jsonschema",
  "libc",
  "libsql",
+ "percent-encoding",
  "rust_decimal",
  "secrecy",
  "serde",

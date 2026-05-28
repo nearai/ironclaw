@@ -19,7 +19,7 @@ where
     let network_policy = service.network_policy_for_request(&mut request)?;
     service.validate_credential_sources_for_request(&request)?;
     let save_body_to = authorize_body_store(service, &mut request)?;
-    super::sanitize::validate_runtime_request(&request)?;
+    super::sanitize::validate_runtime_request(&request, &service.leak_detector)?;
     let scope = request.scope.clone();
     let capability_id = request.capability_id.clone();
 
@@ -32,9 +32,12 @@ where
 
     let response = dispatch_network(service, request, network_policy)?;
     let credentials_injected = !redaction_values.is_empty();
-    let (response, response_redacted) =
-        super::sanitize::sanitize_runtime_response(response, &redaction_values)
-            .map_err(PipelineError::post_transport)?;
+    let (response, response_redacted) = super::sanitize::sanitize_runtime_response(
+        response,
+        &redaction_values,
+        &service.leak_detector,
+    )
+    .map_err(PipelineError::post_transport)?;
     let (response, saved_body) = http_body::apply_body_disposition(
         response,
         save_body_to,

@@ -16,7 +16,9 @@ mod sanitizer;
 pub mod sensitive_paths;
 mod validator;
 
-pub use credential_detect::params_contain_manual_credentials;
+pub use credential_detect::{
+    http_parts_contain_manual_credentials, params_contain_manual_credentials,
+};
 pub use leak_detector::{
     LeakAction, LeakDetectionError, LeakDetector, LeakMatch, LeakPattern, LeakScanResult,
     LeakSeverity,

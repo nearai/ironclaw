@@ -7,8 +7,9 @@ use ironclaw_host_api::{
     RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
 };
 use ironclaw_network::{NetworkHttpEgress, NetworkHttpError};
+use ironclaw_safety::LeakDetector;
 use ironclaw_secrets::SecretStore;
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 
 use crate::http_body::RuntimeHttpBodyStore;
 use crate::obligations::{NetworkObligationPolicyStore, RuntimeSecretInjectionStore};
@@ -23,13 +24,34 @@ enum NetworkPolicySource {
     RequestPolicyFallbackForTests,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HostHttpEgressService<N, S> {
     pub(super) network: N,
     pub(super) secrets: S,
+    pub(super) leak_detector: Arc<LeakDetector>,
     network_policy_source: NetworkPolicySource,
     pub(super) unsafe_raw_diagnostics_allowed: bool,
     pub(super) body_store: Option<Arc<dyn RuntimeHttpBodyStore>>,
+}
+
+impl<N, S> fmt::Debug for HostHttpEgressService<N, S>
+where
+    N: fmt::Debug,
+    S: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HostHttpEgressService")
+            .field("network", &self.network)
+            .field("secrets", &self.secrets)
+            .field("leak_detector", &"<shared>")
+            .field("network_policy_source", &self.network_policy_source)
+            .field(
+                "unsafe_raw_diagnostics_allowed",
+                &self.unsafe_raw_diagnostics_allowed,
+            )
+            .field("body_store", &self.body_store)
+            .finish()
+    }
 }
 
 impl<N, S> HostHttpEgressService<N, S> {
@@ -41,6 +63,7 @@ impl<N, S> HostHttpEgressService<N, S> {
         Self {
             network,
             secrets,
+            leak_detector: Arc::new(LeakDetector::new()),
             network_policy_source: NetworkPolicySource::MissingStagedForTests,
             unsafe_raw_diagnostics_allowed: false,
             body_store: None,
@@ -56,6 +79,7 @@ impl<N, S> HostHttpEgressService<N, S> {
         Self {
             network,
             secrets,
+            leak_detector: Arc::new(LeakDetector::new()),
             network_policy_source: NetworkPolicySource::Production {
                 network_policy_store,
                 secret_injections,
@@ -75,6 +99,7 @@ impl<N, S> HostHttpEgressService<N, S> {
         Self {
             network,
             secrets,
+            leak_detector: Arc::new(LeakDetector::new()),
             network_policy_source: NetworkPolicySource::RequestPolicyFallbackForTests,
             unsafe_raw_diagnostics_allowed: false,
             body_store: None,
