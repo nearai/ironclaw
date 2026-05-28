@@ -145,6 +145,17 @@ pub struct WebuiServeConfig {
     /// flows; supply it when the host installation has a single
     /// canonical project.
     pub(crate) default_project_id: Option<ProjectId>,
+    /// Host-supplied public (unauthenticated) sub-router merged
+    /// into the composed app outside the bearer auth layer. Used
+    /// by `ironclaw_reborn_webui_ingress::webui_v2_auth_router`
+    /// to mount the WebChat v2 OAuth login surface
+    /// (`/auth/providers`, `/auth/login/{provider}`,
+    /// `/auth/callback/{provider}`, `/auth/logout`). The router
+    /// still picks up the outer security headers, CORS, panic
+    /// boundary, and global body limit, but skips the
+    /// descriptor-driven per-route middlewares since those keys
+    /// are scoped to the v2 facade. Defaults to `None`.
+    pub(crate) public_router: Option<Router>,
 }
 
 impl WebuiServeConfig {
@@ -164,7 +175,19 @@ impl WebuiServeConfig {
             canonical_host: None,
             default_agent_id: None,
             default_project_id: None,
+            public_router: None,
         }
+    }
+
+    /// Attach a host-supplied public sub-router that should be
+    /// merged into the composed app outside the bearer auth layer.
+    /// Today this is the seam
+    /// `ironclaw_reborn_webui_ingress::webui_v2_auth_router` plugs
+    /// into; future host-owned public surfaces can reuse the same
+    /// hook without re-opening composition.
+    pub fn with_public_router(mut self, router: Router) -> Self {
+        self.public_router = Some(router);
+        self
     }
 
     /// Set the canonical host for WebSocket same-origin checks. See
@@ -389,6 +412,16 @@ pub fn webui_v2_app(
                 enforce_body_limit,
             ));
         app = app.merge(public);
+    }
+    // Host-supplied public router (today: WebChat v2 OAuth login
+    // surface from `ironclaw_reborn_webui_ingress`). Merged
+    // BEFORE the outer security-header / CORS / global-body-limit
+    // layer stack so the OAuth routes inherit those defenses, but
+    // OUTSIDE the descriptor-driven per-route middlewares above —
+    // those middlewares key on v2 facade descriptors and would
+    // miss-match a host-supplied route table.
+    if let Some(public_router) = config.public_router {
+        app = app.merge(public_router);
     }
 
     let app = app

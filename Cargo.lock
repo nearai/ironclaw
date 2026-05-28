@@ -4995,6 +4995,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "http 1.4.1",
+ "http-body-util",
  "ironclaw_host_api",
  "ironclaw_reborn_composition",
  "jsonwebtoken",
@@ -5005,11 +5006,14 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "subtle",
  "thiserror 2.0.18",
  "tokio",
+ "tower 0.5.3",
  "tracing",
  "url",
+ "urlencoding",
  "uuid",
 ]
 
