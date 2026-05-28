@@ -79,7 +79,6 @@ pub(super) async fn read_file(
     read_state.write().await.record_read(
         read_scope_key(request),
         resolved.virtual_path.as_str().to_string(),
-        stat.modified,
         content_hash(&bytes),
         partial,
     );
@@ -124,11 +123,10 @@ pub(super) async fn write_file(
         .write_file(&resolved.virtual_path, content.as_bytes())
         .await
         .map_err(filesystem_error)?;
-    if let Some(stat) = stat_optional(request, &resolved.virtual_path).await? {
+    if stat_optional(request, &resolved.virtual_path).await?.is_some() {
         read_state.write().await.update_after_write(
             &scope,
             resolved.virtual_path.as_str(),
-            stat.modified,
             content_hash(content.as_bytes()),
         );
     }
@@ -323,11 +321,10 @@ pub(super) async fn apply_patch(
         .write_file(&resolved.virtual_path, &output)
         .await
         .map_err(filesystem_error)?;
-    if let Some(stat) = stat_optional(request, &resolved.virtual_path).await? {
+    if stat_optional(request, &resolved.virtual_path).await?.is_some() {
         read_state.write().await.update_after_write(
             &scope,
             resolved.virtual_path.as_str(),
-            stat.modified,
             content_hash(&output),
         );
     }

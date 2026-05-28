@@ -2,7 +2,6 @@ use std::{
     collections::HashMap,
     hash::{DefaultHasher, Hash, Hasher},
     sync::Arc,
-    time::SystemTime,
 };
 
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
@@ -65,7 +64,6 @@ pub(super) struct CodingReadScopeKey {
 
 #[derive(Debug, Clone)]
 struct CodingReadEntry {
-    modified: Option<SystemTime>,
     content_hash: String,
     partial: bool,
 }
@@ -75,14 +73,12 @@ impl CodingReadState {
         &mut self,
         scope: CodingReadScopeKey,
         path: String,
-        modified: Option<SystemTime>,
         content_hash: String,
         partial: bool,
     ) {
         self.entries.insert(
             (scope, path),
             CodingReadEntry {
-                modified,
                 content_hash,
                 partial,
             },
@@ -109,15 +105,16 @@ impl CodingReadState {
         &mut self,
         scope: &CodingReadScopeKey,
         path: &str,
-        modified: Option<SystemTime>,
         content_hash: String,
     ) {
         let key = (scope.clone(), path.to_string());
-        if let Some(entry) = self.entries.get_mut(&key) {
-            entry.modified = modified;
-            entry.content_hash = content_hash;
-            entry.partial = false;
-        }
+        self.entries.insert(
+            key,
+            CodingReadEntry {
+                content_hash,
+                partial: false,
+            },
+        );
     }
 }
 

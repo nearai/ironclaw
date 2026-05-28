@@ -3817,6 +3817,44 @@ async fn builtin_apply_patch_requires_full_fresh_read_like_v1() {
 }
 
 #[tokio::test]
+async fn builtin_apply_patch_accepts_file_content_written_by_same_scope() {
+    let temp = tempfile::tempdir().unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    invoke_with_context(
+        &runtime,
+        WRITE_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/math_utils.py", "content": "def multiply(a, b):\n    return a + b\n"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    let patched = invoke_with_context(
+        &runtime,
+        APPLY_PATCH_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/math_utils.py",
+            "old_string": "    return a + b",
+            "new_string": "    return a * b"
+        }),
+        context,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(patched["success"], json!(true));
+    assert_eq!(patched["replacements"], json!(1));
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("math_utils.py")).unwrap(),
+        "def multiply(a, b):\n    return a * b\n"
+    );
+}
+
+#[tokio::test]
 async fn builtin_apply_patch_rejects_same_second_content_changes_after_read() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(temp.path().join("code.rs"), "old\n").unwrap();
