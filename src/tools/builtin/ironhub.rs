@@ -80,7 +80,7 @@ fn classify_and_gate(
         HubEntryKind::Tool => manifest.find_tool(name).map(|t| t.provenance),
         HubEntryKind::Skill => manifest.find_skill(name).map(|s| s.provenance),
     }
-    .unwrap_or_default();
+    .unwrap_or(Provenance::New);
     if provenance.is_community_unverified() && !acknowledge_unverified {
         return Err(ToolError::InvalidParameters(format!(
             "'{name}' is UNVERIFIED community content (trust tier: {}). \

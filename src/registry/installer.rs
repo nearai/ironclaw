@@ -35,7 +35,36 @@ fn parse_extra_artifact_hosts(env_value: Option<&str>) -> Vec<String> {
         .split(',')
         .map(|h| h.trim().to_ascii_lowercase())
         .filter(|h| !h.is_empty())
+        .filter(|h| !host_is_disallowed_target(h))
         .collect()
+}
+
+fn host_is_disallowed_target(host: &str) -> bool {
+    let h = host.strip_suffix('.').unwrap_or(host);
+    let ip_form = h
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(h);
+    if ip_form.parse::<IpAddr>().is_ok() {
+        return true;
+    }
+    if h == "localhost" {
+        return true;
+    }
+    const INTERNAL_SUFFIXES: &[&str] = &[
+        ".localhost",
+        ".local",
+        ".internal",
+        ".intranet",
+        ".lan",
+        ".home",
+        ".corp",
+        ".private",
+    ];
+    if INTERNAL_SUFFIXES.iter().any(|s| h.ends_with(s)) {
+        return true;
+    }
+    !h.contains('.')
 }
 
 fn should_attempt_source_fallback(err: &RegistryError) -> bool {
@@ -96,7 +125,7 @@ pub(crate) fn validate_artifact_url(
             reason: "URL host is missing".to_string(),
         })?;
 
-    if host.parse::<IpAddr>().is_ok() || !is_allowed_artifact_host(host) {
+    if host_is_disallowed_target(host) || !is_allowed_artifact_host(host) {
         return Err(RegistryError::InvalidManifest {
             name: manifest_name.to_string(),
             field,
@@ -1464,6 +1493,19 @@ mod tests {
     }
 
     #[test]
+    fn parse_extra_artifact_hosts_filters_unsafe_targets() {
+        assert_eq!(
+            parse_extra_artifact_hosts(Some(
+                "ironhub-staging.up.railway.app, localhost, 127.0.0.1, metadata.internal, intranet, partner.example.com"
+            )),
+            vec![
+                "ironhub-staging.up.railway.app".to_string(),
+                "partner.example.com".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn extras_allow_listed_host_without_widening_const_allowlist() {
         let extras = vec!["ironhub-staging.up.railway.app".to_string()];
         assert!(is_allowed_artifact_host_with_extras(
@@ -1492,8 +1534,29 @@ mod tests {
     fn validate_artifact_url_rejects_non_https_ip_and_unknown_host() {
         assert!(validate_artifact_url("m", "f", "http://hub.ironclaw.com/x").is_err());
         assert!(validate_artifact_url("m", "f", "https://1.2.3.4/x").is_err());
+        assert!(validate_artifact_url("m", "f", "https://[::1]/x").is_err());
+        assert!(validate_artifact_url("m", "f", "https://[fd00::1]/x").is_err());
+        assert!(validate_artifact_url("m", "f", "https://localhost/x").is_err());
+        assert!(validate_artifact_url("m", "f", "https://metadata.internal/x").is_err());
+        assert!(validate_artifact_url("m", "f", "https://intranet/x").is_err());
         assert!(validate_artifact_url("m", "f", "https://evil.example.com/x").is_err());
         assert!(validate_artifact_url("m", "f", "https://hub.ironclaw.com/catalog/x.wasm").is_ok());
+    }
+
+    #[test]
+    fn host_is_disallowed_target_rejects_ip_internal_and_bare() {
+        assert!(host_is_disallowed_target("127.0.0.1"));
+        assert!(host_is_disallowed_target("169.254.169.254"));
+        assert!(host_is_disallowed_target("[::1]"));
+        assert!(host_is_disallowed_target("localhost"));
+        assert!(host_is_disallowed_target("foo.localhost"));
+        assert!(host_is_disallowed_target("svc.internal"));
+        assert!(host_is_disallowed_target("db.local"));
+        assert!(host_is_disallowed_target("intranet"));
+        assert!(host_is_disallowed_target("router.lan."));
+        assert!(!host_is_disallowed_target("hub.ironclaw.com"));
+        assert!(!host_is_disallowed_target("ironhub-staging.up.railway.app"));
+        assert!(!host_is_disallowed_target("objects.githubusercontent.com"));
     }
 
     #[test]

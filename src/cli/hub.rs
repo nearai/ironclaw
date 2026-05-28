@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::Subcommand;
 
 use crate::cli::hub_install::{hub_manifest_url_for_tag, validate_hub_name};
-use crate::registry::{HubInstaller, HubManifest, HubSkillEntry, HubToolEntry};
+use crate::registry::{HubInstaller, HubManifest, HubSkillEntry, HubToolEntry, Provenance};
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum HubCommand {
@@ -232,7 +232,7 @@ async fn install_with_manifest(
         Kind::Tool => manifest.find_tool(name).map(|t| t.provenance),
         Kind::Skill => manifest.find_skill(name).map(|s| s.provenance),
     }
-    .unwrap_or_default();
+    .unwrap_or(Provenance::New);
 
     if provenance.is_community_unverified() && !acknowledge_unverified {
         anyhow::bail!(

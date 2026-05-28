@@ -190,6 +190,9 @@ pub async fn ironhub_install_handler(
         "artifact_digest".into(),
         serde_json::Value::String(req.artifact_digest),
     );
+    // Local owner consent, deliberately outside the HMAC: the signature already binds the
+    // artifact digest, so this can only downgrade the owner's own unverified-content warning,
+    // never change which artifact installs.
     params.insert(
         "acknowledge_unverified".into(),
         serde_json::Value::Bool(req.acknowledge_unverified),

@@ -5,11 +5,11 @@ pub const DEFAULT_HUB_MANIFEST_URL: &str = "https://hub.ironclaw.com/api/catalog
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Provenance {
-    #[default]
     #[serde(alias = "repo")]
     Official,
     Trusted,
     Verified,
+    #[default]
     #[serde(alias = "community")]
     New,
 }
@@ -174,10 +174,10 @@ mod tests {
     }
 
     #[test]
-    fn provenance_defaults_to_official_when_field_absent() {
+    fn provenance_defaults_to_new_when_field_absent() {
         let manifest: HubManifest = serde_json::from_str(SAMPLE_MANIFEST).expect("valid manifest");
-        assert_eq!(manifest.tools[0].provenance, Provenance::Official);
-        assert_eq!(manifest.skills[0].provenance, Provenance::Official);
+        assert_eq!(manifest.tools[0].provenance, Provenance::New);
+        assert_eq!(manifest.skills[0].provenance, Provenance::New);
     }
 
     #[test]
