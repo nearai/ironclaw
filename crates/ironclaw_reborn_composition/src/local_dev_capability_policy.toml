@@ -44,6 +44,9 @@ effects = ["dispatch_capability", "network"]
 mounts = "ambient"
 network = "local_dev_wildcard"
 
+# The first-party shell handler still uses direct host process execution in
+# local-dev, so its filesystem/network authority intentionally mirrors the
+# previous Rust-wired ambient grant.
 [[grants]]
 capability = "builtin.shell"
 effects = [

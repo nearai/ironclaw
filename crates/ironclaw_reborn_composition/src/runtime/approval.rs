@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use ironclaw_host_api::MountView;
 use ironclaw_product_workflow::{
@@ -5,18 +7,22 @@ use ironclaw_product_workflow::{
     ProductWorkflowError,
 };
 
-use crate::local_dev_capability_policy::{
-    LocalDevApprovalPolicyAction, local_dev_capability_policy,
-};
+use crate::local_dev_capability_policy::{LocalDevApprovalPolicyAction, LocalDevCapabilityPolicy};
 
 pub(super) struct LocalDevApprovalLeaseTermsProvider {
+    policy: Arc<LocalDevCapabilityPolicy>,
     workspace_mounts: MountView,
     skill_mounts: MountView,
 }
 
 impl LocalDevApprovalLeaseTermsProvider {
-    pub(super) fn new(workspace_mounts: MountView, skill_mounts: MountView) -> Self {
+    pub(super) fn new(
+        policy: Arc<LocalDevCapabilityPolicy>,
+        workspace_mounts: MountView,
+        skill_mounts: MountView,
+    ) -> Self {
         Self {
+            policy,
             workspace_mounts,
             skill_mounts,
         }
@@ -33,15 +39,13 @@ impl ApprovalLeaseTermsProvider for LocalDevApprovalLeaseTermsProvider {
             .ok_or(ProductWorkflowError::ApprovalInteractionRejected {
                 kind: ApprovalInteractionRejectionKind::UnsupportedAction,
             })?;
-        let policy = local_dev_capability_policy().map_err(|_| {
-            ProductWorkflowError::ApprovalInteractionRejected {
-                kind: ApprovalInteractionRejectionKind::LeaseTermsUnavailable,
-            }
-        })?;
-        policy
+        self.policy
             .lease_approval_for(action, &self.workspace_mounts, &self.skill_mounts)
-            .map_err(|_| ProductWorkflowError::ApprovalInteractionRejected {
-                kind: ApprovalInteractionRejectionKind::LeaseTermsUnavailable,
+            .map_err(|error| {
+                tracing::error!(%error, "local-dev approval lease terms are unavailable");
+                ProductWorkflowError::ApprovalInteractionRejected {
+                    kind: ApprovalInteractionRejectionKind::LeaseTermsUnavailable,
+                }
             })
     }
 }

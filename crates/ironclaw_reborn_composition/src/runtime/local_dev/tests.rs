@@ -266,23 +266,29 @@ mod tests {
         .await
         .expect("local-dev-yolo services build"); // safety: test-only assertion in #[cfg(test)] module.
         let runtime = services.host_runtime.clone().expect("host runtime"); // safety: test-only assertion in #[cfg(test)] module.
-        let workspace_mounts = services
+        let local_runtime = services
             .local_runtime
             .as_ref()
-            .expect("local runtime substrate") // safety: test-only assertion in #[cfg(test)] module.
-            .workspace_mounts
-            .clone();
+            .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
+        let workspace_mounts = local_runtime.workspace_mounts.clone();
+        let skill_mounts = local_runtime.skill_mounts.clone();
+        let policy = Arc::new(
+            crate::local_dev_capability_policy::local_dev_capability_policy()
+                .expect("policy parses"),
+        );
         let capability_io = Arc::new(LocalDevCapabilityIo::default());
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
-        let factory = LocalDevLoopCapabilityPortFactory::new(
+        let factory = LocalDevLoopCapabilityPortFactory {
             runtime,
-            UserId::new("local-yolo-host-user").expect("user id"), // safety: literal test id is valid.
+            user_id: UserId::new("local-yolo-host-user").expect("user id"), // safety: literal test id is valid.
+            policy,
             workspace_mounts,
+            skill_mounts,
             input_resolver,
             result_writer,
-            Arc::new(InMemoryLoopHostMilestoneSink::default()),
-        );
+            milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        };
         let run_context = run_context("host-mount-read").await;
         let port = factory
             .create_capability_port(&run_context)

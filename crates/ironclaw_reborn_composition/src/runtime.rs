@@ -82,6 +82,7 @@ use ironclaw_turns::{
 
 use crate::default_system_prompt::DefaultSystemPromptIdentitySource;
 use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore};
+use crate::local_dev_capability_policy::local_dev_capability_policy;
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
 use crate::{RebornBuildError, RebornCompositionProfile, RebornServices, build_reborn_services};
@@ -984,9 +985,16 @@ pub async fn build_reborn_runtime(
     );
     let milestone_sink = projection_services
         .with_live_reasoning_milestone_sink(durable_milestone_sink, actor_user_id.clone());
+    let local_dev_capability_policy = Arc::new(local_dev_capability_policy().map_err(|error| {
+        tracing::error!(%error, "local-dev capability policy is invalid");
+        RebornRuntimeError::InvalidArgument {
+            reason: format!("local-dev capability policy is invalid: {error}"),
+        }
+    })?);
     let local_dev_capabilities = local_dev::capability_wiring(
         &services,
         actor_user_id.clone(),
+        Arc::clone(&local_dev_capability_policy),
         model_gateway,
         milestone_sink.clone(),
     )
@@ -1073,6 +1081,7 @@ pub async fn build_reborn_runtime(
         Arc::new(DefaultApprovalInteractionService::new(
             approval_read_model,
             Arc::new(approval::LocalDevApprovalLeaseTermsProvider::new(
+                local_dev_capability_policy,
                 local_runtime.workspace_mounts.clone(),
                 local_runtime.skill_mounts.clone(),
             )),

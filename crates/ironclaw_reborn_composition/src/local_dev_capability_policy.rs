@@ -1,4 +1,7 @@
-use std::collections::{BTreeSet, HashSet};
+use std::{
+    collections::{BTreeSet, HashSet},
+    sync::OnceLock,
+};
 
 use ironclaw_approvals::LeaseApproval;
 use ironclaw_host_api::{
@@ -29,6 +32,10 @@ pub(crate) enum LocalDevCapabilityPolicyError {
     InvalidProviderExtensionId(#[source] ironclaw_host_api::HostApiError),
     #[error("local-dev capability policy provider manifest path is empty")]
     EmptyProviderManifestPath,
+    #[error("local-dev capability policy provider manifest path must be absolute")]
+    NonAbsoluteProviderManifestPath,
+    #[error("local-dev capability policy is invalid: {reason}")]
+    CachedInvalid { reason: String },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -239,7 +246,14 @@ impl LocalDevConstraintSource for LocalDevConstraintPolicy {
 
 pub(crate) fn local_dev_capability_policy()
 -> Result<LocalDevCapabilityPolicy, LocalDevCapabilityPolicyError> {
-    parse_local_dev_capability_policy(LOCAL_DEV_CAPABILITY_POLICY_TOML)
+    static POLICY: OnceLock<Result<LocalDevCapabilityPolicy, String>> = OnceLock::new();
+    POLICY
+        .get_or_init(|| {
+            parse_local_dev_capability_policy(LOCAL_DEV_CAPABILITY_POLICY_TOML)
+                .map_err(|error| error.to_string())
+        })
+        .clone()
+        .map_err(|reason| LocalDevCapabilityPolicyError::CachedInvalid { reason })
 }
 
 fn parse_local_dev_capability_policy(
@@ -255,6 +269,9 @@ fn validate_policy(policy: &LocalDevCapabilityPolicy) -> Result<(), LocalDevCapa
         .map_err(LocalDevCapabilityPolicyError::InvalidProviderExtensionId)?;
     if policy.provider.manifest_path.trim().is_empty() {
         return Err(LocalDevCapabilityPolicyError::EmptyProviderManifestPath);
+    }
+    if !policy.provider.manifest_path.starts_with('/') {
+        return Err(LocalDevCapabilityPolicyError::NonAbsoluteProviderManifestPath);
     }
     validate_effects(
         "provider authority_effects",
@@ -319,10 +336,10 @@ fn constraint_terms(
         LocalDevNetworkProfile::LocalDevWildcard => local_dev_wildcard_network_policy(),
     };
     let mut allowed_effects = source.effects().to_vec();
-    if let Some(effect) = required_effect {
-        if !allowed_effects.contains(&effect) {
-            allowed_effects.push(effect);
-        }
+    if let Some(effect) = required_effect
+        && !allowed_effects.contains(&effect)
+    {
+        allowed_effects.push(effect);
     }
     GrantConstraints {
         allowed_effects,
@@ -378,6 +395,14 @@ mod tests {
                 .effects
                 .contains(&EffectKind::SpawnProcess)
         );
+        assert_eq!(
+            policy.approval_defaults.spawn_capability.mounts,
+            LocalDevMountProfile::Workspace
+        );
+        assert_eq!(
+            policy.approval_defaults.spawn_capability.network,
+            LocalDevNetworkProfile::Default
+        );
         assert!(
             policy
                 .grant(&CapabilityId::new("builtin.shell").expect("capability id"))
@@ -392,6 +417,55 @@ mod tests {
             policy
                 .grant(&CapabilityId::new("builtin.skill_install").expect("capability id"))
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn spawn_capability_approval_adds_required_spawn_effect_for_grants_without_it() {
+        let policy = local_dev_capability_policy().expect("policy parses");
+        let capability = CapabilityId::new("builtin.echo").expect("capability id");
+        let approval = policy
+            .lease_approval_for(
+                LocalDevApprovalPolicyAction::SpawnCapability {
+                    capability: &capability,
+                },
+                &MountView::default(),
+                &MountView::default(),
+            )
+            .expect("lease approval");
+
+        assert!(approval.allowed_effects.contains(&EffectKind::SpawnProcess));
+        assert_eq!(
+            approval
+                .allowed_effects
+                .iter()
+                .filter(|effect| **effect == EffectKind::SpawnProcess)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn spawn_capability_approval_does_not_duplicate_declared_spawn_effect() {
+        let policy = local_dev_capability_policy().expect("policy parses");
+        let capability = CapabilityId::new("builtin.shell").expect("capability id");
+        let approval = policy
+            .lease_approval_for(
+                LocalDevApprovalPolicyAction::SpawnCapability {
+                    capability: &capability,
+                },
+                &MountView::default(),
+                &MountView::default(),
+            )
+            .expect("lease approval");
+
+        assert_eq!(
+            approval
+                .allowed_effects
+                .iter()
+                .filter(|effect| **effect == EffectKind::SpawnProcess)
+                .count(),
+            1
         );
     }
 

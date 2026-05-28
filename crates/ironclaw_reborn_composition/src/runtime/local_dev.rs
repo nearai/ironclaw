@@ -31,10 +31,7 @@ use ironclaw_turns::{
     },
 };
 
-use crate::local_dev_capability_policy::{
-    LocalDevCapabilityPolicy, LocalDevCapabilityPolicyError, local_dev_capability_policy,
-};
-use crate::local_dev_mounts::skill_management_mount_view;
+use crate::local_dev_capability_policy::LocalDevCapabilityPolicy;
 use crate::{
     RebornServices,
     projection::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore},
@@ -51,6 +48,7 @@ pub(super) struct LocalDevCapabilityWiring {
 pub(super) fn capability_wiring(
     services: &RebornServices,
     user_id: UserId,
+    policy: Arc<LocalDevCapabilityPolicy>,
     model_gateway: Arc<dyn HostManagedModelGateway>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
 ) -> Option<LocalDevCapabilityWiring> {
@@ -59,19 +57,25 @@ pub(super) fn capability_wiring(
         .local_runtime
         .as_ref()
         .map(|runtime| runtime.workspace_mounts.clone())?;
+    let skill_mounts = services
+        .local_runtime
+        .as_ref()
+        .map(|runtime| runtime.skill_mounts.clone())?;
     let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
     let capability_io = Arc::new(LocalDevCapabilityIo::new(Arc::clone(&display_previews)));
     let capability_input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
     let capability_result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
     let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
-        Arc::new(LocalDevLoopCapabilityPortFactory::new(
+        Arc::new(LocalDevLoopCapabilityPortFactory {
             runtime,
             user_id,
+            policy,
             workspace_mounts,
-            Arc::clone(&capability_input_resolver),
-            Arc::clone(&capability_result_writer),
+            skill_mounts,
+            input_resolver: Arc::clone(&capability_input_resolver),
+            result_writer: Arc::clone(&capability_result_writer),
             milestone_sink,
-        ));
+        });
     let model_gateway: Arc<dyn HostManagedModelGateway> = Arc::new(
         LocalDevResultHydratingModelGateway::new(model_gateway, capability_io),
     );
@@ -89,30 +93,12 @@ pub(super) fn capability_wiring(
 struct LocalDevLoopCapabilityPortFactory {
     runtime: Arc<dyn HostRuntime>,
     user_id: UserId,
+    policy: Arc<LocalDevCapabilityPolicy>,
     workspace_mounts: MountView,
+    skill_mounts: MountView,
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
-}
-
-impl LocalDevLoopCapabilityPortFactory {
-    fn new(
-        runtime: Arc<dyn HostRuntime>,
-        user_id: UserId,
-        workspace_mounts: MountView,
-        input_resolver: Arc<dyn LoopCapabilityInputResolver>,
-        result_writer: Arc<dyn LoopCapabilityResultWriter>,
-        milestone_sink: Arc<dyn LoopHostMilestoneSink>,
-    ) -> Self {
-        Self {
-            runtime,
-            user_id,
-            workspace_mounts,
-            input_resolver,
-            result_writer,
-            milestone_sink,
-        }
-    }
 }
 
 #[async_trait::async_trait]
@@ -122,14 +108,13 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
         run_context: &LoopRunContext,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
         let workspace_mounts = self.workspace_mounts.clone();
-        let skill_mounts = skill_management_mount_view().map_err(host_api_agent_loop_error)?;
-        let policy = local_dev_capability_policy().map_err(local_dev_capability_policy_error)?;
+        let skill_mounts = self.skill_mounts.clone();
         let visible_request = local_dev_visible_capability_request(
             run_context,
             self.user_id.clone(),
             workspace_mounts.clone(),
             skill_mounts.clone(),
-            &policy,
+            &self.policy,
         )?;
         let mut factory = HostRuntimeLoopCapabilityPortFactory::new(
             Arc::clone(&self.runtime),
@@ -139,7 +124,7 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
             Arc::clone(&self.milestone_sink),
         )
         .with_execution_mounts(workspace_mounts);
-        for capability_id in policy.skill_management_capability_ids() {
+        for capability_id in self.policy.skill_management_capability_ids() {
             factory = factory
                 .with_capability_execution_mount(capability_id.clone(), skill_mounts.clone());
         }
@@ -621,13 +606,6 @@ fn local_dev_visible_capability_request(
     )
     .with_policy(CapabilitySurfacePolicy::allow_all())
     .with_provider_trust(provider_trust))
-}
-
-fn local_dev_capability_policy_error(error: LocalDevCapabilityPolicyError) -> AgentLoopHostError {
-    AgentLoopHostError::new(
-        AgentLoopHostErrorKind::Internal,
-        format!("local-dev capability policy is invalid: {error}"),
-    )
 }
 
 fn ensure_local_dev_ref_scope(
