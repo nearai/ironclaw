@@ -136,7 +136,12 @@ impl GoogleProviderTokenSink for SecretStoreGoogleTokenSink {
                     .put(scope.clone(), handle.clone(), refresh_token)
                     .await
                 {
-                    let _ = self.store.delete(&scope, &access_secret).await;
+                    if let Err(delete_error) = self.store.delete(&scope, &access_secret).await {
+                        tracing::debug!(
+                            secret_store_reason = delete_error.stable_reason(),
+                            "google oauth callback cleanup failed after refresh token write failure"
+                        );
+                    }
                     return Err(map_secret_store_error(error));
                 }
                 Some(handle)
@@ -254,7 +259,11 @@ fn google_refresh_token_handle(
     .map_err(|_| AuthProductError::BackendUnavailable)
 }
 
-fn map_secret_store_error(_error: ironclaw_secrets::SecretStoreError) -> AuthProductError {
+fn map_secret_store_error(error: ironclaw_secrets::SecretStoreError) -> AuthProductError {
+    tracing::debug!(
+        secret_store_reason = error.stable_reason(),
+        "google oauth secret store operation failed"
+    );
     AuthProductError::BackendUnavailable
 }
 

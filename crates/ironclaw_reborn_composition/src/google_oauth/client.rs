@@ -169,6 +169,9 @@ impl AuthProviderClient for GoogleProviderClient {
             save_body_to: None,
             timeout_ms: Some(self.timeout_ms),
         };
+        // Production host egress requires the policy staged above for this
+        // scope/capability. The request-carried policy is only a legacy/test
+        // fallback and must not be treated as authority on the production path.
         let response = tokio::task::spawn_blocking(move || egress.execute(egress_request))
             .await
             .map_err(|_| AuthProductError::BackendUnavailable)?;
@@ -250,6 +253,9 @@ impl AuthProviderClient for GoogleProviderClient {
             save_body_to: None,
             timeout_ms: Some(self.timeout_ms),
         };
+        // Production host egress requires the policy staged above for this
+        // scope/capability. The request-carried policy is only a legacy/test
+        // fallback and must not be treated as authority on the production path.
         let response = tokio::task::spawn_blocking(move || egress.execute(egress_request))
             .await
             .map_err(|_| AuthProductError::BackendUnavailable)?;

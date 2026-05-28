@@ -402,6 +402,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn google_provider_fails_closed_when_policy_is_not_staged() {
+        let network = RecordingNetwork::google_token_response();
+        let network_requests = network.requests_handle();
+        let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+        let services = test_host_runtime_services()
+            .with_secret_store_dyn(Arc::clone(&secret_store))
+            .try_with_host_http_egress(network)
+            .expect("host egress should wire with graph secret store");
+        let runtime_ports = services
+            .product_auth_provider_runtime_ports()
+            .expect("runtime ports");
+        let client = GoogleProviderClient::new(
+            runtime_ports.runtime_http_egress(),
+            Arc::new(RecordingTokenSink::new(
+                SecretHandle::new("google-access-secret").expect("valid handle"),
+                None,
+            )),
+            Arc::new(NoopPolicyAuthorizer),
+            OAuthClientId::new("google-client-123").expect("client id"),
+            OAuthRedirectUri::new("https://app.example/oauth/callback").expect("redirect uri"),
+        )
+        .expect("client");
+
+        let error = client
+            .exchange_callback(
+                exchange_context(scope("google-provider-policy-missing"), AuthFlowId::new()),
+                callback_request(google_provider(), label("work gmail")),
+            )
+            .await
+            .expect_err("unstaged policy must fail closed");
+
+        assert_eq!(error, AuthProductError::BackendUnavailable);
+        assert!(
+            network_requests
+                .lock()
+                .expect("network requests")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
     async fn google_provider_sanitizes_provider_errors() {
         let egress = Arc::new(RecordingEgress::ok(RuntimeHttpEgressResponse {
             status: 400,
@@ -1593,6 +1634,20 @@ mod tests {
             _policy: &NetworkPolicy,
         ) -> Result<(), AuthProductError> {
             Err(AuthProductError::BackendUnavailable)
+        }
+    }
+
+    struct NoopPolicyAuthorizer;
+
+    #[async_trait]
+    impl GoogleProviderEgressPolicyAuthorizer for NoopPolicyAuthorizer {
+        async fn authorize_google_token_exchange(
+            &self,
+            _scope: &ResourceScope,
+            _capability_id: &CapabilityId,
+            _policy: &NetworkPolicy,
+        ) -> Result<(), AuthProductError> {
+            Ok(())
         }
     }
 

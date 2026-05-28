@@ -75,39 +75,57 @@ impl GsuiteExecutor {
             .await
             .map_err(map_credential_error)?;
         let execution = capability_execution(capability, request.input)?;
-        let (mut response, mut network_egress_bytes) = execution
+        let (response, network_egress_bytes) = match execution
             .execute(&request, credential.access_secret)
-            .await?;
-        if is_google_auth_expired_response(&response) {
-            self.resolver
-                .refresh(request.scope, &extension, credential.account_id)
-                .await
-                .map_err(|error| {
-                    add_network_usage(map_credential_error(error), network_egress_bytes)
-                })?;
-            let refreshed = self
-                .resolver
-                .resolve_account(request.scope, &extension, credential.account_id, &scopes)
-                .await
-                .map_err(|error| {
-                    add_network_usage(map_credential_error(error), network_egress_bytes)
-                })?;
-            let retry_execution = capability_execution(capability, request.input)?;
-            let (retry_response, retry_network_egress_bytes) = retry_execution
-                .execute(&request, refreshed.access_secret)
-                .await
-                .map_err(|error| add_network_usage(error, network_egress_bytes))?;
-            network_egress_bytes = network_egress_bytes.saturating_add(retry_network_egress_bytes);
-            if is_google_auth_expired_response(&retry_response) {
-                return Err(GsuiteDispatchError::new(RuntimeDispatchErrorKind::Backend)
-                    .with_reason(GsuiteCredentialDispatchReason::BackendAuth)
-                    .with_usage(ResourceUsage {
-                        network_egress_bytes,
-                        ..ResourceUsage::default()
-                    }));
+            .await?
+        {
+            CapabilityExecutionOutcome::Response {
+                response,
+                network_egress_bytes,
+            } => (response, network_egress_bytes),
+            CapabilityExecutionOutcome::AuthExpired {
+                network_egress_bytes,
+            } => {
+                self.resolver
+                    .refresh(request.scope, &extension, credential.account_id)
+                    .await
+                    .map_err(|error| {
+                        add_network_usage(map_credential_error(error), network_egress_bytes)
+                    })?;
+                let refreshed = self
+                    .resolver
+                    .resolve_account(request.scope, &extension, credential.account_id, &scopes)
+                    .await
+                    .map_err(|error| {
+                        add_network_usage(map_credential_error(error), network_egress_bytes)
+                    })?;
+                let retry_execution = capability_execution(capability, request.input)?;
+                match retry_execution
+                    .execute(&request, refreshed.access_secret)
+                    .await
+                    .map_err(|error| add_network_usage(error, network_egress_bytes))?
+                {
+                    CapabilityExecutionOutcome::Response {
+                        response,
+                        network_egress_bytes: retry_network_egress_bytes,
+                    } => (
+                        response,
+                        network_egress_bytes.saturating_add(retry_network_egress_bytes),
+                    ),
+                    CapabilityExecutionOutcome::AuthExpired {
+                        network_egress_bytes: retry_network_egress_bytes,
+                    } => {
+                        return Err(GsuiteDispatchError::new(RuntimeDispatchErrorKind::Backend)
+                            .with_reason(GsuiteCredentialDispatchReason::BackendAuth)
+                            .with_usage(ResourceUsage {
+                                network_egress_bytes: network_egress_bytes
+                                    .saturating_add(retry_network_egress_bytes),
+                                ..ResourceUsage::default()
+                            }));
+                    }
+                }
             }
-            response = retry_response;
-        }
+        };
         let output = response_output(&response)?;
         let wall_clock_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
         let output_bytes = serde_json::to_vec(&output)
@@ -195,12 +213,22 @@ enum CapabilityExecution {
     AddAttendees(CalendarAddAttendeesInput),
 }
 
+enum CapabilityExecutionOutcome {
+    Response {
+        response: ironclaw_host_api::RuntimeHttpEgressResponse,
+        network_egress_bytes: u64,
+    },
+    AuthExpired {
+        network_egress_bytes: u64,
+    },
+}
+
 impl CapabilityExecution {
     async fn execute(
         self,
         request: &GsuiteDispatchRequest<'_>,
         access_secret: ironclaw_host_api::SecretHandle,
-    ) -> Result<(ironclaw_host_api::RuntimeHttpEgressResponse, u64), GsuiteDispatchError> {
+    ) -> Result<CapabilityExecutionOutcome, GsuiteDispatchError> {
         match self {
             Self::Single { method, url, body } => {
                 let response = execute_runtime_http(
@@ -209,7 +237,7 @@ impl CapabilityExecution {
                 )
                 .await?;
                 let network_egress_bytes = response.request_bytes;
-                Ok((response, network_egress_bytes))
+                Ok(response_outcome(response, network_egress_bytes))
             }
             Self::AddAttendees(input) => execute_add_attendees(request, access_secret, input).await,
         }
@@ -220,7 +248,7 @@ async fn execute_add_attendees(
     request: &GsuiteDispatchRequest<'_>,
     access_secret: ironclaw_host_api::SecretHandle,
     input: CalendarAddAttendeesInput,
-) -> Result<(ironclaw_host_api::RuntimeHttpEgressResponse, u64), GsuiteDispatchError> {
+) -> Result<CapabilityExecutionOutcome, GsuiteDispatchError> {
     let url = input.event_path.url();
     let current_response = execute_runtime_http(
         runtime_request(
@@ -235,7 +263,9 @@ async fn execute_add_attendees(
     .await?;
     let mut network_egress_bytes = current_response.request_bytes;
     if is_google_auth_expired_response(&current_response) {
-        return Ok((current_response, network_egress_bytes));
+        return Ok(CapabilityExecutionOutcome::AuthExpired {
+            network_egress_bytes,
+        });
     }
     let current = response_body_json(&current_response)
         .map_err(|error| add_network_usage(error, network_egress_bytes))?;
@@ -260,7 +290,23 @@ async fn execute_add_attendees(
         .await
         .map_err(|error| add_network_usage(error, network_egress_bytes))?;
     network_egress_bytes = network_egress_bytes.saturating_add(response.request_bytes);
-    Ok((response, network_egress_bytes))
+    Ok(response_outcome(response, network_egress_bytes))
+}
+
+fn response_outcome(
+    response: ironclaw_host_api::RuntimeHttpEgressResponse,
+    network_egress_bytes: u64,
+) -> CapabilityExecutionOutcome {
+    if is_google_auth_expired_response(&response) {
+        CapabilityExecutionOutcome::AuthExpired {
+            network_egress_bytes,
+        }
+    } else {
+        CapabilityExecutionOutcome::Response {
+            response,
+            network_egress_bytes,
+        }
+    }
 }
 
 async fn execute_runtime_http(
