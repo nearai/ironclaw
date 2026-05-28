@@ -273,8 +273,10 @@ export function gatewayStatus() {
 // `ironclaw_reborn_webui_ingress` at the same origin as the SPA. The
 // providers endpoint is public; the login + callback routes are
 // reached via `<a href>` navigations from the login page (the SPA
-// does not invoke them via fetch). Logout sends the current bearer
-// so the server-side session can be revoked.
+// does not invoke them via fetch). The callback redirects back with
+// a short-lived `login_ticket`; the SPA exchanges it over same-origin
+// JSON for the real bearer. Logout sends the current bearer so the
+// server-side session can be revoked.
 
 export async function fetchAuthProviders() {
   // Unauthenticated GET — the server returns `{ providers: [] }`
@@ -297,6 +299,36 @@ export async function fetchAuthProviders() {
     // accepts manual token paste.
     return { providers: [] };
   }
+}
+
+export async function exchangeLoginTicket(ticket) {
+  const response = await fetch("/auth/session/exchange", {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    credentials: "same-origin",
+    body: JSON.stringify({ ticket }),
+  });
+  if (!response.ok) {
+    throw new ApiError("Could not complete sign-in.", {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
+  }
+  const data = await response.json();
+  const token = (data?.token || "").trim();
+  if (!token) {
+    throw new ApiError("Sign-in response did not include a token.", {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+      payload: data,
+    });
+  }
+  return token;
 }
 
 export async function logout() {

@@ -10,7 +10,9 @@
 //! - `GET  /auth/callback/{provider}` — exchange the code, resolve
 //!   the user through [`UserDirectory`], create a session via
 //!   [`SessionStore`](crate::SessionStore), and land the browser on
-//!   the SPA with the bearer token in the URL fragment.
+//!   the SPA with a one-time exchange ticket.
+//! - `POST /auth/session/exchange` — consume the one-time ticket and
+//!   return the bearer over same-origin JSON.
 //! - `POST /auth/logout` — revoke the current session.
 //!
 //! The crate ships a Google provider only at the moment; GitHub and

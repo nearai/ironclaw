@@ -56,7 +56,12 @@ Routes mounted by `webui_v2_auth_router`:
   cross-provider replay guard, code exchange via the matching
   `OAuthProvider`, user resolution via `UserDirectory`, session
   mint via `SessionStore`, and redirect to
-  `{redirect_after}#token=<bearer>` (default `/v2`).
+  `{redirect_after}?login_ticket=<ticket>` (default `/v2`). The
+  ticket is short-lived and single-use; the SPA redeems it over
+  same-origin JSON so the bearer never appears in a redirect
+  `Location` header.
+- `POST /auth/session/exchange` — consume the one-time login ticket
+  and return `{ token }`.
 - `POST /auth/logout` — bearer-protected; calls
   `SessionStore::revoke` and returns `204` on success or when no
   bearer is present, `500` if revocation fails, so the SPA's local
@@ -96,6 +101,11 @@ pub trait OAuthProvider: Send + Sync + 'static {
   5-min TTL), and single-use on `take`. A replayed callback cannot
   re-use a state token; cross-provider replay (state minted for
   Google arriving on a future GitHub callback) fails closed.
+- **Session exchange tickets** are process-local, bounded (1024
+  entries + 60-sec TTL), and single-use on `take`. The OAuth
+  callback puts only the ticket in the redirect `Location`; the SPA
+  redeems it via `POST /auth/session/exchange` to receive the real
+  bearer over a same-origin JSON response.
 - **CSRF state** is 32 random bytes (hex). **PKCE verifier** is 32
   random bytes (base64url-no-pad → 43 chars). S256 challenge is
   `base64url_no_pad(sha256(verifier))`.
@@ -112,14 +122,16 @@ pub trait OAuthProvider: Send + Sync + 'static {
   `invalid_request`). Provider error bodies, JWT decode messages,
   and SessionStore errors are logged via `tracing` and never
   echoed back to the client.
-- **Session transport** is bearer in URL fragment
-  (`#token=<bearer>`) — see
+- **Session transport** is one-time login ticket in the callback
+  redirect (`?login_ticket=<ticket>`) followed by same-origin
+  exchange for the bearer — see
   `ironclaw_reborn_composition/CLAUDE.md` → "Session transport
   decision" for the rationale.
 
 ### What the SSO router deliberately does NOT do
 
-- No cookie writes (the SPA stores the bearer in `sessionStorage`).
+- No cookie writes (the SPA stores the exchanged bearer in
+  `sessionStorage`).
 - No DB schema. `UserDirectory` is host-supplied; the crate ships
   only the local-dev `EmailUserDirectory`.
 - No retry / refresh-token handling. The callback is one-shot:
@@ -137,10 +149,10 @@ pub trait OAuthProvider: Send + Sync + 'static {
 - `tests/google_oauth_routes.rs` — caller-level tests on
   `webui_v2_auth_router` covering provider discovery, login
   redirect, callback success, state replay, open-redirect bypass,
-  provider error, hd denial, logout revocation.
+  provider error, hd denial, ticket exchange, logout revocation.
 - `tests/session_round_trip.rs` — end-to-end test composing
   `webui_v2_app` with `SessionAuthenticator` + the OAuth router;
-  drives an OAuth callback, uses the resulting bearer on
+  drives an OAuth callback, exchanges the resulting ticket, uses the bearer on
   `POST /api/webchat/v2/threads`, then revokes and verifies the
   bearer is rejected. This locks the contract called out in
   #4116's acceptance criteria ("session use on a protected

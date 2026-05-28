@@ -5,12 +5,14 @@
 //! `/auth/callback/{provider}` before it has a session, so the
 //! bearer-auth middleware must not run in front of them.
 //!
-//! `/auth/logout` accepts an `Authorization: Bearer <token>` header
-//! (the session token the SPA stored after a previous callback) and
-//! revokes the underlying session record. Composition mounts it in
-//! the SAME public group as the login routes for symmetry — logout
-//! has its own per-route bearer check inside the handler so a bare
-//! request without a header is harmless.
+//! `/auth/session/exchange` consumes the one-time login ticket the
+//! callback placed in the redirect URL and returns the real session
+//! bearer over a same-origin JSON response. `/auth/logout` accepts an
+//! `Authorization: Bearer <token>` header (the session token the SPA
+//! stored after exchange) and revokes the underlying session record.
+//! Composition mounts these in the SAME public group as the login
+//! routes for symmetry — logout and exchange have their own per-route
+//! checks inside the handlers so a bare request is harmless.
 
 use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::Arc;
@@ -33,14 +35,14 @@ use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 
 use super::error::OAuthError;
-use super::pending::{PendingFlowStore, sanitize_redirect};
+use super::pending::{PendingFlowStore, SessionTicketStore, sanitize_redirect};
 use super::provider::OAuthProvider;
 use super::provider_name::OAuthProviderName;
 use super::user_directory::{UserDirectory, UserDirectoryError};
 use crate::session::SessionStore;
 
 /// Default landing page after a successful OAuth callback. The SPA
-/// reads `#token=` from the fragment and stores it in sessionStorage.
+/// reads `?login_ticket=` and exchanges it for a bearer.
 const DEFAULT_REDIRECT_AFTER: &str = "/v2";
 
 /// Default session lifetime (30 days). Matches the v1 gateway's
@@ -98,6 +100,7 @@ struct RouterState {
     base_url: String,
     session_lifetime: ChronoDuration,
     pending: PendingFlowStore,
+    session_tickets: SessionTicketStore,
 }
 
 impl RouterState {
@@ -120,16 +123,18 @@ type RouterStateHandle = Arc<RouterState>;
 const PATH_PROVIDERS: &str = "/auth/providers";
 const PATH_LOGIN: &str = "/auth/login/{provider}";
 const PATH_CALLBACK: &str = "/auth/callback/{provider}";
+const PATH_SESSION_EXCHANGE: &str = "/auth/session/exchange";
 const PATH_LOGOUT: &str = "/auth/logout";
 
 const ROUTE_ID_PROVIDERS: &str = "webui.sso.providers";
 const ROUTE_ID_LOGIN: &str = "webui.sso.login";
 const ROUTE_ID_CALLBACK: &str = "webui.sso.callback";
+const ROUTE_ID_SESSION_EXCHANGE: &str = "webui.sso.session_exchange";
 const ROUTE_ID_LOGOUT: &str = "webui.sso.logout";
 
-/// Maximum logout body size. The handler doesn't read a body — the
-/// bearer comes from the `Authorization` header — but a tight cap
-/// still bounds an oversized POST before the handler runs.
+/// Maximum session-exchange/logout body size. The exchange handler
+/// reads only `{ "ticket": "..." }`; logout doesn't read a body, but
+/// a tight cap still bounds oversized POSTs before handlers run.
 const LOGOUT_BODY_LIMIT_BYTES: NonZeroU64 = NonZeroU64::new(1024).expect("1024 != 0"); // safety: const-evaluated, literal non-zero
 
 /// Per-IP rate-limit window shared across every public SSO route.
@@ -146,6 +151,9 @@ const SSO_LOGIN_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(60).expect("60 != 0")
 /// Callbacks consume cache entries. Same per-IP cap as login so a
 /// flood of fake callbacks cannot starve real ones.
 const SSO_CALLBACK_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(60).expect("60 != 0"); // safety: const-evaluated, literal non-zero
+/// Session-ticket exchanges are single-use and cheap. Keep the same
+/// cap as login/callback so a brute-force loop cannot run unbounded.
+const SSO_EXCHANGE_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(60).expect("60 != 0"); // safety: const-evaluated, literal non-zero
 /// Logout. Per-IP, generous, because a sign-out blip should not 429.
 const SSO_LOGOUT_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(60).expect("60 != 0"); // safety: const-evaluated, literal non-zero
 
@@ -161,12 +169,14 @@ pub fn webui_v2_auth_router(config: OAuthRouterConfig) -> PublicRouteMount {
         base_url: config.base_url,
         session_lifetime: config.session_lifetime,
         pending: PendingFlowStore::new(),
+        session_tickets: SessionTicketStore::new(),
     });
 
     let router = axum::Router::new()
         .route(PATH_PROVIDERS, get(providers_handler))
         .route(PATH_LOGIN, get(login_handler))
         .route(PATH_CALLBACK, get(callback_handler))
+        .route(PATH_SESSION_EXCHANGE, post(session_exchange_handler))
         .route(PATH_LOGOUT, post(logout_handler))
         .with_state(state);
 
@@ -201,6 +211,17 @@ fn sso_route_descriptors() -> Vec<IngressRouteDescriptor> {
             // unauthenticated OAuth callback. Mirrors the existing
             // product-auth callback policy.
             callback_policy(SSO_CALLBACK_MAX_REQUESTS),
+        ),
+        descriptor(
+            ROUTE_ID_SESSION_EXCHANGE,
+            NetworkMethod::Post,
+            PATH_SESSION_EXCHANGE,
+            public_policy(
+                BodyLimitPolicy::Limited {
+                    max_bytes: LOGOUT_BODY_LIMIT_BYTES,
+                },
+                SSO_EXCHANGE_MAX_REQUESTS,
+            ),
         ),
         descriptor(
             ROUTE_ID_LOGOUT,
@@ -361,7 +382,7 @@ struct CallbackParams {
 
 /// `GET /auth/callback/{provider}` — handle the provider's callback,
 /// exchange the code, resolve the user, issue a session, redirect
-/// back to the SPA with the session token in the URL fragment.
+/// back to the SPA with a one-time exchange ticket in the URL query.
 async fn callback_handler(
     State(state): State<RouterStateHandle>,
     Path(raw_provider): Path<String>,
@@ -474,8 +495,42 @@ async fn callback_handler(
         .redirect_after
         .as_deref()
         .unwrap_or(DEFAULT_REDIRECT_AFTER);
-    let location = build_success_redirect(redirect_after, bearer.expose_secret());
+    let ticket = state.session_tickets.insert(bearer);
+    let location = build_success_redirect(redirect_after, &ticket);
     Redirect::to(&location).into_response()
+}
+
+// ─── /auth/session/exchange ───────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct SessionExchangeRequest {
+    ticket: String,
+}
+
+#[derive(Serialize)]
+struct SessionExchangeResponse {
+    token: String,
+}
+
+/// `POST /auth/session/exchange` — consume a short-lived one-time
+/// ticket produced by the OAuth callback and return the real session
+/// bearer. This keeps the bearer out of redirect `Location` headers
+/// while preserving the existing SPA bearer/sessionStorage model.
+async fn session_exchange_handler(
+    State(state): State<RouterStateHandle>,
+    Json(request): Json<SessionExchangeRequest>,
+) -> Response {
+    let ticket = request.ticket.trim();
+    if ticket.is_empty() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Some(bearer) = state.session_tickets.take(ticket) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    Json(SessionExchangeResponse {
+        token: bearer.expose_secret().to_string(),
+    })
+    .into_response()
 }
 
 // ─── /auth/logout ─────────────────────────────────────────────────────
@@ -534,18 +589,24 @@ fn extract_bearer(headers: &axum::http::HeaderMap) -> Option<String> {
     }
 }
 
-/// Build the success redirect URL: `<redirect_after>#token=<bearer>`.
-/// The fragment is the SPA's contract — `app/auth.js::consumeTokenFromUrl`
-/// reads it on load. Fragments are never sent to the server in
-/// subsequent navigation, so the bearer cannot leak through HTTP
-/// access logs or `Referer` headers.
-fn build_success_redirect(redirect_after: &str, bearer: &str) -> String {
+/// Build the success redirect URL:
+/// `<redirect_after>?login_ticket=<ticket>` (or `&login_ticket=...`
+/// if `redirect_after` already carries a query string). The ticket is
+/// short-lived and single-use; the bearer never appears in a redirect
+/// `Location` header.
+fn build_success_redirect(redirect_after: &str, ticket: &str) -> String {
     // `redirect_after` was already validated by `sanitize_redirect`
-    // to start with `/` and to contain only RFC-3986 path chars.
-    // Encode the bearer to be safe inside the fragment (uuid v4
-    // strings are already URL-safe, but a future SessionStore impl
-    // might mint a different shape).
-    format!("{redirect_after}#token={}", urlencoding::encode(bearer))
+    // to start with `/`, contain only RFC-3986 path/query chars, and
+    // exclude fragments.
+    let separator = if redirect_after.contains('?') {
+        '&'
+    } else {
+        '?'
+    };
+    format!(
+        "{redirect_after}{separator}login_ticket={}",
+        urlencoding::encode(ticket)
+    )
 }
 
 /// Build a redirect back to the SPA login route with an opaque error

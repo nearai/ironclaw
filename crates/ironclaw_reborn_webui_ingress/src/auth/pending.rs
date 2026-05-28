@@ -1,11 +1,15 @@
-//! In-memory store of pending OAuth flows awaiting callback.
+//! In-memory stores for pending OAuth flows and one-time session
+//! exchange tickets.
 //!
 //! Each `/auth/login/{provider}` request mints a CSRF state token
 //! plus a PKCE code verifier and persists them under the state
 //! token. The callback handler atomically `take`s the entry by
 //! state, validates the provider name matches the
 //! authorization-stage provider, exchanges the code with the PKCE
-//! verifier, and discards the entry.
+//! verifier, mints a server-side session, then stores that session
+//! bearer behind a short-lived one-time ticket. The browser receives
+//! only the ticket in the redirect URL and redeems it via
+//! `/auth/session/exchange`.
 //!
 //! Bounded (capacity cap + TTL) so a flood of unauthenticated
 //! `/auth/login` calls cannot grow the map unbounded — the cap is
@@ -36,6 +40,12 @@ use super::provider_name::OAuthProviderName;
 const STATE_TTL: Duration = Duration::from_secs(300);
 /// Hard cap on pending-flow entries to bound memory under flood.
 const MAX_PENDING_STATES: usize = 1024;
+/// Session exchange tickets live only long enough for the SPA to
+/// finish loading and POST the ticket back to the same-origin host.
+const SESSION_TICKET_TTL: Duration = Duration::from_secs(60);
+/// Hard cap on session tickets to bound memory if callbacks are
+/// completed but tickets are never redeemed.
+const MAX_SESSION_TICKETS: usize = 1024;
 
 /// A pending OAuth flow awaiting callback completion. The
 /// `code_verifier` is wrapped in [`SecretString`] so accidental
@@ -160,6 +170,58 @@ impl PendingFlowStore {
     }
 }
 
+pub(super) struct SessionTicket {
+    bearer: SecretString,
+    created_at: Instant,
+}
+
+/// One-time, short-lived bearer exchange store. The OAuth callback
+/// returns only the random ticket in the redirect `Location`; the SPA
+/// redeems it once via `/auth/session/exchange` to receive the real
+/// bearer over a same-origin JSON response.
+#[derive(Default)]
+pub(super) struct SessionTicketStore {
+    inner: Mutex<HashMap<String, SessionTicket>>,
+}
+
+impl SessionTicketStore {
+    pub(super) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(super) fn insert(&self, bearer: SecretString) -> String {
+        let ticket = mint_state_token();
+        let entry = SessionTicket {
+            bearer,
+            created_at: Instant::now(),
+        };
+
+        let mut guard = self.inner.lock();
+        if guard.len() >= MAX_SESSION_TICKETS {
+            guard.retain(|_, ticket| ticket.created_at.elapsed() < SESSION_TICKET_TTL);
+        }
+        if guard.len() >= MAX_SESSION_TICKETS
+            && let Some(oldest) = guard
+                .iter()
+                .min_by_key(|(_, ticket)| ticket.created_at)
+                .map(|(k, _)| k.clone())
+        {
+            guard.remove(&oldest);
+        }
+        guard.insert(ticket.clone(), entry);
+        ticket
+    }
+
+    pub(super) fn take(&self, ticket: &str) -> Option<SecretString> {
+        let mut guard = self.inner.lock();
+        let entry = guard.remove(ticket)?;
+        if entry.created_at.elapsed() >= SESSION_TICKET_TTL {
+            return None;
+        }
+        Some(entry.bearer)
+    }
+}
+
 /// Mint a 32-byte hex CSRF state token. Hex (not base64) so it round-
 /// trips cleanly through URL query parameters without escaping.
 fn mint_state_token() -> String {
@@ -174,14 +236,10 @@ fn mint_state_token() -> String {
 /// a `#` fragment marker.
 ///
 /// `#` is deliberately rejected because the OAuth success redirect
-/// concatenates the bearer as `{redirect_after}#token=<bearer>`. A
-/// caller-supplied `redirect_after` carrying its own `#…` would
-/// produce `…#user_fragment#token=<bearer>`, which the SPA's
-/// `URLSearchParams` parses as `token=user_fragment#token=<bearer>`
-/// — the user gets stuck on a malformed bearer rather than being
-/// logged in. Not an exfiltration path (the real bearer never
-/// reaches the attacker), but a clean DoS we can close at the
-/// boundary. The percent-decoded form is also checked so `%23`
+/// appends `?login_ticket=<ticket>` / `&login_ticket=<ticket>` to the
+/// validated path. A caller-supplied fragment would not be sent back
+/// to the server, and it would also leave the SPA on a confusing
+/// post-login URL. The percent-decoded form is also checked so `%23`
 /// smuggling fails.
 pub(super) fn sanitize_redirect(input: Option<String>) -> Option<String> {
     input.filter(|raw| is_safe_redirect(raw))
@@ -328,6 +386,38 @@ mod tests {
     }
 
     #[test]
+    fn session_ticket_is_single_use() {
+        let store = SessionTicketStore::new();
+        let ticket = store.insert(SecretString::from("bearer-1".to_string()));
+
+        let first = store.take(&ticket).expect("ticket present");
+        assert_eq!(first.expose_secret(), "bearer-1");
+        assert!(store.take(&ticket).is_none(), "ticket must be consumed");
+    }
+
+    #[test]
+    fn expired_session_ticket_returns_none_and_is_removed() {
+        let store = SessionTicketStore::new();
+        let ticket = "expired-ticket".to_string();
+        {
+            let mut guard = store.inner.lock();
+            guard.insert(
+                ticket.clone(),
+                SessionTicket {
+                    bearer: SecretString::from("expired-bearer".to_string()),
+                    created_at: Instant::now() - SESSION_TICKET_TTL - Duration::from_secs(1),
+                },
+            );
+        }
+
+        assert!(store.take(&ticket).is_none());
+        assert!(
+            !store.inner.lock().contains_key(&ticket),
+            "expired ticket must be removed after take",
+        );
+    }
+
+    #[test]
     fn safe_redirects_pass_validation() {
         assert!(is_safe_redirect("/"));
         assert!(is_safe_redirect("/v2"));
@@ -352,10 +442,10 @@ mod tests {
         assert!(!is_safe_redirect("/%0d%0aLocation:%20https://evil.example"));
     }
 
-    // Regression: `#` in the caller-supplied redirect would collide
-    // with the OAuth success transport (`/v2#token=<bearer>`) and
-    // strand the user on a malformed token. Reject both raw and
-    // percent-encoded forms.
+    // Regression: fragments in the caller-supplied redirect would
+    // leave the user on a confusing post-login URL, and would not be
+    // visible to the server. Reject both raw and percent-encoded
+    // forms.
     #[test]
     fn redirects_with_fragment_marker_are_blocked() {
         assert!(!is_safe_redirect("/v2#token=fake"));

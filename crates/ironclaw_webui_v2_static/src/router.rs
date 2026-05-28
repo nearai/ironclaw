@@ -488,12 +488,12 @@ mod tests {
         }
     }
 
-    // Locks the WebChat v2 SSO fragment-token contract documented
+    // Locks the WebChat v2 SSO login-ticket contract documented
     // in `app/auth.js` (issue #4116 review finding #11). The
     // user-visible OAuth login path is "callback redirects to
-    // `/v2#token=<bearer>` → SPA consumes the fragment → stores
-    // bearer in sessionStorage → strips the token from the URL →
-    // refuses to overwrite an existing stored token".
+    // `/v2?login_ticket=<ticket>` → SPA strips the ticket from the
+    // URL → exchanges it via `/auth/session/exchange` → stores the
+    // returned bearer in sessionStorage".
     //
     // No JS test runner ships in this workspace and a real
     // Playwright e2e for the OAuth flow requires Google
@@ -504,33 +504,31 @@ mod tests {
     // belong on a follow-up e2e once the SSO mount is wired into
     // a real binary.
     #[test]
-    fn auth_js_carries_fragment_token_contract() {
+    fn auth_js_carries_login_ticket_contract() {
         let asset =
             assets::lookup("js/app/auth.js").expect("auth.js must be in the embedded asset table");
         let source = std::str::from_utf8(asset.bytes).expect("auth.js is UTF-8");
 
-        // 1. Reads the fragment token via URLSearchParams keyed on
-        //    the `token` name — proves the OAuth callback's
-        //    `#token=...` transport is decoded.
+        // 1. Reads and strips the one-time login ticket from the
+        //    query string before exchanging it for the bearer.
         assert!(
-            source.contains("readFragmentParam"),
-            "auth.js must expose a fragment reader; got:\n{source}",
+            source.contains("consumeLoginTicketFromUrl"),
+            "auth.js must consume login tickets; got:\n{source}",
         );
         assert!(
-            source.contains("new URLSearchParams"),
-            "fragment reader must parse via URLSearchParams",
+            source.contains("login_ticket"),
+            "auth.js must read the login_ticket query param",
+        );
+        assert!(
+            source.contains("exchangeLoginTicket"),
+            "auth.js must exchange the login ticket for a bearer",
         );
 
-        // 2. Strips the consumed token from both the query and the
-        //    fragment via `history.replaceState`, so a copy-pasted
-        //    address bar does not leak the bearer.
+        // 2. Strips consumed URL credentials via `history.replaceState`,
+        //    so a copy-pasted address bar does not leak them.
         assert!(
             source.contains("history.replaceState"),
             "auth.js must call history.replaceState to clean the URL",
-        );
-        assert!(
-            source.contains("stripFragmentParam"),
-            "auth.js must strip the token from the fragment too",
         );
 
         // 3. Refuses to overwrite an existing stored token —

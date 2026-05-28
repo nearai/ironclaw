@@ -14,10 +14,11 @@
 //!   `create_thread` for the round-trip assertion.
 //!
 //! The chain it locks: OAuth callback → SessionStore::create_session
-//! → bearer in `#token=` → SessionAuthenticator → v2 route handler
-//! → facade call. A regression that loses any link (e.g. store
-//! mismatch, bearer encoding drift, missing user_id stamp) would
-//! break exactly the path users hit when they sign in with Google.
+//! → one-time `login_ticket` exchange → SessionAuthenticator → v2
+//! route handler → facade call. A regression that loses any link
+//! (e.g. store mismatch, bearer exchange drift, missing user_id
+//! stamp) would break exactly the path users hit when they sign in
+//! with Google.
 
 #![cfg(feature = "dev-in-memory-session")]
 
@@ -30,6 +31,7 @@ use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use chrono::Duration as ChronoDuration;
+use http_body_util::BodyExt;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_workflow::{
     ExtensionName, LifecyclePhase, RebornCancelRunResponse, RebornCreateThreadResponse,
@@ -50,6 +52,7 @@ use ironclaw_reborn_webui_ingress::{
 };
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 use parking_lot::Mutex as PlMutex;
+use serde::Deserialize;
 use tower::ServiceExt;
 
 const TENANT: &str = "tenant-a";
@@ -313,8 +316,8 @@ async fn session_minted_via_oauth_callback_authenticates_protected_v2_route() {
         .to_string();
     let state = state_from_location(&auth_url);
 
-    // 2. Callback mints a session — extract the bearer from the
-    //    `#token=` fragment of the SPA-bound redirect.
+    // 2. Callback mints a session — extract the one-time ticket from
+    //    the SPA-bound redirect, then exchange it for the bearer.
     let callback = app
         .clone()
         .oneshot(with_peer(
@@ -337,7 +340,12 @@ async fn session_minted_via_oauth_callback_authenticates_protected_v2_route() {
         .to_str()
         .expect("utf-8")
         .to_string();
-    let bearer = bearer_from_landing(&landing);
+    assert!(
+        !landing.contains("#token="),
+        "callback Location must not carry the bearer: {landing}",
+    );
+    let ticket = ticket_from_landing(&landing);
+    let bearer = redeem_ticket(app.clone(), &ticket).await;
     assert_eq!(session_store.len(), 1, "session must be persisted");
 
     // 3. Use the bearer on a protected WebChat v2 route. This is
@@ -420,14 +428,44 @@ async fn session_minted_via_oauth_callback_authenticates_protected_v2_route() {
     );
 }
 
-fn bearer_from_landing(landing: &str) -> String {
-    let (_, fragment) = landing
-        .split_once("#token=")
-        .expect("expected #token= fragment");
-    // Fragment may carry additional `&key=value` pairs in the
-    // future; trim at the first separator.
-    let token_value = fragment.split_once('&').map(|(t, _)| t).unwrap_or(fragment);
-    urlencoding::decode(token_value)
-        .expect("decode")
-        .into_owned()
+#[derive(Deserialize)]
+struct SessionExchangeResponse {
+    token: String,
+}
+
+fn ticket_from_landing(landing: &str) -> String {
+    let query = landing.split_once('?').expect("query").1;
+    let query = query.split_once('#').map(|(q, _)| q).unwrap_or(query);
+    for pair in query.split('&') {
+        if let Some(value) = pair.strip_prefix("login_ticket=") {
+            return urlencoding::decode(value).expect("decode").into_owned();
+        }
+    }
+    panic!("no login_ticket in {landing}");
+}
+
+async fn redeem_ticket(app: axum::Router, ticket: &str) -> String {
+    let response = app
+        .oneshot(with_peer(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/auth/session/exchange")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "ticket": ticket }).to_string(),
+                ))
+                .expect("request"),
+        ))
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let payload: SessionExchangeResponse = serde_json::from_slice(&bytes).expect("json");
+    assert!(!payload.token.is_empty());
+    payload.token
 }

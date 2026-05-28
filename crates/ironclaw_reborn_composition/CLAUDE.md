@@ -167,7 +167,7 @@ list the v2 facade and the product-auth callback already use, so
 the descriptor-driven per-route rate-limit and body-limit
 middlewares apply to the host-supplied surface exactly like they
 do to every other route — no side door. Today the SSO mount
-declares its four routes as `LocalGateway`/`OAuthCallback` +
+declares its five routes as `LocalGateway`/`OAuthCallback` +
 `IngressAuthPolicy::Public` + `RateLimitScope::PerIp` (60–120
 req/min/IP, 60s window) + tight body limits, so a sustained
 `/auth/login/*` flood is bounded by the same per-IP counter the
@@ -180,8 +180,11 @@ Reborn-native auth router. v1 gateway code remains untouched —
 
 ### Session transport decision (#4116)
 
-The OAuth callback returns the session bearer to the SPA via the
-URL fragment (`/v2#token=<bearer>`), not via an `HttpOnly` cookie.
+The OAuth callback returns a short-lived, one-time login ticket to
+the SPA via the URL query (`/v2?login_ticket=<ticket>`), not the
+session bearer itself and not an `HttpOnly` cookie. The SPA
+immediately POSTs that ticket to `/auth/session/exchange` and stores
+the returned bearer in `sessionStorage`.
 Rationale:
 
 - **Matches the existing v2 SPA auth model.** `app/auth.js`
@@ -189,13 +192,12 @@ Rationale:
   `Authorization: Bearer` on every API call; SSE / WS use the
   `?token=` query-string shim that the composition layer's bearer
   middleware accepts only on `GET /api/webchat/v2/threads/{id}/events`.
-  Cookies would require a new auth path through the same
-  middleware.
-- **Fragments are never sent to the server in subsequent
-  navigation.** A copy-pasted URL or a `Referer` chain cannot
-  leak the bearer; URL query (the v1 transport) would land in
-  access logs. Composition also emits `Referrer-Policy: no-referrer`
-  as defense in depth.
+  Cookies would require a new auth path through the same middleware.
+- **The bearer never appears in a redirect `Location` header.** A
+  logged callback redirect can expose only the one-time ticket, not
+  the long-lived bearer. Tickets are short-lived and consumed
+  atomically by the exchange route. Composition also emits
+  `Referrer-Policy: no-referrer` as defense in depth.
 - **Logout actually revokes.** `POST /auth/logout` calls
   `SessionStore::revoke`; the regression in
   `crates/ironclaw_reborn_webui_ingress/tests/session_round_trip.rs`

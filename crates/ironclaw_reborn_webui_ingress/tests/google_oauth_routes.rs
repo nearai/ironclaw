@@ -159,6 +159,11 @@ struct ProvidersResponse {
     providers: Vec<String>,
 }
 
+#[derive(Deserialize)]
+struct SessionExchangeResponse {
+    token: String,
+}
+
 // ─── providers ────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -296,7 +301,7 @@ fn state_from_location(location: &str) -> String {
 }
 
 #[tokio::test]
-async fn callback_success_creates_session_and_redirects_with_token_fragment() {
+async fn callback_success_creates_session_and_redirects_with_login_ticket() {
     let store_inner: Arc<InMemorySessionStore> = Arc::new(InMemorySessionStore::new());
     let session_store: Arc<dyn SessionStore> = store_inner.clone();
     let provider = StubProvider::google_with_profile(alice_profile());
@@ -327,8 +332,10 @@ async fn callback_success_creates_session_and_redirects_with_token_fragment() {
     let state = state_from_location(&location);
 
     // 2. Callback with that state — must succeed and redirect with
-    //    `#token=` fragment, and a session must exist in the store.
+    //    a one-time `login_ticket`, and a session must exist in the
+    //    store without leaking the bearer in the Location header.
     let callback = router
+        .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
@@ -349,7 +356,11 @@ async fn callback_success_creates_session_and_redirects_with_token_fragment() {
         .to_str()
         .expect("utf-8")
         .to_string();
-    assert!(landing.starts_with("/v2#token="), "got {landing}");
+    assert!(landing.starts_with("/v2?login_ticket="), "got {landing}",);
+    assert!(
+        !landing.contains("#token="),
+        "callback Location must not carry the bearer: {landing}",
+    );
     assert_eq!(store_inner.len(), 1, "session should be persisted");
 
     // The provider should have received the original PKCE verifier
@@ -366,16 +377,59 @@ async fn callback_success_creates_session_and_redirects_with_token_fragment() {
     );
     assert!(!captured.code_verifier.is_empty());
 
-    // The token in the URL fragment must actually authenticate
-    // against the session store (locks in the round-trip).
-    let token = landing.split_once("#token=").unwrap().1;
-    let decoded = urlencoding::decode(token).expect("decode").into_owned();
+    // The one-time ticket must exchange for a bearer that actually
+    // authenticates against the session store (locks in the
+    // round-trip), and then fail on replay.
+    let ticket = ticket_from_landing(&landing);
+    let decoded = redeem_ticket(router.clone(), &ticket).await;
+    let replay = exchange_ticket(router, &ticket).await;
+    assert_eq!(
+        replay.status(),
+        StatusCode::UNAUTHORIZED,
+        "login ticket must be single-use",
+    );
     let session = store_inner
         .lookup(&decoded)
         .await
         .expect("lookup")
         .expect("session");
     assert_eq!(session.user_id.as_str(), "alice@example.com");
+}
+
+fn ticket_from_landing(landing: &str) -> String {
+    let query = landing.split_once('?').expect("query").1;
+    let query = query.split_once('#').map(|(q, _)| q).unwrap_or(query);
+    for pair in query.split('&') {
+        if let Some(value) = pair.strip_prefix("login_ticket=") {
+            return urlencoding::decode(value).expect("urldecode").into_owned();
+        }
+    }
+    panic!("no login_ticket in {landing}");
+}
+
+async fn exchange_ticket(router: axum::Router, ticket: &str) -> axum::response::Response {
+    router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/auth/session/exchange")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "ticket": ticket }).to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot")
+}
+
+async fn redeem_ticket(router: axum::Router, ticket: &str) -> String {
+    let resp = exchange_ticket(router, ticket).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp.into_body()).await;
+    let payload: SessionExchangeResponse = serde_json::from_str(&body).expect("json");
+    assert!(!payload.token.is_empty());
+    payload.token
 }
 
 // ─── callback failure paths ───────────────────────────────────────────
@@ -443,7 +497,7 @@ async fn callback_with_state_replay_fails_closed() {
     );
 
     // 2. First callback consumes the state, mints a session, and
-    //    redirects with a token in the fragment.
+    //    redirects with a one-time login ticket.
     let first = router
         .clone()
         .oneshot(
@@ -466,7 +520,7 @@ async fn callback_with_state_replay_fails_closed() {
         .to_str()
         .unwrap();
     assert!(
-        first_location.starts_with("/v2#token="),
+        first_location.starts_with("/v2?login_ticket="),
         "first callback must succeed; got {first_location}"
     );
     assert_eq!(store_inner.len(), 1, "first callback must mint a session");
@@ -632,7 +686,7 @@ async fn login_open_redirect_attempt_falls_back_to_default() {
         .unwrap()
         .to_str()
         .unwrap();
-    assert!(location.starts_with("/v2#token="));
+    assert!(location.starts_with("/v2?login_ticket="));
 }
 
 // ─── logout ───────────────────────────────────────────────────────────
@@ -684,8 +738,8 @@ async fn logout_with_bearer_revokes_session() {
         .unwrap()
         .to_str()
         .unwrap();
-    let token = landing.split_once("#token=").unwrap().1;
-    let bearer = urlencoding::decode(token).expect("decode").into_owned();
+    let ticket = ticket_from_landing(landing);
+    let bearer = redeem_ticket(router.clone(), &ticket).await;
     assert_eq!(store_inner.len(), 1);
 
     let logout = router

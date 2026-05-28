@@ -1,21 +1,27 @@
 import { React } from "../lib/html.js";
 import { queryClient } from "../lib/query-client.js";
-import { logout as logoutRequest, readStoredToken, storeToken } from "../lib/api.js";
+import {
+  exchangeLoginTicket,
+  logout as logoutRequest,
+  readStoredToken,
+  storeToken,
+} from "../lib/api.js";
 
 // The Reborn host validates bearer tokens via OIDC; the SPA simply
 // carries whatever token the user supplies (via `?token=` URL param,
-// `#token=` URL fragment, or `sessionStorage`) and lets the server
-// reject anything invalid. No v2 endpoint exposes session probing
-// or profile info, so this hook holds no derived identity state.
+// `#token=` URL fragment, OAuth `login_ticket` exchange, or
+// `sessionStorage`) and lets the server reject anything invalid. No
+// v2 endpoint exposes session probing or profile info, so this hook
+// holds no derived identity state.
 //
 // `?token=`  — manual-token paste pattern (the "Connect" form on
 //              the login page).
-// `#token=`  — OAuth callback transport. The host's
+// `login_ticket=` — OAuth callback transport. The host's
 //              `/auth/callback/{provider}` redirects to
-//              `/v2#token=<bearer>`. Fragments are never sent to
-//              the server in subsequent navigation, so the bearer
-//              cannot leak through HTTP access logs or `Referer`
-//              headers.
+//              `/v2?login_ticket=<ticket>`. The ticket is short-lived
+//              and single-use; the SPA POSTs it to
+//              `/auth/session/exchange` for the real bearer so the
+//              bearer never appears in a redirect `Location` header.
 //
 // Either form is honored ONLY when sessionStorage has no token yet.
 // Without this guard a crafted `/v2/#token=INVALID` link could
@@ -53,8 +59,9 @@ function consumeTokenFromUrl() {
   const url = new URL(window.location.href);
   const queryToken = (url.searchParams.get("token") || "").trim();
   const fragmentToken = readFragmentParam(url.hash, "token").trim();
-  // Fragment wins so an OAuth callback's `#token=` overrides a
-  // stale `?token=` left over in the address bar.
+  // Fragment wins for manual/debug URLs so `#token=` can override a
+  // stale `?token=` left over in the address bar. OAuth uses
+  // `login_ticket`, not a bearer fragment.
   const token = fragmentToken || queryToken;
   if (!token) return "";
 
@@ -73,6 +80,15 @@ function consumeTokenFromUrl() {
   }
   storeToken(token);
   return token;
+}
+
+function consumeLoginTicketFromUrl() {
+  const url = new URL(window.location.href);
+  const ticket = (url.searchParams.get("login_ticket") || "").trim();
+  if (!ticket) return "";
+  url.searchParams.delete("login_ticket");
+  window.history.replaceState({}, "", url.pathname + url.search + url.hash);
+  return ticket;
 }
 
 // Map opaque error codes the OAuth callback emits (`?login_error=...`)
@@ -107,6 +123,35 @@ export function useAuthSession() {
     () => consumeTokenFromUrl() || readStoredToken(),
   );
   const [error, setError] = React.useState(() => consumeLoginErrorFromUrl());
+  const [loginTicket] = React.useState(() => consumeLoginTicketFromUrl());
+  const [isExchanging, setIsExchanging] = React.useState(
+    () => Boolean(loginTicket && !readStoredToken()),
+  );
+
+  React.useEffect(() => {
+    if (!loginTicket || readStoredToken()) {
+      setIsExchanging(false);
+      return undefined;
+    }
+    let cancelled = false;
+    exchangeLoginTicket(loginTicket)
+      .then((nextToken) => {
+        if (cancelled) return;
+        storeToken(nextToken);
+        setToken(nextToken);
+        setError("");
+        setIsExchanging(false);
+        queryClient.clear();
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setError("Could not complete sign-in. Please try again.");
+        setIsExchanging(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [loginTicket]);
 
   const signIn = React.useCallback((nextToken) => {
     storeToken(nextToken);
@@ -133,7 +178,7 @@ export function useAuthSession() {
     profile: null,
     error,
     setError,
-    isChecking: false,
+    isChecking: isExchanging,
     isAuthenticated: Boolean(token),
     // No v2 profile endpoint exists yet, so the SPA cannot prove
     // admin status — default closed. The fork's `!profile`
