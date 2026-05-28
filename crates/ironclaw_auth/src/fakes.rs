@@ -17,12 +17,13 @@ use crate::{
     CredentialRefreshRequest, CredentialSelectionInput, CredentialSetupService,
     ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount, OAuthCallbackClaimRequest,
     OAuthCallbackFailureInput, OAuthCallbackInput, OAuthProviderCallbackRequest,
-    OAuthProviderExchange, OAuthProviderRefresh, OAuthProviderRefreshRequest,
-    ProviderCallbackOutcome, SecretCleanupAction, SecretCleanupQuarantine,
-    SecretCleanupQuarantineReason, SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
-    SecretSubmitRequest, SecretSubmitResult, cleanup::SecretCleanupAction::Deactivate,
-    flow::credential_status_for_completed_flow, interaction::PendingSecretInteraction,
-    provider::validate_provider_callback_request, scope_matches,
+    OAuthProviderExchange, OAuthProviderExchangeContext, OAuthProviderRefresh,
+    OAuthProviderRefreshRequest, ProviderCallbackOutcome, SecretCleanupAction,
+    SecretCleanupQuarantine, SecretCleanupQuarantineReason, SecretCleanupReport,
+    SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest, SecretSubmitResult,
+    cleanup::SecretCleanupAction::Deactivate, flow::credential_status_for_completed_flow,
+    interaction::PendingSecretInteraction, provider::validate_provider_callback_request,
+    scope_matches,
 };
 
 #[derive(Default)]
@@ -489,11 +490,10 @@ impl CredentialAccountService for InMemoryAuthProductServices {
             .filter(|account| {
                 account_is_authorized_for_requester(account, request.requester_extension.as_ref())
             })
-            .map(CredentialAccount::projection)
             .collect::<Vec<_>>();
         match selectable.as_slice() {
             [] => Err(AuthProductError::CrossScopeDenied),
-            [account] => Ok(account.clone()),
+            [account] => Ok(account.projection()),
             _ => Err(AuthProductError::AccountSelectionRequired),
         }
     }
@@ -776,6 +776,7 @@ impl AuthInteractionService for InMemoryAuthProductServices {
 impl AuthProviderClient for InMemoryAuthProductServices {
     async fn exchange_callback(
         &self,
+        _context: OAuthProviderExchangeContext,
         request: OAuthProviderCallbackRequest,
     ) -> Result<OAuthProviderExchange, AuthProductError> {
         validate_provider_callback_request(&request)?;

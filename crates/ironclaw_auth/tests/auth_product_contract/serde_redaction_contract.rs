@@ -1,3 +1,8 @@
+use ironclaw_auth::{
+    AuthProviderClient, OAuthAuthorizationCode, OAuthProviderCallbackRequest,
+    OAuthProviderExchangeContext, PkceVerifierSecret,
+};
+
 use crate::common::*;
 
 #[test]
@@ -113,17 +118,23 @@ async fn serializable_records_never_include_raw_oauth_or_token_material() {
     let owner = scope("alice");
     let flow = oauth_flow(&services, owner.clone()).await;
     let exchange = services
-        .exchange_callback(OAuthProviderCallbackRequest {
-            provider: provider(),
-            account_label: label("work github"),
-            authorization_code: OAuthAuthorizationCode::new(secret("raw-auth-code"))
-                .expect("valid code"),
-            authorization_code_hash: code_hash("code-hash"),
-            pkce_verifier: PkceVerifierSecret::new(secret("raw-pkce-verifier"))
-                .expect("valid verifier"),
-            pkce_verifier_hash: pkce_hash("pkce-hash"),
-            scopes: provider_scopes(&["repo"]),
-        })
+        .exchange_callback(
+            OAuthProviderExchangeContext {
+                scope: owner.clone(),
+                flow_id: flow.id,
+            },
+            OAuthProviderCallbackRequest {
+                provider: provider(),
+                account_label: label("work github"),
+                authorization_code: OAuthAuthorizationCode::new(secret("raw-auth-code"))
+                    .expect("valid code"),
+                authorization_code_hash: code_hash("code-hash"),
+                pkce_verifier: PkceVerifierSecret::new(secret("raw-pkce-verifier"))
+                    .expect("valid verifier"),
+                pkce_verifier_hash: pkce_hash("pkce-hash"),
+                scopes: provider_scopes(&["repo"]),
+            },
+        )
         .await
         .expect("exchange");
     let completed = services

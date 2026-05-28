@@ -83,6 +83,7 @@ use ironclaw_turns::{
 
 use crate::default_system_prompt::DefaultSystemPromptIdentitySource;
 use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore};
+use crate::local_dev_capability_policy::local_dev_capability_policy;
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
 use crate::{RebornBuildError, RebornCompositionProfile, RebornServices, build_reborn_services};
@@ -849,7 +850,7 @@ pub async fn build_reborn_runtime(
         poll,
         identity,
         skill_context_source: configured_skill_context_source,
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         model_gateway_override,
     } = input;
 
@@ -926,7 +927,7 @@ pub async fn build_reborn_runtime(
 
     #[cfg(feature = "root-llm-provider")]
     let model_gateway = {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(gateway) = model_gateway_override {
             gateway
         } else {
@@ -935,7 +936,7 @@ pub async fn build_reborn_runtime(
                 None => build_stub_gateway(),
             }
         }
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-support")))]
         {
             match llm {
                 Some(cfg) => build_llm_gateway(cfg).await?,
@@ -945,13 +946,13 @@ pub async fn build_reborn_runtime(
     };
     #[cfg(not(feature = "root-llm-provider"))]
     let model_gateway = {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(gateway) = model_gateway_override {
             gateway
         } else {
             build_stub_gateway()
         }
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-support")))]
         {
             build_stub_gateway()
         }
@@ -991,11 +992,18 @@ pub async fn build_reborn_runtime(
     );
     let milestone_sink = projection_services
         .with_live_reasoning_milestone_sink(durable_milestone_sink, actor_user_id.clone());
+    let local_dev_capability_policy = Arc::new(local_dev_capability_policy().map_err(|error| {
+        tracing::error!(%error, "local-dev capability policy is invalid");
+        RebornRuntimeError::InvalidArgument {
+            reason: format!("local-dev capability policy is invalid: {error}"),
+        }
+    })?);
     let local_dev_capabilities = local_dev::capability_wiring(
         &services,
         Arc::clone(&thread_service) as Arc<dyn SessionThreadService>,
         thread_scope.clone(),
         actor_user_id.clone(),
+        Arc::clone(&local_dev_capability_policy),
         model_gateway,
         milestone_sink.clone(),
     )
@@ -1082,6 +1090,7 @@ pub async fn build_reborn_runtime(
         Arc::new(DefaultApprovalInteractionService::new(
             approval_read_model,
             Arc::new(approval::LocalDevApprovalLeaseTermsProvider::new(
+                local_dev_capability_policy,
                 local_runtime.workspace_mounts.clone(),
                 local_runtime.skill_mounts.clone(),
             )),

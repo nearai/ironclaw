@@ -497,6 +497,19 @@ impl ironclaw_turns::run_profile::LoopModelPort for StubHost {
 }
 
 #[async_trait]
+impl ironclaw_turns::run_profile::LoopCompactionPort for StubHost {
+    async fn compact_loop_context(
+        &self,
+        _request: ironclaw_turns::run_profile::LoopCompactionRequest,
+    ) -> Result<
+        ironclaw_turns::run_profile::LoopCompactionResponse,
+        ironclaw_turns::run_profile::LoopCompactionError,
+    > {
+        unimplemented!("stub host: never called by mock driver")
+    }
+}
+
+#[async_trait]
 impl ironclaw_turns::run_profile::LoopCapabilityPort for StubHost {
     async fn visible_capabilities(
         &self,
@@ -550,9 +563,14 @@ impl ironclaw_turns::run_profile::LoopProgressPort for StubHost {
     }
 }
 
+#[async_trait]
 impl ironclaw_turns::run_profile::LoopCancellationPort for StubHost {
     fn observe_cancellation(&self) -> Option<ironclaw_turns::run_profile::LoopCancellationSignal> {
         None
+    }
+
+    async fn cancellation_requested(&self) -> ironclaw_turns::run_profile::LoopCancellationSignal {
+        std::future::pending().await
     }
 }
 

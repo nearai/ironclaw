@@ -7,6 +7,8 @@ use std::sync::Arc;
 use chrono::Utc;
 #[cfg(feature = "postgres")]
 use deadpool_postgres::tokio_postgres;
+#[cfg(feature = "libsql")]
+use ironclaw_auth::{OAuthClientId, OAuthRedirectUri};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{
     AgentId, AuditMode, DeploymentMode, EffectKind, FilesystemBackendKind, NetworkMode, PackageId,
@@ -586,6 +588,35 @@ async fn production_requires_configured_trust_policy() {
         result,
         Err(RebornBuildError::MissingProductionTrustPolicy)
     ));
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn production_rejects_google_oauth_config_without_product_auth_ports() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = libsql_db_at(dir.path().join("reborn.db")).await;
+
+    let result = build_reborn_services(
+        RebornBuildInput::libsql(
+            RebornCompositionProfile::Production,
+            "test-owner",
+            db,
+            dir.path().join("events.db").to_string_lossy(),
+            None,
+            test_master_key(),
+        )
+        .with_google_oauth_backend(ironclaw_reborn_composition::OAuthClientConfig {
+            client_id: OAuthClientId::new("google-client-123").unwrap(),
+            client_secret: None,
+            redirect_uri: OAuthRedirectUri::new("https://app.example/oauth/callback").unwrap(),
+        }),
+    )
+    .await;
+
+    let Err(RebornBuildError::InvalidConfig { reason }) = result else {
+        panic!("expected invalid Google OAuth/product-auth config, got {result:?}");
+    };
+    assert!(reason.contains("product-auth ports"));
 }
 
 #[cfg(feature = "libsql")]

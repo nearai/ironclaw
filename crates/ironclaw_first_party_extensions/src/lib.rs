@@ -20,8 +20,8 @@ pub use gsuite::{
     GMAIL_SEND_MESSAGE_CAPABILITY_ID, GMAIL_TRASH_MESSAGE_CAPABILITY_ID, GSUITE_OUTPUT_BYTES_LIMIT,
     GSUITE_REQUEST_BODY_LIMIT, GSUITE_RESPONSE_BODY_LIMIT, GSUITE_TIMEOUT_MS, GoogleCredential,
     GoogleCredentialError, GoogleCredentialResolver, GsuiteCapabilityOperation,
-    GsuiteCapabilitySpec, GsuiteDispatchError, GsuiteDispatchRequest, GsuiteDispatchResult,
-    GsuiteExecutor, GsuitePackageSpec, calendar_package_spec, find_gsuite_capability,
-    gmail_package_spec, google_api_network_policy, google_provider_id, gsuite_package_specs,
-    gsuite_resource_profile,
+    GsuiteCapabilitySpec, GsuiteCredentialDispatchReason, GsuiteDispatchError,
+    GsuiteDispatchRequest, GsuiteDispatchResult, GsuiteExecutor, GsuitePackageSpec,
+    calendar_package_spec, find_gsuite_capability, gmail_package_spec, google_api_network_policy,
+    google_provider_id, gsuite_package_specs, gsuite_resource_profile,
 };

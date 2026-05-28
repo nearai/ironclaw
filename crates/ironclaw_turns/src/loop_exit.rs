@@ -454,6 +454,8 @@ pub enum LoopFailureKind {
     /// conflating them with transport faults. Hook-induced denials (via the
     /// middleware composition seam) accumulate through this variant.
     PolicyDenied,
+    /// System compaction failed after the loop exhausted the safe fallback path.
+    CompactionUnavailable,
 }
 
 impl LoopFailureKind {
@@ -471,6 +473,7 @@ impl LoopFailureKind {
             Self::InterruptedUnexpectedly => "interrupted_unexpectedly",
             Self::NoProgressDetected => "no_progress_detected",
             Self::PolicyDenied => "policy_denied",
+            Self::CompactionUnavailable => "compaction_unavailable",
         }
     }
 

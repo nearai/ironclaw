@@ -13,8 +13,9 @@ use ironclaw_turns::{
         CapabilitySurfaceVersion, CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass,
         ContextProfileId, FinalizeAssistantMessage, LoopCancelReasonKind, LoopCancellationPort,
         LoopCancellationSignal, LoopCheckpointKind, LoopCheckpointRequest, LoopCheckpointStateRef,
-        LoopContextBundle, LoopContextRequest, LoopDriverId, LoopInputAck, LoopInputAckToken,
-        LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopModelMessage, LoopModelRequest,
+        LoopCompactionError, LoopCompactionRequest, LoopCompactionResponse, LoopContextBundle,
+        LoopContextRequest, LoopDriverId, LoopInputAck, LoopInputAckToken, LoopInputBatch,
+        LoopInputCursor, LoopInputCursorToken, LoopModelMessage, LoopModelRequest,
         LoopModelResponse, LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest,
         LoopRunContext, ModelProfileId, ModelStreamChunk, ParentLoopOutput, ProviderToolCallReplay,
         RedactedRunProfileProvenance, ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier,
@@ -30,11 +31,15 @@ use crate::{
     state::{CheckpointKind, GateStrategyState, LoopExecutionState, StopStrategyState},
     strategies::{
         CapabilityErrorClass, CapabilityErrorSummary, CapabilityFilter, CapabilityStrategy,
-        GateHandlingStrategy, GateOutcome, GateSummary, InputDrainStrategy, ModelErrorSummary,
-        RecoveryOutcome, RecoveryStrategy, RetryScope, StopConditionStrategy, StopKind,
-        StopOutcome, TurnSummary,
+        DefaultCompactionStrategy, GateHandlingStrategy, GateOutcome, GateSummary,
+        InputDrainStrategy, ModelErrorSummary, RecoveryOutcome, RecoveryStrategy, RetryScope,
+        StopConditionStrategy, StopKind, StopOutcome, TurnSummary,
     },
 };
+
+mod compaction;
+
+use compaction::MockCompactionSupport;
 
 #[derive(Clone)]
 pub(super) struct MockHost {
@@ -43,6 +48,7 @@ pub(super) struct MockHost {
     model_errors: Arc<Mutex<VecDeque<AgentLoopHostError>>>,
     model_requests: Arc<Mutex<Vec<LoopModelRequest>>>,
     prompt_requests: Arc<Mutex<Vec<LoopPromptBundleRequest>>>,
+    compaction: MockCompactionSupport,
     input_batches: Arc<Mutex<VecDeque<LoopInputBatch>>>,
     acked_input_tokens: Arc<Mutex<Vec<LoopInputAckToken>>>,
     batch_outcomes: Arc<Mutex<VecDeque<ironclaw_turns::run_profile::CapabilityBatchOutcome>>>,
@@ -59,6 +65,7 @@ pub(super) struct MockHost {
     fail_progress_port: bool,
     fail_append_result_ref: bool,
     cancellation: Arc<Mutex<Option<LoopCancellationSignal>>>,
+    cancellation_notify: Arc<tokio::sync::Notify>,
     cancel_after_poll_inputs: Arc<Mutex<bool>>,
     cancel_after_prompt_bundle_count: Arc<Mutex<Option<usize>>>,
     cancel_after_checkpoint: Arc<Mutex<Option<LoopCheckpointKind>>>,
@@ -77,6 +84,7 @@ impl MockHost {
             model_errors: Arc::new(Mutex::new(VecDeque::new())),
             model_requests: Arc::new(Mutex::new(Vec::new())),
             prompt_requests: Arc::new(Mutex::new(Vec::new())),
+            compaction: MockCompactionSupport::new(),
             input_batches: Arc::new(Mutex::new(VecDeque::new())),
             acked_input_tokens: Arc::new(Mutex::new(Vec::new())),
             batch_outcomes: Arc::new(Mutex::new(VecDeque::new())),
@@ -93,6 +101,7 @@ impl MockHost {
             fail_progress_port: false,
             fail_append_result_ref: false,
             cancellation: Arc::new(Mutex::new(None)),
+            cancellation_notify: Arc::new(tokio::sync::Notify::new()),
             cancel_after_poll_inputs: Arc::new(Mutex::new(false)),
             cancel_after_prompt_bundle_count: Arc::new(Mutex::new(None)),
             cancel_after_checkpoint: Arc::new(Mutex::new(None)),
@@ -207,6 +216,7 @@ impl MockHost {
             reason_kind,
             requested_at: chrono::Utc::now(),
         });
+        self.cancellation_notify.notify_waiters();
     }
 
     pub(super) fn cancel_after_checkpoint(self, kind: LoopCheckpointKind) -> Self {
@@ -393,6 +403,7 @@ impl ironclaw_turns::run_profile::LoopPromptPort for MockHost {
                 content_ref: LoopMessageRef::new("msg:user").expect("valid"),
             }],
             surface_version: self.prompt_surface_version.clone(),
+            compaction_message_index: self.compaction.next_prompt_index(),
             instruction_fingerprint: None,
             identity_message_count: 0,
             instruction_snippet_count: 0,
@@ -625,9 +636,28 @@ impl ironclaw_turns::run_profile::LoopProgressPort for MockHost {
     }
 }
 
+#[async_trait]
+impl ironclaw_turns::run_profile::LoopCompactionPort for MockHost {
+    async fn compact_loop_context(
+        &self,
+        request: LoopCompactionRequest,
+    ) -> Result<LoopCompactionResponse, LoopCompactionError> {
+        self.compact_loop_context_for_tests(request).await
+    }
+}
+
+#[async_trait]
 impl LoopCancellationPort for MockHost {
     fn observe_cancellation(&self) -> Option<LoopCancellationSignal> {
         self.cancellation.lock().expect("lock").clone()
+    }
+
+    async fn cancellation_requested(&self) -> LoopCancellationSignal {
+        crate::test_support::wait_for_cancellation_signal(
+            &self.cancellation,
+            &self.cancellation_notify,
+        )
+        .await
     }
 }
 
@@ -851,11 +881,19 @@ pub(super) fn family_with_gate_outcome(outcome: GateOutcome) -> LoopFamily {
     LoopFamily::new(id, version, Arc::new(planner))
 }
 
+pub(super) fn family_with_compaction_strategy(strategy: DefaultCompactionStrategy) -> LoopFamily {
+    let planner = DefaultPlanner::compose_default().with_compaction(Arc::new(strategy));
+    let id = LoopFamilyId::new("executor-compaction-test").expect("valid test family id");
+    let version =
+        ComponentIdentity::from_static("executor-compaction-test", ComponentDigest([5; 32]));
+    LoopFamily::new(id, version, Arc::new(planner))
+}
+
 pub(super) fn family_with_stop_after_observed_turns(turns_completed: u32) -> LoopFamily {
     let planner = DefaultPlanner::compose_default()
         .with_stop(Arc::new(StopAfterObservedTurns { turns_completed }));
     let id = LoopFamilyId::new("executor-stop-test").expect("valid test family id");
-    let version = ComponentIdentity::from_static("executor-stop-test", ComponentDigest([5; 32]));
+    let version = ComponentIdentity::from_static("executor-stop-test", ComponentDigest([6; 32]));
     LoopFamily::new(id, version, Arc::new(planner))
 }
 

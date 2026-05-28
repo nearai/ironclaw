@@ -9,8 +9,10 @@ pub use bounded_ring::BoundedRing;
 pub use ironclaw_turns::LoopFailureKind;
 pub use signature::{ArgsHash, CapabilityCallSignature, CapabilityCallSignatureError};
 pub use slots::{
-    CapabilityStrategyState, ContextStrategyState, GateStrategyState, ModelStrategyState,
-    RecoveryAttemptClass, RecoveryStrategyState, StopStrategyState,
+    CapabilityStrategyState, CompactionPromptSnapshot, CompactionStrategyState,
+    ContextStrategyState, GateStrategyState, GoalRefreshStrategyState, IndexedMessageKind,
+    MessageIndexEntry, ModelStrategyState, RecoveryAttemptClass, RecoveryStrategyState,
+    StopStrategyState,
 };
 
 use ironclaw_turns::{
@@ -18,10 +20,11 @@ use ironclaw_turns::{
     run_profile::{CapabilitySurfaceVersion, LoopInputCursor, LoopRunContext},
 };
 
-/// Checkpoint payload schema reserved for the default Reborn loop.
+/// Initial checkpoint payload schema reserved for the default Reborn loop.
 ///
-/// Changing the payload layout is a compatibility break and requires an
-/// explicit migration plan.
+/// Reborn checkpoint persistence has not shipped yet, so this branch is still
+/// defining the v1 payload shape. Once persisted checkpoints are in use,
+/// changing this layout requires an explicit schema bump and migration plan.
 pub const CHECKPOINT_SCHEMA_ID: &str = "reborn:default-loop-v1";
 pub const CHECKPOINT_SCHEMA_VERSION: u64 = 1;
 
@@ -54,6 +57,12 @@ pub struct LoopExecutionState {
     pub context_state: ContextStrategyState,
     pub capability_state: CapabilityStrategyState,
     pub model_state: ModelStrategyState,
+    #[serde(default)]
+    pub compaction_state: CompactionStrategyState,
+    #[serde(default)]
+    pub compaction_prompt: CompactionPromptSnapshot,
+    #[serde(default)]
+    pub goal_refresh_state: GoalRefreshStrategyState,
     pub recovery_state: RecoveryStrategyState,
     pub stop_state: StopStrategyState,
     pub gate_state: GateStrategyState,
@@ -81,6 +90,9 @@ impl LoopExecutionState {
             context_state: ContextStrategyState::default(),
             capability_state: CapabilityStrategyState::default(),
             model_state: ModelStrategyState::default(),
+            compaction_state: CompactionStrategyState::default(),
+            compaction_prompt: CompactionPromptSnapshot::default(),
+            goal_refresh_state: GoalRefreshStrategyState::default(),
             recovery_state: RecoveryStrategyState::default(),
             stop_state: StopStrategyState::default(),
             gate_state: GateStrategyState::default(),
@@ -391,6 +403,30 @@ mod tests {
         let restored: LoopExecutionState = serde_json::from_value(value).unwrap();
 
         assert_eq!(restored, state);
+    }
+
+    #[test]
+    fn compaction_prompt_snapshot_round_trips_through_checkpoints() {
+        let context = test_run_context();
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        state.compaction_prompt =
+            CompactionPromptSnapshot::from_message_index(vec![MessageIndexEntry {
+                sequence: 1,
+                kind: IndexedMessageKind::User,
+                estimated_tokens: 42,
+            }]);
+
+        let value = serde_json::to_value(&state).unwrap();
+        assert!(
+            value
+                .as_object()
+                .expect("state serializes as object")
+                .contains_key("compaction_prompt")
+        );
+        let restored: LoopExecutionState = serde_json::from_value(value).unwrap();
+
+        assert_eq!(restored.compaction_prompt, state.compaction_prompt);
+        assert_eq!(restored.compaction_state, state.compaction_state);
     }
 
     #[test]

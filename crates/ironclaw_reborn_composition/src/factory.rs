@@ -3,6 +3,7 @@ use std::{
     sync::Arc,
 };
 
+use ironclaw_auth::AuthProviderClient;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_authorization::FilesystemCapabilityLeaseStore;
 use ironclaw_authorization::GrantAuthorizer;
@@ -26,7 +27,7 @@ use ironclaw_filesystem::{
 use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
-use ironclaw_host_api::runtime_policy::FilesystemBackendKind;
+use ironclaw_host_api::runtime_policy::{FilesystemBackendKind, ProcessBackendKind, SecretMode};
 use ironclaw_host_api::{
     EffectKind, ExtensionId, HostPath, MountPermissions, MountView, PackageId, UserId, VirtualPath,
 };
@@ -34,7 +35,8 @@ use ironclaw_host_api::{
 use ironclaw_host_api::{MountAlias, MountGrant};
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostRuntimeServices,
-    builtin_first_party_handlers, builtin_first_party_package,
+    LocalHostProcessPort, ProductAuthProviderRuntimePorts, builtin_first_party_handlers,
+    builtin_first_party_package,
 };
 #[cfg(feature = "libsql")]
 use ironclaw_loop_support::FilesystemCheckpointStateStore;
@@ -49,6 +51,7 @@ use ironclaw_run_state::{FilesystemApprovalRequestStore, FilesystemRunStateStore
 use ironclaw_run_state::{InMemoryApprovalRequestStore, InMemoryRunStateStore};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_secrets::FilesystemSecretStore;
+use ironclaw_secrets::SecretStore;
 #[cfg(feature = "libsql")]
 use ironclaw_threads::FilesystemSessionThreadService;
 #[cfg(not(feature = "libsql"))]
@@ -65,11 +68,14 @@ use ironclaw_turns::{
     InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore, InMemoryTurnStateStore,
 };
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use crate::RebornProductAuthServicePorts;
 use crate::default_system_prompt::seed_default_system_prompt;
+use crate::google_oauth::google_provider_client;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use crate::input::OAuthClientConfig;
 use crate::input::{RebornRuntimeProcessBinding, RebornStorageInput};
 use crate::lifecycle::{RebornLocalSkillManagementPort, build_local_skill_management_port};
+use crate::local_dev_capability_policy::local_dev_capability_policy;
 use crate::local_dev_mounts::{
     ambient_workspace_mount_view, skill_context_mount_view, workspace_mount_view,
 };
@@ -160,6 +166,54 @@ where
             services.with_tenant_sandbox_process_port(process_port)
         }
     }
+}
+
+fn local_dev_process_port_for_policy(
+    runtime_policy: &Option<ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy>,
+    workspace_root: &Path,
+    host_home_root: Option<&LocalDevHostHomeRoot>,
+) -> Option<LocalHostProcessPort> {
+    let runtime_policy = runtime_policy.as_ref()?;
+    if runtime_policy.process_backend != ProcessBackendKind::LocalHost {
+        return None;
+    }
+    let mut process_port = if runtime_policy.secret_mode == SecretMode::InheritedEnv {
+        LocalHostProcessPort::new_inherited_env()
+    } else {
+        LocalHostProcessPort::new()
+    }
+    .with_workdir_alias("/workspace", workspace_root);
+    if let Some(host_home_root) = host_home_root {
+        process_port =
+            process_port.with_workdir_alias("/host", host_home_root.canonical_root.clone());
+        for alias in host_home_root.aliases() {
+            let alias_str = match alias.to_str() {
+                Some(s) => s,
+                None => {
+                    tracing::debug!(alias = ?alias, "skipping non-UTF-8 host home alias");
+                    continue;
+                }
+            };
+            process_port = process_port.with_workdir_alias(alias_str, alias.to_path_buf());
+        }
+    }
+    Some(process_port)
+}
+
+fn require_product_auth_runtime_ports<F, G, S, R>(
+    services: &HostRuntimeServices<F, G, S, R>,
+) -> Result<ProductAuthProviderRuntimePorts, RebornBuildError>
+where
+    F: ironclaw_filesystem::RootFilesystem + 'static,
+    G: ironclaw_resources::ResourceGovernor + 'static,
+    S: ironclaw_processes::ProcessStore + 'static,
+    R: ironclaw_processes::ProcessResultStore + 'static,
+{
+    services
+        .product_auth_provider_runtime_ports()
+        .ok_or_else(|| RebornBuildError::InvalidConfig {
+            reason: "Google OAuth provider backend requires host runtime HTTP egress".to_string(),
+        })
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -273,11 +327,15 @@ fn auth_continuation_dispatcher(
     Arc::new(ProductAuthTurnGateResumeDispatcher::new(turn_coordinator))
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn compose_product_auth_services(
     ports: RebornProductAuthServicePorts,
     turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
+    provider_client: Option<Arc<dyn AuthProviderClient>>,
 ) -> Arc<RebornProductAuthServices> {
+    let ports = match provider_client {
+        Some(provider_client) => ports.with_provider_client(provider_client),
+        None => ports,
+    };
     Arc::new(ports.into_services(auth_continuation_dispatcher(turn_coordinator)))
 }
 
@@ -304,6 +362,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         runtime_policy,
         runtime_process_binding,
         product_auth_ports,
+        google_oauth_config,
         owner_id,
         ..
     } = input;
@@ -391,21 +450,8 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> = Arc::new(
         DefaultTurnCoordinator::new(Arc::clone(&store_graph.turn_state)),
     );
-    let product_auth_services = match product_auth_ports {
-        Some(ports) => ports.into_services(auth_continuation_dispatcher(turn_coordinator.clone())),
-        None => RebornProductAuthServices::local_dev_in_memory(auth_continuation_dispatcher(
-            turn_coordinator.clone(),
-        )),
-    };
-    let product_auth = Arc::new(product_auth_services);
+    let secret_store: Arc<dyn SecretStore> = Arc::new(ironclaw_secrets::InMemorySecretStore::new());
     let mut first_party_registry = builtin_first_party_registry()?;
-    register_bundled_gsuite_first_party_handlers(
-        &mut first_party_registry,
-        product_auth.credential_account_service(),
-    )
-    .map_err(|error| RebornBuildError::InvalidConfig {
-        reason: format!("GSuite first-party handlers are invalid: {error}"),
-    })?;
 
     let local_dev_trust_policy = Arc::new(local_dev_first_party_trust_policy()?);
     let local_dev_trust_invalidation_bus = Arc::new(ironclaw_trust::InvalidationBus::new());
@@ -418,7 +464,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         CapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
     .with_trust_policy(Arc::clone(&local_dev_trust_policy))
-    .with_secret_store(Arc::new(ironclaw_secrets::InMemorySecretStore::new()))
+    .with_secret_store_dyn(Arc::clone(&secret_store))
     .try_with_host_http_egress_with_body_store(
         ironclaw_network::PolicyNetworkHttpEgress::new(
             ironclaw_network::ReqwestNetworkTransport::default(),
@@ -429,10 +475,45 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     .with_approval_requests(Arc::clone(&store_graph.approval_requests))
     .with_capability_leases(Arc::clone(&store_graph.capability_leases))
     .with_turn_state_and_transition_port(Arc::clone(&store_graph.turn_state));
+    let local_dev_process_port = local_dev_process_port_for_policy(
+        &runtime_policy,
+        &workspace_root,
+        host_home_root.as_ref(),
+    );
     if let Some(runtime_policy) = runtime_policy {
         services = services.with_runtime_policy(runtime_policy);
     }
+    if let Some(process_port) = local_dev_process_port {
+        services = services.with_runtime_process_port(Arc::new(process_port));
+    }
     services = apply_runtime_process_binding(services, runtime_process_binding);
+    let google_provider_client = google_oauth_config
+        .map(|config| {
+            let runtime_ports = require_product_auth_runtime_ports(&services)?;
+            google_provider_client(config, Arc::clone(&secret_store), runtime_ports)
+        })
+        .transpose()?;
+    let product_auth = match product_auth_ports {
+        Some(ports) => {
+            compose_product_auth_services(ports, turn_coordinator.clone(), google_provider_client)
+        }
+        None => {
+            let services = RebornProductAuthServices::local_dev_in_memory(
+                auth_continuation_dispatcher(turn_coordinator.clone()),
+            );
+            Arc::new(match google_provider_client {
+                Some(provider_client) => services.with_provider_client(provider_client),
+                None => services,
+            })
+        }
+    };
+    register_bundled_gsuite_first_party_handlers(
+        &mut first_party_registry,
+        product_auth.credential_account_service(),
+    )
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("GSuite first-party handlers are invalid: {error}"),
+    })?;
     let mut available_extensions = AvailableExtensionCatalog::from_filesystem_root(
         filesystem.as_ref(),
         &VirtualPath::new("/system/extensions")?,
@@ -1049,22 +1130,17 @@ fn local_dev_builtin_extension_registry() -> Result<ExtensionRegistry, RebornBui
 }
 
 fn local_dev_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuildError> {
+    let policy =
+        local_dev_capability_policy().map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("local-dev capability policy is invalid: {error}"),
+        })?;
     HostTrustPolicy::new(vec![Box::new(AdminConfig::with_entries(vec![
         AdminEntry::for_local_manifest(
-            PackageId::new("builtin").map_err(|error| RebornBuildError::InvalidConfig {
-                reason: format!("built-in first-party package id is invalid: {error}"),
-            })?,
-            "/system/extensions/builtin/manifest.toml".to_string(),
+            policy.provider.id,
+            policy.provider.manifest_path,
             None,
             HostTrustAssignment::first_party(),
-            vec![
-                EffectKind::DispatchCapability,
-                EffectKind::ReadFilesystem,
-                EffectKind::WriteFilesystem,
-                EffectKind::Network,
-                EffectKind::SpawnProcess,
-                EffectKind::ExecuteCode,
-            ],
+            policy.provider.authority_effects,
             None,
         ),
         AdminEntry::for_local_manifest(
@@ -1117,6 +1193,7 @@ async fn build_production_shaped(
         require_runtime_http_egress,
         require_wasm_credentials,
         product_auth_ports,
+        google_oauth_config,
     } = input;
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     let wiring_config = production_config(
@@ -1124,6 +1201,11 @@ async fn build_production_shaped(
         require_runtime_http_egress,
         require_wasm_credentials,
     );
+    if google_oauth_config.is_some() && product_auth_ports.is_none() {
+        return Err(RebornBuildError::InvalidConfig {
+            reason: "Google OAuth backend config requires product-auth ports".to_string(),
+        });
+    }
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     let _ = (
         production_trust_policy,
@@ -1134,6 +1216,7 @@ async fn build_production_shaped(
         require_runtime_http_egress,
         require_wasm_credentials,
         product_auth_ports,
+        google_oauth_config,
     );
 
     match storage {
@@ -1164,6 +1247,7 @@ async fn build_production_shaped(
                 wiring_config,
                 production_wiring,
                 product_auth_ports,
+                google_oauth_config,
             };
             build_libsql_production(context, db, path_or_url, auth_token, secret_master_key).await
         }
@@ -1185,6 +1269,7 @@ async fn build_production_shaped(
                 wiring_config,
                 production_wiring,
                 product_auth_ports,
+                google_oauth_config,
             };
             build_postgres_production(context, pool, url, secret_master_key).await
         }
@@ -1220,6 +1305,7 @@ struct RebornProductionBuildContext {
     wiring_config: ironclaw_host_runtime::ProductionWiringConfig,
     production_wiring: RebornProductionWiring,
     product_auth_ports: Option<RebornProductAuthServicePorts>,
+    google_oauth_config: Option<OAuthClientConfig>,
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -1323,7 +1409,9 @@ where
         wiring_config,
         production_wiring,
         product_auth_ports,
+        google_oauth_config,
     } = context;
+    let secret_store: Arc<dyn SecretStore> = stores.secret_store.clone();
     let services = HostRuntimeServices::new(
         Arc::new(builtin_extension_registry()?),
         Arc::clone(&stores.filesystem),
@@ -1350,6 +1438,12 @@ where
     .with_filesystem_turn_state_store(stores.scoped_filesystem)
     .with_run_profile_resolver(planned_run_profile_resolver()?)
     .with_turn_run_wake_notifier(production_wiring.turn_run_wake_notifier);
+    let google_provider_client = google_oauth_config
+        .map(|config| {
+            let runtime_ports = require_product_auth_runtime_ports(&services)?;
+            google_provider_client(config, secret_store, runtime_ports)
+        })
+        .transpose()?;
     let services = apply_production_runtime_process_binding(
         services,
         production_wiring.runtime_process_binding,
@@ -1359,8 +1453,9 @@ where
         Arc::new(services.turn_coordinator_for_production()?);
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
         Arc::new(services.host_runtime_for_production(&wiring_config)?);
-    let product_auth = product_auth_ports
-        .map(|ports| compose_product_auth_services(ports, turn_coordinator.clone()));
+    let product_auth = product_auth_ports.map(|ports| {
+        compose_product_auth_services(ports, turn_coordinator.clone(), google_provider_client)
+    });
     let product_auth_ready = product_auth.is_some();
 
     Ok(RebornServices {

@@ -5,7 +5,9 @@ use std::{
     time::Instant,
 };
 
-use ironclaw_auth::{CredentialAccountService, ProviderScope};
+use ironclaw_auth::{
+    CredentialAccountService, CredentialRecoveryKind, CredentialRecoveryProjection, ProviderScope,
+};
 use ironclaw_host_api::{
     CapabilityId, ExtensionId, NetworkMethod, ResourceScope, ResourceUsage,
     RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
@@ -106,16 +108,34 @@ pub struct GsuiteDispatchResult {
     pub usage: ResourceUsage,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GsuiteCredentialDispatchReason {
+    MissingScopes { missing_scopes: Vec<ProviderScope> },
+    MissingAccessSecret,
+    BackendAuth,
+    HostApi,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("GSuite capability dispatch failed: {kind}")]
 pub struct GsuiteDispatchError {
     kind: RuntimeDispatchErrorKind,
+    reason: Option<GsuiteCredentialDispatchReason>,
     usage: Option<ResourceUsage>,
 }
 
 impl GsuiteDispatchError {
     pub fn new(kind: RuntimeDispatchErrorKind) -> Self {
-        Self { kind, usage: None }
+        Self {
+            kind,
+            reason: None,
+            usage: None,
+        }
+    }
+
+    pub fn with_reason(mut self, reason: GsuiteCredentialDispatchReason) -> Self {
+        self.reason = Some(reason);
+        self
     }
 
     pub fn with_usage(mut self, usage: ResourceUsage) -> Self {
@@ -125,6 +145,10 @@ impl GsuiteDispatchError {
 
     pub fn kind(&self) -> RuntimeDispatchErrorKind {
         self.kind
+    }
+
+    pub fn reason(&self) -> Option<&GsuiteCredentialDispatchReason> {
+        self.reason.as_ref()
     }
 
     pub fn usage(&self) -> Option<&ResourceUsage> {
@@ -561,17 +585,27 @@ fn runtime_request(
 }
 
 fn map_credential_error(error: GoogleCredentialError) -> GsuiteDispatchError {
-    let kind = match error {
-        GoogleCredentialError::Missing
-        | GoogleCredentialError::AccountSelectionRequired
-        | GoogleCredentialError::NotConfigured
-        | GoogleCredentialError::MissingAccessSecret
-        | GoogleCredentialError::MissingScopes => RuntimeDispatchErrorKind::Client,
-        GoogleCredentialError::Auth(_) | GoogleCredentialError::HostApi(_) => {
-            RuntimeDispatchErrorKind::Backend
+    match error {
+        GoogleCredentialError::Recovery(recovery) => {
+            GsuiteDispatchError::new(map_recovery_kind(&recovery))
         }
-    };
-    GsuiteDispatchError::new(kind)
+        GoogleCredentialError::MissingScopes { missing_scopes } => {
+            GsuiteDispatchError::new(RuntimeDispatchErrorKind::Client)
+                .with_reason(GsuiteCredentialDispatchReason::MissingScopes { missing_scopes })
+        }
+        GoogleCredentialError::MissingAccessSecret => {
+            GsuiteDispatchError::new(RuntimeDispatchErrorKind::Client)
+                .with_reason(GsuiteCredentialDispatchReason::MissingAccessSecret)
+        }
+        GoogleCredentialError::Auth(_) => {
+            GsuiteDispatchError::new(RuntimeDispatchErrorKind::Backend)
+                .with_reason(GsuiteCredentialDispatchReason::BackendAuth)
+        }
+        GoogleCredentialError::HostApi(_) => {
+            GsuiteDispatchError::new(RuntimeDispatchErrorKind::Backend)
+                .with_reason(GsuiteCredentialDispatchReason::HostApi)
+        }
+    }
 }
 
 fn map_egress_error(error: RuntimeHttpEgressError) -> GsuiteDispatchError {
@@ -589,6 +623,15 @@ fn map_egress_error(error: RuntimeHttpEgressError) -> GsuiteDispatchError {
         network_egress_bytes: error.request_bytes(),
         ..ResourceUsage::default()
     })
+}
+
+fn map_recovery_kind(recovery: &CredentialRecoveryProjection) -> RuntimeDispatchErrorKind {
+    match recovery.kind() {
+        CredentialRecoveryKind::Configured => RuntimeDispatchErrorKind::Backend,
+        CredentialRecoveryKind::SetupRequired
+        | CredentialRecoveryKind::ReauthorizeRequired
+        | CredentialRecoveryKind::AccountSelectionRequired => RuntimeDispatchErrorKind::Client,
+    }
 }
 
 fn add_network_usage(error: GsuiteDispatchError, network_egress_bytes: u64) -> GsuiteDispatchError {
@@ -812,33 +855,87 @@ mod tests {
 
     #[test]
     fn map_credential_error_tests() {
-        for error in [
-            GoogleCredentialError::Missing,
-            GoogleCredentialError::AccountSelectionRequired,
-            GoogleCredentialError::NotConfigured,
-            GoogleCredentialError::MissingAccessSecret,
-            GoogleCredentialError::MissingScopes,
-        ] {
-            assert_eq!(
-                map_credential_error(error).kind(),
-                RuntimeDispatchErrorKind::Client
-            );
-        }
-
         assert_eq!(
-            map_credential_error(GoogleCredentialError::Auth(
-                ironclaw_auth::AuthProductError::BackendUnavailable,
+            map_credential_error(GoogleCredentialError::Recovery(
+                ironclaw_auth::CredentialRecoveryProjection::setup_required(
+                    ironclaw_auth::AuthProviderId::new("google").unwrap(),
+                    ironclaw_auth::CredentialRecoveryReason::NoAccount,
+                    Vec::new(),
+                ),
             ))
             .kind(),
-            RuntimeDispatchErrorKind::Backend
+            RuntimeDispatchErrorKind::Client
         );
         assert_eq!(
-            map_credential_error(GoogleCredentialError::HostApi(
-                HostApiError::InvariantViolation {
-                    reason: "bad contract".to_string(),
-                },
+            map_credential_error(GoogleCredentialError::Recovery(
+                ironclaw_auth::CredentialRecoveryProjection::account_selection_required(
+                    ironclaw_auth::AuthProviderId::new("google").unwrap(),
+                    Vec::new(),
+                ),
             ))
             .kind(),
+            RuntimeDispatchErrorKind::Client
+        );
+        assert_eq!(
+            map_credential_error(GoogleCredentialError::MissingAccessSecret).kind(),
+            RuntimeDispatchErrorKind::Client
+        );
+        assert_eq!(
+            map_credential_error(GoogleCredentialError::MissingAccessSecret).reason(),
+            Some(&GsuiteCredentialDispatchReason::MissingAccessSecret)
+        );
+        let missing_scope =
+            ProviderScope::new("https://www.googleapis.com/auth/gmail.modify").expect("scope");
+        let missing_scopes_error = map_credential_error(GoogleCredentialError::MissingScopes {
+            missing_scopes: vec![missing_scope.clone()],
+        });
+        assert_eq!(
+            missing_scopes_error.kind(),
+            RuntimeDispatchErrorKind::Client
+        );
+        assert_eq!(
+            missing_scopes_error.reason(),
+            Some(&GsuiteCredentialDispatchReason::MissingScopes {
+                missing_scopes: vec![missing_scope],
+            })
+        );
+
+        let backend_error = map_credential_error(GoogleCredentialError::Auth(
+            ironclaw_auth::AuthProductError::BackendUnavailable,
+        ));
+        assert_eq!(backend_error.kind(), RuntimeDispatchErrorKind::Backend);
+        assert_eq!(
+            backend_error.reason(),
+            Some(&GsuiteCredentialDispatchReason::BackendAuth)
+        );
+        let host_api_error = map_credential_error(GoogleCredentialError::HostApi(
+            HostApiError::InvariantViolation {
+                reason: "bad contract".to_string(),
+            },
+        ));
+        assert_eq!(host_api_error.kind(), RuntimeDispatchErrorKind::Backend);
+        assert_eq!(
+            host_api_error.reason(),
+            Some(&GsuiteCredentialDispatchReason::HostApi)
+        );
+
+        let configured_recovery = map_credential_error(GoogleCredentialError::Recovery(
+            ironclaw_auth::CredentialRecoveryProjection::configured(
+                ironclaw_auth::AuthProviderId::new("google").unwrap(),
+                ironclaw_auth::CredentialAccountProjection {
+                    id: ironclaw_auth::CredentialAccountId::new(),
+                    provider: ironclaw_auth::AuthProviderId::new("google").unwrap(),
+                    label: ironclaw_auth::CredentialAccountLabel::new("Google").unwrap(),
+                    status: ironclaw_auth::CredentialAccountStatus::Configured,
+                    ownership: ironclaw_auth::CredentialOwnership::UserReusable,
+                    owner_extension: None,
+                    granted_extensions: Vec::new(),
+                    secret_handle_count: 1,
+                },
+            ),
+        ));
+        assert_eq!(
+            configured_recovery.kind(),
             RuntimeDispatchErrorKind::Backend
         );
     }

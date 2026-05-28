@@ -254,6 +254,7 @@ pub fn build_identity_messages_for_run_detailed(
             message_ref: candidate.message_ref.clone(),
             role: LOOP_SYSTEM_ROLE.to_string(),
             safe_summary: candidate.safe_summary.clone(),
+            compaction: None,
         });
     }
     Ok(IdentityMessageBuildOutcome {

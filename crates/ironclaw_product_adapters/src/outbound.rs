@@ -21,7 +21,6 @@ const CAPABILITY_ACTIVITY_ERROR_KIND_SEGMENT_MAX_BYTES: usize = 24;
 const CAPABILITY_ACTIVITY_UNCLASSIFIED_ERROR_KIND: &str = "Unclassified";
 pub const CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES: usize = 2 * 1024;
 pub const CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES: usize = 16 * 1024;
-pub const CAPABILITY_DISPLAY_PREVIEW_MAX_LINES: usize = 120;
 pub const CAPABILITY_DISPLAY_KIND_MAX_BYTES: usize = 32;
 pub const CAPABILITY_DISPLAY_RESULT_REF_MAX_BYTES: usize = 256;
 
@@ -112,18 +111,7 @@ fn validate_display_preview(value: Option<&str>) -> Result<(), ProductAdapterErr
         "capability_display_output_preview",
         value,
         CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES,
-    )?;
-    if value
-        .lines()
-        .nth(CAPABILITY_DISPLAY_PREVIEW_MAX_LINES)
-        .is_some()
-    {
-        return Err(invalid(
-            "capability_display_output_preview",
-            format!("must be at most {CAPABILITY_DISPLAY_PREVIEW_MAX_LINES} lines"),
-        ));
-    }
-    Ok(())
+    )
 }
 
 fn validate_display_kind(value: Option<&str>) -> Result<(), ProductAdapterError> {
@@ -890,7 +878,7 @@ mod tests {
     }
 
     #[test]
-    fn capability_display_preview_view_rejects_unbounded_preview() {
+    fn capability_display_preview_view_accepts_many_preview_lines() {
         let json = serde_json::json!({
             "invocation_id": InvocationId::new(),
             "thread_id": "thread-tool-preview",
@@ -900,7 +888,35 @@ mod tests {
             "subtitle": "src/main.rs",
             "input_summary": "path: src/main.rs",
             "output_summary": "read file",
-            "output_preview": (0..=CAPABILITY_DISPLAY_PREVIEW_MAX_LINES).map(|_| "line").collect::<Vec<_>>().join("\n"),
+            "output_preview": (0..=240).map(|_| "line").collect::<Vec<_>>().join("\n"),
+            "output_kind": "text",
+            "output_bytes": 12,
+            "result_ref": "result:tool-output",
+            "truncated": true,
+            "updated_at": Utc::now(),
+        });
+
+        let view =
+            serde_json::from_value::<CapabilityDisplayPreviewView>(json).expect("preview is valid");
+        assert!(
+            view.output_preview
+                .as_deref()
+                .is_some_and(|preview| { preview.lines().count() == 241 })
+        );
+    }
+
+    #[test]
+    fn capability_display_preview_view_rejects_preview_over_byte_cap() {
+        let json = serde_json::json!({
+            "invocation_id": InvocationId::new(),
+            "thread_id": "thread-tool-preview",
+            "capability_id": "builtin.read_file",
+            "status": "completed",
+            "title": "read_file",
+            "subtitle": "src/main.rs",
+            "input_summary": "path: src/main.rs",
+            "output_summary": "read file",
+            "output_preview": "x".repeat(CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES + 1),
             "output_kind": "text",
             "output_bytes": 12,
             "result_ref": "result:tool-output",
