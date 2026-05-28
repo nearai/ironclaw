@@ -2,7 +2,6 @@
 
 use glob::Pattern;
 use ironclaw_filesystem::{DirEntry, FileType, FilesystemOperation};
-use ironclaw_host_api::RuntimeDispatchErrorKind;
 use serde_json::{Value, json};
 use std::{cmp::Reverse, time::UNIX_EPOCH};
 
@@ -29,7 +28,7 @@ pub(super) async fn glob(
     let max_results = optional_usize(request.input, "max_results")?.unwrap_or(DEFAULT_MAX_RESULTS);
     let pattern = Pattern::new(pattern).map_err(|_| input_error())?;
     let mut files = Vec::new();
-    walk_entries(request, &resolved, |entry, relative| {
+    let walk_result = walk_entries(request, &resolved, |entry, relative| {
         let scoped_path = scoped_child_path(&resolved.scoped_path, relative);
         if entry.file_type == FileType::File
             && !is_excluded_relative_path(relative)
@@ -55,26 +54,38 @@ pub(super) async fn glob(
         files_with_mtime.push((relative, modified));
     }
     files_with_mtime.sort_by_key(|entry| Reverse(entry.1));
-    let truncated = files_with_mtime.len() > max_results;
+    let truncated = files_with_mtime.len() > max_results || walk_result.visit_limit_reached;
     files_with_mtime.truncate(max_results);
     let files = files_with_mtime
         .into_iter()
         .map(|(relative, _)| relative)
         .collect::<Vec<_>>();
     let count = files.len();
-    Ok(json!({
+    let mut output = json!({
         "files": files,
         "count": count,
         "truncated": truncated,
         "duration_ms": start.elapsed().as_millis() as u64
-    }))
+    });
+    if walk_result.visit_limit_reached {
+        output["limit_reason"] = json!("visited_entries");
+        output["visited_entries"] = json!(walk_result.visited_entries);
+        output["max_visited_entries"] = json!(MAX_VISITED_ENTRIES);
+    }
+    Ok(output)
+}
+
+#[derive(Debug, Default)]
+struct WalkEntriesResult {
+    visited_entries: usize,
+    visit_limit_reached: bool,
 }
 
 async fn walk_entries(
     request: &CodingCapabilityRequest<'_>,
     root: &ResolvedPath,
     mut visit: impl FnMut(&DirEntry, &str) -> Result<bool, CodingCapabilityError>,
-) -> Result<(), CodingCapabilityError> {
+) -> Result<WalkEntriesResult, CodingCapabilityError> {
     let mut stack = vec![root.virtual_path.clone()];
     let mut visited = 0usize;
     while let Some(dir) = stack.pop() {
@@ -86,9 +97,10 @@ async fn walk_entries(
         for entry in entries {
             visited += 1;
             if visited > MAX_VISITED_ENTRIES {
-                return Err(CodingCapabilityError::new(
-                    RuntimeDispatchErrorKind::Resource,
-                ));
+                return Ok(WalkEntriesResult {
+                    visited_entries: MAX_VISITED_ENTRIES,
+                    visit_limit_reached: true,
+                });
             }
             let relative = virtual_to_relative(&root.virtual_path, &entry.path)?;
             let keep_going = visit(&entry, &relative)?;
@@ -100,9 +112,15 @@ async fn walk_entries(
                 stack.push(entry.path.clone());
             }
             if !keep_going {
-                return Ok(());
+                return Ok(WalkEntriesResult {
+                    visited_entries: visited,
+                    visit_limit_reached: false,
+                });
             }
         }
     }
-    Ok(())
+    Ok(WalkEntriesResult {
+        visited_entries: visited,
+        visit_limit_reached: false,
+    })
 }
