@@ -1,7 +1,12 @@
 use async_trait::async_trait;
-use ironclaw_turns::run_profile::{LoopPromptBundleRequest, PromptMode};
+use ironclaw_turns::run_profile::{
+    LoopInlineMessage, LoopInlineMessageRole, LoopPromptBundleRequest, LoopSafeSummary, PromptMode,
+};
 
-use crate::state::LoopExecutionState;
+use crate::state::{LoopExecutionState, ReplyAdmissionRejection, ReplyAdmissionRejectionReason};
+
+pub(crate) const REPLY_ADMISSION_STOP_CONDITION_CONTROL_TEXT: &str =
+    "loop control reply rejected stop condition not met continue";
 
 /// Decides what context the host should materialize for the next model call.
 ///
@@ -48,7 +53,7 @@ impl Default for DefaultContextStrategy {
 
 #[async_trait]
 impl ContextStrategy for DefaultContextStrategy {
-    async fn plan_context_request(&self, _state: &LoopExecutionState) -> LoopPromptBundleRequest {
+    async fn plan_context_request(&self, state: &LoopExecutionState) -> LoopPromptBundleRequest {
         // `max(1)` keeps the host's "zero is rejected" invariant from
         // `LoopPromptBundleRequest` even if a loop family overrides
         // `max_messages` to zero by accident.
@@ -58,8 +63,41 @@ impl ContextStrategy for DefaultContextStrategy {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: Some(self.max_messages.max(1)),
-            inline_messages: Vec::new(),
+            inline_messages: loop_control_inline_messages(state),
             capability_view: None,
+        }
+    }
+}
+
+fn loop_control_inline_messages(state: &LoopExecutionState) -> Vec<LoopInlineMessage> {
+    let Some(rejection) = state.reply_admission_state.pending_rejection.as_ref() else {
+        return Vec::new();
+    };
+    if state.reply_admission_state.pending_rejection_rendered {
+        return Vec::new();
+    }
+    vec![reply_admission_control_message(rejection)]
+}
+
+pub(crate) fn contains_reply_admission_control_message(messages: &[LoopInlineMessage]) -> bool {
+    messages.iter().any(|message| {
+        message.role == LoopInlineMessageRole::System
+            && message.safe_body.as_str() == REPLY_ADMISSION_STOP_CONDITION_CONTROL_TEXT
+    })
+}
+
+fn reply_admission_control_message(rejection: &ReplyAdmissionRejection) -> LoopInlineMessage {
+    LoopInlineMessage {
+        role: LoopInlineMessageRole::System,
+        safe_body: LoopSafeSummary::new(reply_admission_control_text(rejection))
+            .expect("static loop-control text is non-empty and safe"),
+    }
+}
+
+fn reply_admission_control_text(rejection: &ReplyAdmissionRejection) -> &'static str {
+    match rejection.reason_code {
+        ReplyAdmissionRejectionReason::StopConditionNotMet => {
+            REPLY_ADMISSION_STOP_CONDITION_CONTROL_TEXT
         }
     }
 }

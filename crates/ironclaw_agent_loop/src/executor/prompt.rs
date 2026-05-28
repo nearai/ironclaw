@@ -16,7 +16,7 @@ use crate::state::{
     CheckpointKind, CompactionPromptSnapshot, IndexedMessageKind, LoopExecutionState,
     MessageIndexEntry,
 };
-use crate::strategies::CompactionDecision;
+use crate::strategies::{CompactionDecision, contains_reply_admission_control_message};
 
 use super::{
     AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, HostStage,
@@ -54,6 +54,7 @@ pub(super) enum PromptStep {
 pub(super) struct BuiltPromptBundle {
     messages: Vec<LoopModelMessage>,
     compaction_message_index: Vec<LoopContextCompactionMetadata>,
+    rendered_reply_admission_control: bool,
 }
 
 impl BuiltPromptBundle {
@@ -129,6 +130,10 @@ impl FinalPromptBundle {
 
     fn into_messages(self) -> Vec<LoopModelMessage> {
         self.bundle.messages
+    }
+
+    fn rendered_reply_admission_control(&self) -> bool {
+        self.bundle.rendered_reply_admission_control
     }
 }
 
@@ -208,6 +213,9 @@ impl<'a> PromptPlanningPipeline<'a> {
                 bundle
             }
         };
+        if final_bundle.rendered_reply_admission_control() {
+            self.state.reply_admission_state.pending_rejection_rendered = true;
+        }
 
         Ok(PromptStep::Prepared(Box::new(PromptOutput {
             state: self.state,
@@ -497,6 +505,8 @@ pub(super) async fn build_prompt_bundle_for_surface(
     context_request.surface_version = Some(surface_version);
     context_request.capability_view = Some(capability_view);
     let prompt_mode = context_request.mode;
+    let rendered_reply_admission_control =
+        contains_reply_admission_control_message(&context_request.inline_messages);
     let prompt_bundle = ctx
         .host
         .build_prompt_bundle(context_request)
@@ -525,6 +535,7 @@ pub(super) async fn build_prompt_bundle_for_surface(
     Ok(BuiltPromptBundle {
         messages: prompt_bundle.messages,
         compaction_message_index: prompt_bundle.compaction_message_index,
+        rendered_reply_admission_control,
     })
 }
 

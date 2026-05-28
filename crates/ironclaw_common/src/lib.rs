@@ -7,6 +7,7 @@ mod event;
 mod identity;
 pub mod paths;
 mod platform;
+pub mod provider_transcript;
 mod timezone;
 #[allow(dead_code)] // Trust-boundary scaffolding for the Reborn architecture; not yet consumed.
 mod trust_boundary;

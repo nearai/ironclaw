@@ -14,8 +14,9 @@ use crate::strategies::{
     DefaultBatchPolicyStrategy, DefaultBudgetStrategy, DefaultCapabilityStrategy,
     DefaultCompactionStrategy, DefaultContextStrategy, DefaultGateHandlingStrategy,
     DefaultInputDrainStrategy, DefaultModelStrategy, DefaultRecoveryStrategy,
-    DefaultStopConditionStrategy, GateHandlingStrategy, InputDrainStrategy, ModelStrategy,
-    RecoveryStrategy, StopConditionStrategy,
+    DefaultReplyAdmissionStrategy, DefaultStopConditionStrategy, GateHandlingStrategy,
+    InputDrainStrategy, ModelStrategy, RecoveryStrategy, ReplyAdmissionStrategy,
+    StopConditionStrategy,
 };
 
 /// The reference planner: a concrete, Builtin-only strategy composition.
@@ -31,6 +32,7 @@ pub(crate) struct DefaultPlanner {
     batch: Arc<dyn BatchPolicyStrategy>,
     gate: Arc<dyn GateHandlingStrategy>,
     recovery: Arc<dyn RecoveryStrategy>,
+    reply_admission: Arc<dyn ReplyAdmissionStrategy>,
     stop: Arc<dyn StopConditionStrategy>,
     drain: Arc<dyn InputDrainStrategy>,
     budget: Arc<dyn BudgetStrategy>,
@@ -64,6 +66,7 @@ impl DefaultPlanner {
             batch: slots.batch,
             gate: slots.gate,
             recovery: slots.recovery,
+            reply_admission: slots.reply_admission,
             stop: slots.stop,
             drain: slots.drain,
             budget: slots.budget,
@@ -112,6 +115,14 @@ impl DefaultPlanner {
 
     pub(crate) fn with_recovery(mut self, strategy: Arc<dyn RecoveryStrategy>) -> Self {
         self.recovery = strategy;
+        self
+    }
+
+    pub(crate) fn with_reply_admission(
+        mut self,
+        strategy: Arc<dyn ReplyAdmissionStrategy>,
+    ) -> Self {
+        self.reply_admission = strategy;
         self
     }
 
@@ -170,6 +181,10 @@ impl AgentLoopPlannerInternal for DefaultPlanner {
         &*self.recovery
     }
 
+    fn reply_admission(&self) -> &dyn ReplyAdmissionStrategy {
+        &*self.reply_admission
+    }
+
     fn stop(&self) -> &dyn StopConditionStrategy {
         &*self.stop
     }
@@ -195,6 +210,7 @@ pub(crate) struct DefaultStrategySlots {
     batch: Arc<dyn BatchPolicyStrategy>,
     gate: Arc<dyn GateHandlingStrategy>,
     recovery: Arc<dyn RecoveryStrategy>,
+    reply_admission: Arc<dyn ReplyAdmissionStrategy>,
     stop: Arc<dyn StopConditionStrategy>,
     drain: Arc<dyn InputDrainStrategy>,
     budget: Arc<dyn BudgetStrategy>,
@@ -210,6 +226,7 @@ impl Default for DefaultStrategySlots {
             batch: Arc::new(DefaultBatchPolicyStrategy),
             gate: Arc::new(DefaultGateHandlingStrategy),
             recovery: Arc::new(DefaultRecoveryStrategy::default()),
+            reply_admission: Arc::new(DefaultReplyAdmissionStrategy),
             stop: Arc::new(DefaultStopConditionStrategy::default()),
             drain: Arc::new(DefaultInputDrainStrategy),
             budget: Arc::new(DefaultBudgetStrategy::default()),

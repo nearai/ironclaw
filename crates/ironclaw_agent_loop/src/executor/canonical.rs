@@ -10,8 +10,9 @@ use super::{
     AgentLoopExecutorError, AssistantReplyInput, BudgetInput, BudgetStep, CancelCheck,
     CapabilityInput, CheckpointInput, CheckpointKind, CheckpointStage, DefaultExecutorPipeline,
     DrainInput, ExecutorStage, ExitInput, InputStep, ModelInput, ModelStep, PendingInputAck,
-    PromptInput, PromptStep, StageContext, StopInput, StopObservationInput, StopObservationStep,
-    StopStep, TurnCompletedStep, UserFacingInputDrainMode,
+    PromptInput, PromptStep, ReplyAdmissionInput, ReplyAdmissionStep, StageContext, StopInput,
+    StopObservationInput, StopObservationStep, StopStep, TurnCompletedStep,
+    UserFacingInputDrainMode,
 };
 
 impl DefaultExecutorPipeline {
@@ -135,9 +136,27 @@ impl DefaultExecutorPipeline {
 
             let completed = match model_response.output {
                 ParentLoopOutput::AssistantReply(reply) => {
-                    self.assistant_reply
-                        .process(ctx, AssistantReplyInput { state, reply })
+                    match self
+                        .reply_admission
+                        .process(ctx, ReplyAdmissionInput { state, reply })
                         .await?
+                    {
+                        ReplyAdmissionStep::Accept { state, reply } => {
+                            self.assistant_reply
+                                .process(
+                                    ctx,
+                                    AssistantReplyInput {
+                                        state: *state,
+                                        reply,
+                                    },
+                                )
+                                .await?
+                        }
+                        ReplyAdmissionStep::Reject { state } => TurnCompletedStep::Continue {
+                            state,
+                            summary: crate::strategies::TurnSummary::reply_rejected(),
+                        },
+                    }
                 }
                 ParentLoopOutput::CapabilityCalls(calls) => {
                     self.capabilities

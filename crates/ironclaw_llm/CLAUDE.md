@@ -11,6 +11,7 @@ Multi-provider LLM integration with circuit breaker, retry, failover, and respon
 | `error.rs` | `LlmError` enum used by all providers |
 | `provider.rs` | `LlmProvider` trait, `ChatMessage`, `ToolCall`, `CompletionRequest`, `sanitize_tool_messages` |
 | `nearai_chat.rs` | NEAR AI Chat Completions provider (dual auth: session token or API key) |
+| `nearai_tool_message_flattening.rs` | NEAR AI compatibility rewrite for tool-call history |
 | `codex_auth.rs` | Reads Codex CLI `auth.json`, extracts tokens, refreshes ChatGPT OAuth access tokens |
 | `codex_chatgpt.rs` | Custom Responses API provider for Codex ChatGPT backend (`/backend-api/codex`) |
 | `openai_codex_provider.rs` | OpenAI Codex Responses API client (SSE streaming, JWT auth, subscription billing) |
@@ -105,7 +106,7 @@ ID, migrate to it immediately. Advanced users can override headers via
 
 **Session renewal is interactive:** When `SessionExpired` triggers renewal, it blocks and prompts the user in the terminal (GitHub/Google OAuth or manual API key entry). This is unsuitable for headless/hosted deployments — set `NEARAI_SESSION_TOKEN` env var instead.
 
-**Tool message flattening:** NEAR AI's API doesn't support `role: "tool"` messages in the standard format. `nearai_chat.rs` defaults `flatten_tool_messages = true`, converting tool results to user messages with `[Tool result from <name>]: <content>` format. Use `NearAiChatProvider::new_with_flatten(..., false)` to disable for compliant endpoints.
+**Tool message flattening:** NEAR AI's API doesn't support `role: "tool"` messages in the standard format. `nearai_chat.rs` defaults `flatten_tool_messages = true` and delegates the rewrite to `nearai_tool_message_flattening.rs`. Assistant messages that only carry provider tool-call protocol are dropped instead of converted into assistant-authored prose; assistant prose is preserved when present. Tool results become user-side observations using the shared `ironclaw_common::provider_transcript` grammar (`Tool result from <name>: <content>`). Use `NearAiChatProvider::new_with_flatten(..., false)` to disable for compliant endpoints.
 
 **Tool schema normalization:** `nearai_chat.rs` uses the provider-safe `FlattenOnly` policy from `tool_schema.rs`: it still flattens top-level `oneOf`/`anyOf`/`allOf`/`enum`/`not` schemas that OpenAI-compatible tool APIs reject, but it does not rewrite optional object fields into required-nullable strict mode. `RigAdapter::convert_tools` and `openai_codex_provider.rs` continue to use the stricter OpenAI policy.
 

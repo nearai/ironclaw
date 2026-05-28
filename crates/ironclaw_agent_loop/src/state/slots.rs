@@ -186,6 +186,44 @@ pub enum RecoveryAttemptClass {
     ModelInternal,
 }
 
+/// Persistent state owned by `ReplyAdmissionStrategy`.
+///
+/// Rejected replies are loop-private candidates. The latest rejection is kept
+/// until an accepted final reply clears it so checkpoints can resume from the
+/// typed control state, while `pending_rejection_rendered` prevents repeating
+/// the same control event every prompt.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ReplyAdmissionStrategyState {
+    #[serde(default)]
+    pub rejected_reply_candidates: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_rejection: Option<ReplyAdmissionRejection>,
+    #[serde(default)]
+    pub pending_rejection_rendered: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ReplyAdmissionRejection {
+    pub reason_code: ReplyAdmissionRejectionReason,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unmet_obligation_refs: Vec<String>,
+}
+
+impl ReplyAdmissionRejection {
+    pub fn stop_condition_not_met() -> Self {
+        Self {
+            reason_code: ReplyAdmissionRejectionReason::StopConditionNotMet,
+            unmet_obligation_refs: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplyAdmissionRejectionReason {
+    StopConditionNotMet,
+}
+
 /// Persistent state owned by `StopConditionStrategy`. Split from a previously
 /// shared `ControlStrategyState` so Stop and Gate evolve independently — a
 /// future family's growth in stop-condition state cannot perturb gate-handler
@@ -200,6 +238,10 @@ pub struct StopStrategyState {
     /// Total number of results in the most recent capability batch (denominator
     /// for "all results said terminate").
     pub last_batch_total: u32,
+    /// Consecutive turns where a model reply was rejected before transcript
+    /// finalization.
+    #[serde(default)]
+    pub trailing_rejected_replies: u32,
 }
 
 /// Persistent state owned by `GateHandlingStrategy`.

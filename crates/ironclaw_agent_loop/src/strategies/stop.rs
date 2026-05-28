@@ -59,6 +59,14 @@ impl TurnSummary {
             batch_result_refs: result_refs,
         }
     }
+
+    pub(crate) fn reply_rejected() -> Self {
+        Self {
+            kind: TurnEndKind::ReplyRejected,
+            assistant_message_ref: None,
+            batch_result_refs: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -70,6 +78,9 @@ pub(crate) enum TurnEndKind {
     /// The model returned capability calls and the listed refs are the
     /// finalized batch outcomes for this turn.
     AfterCapabilityBatch,
+    /// The model returned a reply that was rejected before transcript
+    /// finalization.
+    ReplyRejected,
 }
 
 /// Strategy decision after completed-turn observation has already updated
@@ -109,6 +120,9 @@ pub(crate) enum StopKind {
 /// 4. **Failure-run escape**: the same `LoopFailureKind` appears
 ///    `failure_run_threshold` (default 3) times in a row →
 ///    `Stop { NoProgressDetected }`.
+/// 5. **Rejected-reply escape**: reply admission rejects
+///    `failure_run_threshold` replies in a row →
+///    `Stop { Aborted(InvalidModelOutput) }`.
 ///
 /// On no signal, returns `Continue`.
 #[derive(Debug, Clone, Copy)]
@@ -137,12 +151,17 @@ impl StopConditionStrategy for DefaultStopConditionStrategy {
     async fn observe_completed_turn(
         &self,
         state: &LoopExecutionState,
-        _just_completed: &TurnSummary,
+        just_completed: &TurnSummary,
     ) -> StopStrategyState {
         // Bump `turns_completed` regardless of stop/continue — every
         // completed turn counts.
         StopStrategyState {
             turns_completed: state.stop_state.turns_completed.saturating_add(1),
+            trailing_rejected_replies: if just_completed.kind == TurnEndKind::ReplyRejected {
+                state.stop_state.trailing_rejected_replies.saturating_add(1)
+            } else {
+                0
+            },
             ..state.stop_state.clone()
         }
     }
@@ -188,6 +207,14 @@ impl StopConditionStrategy for DefaultStopConditionStrategy {
         if state.recent_failure_kinds.same_run_length() >= self.failure_run_threshold {
             return StopOutcome::Stop {
                 kind: StopKind::NoProgressDetected,
+            };
+        }
+
+        // (e) rejected-reply escape — repeated rejected final-answer
+        // candidates are invalid model output, not generic no-progress.
+        if state.stop_state.trailing_rejected_replies as usize >= self.failure_run_threshold {
+            return StopOutcome::Stop {
+                kind: StopKind::Aborted(LoopFailureKind::InvalidModelOutput),
             };
         }
 
@@ -426,6 +453,7 @@ mod tests {
                 turns_completed: 4,
                 terminate_hints_in_last_batch: 0,
                 last_batch_total: 0,
+                trailing_rejected_replies: 0,
             };
 
             let (state, outcome) = observe_and_decide(&strategy, state, after_batch()).await;
@@ -442,6 +470,7 @@ mod tests {
                 turns_completed: 1,
                 terminate_hints_in_last_batch: 3,
                 last_batch_total: 3,
+                trailing_rejected_replies: 0,
             };
 
             let (state, outcome) = observe_and_decide(&strategy, state, after_batch()).await;
@@ -492,6 +521,7 @@ mod tests {
                 turns_completed: 0,
                 terminate_hints_in_last_batch: 0,
                 last_batch_total: 0,
+                trailing_rejected_replies: 0,
             };
 
             let (_state, outcome) = observe_and_decide(
@@ -545,6 +575,27 @@ mod tests {
                 outcome,
                 StopOutcome::Stop {
                     kind: StopKind::NoProgressDetected
+                }
+            ));
+        }
+
+        #[tokio::test]
+        async fn rejected_reply_run_triggers_invalid_model_output() {
+            let strategy = DefaultStopConditionStrategy::default();
+            let mut state = LoopExecutionState::initial_for_run(&test_run_context());
+            let summary = TurnSummary::reply_rejected();
+
+            for _ in 0..3 {
+                state.stop_state = strategy.observe_completed_turn(&state, &summary).await;
+            }
+            let outcome = strategy
+                .should_stop_after_observed_turn(&state, &summary)
+                .await;
+
+            assert!(matches!(
+                outcome,
+                StopOutcome::Stop {
+                    kind: StopKind::Aborted(LoopFailureKind::InvalidModelOutput)
                 }
             ));
         }
