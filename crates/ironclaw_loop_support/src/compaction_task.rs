@@ -4,7 +4,8 @@ use ironclaw_host_api::ThreadId;
 use ironclaw_safety::{InjectionScanner, LeakDetector, LeakScanner, Sanitizer};
 use ironclaw_threads::{
     CreateSummaryArtifactRequest, MessageContent, MessageKind, MessageStatus, SessionThreadService,
-    SummaryKind, SummaryModelContextPolicy, ThreadMessageRangeRequest, ThreadScope,
+    SummaryKind, SummaryModelContextPolicy, ThreadMessageRangeRequest, ThreadMessageRecord,
+    ThreadScope,
 };
 use ironclaw_turns::run_profile::{
     LoopCompactionError, LoopCompactionMode, LoopCompactionPort, LoopCompactionRequest,
@@ -20,6 +21,8 @@ pub(crate) const ANTI_INJECTION_PREFIX: &str = "This message is a generated sess
 pub(crate) enum CompactionError {
     #[error("invalid compaction cut point")]
     InvalidCutPoint,
+    #[error("unsupported compaction mode")]
+    UnsupportedMode,
     #[error("compaction input too large")]
     InputTooLarge { cap: usize, observed_bytes: usize },
     #[error("compaction content contains injection markers")]
@@ -174,28 +177,29 @@ where
         if drop_through_seq == 0 {
             return Err(CompactionError::InvalidCutPoint);
         }
+        if mode != LoopCompactionMode::Fresh {
+            return Err(CompactionError::UnsupportedMode);
+        }
         let start_exclusive = last_compacted_through_seq.unwrap_or(0);
-        let thread_scope = if self.threads.supports_resolve_scope() {
+        if self.threads.supports_resolve_scope() {
             match self.threads.resolve_scope(thread_id.clone()).await {
-                Ok(scope) => scope,
+                Ok(scope) if scope == expected_scope => {}
+                Ok(_) => {
+                    return Err(CompactionError::PersistenceFailed {
+                        safe_summary: safe("thread scope mismatch"),
+                    });
+                }
                 Err(_) => {
                     return Err(CompactionError::PersistenceFailed {
                         safe_summary: safe("thread scope unavailable"),
                     });
                 }
             }
-        } else {
-            expected_scope.clone()
-        };
-        if thread_scope != expected_scope {
-            return Err(CompactionError::PersistenceFailed {
-                safe_summary: safe("thread scope mismatch"),
-            });
         }
         let range = self
             .threads
             .list_thread_messages_range(ThreadMessageRangeRequest {
-                scope: thread_scope.clone(),
+                scope: expected_scope.clone(),
                 thread_id: thread_id.clone(),
                 after_sequence: start_exclusive,
                 through_sequence: drop_through_seq,
@@ -204,11 +208,12 @@ where
             .map_err(|_| CompactionError::PersistenceFailed {
                 safe_summary: safe("thread message range unavailable"),
             })?;
-        if range.thread.scope != thread_scope {
+        if range.thread.scope != expected_scope {
             return Err(CompactionError::PersistenceFailed {
                 safe_summary: safe("thread scope mismatch"),
             });
         }
+        let thread_scope = range.thread.scope.clone();
         let messages = range.messages;
         if !messages.iter().any(|message| {
             message.sequence == drop_through_seq
@@ -226,7 +231,13 @@ where
             if !is_compaction_model_visible(message.kind, message.status) {
                 return Err(CompactionError::InvalidCutPoint);
             }
-            let body = message.content.as_deref().unwrap_or_default();
+            let body = compaction_message_body(message)?;
+            if !self.injection_scanner.scan_injection(body).is_empty() {
+                return Err(CompactionError::InjectionDetected);
+            }
+            if !self.leak_detector.scan_leaks(body).is_clean() {
+                return Err(CompactionError::LeakDetected);
+            }
             let observed_bytes = input.len().saturating_add(escaped_message_len(
                 message.sequence,
                 message.kind,
@@ -255,17 +266,12 @@ where
                 identity: SystemInferenceIdentity {
                     task_kind: SystemTaskKind::Compaction,
                     prompt_source: SystemPromptSource::Static {
-                        prompt_id: match mode {
-                            LoopCompactionMode::Fresh => "compaction_summarizer_fresh",
-                            LoopCompactionMode::Update => "compaction_summarizer_update",
-                        }
-                        .to_string()
-                        .try_into()
-                        .map_err(|_| {
-                            CompactionError::PersistenceFailed {
+                        prompt_id: "compaction_summarizer_fresh"
+                            .to_string()
+                            .try_into()
+                            .map_err(|_| CompactionError::PersistenceFailed {
                                 safe_summary: safe("compaction prompt id is invalid"),
-                            }
-                        })?,
+                            })?,
                     },
                     system_prompt: self.system_prompt.clone(),
                 },
@@ -355,6 +361,13 @@ fn is_compaction_model_visible(kind: MessageKind, status: MessageStatus) -> bool
     )
 }
 
+fn compaction_message_body(message: &ThreadMessageRecord) -> Result<&str, CompactionError> {
+    message
+        .content
+        .as_deref()
+        .ok_or(CompactionError::InvalidCutPoint)
+}
+
 fn append_escaped_message(output: &mut String, sequence: u64, kind: MessageKind, body: &str) {
     output.push_str("<message sequence=\"");
     output.push_str(&sequence.to_string());
@@ -438,6 +451,7 @@ fn safe(value: &'static str) -> LoopSafeSummary {
 fn compaction_error_to_loop(error: CompactionError) -> LoopCompactionError {
     match error {
         CompactionError::InvalidCutPoint => LoopCompactionError::InvalidCutPoint,
+        CompactionError::UnsupportedMode => LoopCompactionError::UnsupportedMode,
         CompactionError::InputTooLarge { .. } => LoopCompactionError::InputTooLarge,
         CompactionError::InjectionDetected => LoopCompactionError::SecurityRejected {
             safe_summary: safe("injection detected"),
@@ -458,6 +472,26 @@ fn compaction_error_to_loop(error: CompactionError) -> LoopCompactionError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_threads::ThreadMessageId;
+
+    fn record_with_content(kind: MessageKind, content: Option<&str>) -> ThreadMessageRecord {
+        ThreadMessageRecord {
+            message_id: ThreadMessageId::new(),
+            thread_id: ThreadId::new("thread-compaction-body").unwrap(),
+            sequence: 1,
+            kind,
+            status: MessageStatus::Finalized,
+            actor_id: None,
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            turn_id: None,
+            turn_run_id: None,
+            tool_result_ref: None,
+            tool_result_provider_call: None,
+            content: content.map(ToString::to_string),
+            redaction_ref: None,
+        }
+    }
 
     #[test]
     fn compaction_visibility_matches_model_context_reference_kinds() {
@@ -477,5 +511,22 @@ mod tests {
             MessageKind::User,
             MessageStatus::Redacted
         ));
+    }
+
+    #[test]
+    fn compaction_message_body_rejects_contentless_visible_records() {
+        let message = record_with_content(MessageKind::ToolResultReference, None);
+
+        assert_eq!(
+            compaction_message_body(&message),
+            Err(CompactionError::InvalidCutPoint)
+        );
+    }
+
+    #[test]
+    fn compaction_message_body_preserves_present_content() {
+        let message = record_with_content(MessageKind::ToolResultReference, Some("tool summary"));
+
+        assert_eq!(compaction_message_body(&message), Ok("tool summary"));
     }
 }

@@ -10,7 +10,7 @@ use crate::families::DEFAULT_FAMILY_DIGEST;
 use crate::family::{ComponentIdentity, LoopFamilyId};
 use crate::planner::{AgentLoopPlanner, AgentLoopPlannerInternal};
 use crate::strategies::{
-    BatchPolicyStrategy, BudgetStrategy, CapabilityStrategy, ContextStrategy,
+    BatchPolicyStrategy, BudgetStrategy, CapabilityStrategy, CompactionStrategy, ContextStrategy,
     DefaultBatchPolicyStrategy, DefaultBudgetStrategy, DefaultCapabilityStrategy,
     DefaultCompactionStrategy, DefaultContextStrategy, DefaultGateHandlingStrategy,
     DefaultInputDrainStrategy, DefaultModelStrategy, DefaultRecoveryStrategy,
@@ -25,7 +25,7 @@ pub(crate) struct DefaultPlanner {
     id: LoopFamilyId,
     version: ComponentIdentity,
     context: Arc<dyn ContextStrategy>,
-    compaction: Arc<dyn crate::strategies::CompactionStrategy>,
+    compaction: Arc<dyn CompactionStrategy>,
     capability: Arc<dyn CapabilityStrategy>,
     model: Arc<dyn ModelStrategy>,
     batch: Arc<dyn BatchPolicyStrategy>,
@@ -85,10 +85,7 @@ impl DefaultPlanner {
         self
     }
 
-    pub(crate) fn with_compaction(
-        mut self,
-        strategy: Arc<dyn crate::strategies::CompactionStrategy>,
-    ) -> Self {
+    pub(crate) fn with_compaction(mut self, strategy: Arc<dyn CompactionStrategy>) -> Self {
         self.compaction = strategy;
         self
     }
@@ -149,7 +146,7 @@ impl AgentLoopPlannerInternal for DefaultPlanner {
         &*self.context
     }
 
-    fn compaction(&self) -> &dyn crate::strategies::CompactionStrategy {
+    fn compaction(&self) -> &dyn CompactionStrategy {
         &*self.compaction
     }
 
@@ -192,7 +189,7 @@ impl AgentLoopPlannerInternal for DefaultPlanner {
 /// without making strategy traits constructible outside this crate.
 pub(crate) struct DefaultStrategySlots {
     context: Arc<dyn ContextStrategy>,
-    compaction: Arc<dyn crate::strategies::CompactionStrategy>,
+    compaction: Arc<dyn CompactionStrategy>,
     capability: Arc<dyn CapabilityStrategy>,
     model: Arc<dyn ModelStrategy>,
     batch: Arc<dyn BatchPolicyStrategy>,

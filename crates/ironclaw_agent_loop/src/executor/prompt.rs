@@ -110,25 +110,26 @@ impl<'a> PromptPlanningPipeline<'a> {
 
         let compaction =
             maybe_compact_prompt_context(self.ctx, self.state, &mut self.pending_input_ack).await?;
-        if let Some(exit) = compaction.exit {
-            return Ok(PromptStep::Exit(exit));
-        }
-        self.state = compaction.state;
-
-        let final_bundle = if compaction.compacted {
-            let bundle = self
-                .build_prompt_bundle(surface.version.clone(), capability_view.clone())
-                .await?;
-            apply_compaction_index_from_prompt_bundle(
-                &mut self.state,
-                &bundle.compaction_message_index,
-            );
-            if let Some(exit) = self.cancel_boundary().await? {
-                return Ok(PromptStep::Exit(exit));
+        let final_bundle = match compaction {
+            PromptCompactionOutcome::Exited(exit) => return Ok(PromptStep::Exit(exit)),
+            PromptCompactionOutcome::Skipped(state) => {
+                self.state = state;
+                candidate_bundle
             }
-            bundle
-        } else {
-            candidate_bundle
+            PromptCompactionOutcome::Compacted(state) => {
+                self.state = state;
+                let bundle = self
+                    .build_prompt_bundle(surface.version.clone(), capability_view.clone())
+                    .await?;
+                apply_compaction_index_from_prompt_bundle(
+                    &mut self.state,
+                    &bundle.compaction_message_index,
+                );
+                if let Some(exit) = self.cancel_boundary().await? {
+                    return Ok(PromptStep::Exit(exit));
+                }
+                bundle
+            }
         };
 
         Ok(PromptStep::Prepared(Box::new(PromptOutput {
@@ -141,20 +142,25 @@ impl<'a> PromptPlanningPipeline<'a> {
     }
 
     async fn cancel_boundary(&mut self) -> Result<Option<LoopExit>, AgentLoopExecutorError> {
+        let original_state = self.state.clone();
         let state = std::mem::replace(
             &mut self.state,
             LoopExecutionState::initial_for_run(self.ctx.host.run_context()),
         );
-        self.state = match CheckpointStage
+        let cancel_check = CheckpointStage
             .cancel_if_requested_after_pending_input_ack(
                 self.ctx,
                 state,
                 &mut self.pending_input_ack,
             )
-            .await?
-        {
-            CancelCheck::Continue(state) => *state,
-            CancelCheck::Exit(exit) => return Ok(Some(exit)),
+            .await;
+        self.state = match cancel_check {
+            Ok(CancelCheck::Continue(state)) => *state,
+            Ok(CancelCheck::Exit(exit)) => return Ok(Some(exit)),
+            Err(error) => {
+                self.state = original_state;
+                return Err(error);
+            }
         };
         Ok(None)
     }
@@ -200,17 +206,17 @@ impl<'a> PromptPlanningPipeline<'a> {
     }
 }
 
-struct PromptCompactionOutput {
-    state: LoopExecutionState,
-    exit: Option<LoopExit>,
-    compacted: bool,
+enum PromptCompactionOutcome {
+    Skipped(LoopExecutionState),
+    Compacted(LoopExecutionState),
+    Exited(LoopExit),
 }
 
 async fn maybe_compact_prompt_context(
     ctx: StageContext<'_>,
     mut state: LoopExecutionState,
     pending_input_ack: &mut PendingInputAck,
-) -> Result<PromptCompactionOutput, AgentLoopExecutorError> {
+) -> Result<PromptCompactionOutcome, AgentLoopExecutorError> {
     let decision = ctx
         .planner
         .compaction()
@@ -222,11 +228,7 @@ async fn maybe_compact_prompt_context(
         deadline_ms,
     } = decision
     else {
-        return Ok(PromptCompactionOutput {
-            state,
-            exit: None,
-            compacted: false,
-        });
+        return Ok(PromptCompactionOutcome::Skipped(state));
     };
 
     let task_id = SystemInferenceTaskId::new();
@@ -245,11 +247,7 @@ async fn maybe_compact_prompt_context(
     {
         CancelCheck::Continue(state) => *state,
         CancelCheck::Exit(exit) => {
-            return Ok(PromptCompactionOutput {
-                state: LoopExecutionState::initial_for_run(ctx.host.run_context()),
-                exit: Some(exit),
-                compacted: false,
-            });
+            return Ok(PromptCompactionOutcome::Exited(exit));
         }
     };
 
@@ -291,11 +289,7 @@ async fn maybe_compact_prompt_context(
     {
         CancelCheck::Continue(state) => *state,
         CancelCheck::Exit(exit) => {
-            return Ok(PromptCompactionOutput {
-                state: LoopExecutionState::initial_for_run(ctx.host.run_context()),
-                exit: Some(exit),
-                compacted: false,
-            });
+            return Ok(PromptCompactionOutcome::Exited(exit));
         }
     };
 
@@ -317,11 +311,7 @@ async fn maybe_compact_prompt_context(
         .write(ctx, state, CheckpointKind::BeforeModel)
         .await?;
     pending_input_ack.ack(ctx.host).await?;
-    Ok(PromptCompactionOutput {
-        state: checked.state,
-        exit: None,
-        compacted: true,
-    })
+    Ok(PromptCompactionOutcome::Compacted(checked.state))
 }
 
 enum CompactionCallOutcome {
@@ -367,17 +357,13 @@ async fn compaction_cancelled_exit(
     ctx: StageContext<'_>,
     state: LoopExecutionState,
     pending_input_ack: &mut PendingInputAck,
-) -> Result<PromptCompactionOutput, AgentLoopExecutorError> {
+) -> Result<PromptCompactionOutcome, AgentLoopExecutorError> {
     let checked = CheckpointStage
         .write(ctx, state, CheckpointKind::Final)
         .await?;
     pending_input_ack.ack(ctx.host).await?;
     let exit = cancelled_exit(ctx.host, checked.state, Some(checked.checkpoint_id))?;
-    Ok(PromptCompactionOutput {
-        state: LoopExecutionState::initial_for_run(ctx.host.run_context()),
-        exit: Some(exit),
-        compacted: false,
-    })
+    Ok(PromptCompactionOutcome::Exited(exit))
 }
 
 async fn compaction_failed_exit(
@@ -386,7 +372,7 @@ async fn compaction_failed_exit(
     pending_input_ack: &mut PendingInputAck,
     task_id: SystemInferenceTaskId,
     error: &LoopCompactionError,
-) -> Result<PromptCompactionOutput, AgentLoopExecutorError> {
+) -> Result<PromptCompactionOutcome, AgentLoopExecutorError> {
     CheckpointStage
         .emit_progress(
             ctx,
@@ -406,11 +392,7 @@ async fn compaction_failed_exit(
         LoopFailureKind::CompactionUnavailable,
         Some(checked.checkpoint_id),
     )?;
-    Ok(PromptCompactionOutput {
-        state: LoopExecutionState::initial_for_run(ctx.host.run_context()),
-        exit: Some(exit),
-        compacted: false,
-    })
+    Ok(PromptCompactionOutcome::Exited(exit))
 }
 
 pub(super) async fn build_prompt_bundle_for_surface(
@@ -478,6 +460,7 @@ pub(super) fn apply_compaction_index_from_prompt_bundle(
 fn loop_compaction_reason(error: &LoopCompactionError) -> LoopSafeSummary {
     let value = match error {
         LoopCompactionError::InvalidCutPoint => "invalid cut point",
+        LoopCompactionError::UnsupportedMode => "unsupported mode",
         LoopCompactionError::InputTooLarge => "input too large",
         LoopCompactionError::SecurityRejected { .. } => "security rejected",
         LoopCompactionError::InferenceFailed { .. } => "inference failed",

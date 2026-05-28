@@ -99,7 +99,7 @@ impl SystemInferencePort for GuardedSystemInferencePort {
         })
         .await
         .map_err(|error| {
-            tracing::warn!(
+            tracing::debug!(
                 error = %error,
                 "system inference worker failed before post-model accounting completed"
             );

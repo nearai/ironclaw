@@ -580,6 +580,53 @@ async fn prompt_stage_cancellation_during_compaction_aborts_prompt_planning() {
 }
 
 #[tokio::test]
+async fn prompt_stage_cancellation_after_compaction_success_skips_final_bundle_rebuild() {
+    let host = MockHost::new(Vec::new())
+        .with_prompt_compaction_indexes(vec![
+            vec![compaction_metadata(1, LoopContextCompactionKind::User, 10)],
+            vec![],
+        ])
+        .with_compaction_result(Ok(LoopCompactionResponse {
+            summary_artifact_id: LoopSummaryArtifactId::new("summary-1").unwrap(),
+            compression_ratio_ppm: 250_000,
+        }))
+        .cancel_after_compaction_success();
+    let family = family_with_compaction_strategy(DefaultCompactionStrategy {
+        deadline_ms: 100,
+        ..Default::default()
+    });
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.compaction_state.force_compact_on_next_iteration = true;
+
+    let step = PromptStage
+        .process(
+            ctx,
+            PromptInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await
+        .expect("prompt stage");
+
+    assert!(matches!(step, PromptStep::Exit(LoopExit::Cancelled(_))));
+    assert_eq!(host.prompt_requests().len(), 1);
+    assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
+    assert_eq!(
+        host.progress_event_names(),
+        vec![
+            "prompt_bundle_built",
+            "compaction_started",
+            "checkpoint_written",
+        ]
+    );
+}
+
+#[tokio::test]
 async fn input_stage_steering_drain_carries_pending_ack() {
     let host = MockHost::new(Vec::new());
     let run_context = host.run_context().clone();
@@ -1429,6 +1476,13 @@ async fn model_retry_success_clears_recovery_state() {
             AgentLoopHostErrorKind::Unavailable,
             "model unavailable",
         )])
+        .with_prompt_compaction_indexes(vec![
+            vec![compaction_metadata(1, LoopContextCompactionKind::User, 10)],
+            vec![
+                compaction_metadata(2, LoopContextCompactionKind::System, 20),
+                compaction_metadata(3, LoopContextCompactionKind::Assistant, 30),
+            ],
+        ])
         .with_prompt_surface_version(Some(stale_surface_version()));
     let executor = CanonicalAgentLoopExecutor;
     let state = LoopExecutionState::initial_for_run(host.run_context());
@@ -1448,7 +1502,24 @@ async fn model_retry_success_clears_recovery_state() {
         2,
         "model retry must request a fresh host-built prompt bundle"
     );
-    assert_eq!(final_staged_state(&host).recovery_state, Default::default());
+    let final_state = final_staged_state(&host);
+    assert_eq!(final_state.recovery_state, Default::default());
+    assert_eq!(
+        final_state.compaction_prompt.message_index,
+        vec![
+            MessageIndexEntry {
+                sequence: 2,
+                kind: IndexedMessageKind::System,
+                estimated_tokens: 20,
+            },
+            MessageIndexEntry {
+                sequence: 3,
+                kind: IndexedMessageKind::Assistant,
+                estimated_tokens: 30,
+            },
+        ]
+    );
+    assert_eq!(final_state.compaction_prompt.observed_prompt_tokens, 50);
 }
 
 #[tokio::test]

@@ -7,6 +7,10 @@ use ironclaw_turns::run_profile::LoopRunContext;
 /// either `Skip` or the inclusive user-message boundary the executor should
 /// compact through. State mutation, transcript reads, inference, persistence,
 /// and progress events stay in the executor and host compaction port.
+///
+/// `Trigger.drop_through_seq` must point at a model-visible user message. The
+/// host compaction port rejects non-user terminal boundaries so custom
+/// strategies cannot compact through assistant, summary, or reference messages.
 pub(crate) trait CompactionStrategy: Send + Sync {
     fn should_compact(
         &self,
@@ -91,23 +95,18 @@ impl CompactionStrategy for DefaultCompactionStrategy {
         }
 
         let mut tail_tokens = 0_u64;
-        let mut latest_user_boundary = None;
         for entry in state.compaction_prompt.message_index.iter().rev() {
             if entry.kind == IndexedMessageKind::User
                 && Some(entry.sequence) > state.compaction_state.last_compacted_through_seq
-            {
-                latest_user_boundary = Some(entry.sequence);
-            }
-            tail_tokens = tail_tokens.saturating_add(entry.estimated_tokens);
-            if tail_tokens >= self.preserve_tail_tokens
-                && let Some(sequence) = latest_user_boundary
+                && tail_tokens >= self.preserve_tail_tokens
             {
                 return CompactionDecision::Trigger {
-                    drop_through_seq: sequence,
+                    drop_through_seq: entry.sequence,
                     preserve_tail_tokens: self.preserve_tail_tokens,
                     deadline_ms: self.deadline_ms,
                 };
             }
+            tail_tokens = tail_tokens.saturating_add(entry.estimated_tokens);
         }
         CompactionDecision::Skip
     }
@@ -230,7 +229,7 @@ mod tests {
         assert_eq!(
             strategy.should_compact(&state, &context),
             CompactionDecision::Trigger {
-                drop_through_seq: 3,
+                drop_through_seq: 1,
                 preserve_tail_tokens: 60,
                 deadline_ms: 7,
             }

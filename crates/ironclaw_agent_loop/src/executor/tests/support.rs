@@ -639,7 +639,7 @@ impl ironclaw_turns::run_profile::LoopCompactionPort for MockHost {
         &self,
         request: LoopCompactionRequest,
     ) -> Result<LoopCompactionResponse, LoopCompactionError> {
-        self.compaction.compact_loop_context(request).await
+        self.compact_loop_context_for_tests(request).await
     }
 }
 

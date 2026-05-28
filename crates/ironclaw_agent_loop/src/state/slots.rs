@@ -67,6 +67,64 @@ pub enum IndexedMessageKind {
     Other,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(sequence: u64, estimated_tokens: u64) -> MessageIndexEntry {
+        MessageIndexEntry {
+            sequence,
+            kind: IndexedMessageKind::User,
+            estimated_tokens,
+        }
+    }
+
+    #[test]
+    fn retain_after_sequence_keeps_empty_snapshot_empty() {
+        let mut snapshot = CompactionPromptSnapshot::default();
+
+        snapshot.retain_after_sequence(1);
+
+        assert!(snapshot.message_index.is_empty());
+        assert_eq!(snapshot.observed_prompt_tokens, 0);
+    }
+
+    #[test]
+    fn retain_after_sequence_can_retain_no_entries() {
+        let mut snapshot = CompactionPromptSnapshot::from_message_index(vec![entry(1, 10)]);
+
+        snapshot.retain_after_sequence(1);
+
+        assert!(snapshot.message_index.is_empty());
+        assert_eq!(snapshot.observed_prompt_tokens, 0);
+    }
+
+    #[test]
+    fn retain_after_sequence_can_retain_all_entries() {
+        let mut snapshot =
+            CompactionPromptSnapshot::from_message_index(vec![entry(1, 10), entry(2, 20)]);
+
+        snapshot.retain_after_sequence(0);
+
+        assert_eq!(snapshot.message_index, vec![entry(1, 10), entry(2, 20)]);
+        assert_eq!(snapshot.observed_prompt_tokens, 30);
+    }
+
+    #[test]
+    fn retain_after_sequence_updates_tokens_for_partial_retention() {
+        let mut snapshot = CompactionPromptSnapshot::from_message_index(vec![
+            entry(1, 10),
+            entry(2, 20),
+            entry(3, 30),
+        ]);
+
+        snapshot.retain_after_sequence(1);
+
+        assert_eq!(snapshot.message_index, vec![entry(2, 20), entry(3, 30)]);
+        assert_eq!(snapshot.observed_prompt_tokens, 50);
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GoalRefreshStrategyState {
     #[serde(default)]

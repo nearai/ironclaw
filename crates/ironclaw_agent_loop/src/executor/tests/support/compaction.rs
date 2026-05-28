@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use ironclaw_turns::run_profile::{
-    LoopCompactionError, LoopCompactionRequest, LoopCompactionResponse,
+    LoopCancelReasonKind, LoopCompactionError, LoopCompactionRequest, LoopCompactionResponse,
     LoopContextCompactionMetadata,
 };
 
@@ -13,6 +13,7 @@ pub(super) struct MockCompactionSupport {
     prompt_indexes: Arc<Mutex<VecDeque<Vec<LoopContextCompactionMetadata>>>>,
     result: Arc<Mutex<Result<LoopCompactionResponse, LoopCompactionError>>>,
     delay: Arc<Mutex<Option<std::time::Duration>>>,
+    cancel_after_success: Arc<Mutex<bool>>,
 }
 
 impl MockCompactionSupport {
@@ -21,6 +22,7 @@ impl MockCompactionSupport {
             prompt_indexes: Arc::new(Mutex::new(VecDeque::new())),
             result: Arc::new(Mutex::new(Err(LoopCompactionError::InputTooLarge))),
             delay: Arc::new(Mutex::new(None)),
+            cancel_after_success: Arc::new(Mutex::new(false)),
         }
     }
 
@@ -46,6 +48,14 @@ impl MockCompactionSupport {
 
     pub(super) fn set_delay(&self, delay: std::time::Duration) {
         *self.delay.lock().expect("lock") = Some(delay);
+    }
+
+    pub(super) fn set_cancel_after_success(&self) {
+        *self.cancel_after_success.lock().expect("lock") = true;
+    }
+
+    pub(super) fn take_cancel_after_success(&self) -> bool {
+        std::mem::take(&mut *self.cancel_after_success.lock().expect("lock"))
     }
 
     pub(super) async fn compact_loop_context(
@@ -91,5 +101,21 @@ impl MockHost {
     ) -> Self {
         self.compaction.set_delay(delay);
         self
+    }
+
+    pub(in crate::executor::tests) fn cancel_after_compaction_success(self) -> Self {
+        self.compaction.set_cancel_after_success();
+        self
+    }
+
+    pub(super) async fn compact_loop_context_for_tests(
+        &self,
+        request: LoopCompactionRequest,
+    ) -> Result<LoopCompactionResponse, LoopCompactionError> {
+        let result = self.compaction.compact_loop_context(request).await;
+        if result.is_ok() && self.compaction.take_cancel_after_success() {
+            self.request_cancellation(LoopCancelReasonKind::UserRequested);
+        }
+        result
     }
 }

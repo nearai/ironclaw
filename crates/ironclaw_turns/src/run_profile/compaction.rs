@@ -43,8 +43,8 @@ pub struct LoopCompactionRequest {
 }
 
 /// Opaque reference to a durable summary artifact produced by compaction.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
-#[serde(transparent)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
+#[serde(try_from = "String")]
 pub struct LoopSummaryArtifactId(String);
 
 impl LoopSummaryArtifactId {
@@ -84,13 +84,12 @@ impl TryFrom<String> for LoopSummaryArtifactId {
     }
 }
 
-impl<'de> Deserialize<'de> for LoopSummaryArtifactId {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+impl Serialize for LoopSummaryArtifactId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
-        D: serde::Deserializer<'de>,
+        S: serde::Serializer,
     {
-        let value = String::deserialize(deserializer)?;
-        Self::new(value).map_err(serde::de::Error::custom)
+        serializer.serialize_str(self.as_str())
     }
 }
 
@@ -109,6 +108,8 @@ pub struct LoopCompactionResponse {
 pub enum LoopCompactionError {
     #[error("compaction cut point is invalid")]
     InvalidCutPoint,
+    #[error("compaction mode is not supported")]
+    UnsupportedMode,
     #[error("compaction input is too large")]
     InputTooLarge,
     #[error("compaction security check failed: {safe_summary}")]
