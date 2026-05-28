@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use crate::{
     CommandExecutionRequest, FirstPartyCapabilityError, FirstPartyCapabilityRequest,
     RuntimeProcessError, SavedCommandOutput, SavedCommandOutputSanitization,
+    process_output::saved_output_ref,
 };
 
 use super::{FIRST_PARTY_MAX_OUTPUT_BYTES, first_party_capability_manifest};
@@ -101,21 +102,18 @@ fn render_shell_output(output: &str, saved_output: Option<&SavedCommandOutput>) 
     let Some(saved_output) = saved_output else {
         return output.to_string();
     };
+    let ref_id = saved_output_ref(saved_output);
     let mut note = match saved_output.sanitization {
         SavedCommandOutputSanitization::Blocked => {
             format!(
-                "Full output was not saved because it matched secret-leak blocking rules; marker saved to: {}",
-                saved_output.path.display()
+                "Full output was not saved because it matched secret-leak blocking rules; marker saved as ref: {ref_id}"
             )
         }
         SavedCommandOutputSanitization::Redacted => {
-            format!(
-                "Full output saved to: {} (secret-like values redacted)",
-                saved_output.path.display()
-            )
+            format!("Full output saved as ref: {ref_id} (secret-like values redacted)")
         }
         SavedCommandOutputSanitization::Clean => {
-            format!("Full output saved to: {}", saved_output.path.display())
+            format!("Full output saved as ref: {ref_id}")
         }
     };
     if saved_output.stream_was_capped {
@@ -202,7 +200,8 @@ mod tests {
             }),
         );
 
-        assert!(rendered.contains("Full output saved to: /tmp/command.log"));
+        assert!(rendered.contains("Full output saved as ref: command.log"));
+        assert!(!rendered.contains("/tmp/command.log"));
         assert!(rendered.contains("secret-like values redacted"));
     }
 
@@ -217,7 +216,8 @@ mod tests {
         );
 
         assert!(rendered.contains("Full output was not saved because"));
-        assert!(rendered.contains("marker saved to: /tmp/command.log"));
+        assert!(rendered.contains("marker saved as ref: command.log"));
+        assert!(!rendered.contains("/tmp/command.log"));
     }
 
     #[test]

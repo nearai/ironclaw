@@ -88,6 +88,21 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["command"],
             "additionalProperties": false
         }),
+        "schemas/builtin/saved_output_read.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "ref": { "type": "string", "description": "Saved-output ref returned by builtin.shell" },
+                "offset_bytes": { "type": "integer", "minimum": 0, "description": "Byte offset to start reading from" },
+                "limit_bytes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 524288,
+                    "description": "Maximum bytes to return. Defaults to 524288."
+                }
+            },
+            "required": ["ref"],
+            "additionalProperties": false
+        }),
         "schemas/builtin/spawn_subagent.input.v1.json" => json!({
             "type": "object",
             "properties": {

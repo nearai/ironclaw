@@ -8,6 +8,7 @@
 mod echo;
 mod http;
 mod json;
+mod saved_output_read;
 mod schemas;
 mod shell;
 mod skill_management;
@@ -41,6 +42,7 @@ pub(crate) use self::schemas::resolve_builtin_input_schema_ref;
 pub use echo::ECHO_CAPABILITY_ID;
 pub use http::HTTP_CAPABILITY_ID;
 pub use json::JSON_CAPABILITY_ID;
+pub use saved_output_read::SAVED_OUTPUT_READ_CAPABILITY_ID;
 pub use shell::SHELL_CAPABILITY_ID;
 pub use skill_management::{
     SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
@@ -144,6 +146,7 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                     json::manifest()?,
                     http::manifest()?,
                     shell::manifest()?,
+                    saved_output_read::manifest()?,
                     spawn_subagent::manifest()?,
                 ];
                 capabilities.extend(coding_manifests()?);
@@ -178,7 +181,11 @@ pub fn builtin_first_party_handlers() -> Result<FirstPartyCapabilityRegistry, Ho
         .with_handler(CapabilityId::new(TIME_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(JSON_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(HTTP_CAPABILITY_ID)?, handler.clone())
-        .with_handler(CapabilityId::new(SHELL_CAPABILITY_ID)?, handler.clone());
+        .with_handler(CapabilityId::new(SHELL_CAPABILITY_ID)?, handler.clone())
+        .with_handler(
+            CapabilityId::new(SAVED_OUTPUT_READ_CAPABILITY_ID)?,
+            handler.clone(),
+        );
     for metadata in CODING_CAPABILITIES {
         registry.insert_handler(CapabilityId::new(metadata.id)?, handler.clone());
     }
@@ -265,6 +272,7 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
                     },
                 ));
             }
+            SAVED_OUTPUT_READ_CAPABILITY_ID => saved_output_read::dispatch(&request)?,
             SPAWN_SUBAGENT_CAPABILITY_ID => spawn_subagent::dispatch(),
             capability_id => {
                 let Some(metadata) = coding_capability_metadata(capability_id) else {

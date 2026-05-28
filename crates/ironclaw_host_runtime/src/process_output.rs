@@ -27,6 +27,7 @@ const COMMAND_OUTPUT_ROOT_DIRNAME: &str = "ironclaw-command-outputs";
 const COMMAND_OUTPUT_BLOCKED_MARKER: &str =
     "[Full command output blocked due to potential secret leakage]\n";
 const STREAM_READ_BUF_SIZE: usize = 16 * 1024;
+pub(crate) const SAVED_OUTPUT_READ_MAX_BYTES: usize = 512 * 1024;
 
 /// Metadata for full process output persisted outside the model preview.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +49,9 @@ pub enum SavedCommandOutputSanitization {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CapturedCommandOutput {
     pub(crate) preview: String,
+    /// Metadata exists only when full output was persisted behind a saved-output
+    /// ref. Small inline output still passes through the same sanitizer, but
+    /// its sanitization state is represented by `preview` alone.
     pub(crate) saved_output: Option<SavedCommandOutput>,
 }
 
@@ -104,6 +108,12 @@ impl ScratchOutputPath {
 impl Drop for ScratchOutputPath {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.0);
+    }
+}
+
+impl From<PathBuf> for ScratchOutputPath {
+    fn from(path: PathBuf) -> Self {
+        Self(path)
     }
 }
 
@@ -172,7 +182,7 @@ where
         }
 
         if saved_file.is_none() {
-            cleanup_stale_command_outputs(scope);
+            cleanup_stale_command_outputs_async(scope).await;
             let (path, file) = create_private_temp_file(scope, COMMAND_OUTPUT_SCRATCH_PREFIX)?;
             let mut file = tokio::fs::File::from_std(file);
             if let StreamStorage::Inline(output) = &capture.storage {
@@ -231,22 +241,17 @@ pub(crate) fn capture_command_output(
 
     let mut preview = PreviewBytes::default();
     (|| {
-        let raw_path = materialize_combined_output(scope, &stdout, &stderr, &mut preview)?;
-        match finalize_saved_output(
+        let raw_output = materialize_combined_output(scope, &stdout, &stderr, &mut preview)?;
+        finalize_saved_output(
             scope,
-            raw_path.clone(),
+            &raw_output,
             stdout.was_capped || stderr.was_capped,
             preview,
-        ) {
-            Ok((saved_output, preview)) => Ok(CapturedCommandOutput {
-                preview,
-                saved_output: Some(saved_output),
-            }),
-            Err(error) => {
-                let _ = fs::remove_file(raw_path);
-                Err(error)
-            }
-        }
+        )
+        .map(|(saved_output, preview)| CapturedCommandOutput {
+            preview,
+            saved_output: Some(saved_output),
+        })
     })()
 }
 
@@ -283,9 +288,9 @@ fn materialize_combined_output(
     stdout: &StreamCapture,
     stderr: &StreamCapture,
     preview: &mut PreviewBytes,
-) -> Result<PathBuf, RuntimeProcessError> {
-    cleanup_stale_command_outputs(scope);
+) -> Result<ScratchOutputPath, RuntimeProcessError> {
     let (path, mut file) = create_private_temp_file(scope, COMMAND_OUTPUT_SCRATCH_PREFIX)?;
+    let scratch = ScratchOutputPath::from(path);
     let result = (|| {
         append_stream(stdout, &mut file, preview)?;
         if stdout.has_output() && stderr.has_output() {
@@ -293,11 +298,8 @@ fn materialize_combined_output(
         }
         append_stream(stderr, &mut file, preview)
     })();
-    if let Err(error) = result {
-        let _ = fs::remove_file(&path);
-        return Err(error);
-    }
-    Ok(path)
+    result?;
+    Ok(scratch)
 }
 
 fn append_stream(
@@ -336,19 +338,22 @@ fn append_bytes(
 
 fn finalize_saved_output(
     scope: &ResourceScope,
-    raw_path: PathBuf,
+    raw_path: &ScratchOutputPath,
     stream_was_capped: bool,
     raw_preview: PreviewBytes,
 ) -> Result<(SavedCommandOutput, String), RuntimeProcessError> {
-    let content =
-        fs::read(&raw_path).map_err(file_error("read saved command output for sanitization"))?;
+    // Each stream is capped before materialization, so this read is bounded to
+    // stdout + stderr plus the separator: about 2 * COMMAND_MAX_SAVED_STREAM_SIZE.
+    // LeakDetector is string-oriented today; keep the bound explicit until it
+    // supports streaming or byte-span sanitization.
+    let content = fs::read(raw_path.as_path())
+        .map_err(file_error("read saved command output for sanitization"))?;
     let sanitized = sanitize_command_output_bytes(&content, raw_preview.render());
     let final_path = if let Some(saved_replacement) = sanitized.saved_replacement.as_deref() {
         write_final_saved_output(scope, saved_replacement.as_bytes())?
     } else {
         write_final_saved_output(scope, &content)?
     };
-    let _ = fs::remove_file(raw_path);
     let saved_output = SavedCommandOutput {
         path: final_path,
         sanitization: sanitized.sanitization,
@@ -357,6 +362,58 @@ fn finalize_saved_output(
         expires_at_unix_secs: expires_at_unix_secs(),
     };
     Ok((saved_output, sanitized.preview))
+}
+
+pub(crate) fn saved_output_ref(saved_output: &SavedCommandOutput) -> String {
+    saved_output
+        .path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("unavailable-saved-output")
+        .to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SavedOutputRead {
+    pub(crate) content: Vec<u8>,
+    pub(crate) offset: usize,
+    pub(crate) next_offset: Option<usize>,
+    pub(crate) total_bytes: usize,
+}
+
+pub(crate) fn read_saved_output_ref(
+    scope: &ResourceScope,
+    ref_id: &str,
+    offset: usize,
+    limit: usize,
+) -> Result<SavedOutputRead, RuntimeProcessError> {
+    if !is_valid_saved_output_ref(ref_id) {
+        return Err(RuntimeProcessError::ExecutionFailed(
+            "invalid saved output ref".to_string(),
+        ));
+    }
+    let path = scoped_output_dir_path(scope).join(ref_id);
+    let content = fs::read(&path).map_err(file_error("read saved command output ref"))?;
+    let total_bytes = content.len();
+    let offset = offset.min(total_bytes);
+    let limit = limit.clamp(1, SAVED_OUTPUT_READ_MAX_BYTES);
+    let end = offset.saturating_add(limit).min(total_bytes);
+    let next_offset = (end < total_bytes).then_some(end);
+    Ok(SavedOutputRead {
+        content: content[offset..end].to_vec(),
+        offset,
+        next_offset,
+        total_bytes,
+    })
+}
+
+fn is_valid_saved_output_ref(ref_id: &str) -> bool {
+    !ref_id.is_empty()
+        && ref_id.starts_with(COMMAND_OUTPUT_TEMP_PREFIX)
+        && ref_id.ends_with(".log")
+        && !ref_id.contains('/')
+        && !ref_id.contains('\\')
+        && !ref_id.contains("..")
 }
 
 fn write_final_saved_output(
@@ -410,6 +467,11 @@ fn sanitize_command_output_bytes(content: &[u8], raw_preview: String) -> Sanitiz
         sanitization,
         saved_replacement,
     }
+}
+
+async fn cleanup_stale_command_outputs_async(scope: &ResourceScope) {
+    let scope = scope.clone();
+    let _ = tokio::task::spawn_blocking(move || cleanup_stale_command_outputs(&scope)).await;
 }
 
 /// Walk only the current scope's saved-output directory and remove files older
@@ -672,6 +734,25 @@ mod tests {
     }
 
     #[test]
+    fn saved_output_ref_reads_only_with_matching_scope() {
+        let scope = test_scope_with("tenant-read", "alice", Some("project"));
+        let other_scope = test_scope_with("tenant-read", "bob", Some("project"));
+        let stdout = saved_stream_capture_for_scope(&scope, b"large clean output");
+
+        let output = capture_command_output(&scope, stdout, StreamCapture::default())
+            .expect("capture succeeds");
+        let saved_output = output.saved_output.expect("saved output metadata");
+        let ref_id = saved_output_ref(&saved_output);
+        let read = read_saved_output_ref(&scope, &ref_id, 0, 5).expect("read saved output");
+        let _ = fs::remove_file(&saved_output.path);
+
+        assert_eq!(read.content, b"large");
+        assert_eq!(read.offset, 0);
+        assert_eq!(read.next_offset, Some(5));
+        assert!(read_saved_output_ref(&other_scope, &ref_id, 0, 5).is_err());
+    }
+
+    #[test]
     fn capture_command_output_blocks_secret_like_saved_output() {
         let secret = "sk-proj-test1234567890abcdefghij";
         let raw = format!("{}{}", "x".repeat(COMMAND_MAX_OUTPUT_SIZE + 1), secret);
@@ -731,9 +812,12 @@ mod tests {
     }
 
     fn saved_stream_capture(bytes: &[u8]) -> StreamCapture {
+        saved_stream_capture_for_scope(&test_scope(), bytes)
+    }
+
+    fn saved_stream_capture_for_scope(scope: &ResourceScope, bytes: &[u8]) -> StreamCapture {
         let (path, mut file) =
-            create_private_temp_file(&test_scope(), COMMAND_OUTPUT_SCRATCH_PREFIX)
-                .expect("stream file");
+            create_private_temp_file(scope, COMMAND_OUTPUT_SCRATCH_PREFIX).expect("stream file");
         file.write_all(bytes).expect("write stream file");
         StreamCapture {
             storage: StreamStorage::Saved(ScratchOutputPath(path)),

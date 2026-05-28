@@ -26,11 +26,11 @@ use ironclaw_host_runtime::{
     GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HostRuntime, HostRuntimeServices, JSON_CAPABILITY_ID,
     LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityOutcome,
     RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeProcessError, RuntimeProcessPort,
-    SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
-    SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind,
-    TIME_CAPABILITY_ID, TenantSandboxProcessPort, VisibleCapabilityAccess,
-    VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
-    builtin_first_party_package,
+    SAVED_OUTPUT_READ_CAPABILITY_ID, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
+    SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID,
+    SandboxCommandTransport, SurfaceKind, TIME_CAPABILITY_ID, TenantSandboxProcessPort,
+    VisibleCapabilityAccess, VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID,
+    builtin_first_party_handlers, builtin_first_party_package,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpResponse, NetworkHttpTransport,
@@ -461,8 +461,75 @@ async fn builtin_shell_truncates_large_output_without_output_overflow() {
 
     let output = output["output"].as_str().expect("shell output is text");
     assert!(output.contains("[truncated"));
-    assert!(output.contains("Full output saved to: "));
+    assert!(output.contains("Full output saved as ref: "));
+    assert!(!output.contains(std::env::temp_dir().to_string_lossy().as_ref()));
     assert!(output.len() <= 66_000);
+}
+
+#[tokio::test]
+async fn builtin_saved_output_read_resolves_ref_in_current_scope() {
+    let runtime = runtime();
+    let context = execution_context_with_network(
+        [SHELL_CAPABILITY_ID, SAVED_OUTPUT_READ_CAPABILITY_ID],
+        shell_test_policy(),
+    );
+    let shell_output = invoke_with_context(
+        &runtime,
+        SHELL_CAPABILITY_ID,
+        json!({
+            "command": "printf 'saved-start-'; yes m | head -c 70000; printf 'saved-end'",
+            "timeout": 5
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    let output = shell_output["output"].as_str().expect("shell output text");
+    let ref_id = output
+        .split("Full output saved as ref: ")
+        .nth(1)
+        .and_then(|tail| tail.split_whitespace().next())
+        .expect("saved output ref");
+    assert!(!ref_id.contains('/'), "shell must not expose host paths");
+
+    let read_output = invoke_with_context(
+        &runtime,
+        SAVED_OUTPUT_READ_CAPABILITY_ID,
+        json!({"ref": ref_id, "limit_bytes": 64}),
+        context,
+    )
+    .await
+    .unwrap();
+    let bytes = BASE64_STANDARD
+        .decode(
+            read_output["content_base64"]
+                .as_str()
+                .expect("base64 content"),
+        )
+        .expect("valid base64");
+
+    assert!(
+        std::str::from_utf8(&bytes)
+            .unwrap()
+            .starts_with("saved-start-")
+    );
+    assert_eq!(read_output["offset_bytes"], json!(0));
+    assert_eq!(read_output["encoding"], json!("base64"));
+    assert!(read_output["next_offset_bytes"].as_u64().is_some());
+}
+
+#[tokio::test]
+async fn builtin_shell_blocks_small_secret_output_through_dispatch() {
+    let output = invoke_shell(json!({
+        "command": "printf '%s' 'sk-proj-test1234567890abcdefghij'"
+    }))
+    .await
+    .unwrap();
+
+    assert_eq!(
+        output["output"],
+        json!("[Full command output blocked due to potential secret leakage]\n")
+    );
 }
 
 #[tokio::test]
@@ -3926,13 +3993,14 @@ fn provider_id() -> ExtensionId {
     ExtensionId::new("builtin").unwrap()
 }
 
-fn all_builtin_capability_ids() -> [&'static str; 15] {
+fn all_builtin_capability_ids() -> [&'static str; 16] {
     [
         ECHO_CAPABILITY_ID,
         TIME_CAPABILITY_ID,
         JSON_CAPABILITY_ID,
         HTTP_CAPABILITY_ID,
         SHELL_CAPABILITY_ID,
+        SAVED_OUTPUT_READ_CAPABILITY_ID,
         SPAWN_SUBAGENT_CAPABILITY_ID,
         READ_FILE_CAPABILITY_ID,
         WRITE_FILE_CAPABILITY_ID,
