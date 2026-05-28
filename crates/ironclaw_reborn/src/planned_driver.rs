@@ -738,9 +738,14 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
     impl LoopCancellationPort for ResumePayloadHost {
         fn observe_cancellation(&self) -> Option<LoopCancellationSignal> {
             self.inner.observe_cancellation()
+        }
+
+        async fn cancellation_requested(&self) -> LoopCancellationSignal {
+            self.inner.cancellation_requested().await
         }
     }
 

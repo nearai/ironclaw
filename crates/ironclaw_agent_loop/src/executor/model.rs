@@ -13,7 +13,7 @@ use crate::{
     strategies::{ModelErrorSummary, RecoveryOutcome},
 };
 
-use super::prompt::{apply_compaction_index_from_prompt_bundle, build_prompt_bundle_for_surface};
+use super::prompt::build_prompt_bundle_for_surface;
 use super::{
     AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, HostStage,
     MAX_MODEL_RETRIES, StageContext, failed_exit, honor_retry_alteration, model_error_class,
@@ -168,11 +168,7 @@ impl ExecutorStage<ModelInput> for ModelStage {
                                 CancelCheck::Continue(next) => state = *next,
                                 CancelCheck::Exit(exit) => return Ok(ModelStep::Exit(exit)),
                             }
-                            apply_compaction_index_from_prompt_bundle(
-                                &mut state,
-                                &bundle.compaction_message_index,
-                            );
-                            request.messages = bundle.messages;
+                            request.messages = bundle.into_model_messages(&mut state);
                         }
                         RecoveryOutcome::ToolErrorResult { .. } => {
                             return Err(AgentLoopExecutorError::PlannerContract {

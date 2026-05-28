@@ -567,8 +567,13 @@ impl LoopCompactionPort for ForbiddenResumeHost {
     }
 }
 
+#[async_trait::async_trait]
 impl LoopCancellationPort for ForbiddenResumeHost {
     fn observe_cancellation(&self) -> Option<LoopCancellationSignal> {
         None
+    }
+
+    async fn cancellation_requested(&self) -> LoopCancellationSignal {
+        std::future::pending().await
     }
 }

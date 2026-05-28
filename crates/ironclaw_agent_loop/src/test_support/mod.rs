@@ -60,6 +60,7 @@ pub struct MockAgentLoopDriverHost {
     progress_events: Mutex<Vec<LoopProgressEvent>>,
     acked_tokens: Mutex<Vec<LoopInputAckToken>>,
     cancellation: Mutex<Option<LoopCancellationSignal>>,
+    cancellation_notify: tokio::sync::Notify,
 }
 
 impl MockAgentLoopDriverHost {
@@ -89,6 +90,12 @@ impl MockAgentLoopDriverHost {
     /// Returns loop progress events emitted through the host progress port.
     pub fn progress_events(&self) -> Vec<LoopProgressEvent> {
         clone_mutex_vec(&self.progress_events)
+    }
+
+    /// Sets the exact cancellation signal and wakes async waiters.
+    pub fn set_cancellation_signal(&self, signal: LoopCancellationSignal) {
+        *lock_or_panic(&self.cancellation) = Some(signal);
+        self.cancellation_notify.notify_waiters();
     }
 
     fn record_call(&self, call: MockHostCall) {
@@ -204,6 +211,7 @@ impl MockAgentLoopDriverHostBuilder {
                 progress_events: Mutex::new(Vec::new()),
                 acked_tokens: Mutex::new(Vec::new()),
                 cancellation: Mutex::new(self.cancellation),
+                cancellation_notify: tokio::sync::Notify::new(),
             },
             checkpoints,
         )
@@ -813,9 +821,14 @@ impl ironclaw_turns::run_profile::LoopCompactionPort for MockAgentLoopDriverHost
     }
 }
 
+#[async_trait]
 impl LoopCancellationPort for MockAgentLoopDriverHost {
     fn observe_cancellation(&self) -> Option<LoopCancellationSignal> {
         lock_or_panic(&self.cancellation).clone()
+    }
+
+    async fn cancellation_requested(&self) -> LoopCancellationSignal {
+        wait_for_cancellation_signal(&self.cancellation, &self.cancellation_notify).await
     }
 }
 
@@ -1085,6 +1098,19 @@ fn safe_ref_suffix(value: &str) -> String {
             }
         })
         .collect()
+}
+
+pub(crate) async fn wait_for_cancellation_signal(
+    cancellation: &Mutex<Option<LoopCancellationSignal>>,
+    notify: &tokio::sync::Notify,
+) -> LoopCancellationSignal {
+    loop {
+        let notified = notify.notified();
+        if let Some(signal) = lock_or_panic(cancellation).clone() {
+            return signal;
+        }
+        notified.await;
+    }
 }
 
 fn lock_or_panic<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {

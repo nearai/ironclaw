@@ -580,6 +580,49 @@ async fn prompt_stage_cancellation_during_compaction_aborts_prompt_planning() {
 }
 
 #[tokio::test]
+async fn prompt_stage_compaction_aborts_immediately_when_cancellation_already_set() {
+    let host = MockHost::new(Vec::new())
+        .with_prompt_compaction_index(vec![compaction_metadata(
+            1,
+            LoopContextCompactionKind::User,
+            10,
+        )])
+        .with_compaction_result(Ok(LoopCompactionResponse {
+            summary_artifact_id: LoopSummaryArtifactId::new("summary-1").unwrap(),
+            compression_ratio_ppm: 250_000,
+        }))
+        .with_compaction_delay(std::time::Duration::from_secs(1))
+        .cancel_on_compaction_start();
+    let family = family_with_compaction_strategy(DefaultCompactionStrategy {
+        deadline_ms: 5_000,
+        ..Default::default()
+    });
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.compaction_state.force_compact_on_next_iteration = true;
+
+    let step = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        PromptStage.process(
+            ctx,
+            PromptInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        ),
+    )
+    .await
+    .expect("already-requested cancellation should not wait for compaction")
+    .expect("prompt stage");
+
+    assert!(matches!(step, PromptStep::Exit(LoopExit::Cancelled(_))));
+    assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
+}
+
+#[tokio::test]
 async fn prompt_stage_cancellation_after_compaction_success_skips_final_bundle_rebuild() {
     let host = MockHost::new(Vec::new())
         .with_prompt_compaction_indexes(vec![

@@ -1962,20 +1962,22 @@ pub trait LoopProgressPort: Send + Sync {
 /// intentionally synchronous and non-blocking: implementations should expose a
 /// cheap snapshot, usually backed by an atomic flag plus immutable signal data.
 ///
-/// **Cancellation is cooperative and boundary-observation only — it is not
-/// preempted across in-flight host calls.** `build_prompt_bundle`,
-/// `stream_model`, and `invoke_capability` are awaited to completion before
-/// the next observation point is reached. A stuck model stream or long-running
-/// capability call will not observe cancellation until control returns to the
-/// executor. Implementations of those host methods that need finer-grained
-/// cancellation must integrate their own abort signal internally; this port
-/// only covers the between-call boundaries that the executor controls.
+/// Cancellation is cooperative. Most executor stages observe it only at
+/// explicit boundaries via [`LoopCancellationPort::observe_cancellation`].
+/// Executor-owned waits that can safely race host work, such as prompt
+/// compaction, may also wait on
+/// [`LoopCancellationPort::cancellation_requested`] to avoid timer polling.
+#[async_trait]
 pub trait LoopCancellationPort: Send + Sync {
     /// Returns `Some(signal)` once cancellation has been requested for this run.
     ///
     /// Implementations must be idempotent across reads. After the request fires,
     /// repeated calls must keep returning the same signal.
     fn observe_cancellation(&self) -> Option<LoopCancellationSignal>;
+
+    /// Waits until cancellation has been requested for this run and returns the
+    /// same stable signal reported by [`Self::observe_cancellation`].
+    async fn cancellation_requested(&self) -> LoopCancellationSignal;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

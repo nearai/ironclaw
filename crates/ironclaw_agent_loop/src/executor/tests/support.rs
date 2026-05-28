@@ -65,6 +65,7 @@ pub(super) struct MockHost {
     fail_progress_port: bool,
     fail_append_result_ref: bool,
     cancellation: Arc<Mutex<Option<LoopCancellationSignal>>>,
+    cancellation_notify: Arc<tokio::sync::Notify>,
     cancel_after_poll_inputs: Arc<Mutex<bool>>,
     cancel_after_prompt_bundle_count: Arc<Mutex<Option<usize>>>,
     cancel_after_checkpoint: Arc<Mutex<Option<LoopCheckpointKind>>>,
@@ -100,6 +101,7 @@ impl MockHost {
             fail_progress_port: false,
             fail_append_result_ref: false,
             cancellation: Arc::new(Mutex::new(None)),
+            cancellation_notify: Arc::new(tokio::sync::Notify::new()),
             cancel_after_poll_inputs: Arc::new(Mutex::new(false)),
             cancel_after_prompt_bundle_count: Arc::new(Mutex::new(None)),
             cancel_after_checkpoint: Arc::new(Mutex::new(None)),
@@ -214,6 +216,7 @@ impl MockHost {
             reason_kind,
             requested_at: chrono::Utc::now(),
         });
+        self.cancellation_notify.notify_waiters();
     }
 
     pub(super) fn cancel_after_checkpoint(self, kind: LoopCheckpointKind) -> Self {
@@ -643,9 +646,18 @@ impl ironclaw_turns::run_profile::LoopCompactionPort for MockHost {
     }
 }
 
+#[async_trait]
 impl LoopCancellationPort for MockHost {
     fn observe_cancellation(&self) -> Option<LoopCancellationSignal> {
         self.cancellation.lock().expect("lock").clone()
+    }
+
+    async fn cancellation_requested(&self) -> LoopCancellationSignal {
+        crate::test_support::wait_for_cancellation_signal(
+            &self.cancellation,
+            &self.cancellation_notify,
+        )
+        .await
     }
 }
 

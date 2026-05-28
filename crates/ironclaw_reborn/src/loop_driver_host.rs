@@ -1520,9 +1520,14 @@ impl LoopRunInfoPort for RebornLoopDriverHost {
     }
 }
 
+#[async_trait]
 impl LoopCancellationPort for RebornLoopDriverHost {
     fn observe_cancellation(&self) -> Option<LoopCancellationSignal> {
         self.cancellation.observe_cancellation()
+    }
+
+    async fn cancellation_requested(&self) -> LoopCancellationSignal {
+        self.cancellation.cancellation_requested().await
     }
 }
 

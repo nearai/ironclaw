@@ -563,9 +563,14 @@ impl ironclaw_turns::run_profile::LoopProgressPort for StubHost {
     }
 }
 
+#[async_trait]
 impl ironclaw_turns::run_profile::LoopCancellationPort for StubHost {
     fn observe_cancellation(&self) -> Option<ironclaw_turns::run_profile::LoopCancellationSignal> {
         None
+    }
+
+    async fn cancellation_requested(&self) -> ironclaw_turns::run_profile::LoopCancellationSignal {
+        std::future::pending().await
     }
 }
 

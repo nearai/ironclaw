@@ -2624,9 +2624,14 @@ impl LoopCompactionPort for RecordingAgentLoopHost {
     }
 }
 
+#[async_trait]
 impl LoopCancellationPort for RecordingAgentLoopHost {
     fn observe_cancellation(&self) -> Option<LoopCancellationSignal> {
         None
+    }
+
+    async fn cancellation_requested(&self) -> LoopCancellationSignal {
+        std::future::pending().await
     }
 }
 
