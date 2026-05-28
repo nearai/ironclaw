@@ -105,6 +105,7 @@ pub use sandbox_process::{
     RebornSandboxScopeKey, RebornSandboxSecretBroker, RebornSandboxWorkspaceMode,
     RebornScopedSandboxCommandTransport,
 };
+pub use services::ProductAuthProviderRuntimePorts;
 pub use services::{
     HostRuntimeServices, ProductionEventStoreWiringError, ProductionWiringComponent,
     ProductionWiringConfig, ProductionWiringIssue, ProductionWiringIssueKind,

@@ -14,7 +14,6 @@ mod credential;
 mod error;
 mod fakes;
 mod flow;
-mod google_provider;
 mod ids;
 mod interaction;
 mod oauth;
@@ -41,10 +40,6 @@ pub use flow::{
     AuthFlowRecord, AuthFlowStatus, CredentialAccountUpdateBinding, CredentialSelectionInput,
     NewAuthFlow, OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
     ProviderCallbackOutcome,
-};
-pub use google_provider::{
-    GoogleProviderEgressPolicyAuthorizer, GoogleProviderStoredTokens, GoogleProviderTokenSet,
-    GoogleProviderTokenSink, GoogleProviderTokenStorageRequest,
 };
 pub use ids::{
     AuthFlowId, AuthGateRef, AuthInteractionId, AuthProviderId, AuthSessionId,

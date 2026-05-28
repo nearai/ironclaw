@@ -42,8 +42,6 @@ use ironclaw_loop_support::FilesystemCheckpointStateStore;
 use ironclaw_processes::ProcessServices;
 use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
 use ironclaw_resources::InMemoryResourceGovernor;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_resources::ResourceGovernor;
 #[cfg(feature = "libsql")]
 use ironclaw_resources::{FilesystemResourceGovernorStore, PersistentResourceGovernor};
 #[cfg(feature = "libsql")]
@@ -396,13 +394,44 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         DefaultTurnCoordinator::new(Arc::clone(&store_graph.turn_state)),
     );
     let secret_store: Arc<dyn SecretStore> = Arc::new(ironclaw_secrets::InMemorySecretStore::new());
+    let mut first_party_registry = builtin_first_party_registry()?;
+
+    let local_dev_trust_policy = Arc::new(local_dev_first_party_trust_policy()?);
+    let local_dev_trust_invalidation_bus = Arc::new(ironclaw_trust::InvalidationBus::new());
+    let mut services = HostRuntimeServices::new(
+        Arc::new(local_dev_builtin_extension_registry()?),
+        Arc::clone(&filesystem),
+        Arc::clone(&store_graph.resource_governor),
+        Arc::new(GrantAuthorizer::new()),
+        store_graph.process_services.clone(),
+        CapabilitySurfaceVersion::new("reborn-app-v1")?,
+    )
+    .with_trust_policy(Arc::clone(&local_dev_trust_policy))
+    .with_secret_store_dyn(Arc::clone(&secret_store))
+    .try_with_host_http_egress_with_body_store(
+        ironclaw_network::PolicyNetworkHttpEgress::new(
+            ironclaw_network::ReqwestNetworkTransport::default(),
+        ),
+        http_body_filesystem,
+    )?
+    .with_run_state(Arc::clone(&store_graph.run_state))
+    .with_approval_requests(Arc::clone(&store_graph.approval_requests))
+    .with_capability_leases(Arc::clone(&store_graph.capability_leases))
+    .with_turn_state_and_transition_port(Arc::clone(&store_graph.turn_state));
+    if let Some(runtime_policy) = runtime_policy {
+        services = services.with_runtime_policy(runtime_policy);
+    }
+    services = apply_runtime_process_binding(services, runtime_process_binding);
     let google_provider_client = google_oauth_config
         .map(|config| {
-            google_provider_client(
-                config,
-                Arc::clone(&secret_store),
-                store_graph.resource_governor.clone(),
-            )
+            let runtime_ports =
+                services
+                    .product_auth_provider_runtime_ports()
+                    .ok_or_else(|| RebornBuildError::InvalidConfig {
+                        reason: "Google OAuth provider backend requires host runtime HTTP egress"
+                            .to_string(),
+                    })?;
+            google_provider_client(config, Arc::clone(&secret_store), runtime_ports)
         })
         .transpose()?;
     let product_auth = match product_auth_ports {
@@ -419,7 +448,6 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
             })
         }
     };
-    let mut first_party_registry = builtin_first_party_registry()?;
     register_bundled_gsuite_first_party_handlers(
         &mut first_party_registry,
         product_auth.credential_account_service(),
@@ -427,33 +455,6 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("GSuite first-party handlers are invalid: {error}"),
     })?;
-
-    let local_dev_trust_policy = Arc::new(local_dev_first_party_trust_policy()?);
-    let local_dev_trust_invalidation_bus = Arc::new(ironclaw_trust::InvalidationBus::new());
-    let mut services = HostRuntimeServices::new(
-        Arc::new(local_dev_builtin_extension_registry()?),
-        Arc::clone(&filesystem),
-        Arc::clone(&store_graph.resource_governor),
-        Arc::new(GrantAuthorizer::new()),
-        store_graph.process_services.clone(),
-        CapabilitySurfaceVersion::new("reborn-app-v1")?,
-    )
-    .with_trust_policy(Arc::clone(&local_dev_trust_policy))
-    .with_secret_store_dyn(secret_store)
-    .try_with_host_http_egress_with_body_store(
-        ironclaw_network::PolicyNetworkHttpEgress::new(
-            ironclaw_network::ReqwestNetworkTransport::default(),
-        ),
-        http_body_filesystem,
-    )?
-    .with_run_state(Arc::clone(&store_graph.run_state))
-    .with_approval_requests(Arc::clone(&store_graph.approval_requests))
-    .with_capability_leases(Arc::clone(&store_graph.capability_leases))
-    .with_turn_state_and_transition_port(Arc::clone(&store_graph.turn_state));
-    if let Some(runtime_policy) = runtime_policy {
-        services = services.with_runtime_policy(runtime_policy);
-    }
-    services = apply_runtime_process_binding(services, runtime_process_binding);
     let mut available_extensions = AvailableExtensionCatalog::from_filesystem_root(
         filesystem.as_ref(),
         &VirtualPath::new("/system/extensions")?,
@@ -1345,9 +1346,17 @@ where
     .with_filesystem_turn_state_store(stores.scoped_filesystem)
     .with_run_profile_resolver(planned_run_profile_resolver()?)
     .with_turn_run_wake_notifier(production_wiring.turn_run_wake_notifier);
-    let google_resource_governor: Arc<dyn ResourceGovernor> = services.resource_governor();
     let google_provider_client = google_oauth_config
-        .map(|config| google_provider_client(config, secret_store, google_resource_governor))
+        .map(|config| {
+            let runtime_ports =
+                services
+                    .product_auth_provider_runtime_ports()
+                    .ok_or_else(|| RebornBuildError::InvalidConfig {
+                        reason: "Google OAuth provider backend requires host runtime HTTP egress"
+                            .to_string(),
+                    })?;
+            google_provider_client(config, secret_store, runtime_ports)
+        })
         .transpose()?;
     let services = apply_production_runtime_process_binding(
         services,
