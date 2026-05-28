@@ -7,23 +7,23 @@ use ironclaw_host_api::{ExtensionId, SecretHandle};
 
 use crate::{
     AuthChallenge, AuthContinuationEvent, AuthFlowId, AuthFlowManager, AuthFlowRecord,
-    AuthFlowStatus, AuthInteractionId, AuthInteractionService, AuthProductError,
-    AuthProviderClient, CredentialAccount, CredentialAccountChoiceRequest, CredentialAccountId,
-    CredentialAccountListPage, CredentialAccountListRequest, CredentialAccountLookupRequest,
-    CredentialAccountMutation, CredentialAccountProjection, CredentialAccountSelectionRequest,
-    CredentialAccountService, CredentialAccountStatus, CredentialAccountUpdateBinding,
-    CredentialOwnership, CredentialRecoveryKind, CredentialRecoveryProjection,
-    CredentialRecoveryReason, CredentialRecoveryRequest, CredentialRefreshReport,
-    CredentialRefreshRequest, CredentialSelectionInput, CredentialSetupService,
-    ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount, OAuthCallbackClaimRequest,
-    OAuthCallbackFailureInput, OAuthCallbackInput, OAuthProviderCallbackRequest,
-    OAuthProviderExchange, OAuthProviderExchangeContext, OAuthProviderRefresh,
-    OAuthProviderRefreshRequest, ProviderCallbackOutcome, SecretCleanupAction,
-    SecretCleanupQuarantine, SecretCleanupQuarantineReason, SecretCleanupReport,
-    SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest, SecretSubmitResult,
-    cleanup::SecretCleanupAction::Deactivate, flow::credential_status_for_completed_flow,
-    interaction::PendingSecretInteraction, provider::validate_provider_callback_request,
-    scope_matches,
+    AuthFlowRecordSource, AuthFlowStatus, AuthInteractionId, AuthInteractionService,
+    AuthProductError, AuthProviderClient, CredentialAccount, CredentialAccountChoiceRequest,
+    CredentialAccountId, CredentialAccountListPage, CredentialAccountListRequest,
+    CredentialAccountLookupRequest, CredentialAccountMutation, CredentialAccountProjection,
+    CredentialAccountSelectionRequest, CredentialAccountService, CredentialAccountStatus,
+    CredentialAccountUpdateBinding, CredentialOwnership, CredentialRecoveryKind,
+    CredentialRecoveryProjection, CredentialRecoveryReason, CredentialRecoveryRequest,
+    CredentialRefreshReport, CredentialRefreshRequest, CredentialSelectionInput,
+    CredentialSetupService, ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount,
+    OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
+    OAuthProviderCallbackRequest, OAuthProviderExchange, OAuthProviderExchangeContext,
+    OAuthProviderRefresh, OAuthProviderRefreshRequest, ProviderCallbackOutcome,
+    SecretCleanupAction, SecretCleanupQuarantine, SecretCleanupQuarantineReason,
+    SecretCleanupReport, SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest,
+    SecretSubmitResult, cleanup::SecretCleanupAction::Deactivate,
+    flow::credential_status_for_completed_flow, interaction::PendingSecretInteraction,
+    provider::validate_provider_callback_request, scope_matches,
 };
 
 #[derive(Default)]
@@ -94,6 +94,12 @@ impl InMemoryAuthProductServices {
         self.state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+impl AuthFlowRecordSource for InMemoryAuthProductServices {
+    fn flow_records_snapshot(&self) -> Vec<AuthFlowRecord> {
+        Self::flow_records_snapshot(self)
     }
 }
 

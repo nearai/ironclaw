@@ -233,6 +233,15 @@ pub trait AuthFlowManager: Send + Sync {
     ) -> Result<AuthFlowRecord, AuthProductError>;
 }
 
+/// Read-only auth-flow projection source for product interaction views.
+///
+/// This is intentionally smaller than [`AuthFlowManager`]: callers can list
+/// sanitized flow records for scoped read-model composition, but cannot mutate
+/// auth-flow state or bypass manager validation.
+pub trait AuthFlowRecordSource: Send + Sync {
+    fn flow_records_snapshot(&self) -> Vec<AuthFlowRecord>;
+}
+
 pub(crate) fn credential_status_for_completed_flow() -> CredentialAccountStatus {
     CredentialAccountStatus::Configured
 }

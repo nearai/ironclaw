@@ -162,6 +162,7 @@ struct FakeTurnCoordinator {
     run_state_error: Mutex<Option<TurnError>>,
     parked_gate_ref: Mutex<Option<GateRef>>,
     parked_auth_gate: Mutex<bool>,
+    parked_approval_gate: Mutex<bool>,
 }
 
 impl FakeTurnCoordinator {
@@ -186,11 +187,19 @@ impl FakeTurnCoordinator {
     fn set_parked_gate(&self, gate_ref: GateRef) {
         *self.parked_gate_ref.lock().expect("lock") = Some(gate_ref);
         *self.parked_auth_gate.lock().expect("lock") = false;
+        *self.parked_approval_gate.lock().expect("lock") = false;
     }
 
     fn set_parked_auth_gate(&self, gate_ref: GateRef) {
         *self.parked_gate_ref.lock().expect("lock") = Some(gate_ref);
         *self.parked_auth_gate.lock().expect("lock") = true;
+        *self.parked_approval_gate.lock().expect("lock") = false;
+    }
+
+    fn set_parked_approval_gate(&self, gate_ref: GateRef) {
+        *self.parked_gate_ref.lock().expect("lock") = Some(gate_ref);
+        *self.parked_auth_gate.lock().expect("lock") = false;
+        *self.parked_approval_gate.lock().expect("lock") = true;
     }
 
     fn submission_count(&self) -> usize {
@@ -291,6 +300,8 @@ impl TurnCoordinator for FakeTurnCoordinator {
         let gate_ref = self.parked_gate_ref.lock().expect("lock").clone();
         let status = if *self.parked_auth_gate.lock().expect("lock") {
             TurnStatus::BlockedAuth
+        } else if *self.parked_approval_gate.lock().expect("lock") {
+            TurnStatus::BlockedApproval
         } else {
             TurnStatus::Queued
         };
@@ -2406,6 +2417,79 @@ async fn generic_gate_resolution_rejects_blocked_auth_run() {
 }
 
 #[tokio::test]
+async fn blocked_auth_run_routes_non_prefixed_gate_to_auth_interaction_service() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let auth_interactions = Arc::new(RecordingAuthInteractionService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    )
+    .with_auth_interactions(auth_interactions.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+    coordinator.set_parked_auth_gate(GateRef::new("custom-auth-gate").expect("gate"));
+
+    let response = services
+        .resolve_gate(
+            caller(),
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "gate-auth-state-routed",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string(),
+                "gate_ref": "custom-auth-gate",
+                "resolution": "denied"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("blocked auth status routes to auth interaction service");
+
+    assert!(matches!(response, RebornResolveGateResponse::Cancelled(_)));
+    assert_eq!(auth_interactions.resolution_count(), 1);
+    let resolution = auth_interactions.last_resolution().expect("resolution");
+    assert_eq!(resolution.gate_ref.as_str(), "custom-auth-gate");
+    assert_eq!(resolution.decision, AuthInteractionDecision::Deny);
+    assert_eq!(coordinator.cancellation_count(), 0);
+}
+
+#[tokio::test]
+async fn blocked_approval_run_routes_non_prefixed_gate_to_approval_interaction_service() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let approval_interactions = Arc::new(RecordingApprovalInteractionService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    )
+    .with_approval_interactions(approval_interactions.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+    coordinator.set_parked_approval_gate(GateRef::new("custom-approval-gate").expect("gate"));
+
+    let response = services
+        .resolve_gate(
+            caller(),
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "gate-approval-state-routed",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string(),
+                "gate_ref": "custom-approval-gate",
+                "resolution": "approved"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("blocked approval status routes to approval interaction service");
+
+    assert!(matches!(response, RebornResolveGateResponse::Resumed(_)));
+    assert_eq!(approval_interactions.resolution_count(), 1);
+    let resolution = approval_interactions.last_resolution().expect("resolution");
+    assert_eq!(resolution.gate_ref.as_str(), "custom-approval-gate");
+    assert_eq!(
+        resolution.decision,
+        ApprovalInteractionDecision::ApproveOnce
+    );
+    assert_eq!(coordinator.resumption_count(), 0);
+}
+
+#[tokio::test]
 async fn approval_gate_resolution_uses_approval_interaction_service() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let approval_interactions = Arc::new(RecordingApprovalInteractionService::default());
@@ -2587,6 +2671,47 @@ async fn hook_auth_gate_denial_uses_auth_interaction_service() {
     let resolution = auth_interactions.last_resolution().expect("resolution");
     assert_eq!(resolution.gate_ref.as_str(), "gate:hook-auth-alpha");
     assert_eq!(resolution.decision, AuthInteractionDecision::Deny);
+    assert_eq!(coordinator.cancellation_count(), 0);
+}
+
+#[tokio::test]
+async fn missing_run_state_for_auth_gate_still_routes_to_auth_interaction_service() {
+    let coordinator = Arc::new(FakeTurnCoordinator::with_run_state_error(
+        TurnError::ScopeNotFound,
+    ));
+    let auth_interactions = Arc::new(RecordingAuthInteractionService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    )
+    .with_auth_interactions(auth_interactions.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let response = services
+        .resolve_gate(
+            caller(),
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "gate-auth-missing-run",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string(),
+                "gate_ref": "gate:hook-auth-missing",
+                "resolution": "denied"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("typed auth gate routes to auth interaction service when run-state is gone");
+
+    assert!(matches!(response, RebornResolveGateResponse::Cancelled(_)));
+    assert_eq!(auth_interactions.resolution_count(), 1);
+    assert_eq!(
+        auth_interactions
+            .last_resolution()
+            .expect("resolution")
+            .gate_ref
+            .as_str(),
+        "gate:hook-auth-missing"
+    );
     assert_eq!(coordinator.cancellation_count(), 0);
 }
 

@@ -36,6 +36,7 @@ mod conversation_binding;
 mod error;
 #[cfg(any(test, feature = "test-support"))]
 mod fakes;
+mod gate_state;
 mod in_memory_ledger;
 mod inbound_turn;
 mod ledger;

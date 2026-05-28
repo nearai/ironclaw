@@ -5,8 +5,8 @@ use ironclaw_approvals::DenyApproval;
 use ironclaw_host_api::{Action, Principal};
 use ironclaw_run_state::ApprovalStatus;
 use ironclaw_turns::{
-    CancelRunRequest, GateRef, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
-    SanitizedCancelReason, TurnCoordinator, TurnError, TurnErrorCategory, TurnRunId, TurnStatus,
+    CancelRunRequest, GateRef, ResumeTurnPrecondition, ResumeTurnRequest, SanitizedCancelReason,
+    TurnCoordinator, TurnError, TurnErrorCategory, TurnRunId, TurnStatus,
 };
 
 use super::gate_ref::{approval_reply_binding_ref, approval_source_binding_ref};
@@ -17,6 +17,7 @@ use super::{
     ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse, approval_rejected,
 };
 use crate::error::ProductWorkflowError;
+use crate::gate_state::{BlockedGateState, BlockedGateStateError, blocked_gate_state};
 
 /// Approval-only service consumed by product/WebUI surfaces.
 #[async_trait]
@@ -68,12 +69,6 @@ enum ApprovalCapabilityAction {
     Spawn,
 }
 
-#[derive(Clone, Copy)]
-enum ApprovalTurnGateState {
-    ParkedOnGate,
-    NotParkedOnGate,
-}
-
 impl ApprovalCapabilityAction {
     fn from_action(action: &Action) -> Result<Self, ProductWorkflowError> {
         match action {
@@ -117,26 +112,17 @@ impl DefaultApprovalInteractionService {
         &self,
         request: &ResolveApprovalInteractionRequest,
         run_id: TurnRunId,
-    ) -> Result<ApprovalTurnGateState, ProductWorkflowError> {
-        let state = self
-            .turn_coordinator
-            .get_run_state(GetRunStateRequest {
-                scope: request.scope.clone(),
-                run_id,
-            })
-            .await
-            .map_err(map_gate_state_error)?;
-        if state.actor.as_ref() != Some(&request.actor) {
-            return Err(approval_rejected(
-                ApprovalInteractionRejectionKind::CrossScopeDenied,
-            ));
-        }
-        if state.status != TurnStatus::BlockedApproval
-            || state.gate_ref.as_ref() != Some(&request.gate_ref)
-        {
-            return Ok(ApprovalTurnGateState::NotParkedOnGate);
-        }
-        Ok(ApprovalTurnGateState::ParkedOnGate)
+    ) -> Result<BlockedGateState, ProductWorkflowError> {
+        blocked_gate_state(
+            self.turn_coordinator.as_ref(),
+            &request.scope,
+            &request.actor,
+            run_id,
+            &request.gate_ref,
+            TurnStatus::BlockedApproval,
+        )
+        .await
+        .map_err(map_blocked_gate_state_error)
     }
 
     async fn approve_gate(
@@ -318,25 +304,34 @@ impl ApprovalInteractionService for DefaultApprovalInteractionService {
             gate.status(),
             request.decision,
         ) {
-            (ApprovalTurnGateState::ParkedOnGate, _, ApprovalInteractionDecision::ApproveOnce) => {
+            (BlockedGateState::ParkedOnGate, _, ApprovalInteractionDecision::ApproveOnce) => {
                 self.approve_gate(request, gate, run_id).await
             }
-            (ApprovalTurnGateState::ParkedOnGate, _, ApprovalInteractionDecision::Deny) => {
+            (BlockedGateState::ParkedOnGate, _, ApprovalInteractionDecision::Deny) => {
                 self.deny_gate(request, gate, run_id).await
             }
             (
-                ApprovalTurnGateState::NotParkedOnGate,
+                BlockedGateState::NotParkedOnGate,
                 ApprovalStatus::Approved,
                 ApprovalInteractionDecision::ApproveOnce,
             ) => self.replay_approved_gate(request, run_id).await,
             (
-                ApprovalTurnGateState::NotParkedOnGate,
+                BlockedGateState::NotParkedOnGate,
                 ApprovalStatus::Denied,
                 ApprovalInteractionDecision::Deny,
             ) => self.replay_denied_gate(request, run_id).await,
             _ => Err(approval_rejected(
                 ApprovalInteractionRejectionKind::StaleGate,
             )),
+        }
+    }
+}
+
+fn map_blocked_gate_state_error(error: BlockedGateStateError) -> ProductWorkflowError {
+    match error {
+        BlockedGateStateError::Turn(error) => map_gate_state_error(error),
+        BlockedGateStateError::ActorMismatch => {
+            approval_rejected(ApprovalInteractionRejectionKind::CrossScopeDenied)
         }
     }
 }

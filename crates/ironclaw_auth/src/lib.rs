@@ -38,9 +38,9 @@ pub use error::{AuthErrorCode, AuthProductError};
 pub use fakes::InMemoryAuthProductServices;
 pub use flow::{
     AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthFlowKind, AuthFlowManager,
-    AuthFlowRecord, AuthFlowStatus, CredentialAccountUpdateBinding, CredentialSelectionInput,
-    NewAuthFlow, OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
-    ProviderCallbackOutcome,
+    AuthFlowRecord, AuthFlowRecordSource, AuthFlowStatus, CredentialAccountUpdateBinding,
+    CredentialSelectionInput, NewAuthFlow, OAuthCallbackClaimRequest, OAuthCallbackFailureInput,
+    OAuthCallbackInput, ProviderCallbackOutcome,
 };
 pub use google_provider::{
     GoogleProviderEgressPolicyAuthorizer, GoogleProviderStoredTokens, GoogleProviderTokenSet,
