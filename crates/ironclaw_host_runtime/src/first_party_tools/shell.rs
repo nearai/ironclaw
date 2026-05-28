@@ -1,16 +1,17 @@
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
+use ironclaw_filesystem::FilesystemError;
 use std::time::Duration;
 
 use ironclaw_host_api::{
     EffectKind, PermissionMode, ResourceCeiling, ResourceEstimate, ResourceProfile,
-    RuntimeDispatchErrorKind, SandboxQuota, ScopedPath,
+    RuntimeDispatchErrorKind, SandboxQuota, ScopedPath, VirtualPath,
 };
 use serde_json::{Value, json};
 
 use crate::{
     CommandExecutionRequest, FirstPartyCapabilityError, FirstPartyCapabilityRequest,
     RuntimeProcessError, SavedCommandOutput, SavedCommandOutputSanitization,
-    process_output::saved_output_ref,
+    process_output::saved_output_filename,
 };
 
 use super::{FIRST_PARTY_MAX_OUTPUT_BYTES, first_party_capability_manifest};
@@ -24,6 +25,7 @@ const DEFAULT_SHELL_WALL_CLOCK_MS: u64 = 120_000;
 const MAX_SHELL_WALL_CLOCK_MS: u64 = 120_000;
 const MAX_SHELL_TIMEOUT_SECS: u64 = MAX_SHELL_WALL_CLOCK_MS / 1000;
 const DEFAULT_SHELL_OUTPUT_BYTES: u64 = crate::process_output::COMMAND_MAX_OUTPUT_SIZE as u64;
+const SAVED_OUTPUT_SCOPED_DIR: &str = "command-outputs";
 
 pub(super) fn manifest() -> Result<CapabilityManifest, ExtensionError> {
     first_party_capability_manifest(
@@ -88,7 +90,13 @@ pub(super) async fn dispatch(
         .await
         .map_err(process_error)?;
 
-    let rendered_output = render_shell_output(&output.output, output.saved_output.as_ref());
+    let saved_output_path =
+        publish_saved_output_for_file_read(request, output.saved_output.as_ref()).await?;
+    let rendered_output = render_shell_output(
+        &output.output,
+        output.saved_output.as_ref(),
+        saved_output_path.as_deref(),
+    );
     let output_value = json!({
         "output": rendered_output,
         "exit_code": output.exit_code,
@@ -98,24 +106,99 @@ pub(super) async fn dispatch(
     Ok((output_value, output.duration))
 }
 
-fn render_shell_output(output: &str, saved_output: Option<&SavedCommandOutput>) -> String {
+async fn publish_saved_output_for_file_read(
+    request: &FirstPartyCapabilityRequest,
+    saved_output: Option<&SavedCommandOutput>,
+) -> Result<Option<String>, FirstPartyCapabilityError> {
+    let Some(saved_output) = saved_output else {
+        return Ok(None);
+    };
+    let Some((scoped_path, virtual_path)) = saved_output_publish_path(request, saved_output) else {
+        let _ = tokio::fs::remove_file(&saved_output.path).await;
+        return Ok(None);
+    };
+    let content = tokio::fs::read(&saved_output.path)
+        .await
+        .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed))?;
+    if let Some(parent) = virtual_parent(&virtual_path) {
+        match request.services.filesystem.create_dir_all(&parent).await {
+            Ok(()) | Err(FilesystemError::Unsupported { .. }) => {}
+            Err(_) => {
+                return Err(FirstPartyCapabilityError::new(
+                    RuntimeDispatchErrorKind::OperationFailed,
+                ));
+            }
+        }
+    }
+    request
+        .services
+        .filesystem
+        .write_file(&virtual_path, &content)
+        .await
+        .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed))?;
+    let _ = tokio::fs::remove_file(&saved_output.path).await;
+    Ok(Some(scoped_path))
+}
+
+fn saved_output_publish_path(
+    request: &FirstPartyCapabilityRequest,
+    saved_output: &SavedCommandOutput,
+) -> Option<(String, VirtualPath)> {
+    let mounts = request.mounts.as_ref()?;
+    let grant = mounts
+        .mounts
+        .iter()
+        .find(|grant| grant.permissions.read && grant.permissions.write)?;
+    let filename = saved_output_filename(saved_output);
+    let relative_path = format!("{SAVED_OUTPUT_SCOPED_DIR}/{filename}");
+    let scoped_path = format!(
+        "{}/{}",
+        grant.alias.as_str().trim_end_matches('/'),
+        relative_path
+    );
+    let virtual_path = mounts
+        .scoped_path(scoped_path.clone())
+        .and_then(|path| mounts.resolve(&path))
+        .ok()?;
+    Some((scoped_path, virtual_path))
+}
+
+fn virtual_parent(path: &VirtualPath) -> Option<VirtualPath> {
+    let (parent, _) = path.as_str().rsplit_once('/')?;
+    if parent.is_empty() {
+        None
+    } else {
+        VirtualPath::new(parent.to_string()).ok()
+    }
+}
+
+fn render_shell_output(
+    output: &str,
+    saved_output: Option<&SavedCommandOutput>,
+    saved_output_path: Option<&str>,
+) -> String {
     let Some(saved_output) = saved_output else {
         return output.to_string();
     };
-    let ref_id = saved_output_ref(saved_output);
+    let Some(saved_output_path) = saved_output_path else {
+        return format!(
+            "{output}\n\nFull output was captured but no file_read-accessible scoped path was available"
+        );
+    };
     let mut note = match saved_output.sanitization {
         SavedCommandOutputSanitization::Blocked => {
             format!(
-                "Full output was not saved because it matched secret-leak blocking rules; marker saved as ref: {ref_id}"
+                "Full output was not saved because it matched secret-leak blocking rules; marker saved to: {saved_output_path}"
             )
         }
         SavedCommandOutputSanitization::Redacted => {
-            format!("Full output saved as ref: {ref_id} (secret-like values redacted)")
+            format!("Full output saved to: {saved_output_path} (secret-like values redacted)")
         }
         SavedCommandOutputSanitization::Clean => {
-            format!("Full output saved as ref: {ref_id}")
+            format!("Full output saved to: {saved_output_path}")
         }
     };
+    note.push_str("\nUse file_read to inspect it");
     if saved_output.stream_was_capped {
         note.push_str(&format!(
             " (saved output capped at {} bytes per stream)",
@@ -129,18 +212,15 @@ fn reject_unbacked_scoped_workdir(
     request: &FirstPartyCapabilityRequest,
     workdir: Option<&str>,
 ) -> Result<(), FirstPartyCapabilityError> {
+    let Some(workdir) = workdir else {
+        return Ok(());
+    };
     let Some(mounts) = request
         .mounts
         .as_ref()
         .filter(|mounts| !mounts.mounts.is_empty())
     else {
         return Ok(());
-    };
-
-    let Some(workdir) = workdir else {
-        return Err(FirstPartyCapabilityError::new(
-            RuntimeDispatchErrorKind::Client,
-        ));
     };
     let scoped_path = ScopedPath::new(workdir.to_string())
         .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode))?;
@@ -185,7 +265,7 @@ mod tests {
 
     #[test]
     fn render_shell_output_preserves_unsaved_output() {
-        assert_eq!(render_shell_output("hello", None), "hello");
+        assert_eq!(render_shell_output("hello", None, None), "hello");
     }
 
     #[test]
@@ -198,11 +278,13 @@ mod tests {
                 sanitization: SavedCommandOutputSanitization::Redacted,
                 ..saved
             }),
+            Some("/workspace/command-outputs/command.log"),
         );
 
-        assert!(rendered.contains("Full output saved as ref: command.log"));
+        assert!(rendered.contains("Full output saved to: /workspace/command-outputs/command.log"));
         assert!(!rendered.contains("/tmp/command.log"));
         assert!(rendered.contains("secret-like values redacted"));
+        assert!(rendered.contains("use file_read to inspect it"));
     }
 
     #[test]
@@ -213,10 +295,11 @@ mod tests {
                 sanitization: SavedCommandOutputSanitization::Blocked,
                 ..saved_output()
             }),
+            Some("/workspace/command-outputs/command.log"),
         );
 
         assert!(rendered.contains("Full output was not saved because"));
-        assert!(rendered.contains("marker saved as ref: command.log"));
+        assert!(rendered.contains("marker saved to: /workspace/command-outputs/command.log"));
         assert!(!rendered.contains("/tmp/command.log"));
     }
 
@@ -229,6 +312,7 @@ mod tests {
                 max_saved_stream_size: 123,
                 ..saved_output()
             }),
+            Some("/workspace/command-outputs/command.log"),
         );
 
         assert!(rendered.contains("saved output capped at 123 bytes per stream"));

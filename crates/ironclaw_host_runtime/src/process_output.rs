@@ -27,7 +27,6 @@ const COMMAND_OUTPUT_ROOT_DIRNAME: &str = "ironclaw-command-outputs";
 const COMMAND_OUTPUT_BLOCKED_MARKER: &str =
     "[Full command output blocked due to potential secret leakage]\n";
 const STREAM_READ_BUF_SIZE: usize = 16 * 1024;
-pub(crate) const SAVED_OUTPUT_READ_MAX_BYTES: usize = 512 * 1024;
 
 /// Metadata for full process output persisted outside the model preview.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -364,56 +363,13 @@ fn finalize_saved_output(
     Ok((saved_output, sanitized.preview))
 }
 
-pub(crate) fn saved_output_ref(saved_output: &SavedCommandOutput) -> String {
+pub(crate) fn saved_output_filename(saved_output: &SavedCommandOutput) -> String {
     saved_output
         .path
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("unavailable-saved-output")
         .to_string()
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SavedOutputRead {
-    pub(crate) content: Vec<u8>,
-    pub(crate) offset: usize,
-    pub(crate) next_offset: Option<usize>,
-    pub(crate) total_bytes: usize,
-}
-
-pub(crate) fn read_saved_output_ref(
-    scope: &ResourceScope,
-    ref_id: &str,
-    offset: usize,
-    limit: usize,
-) -> Result<SavedOutputRead, RuntimeProcessError> {
-    if !is_valid_saved_output_ref(ref_id) {
-        return Err(RuntimeProcessError::ExecutionFailed(
-            "invalid saved output ref".to_string(),
-        ));
-    }
-    let path = scoped_output_dir_path(scope).join(ref_id);
-    let content = fs::read(&path).map_err(file_error("read saved command output ref"))?;
-    let total_bytes = content.len();
-    let offset = offset.min(total_bytes);
-    let limit = limit.clamp(1, SAVED_OUTPUT_READ_MAX_BYTES);
-    let end = offset.saturating_add(limit).min(total_bytes);
-    let next_offset = (end < total_bytes).then_some(end);
-    Ok(SavedOutputRead {
-        content: content[offset..end].to_vec(),
-        offset,
-        next_offset,
-        total_bytes,
-    })
-}
-
-fn is_valid_saved_output_ref(ref_id: &str) -> bool {
-    !ref_id.is_empty()
-        && ref_id.starts_with(COMMAND_OUTPUT_TEMP_PREFIX)
-        && ref_id.ends_with(".log")
-        && !ref_id.contains('/')
-        && !ref_id.contains('\\')
-        && !ref_id.contains("..")
 }
 
 fn write_final_saved_output(
@@ -731,25 +687,6 @@ mod tests {
         );
         assert!(!saved_output.stream_was_capped);
         assert_eq!(saved, raw);
-    }
-
-    #[test]
-    fn saved_output_ref_reads_only_with_matching_scope() {
-        let scope = test_scope_with("tenant-read", "alice", Some("project"));
-        let other_scope = test_scope_with("tenant-read", "bob", Some("project"));
-        let stdout = saved_stream_capture_for_scope(&scope, b"large clean output");
-
-        let output = capture_command_output(&scope, stdout, StreamCapture::default())
-            .expect("capture succeeds");
-        let saved_output = output.saved_output.expect("saved output metadata");
-        let ref_id = saved_output_ref(&saved_output);
-        let read = read_saved_output_ref(&scope, &ref_id, 0, 5).expect("read saved output");
-        let _ = fs::remove_file(&saved_output.path);
-
-        assert_eq!(read.content, b"large");
-        assert_eq!(read.offset, 0);
-        assert_eq!(read.next_offset, Some(5));
-        assert!(read_saved_output_ref(&other_scope, &ref_id, 0, 5).is_err());
     }
 
     #[test]

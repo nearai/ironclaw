@@ -14,7 +14,7 @@ use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::ExtensionRegistry;
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
-use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
+use ironclaw_filesystem::{InMemoryBackend, LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -26,11 +26,11 @@ use ironclaw_host_runtime::{
     GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime,
     HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID,
     RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeProcessError,
-    RuntimeProcessPort, SAVED_OUTPUT_READ_CAPABILITY_ID, SHELL_CAPABILITY_ID,
-    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
-    SPAWN_SUBAGENT_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind, TIME_CAPABILITY_ID,
-    TenantSandboxProcessPort, VisibleCapabilityAccess, VisibleCapabilityRequest,
-    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers, builtin_first_party_package,
+    RuntimeProcessPort, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
+    SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind,
+    TIME_CAPABILITY_ID, TenantSandboxProcessPort, VisibleCapabilityAccess,
+    VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
+    builtin_first_party_package,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpResponse, NetworkHttpTransport,
@@ -502,23 +502,25 @@ async fn builtin_shell_truncates_large_output_without_output_overflow() {
 
     let output = output["output"].as_str().expect("shell output is text");
     assert!(output.contains("[truncated"));
-    assert!(output.contains("Full output saved as ref: "));
+    assert!(output.contains("no file_read-accessible scoped path was available"));
     assert!(!output.contains(std::env::temp_dir().to_string_lossy().as_ref()));
     assert!(output.len() <= 66_000);
 }
 
 #[tokio::test]
-async fn builtin_saved_output_read_resolves_ref_in_current_scope() {
-    let runtime = runtime();
-    let context = execution_context_with_network(
-        [SHELL_CAPABILITY_ID, SAVED_OUTPUT_READ_CAPABILITY_ID],
+async fn builtin_shell_saves_large_output_to_file_read_path() {
+    let (filesystem, mounts) = in_memory_mounted_filesystem(MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts_and_network(
+        [SHELL_CAPABILITY_ID, READ_FILE_CAPABILITY_ID],
+        mounts,
         shell_test_policy(),
     );
     let shell_output = invoke_with_context(
         &runtime,
         SHELL_CAPABILITY_ID,
         json!({
-            "command": "printf 'saved-start-'; yes m | head -c 70000; printf 'saved-end'",
+            "command": "printf 'saved-start\\n'; yes m | head -c 70000; printf 'saved-end'",
             "timeout": 5
         }),
         context.clone(),
@@ -526,37 +528,30 @@ async fn builtin_saved_output_read_resolves_ref_in_current_scope() {
     .await
     .unwrap();
     let output = shell_output["output"].as_str().expect("shell output text");
-    let ref_id = output
-        .split("Full output saved as ref: ")
+    let saved_path = output
+        .split("Full output saved to: ")
         .nth(1)
         .and_then(|tail| tail.split_whitespace().next())
-        .expect("saved output ref");
-    assert!(!ref_id.contains('/'), "shell must not expose host paths");
+        .expect("saved output path");
+    assert!(saved_path.starts_with("/workspace/command-outputs/"));
+    assert!(!output.contains(std::env::temp_dir().to_string_lossy().as_ref()));
+    assert!(output.contains("Use file_read to inspect it"));
 
     let read_output = invoke_with_context(
         &runtime,
-        SAVED_OUTPUT_READ_CAPABILITY_ID,
-        json!({"ref": ref_id, "limit_bytes": 64}),
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": saved_path, "limit": 1}),
         context,
     )
     .await
     .unwrap();
-    let bytes = BASE64_STANDARD
-        .decode(
-            read_output["content_base64"]
-                .as_str()
-                .expect("base64 content"),
-        )
-        .expect("valid base64");
-
     assert!(
-        std::str::from_utf8(&bytes)
-            .unwrap()
-            .starts_with("saved-start-")
+        read_output["content"]
+            .as_str()
+            .expect("read_file content")
+            .contains("saved-start")
     );
-    assert_eq!(read_output["offset_bytes"], json!(0));
-    assert_eq!(read_output["encoding"], json!("base64"));
-    assert!(read_output["next_offset_bytes"].as_u64().is_some());
+    assert_eq!(read_output["path"], json!(saved_path));
 }
 
 #[tokio::test]
@@ -4191,7 +4186,7 @@ fn provider_id() -> ExtensionId {
     ExtensionId::new("builtin").unwrap()
 }
 
-fn all_builtin_capability_ids() -> [&'static str; 17] {
+fn all_builtin_capability_ids() -> [&'static str; 16] {
     [
         ECHO_CAPABILITY_ID,
         TIME_CAPABILITY_ID,
@@ -4199,7 +4194,6 @@ fn all_builtin_capability_ids() -> [&'static str; 17] {
         HTTP_CAPABILITY_ID,
         HTTP_SAVE_CAPABILITY_ID,
         SHELL_CAPABILITY_ID,
-        SAVED_OUTPUT_READ_CAPABILITY_ID,
         SPAWN_SUBAGENT_CAPABILITY_ID,
         READ_FILE_CAPABILITY_ID,
         WRITE_FILE_CAPABILITY_ID,
@@ -4228,6 +4222,16 @@ fn mounted_filesystem(path: &Path, permissions: MountPermissions) -> (LocalFiles
     )])
     .unwrap();
     (filesystem, mounts)
+}
+
+fn in_memory_mounted_filesystem(permissions: MountPermissions) -> (InMemoryBackend, MountView) {
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/coding-pack").unwrap(),
+        permissions,
+    )])
+    .unwrap();
+    (InMemoryBackend::new(), mounts)
 }
 
 fn mounted_skill_filesystem(path: &Path) -> (LocalFilesystem, MountView) {
