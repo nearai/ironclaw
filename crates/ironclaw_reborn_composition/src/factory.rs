@@ -875,6 +875,7 @@ fn local_dev_bytes_capabilities() -> BackendCapabilities {
         .with(Capability::Delete)
 }
 
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn local_dev_scoped_filesystem(
     filesystem: Arc<LocalDevRootFilesystem>,
 ) -> Arc<ScopedFilesystem<LocalDevRootFilesystem>> {
