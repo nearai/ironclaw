@@ -597,6 +597,10 @@ impl ProviderBackedCredentialAccountService {
                 account.scope.clone(),
                 account.provider.clone(),
             ))
+            // silent-ok: refresh reporting is allowed to degrade to the
+            // single-account projection when the broader recovery projection
+            // lookup fails; the refresh mutation has already been applied and
+            // the caller still gets the refreshed account snapshot.
             .await
             .unwrap_or_else(|_| single_account_recovery(account));
         Ok(CredentialRefreshReport {

@@ -218,13 +218,18 @@ impl GoogleProviderTokenSink for SecretStoreGoogleTokenSink {
         scope: &ResourceScope,
         handles: &[SecretHandle],
     ) -> Result<(), AuthProductError> {
+        let mut first_error = None;
         for handle in handles {
-            self.store
-                .delete(scope, handle)
-                .await
-                .map_err(map_secret_store_error)?;
+            if let Err(error) = self.store.delete(scope, handle).await
+                && first_error.is_none()
+            {
+                first_error = Some(map_secret_store_error(error));
+            }
         }
-        Ok(())
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 }
 
@@ -244,8 +249,8 @@ fn google_refresh_token_handle(
     token_kind: &'static str,
 ) -> Result<SecretHandle, AuthProductError> {
     SecretHandle::new(format!(
-        "google-oauth-refresh-{token_kind}-{}-{}",
-        request.account_id, request.scope.invocation_id
+        "google-oauth-refresh-{token_kind}-{}",
+        request.account_id
     ))
     .map_err(|_| AuthProductError::BackendUnavailable)
 }
@@ -264,5 +269,177 @@ fn map_refresh_secret_error(error: ironclaw_secrets::SecretStoreError) -> AuthPr
         AuthProductError::RefreshFailed
     } else {
         AuthProductError::BackendUnavailable
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use ironclaw_host_api::{InvocationId, ResourceScope, SecretHandle, TenantId, UserId};
+    use ironclaw_secrets::{
+        SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore,
+    };
+    use secrecy::SecretString;
+
+    use super::{
+        GoogleProviderRefreshTokenStorageRequest, GoogleProviderTokenSet, GoogleProviderTokenSink,
+        SecretStoreGoogleTokenSink, google_refresh_token_handle,
+    };
+
+    fn sample_scope(invocation_id: InvocationId) -> ResourceScope {
+        ResourceScope {
+            tenant_id: TenantId::new("tenant-a").unwrap(),
+            user_id: UserId::new("user-a").unwrap(),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id,
+        }
+    }
+
+    fn sample_request(
+        invocation_id: InvocationId,
+        account_id: ironclaw_auth::CredentialAccountId,
+    ) -> GoogleProviderRefreshTokenStorageRequest {
+        GoogleProviderRefreshTokenStorageRequest {
+            scope: sample_scope(invocation_id),
+            account_id,
+            tokens: GoogleProviderTokenSet {
+                access_token: SecretString::new("access".into()),
+                refresh_token: Some(SecretString::new("refresh".into())),
+            },
+        }
+    }
+
+    struct RecordingSecretStore {
+        deleted: Mutex<Vec<String>>,
+        failing_handles: HashSet<String>,
+    }
+
+    impl RecordingSecretStore {
+        fn new(failing_handles: impl IntoIterator<Item = impl Into<String>>) -> Self {
+            Self {
+                deleted: Mutex::new(Vec::new()),
+                failing_handles: failing_handles.into_iter().map(Into::into).collect(),
+            }
+        }
+
+        fn deleted_handles(&self) -> Vec<String> {
+            self.deleted.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl SecretStore for RecordingSecretStore {
+        async fn put(
+            &self,
+            _scope: ResourceScope,
+            _handle: SecretHandle,
+            _material: SecretMaterial,
+        ) -> Result<SecretMetadata, ironclaw_secrets::SecretStoreError> {
+            unreachable!("not used in tests")
+        }
+
+        async fn metadata(
+            &self,
+            _scope: &ResourceScope,
+            _handle: &SecretHandle,
+        ) -> Result<Option<SecretMetadata>, ironclaw_secrets::SecretStoreError> {
+            unreachable!("not used in tests")
+        }
+
+        async fn delete(
+            &self,
+            _scope: &ResourceScope,
+            handle: &SecretHandle,
+        ) -> Result<bool, ironclaw_secrets::SecretStoreError> {
+            self.deleted
+                .lock()
+                .unwrap()
+                .push(handle.as_str().to_string());
+            if self.failing_handles.contains(handle.as_str()) {
+                Err(ironclaw_secrets::SecretStoreError::BackendMisconfigured {
+                    reason: format!("failed to delete {}", handle.as_str()),
+                })
+            } else {
+                Ok(true)
+            }
+        }
+
+        async fn lease_once(
+            &self,
+            _scope: &ResourceScope,
+            _handle: &SecretHandle,
+        ) -> Result<SecretLease, ironclaw_secrets::SecretStoreError> {
+            unreachable!("not used in tests")
+        }
+
+        async fn consume(
+            &self,
+            _scope: &ResourceScope,
+            _lease_id: SecretLeaseId,
+        ) -> Result<SecretMaterial, ironclaw_secrets::SecretStoreError> {
+            unreachable!("not used in tests")
+        }
+
+        async fn revoke(
+            &self,
+            _scope: &ResourceScope,
+            _lease_id: SecretLeaseId,
+        ) -> Result<SecretLease, ironclaw_secrets::SecretStoreError> {
+            unreachable!("not used in tests")
+        }
+
+        async fn leases_for_scope(
+            &self,
+            _scope: &ResourceScope,
+        ) -> Result<Vec<SecretLease>, ironclaw_secrets::SecretStoreError> {
+            unreachable!("not used in tests")
+        }
+    }
+
+    #[tokio::test]
+    async fn google_refresh_token_handles_ignore_invocation_id() {
+        let account_id = ironclaw_auth::CredentialAccountId::new();
+        let request_a = sample_request(InvocationId::new(), account_id);
+        let request_b = sample_request(InvocationId::new(), account_id);
+
+        let access_a = google_refresh_token_handle(&request_a, "access").unwrap();
+        let access_b = google_refresh_token_handle(&request_b, "access").unwrap();
+        let refresh_a = google_refresh_token_handle(&request_a, "refresh").unwrap();
+        let refresh_b = google_refresh_token_handle(&request_b, "refresh").unwrap();
+
+        assert_eq!(access_a, access_b);
+        assert_eq!(refresh_a, refresh_b);
+    }
+
+    #[tokio::test]
+    async fn delete_tokens_attempts_every_handle_before_returning_first_error() {
+        let store = Arc::new(RecordingSecretStore::new(["second"]));
+        let sink = SecretStoreGoogleTokenSink {
+            store: store.clone(),
+        };
+        let scope = sample_scope(InvocationId::new());
+        let handles = vec![
+            SecretHandle::new("first").unwrap(),
+            SecretHandle::new("second").unwrap(),
+            SecretHandle::new("third").unwrap(),
+        ];
+
+        let error = sink.delete_tokens(&scope, &handles).await.unwrap_err();
+
+        assert_eq!(error, ironclaw_auth::AuthProductError::BackendUnavailable);
+        assert_eq!(
+            store.deleted_handles(),
+            vec![
+                "first".to_string(),
+                "second".to_string(),
+                "third".to_string()
+            ]
+        );
     }
 }

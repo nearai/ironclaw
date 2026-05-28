@@ -67,8 +67,8 @@ mod tests {
         CredentialRefreshRequest, GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE,
         GOOGLE_PROVIDER_ID, GOOGLE_TOKEN_ENDPOINT, InMemoryAuthProductServices,
         NewCredentialAccount, OAuthAuthorizationCode, OAuthClientId, OAuthProviderCallbackRequest,
-        OAuthProviderExchangeContext, OAuthProviderRefreshRequest, OAuthRedirectUri,
-        PkceVerifierHash, PkceVerifierSecret, ProviderScope,
+        OAuthProviderExchange, OAuthProviderExchangeContext, OAuthProviderRefreshRequest,
+        OAuthRedirectUri, PkceVerifierHash, PkceVerifierSecret, ProviderScope,
     };
     use ironclaw_authorization::GrantAuthorizer;
     use ironclaw_capabilities::{
@@ -825,6 +825,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn google_provider_refresh_rejects_system_scope_before_side_effects() {
+        let egress = Arc::new(RecordingEgress::ok(RuntimeHttpEgressResponse {
+            status: 200,
+            headers: vec![("content-type".to_string(), "application/json".to_string())],
+            body: br#"{
+                "access_token":"provider-refreshed-access-token",
+                "scope":"https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send",
+                "expires_in":3600,
+                "token_type":"Bearer"
+            }"#
+            .to_vec(),
+            saved_body: None,
+            request_bytes: 0,
+            response_bytes: 0,
+            redaction_applied: true,
+        }));
+        let sink = Arc::new(RecordingTokenSink::new(
+            SecretHandle::new("google-refreshed-access-secret").expect("valid handle"),
+            None,
+        ));
+        let policy_authorizer = Arc::new(RecordingPolicyAuthorizer::default());
+        let client = GoogleProviderClient::new(
+            egress.clone(),
+            sink.clone(),
+            policy_authorizer.clone(),
+            OAuthClientId::new("google-client-123").expect("client id"),
+            OAuthRedirectUri::new("https://app.example/oauth/callback").expect("redirect uri"),
+        )
+        .expect("client");
+
+        let error = client
+            .refresh_token(OAuthProviderRefreshRequest {
+                provider: google_provider(),
+                scope: AuthProductScope::new(ResourceScope::system(), AuthSurface::Callback),
+                account_id: ironclaw_auth::CredentialAccountId::new(),
+                refresh_secret: SecretHandle::new("google-refresh-secret").expect("valid handle"),
+                scopes: provider_scopes(&[GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE]),
+            })
+            .await
+            .expect_err("system-scoped refresh is rejected");
+
+        assert_eq!(error, AuthProductError::CrossScopeDenied);
+        assert!(egress.requests().is_empty());
+        assert!(policy_authorizer.authorizations().is_empty());
+        assert!(sink.access_tokens().is_empty());
+        assert!(sink.deleted_handles().is_empty());
+    }
+
+    #[tokio::test]
+    async fn google_provider_refresh_maps_http_5xx_to_backend_unavailable() {
+        let egress = Arc::new(RecordingEgress::ok(RuntimeHttpEgressResponse {
+            status: 503,
+            headers: vec![("content-type".to_string(), "application/json".to_string())],
+            body: br#"{"error":"unavailable"}"#.to_vec(),
+            saved_body: None,
+            request_bytes: 0,
+            response_bytes: 0,
+            redaction_applied: false,
+        }));
+        let client = google_client(egress, Arc::new(RecordingPolicyAuthorizer::default()));
+
+        let error = client
+            .refresh_token(refresh_request(google_provider()))
+            .await
+            .expect_err("5xx response is backend unavailable");
+        assert_eq!(error, AuthProductError::BackendUnavailable);
+    }
+
+    #[tokio::test]
     async fn product_auth_refresh_uses_concrete_google_provider_and_updates_account() {
         let owner = scope("google-product-refresh");
         let auth = Arc::new(InMemoryAuthProductServices::new());
@@ -989,6 +1058,77 @@ mod tests {
             .expect_err("non-google refresh is rejected");
         assert_eq!(non_google_error, AuthProductError::RefreshFailed);
         assert!(egress.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn google_provider_cleanup_exchange_deletes_google_handles_and_skips_non_google() {
+        let access_handle =
+            SecretHandle::new("google-cleanup-access-secret").expect("valid handle");
+        let refresh_handle =
+            SecretHandle::new("google-cleanup-refresh-secret").expect("valid handle");
+        let sink = Arc::new(RecordingTokenSink::new(
+            access_handle.clone(),
+            Some(refresh_handle.clone()),
+        ));
+        let client = GoogleProviderClient::new(
+            Arc::new(RecordingEgress::ok(RuntimeHttpEgressResponse {
+                status: 200,
+                headers: vec![],
+                body: Vec::new(),
+                request_bytes: 0,
+                response_bytes: 0,
+                saved_body: None,
+                redaction_applied: false,
+            })),
+            sink.clone(),
+            Arc::new(RecordingPolicyAuthorizer::default()),
+            OAuthClientId::new("google-client-123").expect("client id"),
+            OAuthRedirectUri::new("https://app.example/oauth/callback").expect("redirect uri"),
+        )
+        .expect("client");
+
+        let google_exchange = OAuthProviderExchange {
+            provider: google_provider(),
+            account_label: label("work gmail"),
+            authorization_code_hash: code_hash("cleanup-code-hash"),
+            pkce_verifier_hash: pkce_hash("cleanup-pkce-hash"),
+            access_secret: access_handle.clone(),
+            refresh_secret: Some(refresh_handle.clone()),
+            scopes: provider_scopes(&[GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE]),
+            account_id: None,
+        };
+        client
+            .cleanup_exchange(
+                exchange_context(scope("google-cleanup"), AuthFlowId::new()),
+                &google_exchange,
+            )
+            .await
+            .expect("google cleanup");
+        assert_eq!(
+            sink.deleted_handles(),
+            vec![vec![access_handle.clone(), refresh_handle.clone()]]
+        );
+
+        sink.clear_deleted_handles();
+
+        let non_google_exchange = OAuthProviderExchange {
+            provider: provider(),
+            account_label: label("work github"),
+            authorization_code_hash: code_hash("cleanup-non-google-code-hash"),
+            pkce_verifier_hash: pkce_hash("cleanup-non-google-pkce-hash"),
+            access_secret: access_handle,
+            refresh_secret: Some(refresh_handle),
+            scopes: provider_scopes(&[GOOGLE_GMAIL_READONLY_SCOPE]),
+            account_id: None,
+        };
+        client
+            .cleanup_exchange(
+                exchange_context(scope("google-cleanup-non-google"), AuthFlowId::new()),
+                &non_google_exchange,
+            )
+            .await
+            .expect("non-google cleanup");
+        assert!(sink.deleted_handles().is_empty());
     }
 
     #[tokio::test]
@@ -1278,6 +1418,7 @@ mod tests {
         flow_ids: Mutex<Vec<AuthFlowId>>,
         access_tokens: Mutex<Vec<String>>,
         refresh_tokens: Mutex<Vec<String>>,
+        deleted_handles: Mutex<Vec<Vec<SecretHandle>>>,
         access_handle: SecretHandle,
         refresh_handle: Option<SecretHandle>,
     }
@@ -1289,6 +1430,7 @@ mod tests {
                 flow_ids: Mutex::new(Vec::new()),
                 access_tokens: Mutex::new(Vec::new()),
                 refresh_tokens: Mutex::new(Vec::new()),
+                deleted_handles: Mutex::new(Vec::new()),
                 access_handle,
                 refresh_handle,
             }
@@ -1308,6 +1450,20 @@ mod tests {
 
         fn refresh_tokens(&self) -> Vec<String> {
             self.refresh_tokens.lock().expect("refresh tokens").clone()
+        }
+
+        fn deleted_handles(&self) -> Vec<Vec<SecretHandle>> {
+            self.deleted_handles
+                .lock()
+                .expect("deleted handles")
+                .clone()
+        }
+
+        fn clear_deleted_handles(&self) {
+            self.deleted_handles
+                .lock()
+                .expect("deleted handles")
+                .clear();
         }
     }
 
@@ -1378,8 +1534,12 @@ mod tests {
         async fn delete_tokens(
             &self,
             _scope: &ResourceScope,
-            _handles: &[SecretHandle],
+            handles: &[SecretHandle],
         ) -> Result<(), AuthProductError> {
+            self.deleted_handles
+                .lock()
+                .expect("deleted handles")
+                .push(handles.to_vec());
             Ok(())
         }
     }

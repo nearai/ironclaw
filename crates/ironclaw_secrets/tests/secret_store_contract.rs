@@ -52,6 +52,48 @@ async fn secret_store_consumes_one_shot_secret_lease() {
 }
 
 #[tokio::test]
+async fn consuming_one_lease_does_not_delete_underlying_secret() {
+    let store = InMemorySecretStore::new();
+    let scope = sample_scope("tenant-a", "user-a");
+    let handle = SecretHandle::new("refresh_token").unwrap();
+    store
+        .put(
+            scope.clone(),
+            handle.clone(),
+            SecretMaterial::from("refresh-secret"),
+        )
+        .await
+        .unwrap();
+
+    let first_lease = store.lease_once(&scope, &handle).await.unwrap();
+    assert_eq!(
+        store
+            .consume(&scope, first_lease.id)
+            .await
+            .unwrap()
+            .expose_secret(),
+        "refresh-secret"
+    );
+    assert!(
+        store
+            .consume(&scope, first_lease.id)
+            .await
+            .unwrap_err()
+            .is_consumed()
+    );
+
+    let second_lease = store.lease_once(&scope, &handle).await.unwrap();
+    assert_eq!(
+        store
+            .consume(&scope, second_lease.id)
+            .await
+            .unwrap()
+            .expose_secret(),
+        "refresh-secret"
+    );
+}
+
+#[tokio::test]
 async fn secret_store_isolates_same_handle_between_tenants() {
     let store = InMemorySecretStore::new();
     let tenant_a = sample_scope("tenant-a", "user-a");

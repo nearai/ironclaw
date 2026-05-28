@@ -180,6 +180,61 @@ async fn gsuite_handler_refreshes_expired_google_token_once_and_retries() {
 }
 
 #[tokio::test]
+async fn gsuite_handler_errors_when_refresh_retry_is_still_auth_expired() {
+    let scope = scope();
+    let auth = Arc::new(InMemoryAuthProductServices::new());
+    ironclaw_auth::CredentialAccountService::create_account(
+        auth.as_ref(),
+        NewCredentialAccount {
+            scope: auth_scope(&scope),
+            provider: google_provider_id().unwrap(),
+            label: CredentialAccountLabel::new("work google").unwrap(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("google-old-access").unwrap()),
+            refresh_secret: Some(SecretHandle::new("google-old-refresh").unwrap()),
+            scopes: vec![provider_scope(GOOGLE_GMAIL_SEND_SCOPE)],
+        },
+    )
+    .await
+    .unwrap();
+    let egress = Arc::new(RecordingEgress::with_responses(vec![
+        RecordingEgress::json_status(
+            401,
+            json!({"error":{"status":"UNAUTHENTICATED","message":"expired"}}),
+        ),
+        RecordingEgress::json_status(
+            401,
+            json!({"error":{"status":"UNAUTHENTICATED","message":"still expired"}}),
+        ),
+    ]));
+    let capability_id = capability_id(GMAIL_SEND_MESSAGE_CAPABILITY_ID);
+
+    let error = GsuiteExecutor::new(auth)
+        .dispatch(GsuiteDispatchRequest {
+            capability_id: &capability_id,
+            scope: &scope,
+            input: &json!({ "message": { "raw": "base64url-rfc822" } }),
+            runtime_http_egress: egress.clone(),
+        })
+        .await
+        .expect_err("retry auth expiry should fail");
+
+    assert_eq!(error.kind(), RuntimeDispatchErrorKind::Backend);
+    assert_eq!(
+        error.reason(),
+        Some(&GsuiteCredentialDispatchReason::BackendAuth)
+    );
+    assert_eq!(egress.requests().len(), 2);
+    assert_eq!(
+        error.usage().map(|usage| usage.network_egress_bytes),
+        Some(246)
+    );
+}
+
+#[tokio::test]
 async fn gsuite_handler_rejects_oversized_request_body_before_egress() {
     let scope = scope();
     let auth = auth_with_google_account(
@@ -906,6 +961,89 @@ fn gsuite_resource_profile_allows_wrapped_response_headroom() {
             .and_then(|ceiling| ceiling.max_output_bytes),
         Some(GSUITE_OUTPUT_BYTES_LIMIT)
     );
+}
+
+#[tokio::test]
+async fn add_attendees_refreshes_expired_get_and_retries_patch() {
+    let scope = scope();
+    let auth = Arc::new(InMemoryAuthProductServices::new());
+    ironclaw_auth::CredentialAccountService::create_account(
+        auth.as_ref(),
+        NewCredentialAccount {
+            scope: auth_scope(&scope),
+            provider: google_provider_id().unwrap(),
+            label: CredentialAccountLabel::new("work google").unwrap(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("google-old-access").unwrap()),
+            refresh_secret: Some(SecretHandle::new("google-old-refresh").unwrap()),
+            scopes: vec![provider_scope(ironclaw_auth::GOOGLE_CALENDAR_EVENTS_SCOPE)],
+        },
+    )
+    .await
+    .unwrap();
+    let capability_id = capability_id(CALENDAR_ADD_ATTENDEES_CAPABILITY_ID);
+    let egress = Arc::new(RecordingEgress::with_responses(vec![
+        RecordingEgress::json_status(
+            401,
+            json!({"error":{"status":"UNAUTHENTICATED","message":"expired"}}),
+        ),
+        RecordingEgress::json_with_request_bytes(
+            json!({
+                "attendees":[{"email":"existing@example.com"}],
+                "etag":"retry-get-etag"
+            }),
+            101,
+        ),
+        RecordingEgress::json_with_request_bytes(json!({"id":"evt-1","updated":true}), 211),
+    ]));
+
+    let result = GsuiteExecutor::new(auth)
+        .dispatch(GsuiteDispatchRequest {
+            capability_id: &capability_id,
+            scope: &scope,
+            input: &json!({
+                "calendar_id": "primary",
+                "event_id": "evt-1",
+                "attendees": [{"email": "new@example.com"}]
+            }),
+            runtime_http_egress: egress.clone(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.output["status"], 200);
+    assert_eq!(result.output["body"]["id"], "evt-1");
+    assert_eq!(result.output["body"]["updated"], true);
+    assert_eq!(result.output["redaction_applied"], true);
+
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[0].method, NetworkMethod::Get);
+    assert!(requests[0].url.ends_with("/calendars/primary/events/evt-1"));
+    assert_eq!(requests[1].method, NetworkMethod::Get);
+    assert!(requests[1].url.ends_with("/calendars/primary/events/evt-1"));
+    assert_eq!(requests[2].method, NetworkMethod::Patch);
+    assert!(requests[2].url.ends_with("/calendars/primary/events/evt-1"));
+    assert_eq!(
+        requests[2]
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("if-match"))
+            .map(|(_, value)| value.as_str()),
+        Some("retry-get-etag")
+    );
+    let patch_body: serde_json::Value = serde_json::from_slice(&requests[2].body).unwrap();
+    assert_eq!(
+        patch_body["attendees"],
+        json!([
+            {"email":"existing@example.com"},
+            {"email":"new@example.com"}
+        ])
+    );
+    assert_eq!(result.usage.network_egress_bytes, 435);
 }
 
 #[tokio::test]

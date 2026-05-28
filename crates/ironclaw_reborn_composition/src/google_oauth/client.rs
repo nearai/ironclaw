@@ -256,7 +256,7 @@ impl AuthProviderClient for GoogleProviderClient {
         let response = response.map_err(|_| AuthProductError::BackendUnavailable)?;
 
         if !(200..300).contains(&response.status) {
-            return Err(AuthProductError::RefreshFailed);
+            return Err(map_refresh_error(response.status));
         }
 
         let token_response =
@@ -295,5 +295,13 @@ impl AuthProviderClient for GoogleProviderClient {
         self.token_sink
             .delete_tokens(&context.scope.resource, &handles)
             .await
+    }
+}
+
+fn map_refresh_error(status: u16) -> AuthProductError {
+    if (500..600).contains(&status) {
+        AuthProductError::BackendUnavailable
+    } else {
+        AuthProductError::RefreshFailed
     }
 }

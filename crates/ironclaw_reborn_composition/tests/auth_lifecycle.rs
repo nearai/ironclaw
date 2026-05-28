@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use ironclaw_auth::{
@@ -45,6 +46,34 @@ impl ironclaw_auth::AuthProviderClient for AccessOnlyRefreshProvider {
             provider: request.provider,
             access_secret: SecretHandle::new("google-new-access").unwrap(),
             refresh_secret: None,
+            scopes: request.scopes,
+        })
+    }
+}
+
+struct CountingRefreshProvider {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl ironclaw_auth::AuthProviderClient for CountingRefreshProvider {
+    async fn exchange_callback(
+        &self,
+        _context: OAuthProviderExchangeContext,
+        _request: OAuthProviderCallbackRequest,
+    ) -> Result<OAuthProviderExchange, AuthProductError> {
+        Err(AuthProductError::TokenExchangeFailed)
+    }
+
+    async fn refresh_token(
+        &self,
+        request: OAuthProviderRefreshRequest,
+    ) -> Result<OAuthProviderRefresh, AuthProductError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(OAuthProviderRefresh {
+            provider: request.provider,
+            access_secret: SecretHandle::new("google-counted-access").unwrap(),
+            refresh_secret: Some(SecretHandle::new("google-counted-refresh").unwrap()),
             scopes: request.scopes,
         })
     }
@@ -154,6 +183,43 @@ async fn refresh_credential_account_maps_facade_errors_to_stable_codes() {
     let serialized = serde_json::to_string(&error).unwrap();
     assert!(!serialized.contains("github-shared-access"));
     assert!(!serialized.contains("github-shared-refresh"));
+}
+
+#[tokio::test]
+async fn refresh_credential_account_rejects_system_owned_accounts_before_provider_call() {
+    let auth = Arc::new(InMemoryAuthProductServices::new());
+    let owner = scope("alice");
+    let account = auth
+        .create_account(NewCredentialAccount {
+            scope: owner.clone(),
+            provider: provider(),
+            label: ironclaw_auth::CredentialAccountLabel::new("system").unwrap(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::System,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("github-system-access").unwrap()),
+            refresh_secret: Some(SecretHandle::new("github-system-refresh").unwrap()),
+            scopes: vec![provider_scope("repo")],
+        })
+        .await
+        .unwrap();
+    let refresh_provider = Arc::new(CountingRefreshProvider {
+        calls: AtomicUsize::new(0),
+    });
+    let services = auth_services(Arc::clone(&auth)).with_provider_client(refresh_provider.clone());
+
+    let error = services
+        .refresh_credential_account(CredentialRefreshRequest::new(
+            owner.clone(),
+            provider(),
+            account.id,
+        ))
+        .await
+        .expect_err("system-owned accounts cannot refresh");
+
+    assert_eq!(error.code, ironclaw_auth::AuthErrorCode::CrossScopeDenied);
+    assert_eq!(refresh_provider.calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

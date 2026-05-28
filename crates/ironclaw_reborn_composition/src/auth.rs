@@ -586,7 +586,7 @@ impl RebornProductAuthServices {
                                 )
                                 .await
                             {
-                                tracing::debug!(
+                                tracing::warn!(
                                     flow_id = %request.flow_id,
                                     exchange_error_code = ?error_code,
                                     fail_error_code = ?fail_error.code(),

@@ -97,8 +97,16 @@ impl GsuiteExecutor {
                 .execute(&request, refreshed.access_secret)
                 .await
                 .map_err(|error| add_network_usage(error, network_egress_bytes))?;
-            response = retry_response;
             network_egress_bytes = network_egress_bytes.saturating_add(retry_network_egress_bytes);
+            if is_google_auth_expired_response(&retry_response) {
+                return Err(GsuiteDispatchError::new(RuntimeDispatchErrorKind::Backend)
+                    .with_reason(GsuiteCredentialDispatchReason::BackendAuth)
+                    .with_usage(ResourceUsage {
+                        network_egress_bytes,
+                        ..ResourceUsage::default()
+                    }));
+            }
+            response = retry_response;
         }
         let output = response_output(&response)?;
         let wall_clock_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
@@ -290,6 +298,9 @@ fn response_body_json(
 fn is_google_auth_expired_response(
     response: &ironclaw_host_api::RuntimeHttpEgressResponse,
 ) -> bool {
+    if (200..300).contains(&response.status) {
+        return false;
+    }
     if response.status == 401 {
         return true;
     }
