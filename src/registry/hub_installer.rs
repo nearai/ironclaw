@@ -162,6 +162,12 @@ pub struct HubInstaller {
     skills_dir: PathBuf,
 }
 
+fn resolve_manifest_url(env_value: Option<String>) -> String {
+    env_value
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_HUB_MANIFEST_URL.to_string())
+}
+
 impl HubInstaller {
     pub fn new(manifest_url: String, tools_dir: PathBuf, skills_dir: PathBuf) -> Self {
         Self {
@@ -173,11 +179,8 @@ impl HubInstaller {
 
     pub fn with_defaults() -> Self {
         let base = ironclaw_base_dir();
-        Self::new(
-            DEFAULT_HUB_MANIFEST_URL.to_string(),
-            base.join("tools"),
-            base.join("skills"),
-        )
+        let manifest_url = resolve_manifest_url(std::env::var("IRONHUB_MANIFEST_URL").ok());
+        Self::new(manifest_url, base.join("tools"), base.join("skills"))
     }
 
     pub fn with_manifest_url(mut self, url: String) -> Self {
@@ -579,6 +582,25 @@ mod tests {
             "https://github.com/nearai/ironhub/releases/download/test/tools.json".to_string();
         let installer = HubInstaller::with_defaults().with_manifest_url(pinned.clone());
         assert_eq!(installer.manifest_url(), pinned);
+    }
+
+    #[test]
+    fn resolve_manifest_url_prefers_env_then_falls_back() {
+        assert_eq!(
+            resolve_manifest_url(Some(
+                "https://ironhub-staging.up.railway.app/api/catalog/manifest.json".to_string()
+            )),
+            "https://ironhub-staging.up.railway.app/api/catalog/manifest.json"
+        );
+        assert_eq!(resolve_manifest_url(None), DEFAULT_HUB_MANIFEST_URL);
+        assert_eq!(
+            resolve_manifest_url(Some(String::new())),
+            DEFAULT_HUB_MANIFEST_URL
+        );
+        assert_eq!(
+            resolve_manifest_url(Some("   ".to_string())),
+            DEFAULT_HUB_MANIFEST_URL
+        );
     }
 
     #[test]

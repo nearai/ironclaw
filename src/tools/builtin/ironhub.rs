@@ -64,6 +64,11 @@ fn catalog_unavailable() -> ToolError {
     ToolError::ExternalService("IronHub catalog is temporarily unavailable".into())
 }
 
+fn catalog_unavailable_from(err: RegistryError) -> ToolError {
+    tracing::debug!("IronHub catalog fetch failed: {err}");
+    catalog_unavailable()
+}
+
 fn classify_and_gate(
     manifest: &HubManifest,
     name: &str,
@@ -583,7 +588,7 @@ impl Tool for IronhubInstallTool {
         let manifest = probe
             .fetch_manifest()
             .await
-            .map_err(|_| catalog_unavailable())?;
+            .map_err(catalog_unavailable_from)?;
         self.install_from_manifest(start, manifest, parsed, ctx)
             .await
     }
@@ -659,7 +664,7 @@ impl Tool for IronhubSearchTool {
         let manifest = installer
             .fetch_manifest_cached()
             .await
-            .map_err(|_| catalog_unavailable())?;
+            .map_err(catalog_unavailable_from)?;
 
         let q = query.to_ascii_lowercase();
         let mut results: Vec<serde_json::Value> = manifest
@@ -744,7 +749,7 @@ impl Tool for IronhubListTool {
         let manifest = installer
             .fetch_manifest_cached()
             .await
-            .map_err(|_| catalog_unavailable())?;
+            .map_err(catalog_unavailable_from)?;
 
         let tools: Vec<serde_json::Value> = manifest.tools.iter().map(tool_entry_json).collect();
         let skills: Vec<serde_json::Value> = manifest.skills.iter().map(skill_entry_json).collect();
@@ -831,7 +836,7 @@ impl Tool for IronhubInfoTool {
         let manifest = installer
             .fetch_manifest_cached()
             .await
-            .map_err(|_| catalog_unavailable())?;
+            .map_err(catalog_unavailable_from)?;
 
         if let Some(t) = manifest.find_tool(name) {
             let json = info_tool_json(t, &manifest.release_tag);

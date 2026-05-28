@@ -17,6 +17,27 @@ const ALLOWED_ARTIFACT_HOSTS: &[&str] = &[
     "raw.githubusercontent.com",
 ];
 
+fn extra_artifact_hosts() -> &'static [String] {
+    use std::sync::OnceLock;
+    static EXTRA: OnceLock<Vec<String>> = OnceLock::new();
+    EXTRA.get_or_init(|| {
+        parse_extra_artifact_hosts(
+            std::env::var("IRONHUB_EXTRA_ARTIFACT_HOSTS")
+                .ok()
+                .as_deref(),
+        )
+    })
+}
+
+fn parse_extra_artifact_hosts(env_value: Option<&str>) -> Vec<String> {
+    env_value
+        .unwrap_or("")
+        .split(',')
+        .map(|h| h.trim().to_ascii_lowercase())
+        .filter(|h| !h.is_empty())
+        .collect()
+}
+
 fn should_attempt_source_fallback(err: &RegistryError) -> bool {
     match err {
         // `releases/latest` is a moving target: every new release rebuilds WASM
@@ -37,10 +58,15 @@ fn should_attempt_source_fallback(err: &RegistryError) -> bool {
 }
 
 fn is_allowed_artifact_host(host: &str) -> bool {
+    is_allowed_artifact_host_with_extras(host, extra_artifact_hosts())
+}
+
+fn is_allowed_artifact_host_with_extras(host: &str, extras: &[String]) -> bool {
     ALLOWED_ARTIFACT_HOSTS
         .iter()
         .any(|allowed| host.eq_ignore_ascii_case(allowed))
         || host.ends_with(".githubusercontent.com")
+        || extras.iter().any(|h| host.eq_ignore_ascii_case(h))
 }
 
 pub(crate) fn validate_artifact_url(
@@ -1420,6 +1446,46 @@ mod tests {
         assert!(!is_allowed_artifact_host("hub.ironclaw.com.evil.com"));
         assert!(!is_allowed_artifact_host("evil.hub.ironclaw.com"));
         assert!(!is_allowed_artifact_host("ironclaw.com"));
+    }
+
+    #[test]
+    fn parse_extra_artifact_hosts_handles_unset_empty_and_comma_list() {
+        assert!(parse_extra_artifact_hosts(None).is_empty());
+        assert!(parse_extra_artifact_hosts(Some("")).is_empty());
+        assert!(parse_extra_artifact_hosts(Some(" , , ")).is_empty());
+        assert_eq!(
+            parse_extra_artifact_hosts(Some("ironhub-staging.up.railway.app")),
+            vec!["ironhub-staging.up.railway.app".to_string()]
+        );
+        assert_eq!(
+            parse_extra_artifact_hosts(Some(" Foo.Example , bar.example ,  ")),
+            vec!["foo.example".to_string(), "bar.example".to_string()]
+        );
+    }
+
+    #[test]
+    fn extras_allow_listed_host_without_widening_const_allowlist() {
+        let extras = vec!["ironhub-staging.up.railway.app".to_string()];
+        assert!(is_allowed_artifact_host_with_extras(
+            "ironhub-staging.up.railway.app",
+            &extras
+        ));
+        assert!(is_allowed_artifact_host_with_extras(
+            "IRONHUB-STAGING.up.railway.app",
+            &extras
+        ));
+        assert!(!is_allowed_artifact_host_with_extras(
+            "evil.example.com",
+            &extras
+        ));
+        assert!(is_allowed_artifact_host_with_extras(
+            "hub.ironclaw.com",
+            &extras
+        ));
+        assert!(!is_allowed_artifact_host_with_extras(
+            "ironhub-staging.up.railway.app",
+            &[]
+        ));
     }
 
     #[test]
