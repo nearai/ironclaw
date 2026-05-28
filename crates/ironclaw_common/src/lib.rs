@@ -6,6 +6,7 @@ pub mod env_helpers;
 mod event;
 mod identity;
 pub mod paths;
+pub mod pkce;
 mod platform;
 pub mod provider_transcript;
 mod timezone;

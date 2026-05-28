@@ -33,7 +33,6 @@ use ironclaw_host_api::ingress::{
 };
 use ironclaw_host_api::{
     AgentId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
-    sha256_digest_token,
 };
 use ironclaw_product_workflow::WebUiAuthenticatedCaller;
 use lru::LruCache;
@@ -849,11 +848,7 @@ fn authorization_code_hash(value: &str) -> Result<AuthorizationCodeHash, Product
 }
 
 fn sha256_hex(value: &str) -> String {
-    let digest = sha256_digest_token(value.as_bytes());
-    digest
-        .strip_prefix("sha256:")
-        .unwrap_or(digest.as_str())
-        .to_string()
+    ironclaw_common::pkce::sha256_hex(value.as_bytes())
 }
 
 fn parse_provider_scopes(raw: Option<&str>) -> Result<Vec<ProviderScope>, ProductAuthRouteFailure> {

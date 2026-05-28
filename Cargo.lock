@@ -4134,6 +4134,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "hex",
+ "ironclaw_common",
  "ironclaw_host_api",
  "secrecy",
  "serde",
@@ -4189,10 +4190,13 @@ dependencies = [
 name = "ironclaw_common"
 version = "0.4.2"
 dependencies = [
+ "base64 0.22.1",
  "chrono-tz",
  "dirs",
+ "rand 0.8.6",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.18",
  "tracing",
 ]
