@@ -146,6 +146,60 @@ Reborn-native product-auth OAuth surface:
 rate-limit middlewares consume so the two enforcers cannot drift on
 which request belongs to which descriptor.
 
+### Host-supplied public router (#4116 — SSO login surface)
+
+`WebuiServeConfig::with_public_router(Router)` attaches a
+host-supplied axum `Router` that is merged into the composed app
+OUTSIDE the bearer-auth layer but INSIDE the outer security-header
+/ CORS / global-body-limit stack. The seam exists for the WebChat
+v2 SSO login surface shipped by
+`ironclaw_reborn_webui_ingress::webui_v2_auth_router`, which mounts
+`/auth/providers`, `/auth/login/{provider}`,
+`/auth/callback/{provider}`, and `/auth/logout`. The browser must
+reach those routes without a session (the whole point of login),
+so they cannot live behind the bearer middleware; they still
+inherit the same defense-in-depth headers and CORS allow-list as
+every other response.
+
+The public router is intentionally NOT routed through the
+descriptor-driven per-route body-limit / rate-limit middlewares
+above. Those middlewares key on `webui_v2_routes()` plus
+product-auth descriptors, and a host-supplied route would silently
+miss-match. The OAuth router owns its own bounded pending-flow
+store as the rate-floor.
+
+This seam must NOT be used to re-introduce v1 `/auth/*` handlers
+into the v2 listener; the only intended consumer is the
+Reborn-native auth router. v1 gateway code remains untouched —
+`src/channels/web/` keeps its own bearer/OAuth stack.
+
+### Session transport decision (#4116)
+
+The OAuth callback returns the session bearer to the SPA via the
+URL fragment (`/v2#token=<bearer>`), not via an `HttpOnly` cookie.
+Rationale:
+
+- **Matches the existing v2 SPA auth model.** `app/auth.js`
+  already stores the bearer in `sessionStorage` and sends it as
+  `Authorization: Bearer` on every API call; SSE / WS use the
+  `?token=` query-string shim that the composition layer's bearer
+  middleware accepts only on `GET /api/webchat/v2/threads/{id}/events`.
+  Cookies would require a new auth path through the same
+  middleware.
+- **Fragments are never sent to the server in subsequent
+  navigation.** A copy-pasted URL or a `Referer` chain cannot
+  leak the bearer; URL query (the v1 transport) would land in
+  access logs. Composition also emits `Referrer-Policy: no-referrer`
+  as defense in depth.
+- **Logout actually revokes.** `POST /auth/logout` calls
+  `SessionStore::revoke`; the regression in
+  `crates/ironclaw_reborn_webui_ingress/tests/session_round_trip.rs`
+  locks that a post-revoke bearer fails on `/api/webchat/v2/threads`.
+
+This is a deliberate divergence from the v1 gateway, which sets a
+`Set-Cookie: ironclaw_session=...; HttpOnly` on its OAuth
+callback. v1 cookie code is NOT shared with the v2 listener.
+
 ### Entrypoint inventory (#3580)
 
 Mapping of every v1 gateway entrypoint to its Reborn native-surface
@@ -166,6 +220,7 @@ rows are inventoried here, not implemented in the current PR.
 | Approval shim | `POST /api/chat/approval` | (Subsumed by `resolve_gate`) | Mapped |
 | Auth-token / auth-cancel | `POST /api/chat/auth-{token,cancel}` | (Engine v1 compatibility shim; delete with v1) | v1-only (legacy) |
 | Extensions onboarding | `GET\|POST /api/extensions/{name}/setup` | `POST /api/webchat/v2/extensions/{name}/setup` | Mapped to lifecycle projection; no production setup side effects yet |
+| SSO login (Google) | `GET /auth/providers`, `GET /auth/login/{p}`, `GET /auth/callback/{p}`, `POST /auth/logout` | Same paths on the v2 listener via `ironclaw_reborn_webui_ingress::webui_v2_auth_router`, merged into `webui_v2_app` through [`WebuiServeConfig::with_public_router`] | Mapped (Google); GitHub + NEAR follow under #4116 |
 
 ### Security invariants on every "Mapped" row
 

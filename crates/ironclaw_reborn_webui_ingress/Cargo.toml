@@ -47,6 +47,15 @@ uuid = { version = "1", features = ["v4"] }
 axum = { version = "0.8", features = ["macros"] }
 http = "1"
 http-body-util = "0.1"
+# End-to-end session test (`tests/session_round_trip.rs`) drives the
+# composed `webui_v2_app` with a minimal `RebornServicesApi` stub so
+# the assertion covers SessionAuthenticator + the v2 route surface
+# together. The runtime `ironclaw_reborn_composition` dep already
+# enables `webui-v2-beta`; the three crates below supply the trait
+# + DTO shapes the stub implements.
+ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
+ironclaw_threads = { path = "../ironclaw_threads" }
+ironclaw_turns = { path = "../ironclaw_turns" }
 tower = { version = "0.5", features = ["util"] }
 # Generate test RSA keypairs at test time so the OIDC e2e test can
 # mint real signed JWTs without relying on a checked-in private key.
