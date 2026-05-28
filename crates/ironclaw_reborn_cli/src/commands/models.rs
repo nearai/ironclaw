@@ -144,7 +144,7 @@ impl ModelsSetCommand {
         let admin =
             ironclaw_reborn_composition::RebornProviderAdmin::new(context.boot_config().clone());
         let outcome = admin.set_model(&self.model)?;
-        print_write_outcome("Model", &outcome);
+        print_write_outcome(WriteOutcomeKind::Model, &outcome);
         Ok(())
     }
 }
@@ -152,10 +152,7 @@ impl ModelsSetCommand {
 #[cfg(not(feature = "root-llm-provider"))]
 impl ModelsSetCommand {
     fn execute(self) -> anyhow::Result<()> {
-        anyhow::bail!(
-            "`models set {}` requires the root-llm-provider feature; v1_state: not-used",
-            self.model
-        )
+        Err(feature_not_available(&format!("set {}", self.model)))
     }
 }
 
@@ -166,7 +163,7 @@ impl ModelsSetProviderCommand {
         let admin =
             ironclaw_reborn_composition::RebornProviderAdmin::new(context.boot_config().clone());
         let outcome = admin.set_provider(&self.provider, self.model.as_deref())?;
-        print_write_outcome("Provider", &outcome);
+        print_write_outcome(WriteOutcomeKind::Provider, &outcome);
         Ok(())
     }
 }
@@ -174,11 +171,16 @@ impl ModelsSetProviderCommand {
 #[cfg(not(feature = "root-llm-provider"))]
 impl ModelsSetProviderCommand {
     fn execute(self) -> anyhow::Result<()> {
-        anyhow::bail!(
-            "`models set-provider {}` requires the root-llm-provider feature; v1_state: not-used",
+        Err(feature_not_available(&format!(
+            "set-provider {}",
             self.provider
-        )
+        )))
     }
+}
+
+#[cfg(not(feature = "root-llm-provider"))]
+fn feature_not_available(command: &str) -> anyhow::Error {
+    anyhow::anyhow!("`models {command}` requires the root-llm-provider feature; v1_state: not-used")
 }
 
 #[cfg(not(feature = "root-llm-provider"))]
@@ -233,7 +235,7 @@ fn print_provider_list(list: &ironclaw_reborn_composition::RebornProviderList, v
     println!();
 
     for provider in &list.providers {
-        let marker = provider.active.then_some(" *").unwrap_or("");
+        let marker = if provider.active { " *" } else { "" };
         if verbose {
             println!("{}{}", provider.id, marker);
             println!("  description: {}", provider.description);
@@ -353,20 +355,30 @@ fn print_status(status: &ironclaw_reborn_composition::RebornProviderStatus) {
 }
 
 #[cfg(feature = "root-llm-provider")]
+#[derive(Debug, Clone, Copy)]
+enum WriteOutcomeKind {
+    Model,
+    Provider,
+}
+
+#[cfg(feature = "root-llm-provider")]
 fn print_write_outcome(
-    label: &str,
+    kind: WriteOutcomeKind,
     outcome: &ironclaw_reborn_composition::RebornProviderWriteOutcome,
 ) {
-    if label == "Model" {
-        println!(
-            "Model set to `{}` for provider `{}`",
-            outcome.model, outcome.provider_id
-        );
-    } else {
-        println!(
-            "{label} set to `{}`, model set to `{}`",
-            outcome.provider_id, outcome.model
-        );
+    match kind {
+        WriteOutcomeKind::Model => {
+            println!(
+                "Model set to `{}` for provider `{}`",
+                outcome.model, outcome.provider_id
+            );
+        }
+        WriteOutcomeKind::Provider => {
+            println!(
+                "Provider set to `{}`, model set to `{}`",
+                outcome.provider_id, outcome.model
+            );
+        }
     }
     println!("Saved to {}", outcome.config_file.display());
     if outcome.missing_api_key

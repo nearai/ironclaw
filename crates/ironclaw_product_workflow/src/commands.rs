@@ -132,24 +132,44 @@ fn parse_model_command(payload: &InboundCommandPayload) -> ProductCommandParseRe
             action: ProductModelCommand::Status,
         });
     };
-    if matches!(first, "set-provider" | "provider") {
-        let Some(provider) = args.next() else {
-            return invalid_lifecycle_command("model set-provider requires a provider id");
-        };
-        let remaining = args.collect::<Vec<_>>();
-        let model = parse_model_option(&remaining)?;
-        return Ok(ProductCommand::Model {
-            action: ProductModelCommand::SetProvider {
-                provider: provider.to_string(),
-                model,
+    match ModelCommandHead::parse(first)? {
+        ModelCommandHead::SetProvider => {
+            let Some(provider) = args.next() else {
+                return invalid_lifecycle_command("model set-provider requires a provider id");
+            };
+            let remaining = args.collect::<Vec<_>>();
+            let model = parse_model_option(&remaining)?;
+            Ok(ProductCommand::Model {
+                action: ProductModelCommand::SetProvider {
+                    provider: provider.to_string(),
+                    model,
+                },
+            })
+        }
+        ModelCommandHead::SetModel(model) => Ok(ProductCommand::Model {
+            action: ProductModelCommand::Set {
+                model: model.to_string(),
             },
-        });
+        }),
     }
-    Ok(ProductCommand::Model {
-        action: ProductModelCommand::Set {
-            model: first.to_string(),
-        },
-    })
+}
+
+enum ModelCommandHead<'a> {
+    SetProvider,
+    SetModel(&'a str),
+}
+
+impl<'a> ModelCommandHead<'a> {
+    fn parse(value: &'a str) -> Result<Self, ProductRejection> {
+        match value {
+            "set-provider" | "provider" => Ok(Self::SetProvider),
+            flag if flag.starts_with('-') => Err(ProductRejection::permanent(
+                ProductRejectionKind::InvalidRequest,
+                "model set requires a model name; flags are only valid after `set-provider`",
+            )),
+            model => Ok(Self::SetModel(model)),
+        }
+    }
 }
 
 fn parse_status_command(_payload: &InboundCommandPayload) -> ProductCommandParseResult {

@@ -70,6 +70,16 @@ fn model_provider_command_rejects_unsupported_option() {
 }
 
 #[test]
+fn model_command_rejects_flag_shaped_model_name() {
+    let payload = InboundCommandPayload::new("model", "--json", ProductTriggerReason::BotCommand)
+        .expect("valid command");
+
+    let rejection = ProductCommand::from_payload(&payload).expect_err("flag-shaped model");
+
+    assert_eq!(rejection.kind, ProductRejectionKind::InvalidRequest);
+}
+
+#[test]
 fn command_payload_maps_all_declared_commands_and_unknown_fallback() {
     let cases = [
         (

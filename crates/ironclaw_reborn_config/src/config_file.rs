@@ -293,14 +293,33 @@ impl DefaultLlmSlotUpdateSession {
     pub fn default_llm_slot(
         &self,
     ) -> Result<Option<LlmSlotSelection>, RebornConfigFileUpdateError> {
-        let text = self.doc.to_string();
-        let config = RebornConfigFile::parse_text(&text, &self.path).map_err(|source| {
-            RebornConfigFileUpdateError::Validate {
-                path: self.path.clone(),
-                source: Box::new(source),
-            }
-        })?;
-        Ok(config.default_llm_slot().cloned())
+        let Some(default_slot) = self
+            .doc
+            .get("llm")
+            .and_then(|llm| llm.get("default"))
+            .and_then(toml_edit::Item::as_table_like)
+        else {
+            return Ok(None);
+        };
+
+        Ok(Some(LlmSlotSelection {
+            provider_id: default_slot
+                .get("provider_id")
+                .and_then(toml_edit::Item::as_str)
+                .map(str::to_string),
+            model: default_slot
+                .get("model")
+                .and_then(toml_edit::Item::as_str)
+                .map(str::to_string),
+            api_key_env: default_slot
+                .get("api_key_env")
+                .and_then(toml_edit::Item::as_str)
+                .map(str::to_string),
+            base_url: default_slot
+                .get("base_url")
+                .and_then(toml_edit::Item::as_str)
+                .map(str::to_string),
+        }))
     }
 
     pub fn apply(

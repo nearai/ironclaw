@@ -107,9 +107,9 @@ pub use production_runtime_policy::RebornProductionRuntimePolicy;
 pub use profile::{RebornCompositionProfile, RebornCompositionProfileParseError};
 #[cfg(feature = "root-llm-provider")]
 pub use provider_admin::{
-    RebornProviderAdmin, RebornProviderAdminError, RebornProviderInfo, RebornProviderList,
-    RebornProviderMetadata, RebornProviderSelection, RebornProviderStatus,
-    RebornProviderWriteOutcome,
+    RebornModelRoutesState, RebornProviderAdmin, RebornProviderAdminError, RebornProviderInfo,
+    RebornProviderList, RebornProviderMetadata, RebornProviderSelection, RebornProviderStatus,
+    RebornProviderWriteOutcome, RebornV1State,
 };
 #[cfg(feature = "root-llm-provider")]
 pub use provider_admin_product_command::RebornProviderAdminProductCommandService;

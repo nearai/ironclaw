@@ -9,8 +9,8 @@ use ironclaw_product_workflow::{
 use serde::Serialize;
 
 use crate::{
-    RebornProviderAdmin, RebornProviderAdminError, RebornProviderSelection, RebornProviderStatus,
-    RebornProviderWriteOutcome,
+    RebornModelRoutesState, RebornProviderAdmin, RebornProviderAdminError, RebornProviderSelection,
+    RebornProviderStatus, RebornProviderWriteOutcome, RebornV1State,
 };
 
 pub struct RebornProviderAdminProductCommandService {
@@ -82,9 +82,9 @@ fn provider_admin_payload(
 
 #[derive(Serialize)]
 struct ProductSafeProviderStatus {
-    routes: &'static str,
+    routes: RebornModelRoutesState,
     default: Option<ProductSafeProviderSelection>,
-    v1_state: &'static str,
+    v1_state: RebornV1State,
 }
 
 impl From<RebornProviderStatus> for ProductSafeProviderStatus {
@@ -126,7 +126,7 @@ struct ProductSafeProviderWriteOutcome {
     model: String,
     api_key_required: bool,
     missing_api_key: bool,
-    v1_state: &'static str,
+    v1_state: RebornV1State,
 }
 
 impl From<RebornProviderWriteOutcome> for ProductSafeProviderWriteOutcome {
@@ -149,22 +149,76 @@ impl ProductSafeProviderWriteOutcome {
 
 fn provider_admin_workflow_error(error: RebornProviderAdminError) -> ProductWorkflowError {
     match error {
-        RebornProviderAdminError::UnknownProvider {
-            provider, known, ..
-        } => ProductWorkflowError::InvalidBindingRequest {
-            reason: format!(
-                "unknown Reborn LLM provider `{}`; available providers: {}",
-                provider,
-                known.join(", ")
-            ),
-        },
+        RebornProviderAdminError::UnknownProvider { provider, .. } => {
+            ProductWorkflowError::InvalidBindingRequest {
+                reason: format!("unknown Reborn LLM provider `{provider}`"),
+            }
+        }
         RebornProviderAdminError::InvalidRequest { reason } => {
             ProductWorkflowError::InvalidBindingRequest { reason }
         }
-        RebornProviderAdminError::LoadRegistry { .. }
-        | RebornProviderAdminError::LoadConfig { .. }
-        | RebornProviderAdminError::UpdateConfig { .. } => ProductWorkflowError::Transient {
-            reason: "provider-admin operation failed".to_string(),
+        RebornProviderAdminError::LoadRegistry { reason, .. } => ProductWorkflowError::Transient {
+            reason: format!("load Reborn provider catalog failed: {reason}"),
         },
+        RebornProviderAdminError::LoadConfig { source, .. } => ProductWorkflowError::Transient {
+            reason: format!(
+                "load Reborn config failed: {}",
+                config_load_error_reason(source.as_ref())
+            ),
+        },
+        RebornProviderAdminError::UpdateConfig { source, .. } => ProductWorkflowError::Transient {
+            reason: format!(
+                "update Reborn config failed: {}",
+                config_update_error_reason(source.as_ref())
+            ),
+        },
+    }
+}
+
+fn config_load_error_reason(error: &ironclaw_reborn_config::RebornConfigFileError) -> String {
+    match error {
+        ironclaw_reborn_config::RebornConfigFileError::Io { source, .. } => {
+            format!("read failed: {source}")
+        }
+        ironclaw_reborn_config::RebornConfigFileError::Toml { source, .. } => {
+            format!("TOML parse failed: {source}")
+        }
+        ironclaw_reborn_config::RebornConfigFileError::IncompatibleApiVersion {
+            found,
+            expected,
+            ..
+        } => {
+            format!("api_version `{found}` is incompatible with `{expected}`")
+        }
+        ironclaw_reborn_config::RebornConfigFileError::InlineSecret { source, .. } => {
+            format!("field validation failed: {source}")
+        }
+        ironclaw_reborn_config::RebornConfigFileError::InvalidApiVersion {
+            found, reason, ..
+        } => {
+            format!("api_version `{found}` could not be parsed: {reason}")
+        }
+    }
+}
+
+fn config_update_error_reason(
+    error: &ironclaw_reborn_config::RebornConfigFileUpdateError,
+) -> String {
+    match error {
+        ironclaw_reborn_config::RebornConfigFileUpdateError::Lock { source, .. } => {
+            format!("lock failed: {source}")
+        }
+        ironclaw_reborn_config::RebornConfigFileUpdateError::Read { source, .. } => {
+            format!("read failed: {source}")
+        }
+        ironclaw_reborn_config::RebornConfigFileUpdateError::Parse { source, .. } => {
+            format!("TOML parse failed: {source}")
+        }
+        ironclaw_reborn_config::RebornConfigFileUpdateError::Validate { source, .. } => {
+            format!("validation failed: {}", config_load_error_reason(source))
+        }
+        ironclaw_reborn_config::RebornConfigFileUpdateError::Write { source, .. } => {
+            format!("write failed: {source}")
+        }
     }
 }

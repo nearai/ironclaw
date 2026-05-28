@@ -5,7 +5,7 @@
 //! Reborn `$IRONCLAW_REBORN_HOME/config.toml` and reads the shared provider
 //! catalog through `ironclaw_llm`.
 
-use std::path::PathBuf;
+use std::{fmt, path::PathBuf};
 
 use ironclaw_reborn_config::{
     DefaultLlmSlotUpdate, LlmSlotFieldUpdate, LlmSlotSelection, RebornBootConfig, RebornConfigFile,
@@ -34,7 +34,7 @@ impl RebornProviderAdmin {
         let config = RebornConfigFile::load(&home.config_file_path()).map_err(|source| {
             RebornProviderAdminError::LoadConfig {
                 path: home.config_file_path(),
-                source,
+                source: Box::new(source),
             }
         })?;
         let active = active_llm_selection(config.as_ref(), &registry);
@@ -59,7 +59,7 @@ impl RebornProviderAdmin {
             providers,
             config_file: home.config_file_path(),
             providers_file: home.providers_file_path(),
-            v1_state: "not-used",
+            v1_state: RebornV1State::NotUsed,
         })
     }
 
@@ -69,15 +69,15 @@ impl RebornProviderAdmin {
         let config = RebornConfigFile::load(&home.config_file_path()).map_err(|source| {
             RebornProviderAdminError::LoadConfig {
                 path: home.config_file_path(),
-                source,
+                source: Box::new(source),
             }
         })?;
         let active = active_llm_selection(config.as_ref(), &registry);
         Ok(RebornProviderStatus {
             routes: if active.is_some() {
-                "configured"
+                RebornModelRoutesState::Configured
             } else {
-                "not-configured"
+                RebornModelRoutesState::NotConfigured
             },
             default: active.map(|selection| RebornProviderSelection {
                 provider_id: selection.provider_id,
@@ -88,7 +88,7 @@ impl RebornProviderAdmin {
             }),
             config_file: home.config_file_path(),
             providers_file: home.providers_file_path(),
-            v1_state: "not-used",
+            v1_state: RebornV1State::NotUsed,
         })
     }
 
@@ -108,14 +108,14 @@ impl RebornProviderAdmin {
         let session = begin_default_llm_slot_update(&config_path).map_err(|source| {
             RebornProviderAdminError::UpdateConfig {
                 path: config_path.clone(),
-                source,
+                source: Box::new(source),
             }
         })?;
         let provider_id = session
             .default_llm_slot()
             .map_err(|source| RebornProviderAdminError::UpdateConfig {
                 path: config_path.clone(),
-                source,
+                source: Box::new(source),
             })?
             .as_ref()
             .and_then(|selection| selection.provider_id.as_deref())
@@ -126,8 +126,8 @@ impl RebornProviderAdmin {
             .to_string();
 
         let registry = self.load_registry()?;
-        let canonical_id = registry
-            .find(&provider_id)
+        let provider_def = registry.find(&provider_id);
+        let canonical_id = provider_def
             .map(|def| def.id.clone())
             .unwrap_or_else(|| provider_id.to_string());
         session
@@ -138,17 +138,21 @@ impl RebornProviderAdmin {
             })
             .map_err(|source| RebornProviderAdminError::UpdateConfig {
                 path: config_path.clone(),
-                source,
+                source: Box::new(source),
             })?;
 
         Ok(RebornProviderWriteOutcome {
             provider_id: canonical_id,
             model: model.to_string(),
-            api_key_env: None,
-            api_key_required: false,
-            missing_api_key: false,
+            api_key_env: provider_def.and_then(|def| def.api_key_env.clone()),
+            api_key_required: provider_def.is_some_and(|def| def.api_key_required),
+            missing_api_key: provider_def.is_some_and(|def| {
+                def.api_key_env.as_deref().is_some_and(|api_key_env| {
+                    def.api_key_required && std::env::var_os(api_key_env).is_none()
+                })
+            }),
             config_file: config_path,
-            v1_state: "not-used",
+            v1_state: RebornV1State::NotUsed,
         })
     }
 
@@ -195,7 +199,7 @@ impl RebornProviderAdmin {
         )
         .map_err(|source| RebornProviderAdminError::UpdateConfig {
             path: config_path.clone(),
-            source,
+            source: Box::new(source),
         })?;
 
         Ok(RebornProviderWriteOutcome {
@@ -207,7 +211,7 @@ impl RebornProviderAdmin {
                 def.api_key_required && std::env::var_os(api_key_env).is_none()
             }),
             config_file: config_path,
-            v1_state: "not-used",
+            v1_state: RebornV1State::NotUsed,
         })
     }
 
@@ -225,9 +229,11 @@ impl RebornProviderAdmin {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RebornProviderList {
     pub providers: Vec<RebornProviderInfo>,
+    #[serde(skip_serializing)]
     pub config_file: PathBuf,
+    #[serde(skip_serializing)]
     pub providers_file: PathBuf,
-    pub v1_state: &'static str,
+    pub v1_state: RebornV1State,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -259,11 +265,13 @@ pub struct RebornProviderMetadata {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RebornProviderStatus {
-    pub routes: &'static str,
+    pub routes: RebornModelRoutesState,
     pub default: Option<RebornProviderSelection>,
+    #[serde(skip_serializing)]
     pub config_file: PathBuf,
+    #[serde(skip_serializing)]
     pub providers_file: PathBuf,
-    pub v1_state: &'static str,
+    pub v1_state: RebornV1State,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -282,8 +290,52 @@ pub struct RebornProviderWriteOutcome {
     pub api_key_env: Option<String>,
     pub api_key_required: bool,
     pub missing_api_key: bool,
+    #[serde(skip_serializing)]
     pub config_file: PathBuf,
-    pub v1_state: &'static str,
+    pub v1_state: RebornV1State,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum RebornV1State {
+    #[serde(rename = "not-used")]
+    NotUsed,
+}
+
+impl RebornV1State {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotUsed => "not-used",
+        }
+    }
+}
+
+impl fmt::Display for RebornV1State {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum RebornModelRoutesState {
+    #[serde(rename = "configured")]
+    Configured,
+    #[serde(rename = "not-configured")]
+    NotConfigured,
+}
+
+impl RebornModelRoutesState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Configured => "configured",
+            Self::NotConfigured => "not-configured",
+        }
+    }
+}
+
+impl fmt::Display for RebornModelRoutesState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 #[derive(Debug, Error)]
@@ -293,7 +345,7 @@ pub enum RebornProviderAdminError {
     #[error("load Reborn config `{}`: {source}", path.display())]
     LoadConfig {
         path: PathBuf,
-        source: ironclaw_reborn_config::RebornConfigFileError,
+        source: Box<ironclaw_reborn_config::RebornConfigFileError>,
     },
     #[error("unknown Reborn LLM provider `{provider}` in {}; available providers: {}", providers_file.display(), known.join(", "))]
     UnknownProvider {
@@ -306,7 +358,7 @@ pub enum RebornProviderAdminError {
     #[error("update Reborn config `{}`: {source}", path.display())]
     UpdateConfig {
         path: PathBuf,
-        source: ironclaw_reborn_config::RebornConfigFileUpdateError,
+        source: Box<ironclaw_reborn_config::RebornConfigFileUpdateError>,
     },
 }
 
@@ -391,7 +443,7 @@ fn provider_info(
         active_model,
         metadata: verbose.then(|| RebornProviderMetadata {
             aliases: def.aliases.clone(),
-            protocol: format!("{:?}", def.protocol),
+            protocol: provider_protocol_wire_name(def.protocol),
             model_env: def.model_env.clone(),
             api_key_env: def.api_key_env.clone(),
             api_key_required: def.api_key_required,
@@ -403,4 +455,11 @@ fn provider_info(
                 .is_some_and(ironclaw_llm::registry::SetupHint::can_list_models),
         }),
     }
+}
+
+fn provider_protocol_wire_name(protocol: ironclaw_llm::registry::ProviderProtocol) -> String {
+    serde_json::to_value(protocol)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string())
 }
