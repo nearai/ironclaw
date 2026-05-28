@@ -124,13 +124,6 @@ pub struct SpawnSubagentArgs {
     pub task: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff: Option<String>,
-    pub mode: SpawnSubagentMode,
-}
-
-impl SpawnSubagentArgs {
-    pub fn spawn_mode(&self) -> SpawnSubagentMode {
-        self.mode
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -141,26 +134,33 @@ struct SpawnSubagentWireArgs {
     #[serde(default)]
     handoff: Option<String>,
     #[serde(default)]
-    mode: Option<SpawnSubagentMode>,
+    mode: Option<SpawnSubagentWireMode>,
     #[serde(default)]
     run_in_background: bool,
 }
 
-impl From<SpawnSubagentWireArgs> for SpawnSubagentArgs {
-    fn from(value: SpawnSubagentWireArgs) -> Self {
-        let mode = value.mode.unwrap_or({
-            if value.run_in_background {
-                SpawnSubagentMode::Background
-            } else {
-                SpawnSubagentMode::Blocking
-            }
-        });
-        Self {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SpawnSubagentWireMode {
+    Blocking,
+    Background,
+}
+
+impl TryFrom<SpawnSubagentWireArgs> for SpawnSubagentArgs {
+    type Error = AgentLoopHostError;
+
+    fn try_from(value: SpawnSubagentWireArgs) -> Result<Self, Self::Error> {
+        if value.run_in_background {
+            return Err(background_subagents_disabled());
+        }
+        if value.mode == Some(SpawnSubagentWireMode::Background) {
+            return Err(background_subagents_disabled());
+        }
+        Ok(Self {
             subagent_kind: value.subagent_kind,
             task: value.task,
             handoff: value.handoff,
-            mode,
-        }
+        })
     }
 }
 
@@ -597,17 +597,14 @@ impl SubagentSpawnCapabilityPort {
         let child_thread_id =
             ThreadId::new(format!("subagent-{}", child_run_id.as_uuid().simple()))
                 .map_err(invalid_static_ref)?;
-        let mode = args.spawn_mode();
+        let mode = SpawnSubagentMode::Blocking;
         // The gate ref is also returned as a `LoopGateRef`; keep the opaque
         // suffix colon-free so it satisfies the model-visible loop ref
         // contract (`gate:<ascii-id>` with only alnum/underscore/dash/dot).
-        let gate_ref = match gate_override {
-            Some(gate_ref) => gate_ref,
-            None => GateRef::new(match mode {
-                SpawnSubagentMode::Blocking => format!("gate:subagent-{child_run_id}"),
-                SpawnSubagentMode::Background => format!("gate:subagent-bg-{child_run_id}"),
-            })
-            .map_err(invalid_static_ref)?,
+        let gate_ref = if let Some(gate_ref) = gate_override {
+            gate_ref
+        } else {
+            GateRef::new(format!("gate:subagent-{child_run_id}")).map_err(invalid_static_ref)?
         };
         let payload = spawn_result_payload(
             child_run_id,
@@ -753,22 +750,12 @@ impl SubagentSpawnCapabilityPort {
             return Err(map_thread_error(error));
         }
 
-        match mode {
-            SpawnSubagentMode::Blocking => {
-                let loop_gate_ref =
-                    LoopGateRef::new(gate_ref.as_str()).map_err(invalid_static_ref)?;
-                Ok(CapabilityOutcome::AwaitDependentRun {
-                    gate_ref: loop_gate_ref,
-                    result_ref,
-                    safe_summary: safe_summary("subagent spawned; waiting for completion"),
-                })
-            }
-            SpawnSubagentMode::Background => Ok(CapabilityOutcome::SpawnedChildRun {
-                child_run_id,
-                result_ref,
-                safe_summary: safe_summary("subagent spawned in background"),
-            }),
-        }
+        let loop_gate_ref = LoopGateRef::new(gate_ref.as_str()).map_err(invalid_static_ref)?;
+        Ok(CapabilityOutcome::AwaitDependentRun {
+            gate_ref: loop_gate_ref,
+            result_ref,
+            safe_summary: safe_summary("subagent spawned; waiting for completion"),
+        })
     }
 
     async fn cancel_child_after_submission_failure(
@@ -852,14 +839,14 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
         request: CapabilityInvocation,
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
         if self.is_spawn(&request.capability_id) {
-            if let Some(outcome) = self.authorize_spawn(&request).await? {
-                return Ok(outcome);
-            }
             let args = self
                 .deps
                 .spawn_input_codec
                 .decode(&self.run_context, &request.input_ref)
                 .await?;
+            if let Some(outcome) = self.authorize_spawn(&request).await? {
+                return Ok(outcome);
+            }
             return self.handle_spawn_with_gate(&request, args, None).await;
         }
         self.inner.invoke_capability(request).await
@@ -870,10 +857,10 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
         request: CapabilityBatchInvocation,
     ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
         let mut outcomes = Vec::with_capacity(request.invocations.len());
-        // Pre-decode every spawn invocation so we know how many are Blocking
-        // before allocating the shared batch gate. Only batches with at least
-        // two Blocking spawns benefit from gate coalescing; otherwise the gate
-        // would be created and never registered, wasting a TurnRunId.
+        // Pre-decode every spawn invocation before allocating the shared batch
+        // gate. Only batches with at least two valid blocking spawns benefit
+        // from gate coalescing; otherwise the gate would be created and never
+        // registered, wasting a TurnRunId.
         let mut spawn_args: HashMap<usize, SpawnSubagentArgs> = HashMap::new();
         let mut blocking_count = 0_usize;
         for (idx, invocation) in request.invocations.iter().enumerate() {
@@ -885,9 +872,7 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
                 .spawn_input_codec
                 .decode(&self.run_context, &invocation.input_ref)
                 .await?;
-            if args.spawn_mode() == SpawnSubagentMode::Blocking {
-                blocking_count += 1;
-            }
+            blocking_count += 1;
             spawn_args.insert(idx, args);
         }
         let batch_blocking_gate = if blocking_count > 1 {
@@ -911,9 +896,7 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
                             "subagent spawn args missing from pre-decode pass",
                         )
                     })?;
-                    let gate_override = (args.spawn_mode() == SpawnSubagentMode::Blocking)
-                        .then(|| batch_blocking_gate.clone())
-                        .flatten();
+                    let gate_override = batch_blocking_gate.clone();
                     self.handle_spawn_with_gate(invocation, args, gate_override)
                         .await?
                 };
@@ -988,13 +971,13 @@ impl SpawnSubagentInputCodec for JsonSpawnSubagentInputCodec {
             .resolve_capability_input(run_context, input_ref)
             .await?;
         serde_json::from_value::<SpawnSubagentWireArgs>(value)
-            .map(Into::into)
             .map_err(|error| {
                 AgentLoopHostError::new(
                     AgentLoopHostErrorKind::InvalidInvocation,
                     format!("invalid spawn_subagent input: {error}"),
                 )
-            })
+            })?
+            .try_into()
     }
 
     async fn register_provider_tool_call_input(
@@ -1041,6 +1024,13 @@ fn spawn_rejected(reason: &'static str) -> CapabilityOutcome {
             .unwrap_or(CapabilityDeniedReasonKind::EmptySurface),
         safe_summary: format!("subagent spawn rejected: {reason}"),
     })
+}
+
+fn background_subagents_disabled() -> AgentLoopHostError {
+    AgentLoopHostError::new(
+        AgentLoopHostErrorKind::InvalidInvocation,
+        "background subagents are disabled pending durable completion delivery design (#4147)",
+    )
 }
 
 fn map_turn_error(error: TurnError) -> AgentLoopHostError {

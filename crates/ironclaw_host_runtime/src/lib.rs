@@ -55,6 +55,7 @@ mod invocation_services;
 pub mod memory_context;
 mod obligations;
 mod planner;
+mod process_aliases;
 mod process_port;
 mod production;
 mod sandbox_process;
@@ -79,10 +80,10 @@ pub use first_party::{
 pub use first_party_tools::{
     APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, BuiltinFirstPartyTools,
     ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID,
-    JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
-    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
-    SPAWN_SUBAGENT_CAPABILITY_ID, TIME_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
-    builtin_first_party_handlers, builtin_first_party_package,
+    HTTP_SAVE_CAPABILITY_ID, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID,
+    SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
+    SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, TIME_CAPABILITY_ID,
+    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers, builtin_first_party_package,
 };
 pub use http_body::{RuntimeHttpBodyStore, RuntimeHttpBodyStoreError};
 pub use invocation_services::{
@@ -106,9 +107,9 @@ pub use sandbox_process::{
     RebornScopedSandboxCommandTransport,
 };
 pub use services::{
-    HostRuntimeServices, ProductionEventStoreWiringError, ProductionWiringComponent,
-    ProductionWiringConfig, ProductionWiringIssue, ProductionWiringIssueKind,
-    ProductionWiringReport, RegisteredRuntimeHealth,
+    HostRuntimeServices, ProductAuthProviderRuntimePorts, ProductionEventStoreWiringError,
+    ProductionWiringComponent, ProductionWiringConfig, ProductionWiringIssue,
+    ProductionWiringIssueKind, ProductionWiringReport, RegisteredRuntimeHealth,
 };
 pub use surface::{CapabilitySurfacePolicy, VisibleCapability, VisibleCapabilityAccess};
 pub use turn_scheduler::{
@@ -726,14 +727,21 @@ fn bounded_runtime_failure_summary(summary: &str) -> String {
 
 /// Central disposition policy for runtime capability failures.
 ///
-/// Same-loop continuation is reserved for failures the runtime can summarize
-/// safely. Protocol, cancellation, and unknown failures end the current run
-/// even if they have a displayable message, so the next turn can receive
-/// recovery context without corrupting the assistant/tool-result transcript.
+/// Same-loop continuation is reserved for model-correctable failures. Most of
+/// those require a safe runtime summary; malformed caller input remains
+/// model-visible even when only the failure kind is available, so the loop can
+/// return a normal tool error and let the model repair the arguments. Protocol,
+/// cancellation, and unknown failures end the current run even if they have a
+/// displayable message, so the next turn can receive recovery context without
+/// corrupting the assistant/tool-result transcript.
 pub const fn capability_failure_disposition(
     kind: RuntimeFailureKind,
     has_safe_summary: bool,
 ) -> CapabilityFailureDisposition {
+    if matches!(kind, RuntimeFailureKind::InvalidInput) {
+        return CapabilityFailureDisposition::ModelVisibleToolError;
+    }
+
     if runtime_failure_requires_run_recovery(kind) {
         return CapabilityFailureDisposition::RecoverableRunFailure;
     }
@@ -877,10 +885,36 @@ pub trait HostRuntime: Send + Sync {
         request: RuntimeCapabilityRequest,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError>;
 
+    async fn spawn_capability(
+        &self,
+        request: RuntimeCapabilityRequest,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        Ok(RuntimeCapabilityOutcome::Failed(
+            RuntimeCapabilityFailure::new(
+                request.capability_id,
+                RuntimeFailureKind::Unavailable,
+                Some("capability spawn is unsupported by this host runtime".to_string()),
+            ),
+        ))
+    }
+
     async fn resume_capability(
         &self,
         request: RuntimeCapabilityResumeRequest,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError>;
+
+    async fn resume_spawn_capability(
+        &self,
+        request: RuntimeCapabilityResumeRequest,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        Ok(RuntimeCapabilityOutcome::Failed(
+            RuntimeCapabilityFailure::new(
+                request.capability_id,
+                RuntimeFailureKind::Unavailable,
+                Some("capability spawn resume is unsupported by this host runtime".to_string()),
+            ),
+        ))
+    }
 
     async fn visible_capabilities(
         &self,

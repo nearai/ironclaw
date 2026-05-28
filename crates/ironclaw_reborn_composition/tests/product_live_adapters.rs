@@ -778,6 +778,7 @@ async fn local_dev_adapter_exposes_skill_install_provider_tool_schema_requires_s
     let skill_install_effects = vec![
         EffectKind::ReadFilesystem,
         EffectKind::WriteFilesystem,
+        EffectKind::DeleteFilesystem,
         EffectKind::Network,
     ];
     let adapters = ProductLivePlannedRuntimeAdapters::from_services(

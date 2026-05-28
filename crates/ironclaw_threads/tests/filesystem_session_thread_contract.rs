@@ -21,8 +21,8 @@ use ironclaw_threads::{
     CapabilityDisplayPreviewEnvelopeInput, CapabilityDisplayPreviewStatus,
     CreateSummaryArtifactRequest, EnsureThreadRequest, FilesystemSessionThreadService,
     LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
-    MessageStatus, RedactMessageRequest, SessionThreadError, SessionThreadService,
-    ThreadHistoryRequest, ThreadScope, UpdateAssistantDraftRequest,
+    MessageStatus, RedactMessageRequest, SessionThreadError, SessionThreadService, SummaryKind,
+    SummaryModelContextPolicy, ThreadHistoryRequest, ThreadScope, UpdateAssistantDraftRequest,
 };
 
 #[tokio::test]
@@ -125,9 +125,9 @@ async fn filesystem_store_persists_preview_history_while_hiding_it_from_context(
             thread_id: thread.thread_id.clone(),
             start_sequence: 1,
             end_sequence: 2,
-            summary_kind: "model_context".into(),
+            summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("summary must not replace preview range"),
-            model_context_policy: Some("replace_range_when_selected".into()),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
         })
         .await
         .unwrap();
@@ -452,9 +452,9 @@ async fn durable_history_flow(service: &impl SessionThreadService, label: &str) 
             thread_id: thread.thread_id.clone(),
             start_sequence: 1,
             end_sequence: 2,
-            summary_kind: "model_context".into(),
+            summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("summary that mentions secret token"),
-            model_context_policy: Some("replace_range_when_selected".into()),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
         })
         .await
         .unwrap();

@@ -11,6 +11,126 @@ pub struct ModelStrategyState {
     pub fallback_index: u32,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CompactionStrategyState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_compacted_through_seq: Option<u64>,
+    #[serde(default)]
+    pub force_compact_on_next_iteration: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CompactionPromptSnapshot {
+    pub message_index: Vec<MessageIndexEntry>,
+    pub observed_prompt_tokens: u64,
+}
+
+impl CompactionPromptSnapshot {
+    pub fn from_message_index(message_index: Vec<MessageIndexEntry>) -> Self {
+        let observed_prompt_tokens = message_index
+            .iter()
+            .map(|entry| entry.estimated_tokens)
+            .sum();
+        Self {
+            message_index,
+            observed_prompt_tokens,
+        }
+    }
+
+    pub fn retain_after_sequence(&mut self, sequence: u64) {
+        let mut removed_tokens = 0_u64;
+        self.message_index.retain(|entry| {
+            let keep = entry.sequence > sequence;
+            if !keep {
+                removed_tokens = removed_tokens.saturating_add(entry.estimated_tokens);
+            }
+            keep
+        });
+        self.observed_prompt_tokens = self.observed_prompt_tokens.saturating_sub(removed_tokens);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MessageIndexEntry {
+    pub sequence: u64,
+    pub kind: IndexedMessageKind,
+    pub estimated_tokens: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IndexedMessageKind {
+    User,
+    Assistant,
+    System,
+    Summary,
+    Other,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(sequence: u64, estimated_tokens: u64) -> MessageIndexEntry {
+        MessageIndexEntry {
+            sequence,
+            kind: IndexedMessageKind::User,
+            estimated_tokens,
+        }
+    }
+
+    #[test]
+    fn retain_after_sequence_keeps_empty_snapshot_empty() {
+        let mut snapshot = CompactionPromptSnapshot::default();
+
+        snapshot.retain_after_sequence(1);
+
+        assert!(snapshot.message_index.is_empty());
+        assert_eq!(snapshot.observed_prompt_tokens, 0);
+    }
+
+    #[test]
+    fn retain_after_sequence_can_retain_no_entries() {
+        let mut snapshot = CompactionPromptSnapshot::from_message_index(vec![entry(1, 10)]);
+
+        snapshot.retain_after_sequence(1);
+
+        assert!(snapshot.message_index.is_empty());
+        assert_eq!(snapshot.observed_prompt_tokens, 0);
+    }
+
+    #[test]
+    fn retain_after_sequence_can_retain_all_entries() {
+        let mut snapshot =
+            CompactionPromptSnapshot::from_message_index(vec![entry(1, 10), entry(2, 20)]);
+
+        snapshot.retain_after_sequence(0);
+
+        assert_eq!(snapshot.message_index, vec![entry(1, 10), entry(2, 20)]);
+        assert_eq!(snapshot.observed_prompt_tokens, 30);
+    }
+
+    #[test]
+    fn retain_after_sequence_updates_tokens_for_partial_retention() {
+        let mut snapshot = CompactionPromptSnapshot::from_message_index(vec![
+            entry(1, 10),
+            entry(2, 20),
+            entry(3, 30),
+        ]);
+
+        snapshot.retain_after_sequence(1);
+
+        assert_eq!(snapshot.message_index, vec![entry(2, 20), entry(3, 30)]);
+        assert_eq!(snapshot.observed_prompt_tokens, 50);
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GoalRefreshStrategyState {
+    #[serde(default)]
+    pub turns_since_refresh: u32,
+}
+
 /// Per-error-class attempt counters for the recovery strategy.
 ///
 /// Semantics: the retry budget is *not* durable across resume — on rehydration

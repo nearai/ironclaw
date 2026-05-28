@@ -4,9 +4,8 @@ use async_trait::async_trait;
 use ironclaw_event_projections::{CapabilityActivityProjection, CapabilityActivityStatus};
 use ironclaw_host_api::{CapabilityId, InvocationId};
 use ironclaw_product_adapters::{
-    CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES, CAPABILITY_DISPLAY_PREVIEW_MAX_LINES,
-    CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES, CapabilityDisplayPreviewView,
-    CapabilityDisplayPreviewViewInput, ProductAdapterError,
+    CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
+    CapabilityDisplayPreviewView, CapabilityDisplayPreviewViewInput, ProductAdapterError,
 };
 use ironclaw_threads::ThreadMessageId;
 use ironclaw_turns::run_profile::CapabilityInputRef;
@@ -467,24 +466,8 @@ fn bounded_display_text(text: &str, max_bytes: usize) -> DisplayText {
 }
 
 fn bounded_preview_text(text: &str) -> DisplayText {
-    let mut sanitized = sanitize_text(text);
-    let mut truncated = false;
-    let mut line_count = 0usize;
-    let mut end = sanitized.len();
-    for (index, _) in sanitized.match_indices('\n') {
-        line_count += 1;
-        if line_count >= CAPABILITY_DISPLAY_PREVIEW_MAX_LINES {
-            end = index;
-            truncated = true;
-            break;
-        }
-    }
-    if truncated {
-        sanitized.truncate(end);
-    }
-    let mut bounded = truncate_bytes(&sanitized, CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES);
-    bounded.truncated |= truncated;
-    bounded
+    let sanitized = sanitize_text(text);
+    truncate_bytes(&sanitized, CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES)
 }
 
 fn non_empty(text: String) -> Option<String> {

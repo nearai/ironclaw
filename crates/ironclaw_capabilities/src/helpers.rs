@@ -117,6 +117,84 @@ pub(crate) async fn fail_run_if_configured(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CapabilityRunStateTransition {
+    Fail { error_kind: &'static str },
+    BlockAuth { error_kind: &'static str },
+}
+
+impl CapabilityRunStateTransition {
+    pub(crate) fn error_kind(self) -> &'static str {
+        match self {
+            Self::Fail { error_kind } | Self::BlockAuth { error_kind } => error_kind,
+        }
+    }
+}
+
+impl CapabilityInvocationError {
+    pub(crate) fn run_state_transition(&self) -> CapabilityRunStateTransition {
+        match self {
+            Self::UnsupportedObligations { .. } => CapabilityRunStateTransition::Fail {
+                error_kind: "UnsupportedObligations",
+            },
+            Self::ObligationFailed { .. } => CapabilityRunStateTransition::Fail {
+                error_kind: "ObligationFailed",
+            },
+            Self::AuthorizationRequiresAuth { .. } => CapabilityRunStateTransition::BlockAuth {
+                error_kind: "AuthRequired",
+            },
+            Self::UnknownCapability { .. }
+            | Self::AuthorizationDenied { .. }
+            | Self::AuthorizationRequiresApproval { .. }
+            | Self::InvocationFingerprint { .. }
+            | Self::ApprovalRequestMismatch { .. }
+            | Self::ApprovalFingerprintMismatch { .. }
+            | Self::ApprovalNotApproved { .. }
+            | Self::ApprovalStoreMissing { .. }
+            | Self::ApprovalLeaseMissing { .. }
+            | Self::ResumeStoreMissing { .. }
+            | Self::ProcessManagerMissing { .. }
+            | Self::ResumeNotBlocked { .. }
+            | Self::ResumeContextMismatch { .. }
+            | Self::Lease(_)
+            | Self::RunState(_)
+            | Self::Process(_)
+            | Self::Dispatch { .. } => CapabilityRunStateTransition::Fail {
+                error_kind: "Obligation",
+            },
+        }
+    }
+}
+
+pub(crate) async fn apply_run_state_transition_if_configured(
+    run_state: Option<&dyn RunStateStore>,
+    scope: &ResourceScope,
+    invocation_id: InvocationId,
+    error: &CapabilityInvocationError,
+) {
+    let Some(run_state) = run_state else {
+        return;
+    };
+    match error.run_state_transition() {
+        CapabilityRunStateTransition::Fail { error_kind } => {
+            fail_run_if_configured(Some(run_state), scope, invocation_id, error_kind).await;
+        }
+        CapabilityRunStateTransition::BlockAuth { error_kind } => {
+            if let Err(error) = run_state
+                .block_auth(scope, invocation_id, error_kind.to_string())
+                .await
+            {
+                warn!(
+                    invocation_id = %invocation_id,
+                    error_kind,
+                    transition_error_kind = run_state_error_kind(&error),
+                    "run-state auth block transition failed; original business error is being returned to caller",
+                );
+            }
+        }
+    }
+}
+
 pub(crate) async fn fail_run(
     run_state: &dyn RunStateStore,
     scope: &ResourceScope,

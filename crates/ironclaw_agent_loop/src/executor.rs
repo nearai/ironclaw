@@ -48,7 +48,7 @@ use mapping::{
 use model::{ModelInput, ModelStage, ModelStep};
 use pipeline::{DefaultExecutorPipeline, ExecutorStage, StageContext};
 use prompt::{PromptInput, PromptStage, PromptStep};
-use turn_stop::{StopInput, StopStage, StopStep};
+use turn_stop::{StopInput, StopObservationInput, StopObservationStep, StopStage, StopStep};
 
 use async_trait::async_trait;
 use ironclaw_turns::{

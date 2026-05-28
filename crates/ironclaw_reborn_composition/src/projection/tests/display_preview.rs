@@ -524,7 +524,7 @@ async fn capability_display_preview_falls_back_for_failed_tool_without_result() 
 }
 
 #[tokio::test]
-async fn capability_display_preview_store_truncates_long_output_by_lines() {
+async fn capability_display_preview_store_preserves_long_line_counts() {
     let run_id = TurnRunId::new();
     let capability = CapabilityId::new("script.long_output").unwrap();
     let input_ref = preview_input_ref("long-output-input");
@@ -562,16 +562,16 @@ async fn capability_display_preview_store_truncates_long_output_by_lines() {
         .unwrap()
         .unwrap();
 
-    assert!(preview.truncated);
+    assert!(!preview.truncated);
     assert!(
         preview
             .output_preview
             .as_ref()
             .unwrap()
-            .contains("line-119")
+            .contains("line-129")
     );
     assert!(
-        !preview
+        preview
             .output_preview
             .as_ref()
             .unwrap()

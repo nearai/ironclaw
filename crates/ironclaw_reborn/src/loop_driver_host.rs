@@ -18,11 +18,12 @@ use ironclaw_hooks::middleware::{
 use ironclaw_host_api::ExtensionId;
 use ironclaw_loop_support::{
     CapabilityResolveError, CapabilitySurfaceProfileFilter, CapabilitySurfaceProfileResolver,
-    EmptyLoopCapabilityPort, HostIdentityContextSource, HostInputQueue, HostManagedModelGateway,
-    HostQueueLoopInputPort, HostSkillContextSource, LoopCapabilityInputResolver,
-    RunCancellationFactory, RunCancellationObservationKind, RunStateLoopCancellationPort,
-    SubagentLoopPromptPort, SubagentPromptComposer, ThreadBackedLoopContextPort,
-    ThreadBackedLoopTranscriptPort, TurnStateRunCancellationFactory,
+    EmptyLoopCapabilityPort, GuardedSystemInferencePort, HostIdentityContextSource, HostInputQueue,
+    HostManagedModelGateway, HostQueueLoopInputPort, HostSkillContextSource,
+    LoopCapabilityInputResolver, ModelGatewayBackedSystemInferencePort, RunCancellationFactory,
+    RunCancellationObservationKind, RunStateLoopCancellationPort, SubagentLoopPromptPort,
+    SubagentPromptComposer, ThreadBackedLoopContextPort, ThreadBackedLoopTranscriptPort,
+    TurnStateRunCancellationFactory, default_host_managed_loop_compaction_port,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 
@@ -63,15 +64,16 @@ use ironclaw_turns::{
         InstructionBundleMaterializedMessage, InstructionMaterializationStore,
         InstructionSafetyContext, LoadCheckpointPayloadRequest, LoadedCheckpointPayload,
         LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointPort,
-        LoopCheckpointRequest, LoopContextBundle, LoopContextPort, LoopContextRequest,
+        LoopCheckpointRequest, LoopCompactionError, LoopCompactionPort, LoopCompactionRequest,
+        LoopCompactionResponse, LoopContextBundle, LoopContextPort, LoopContextRequest,
         LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputPort,
         LoopModelBudgetAccountant, LoopModelPolicyGuard, LoopModelPort, LoopModelRequest,
         LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
         LoopPromptBundleAuthority, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
         LoopRunInfoPort, LoopTranscriptPort, NoOpBudgetAccountant, NoOpPolicyGuard,
         ProviderToolCall, ProviderToolDefinition, RunScopedHookMilestoneSink,
-        StageCheckpointPayloadRequest, UpdateAssistantDraft, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        StageCheckpointPayloadRequest, SystemInferencePort, UpdateAssistantDraft,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
     runner::ClaimedTurnRun,
 };
@@ -138,7 +140,7 @@ impl HookPromptMaterializationSink for InstructionStoreBackedHookSink {
             vec![InstructionBundleMaterializedMessage {
                 role: role.to_string(),
                 content_ref: content_ref.clone(),
-                safe_content,
+                model_content: safe_content,
             }],
         )
     }
@@ -879,6 +881,27 @@ where
         self.cancellation_factory.observation_kind()
     }
 
+    fn build_compaction_ports(&self, run_context: &LoopRunContext) -> Arc<dyn LoopCompactionPort> {
+        let direct_system_inference: Arc<dyn SystemInferencePort> =
+            Arc::new(ModelGatewayBackedSystemInferencePort::new(
+                Arc::clone(&self.model_gateway),
+                run_context.clone(),
+            ));
+        let system_inference: Arc<dyn SystemInferencePort> =
+            Arc::new(GuardedSystemInferencePort::new(
+                direct_system_inference,
+                run_context.clone(),
+                Arc::clone(&self.model_accountant),
+                Arc::clone(&self.model_policy_guard),
+            ));
+        default_host_managed_loop_compaction_port(
+            system_inference,
+            Arc::clone(&self.thread_service),
+            self.thread_scope.clone(),
+            include_str!("../../ironclaw_loop_support/prompts/compaction_summarizer_fresh.md"),
+        )
+    }
+
     pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {
         self.skill_context_source = Some(source);
         self
@@ -1386,6 +1409,7 @@ where
             run_context.clone(),
             Arc::clone(&self.milestone_sink),
         ));
+        let compaction = self.build_compaction_ports(&run_context);
         let cancellation_handle = self
             .cancellation_factory
             .handle_for_run(&run_context.scope, run_context.run_id)
@@ -1406,6 +1430,7 @@ where
             capabilities,
             transcript,
             progress,
+            compaction,
             cancellation,
             _event_subscription: event_subscription,
         })
@@ -1472,6 +1497,7 @@ pub struct RebornLoopDriverHost {
     capabilities: Arc<dyn LoopCapabilityPort>,
     transcript: Arc<dyn LoopTranscriptPort>,
     progress: Arc<dyn LoopProgressPort>,
+    compaction: Arc<dyn LoopCompactionPort>,
     cancellation: Arc<dyn LoopCancellationPort>,
     _event_subscription: Option<EventTriggeredHookSubscriptionHandle>,
 }
@@ -1494,9 +1520,14 @@ impl LoopRunInfoPort for RebornLoopDriverHost {
     }
 }
 
+#[async_trait]
 impl LoopCancellationPort for RebornLoopDriverHost {
     fn observe_cancellation(&self) -> Option<LoopCancellationSignal> {
         self.cancellation.observe_cancellation()
+    }
+
+    async fn cancellation_requested(&self) -> LoopCancellationSignal {
+        self.cancellation.cancellation_requested().await
     }
 }
 
@@ -1648,6 +1679,16 @@ impl LoopCheckpointPort for RebornLoopDriverHost {
 impl LoopProgressPort for RebornLoopDriverHost {
     async fn emit_loop_progress(&self, event: LoopProgressEvent) -> Result<(), AgentLoopHostError> {
         self.progress.emit_loop_progress(event).await
+    }
+}
+
+#[async_trait]
+impl LoopCompactionPort for RebornLoopDriverHost {
+    async fn compact_loop_context(
+        &self,
+        request: LoopCompactionRequest,
+    ) -> Result<LoopCompactionResponse, LoopCompactionError> {
+        self.compaction.compact_loop_context(request).await
     }
 }
 

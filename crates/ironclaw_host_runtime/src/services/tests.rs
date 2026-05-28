@@ -40,6 +40,30 @@ fn shared_extension_registry_returns_same_instance() {
 }
 
 #[test]
+fn product_auth_provider_runtime_ports_returns_none_without_egress() {
+    let services = test_services();
+
+    assert!(services.product_auth_provider_runtime_ports().is_none());
+}
+
+#[test]
+fn product_auth_provider_runtime_ports_returns_configured_egress_and_obligation_handler() {
+    let services = test_services()
+        .with_secret_store(Arc::new(InMemorySecretStore::new()))
+        .try_with_host_http_egress(RecordingNetwork::ok())
+        .expect("host HTTP egress should wire with graph secret store");
+
+    let ports = services
+        .product_auth_provider_runtime_ports()
+        .expect("runtime ports should be configured");
+    assert!(Arc::ptr_eq(
+        &ports.runtime_http_egress(),
+        &configured_egress(&services)
+    ));
+    let _handler = ports.obligation_handler();
+}
+
+#[test]
 fn host_http_egress_borrows_staged_policy_for_repeated_invocation_requests() {
     let network = RecordingNetwork::ok();
     let recorded_requests = Arc::clone(&network.requests);

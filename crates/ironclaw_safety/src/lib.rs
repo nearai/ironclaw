@@ -29,6 +29,30 @@ pub use provider_validation::{
 pub use sanitizer::{InjectionWarning, SanitizedOutput, Sanitizer};
 pub use validator::{ValidationResult, Validator};
 
+/// Interface for raw prompt-injection scans before untrusted text is wrapped
+/// into model-visible structural markup.
+pub trait InjectionScanner: Send + Sync {
+    fn scan_injection(&self, content: &str) -> Vec<InjectionWarning>;
+}
+
+impl InjectionScanner for Sanitizer {
+    fn scan_injection(&self, content: &str) -> Vec<InjectionWarning> {
+        self.detect(content)
+    }
+}
+
+/// Interface for secret-leak checks before model output crosses a persistence
+/// or projection boundary.
+pub trait LeakScanner: Send + Sync {
+    fn scan_leaks(&self, content: &str) -> LeakScanResult;
+}
+
+impl LeakScanner for LeakDetector {
+    fn scan_leaks(&self, content: &str) -> LeakScanResult {
+        self.scan(content)
+    }
+}
+
 /// Safety configuration.
 #[derive(Debug, Clone)]
 pub struct SafetyConfig {

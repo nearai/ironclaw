@@ -513,7 +513,7 @@ async fn oauth_callback_handler(
             .await
             .map_err(ProductAuthRouteFailure::from)?;
     }
-    let outcome = callback_outcome_from_query(&state, flow_id, &query)?;
+    let outcome = callback_outcome_from_query(&state, flow_id, &scope, &query)?;
 
     let response = match state
         .product_auth
@@ -543,6 +543,7 @@ async fn oauth_callback_handler(
 fn callback_outcome_from_query(
     state: &ProductAuthRouteState,
     flow_id: AuthFlowId,
+    _scope: &AuthProductScope,
     query: &OAuthCallbackQuery,
 ) -> Result<RebornOAuthCallbackOutcome, ProductAuthRouteFailure> {
     if query
@@ -560,6 +561,10 @@ fn callback_outcome_from_query(
         .as_ref()
         .ok_or_else(ProductAuthRouteFailure::malformed_callback)?;
     let pkce_verifier = state.pkce_verifier_for_callback(flow_id)?;
+    let scopes = parse_provider_scopes(query.scopes.as_deref())?;
+    if scopes.is_empty() {
+        return Err(ProductAuthRouteFailure::malformed_callback());
+    }
     let authorization_code_hash = authorization_code_hash(code.expose_secret())?;
     let pkce_verifier_hash = pkce_verifier_hash(pkce_verifier.expose_secret())?;
 
@@ -575,7 +580,7 @@ fn callback_outcome_from_query(
             pkce_verifier: PkceVerifierSecret::new(pkce_verifier)
                 .map_err(ProductAuthRouteFailure::from)?,
             pkce_verifier_hash,
-            scopes: parse_provider_scopes(query.scopes.as_deref())?,
+            scopes,
         },
     })
 }
