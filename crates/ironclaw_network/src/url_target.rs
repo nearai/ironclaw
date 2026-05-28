@@ -19,6 +19,15 @@ pub fn network_target_for_url(raw: &str) -> Result<NetworkTarget, NetworkTargetU
     network_target_for_url_inner(raw)
 }
 
+pub fn is_rfc3986_unreserved_segment(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment != "."
+        && segment != ".."
+        && segment
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~'))
+}
+
 pub(crate) fn network_target_for_http_url(
     raw: &str,
     request_bytes: u64,
@@ -57,5 +66,24 @@ pub(crate) fn default_port(scheme: NetworkScheme) -> u16 {
     match scheme {
         NetworkScheme::Http => 80,
         NetworkScheme::Https => 443,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_rfc3986_unreserved_segment;
+
+    #[test]
+    fn rfc3986_unreserved_segment_accepts_unreserved_path_parts() {
+        for segment in ["abc", "ABC", "abc-._~", "a1_b2.c3~d4"] {
+            assert!(is_rfc3986_unreserved_segment(segment), "{segment}");
+        }
+    }
+
+    #[test]
+    fn rfc3986_unreserved_segment_rejects_empty_dot_segments_and_reserved_chars() {
+        for segment in ["", ".", "..", "/", "a/b", "?", "a?b", "#", "a#b", "%2f"] {
+            assert!(!is_rfc3986_unreserved_segment(segment), "{segment}");
+        }
     }
 }

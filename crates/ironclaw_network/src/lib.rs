@@ -24,4 +24,6 @@ pub use types::{
     DEFAULT_RESPONSE_BODY_LIMIT, NetworkHttpRequest, NetworkHttpResponse, NetworkRequest,
     NetworkTransportRequest, NetworkUsage,
 };
-pub use url_target::{NetworkTargetUrlError, network_target_for_url};
+pub use url_target::{
+    NetworkTargetUrlError, is_rfc3986_unreserved_segment, network_target_for_url,
+};

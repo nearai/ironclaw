@@ -807,15 +807,15 @@ where
                 None,
             ));
         };
-        let mut service =
-            crate::HostHttpEgressService::new(network, SharedSecretStore(secret_store))
-                .with_network_policy_store(Arc::clone(&self.network_policy_store))
-                .with_secret_injection_store(Arc::clone(&self.secret_injection_store))
-                .with_unsafe_raw_diagnostics_allowed(
-                    crate::runtime_policy_allows_unsafe_raw_http_diagnostics(
-                        self.runtime_policy.as_ref(),
-                    ),
-                );
+        let mut service = crate::HostHttpEgressService::production(
+            network,
+            SharedSecretStore(secret_store),
+            Arc::clone(&self.network_policy_store),
+            Arc::clone(&self.secret_injection_store),
+        )
+        .with_unsafe_raw_diagnostics_allowed(
+            crate::runtime_policy_allows_unsafe_raw_http_diagnostics(self.runtime_policy.as_ref()),
+        );
         if let Some(store) = body_store {
             service = service.with_body_store(store);
         }

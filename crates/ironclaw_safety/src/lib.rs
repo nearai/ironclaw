@@ -11,6 +11,7 @@ mod credential_detect;
 mod leak_detector;
 mod policy;
 mod provider_validation;
+mod redaction;
 mod sanitizer;
 pub mod sensitive_paths;
 mod validator;
@@ -26,6 +27,7 @@ pub use provider_validation::{
     validate_optional_provider_metadata_text, validate_provider_arguments,
     validate_provider_identity, validate_provider_token, validate_provider_tool_name,
 };
+pub use redaction::{redact_exact_values, redaction_values_for_secret};
 pub use sanitizer::{InjectionWarning, SanitizedOutput, Sanitizer};
 pub use validator::{ValidationResult, Validator};
 

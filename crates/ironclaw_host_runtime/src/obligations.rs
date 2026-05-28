@@ -423,9 +423,12 @@ impl BuiltinObligationServices {
     where
         N: NetworkHttpEgress + 'static,
     {
-        crate::HostHttpEgressService::new(network, SharedSecretStore(self.secret_store.clone()))
-            .with_network_policy_store(self.network_policies.clone())
-            .with_secret_injection_store(self.secret_injections.clone())
+        crate::HostHttpEgressService::production(
+            network,
+            SharedSecretStore(self.secret_store.clone()),
+            self.network_policies.clone(),
+            self.secret_injections.clone(),
+        )
     }
 
     pub fn process_obligation_lifecycle_store<S>(

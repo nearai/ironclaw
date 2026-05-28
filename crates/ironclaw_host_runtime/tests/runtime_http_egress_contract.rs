@@ -2904,7 +2904,8 @@ fn host_http_egress_blocks_credential_shaped_response_body() {
 
     assert!(matches!(
         error,
-        ironclaw_host_api::RuntimeHttpEgressError::Response { .. }
+        ironclaw_host_api::RuntimeHttpEgressError::Response { ref reason, .. }
+            if reason == "response_leak_blocked"
     ));
     assert!(!error.to_string().contains("sk-proj-test"));
     assert_eq!(error.request_bytes(), 5);
@@ -2948,7 +2949,8 @@ fn host_http_egress_blocks_credential_shaped_runtime_request_before_network() {
 
     assert!(matches!(
         error,
-        ironclaw_host_api::RuntimeHttpEgressError::Request { .. }
+        ironclaw_host_api::RuntimeHttpEgressError::Request { ref reason, .. }
+            if reason == "credential_leak_blocked"
     ));
     assert!(!error.to_string().contains("sk-proj-test"));
     assert!(network_recorder.lock().unwrap().is_empty());
