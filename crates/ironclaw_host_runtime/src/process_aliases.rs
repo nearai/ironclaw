@@ -7,14 +7,23 @@ pub(crate) struct LocalHostWorkdirAlias {
 }
 
 impl LocalHostWorkdirAlias {
+    /// Create a new alias mapping.
+    ///
+    /// `host_path` must be an absolute, canonicalized host path from a trusted source
+    /// (e.g. from `std::fs::canonicalize`). Non-canonicalized or relative paths may
+    /// produce silently invalid mappings.
     pub(crate) fn try_new(
         alias: impl Into<String>,
         host_path: impl Into<PathBuf>,
     ) -> Result<Self, String> {
         let alias = normalize_alias(alias.into())?;
+        let host_path = host_path.into();
+        if !host_path.is_absolute() {
+            return Err("local host workdir alias host_path must be absolute".to_string());
+        }
         Ok(Self {
             alias,
-            host_path: host_path.into(),
+            host_path,
         })
     }
 
@@ -48,6 +57,13 @@ pub(crate) fn rewrite_local_host_command_aliases(
     command: &str,
     aliases: &[LocalHostWorkdirAlias],
 ) -> String {
+    // NOTE: This rewriter handles single-quote, double-quote, and escape
+    // contexts but does NOT model command-substitution context reset.
+    // Inside `$(...)` the shell restarts quoting from scratch, so a command
+    // like `printf "$(cat '/workspace/file')"` may misquote the rewritten
+    // path. Paths in local-dev-yolo mode are trusted, so this produces a
+    // misquoted but not dangerous rewrite. Full $(...) tracking is left as
+    // a future enhancement.
     if aliases.is_empty() {
         return command.to_string();
     }
@@ -259,6 +275,26 @@ mod tests {
         assert_eq!(
             rewrite_local_host_command_aliases("printf \\/workspace /workspace", &[alias]),
             "printf \\/workspace '/tmp/workspace'"
+        );
+    }
+
+    #[test]
+    fn command_alias_rewrite_at_start_of_command() {
+        let alias = alias("/workspace", "/tmp/workspace");
+
+        assert_eq!(
+            rewrite_local_host_command_aliases("/workspace/run.sh", &[alias]),
+            "'/tmp/workspace'/run.sh"
+        );
+    }
+
+    #[test]
+    fn command_alias_rewrite_followed_by_semicolon_boundary() {
+        let alias = alias("/workspace", "/tmp/workspace");
+
+        assert_eq!(
+            rewrite_local_host_command_aliases("cd /workspace; ls", &[alias]),
+            "cd '/tmp/workspace'; ls"
         );
     }
 

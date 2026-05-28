@@ -179,8 +179,15 @@ fn local_dev_process_port_for_policy(
         process_port =
             process_port.with_workdir_alias("/host", host_home_root.canonical_root.clone());
         for alias in host_home_root.aliases() {
+            let alias_str = match alias.to_str() {
+                Some(s) => s,
+                None => {
+                    tracing::debug!(alias = ?alias, "skipping non-UTF-8 host home alias");
+                    continue;
+                }
+            };
             process_port =
-                process_port.with_workdir_alias(alias.display().to_string(), alias.to_path_buf());
+                process_port.with_workdir_alias(alias_str, alias.to_path_buf());
         }
     }
     Some(process_port)

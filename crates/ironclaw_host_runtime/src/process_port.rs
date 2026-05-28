@@ -197,7 +197,7 @@ impl LocalHostProcessPort {
     ) -> Self {
         match LocalHostWorkdirAlias::try_new(alias, host_path) {
             Ok(alias) => self.workdir_aliases.push(alias),
-            Err(reason) => tracing::warn!(
+            Err(reason) => tracing::debug!(
                 reason = %reason,
                 "ignoring invalid local host process workdir alias"
             ),
