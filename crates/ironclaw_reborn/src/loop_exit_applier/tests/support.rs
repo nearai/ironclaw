@@ -8,7 +8,7 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
-    GetLoopCheckpointRequest, GetRunStateRequest, LoopBlocked, LoopBlockedKind,
+    GetLoopCheckpointRequest, GetRunStateRequest, LoopBlocked, LoopBlockedKind, LoopCheckpointKind,
     LoopCheckpointRecord, LoopCheckpointStateRef, LoopCheckpointStore, LoopCompleted,
     LoopCompletionKind, LoopExit, LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef,
     PutLoopCheckpointRequest, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse,
@@ -122,6 +122,45 @@ impl LoopCheckpointStore for PanicLoopCheckpointStore {
     }
 }
 
+pub(super) struct StaticLoopCheckpointStore {
+    record: Option<LoopCheckpointRecord>,
+}
+
+impl StaticLoopCheckpointStore {
+    pub(super) fn new(record: LoopCheckpointRecord) -> Self {
+        Self {
+            record: Some(record),
+        }
+    }
+}
+
+#[async_trait]
+impl LoopCheckpointStore for StaticLoopCheckpointStore {
+    async fn put_loop_checkpoint(
+        &self,
+        _request: PutLoopCheckpointRequest,
+    ) -> Result<LoopCheckpointRecord, TurnError> {
+        panic!("put_loop_checkpoint should not be called by evidence tests")
+    }
+
+    async fn get_loop_checkpoint(
+        &self,
+        request: GetLoopCheckpointRequest,
+    ) -> Result<Option<LoopCheckpointRecord>, TurnError> {
+        Ok(self.record.as_ref().and_then(|record| {
+            if record.scope == request.scope
+                && record.turn_id == request.turn_id
+                && record.run_id == request.run_id
+                && record.checkpoint_id == request.checkpoint_id
+            {
+                Some(record.clone())
+            } else {
+                None
+            }
+        }))
+    }
+}
+
 pub(super) fn test_exit_id() -> LoopExitId {
     LoopExitId::new("exit:test").expect("valid")
 }
@@ -141,13 +180,55 @@ pub(super) fn completed_exit(
 }
 
 pub(super) fn blocked_exit(kind: LoopBlockedKind) -> LoopExit {
+    blocked_exit_with_checkpoint(
+        kind,
+        TurnCheckpointId::new(),
+        LoopCheckpointStateRef::new("checkpoint:blocked-state").expect("valid"),
+    )
+}
+
+pub(super) fn blocked_exit_with_checkpoint(
+    kind: LoopBlockedKind,
+    checkpoint_id: TurnCheckpointId,
+    state_ref: LoopCheckpointStateRef,
+) -> LoopExit {
     LoopExit::Blocked(LoopBlocked {
         kind,
         gate_ref: LoopGateRef::new("gate:test").expect("valid"),
-        checkpoint_id: TurnCheckpointId::new(),
-        state_ref: LoopCheckpointStateRef::new("checkpoint:blocked-state").expect("valid"),
+        checkpoint_id,
+        state_ref,
         exit_id: test_exit_id(),
     })
+}
+
+pub(super) fn loop_checkpoint_record(
+    claimed: &ClaimedTurnRun,
+    checkpoint_id: TurnCheckpointId,
+    state_ref: LoopCheckpointStateRef,
+    kind: LoopCheckpointKind,
+) -> LoopCheckpointRecord {
+    loop_checkpoint_record_with_gate(claimed, checkpoint_id, state_ref, kind, None)
+}
+
+pub(super) fn loop_checkpoint_record_with_gate(
+    claimed: &ClaimedTurnRun,
+    checkpoint_id: TurnCheckpointId,
+    state_ref: LoopCheckpointStateRef,
+    kind: LoopCheckpointKind,
+    gate_ref: Option<LoopGateRef>,
+) -> LoopCheckpointRecord {
+    LoopCheckpointRecord {
+        checkpoint_id,
+        scope: claimed.state.scope.clone(),
+        turn_id: claimed.state.turn_id,
+        run_id: claimed.state.run_id,
+        state_ref,
+        schema_id: claimed.resolved_run_profile.checkpoint_schema_id.clone(),
+        schema_version: claimed.resolved_run_profile.checkpoint_schema_version,
+        kind,
+        gate_ref,
+        created_at: chrono::Utc::now(),
+    }
 }
 
 pub(super) struct Fixture {

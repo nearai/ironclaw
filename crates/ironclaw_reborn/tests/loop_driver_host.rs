@@ -233,6 +233,7 @@ async fn text_only_host_factory_builds_complete_agent_loop_driver_host() {
         .checkpoint(LoopCheckpointRequest {
             kind: LoopCheckpointKind::BeforeModel,
             state_ref: checkpoint_state.state_ref.clone(),
+            gate_ref: None,
         })
         .await
         .unwrap();
@@ -1905,6 +1906,7 @@ async fn text_only_host_e2e_keeps_persisted_model_route_through_full_flow() {
         .checkpoint(LoopCheckpointRequest {
             kind: LoopCheckpointKind::BeforeModel,
             state_ref: checkpoint_state.state_ref.clone(),
+            gate_ref: None,
         })
         .await
         .unwrap();
@@ -2990,6 +2992,7 @@ async fn text_only_host_e2e_flow_persists_checkpoint_mapping_in_turn_state_store
         .checkpoint(LoopCheckpointRequest {
             kind: LoopCheckpointKind::BeforeBlock,
             state_ref: checkpoint_state.state_ref.clone(),
+            gate_ref: None,
         })
         .await
         .unwrap();
@@ -3621,6 +3624,7 @@ async fn text_only_host_checkpoint_port_persists_ref_without_public_payload() {
         .checkpoint(LoopCheckpointRequest {
             kind: LoopCheckpointKind::BeforeSideEffect,
             state_ref: checkpoint_state.state_ref.clone(),
+            gate_ref: None,
         })
         .await
         .unwrap();
@@ -3684,6 +3688,7 @@ async fn text_only_host_checkpoint_port_rejects_foreign_state_ref() {
         .checkpoint(LoopCheckpointRequest {
             kind: LoopCheckpointKind::BeforeModel,
             state_ref: foreign_state.state_ref,
+            gate_ref: None,
         })
         .await
         .unwrap_err();
@@ -3703,6 +3708,7 @@ async fn text_only_host_checkpoint_port_rejects_kind_mismatch() {
         .checkpoint(LoopCheckpointRequest {
             kind: LoopCheckpointKind::BeforeSideEffect,
             state_ref: state.state_ref,
+            gate_ref: None,
         })
         .await
         .unwrap_err();
@@ -3729,6 +3735,7 @@ async fn text_only_host_checkpoint_port_maps_store_failures_to_unavailable() {
         .checkpoint(LoopCheckpointRequest {
             kind: LoopCheckpointKind::BeforeBlock,
             state_ref: state.state_ref,
+            gate_ref: None,
         })
         .await
         .unwrap_err();
@@ -3764,6 +3771,7 @@ async fn text_only_host_stage_checkpoint_payload_returns_ref_usable_by_checkpoin
         .checkpoint(LoopCheckpointRequest {
             kind: LoopCheckpointKind::BeforeSideEffect,
             state_ref: state_ref.clone(),
+            gate_ref: None,
         })
         .await
         .expect("checkpoint should accept the staged state_ref");
