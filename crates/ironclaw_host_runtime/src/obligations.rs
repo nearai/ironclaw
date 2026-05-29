@@ -1422,7 +1422,7 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
             return Err(network_obligation_failed());
         }
         let scoped_mounts = scoped_mount_obligation(request.context, request.obligations)?;
-        let secret_handles = secret_injection_obligations(request.obligations);
+        let secret_handles = secret_injection_handles(request.obligations);
         self.preflight_secret_injection(&request, &secret_handles)
             .await?;
         self.preflight_resource_ceiling(&request)?;
@@ -1662,7 +1662,7 @@ fn obligation_supported_after_dispatch(
     }
 }
 
-fn secret_injection_obligations(obligations: &[Obligation]) -> Vec<SecretHandle> {
+fn secret_injection_handles(obligations: &[Obligation]) -> Vec<SecretHandle> {
     obligations
         .iter()
         .filter_map(|obligation| match obligation {

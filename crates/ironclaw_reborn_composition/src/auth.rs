@@ -306,6 +306,10 @@ impl RebornProductAuthServicePorts {
         )
     }
 
+    pub fn credential_account_service(&self) -> Arc<dyn CredentialAccountService> {
+        self.credential_account_service.clone()
+    }
+
     pub(crate) fn into_services(
         self,
         continuation_dispatcher: Arc<dyn RebornAuthContinuationDispatcher>,

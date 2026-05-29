@@ -1263,6 +1263,19 @@ impl RuntimeCredentialAccountResolver for AlwaysAuthRequiredResolver {
     }
 }
 
+#[derive(Debug)]
+struct FixedHandleResolver(ironclaw_host_api::SecretHandle);
+
+#[async_trait::async_trait]
+impl RuntimeCredentialAccountResolver for FixedHandleResolver {
+    async fn resolve_access_secret(
+        &self,
+        _request: RuntimeCredentialAccountRequest<'_>,
+    ) -> Result<ironclaw_host_api::SecretHandle, RuntimeCredentialAccountError> {
+        Ok(self.0.clone())
+    }
+}
+
 #[tokio::test]
 async fn inject_credential_account_once_fails_when_no_resolver_wired() {
     // Services built without a credential_account_resolver — obligation must hard-fail.
@@ -1335,6 +1348,93 @@ async fn inject_credential_account_once_fails_when_resolver_returns_auth_require
     assert!(
         matches!(err, CapabilityObligationError::AuthRequired),
         "expected AuthRequired, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn inject_credential_account_once_resolves_and_stages_secret() {
+    // Happy path: resolver returns Ok(handle), material exists in store,
+    // obligation is satisfied, and the staged secret appears in the injection store.
+    let access_handle = ironclaw_host_api::SecretHandle::new("github_access_secret").unwrap();
+    let injection_slot = ironclaw_host_api::SecretHandle::new("github_runtime_token").unwrap();
+    let secret_store = Arc::new(ironclaw_secrets::InMemorySecretStore::new());
+    // Seed the store with material under the access handle.
+    secret_store
+        .put(
+            execution_context(CapabilitySet::default())
+                .resource_scope
+                .clone(),
+            access_handle.clone(),
+            ironclaw_secrets::SecretMaterial::from("test-github-token"),
+        )
+        .await
+        .unwrap();
+    let governor = Arc::new(ironclaw_resources::InMemoryResourceGovernor::new());
+    let services = BuiltinObligationServices::new(
+        Arc::new(ironclaw_events::InMemoryAuditSink::new()),
+        secret_store,
+        governor,
+    )
+    .with_credential_account_resolver(Arc::new(FixedHandleResolver(access_handle.clone())));
+    let handler = services.obligation_handler();
+    let context = execution_context(CapabilitySet::default());
+    let capability_id = capability_id();
+    let estimate = ResourceEstimate::default();
+    let obligations = vec![Obligation::InjectCredentialAccountOnce {
+        handle: injection_slot.clone(),
+        provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        requester_extension: ironclaw_host_api::ExtensionId::new("github").unwrap(),
+    }];
+
+    handler
+        .satisfy(CapabilityObligationRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+        })
+        .await
+        .expect("obligation should be satisfied");
+}
+
+#[tokio::test]
+async fn inject_credential_account_once_fails_when_resolved_secret_not_in_store() {
+    // Resolver returns Ok(handle) but that handle has no material in the secret store.
+    // Expected: Failed (lease_once returns an error -> secret_obligation_failed).
+    let access_handle = ironclaw_host_api::SecretHandle::new("missing_secret").unwrap();
+    let secret_store = Arc::new(ironclaw_secrets::InMemorySecretStore::new()); // empty store
+    let governor = Arc::new(ironclaw_resources::InMemoryResourceGovernor::new());
+    let services = BuiltinObligationServices::new(
+        Arc::new(ironclaw_events::InMemoryAuditSink::new()),
+        secret_store,
+        governor,
+    )
+    .with_credential_account_resolver(Arc::new(FixedHandleResolver(access_handle.clone())));
+    let handler = services.obligation_handler();
+    let context = execution_context(CapabilitySet::default());
+    let capability_id = capability_id();
+    let estimate = ResourceEstimate::default();
+    let obligations = vec![Obligation::InjectCredentialAccountOnce {
+        handle: ironclaw_host_api::SecretHandle::new("github_runtime_token").unwrap(),
+        provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        requester_extension: ironclaw_host_api::ExtensionId::new("github").unwrap(),
+    }];
+
+    let err = handler
+        .satisfy(CapabilityObligationRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, CapabilityObligationError::Failed { .. }),
+        "expected Failed when resolved handle not in store, got {err:?}"
     );
 }
 
