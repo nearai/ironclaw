@@ -551,16 +551,25 @@ pub struct CapabilityDescriptor {
 
 pub struct RuntimeCredentialRequirement {
     pub handle: SecretHandle,
+    pub source: RuntimeCredentialRequirementSource,
     pub audience: NetworkTargetPattern,
     pub target: RuntimeCredentialTarget,
     pub required: bool,
 }
+
+pub enum RuntimeCredentialRequirementSource {
+    SecretHandle,
+    ProductAuthAccount { provider: RuntimeCredentialAccountProviderId },
+}
 ```
 
 `runtime_credentials` is declarative host-owned injection metadata only. A
-credential requirement names the secret handle, HTTPS audience, injection target,
-and required/optional behavior; authorization and runtime egress still decide
-whether material is staged and consumed for a specific invocation.
+credential requirement names the runtime credential slot handle, material source,
+HTTPS audience, injection target, and required/optional behavior; authorization
+and runtime egress still decide whether material is staged and consumed for a
+specific invocation. Account-backed sources resolve through product auth before
+runtime egress and stage material under the runtime slot handle, so the WASM
+guest never sees account ids or backend secret handles.
 
 ### 10.3 Capability grants
 

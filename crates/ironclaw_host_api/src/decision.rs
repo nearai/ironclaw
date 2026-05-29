@@ -12,7 +12,8 @@ use std::collections::HashSet;
 
 use crate::ApprovalRequest;
 use crate::{
-    HostApiError, MountView, NetworkPolicy, ResourceCeiling, ResourceReservationId, SecretHandle,
+    ExtensionId, HostApiError, MountView, NetworkPolicy, ResourceCeiling, ResourceReservationId,
+    RuntimeCredentialAccountProviderId, SecretHandle,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -54,6 +55,11 @@ pub enum Obligation {
     InjectSecretOnce {
         handle: SecretHandle,
     },
+    InjectCredentialAccountOnce {
+        handle: SecretHandle,
+        provider: RuntimeCredentialAccountProviderId,
+        requester_extension: ExtensionId,
+    },
     ApplyNetworkPolicy {
         policy: NetworkPolicy,
     },
@@ -73,6 +79,7 @@ pub enum ObligationKind {
     UseScopedMounts,
     ApplyNetworkPolicy,
     InjectSecretOnce,
+    InjectCredentialAccountOnce,
     AuditBefore,
     RedactOutput,
     EnforceResourceCeiling,
@@ -86,6 +93,7 @@ pub const OBLIGATION_EVALUATION_ORDER: &[ObligationKind] = &[
     ObligationKind::UseScopedMounts,
     ObligationKind::ApplyNetworkPolicy,
     ObligationKind::InjectSecretOnce,
+    ObligationKind::InjectCredentialAccountOnce,
     ObligationKind::AuditBefore,
     ObligationKind::RedactOutput,
     ObligationKind::EnforceResourceCeiling,
@@ -134,6 +142,26 @@ impl Obligations {
                         if !seen_handles.insert(handle.clone()) {
                             return Err(HostApiError::invariant(
                                 "duplicate InjectSecretOnce obligations for the same handle are not allowed",
+                            ));
+                        }
+                        normalized.push(obligation.clone());
+                    }
+                    continue;
+                }
+                if *kind == ObligationKind::InjectCredentialAccountOnce {
+                    let mut seen_handles = HashSet::new();
+                    if let Obligation::InjectCredentialAccountOnce { handle, .. } = first {
+                        seen_handles.insert(handle.clone());
+                    }
+                    normalized.push(first.clone());
+                    for obligation in matching {
+                        let Obligation::InjectCredentialAccountOnce { handle, .. } = obligation
+                        else {
+                            unreachable!("filtered by InjectCredentialAccountOnce kind");
+                        };
+                        if !seen_handles.insert(handle.clone()) {
+                            return Err(HostApiError::invariant(
+                                "duplicate InjectCredentialAccountOnce obligations for the same handle are not allowed",
                             ));
                         }
                         normalized.push(obligation.clone());
@@ -189,6 +217,7 @@ impl Obligation {
             Self::ReserveResources { .. } => ObligationKind::ReserveResources,
             Self::UseScopedMounts { .. } => ObligationKind::UseScopedMounts,
             Self::InjectSecretOnce { .. } => ObligationKind::InjectSecretOnce,
+            Self::InjectCredentialAccountOnce { .. } => ObligationKind::InjectCredentialAccountOnce,
             Self::ApplyNetworkPolicy { .. } => ObligationKind::ApplyNetworkPolicy,
             Self::EnforceResourceCeiling { .. } => ObligationKind::EnforceResourceCeiling,
             Self::EnforceOutputLimit { .. } => ObligationKind::EnforceOutputLimit,

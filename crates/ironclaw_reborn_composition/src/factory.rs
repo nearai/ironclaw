@@ -80,6 +80,7 @@ use crate::local_dev_mounts::{
     ambient_workspace_mount_view, skill_context_mount_view, skill_management_mount_view,
     workspace_mount_view,
 };
+use crate::product_auth_runtime_credentials::ProductAuthRuntimeCredentialResolver;
 use crate::{
     RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
     RebornFacadeReadiness, RebornProductAuthServices, RebornReadiness, RebornReadinessState,
@@ -507,6 +508,9 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
             })
         }
     };
+    services = services.with_runtime_credential_account_resolver(Arc::new(
+        ProductAuthRuntimeCredentialResolver::new(product_auth.credential_account_service()),
+    ));
     register_bundled_gsuite_first_party_handlers(
         &mut first_party_registry,
         product_auth.credential_account_service(),

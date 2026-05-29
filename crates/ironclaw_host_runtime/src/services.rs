@@ -74,7 +74,8 @@ use ironclaw_wasm::{
 };
 
 use crate::obligations::{
-    NetworkObligationPolicyStore, RuntimeSecretInjectionStore, SharedSecretStore,
+    NetworkObligationPolicyStore, RuntimeCredentialAccountResolver, RuntimeSecretInjectionStore,
+    SharedSecretStore,
 };
 use crate::{
     BuiltinObligationHandler, CapabilitySurfaceVersion, DefaultHostRuntime,
@@ -137,6 +138,7 @@ where
     secret_store: Option<Arc<dyn SecretStore>>,
     credential_account_store: Arc<dyn CredentialAccountStore>,
     credential_session_store: Arc<dyn CredentialSessionStore>,
+    runtime_credential_account_resolver: Option<Arc<dyn RuntimeCredentialAccountResolver>>,
     network_policy_store: Arc<NetworkObligationPolicyStore>,
     secret_injection_store: Arc<RuntimeSecretInjectionStore>,
     process_lifecycle_store: Arc<ProcessObligationLifecycleStore>,
@@ -234,6 +236,7 @@ where
             secret_store: None,
             credential_account_store,
             credential_session_store,
+            runtime_credential_account_resolver: None,
             network_policy_store,
             secret_injection_store,
             process_lifecycle_store,
@@ -471,6 +474,9 @@ where
         }
         if let Some(secret_store) = &self.secret_store {
             handler = handler.with_secret_store_dyn(Arc::clone(secret_store));
+        }
+        if let Some(resolver) = &self.runtime_credential_account_resolver {
+            handler = handler.with_credential_account_resolver_dyn(Arc::clone(resolver));
         }
 
         handler

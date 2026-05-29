@@ -18,9 +18,10 @@ use ironclaw_events::{
 };
 use ironclaw_host_api::{
     ActionResultSummary, ActionSummary, AuditEnvelope, AuditEventId, AuditStage,
-    CapabilityDispatchResult, CapabilityId, DecisionSummary, EffectKind, MountView, NetworkPolicy,
-    Obligation, ProcessId, ResourceCeiling, ResourceEstimate, ResourceReservation, ResourceScope,
-    ResourceUsage, RuntimeHttpEgress, SandboxQuota, SecretHandle,
+    CapabilityDispatchResult, CapabilityId, DecisionSummary, EffectKind, ExtensionId, MountView,
+    NetworkPolicy, Obligation, ProcessId, ResourceCeiling, ResourceEstimate, ResourceReservation,
+    ResourceScope, ResourceUsage, RuntimeCredentialAccountProviderId, RuntimeHttpEgress,
+    SandboxQuota, SecretHandle,
 };
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_processes::{ProcessError, ProcessRecord, ProcessStart, ProcessStore};
@@ -34,6 +35,27 @@ use crate::http_body::{RuntimeHttpBodyStore, UnsupportedRuntimeHttpBodyStore};
 
 /// Default maximum lifetime for one-shot runtime secret material staged in memory.
 pub(crate) const DEFAULT_RUNTIME_SECRET_INJECTION_TTL: Duration = Duration::from_secs(300);
+
+#[derive(Debug)]
+pub struct RuntimeCredentialAccountRequest<'a> {
+    pub scope: &'a ResourceScope,
+    pub provider: &'a RuntimeCredentialAccountProviderId,
+    pub requester_extension: &'a ExtensionId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeCredentialAccountError {
+    AuthRequired,
+    Failed,
+}
+
+#[async_trait]
+pub trait RuntimeCredentialAccountResolver: Send + Sync + fmt::Debug {
+    async fn resolve_access_secret(
+        &self,
+        request: RuntimeCredentialAccountRequest<'_>,
+    ) -> Result<SecretHandle, RuntimeCredentialAccountError>;
+}
 
 /// One-shot runtime secret material staged after `InjectSecretOnce` lease consumption.
 ///
@@ -373,6 +395,7 @@ pub struct BuiltinObligationServices {
     secret_store: Arc<dyn SecretStore>,
     secret_injections: Arc<RuntimeSecretInjectionStore>,
     resource_governor: Arc<dyn ResourceGovernor>,
+    credential_account_resolver: Option<Arc<dyn RuntimeCredentialAccountResolver>>,
 }
 
 impl BuiltinObligationServices {
@@ -403,7 +426,24 @@ impl BuiltinObligationServices {
             secret_store,
             secret_injections,
             resource_governor,
+            credential_account_resolver: None,
         }
+    }
+
+    pub fn with_credential_account_resolver<T>(mut self, resolver: Arc<T>) -> Self
+    where
+        T: RuntimeCredentialAccountResolver + 'static,
+    {
+        self.credential_account_resolver = Some(resolver);
+        self
+    }
+
+    pub fn with_credential_account_resolver_dyn(
+        mut self,
+        resolver: Arc<dyn RuntimeCredentialAccountResolver>,
+    ) -> Self {
+        self.credential_account_resolver = Some(resolver);
+        self
     }
 
     pub fn audit_sink(&self) -> Arc<dyn AuditSink> {
@@ -475,12 +515,16 @@ impl BuiltinObligationServices {
     }
 
     pub fn obligation_handler(&self) -> BuiltinObligationHandler {
-        BuiltinObligationHandler::new()
+        let handler = BuiltinObligationHandler::new()
             .with_audit_sink_dyn(self.audit_sink.clone())
             .with_network_policy_store(self.network_policies.clone())
             .with_secret_store_dyn(self.secret_store.clone())
             .with_secret_injection_store(self.secret_injections.clone())
-            .with_resource_governor_dyn(self.resource_governor.clone())
+            .with_resource_governor_dyn(self.resource_governor.clone());
+        match &self.credential_account_resolver {
+            Some(resolver) => handler.with_credential_account_resolver_dyn(Arc::clone(resolver)),
+            None => handler,
+        }
     }
 }
 
@@ -493,6 +537,13 @@ impl fmt::Debug for BuiltinObligationServices {
             .field("secret_store", &"[REDACTED]")
             .field("secret_injections", &self.secret_injections)
             .field("resource_governor", &"<resource_governor>")
+            .field(
+                "credential_account_resolver",
+                &self
+                    .credential_account_resolver
+                    .as_ref()
+                    .map(|_| "<resolver>"),
+            )
             .finish()
     }
 }
@@ -996,6 +1047,7 @@ pub struct BuiltinObligationHandler {
     secret_store: Option<Arc<dyn SecretStore>>,
     secret_injections: Option<Arc<RuntimeSecretInjectionStore>>,
     resource_governor: Option<Arc<dyn ResourceGovernor>>,
+    credential_account_resolver: Option<Arc<dyn RuntimeCredentialAccountResolver>>,
 }
 
 impl BuiltinObligationHandler {
@@ -1069,6 +1121,23 @@ impl BuiltinObligationHandler {
 
     pub fn with_resource_governor_dyn(mut self, governor: Arc<dyn ResourceGovernor>) -> Self {
         self.resource_governor = Some(governor);
+        self
+    }
+
+    pub fn with_credential_account_resolver<T>(mut self, resolver: Arc<T>) -> Self
+    where
+        T: RuntimeCredentialAccountResolver + 'static,
+    {
+        let resolver: Arc<dyn RuntimeCredentialAccountResolver> = resolver;
+        self.credential_account_resolver = Some(resolver);
+        self
+    }
+
+    pub fn with_credential_account_resolver_dyn(
+        mut self,
+        resolver: Arc<dyn RuntimeCredentialAccountResolver>,
+    ) -> Self {
+        self.credential_account_resolver = Some(resolver);
         self
     }
 
@@ -1158,6 +1227,54 @@ impl BuiltinObligationHandler {
         Ok(())
     }
 
+    async fn inject_credential_accounts(
+        &self,
+        request: &CapabilityObligationRequest<'_>,
+    ) -> Result<(), CapabilityObligationError> {
+        let account_obligations = credential_account_injection_obligations(request.obligations);
+        if account_obligations.is_empty() {
+            return Ok(());
+        }
+        let Some(resolver) = &self.credential_account_resolver else {
+            return Err(secret_obligation_failed());
+        };
+        let Some(secret_store) = &self.secret_store else {
+            return Err(secret_obligation_failed());
+        };
+        let Some(secret_injections) = &self.secret_injections else {
+            return Err(secret_obligation_failed());
+        };
+
+        for obligation in account_obligations {
+            let access_secret = resolver
+                .resolve_access_secret(RuntimeCredentialAccountRequest {
+                    scope: &request.context.resource_scope,
+                    provider: obligation.provider,
+                    requester_extension: obligation.requester_extension,
+                })
+                .await
+                .map_err(runtime_credential_account_error)?;
+            let lease = secret_store
+                .lease_once(&request.context.resource_scope, &access_secret)
+                .await
+                .map_err(|_| secret_obligation_failed())?;
+            let secret = secret_store
+                .consume(&request.context.resource_scope, lease.id)
+                .await
+                .map_err(|_| secret_obligation_failed())?;
+            secret_injections
+                .insert(
+                    &request.context.resource_scope,
+                    request.capability_id,
+                    obligation.handle,
+                    secret,
+                )
+                .map_err(|_| secret_obligation_failed())?;
+        }
+
+        Ok(())
+    }
+
     fn reserve_resource_obligation(
         &self,
         request: &CapabilityObligationRequest<'_>,
@@ -1213,6 +1330,7 @@ impl BuiltinObligationHandler {
         }
 
         self.inject_secrets(request, secret_handles).await?;
+        self.inject_credential_accounts(request).await?;
 
         if let Some(policy) = network_policy {
             let Some(store) = &self.network_policies else {
@@ -1453,7 +1571,7 @@ impl BuiltinObligationHandler {
         }
 
         if let Some(store) = &self.secret_injections {
-            for handle in secret_injection_obligations(obligations) {
+            for handle in staged_secret_injection_handles(obligations) {
                 let _ = store
                     .take(scope, capability_id, &handle)
                     .map_err(|_| secret_obligation_failed())?;
@@ -1498,6 +1616,7 @@ fn obligation_supported_before_dispatch(
     match obligation {
         Obligation::AuditBefore
         | Obligation::ApplyNetworkPolicy { .. }
+        | Obligation::InjectCredentialAccountOnce { .. }
         | Obligation::InjectSecretOnce { .. }
         | Obligation::ReserveResources { .. }
         | Obligation::UseScopedMounts { .. } => true,
@@ -1530,6 +1649,7 @@ fn obligation_supported_after_dispatch(
     match obligation {
         Obligation::AuditBefore
         | Obligation::ApplyNetworkPolicy { .. }
+        | Obligation::InjectCredentialAccountOnce { .. }
         | Obligation::InjectSecretOnce { .. }
         | Obligation::ReserveResources { .. }
         | Obligation::UseScopedMounts { .. } => true,
@@ -1552,6 +1672,52 @@ fn secret_injection_obligations(obligations: &[Obligation]) -> Vec<SecretHandle>
             _ => None,
         })
         .collect()
+}
+
+struct CredentialAccountInjectionObligation<'a> {
+    handle: &'a SecretHandle,
+    provider: &'a RuntimeCredentialAccountProviderId,
+    requester_extension: &'a ExtensionId,
+}
+
+fn credential_account_injection_obligations(
+    obligations: &[Obligation],
+) -> Vec<CredentialAccountInjectionObligation<'_>> {
+    obligations
+        .iter()
+        .filter_map(|obligation| match obligation {
+            Obligation::InjectCredentialAccountOnce {
+                handle,
+                provider,
+                requester_extension,
+            } => Some(CredentialAccountInjectionObligation {
+                handle,
+                provider,
+                requester_extension,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+fn staged_secret_injection_handles(obligations: &[Obligation]) -> Vec<SecretHandle> {
+    obligations
+        .iter()
+        .filter_map(|obligation| match obligation {
+            Obligation::InjectSecretOnce { handle }
+            | Obligation::InjectCredentialAccountOnce { handle, .. } => Some(handle.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn runtime_credential_account_error(
+    error: RuntimeCredentialAccountError,
+) -> CapabilityObligationError {
+    match error {
+        RuntimeCredentialAccountError::AuthRequired => CapabilityObligationError::AuthRequired,
+        RuntimeCredentialAccountError::Failed => secret_obligation_failed(),
+    }
 }
 
 fn network_policy_obligation(
@@ -1903,6 +2069,7 @@ fn obligation_label(obligation: &Obligation) -> Option<&'static str> {
         Obligation::RedactOutput => Some("redact_output"),
         Obligation::ApplyNetworkPolicy { .. } => Some("apply_network_policy"),
         Obligation::InjectSecretOnce { .. } => Some("inject_secret_once"),
+        Obligation::InjectCredentialAccountOnce { .. } => Some("inject_credential_account_once"),
         Obligation::EnforceOutputLimit { .. } => Some("enforce_output_limit"),
         Obligation::ReserveResources { .. } => Some("reserve_resources"),
         Obligation::UseScopedMounts { .. } => Some("use_scoped_mounts"),

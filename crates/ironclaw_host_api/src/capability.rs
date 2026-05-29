@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     CapabilityGrantId, CapabilityId, ExtensionId, MountView, NetworkPolicy, NetworkTargetPattern,
-    Principal, ResourceCeiling, ResourceProfile, RuntimeCredentialTarget, RuntimeKind,
-    SecretHandle, Timestamp, TrustClass,
+    Principal, ResourceCeiling, ResourceProfile, RuntimeCredentialAccountProviderId,
+    RuntimeCredentialTarget, RuntimeKind, SecretHandle, Timestamp, TrustClass,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -77,9 +77,26 @@ pub struct CapabilityDescriptor {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeCredentialRequirement {
     pub handle: SecretHandle,
+    #[serde(default)]
+    pub source: RuntimeCredentialRequirementSource,
     pub audience: NetworkTargetPattern,
     pub target: RuntimeCredentialTarget,
     pub required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum RuntimeCredentialRequirementSource {
+    SecretHandle,
+    ProductAuthAccount {
+        provider: RuntimeCredentialAccountProviderId,
+    },
+}
+
+impl Default for RuntimeCredentialRequirementSource {
+    fn default() -> Self {
+        Self::SecretHandle
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
